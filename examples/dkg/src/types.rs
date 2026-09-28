@@ -68,14 +68,14 @@ pub type Qmdb<E> = fixed::Db<mmr::Family, E, U64, U64, Sha256, TwoCap, Sequentia
 /// Shared handle to the application QMDB.
 pub type Database<E> = Shared<Qmdb<E>>;
 /// Globally unique namespace for every message signed by this example.
-pub const NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE_EXAMPLE";
+pub const NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_DKG";
 /// Number of blocks in each epoch.
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(64);
 /// Maximum entries accepted in each DKG participant set.
 pub const MAX_PARTICIPANTS: NonZeroU32 = commonware_utils::NZU32!(64);
-/// Share derivation mode used by DKG and reshare ceremonies.
+/// Share derivation mode used by bootstrap and reshare ceremonies.
 pub const SHARING_MODE: Mode = Mode::NonZeroCounter;
-/// Revealed-share calculation used by DKG and reshare ceremonies.
+/// Revealed-share calculation used by bootstrap and reshare ceremonies.
 pub const REVEAL: Reveal = Reveal::V1;
 /// Newest sharing mode version this binary accepts.
 pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v0();
@@ -381,14 +381,14 @@ fn epoch(key: &Key) -> Epoch {
 
 /// Runtime storage partition of a [`Secrets`] store.
 ///
-/// The bootstrap ceremony and the validator's first reshare both persist dealer
-/// seeds and received dealings for epoch 0, so each uses its own partition.
+/// The bootstrap and the validator's first reshare both persist dealer seeds
+/// and received dealings for epoch 0, so each uses its own partition.
 #[derive(Clone, Copy)]
 pub enum Partition {
-    /// `dkg-secrets`, used by the `dkg` ceremony.
-    Dkg,
+    /// `bootstrap-secrets`, used by `bootstrap`.
+    Bootstrap,
 
-    /// `secrets`, used by `validator` for the epoch-0 share that `dkg` hands
+    /// `secrets`, used by `validator` for the epoch-0 share that `bootstrap` hands
     /// over and for every reshare's material.
     Validator,
 }
@@ -417,7 +417,7 @@ impl<E: StorageContext> Secrets<E> {
     /// Open the store in `partition`, starting empty if nothing was stored.
     pub async fn init(context: E, partition: Partition) -> Self {
         let partition = match partition {
-            Partition::Dkg => "dkg-secrets",
+            Partition::Bootstrap => "bootstrap-secrets",
             Partition::Validator => "secrets",
         };
         let metadata = Metadata::init(
@@ -572,7 +572,7 @@ impl EncodedGenesis {
         info: &dkg::types::EpochInfo<MinSig, ed25519::PublicKey>,
     ) -> anyhow::Result<()> {
         // Overwrite an artifact that cannot be parsed, such as one torn by a crash
-        // mid-write. `dkg` re-derives the artifact from its own finalized chain.
+        // mid-write. `bootstrap` re-derives the artifact from its own finalized chain.
         let path = genesis_path(node_dir);
         match fs::read(&path) {
             Ok(contents) => {
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn genesis_conflict_detection() {
         let path =
-            std::env::temp_dir().join(format!("commonware-reshare-genesis-{}", std::process::id()));
+            std::env::temp_dir().join(format!("commonware-dkg-genesis-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
 
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn genesis_replaces_unreadable_artifact() {
         let path = std::env::temp_dir().join(format!(
-            "commonware-reshare-torn-genesis-{}",
+            "commonware-dkg-torn-genesis-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&path);
@@ -809,7 +809,7 @@ mod tests {
         });
     }
 
-    /// The `dkg` handoff copies only the epoch-0 share from the bootstrap
+    /// The `bootstrap` handoff copies only the epoch-0 share from the bootstrap
     /// partition into the validator partition, and the share survives an
     /// unclean restart.
     #[test]
@@ -831,13 +831,13 @@ mod tests {
                 // The engine's clone of the bootstrap store persists the
                 // ceremony's epoch-0 share, seed, and dealing.
                 let mut bootstrap =
-                    Secrets::init(context.child("secrets"), crate::dkg::PARTITION).await;
+                    Secrets::init(context.child("secrets"), crate::bootstrap::PARTITION).await;
                 let mut engine = bootstrap.clone();
                 engine.put_share(Epoch::zero(), share).await;
                 engine.put_seed(Epoch::zero(), seed).await;
                 engine.put_dealing(Epoch::zero(), dealer, dealing).await;
 
-                // Hand over the share as `dkg` does, then crash.
+                // Hand over the share as `bootstrap` does, then crash.
                 let share = bootstrap.get_share(Epoch::zero()).await.unwrap();
                 let mut handoff =
                     Secrets::init(context.child("handoff"), crate::validator::PARTITION).await;
@@ -876,14 +876,14 @@ mod tests {
             let dealer = dealer.clone();
             |context| async move {
                 let mut bootstrap =
-                    Secrets::init(context.child("secrets"), crate::dkg::PARTITION).await;
+                    Secrets::init(context.child("secrets"), crate::bootstrap::PARTITION).await;
                 bootstrap.put_share(Epoch::zero(), share).await;
                 bootstrap.put_seed(Epoch::zero(), seed).await;
                 bootstrap.put_dealing(Epoch::zero(), dealer, dealing).await;
                 drop(bootstrap);
 
                 // Reopen and erase the partition, as `validator` does.
-                Secrets::init(context.child("dkg"), crate::dkg::PARTITION)
+                Secrets::init(context.child("bootstrap"), crate::bootstrap::PARTITION)
                     .await
                     .destroy()
                     .await;
@@ -893,7 +893,7 @@ mod tests {
         // Nothing survives in the bootstrap partition.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let mut bootstrap =
-                Secrets::init(context.child("secrets"), crate::dkg::PARTITION).await;
+                Secrets::init(context.child("secrets"), crate::bootstrap::PARTITION).await;
             assert_eq!(bootstrap.get_share(Epoch::zero()).await, None);
             assert_eq!(bootstrap.get_seed(Epoch::zero()).await, None);
             assert_eq!(bootstrap.get_dealing(Epoch::zero(), &dealer).await, None);

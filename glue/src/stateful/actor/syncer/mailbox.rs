@@ -43,6 +43,8 @@ where
     }
 }
 
+// Replacing a queued update drops its response sender. `Mailbox::retarget` has one caller, which
+// awaits each update before sending the next, so a live response is never dropped.
 impl<E, A> Policy for Message<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -73,10 +75,12 @@ where
         Self { sender }
     }
 
-    /// Sends a target update and waits until the live sync coordinator records it.
+    /// Sends a target update and waits until the sync coordinator records it.
     ///
-    /// If sync already completed before the update could be observed, returns the
-    /// completed artifact instead.
+    /// Returns `None` once the update is recorded, or the converged [`Artifact`] if state sync
+    /// finished first.
+    ///
+    /// Panics if the syncer stops without responding.
     pub async fn retarget(
         &self,
         anchor: Anchor<BlockDigest<A, E>>,
@@ -90,16 +94,14 @@ where
             match receiver.await.expect("Syncer should respond to retarget") {
                 Some(artifact) => return Some(artifact),
                 None => {
-                    // Wait until the live sync coordinator has recorded the new tip update.
-                    // Enqueueing it into Syncer is not enough to prove the eventual sync
-                    // artifact includes the target or to discard its handoff state.
+                    // Only the coordinator's record, not enqueueing, proves the converged state
+                    // covers this target.
                     if observed.await.is_ok() {
                         return None;
                     }
 
-                    // The active coordinator dropped before recording this update.
-                    // Retry so Syncer can either hand the update to the next coordinator
-                    // or report the completed sync artifact.
+                    // The update was dropped unrecorded. Retry until it is recorded or the
+                    // converged artifact is returned.
                 }
             }
         }

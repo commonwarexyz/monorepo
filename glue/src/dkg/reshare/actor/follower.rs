@@ -40,13 +40,17 @@ where
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
 {
-    /// Enter follower mode until the end of the current epoch is observed.
+    /// Follows the chain without participating until the next final block of an
+    /// epoch is applied.
     ///
-    /// This mode is entered when setup lacks the public history required to
-    /// reconstruct the active ceremony, either because boundary information is
-    /// unavailable or state sync skipped part of the inclusion window. The actor
-    /// waits until the final block and registers for the next epoch from its
-    /// outcome.
+    /// Acknowledges earlier finalized blocks without effects. Dealer-log requests
+    /// receive no log and final-block requests receive
+    /// [`EpochInfoResponse::Following`]. Commits and registers the final block's
+    /// [`EpochInfo`](crate::dkg::types::EpochInfo) before returning `Continue`.
+    /// Returns `Break` on shutdown or when the mailbox closes.
+    ///
+    /// Panics if the final block carries no
+    /// [`EpochInfo`](crate::dkg::types::EpochInfo).
     pub(super) async fn follow(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,

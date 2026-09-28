@@ -1,23 +1,20 @@
-//! DKG/reshare crash-recovery storage.
+//! Crash-recovery storage for the reshare actor.
 //!
-//! This store exists only to recover state a restarted actor cannot otherwise
-//! re-obtain. After a crash the actor does not re-receive P2P messages and
-//! marshal does not redeliver finalized blocks it already processed, so this
-//! store keeps a plaintext journal of the public messages a restarted node would
-//! otherwise lose:
+//! A restarted actor does not re-receive P2P messages, and marshal does not
+//! redeliver finalized blocks it already processed. [`Store`] journals the
+//! public messages a restarted node would otherwise lose:
 //!
-//! - public dealer messages and player acknowledgements, so a player can rebuild
-//!   the acks it already emitted (its private dealings are recovered from
-//!   [`SecretStore`]);
+//! - public dealer messages, so a player can rebuild the acknowledgements it
+//!   already sent (the matching private dealings are recovered from
+//!   [`SecretStore`]),
+//! - player acknowledgements received by this node's dealer, so a restarted
+//!   dealer resends only unacknowledged dealings,
 //! - finalized dealer logs observed during inclusion.
 //!
-//! The current epoch's public state is not persisted here: ordinary recovery
-//! re-derives it from the finalized boundary block, while state-sync recovery
-//! uses the shared [`state_sync::Plan`](crate::dkg::state_sync::Plan). Everything
-//! secret stays out of this plaintext store and is held only through
-//! [`SecretStore`]: shares, private dealings, and the dealer RNG seed (which
-//! seeds the dealer polynomial and so reveals every share that dealer
-//! distributes).
+//! Secret material never enters the journal. Shares, private dealings, and the
+//! dealer RNG seed (which seeds the dealer polynomial and so reveals every share
+//! that dealer distributes) are held only through [`SecretStore`]. The current
+//! epoch is held only in memory (see [`Store::commit_epoch`]).
 
 use crate::dkg::{SecretStore, network::Directory, types::EpochInfo};
 use bytes::BufMut;
@@ -45,18 +42,13 @@ use commonware_storage::journal::{
     self,
     segmented::variable::{Config as JournalConfig, Journal},
 };
-use commonware_utils::{Faults, N3f1, NZU16, NZUsize, futures::rebind, sequence::Unit};
+use commonware_utils::{Faults, N3f1, futures::rebind, sequence::Unit};
 use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
-    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
+    num::{NonZeroU32, NonZeroUsize},
 };
 use tracing::{debug, warn};
-
-const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12); // 4 KiB
-const PAGE_CACHE_CAPACITY: NonZeroUsize = NZUsize!(1 << 13); // 8 KiB
-const WRITE_BUFFER: NonZeroUsize = NZUsize!(1 << 12); // 4 KiB
-const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20); // 1 MiB
 
 enum Event<V: Variant, P: PublicKey> {
     Dealing(P, DealerPubMsg<V>),
@@ -148,13 +140,9 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
     }
 }
 
-/// DKG/reshare crash-recovery store.
+/// Crash-recovery store for the reshare actor.
 ///
-/// The plaintext side holds only the dealer-message, acknowledgement, and
-/// finalized-log journal. The current epoch's public state comes from finalized
-/// boundary blocks or the separate state-sync store, not this journal. All
-/// secret material (shares, private dealings, and the dealer RNG seed) is held only through
-/// [`SecretStore`], never in plaintext.
+/// See the [module docs](crate::dkg::reshare::store) for what it journals.
 pub struct Store<E, SS, V, P, D = Unit>
 where
     E: BufferPooler + Clock + RuntimeStorage + Metrics,
@@ -177,14 +165,19 @@ where
     P: PublicKey,
     D: Directory<P>,
 {
-    /// Initializes the store and replays durable crash-recovery state.
+    /// Opens the recovery journal under `partition_prefix` and replays it.
+    ///
+    /// A journaled dealing is restored only if its private half is in
+    /// `secret_store`. Panics if the journal cannot be opened or replayed.
     pub async fn init(
         context: E,
         partition_prefix: &str,
         max_participants: NonZeroU32,
+        page_cache: CacheRef,
+        write_buffer: NonZeroUsize,
+        replay_buffer: NonZeroUsize,
         mut secret_store: SS,
     ) -> Self {
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let events = Journal::init(
             context.child("events"),
             JournalConfig {
@@ -192,15 +185,12 @@ where
                 compression: None,
                 codec_config: max_participants,
                 page_cache,
-                write_buffer: WRITE_BUFFER,
+                write_buffer,
             },
         )
         .await
         .expect("failed to initialize reshare event journal");
 
-        // The current epoch is not persisted: it is re-derived from finalized
-        // boundary blocks by the setup state, so a restarted store starts with no
-        // current epoch.
         let current = None;
 
         let mut epochs = BTreeMap::<Epoch, EpochCache<V, P>>::new();
@@ -208,7 +198,7 @@ where
             // Replay rebuilds the epoch caches in memory, so journal pages need
             // not remain in the OS page cache.
             let mut replay = events
-                .replay(0, 0, READ_BUFFER, ReadOptions::DONT_CACHE)
+                .replay(0, 0, replay_buffer, ReadOptions::DONT_CACHE)
                 .await
                 .expect("failed to replay reshare events");
 
@@ -242,7 +232,8 @@ where
         }
     }
 
-    /// Returns the current epoch state, if one has been entered.
+    /// Returns the epoch most recently committed with [`Self::commit_epoch`]
+    /// (`None` until one is committed after startup).
     pub fn current(&self) -> Option<EpochInfo<V, P, D>> {
         self.current.clone()
     }
@@ -273,12 +264,11 @@ where
         self.secret_store.put_seed(epoch, rng_seed).await;
     }
 
-    /// Advances to `info`, persisting its secrets before the current epoch moves.
+    /// Durably stores `share` (if any) and `rng_seed` for `info.epoch`, then
+    /// makes `info` the current epoch.
     ///
-    /// The public artifact in `info` is read from the finalized boundary block,
-    /// not from local state, and is held only in memory. The share is persisted
-    /// only when it matches that finalized truth; otherwise the node continues as
-    /// an observer.
+    /// `info` is held only in memory, so a restarted store has no current epoch.
+    /// `share` must be this node's share of `info.output`.
     pub async fn commit_epoch(
         &mut self,
         info: EpochInfo<V, P, D>,
@@ -296,8 +286,6 @@ where
     /// Prunes public recovery data and secret material older than `min`.
     pub async fn prune(&mut self, min: Epoch) {
         self.epochs.retain(|epoch, _| *epoch >= min);
-        // Prune the recovery journal and the secret store concurrently; they are
-        // independent backends.
         let secret = &mut self.secret_store;
         futures::join!(
             async {
@@ -321,7 +309,7 @@ where
             .unwrap_or_default()
     }
 
-    /// Returns true if `dealer` already has a finalized log recorded.
+    /// Returns whether a finalized log from `dealer` is recorded for `epoch`.
     pub fn has_log(&self, epoch: Epoch, dealer: &P) -> bool {
         self.epochs
             .get(&epoch)
@@ -356,7 +344,11 @@ where
             .unwrap_or_default()
     }
 
-    /// Persists a public/private dealing already accepted by the cryptographic player.
+    /// Durably records a dealing the player has accepted, returning `false`
+    /// without writing if one from `dealer` is already recorded for `epoch`.
+    ///
+    /// Both halves are durable when this returns, so an acknowledgement sent
+    /// afterward is backed by recoverable state.
     async fn append_dealing(
         &mut self,
         epoch: Epoch,
@@ -371,11 +363,9 @@ where
         {
             return false;
         }
-        // Persist the private dealing (secret store) and the public dealer message
-        // (recovery journal) concurrently. Both are durable before this returns, so
-        // the ack the caller emits next is always backed by recoverable state. A
-        // crash mid-write is safe: replay loads a dealing only when both its public
-        // and private parts survived.
+
+        // Replay restores a dealing only when both halves survived, so a crash
+        // between the two writes drops the dealing instead of splitting it.
         let event = Event::Dealing(dealer.clone(), public.clone());
         let secret = &mut self.secret_store;
         futures::join!(
@@ -392,6 +382,8 @@ where
         true
     }
 
+    /// Durably records `ack`, returning `false` without writing if one from
+    /// `player` is already recorded for `epoch`.
     async fn append_ack(&mut self, epoch: Epoch, player: P, ack: PlayerAck<P>) -> bool {
         if self
             .epochs
@@ -410,7 +402,8 @@ where
         true
     }
 
-    /// Records a finalized dealer log.
+    /// Durably records a finalized dealer log, returning `false` without writing
+    /// if one from `dealer` is already recorded for `epoch`.
     pub async fn append_log(&mut self, epoch: Epoch, dealer: P, log: DealerLog<V, P>) -> bool {
         if self.has_log(epoch, &dealer) {
             return false;
@@ -425,7 +418,11 @@ where
         true
     }
 
-    /// Replays dealer state for `epoch`.
+    /// Rebuilds this node's dealer for `epoch` from `rng_seed`, replaying the
+    /// recorded acknowledgements.
+    ///
+    /// Returns `None` if this dealer's log is already recorded for `epoch`.
+    /// Panics if the dealer cannot start from `info` and `share`.
     pub fn create_dealer<C, M>(
         &self,
         epoch: Epoch,
@@ -465,11 +462,8 @@ where
         })
     }
 
-    /// Replays player state for `epoch`.
-    ///
-    /// Returns `None` when this node observes an on-chain dealer log carrying its
-    /// own acknowledgement but has lost the matching private dealing; see
-    /// [`resume_player`](Self::resume_player).
+    /// Rebuilds this node's player for `epoch` from the recorded dealings and
+    /// finalized logs (`None` as described in [`resume_player`](Self::resume_player)).
     pub fn create_player<C, M>(
         &self,
         epoch: Epoch,
@@ -483,10 +477,9 @@ where
         self.resume_player::<C, M>(epoch, signer, info, &self.logs(epoch))
     }
 
-    /// Replays player state using a supplied, non-durable log view.
-    ///
-    /// Returns `None` under the same missing-dealing condition as
-    /// [`create_player`](Self::create_player).
+    /// Rebuilds this node's player for `epoch` like
+    /// [`create_player`](Self::create_player), but from `logs` instead of the
+    /// recorded finalized logs.
     pub fn create_player_with_logs<C, M>(
         &self,
         epoch: Epoch,
@@ -501,16 +494,13 @@ where
         self.resume_player::<C, M>(epoch, signer, info, logs)
     }
 
-    /// Resumes player state for `epoch` from `logs`.
+    /// Resumes player state for `epoch` from `logs` and the recorded dealings.
     ///
-    /// Degrades to observer mode (returns `None`) when [`CryptoPlayer::resume`]
-    /// reports [`MissingPlayerDealing`](DkgError::MissingPlayerDealing): a
-    /// finalized dealer log carries this node's valid acknowledgement, but the
-    /// matching private dealing is absent from the secret store (for example, a
-    /// secret store restored from a backup taken before the ack was emitted).
-    /// The ceremony has otherwise succeeded, so the node commits the epoch as a
-    /// share-less verifier rather than crash-looping. Any other error signals
-    /// genuine corruption and stays fatal.
+    /// Returns `None` if [`CryptoPlayer::resume`] reports
+    /// [`MissingPlayerDealing`](DkgError::MissingPlayerDealing): a log in `logs`
+    /// carries this node's acknowledgement, but the matching private dealing is
+    /// absent from the secret store (for example, after restoring a backup taken
+    /// before the acknowledgement was sent). Panics on any other resume error.
     fn resume_player<C, M>(
         &self,
         epoch: Epoch,
@@ -536,7 +526,7 @@ where
     }
 }
 
-/// Appends `event` to the recovery journal for `epoch` and flushes it durably.
+/// Appends `event` to `epoch`'s journal section and syncs it.
 async fn append_synced<E, V, P>(
     events: Journal<E, Event<V, P>>,
     epoch: Epoch,
@@ -575,7 +565,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         self.unsent.len() <= M::max_faults(players) as usize
     }
 
-    /// Records a player ack.
+    /// Records `ack` from `player`.
     ///
     /// Returns [`AckOutcome::Recorded`] for a new acknowledgement and
     /// [`AckOutcome::Duplicate`] for one already recorded.
@@ -613,7 +603,8 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         Ok(AckOutcome::Recorded)
     }
 
-    /// Finalizes once and returns true if a new log became available.
+    /// Signs this dealer's log, returning `true` on the first call and `false`
+    /// afterward.
     pub fn finalize<M: Faults>(&mut self) -> bool {
         if self.finalized.is_some() {
             return false;
@@ -625,17 +616,20 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         true
     }
 
-    /// Returns a cloned finalized log.
+    /// Returns the signed log (`None` before [`Self::finalize`] or after
+    /// [`Self::clear_finalized`]).
     pub fn finalized(&self) -> Option<SignedDealerLog<V, C>> {
         self.finalized.clone()
     }
 
-    /// Clears a finalized log after it is observed in a finalized block.
+    /// Drops the signed log. Callers invoke this once the log is included in a
+    /// finalized block.
     pub fn clear_finalized(&mut self) {
         self.finalized = None;
     }
 
-    /// Returns private dealings that still need to be sent.
+    /// Returns the dealing for each player whose acknowledgement is not yet
+    /// recorded.
     pub fn shares_to_distribute(
         &self,
     ) -> impl Iterator<Item = (C::PublicKey, DealerPubMsg<V>, DealerPrivMsg)> + '_ {
@@ -652,12 +646,14 @@ pub struct Player<V: Variant, C: Signer> {
 }
 
 impl<V: Variant, C: Signer> Player<V, C> {
-    /// Handles a dealer message, persisting it before returning the ack.
+    /// Handles a dealing from `dealer`, durably recording it before returning
+    /// the acknowledgement.
     ///
-    /// A previously processed dealer returns its cached acknowledgement. A first
-    /// message returns the exact [`DkgDealerMessageError`] for an unexpected
-    /// dealer, invalid commitment degree, mismatched reshare commitment, or
-    /// invalid private share. Rejected messages are not persisted.
+    /// If `dealer` was already processed, returns its cached acknowledgement
+    /// without validating the new message. A new message that fails validation
+    /// returns the [`DkgDealerMessageError`] for an unexpected dealer, invalid
+    /// commitment degree, mismatched reshare commitment, or invalid private
+    /// share, and is not recorded.
     pub async fn handle<E, SS, D>(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, D>,
@@ -705,7 +701,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
 mod tests {
     use super::*;
     use crate::dkg::{
-        tests::mocks::MemorySecretStore,
+        tests::mocks::{self, MemorySecretStore},
         types::{EpochInfo, EpochOutcome},
     };
     use commonware_codec::FixedSize;
@@ -719,7 +715,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::{N3f1, NZU32, TestRng, ordered::Set};
+    use commonware_utils::{N3f1, TestRng, ordered::Set};
 
     type TestStore<E> = Store<E, MemorySecretStore, MinPk, PublicKey>;
 
@@ -765,7 +761,7 @@ mod tests {
     where
         E: BufferPooler + Clock + RuntimeStorage + Metrics,
     {
-        Store::init(context, partition, NZU32!(16), secret_store).await
+        mocks::store(context, partition, secret_store).await
     }
 
     #[test]

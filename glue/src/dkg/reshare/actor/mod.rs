@@ -1,155 +1,23 @@
-//! Drive per-epoch BLS resharing from finalized marshal state.
+//! Per-epoch driver for the reshare ceremony.
 //!
-//! The actor bridges finalized epoch metadata, the Feldman-Desmedt reshare
-//! protocol, P2P dealer traffic, and certificate-scheme registration. Each loop
-//! iteration derives the active epoch from the first height the actor does not
-//! cover, loads the epoch's public [`EpochInfo`] from the finalized boundary
-//! block, and either participates in the ceremony or follows until the next
-//! boundary is finalized.
+//! See the [reshare docs](crate::dkg::reshare) for the protocol, application
+//! contract, and recovery rules this actor implements.
 //!
-//! # Epoch Lifecycle
+//! # Architecture
 //!
-//! A participating epoch has three states:
+//! Each iteration of the run loop handles the epoch containing the first height
+//! the actor has not applied:
 //!
-//! 1. **Setup** reads the canonical boundary block, replays durable recovery
-//!    state, opens the epoch peer set, registers the current scheme with the
-//!    [`Registrar`], and prepares optional dealer/player state for this node.
-//! 2. **Dealing** runs during the early half of the epoch. Dealers send private
-//!    shares to players over P2P and players return signed acknowledgements.
-//! 3. **Inclusion** runs from the midpoint through the final block. The actor
-//!    offers one finalized dealer log to the application, observes finalized
-//!    logs on-chain, computes the next [`EpochInfo`],
-//!    and registers the next epoch once that boundary block finalizes.
-//!
-//! ```text
-//! finalized boundary for epoch N
-//!        |
-//!        v
-//! setup: load EpochInfo(N), share, seed, recovery journal
-//!        |
-//!        +-- no boundary info and already inside epoch --> follower mode
-//!        |
-//!        v
-//! early blocks
-//!        |
-//!        v
-//! dealing: dealer shares <--> player acknowledgements
-//!        |
-//!        v
-//! midpoint
-//!        |
-//!        v
-//! inclusion: propose/observe dealer logs
-//!        |
-//!        v
-//! final block carries EpochInfo(N + 1)
-//!        |
-//!        v
-//! register scheme for epoch N + 1
-//! ```
-//!
-//! # Payload Flow
-//!
-//! Consensus asks the actor for an optional payload before proposing each block,
-//! and reports finalized blocks after marshal processes them:
-//!
-//! ```text
-//! application --Next(height)-----------> Actor --Payload?----------> application
-//! marshal     --Finalized(block)-------> Actor --acknowledge-------> marshal
-//! peer        --Dealer/Ack(epoch)------> Actor --Ack/Dealer(epoch)-> peer
-//! ```
-//!
-//! During dealing, `Next` never returns a payload. During inclusion, `Next`
-//! returns at most one dealer log before the final height, and returns the
-//! computed [`EpochInfo`] at the final height when
-//! enough valid logs are available. Finalized blocks are the source of truth:
-//! only logs and epoch info that appear in finalized blocks update durable state
-//! or registered schemes.
-//!
-//! Within a run, the actor covers every finalized block at or below the latest
-//! one it has applied and acknowledged. Startup covers marshal's processed
-//! position and every block below a state-sync floor. After a restart, marshal
-//! redelivers blocks above its processed position and the actor applies again
-//! those that startup does not cover. Marshal can redeliver a finalized block
-//! with a fresh acknowledgement, and the actor acknowledges a covered block
-//! without repeating its effects.
-//!
-//! Only a startup state-sync floor may skip blocks the actor does not cover. A
-//! floor installed while the actor runs must not, because the actor has no
-//! state for the skipped blocks. Dealing panics on a skip past its early phase
-//! and inclusion panics on a skip past its epoch. Other skips go unchecked.
-//!
-//! # Crash Recovery
-//!
-//! Recovery state is split by sensitivity. Public, replayable protocol messages
-//! are journaled by [`Store`]: dealer public messages, player acknowledgements,
-//! and finalized dealer logs. Secret material is kept only in [`SecretStore`]:
-//! current shares, private dealings, and dealer RNG seeds. Public epoch info is
-//! normally re-derived from finalized boundary blocks; state-sync startup
-//! material is retained separately and removed on a later startup after marshal
-//! has advanced beyond its epoch.
-//!
-//! ```text
-//! restart
-//!   |
-//!   +--> first height above marshal's processed position, or the
-//!   |    state-sync floor if later, determines candidate epoch
-//!   |
-//!   +--> boundary block supplies canonical EpochInfo
-//!   |
-//!   +--> Store replays public journal
-//!   |
-//!   +--> SecretStore supplies share, private dealings, and seed
-//!   |
-//!   v
-//! resume as dealer/player/observer when enough state is available
-//! ```
-//!
-//! Reusing the persisted dealer seed makes regenerated dealer shares identical
-//! after a restart. Persisted acknowledgements and finalized logs let a player or
-//! observer rebuild the same outcome even though P2P messages are not replayed
-//! and marshal does not redeliver processed blocks. If the node lacks a valid
-//! share for a dealer role, it simply observes or plays instead of manufacturing
-//! local state.
-//!
-//! # Follower Mode
-//!
-//! The actor follows instead of participating when setup cannot read the
-//! boundary [`EpochInfo`] for the epoch containing the first height the actor
-//! does not cover, or when a state-sync floor skips part of the inclusion
-//! window. In either case the actor lacks the public history needed to
-//! reconstruct the ceremony.
-//!
-//! ```text
-//! first uncovered height = H
-//!        |
-//!        v
-//! H is in epoch N
-//!        |
-//!        v
-//! boundary EpochInfo(N) unavailable locally
-//! or state-sync floor skipped inclusion blocks
-//!        |
-//!        v
-//! follower mode until final(N)
-//!        |
-//!        v
-//! final(N) carries EpochInfo(N + 1)
-//!        |
-//!        +--> failed ceremony and prior share held -> register signer
-//!        |
-//!        +--> otherwise -> register verifier
-//!        |
-//!        v
-//! setup again
-//! ```
-//!
-//! While following, `Next` always returns no payload and finalized blocks are
-//! acknowledged without mutation until the final block of the current epoch. The
-//! final block's epoch info is used as the next loop's boundary state. When a
-//! failed ceremony carries the previous threshold output forward, the actor also
-//! carries forward a locally held share and registers as a signer. Otherwise, it
-//! commits without a share and registers as a verifier.
+//! - `setup` is responsible for loading the epoch's [`EpochInfo`], registering
+//!   its scheme, and restoring this node's dealer and player state.
+//! - `dealing` is responsible for exchanging private dealings and
+//!   acknowledgements during the first half of the epoch.
+//! - `inclusion` is responsible for offering this node's dealer log, recording
+//!   finalized logs, and deriving the next [`EpochInfo`].
+//! - `follower` is responsible for following the chain without participating
+//!   until the next final block of an epoch is applied.
+//! - `dkg` is responsible for the one-shot DKG mode used by
+//!   [`bootstrap`](crate::dkg::bootstrap).
 
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
@@ -177,7 +45,8 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
+    spawn_cell,
 };
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, ordered::Set};
 use rand_core::CryptoRng;
@@ -188,7 +57,7 @@ use std::{
 
 type DkgCompletion<V, P, D> = Box<dyn FnOnce(Option<EpochInfo<V, P, D>>) + Send>;
 
-/// Height and digest of the latest finalized block the actor covers.
+/// Height and digest of the latest finalized block the actor has applied.
 #[derive(Clone, Copy)]
 struct FinalizedTip<D> {
     height: Height,
@@ -204,7 +73,7 @@ mod setup;
 mod utils;
 use setup::{Setup, StateSyncStart, startup};
 
-/// Configuration for the crate-private one-shot DKG mode.
+/// Configuration for the one-shot DKG mode used by [`bootstrap`](crate::dkg::bootstrap).
 pub(crate) struct DkgConfig<V, P, D>
 where
     V: BlsVariant,
@@ -244,7 +113,7 @@ where
     <MV::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = C::PublicKey>,
     R: Registrar<PublicKey = C::PublicKey>,
 {
-    /// Signer for player acknowledgments and dealer logs.
+    /// Signer for player acknowledgements and dealer logs.
     pub signer: C,
 
     /// P2P manager used to track peers during one-shot DKG.
@@ -256,23 +125,22 @@ where
     /// Blocker used to block peers that send invalid protocol messages.
     pub blocker: X,
 
-    /// Provider of participant policy.
+    /// Source of future participant sets and transport directories.
     pub participants_provider: P,
 
-    /// Store for private share material.
+    /// Store for shares, private dealings, and dealer RNG seeds.
     pub secret_store: SS,
 
     /// Parallel strategy for cryptographic verification.
     pub strategy: T,
 
-    /// Registrar for configuring signing scheme providers.
+    /// Receives each epoch's signer or verifier scheme.
     pub registrar: R,
 
-    /// Marshal mailbox used to read canonical public epoch state from finalized
-    /// boundary blocks.
+    /// Marshal mailbox used to read finalized blocks.
     pub marshal: MarshalMailbox<S, MV>,
 
-    /// Shared DKG state-sync startup recovery plan.
+    /// State-sync recovery plan shared with the orchestrator.
     pub state_sync: StateSyncPlan<
         S,
         MV::Commitment,
@@ -280,7 +148,7 @@ where
         <MV::ApplicationBlock as ReshareBlock>::Directory,
     >,
 
-    /// Epoch readiness fence.
+    /// Fence marked after each epoch's scheme is registered.
     pub fence: Fence,
 
     /// Application namespace for transcript separation.
@@ -295,8 +163,17 @@ where
     /// Actor mailbox capacity.
     pub mailbox_size: NonZeroUsize,
 
-    /// Runtime-storage partition prefix.
+    /// Prefix of the recovery journal's storage partition.
     pub partition_prefix: String,
+
+    /// Page cache for the recovery journal.
+    pub page_cache: CacheRef,
+
+    /// The size of the write buffer to use for each blob in the recovery journal.
+    pub write_buffer: NonZeroUsize,
+
+    /// Number of bytes to buffer when replaying the recovery journal during startup.
+    pub replay_buffer: NonZeroUsize,
 
     /// Maximum entries accepted in each decoded or provider-supplied
     /// participant set.
@@ -305,10 +182,13 @@ where
     /// Epoch schedule used to interpret finalized block heights.
     pub blocks_per_epoch: NonZeroU64,
 
-    /// Batch verifier marker.
+    /// Batch verifier used to verify dealer logs.
     pub batch_verifier: PhantomData<BV>,
 }
 
+/// Reshare actor for one node.
+///
+/// See the [module docs](crate::dkg::reshare) for the protocol it runs.
 pub struct Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A = Exact>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
@@ -342,6 +222,9 @@ where
     sharing_mode: SharingMode,
     reveal: Reveal,
     partition_prefix: String,
+    page_cache: CacheRef,
+    write_buffer: NonZeroUsize,
+    replay_buffer: NonZeroUsize,
     max_participants: NonZeroU32,
     blocks_per_epoch: NonZeroU64,
     epocher: FixedEpocher,
@@ -368,6 +251,7 @@ where
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
 {
+    /// Creates an actor from `config` and returns it with its [`Mailbox`].
     pub fn new(
         context: E,
         config: Config<C, M, X, P, SS, T, BV, S, MV, R>,
@@ -393,6 +277,9 @@ where
                 sharing_mode: config.sharing_mode,
                 reveal: config.reveal,
                 partition_prefix: config.partition_prefix,
+                page_cache: config.page_cache,
+                write_buffer: config.write_buffer,
+                replay_buffer: config.replay_buffer,
                 max_participants: config.max_participants,
                 blocks_per_epoch: config.blocks_per_epoch,
                 epocher,
@@ -419,6 +306,12 @@ where
         (actor, mailbox)
     }
 
+    /// Spawns the actor with its P2P channel `chan`.
+    ///
+    /// The task exits when the runtime stops, when the mailbox closes, or when
+    /// `chan` closes during a dealing window. See the
+    /// [module docs](crate::dkg::reshare#failures) for the conditions under
+    /// which it panics.
     pub fn start<SE, RE>(mut self, chan: (SE, RE)) -> Handle<()>
     where
         SE: Sender<PublicKey = C::PublicKey>,
@@ -440,6 +333,9 @@ where
             self.context.child("store"),
             &self.partition_prefix,
             self.max_participants,
+            self.page_cache.clone(),
+            self.write_buffer,
+            self.replay_buffer,
             secret_store,
         )
         .await;
@@ -456,10 +352,8 @@ where
             )
             .await;
 
-        // Install the recovered epoch scheme, then materialize the certified
-        // floor commitment and retain its height with the epoch metadata. Setup
-        // uses that bound to decide whether the public dealer-log window is
-        // replayable.
+        // Register the synced epoch, then resolve its floor height. Setup uses
+        // the floor to decide whether the epoch's dealer-log window is complete.
         let (mut state_sync, floor) = if let Some(state_sync) = state_sync {
             let share = self.recovered_share(&mut store, &state_sync.info).await;
             self.register_epoch(&state_sync.info, share).await;
@@ -480,8 +374,6 @@ where
             (None, None)
         };
 
-        // The tip starts at marshal's processed position and covers every
-        // block below a state-sync floor.
         self.tip = startup(self.marshal.get_anchor().await, floor);
 
         if matches!(self.mode, Mode::Dkg { .. }) {
@@ -533,8 +425,8 @@ where
         }
     }
 
-    /// Returns whether the actor already covers `block`, either from startup or
-    /// because it completed the block's effects.
+    /// Returns whether the actor has already applied `block`, either at startup
+    /// or by completing its effects.
     ///
     /// # Panics
     ///
@@ -552,7 +444,7 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the tip already covers `block`.
+    /// Panics if `block` is not above the tip.
     fn advance(&mut self, block: &B) {
         assert!(
             self.tip.is_none_or(|tip| block.height() > tip.height),

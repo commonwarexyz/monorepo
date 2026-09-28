@@ -1,99 +1,139 @@
-//! Manage QMDB database instances on behalf of a stateful application.
+//! Speculative and finalized QMDB state for applications built on consensus.
 //!
-//! A stateful application built on consensus must maintain speculative state for
-//! every pending chain built on top of the finalized tip. This module provides
-//! the [`Application`] trait and a [`Stateful`] actor that automates that
-//! bookkeeping:
+//! `stateful` lets an [`Application`] execute blocks against QMDB databases while the [`Stateful`]
+//! actor manages storage. [`Stateful`] maintains state for every pending block built on the
+//! finalized tip, applies finalized blocks to the databases, and can bootstrap a new node from
+//! peers with QMDB state sync. Its [`Mailbox`] implements the consensus
+//! [`Application`](commonware_consensus::Application) and receives finalized blocks from marshal as
+//! a [`Reporter`](commonware_consensus::Reporter).
 //!
-//! 1. Before each `propose` or `verify`, the actor forks unmerkleized batches
-//!    from the parent block's pending state (or from committed database state
-//!    if the parent has been finalized).
-//! 2. The application executes against those batches and returns merkleized
-//!    results, which the actor stores as a new pending tip keyed by the
-//!    block's digest.
-//! 3. On finalization, the actor applies the winning tip's changesets to the
-//!    underlying databases and prunes pending entries from dead forks.
+//! # Overview
 //!
-//! # Database Layer
+//! The _application_ executes a block against unmerkleized database batches and returns the
+//! merkleized result. [`Stateful`] holds each accepted result in memory as the _pending state_ of
+//! its block.
 //!
-//! The [`db`] module defines batch lifecycle traits ([`db::Unmerkleized`],
-//! [`db::Merkleized`], [`db::ManagedDb`]) and a [`db::DatabaseSet`] trait that
-//! groups one or more databases into a single unit.
+//! Upon `propose` or `verify` of a block with parent `p`:
 //!
-//! The [`db::p2p`] submodule provides a P2P resolver actor
-//! (implementing [`commonware_storage::qmdb::sync::Source`]) over
-//! [`commonware-resolver`](commonware_resolver), enabling databases to fetch
-//! and serve sync operations from peers.
+//! * Fork batches from the pending state of `p`, or from the databases if `p` is the last applied
+//!   block. If neither exists, recover the state of `p` first (see
+//!   [Lazy Recovery](#lazy-recovery)).
+//! * Call [`Application::propose`] or [`Application::verify`] with those batches.
+//! * Keep the result as the pending state of the block if it matches the block's
+//!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics, and a mismatched
+//!   verification votes `false`.
 //!
-//! # Syncing
+//! Upon finalization of block `b` (marshal delivers finalized blocks in height order):
 //!
-//! State sync operates against a single trusted target at a time. The peers serving operations and
-//! proofs remain untrusted, and their responses are verified against that target. Selecting the
-//! target before the storage boundary lets the sync engines follow strictly advancing updates
-//! instead of reconciling competing targets.
+//! * Answer `false` to verifications of blocks that cannot descend from `b`, and restart those
+//!   that cannot continue across the finalization.
+//! * Take the pending state of `b`, or re-execute `b` with [`Application::apply`] if it has none.
+//! * Discard pending state that does not descend from `b`.
+//! * Call [`Application::capture`], apply the state of `b` to the databases, then call
+//!   [`Application::finalized`].
+//! * Acknowledge `b` to marshal once `finalized` resolves and `b` is durable (see
+//!   [Persistence](#persistence)).
 //!
-//! Applications load a [`SyncPlan`] before constructing marshal and [`Stateful`].
-//! The plan reads the durable state sync state and keeps that metadata handle
-//! until [`Stateful`] consumes it, avoiding multiple opens of the same metadata
-//! partition during startup. Callers use [`SyncPlan::should_sync`] to
-//! decide whether to discover a finalized floor and persist it via
-//! [`SyncPlan::set_floor`]. After floor selection, the same plan drives
-//! marshal (via [`SyncPlan::marshal_start`]) and stateful (via
-//! [`Config::plan`]). Both read the floor from durable metadata, so they agree
-//! on the startup decision and a crash before either actor starts still resumes
-//! state sync. Once the durable complete height is set, the node never performs
-//! peer state sync again and must recover from the later of the stored height
-//! and marshal's processed height on future startups.
+//! # Architecture
 //!
-//! The actor supports two startup paths:
+//! [`Stateful`] runs in one of two modes. While state sync runs, it rejects proposals, defers
+//! verifications, and uses finalized blocks to advance the sync target. Once its databases are
+//! ready, it serves proposals, verifications, and finalizations as described above.
 //!
-//! - **Recovery** (no persisted floor): the actor spawned by [`Stateful::start`]
-//!   opens the database set before it polls its mailbox. New nodes initialize from
-//!   genesis. Restarted nodes open the database set at the later of
-//!   marshal's processed anchor and the stored state sync height.
-//!   If marshal is behind that stored height, the actor acknowledges old
-//!   finalized blocks without applying them again until marshal catches up. The
-//!   actor then starts directly in normal processing mode while marshal continues
-//!   backfilling blocks from the network.
+//! The [`db`] module defines the batch lifecycle traits ([`db::Unmerkleized`], [`db::Merkleized`],
+//! [`db::ManagedDb`]) and the [`db::DatabaseSet`] trait that groups one or more databases into a
+//! single unit. The [`db::p2p`] module provides a resolver over
+//! [`commonware-resolver`](commonware_resolver) that fetches sync operations from peers and serves
+//! local operations to them. Its [`Mailbox`](db::p2p::Mailbox) implements
+//! [`commonware_storage::qmdb::sync::Source`]. The [`probe`] module gathers a recent finalization
+//! to sync from.
 //!
-//! - **State sync** (persisted floor): Run a one-time QMDB state sync from
-//!   marshal's configured floor block, populating each database via
-//!   [`db::StateSyncSet::sync`]. The actor retains finalized blocks and their
-//!   acknowledgements in batches up to marshal's configured pending-ack window size, waits for
-//!   the live sync coordinator to record the newest block's target, and releases each batch.
-//!   If state sync completes before the window fills, the pending blocks are handled
-//!   during the transition to normal processing. Durable metadata records the selected
-//!   floor before marshal starts from it and is marked complete only after the converged
-//!   state and any required handoff blocks are durable. A crash before completion restarts
-//!   state sync from that floor, or from a newer selection, even without a request. The
-//!   storage target is advanced to the block backing marshal's durable processed position
-//!   when necessary, because marshal does not redeliver blocks at or below that position.
-//!   Journal state that has pruned the resulting range start is discarded and rebuilt.
-//!   Initialization removes state beyond the target and reuses the retained prefix.
-//!   A lagging floor sampled during restart cannot move the floor backward.
-//!   Subsequent restarts after completion take the recovery path to ensure a contiguous stream.
+//! # Startup
+//!
+//! 1. Load a [`SyncPlan`] with [`SyncPlan::init`].
+//! 2. If [`SyncPlan::should_sync`] returns `true`, select a finalized floor and persist it with
+//!    [`SyncPlan::set_floor`].
+//! 3. Start marshal from [`SyncPlan::marshal_start`] and pass the same plan to [`Stateful`] as
+//!    [`Config::plan`].
+//!
+//! With a persisted floor, [`Stateful`] runs [state sync](#state-sync). Without one, it _recovers_:
+//! before handling any message, it opens the databases at the later of marshal's processed height
+//! and the recorded completion height (genesis on a new node). While marshal is behind that height,
+//! finalized blocks at or below it are acknowledged without being applied again.
+//!
+//! _Completion_ is recorded when state sync converges and on every recovery. Once it is recorded,
+//! peer state sync never runs on the node again.
+//!
+//! # State Sync
+//!
+//! State sync follows a single trusted target at a time: the targets committed by a finalized
+//! block. The peers serving operations and proofs remain untrusted, and their responses are
+//! verified against that target.
+//!
+//! Upon startup with persisted floor `f`:
+//!
+//! * Sync the databases toward the targets of `f`, or toward those of the block backing marshal's
+//!   processed height if marshal has already passed `f` (marshal does not redeliver blocks at or
+//!   below its processed height).
+//!
+//! Upon finalization of block `b` while syncing:
+//!
+//! * Retain `b` with its marshal acknowledgement.
+//! * Once marshal's pending acknowledgement window is full, record the newest retained block as the
+//!   sync target and acknowledge every retained block.
+//!
+//! Upon convergence at anchor `a`:
+//!
+//! * Acknowledge retained blocks at or below `a` without running application hooks.
+//! * Apply retained blocks above `a` in height order, as for any finalization, and acknowledge them
+//!   once they are durable.
+//! * Record completion, attach the databases to the resolvers, and start serving requests.
+//!
+//! # Persistence
+//!
+//! Pending state is held only in memory. The databases and the state sync metadata are durable.
+//!
+//! * Once the databases are ready, a finalized block is acknowledged to marshal only when database
+//!   state through it is durable, so marshal's processed height does not pass durable database
+//!   state. After a crash, recovery opens every database at the recovery height (rewinding any
+//!   that are ahead), and the blocks above it are delivered and applied again.
+//! * During state sync, retained blocks are acknowledged before the databases reach them (see
+//!   [State Sync](#state-sync)). A crash then resumes state sync, from the block backing marshal's
+//!   processed height if marshal has passed the floor.
+//! * Following [Startup](#startup), the floor is durable before marshal starts from it. A crash
+//!   before completion resumes state sync from that floor, or from a newer selection, whether or
+//!   not state sync is requested. A lagging selection cannot move the floor backward.
+//! * Completion is recorded only after the converged state and every applied handoff block are
+//!   durable, and before the databases are pruned or exposed.
+//!
+//! [`Application::finalized`] describes which hooks may run again after a crash.
 //!
 //! # Lazy Recovery
 //!
-//! Pending state is kept entirely in memory to avoid disk writes on the
-//! consensus hot path. After a restart the map is empty, but the actor
-//! recovers lazily: when `propose` or `verify` encounters a parent whose
-//! state is missing, the actor walks back through the block DAG (via a
-//! [`BlockProvider`](commonware_consensus::marshal::ancestry::BlockProvider))
-//! to the nearest known ancestor or the finalized tip,
-//! then replays forward via [`Application::apply`] to fill the gap. Each
-//! replayed block is inserted into the pending map immediately so that
-//! partial progress survives timeouts. Consensus may build on a block before
-//! it is certified (for example, with stable leaders), so a replayed ancestor
-//! is not guaranteed to be valid.
-//! Replayed state is reusable as parent state but is never a verification
-//! verdict: verifying a replayed block still runs [`Application::verify`].
+//! After a restart no pending state exists. When `propose` or `verify` needs the state of a parent
+//! that is neither pending nor the last applied block, [`Stateful`] walks back through the block
+//! DAG (via a [`BlockProvider`](commonware_consensus::marshal::ancestry::BlockProvider)) to the
+//! nearest pending or applied block, then replays forward with [`Application::apply`]. Each
+//! replayed block becomes pending state as soon as it is rebuilt, so a cancelled request does not
+//! discard completed replay.
+//!
+//! Consensus may build on a block before it is certified (for example, with stable leaders), so a
+//! replayed ancestor is not guaranteed to be valid. Replayed state is reusable as parent state but
+//! is never a verification verdict: verifying a replayed block still runs [`Application::verify`].
+//!
+//! # Failures
+//!
+//! [`Stateful`] panics if a proposal does not match its sync targets, if [`Application::apply`]
+//! cannot execute or reproduce a finalized block, if state sync fails, if a database operation
+//! fails (see [Failures](db#failures)), if a state sync metadata write fails, or if marshal cannot
+//! return a block needed at startup. If shutdown interrupts a database barrier, [`Stateful`] stops
+//! without acknowledging the blocks that barrier covers.
 //!
 //! # Compatibility
 //!
-//! The [`Stateful`] application may be used with [`Deferred`] and [`coding::Marshaled`],
-//! but not with [`Inline`]. This is because [`Inline`] does not verify the correctness
-//! of the embedded context within the [`CertifiableBlock`].
+//! The [`Stateful`] application may be used with [`Deferred`] and [`coding::Marshaled`], but not
+//! with [`Inline`]: [`Inline`] does not verify the correctness of the embedded context within the
+//! [`CertifiableBlock`].
 //!
 //! [`Deferred`]: commonware_consensus::marshal::standard::Deferred
 //! [`Inline`]: commonware_consensus::marshal::standard::Inline
@@ -124,37 +164,29 @@ pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
     pub merkleized: <A::Databases as DatabaseSet<E>>::Merkleized,
 }
 
-/// Aggregated per-proposal input a [`Stateful`] application hands its inner
-/// application.
+/// Per-proposal input passed to [`Application::propose`].
 ///
-/// `upstream` is the input [`Stateful`] received as a
-/// [`commonware_consensus::Application`] (from whatever wraps it);
-/// `provider` is the stateful-owned handle from [`Config::provider`]. Being
-/// generic over the upstream input, it lets an outer application (for example a
-/// reshare wrapper) stack its own input on top of the stateful-owned provider
-/// without either layer knowing the other.
+/// Pairs the input [`Stateful`] receives from its caller with the provider from
+/// [`Config::provider`], so an outer application can supply its own input independently of the
+/// provider.
 pub struct Input<Upstream, Provider> {
-    /// Input forwarded from the application wrapping [`Stateful`].
+    /// Input passed to [`Stateful`] by its caller.
     pub upstream: Upstream,
 
-    /// Provider owned by the stateful actor, from its [`Config::provider`].
+    /// A clone of [`Config::provider`].
     pub provider: Provider,
 }
 
-/// A stateful application whose storage is managed by a [`DatabaseSet`].
+/// A deterministic state machine whose storage is managed by [`Stateful`].
 ///
-/// Implementors receive [`DatabaseSet::Unmerkleized`] batches and
-/// return [`DatabaseSet::Merkleized`] batches after execution. The surrounding
-/// wrapper handles persistence: storing merkleized batches as pending tips on
-/// the block tree and applying changesets to the underlying databases on
-/// finalization.
+/// Implementors execute blocks against [`DatabaseSet::Unmerkleized`] batches and return
+/// [`DatabaseSet::Merkleized`] batches (see the [module docs](crate::stateful)).
 ///
-/// [`Stateful`] may freely clone the application and invoke its methods
-/// concurrently. Implementors should treat `Application` as a stateless,
-/// deterministic state machine: given the same method inputs and database
-/// state, every clone must produce the same state-transition result. Mutable
-/// state that affects those results must live in the database batches provided
-/// to proposal, verification, and replay methods.
+/// [`Stateful`] may freely clone the application and invoke its methods concurrently. Implementors
+/// should treat `Application` as a stateless, deterministic state machine: given the same method
+/// inputs and database state, every clone must produce the same state-transition result. Mutable
+/// state that affects those results must live in the database batches provided to proposal,
+/// verification, and replay methods.
 pub trait Application<E>: Clone + Send + 'static
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -162,75 +194,56 @@ where
     /// The signing scheme used by the application.
     type SigningScheme: Scheme;
 
-    /// Metadata provided by the consensus engine for a given block.
-    ///
-    /// This often includes things like the proposer, view number, height, or
-    /// epoch. Must be [`Epochable`] and [`Viewable`] so the wrapper can
-    /// construct a [`Round`](commonware_consensus::types::Round) for
-    /// pending-state pruning.
+    /// Consensus metadata for a block (for example its proposer, epoch, and view).
     type Context: Clone + Epochable + Viewable + Send;
 
     /// The block type produced by the application.
-    ///
-    /// Must implement [`CertifiableBlock`] so the wrapper can extract
-    /// the consensus context during lazy recovery (see
-    /// [`apply`](Self::apply)).
     type Block: CertifiableBlock<Context = Self::Context>;
 
     /// The set of databases managed on behalf of this application.
     type Databases: DatabaseSet<E>;
 
-    /// Owned data captured from winning batches before they are applied.
+    /// Owned data captured from a finalized block's state before it is applied.
     ///
     /// Applications with nothing to capture use `()`.
     type Captured: Send;
 
-    /// The stateful-owned provider, supplied through
-    /// [`Config::provider`](crate::stateful::Config::provider).
+    /// The provider supplied through [`Config::provider`](crate::stateful::Config::provider).
     ///
-    /// This may be a mempool that serves transactions, a stream of
-    /// certificates, or any other handle to data that drives state
-    /// transitions. The stateful actor owns it and clones it for each proposal,
-    /// so it must be cheap to clone (e.g. `()` or a handle).
+    /// This may be a mempool that serves transactions, a stream of certificates, or any other
+    /// handle to data that drives state transitions. [`Stateful`] clones it into each proposal, so
+    /// it must be cheap to clone (e.g. `()` or a handle).
     type Provider: Send + Clone;
 
-    /// Per-proposal input forwarded from the application wrapping
-    /// [`Stateful`], aggregated with [`Provider`](Self::Provider) into the
-    /// [`Input`] handed to [`propose`](Self::propose). Set this to `()`
-    /// when nothing wraps the stateful actor with its own input.
+    /// Per-proposal input from the caller of [`Stateful`], passed to [`propose`](Self::propose)
+    /// with the [`Provider`](Self::Provider) as an [`Input`].
+    ///
+    /// Use `()` when callers supply no input.
     type Input: Send;
 
-    /// Extract per-database sync targets from a finalized block.
+    /// Returns the per-database sync targets that `block` commits to.
     ///
-    /// Called by the wrapper for finalized blocks received during state sync.
-    ///
-    /// Target selection occurs before this boundary, so state sync trusts the returned targets
-    /// and only verifies that peer data matches them.
-    ///
-    /// The returned targets are handed to the state sync coordinator so the
-    /// sync engines can track the latest finalized state root and range.
+    /// [`Stateful`] treats these targets as the block's state commitment: proposed, verified, and
+    /// replayed results are checked against them, recovery opens the databases at them, and state
+    /// sync trusts them and verifies peer data against them.
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets;
 
-    /// Block used to initialize the consensus engine in the first epoch.
+    /// Returns the block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
-    /// Build a new block on top of the provided parent ancestry.
+    /// Builds a block on top of the provided parent ancestry.
     ///
-    /// Returns [`None`] if the build fails.
+    /// Returns the block and its merkleized state, or [`None`] if no block is built.
     ///
-    /// The wrapper checks that the returned merkleized state matches
-    /// [`sync_targets`](Self::sync_targets) for the returned block before the
-    /// result is cached as pending state. If the implementor produces a
-    /// block with mismatched targets, this function will panic.
+    /// The merkleized state must match [`sync_targets`](Self::sync_targets) for the returned block:
+    /// [`Stateful`] panics otherwise. Applications using
+    /// [`qmdb::current`](commonware_storage::qmdb::current) must also ensure the block commits to
+    /// the merkleized batch's canonical root, because the sync targets cover only the ops root and
+    /// operation range.
     ///
-    /// Applications using [`qmdb::current`](commonware_storage::qmdb::current)
-    /// must still ensure the proposed block commits to the merkleized batch's
-    /// canonical root. The wrapper's sync-target check only verifies the ops
-    /// root and operation range used by replay sync.
-    ///
-    /// This future may be cancelled by consensus if the caller drops its
-    /// response receiver. Implementations should be cancellation-safe: dropping
-    /// and retrying must not violate invariants or lose durable progress.
+    /// This future may be cancelled by consensus if the caller drops its response receiver.
+    /// Implementations should be cancellation-safe: dropping and retrying must not violate
+    /// invariants or lose durable progress.
     fn propose(
         &mut self,
         context: (E, Self::Context),
@@ -239,50 +252,36 @@ where
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
 
-    /// Verify a block received from a peer, relative to its ancestry.
+    /// Verifies a block received from a peer against its ancestry.
     ///
-    /// Called before the node votes to finalize the block (the notarize vote
-    /// may already have been cast). The implementation should execute the
-    /// block against the provided batches and merkleize them.
+    /// Called before this node votes to finalize the block (its notarize vote may already have
+    /// been cast). The implementation should execute the block against `batches` and return the
+    /// merkleized result.
     ///
-    /// This future should not resolve until the implementation can produce a
-    /// stable verdict. Return [`None`] only when the block is permanently
-    /// invalid for the supplied context, ancestry, and batches. If validity may
-    /// still change as additional information becomes available, continue
-    /// waiting instead of returning [`None`].
+    /// Returns [`None`] only if the block is permanently invalid for the supplied context,
+    /// ancestry, and batches. While validity may still change, the future should stay pending:
+    /// there is no abstain value, so abstaining means not resolving until validity is decided or
+    /// the request is cancelled. A verdict is relative to its inputs. Finalizing a competing branch
+    /// later does not change a completed verdict.
     ///
-    /// Validity is relative to those inputs: finalizing a competing branch
-    /// later does not retroactively change a completed verdict.
+    /// Verification must reject any block whose execution result does not match the block's
+    /// committed state (for example, a state root mismatch). [`Stateful`] votes `false` on any
+    /// returned state that does not match [`sync_targets`](Self::sync_targets), so implementations
+    /// need not re-check those. Applications using
+    /// [`qmdb::current`](commonware_storage::qmdb::current) must still reject blocks whose
+    /// committed canonical root differs from the merkleized batch root, because the sync targets
+    /// cover only the ops root and operation range.
     ///
-    /// In other words, to abstain from voting, do not resolve this future yet.
-    /// Keep it pending until the implementation can either prove the block
-    /// valid, prove it invalid, or the consensus engine cancels the request.
-    /// Abstaining is not represented by a special return value.
+    /// This future is scoped to its caller. [`Stateful`] may also cancel and retry it before
+    /// finalization or pruning. Cancellation and retry must not violate invariants or lose durable
+    /// progress.
     ///
-    /// Verification must reject any block whose execution result does not
-    /// match the block's committed state (for example, a state root mismatch).
-    /// Implementations do not need to re-check [`sync_targets`](Self::sync_targets)
-    /// against the produced batches themselves: the wrapper enforces
-    /// this by checking that any returned merkleized state matches the block
-    /// before it is cached as pending state.
-    ///
-    /// Applications using [`qmdb::current`](commonware_storage::qmdb::current)
-    /// must still reject blocks whose committed canonical root differs from the
-    /// merkleized batch root. The wrapper's sync-target check only verifies the
-    /// ops root and operation range used by replay sync.
-    ///
-    /// This future is scoped to its caller. Stateful may also cancel and retry
-    /// it before finalization or pruning. Cancellation and retry must not
-    /// violate invariants or lose durable progress.
-    ///
-    /// Verification may overlap finalization while its batches remain valid.
-    /// Stateful retries or rejects requests that cannot safely overlap it.
-    /// Read through the provided batches without holding the database set's
-    /// locks. Batches may be branch-scoped views rather than historical
-    /// snapshots: retained ancestor overlays preserve same-branch state, while
-    /// unresolved reads may fall through to the live applied database. Such
-    /// batches remain valid only while applied state advances along their branch
-    /// (see [`db::Shared::read`] for guard discipline).
+    /// Verification may overlap finalization while its batches remain valid, and [`Stateful`]
+    /// retries or rejects requests that cannot. Batches may be branch-scoped views rather than
+    /// historical snapshots: retained ancestor overlays preserve same-branch state, while
+    /// unresolved reads may fall through to the live applied database, so batches remain valid only
+    /// while applied state advances along their branch. Read through the provided batches without
+    /// holding the database set's locks (see [`db::Shared::read`] for guard discipline).
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -290,30 +289,27 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
-    /// Apply a block to reconstruct its merkleized state.
+    /// Re-executes `block` to reconstruct its merkleized state.
     ///
-    /// Called when the wrapper lacks state for `block`: during lazy recovery
-    /// for a missing ancestor (e.g. after a restart), or during finalization
-    /// for an uncached winner. The implementation should execute the block's
-    /// state transitions.
+    /// [`Stateful`] calls this when it lacks the state of `block`: during lazy recovery of a
+    /// missing ancestor (e.g. after a restart), and during finalization of a block with no pending
+    /// state.
     ///
-    /// The returned merkleized state must match what
-    /// [`verify`](Self::verify) accepts for `block`. The wrapper checks it
-    /// against the block's commitments before caching it and reuses it as
-    /// parent state, but never as a verdict: a request to verify the replayed
-    /// block still runs [`verify`](Self::verify). The wrapper commits this
-    /// replay result during finalization and cannot re-check block-specific
-    /// commitments generically.
+    /// The returned state must match what [`verify`](Self::verify) accepts for `block`.
+    /// [`Stateful`] checks it against [`sync_targets`](Self::sync_targets) and reuses it as parent
+    /// state, but never as a verdict: a request to verify the replayed block still runs
+    /// [`verify`](Self::verify). A replayed result may be committed at finalization, and
+    /// [`Stateful`] cannot check block-specific commitments beyond the sync targets.
     ///
-    /// Return [`None`] if the block cannot be executed. Consensus may ask the
-    /// wrapper to verify or build on a block before its ancestors are certified,
-    /// so a replayed ancestor is not guaranteed to have passed
-    /// [`verify`](Self::verify) anywhere. The wrapper then rejects the ancestry
-    /// that depends on it. A finalized block always executes.
+    /// Returns [`None`] if the block cannot be executed, and [`Stateful`] then rejects the ancestry
+    /// that depends on it: a replayed ancestor is not guaranteed to have passed
+    /// [`verify`](Self::verify) anywhere (see [Lazy Recovery](crate::stateful#lazy-recovery)).
+    /// [`Stateful`] panics if this returns [`None`], or state that does not match the sync targets,
+    /// for a finalized block.
     ///
-    /// This future may be cancelled if its originating request is dropped, or
-    /// cancelled and retried before finalization or pruning. Cancellation and
-    /// retry must not violate invariants or lose durable progress.
+    /// This future may be cancelled if its originating request is dropped, or cancelled and
+    /// retried before finalization or pruning. Cancellation and retry must not violate invariants
+    /// or lose durable progress.
     ///
     /// # Panics
     ///
@@ -325,25 +321,20 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
-    /// Capture data from winning batches before they are applied.
+    /// Captures data from a finalized block's state before it is applied.
     ///
-    /// The wrapper calls this immediately before applying each block's winning
-    /// batches. It does not call this for blocks already reflected in the
-    /// database set: the genesis block on a fresh boot, blocks reconciled at
-    /// startup, and blocks covered by state sync.
+    /// [`Stateful`] calls this immediately before applying each finalized block's state. Blocks
+    /// already reflected in the databases skip this hook and [`finalized`](Self::finalized): the
+    /// genesis block on a new node, blocks reconciled at startup, and blocks covered by state sync.
     ///
-    /// Only reads completed through `readers` during this call are guaranteed
-    /// to observe database state before `batches`. Retain owned values instead
-    /// of reader handles when the pre-apply state is required later. The
-    /// returned value is passed unchanged to [`finalized`](Self::finalized)
-    /// after the batches are applied.
+    /// Only reads completed through `readers` during this call are guaranteed to observe database
+    /// state before `batches`. Retain owned values instead of reader handles when the pre-apply
+    /// state is required later. The returned value is passed unchanged to
+    /// [`finalized`](Self::finalized) after the batches are applied.
     ///
-    /// This future and [`finalized`](Self::finalized) are awaited on the
-    /// stateful actor's serial mailbox path. The actor cannot process other
-    /// mailbox messages while either is pending. Keep this capture cheap and
-    /// spawn expensive follow-on work from [`finalized`](Self::finalized)
-    /// instead of awaiting it on this path. Applications with nothing to
-    /// capture return `()`.
+    /// [`Stateful`] handles no other message while this future or [`finalized`](Self::finalized) is
+    /// pending (verifications already running continue). Keep this capture cheap, and spawn
+    /// expensive follow-on work from [`finalized`](Self::finalized) instead of awaiting it.
     ///
     /// # Panics
     ///
@@ -356,29 +347,24 @@ where
         readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) -> impl Future<Output = Self::Captured> + Send;
 
-    /// Observe a finalized block after its winning batches are applied.
+    /// Observes a finalized block after its state is applied.
     ///
-    /// The wrapper calls this after every [`DatabaseSet::apply`] in application
-    /// order. `captured` is the value returned by [`capture`](Self::capture)
-    /// for the exact applied batches. The block's state is readable from the
-    /// databases, but durability through that block may still be pending. A
-    /// database barrier may run concurrently with this future. The wrapper
-    /// releases the block's marshal acknowledgement only after this future
-    /// resolves and a barrier covering the block completes.
+    /// [`Stateful`] calls this after every [`DatabaseSet::apply`], in application order. `captured`
+    /// is the value [`capture`](Self::capture) returned for the same batches. The block's state is
+    /// readable from the databases but may not be durable yet, and a database barrier may run
+    /// concurrently with this future. [`Stateful`] acknowledges the block to marshal only after
+    /// this future resolves and a barrier covering the block completes.
     ///
-    /// Blocks already reflected in the database set invoke neither this hook
-    /// nor [`capture`](Self::capture): the genesis block on a fresh boot,
-    /// blocks reconciled at startup, and blocks covered by state sync.
-    /// Consecutive hook calls may therefore skip heights after state sync.
+    /// Blocks already reflected in the databases skip this hook (see [`capture`](Self::capture)),
+    /// so consecutive calls may skip heights after state sync.
     ///
-    /// This hook receives read-only database handles and may overlap verification
-    /// of blocks built on the newly finalized block or one of its retained
-    /// descendants. Result-affecting mutations must be made through normal block
-    /// execution, not from this observer.
+    /// This hook receives read-only database handles and may overlap verification of blocks built
+    /// on the newly finalized block or one of its retained descendants. Result-affecting mutations
+    /// must be made through normal block execution, not from this observer.
     ///
-    /// A crash after this hook runs but before a database sync covering the
-    /// block and marshal's processed position are durable may cause the block's
-    /// batches to be captured, applied, and observed again after restart.
+    /// A crash after this hook runs but before a database sync covering the block and marshal's
+    /// processed position are durable may cause the block's batches to be captured, applied, and
+    /// observed again after restart.
     ///
     /// # Panics
     ///

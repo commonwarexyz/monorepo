@@ -38,16 +38,16 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
-    reschedule, telemetry::metrics::count_running_tasks,
+    Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _, buffer::paged::CacheRef,
+    deterministic, reschedule, telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{
-    NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, probability,
+    NZU16, NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, probability,
     sequence::Unit, sync::Mutex, test_rng,
 };
 use std::{
     collections::{BTreeMap, HashSet},
-    num::NonZeroU64,
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
@@ -55,6 +55,9 @@ use tracing::info;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_INITIAL_E2E";
 const EPOCH_LENGTH: NonZeroU64 = NZU64!(32);
+const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16);
+const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
 const VOTES: u64 = 0;
@@ -236,6 +239,9 @@ impl EngineDefinition for DkgEngine {
                 reveal: Reveal::V1,
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: format!("dkg-{index}"),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
                 participants: self.participants_set(),
                 directory: Unit,
                 blocks_per_epoch: EPOCH_LENGTH,
@@ -456,6 +462,9 @@ pub(super) fn run_closed_network_receiver() {
                 reveal: Reveal::V1,
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: "dkg-closed-receiver".into(),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
                 participants,
                 directory: Unit,
                 blocks_per_epoch: EPOCH_LENGTH,
@@ -530,6 +539,9 @@ pub(super) fn run_activation_failure_completes_empty() {
                 reveal: Reveal::V1,
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: "dkg-activation-failure".into(),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
                 participants: engine.participants_set(),
                 directory: Unit,
                 blocks_per_epoch: EPOCH_LENGTH,
@@ -756,6 +768,9 @@ where
             reveal: Reveal::V1,
             max_supported_mode: max_supported_mode(),
             partition_prefix: "dkg-single".into(),
+            page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
             participants: engine.participants_set(),
             directory: Unit,
             blocks_per_epoch: EPOCH_LENGTH,

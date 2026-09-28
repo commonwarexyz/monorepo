@@ -40,24 +40,20 @@ where
 {
     /// Runtime context.
     pub context: E,
-    /// P2P manager used to track the bootstrap participants when discovery
-    /// begins.
+    /// Peer manager that activates the bootstrap snapshot when discovery begins.
     pub manager: M,
     /// The weakly subjective checkpoint to bootstrap from.
     pub bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
     /// State-sync floor persisted by an interrupted sync, if any.
     ///
-    /// A node resuming a persisted floor must pass it here. Otherwise the
-    /// discovered info can describe an epoch older than that floor, and
-    /// [`state_sync::Plan::init`](crate::dkg::state_sync::Plan::init) panics
-    /// on that pair.
-    ///
-    /// Latest-finalization replies below this floor's epoch are ignored, so
-    /// the discovered [`Artifact::info`](crate::dkg::probe::Artifact::info)
-    /// describes the epoch of whichever of this floor and
-    /// [`Artifact::floor`](crate::dkg::probe::Artifact::floor) is later. The
-    /// solicited committee and its peer-set ID come from
-    /// [`Config::bootstrap`] alone.
+    /// A node resuming a persisted floor must pass it here: replies below its
+    /// epoch are then ignored, so
+    /// [`Artifact::info`](crate::dkg::probe::Artifact::info) describes the epoch
+    /// of whichever of this floor and
+    /// [`Artifact::floor`](crate::dkg::probe::Artifact::floor) is later. Without
+    /// it, the discovered info can describe an earlier epoch, and
+    /// [`state_sync::Plan::init`](crate::dkg::state_sync::Plan::init) panics on
+    /// the pair.
     pub floor: Option<Finalization<S, V::Commitment>>,
     /// All-epoch certificate verifier built from the constant BLS identity.
     pub verifier: S,
@@ -81,7 +77,8 @@ where
     pub block_codec_config: <V::ApplicationBlock as Read>::Cfg,
 }
 
-/// DKG probe actor.
+/// Discovers and serves DKG bootstrap material (see the
+/// [module docs](crate::dkg::probe)).
 pub struct Actor<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -128,7 +125,7 @@ where
     T: Strategy,
     B: Blocker<PublicKey = S::PublicKey>,
 {
-    /// Create a probe actor and mailbox.
+    /// Creates a probe actor and its mailbox.
     pub fn new(config: Config<E, M, S, V, T, B>) -> (Self, Mailbox<S, V>) {
         let (sender, mailbox) =
             actor_mailbox::new(config.context.child("mailbox"), config.mailbox_size);
@@ -152,12 +149,10 @@ where
         )
     }
 
-    /// Start the probe actor.
+    /// Starts the probe actor.
     ///
-    /// The boundary network is the probe request channel used to sample the
-    /// configured committee's latest finalizations, fetch the target epoch's
-    /// boundary finalization and block, and later serve the same requests to
-    /// other joining peers.
+    /// `boundaries` carries probe requests and responses in both directions:
+    /// this node's discovery and its service to other joining peers.
     pub fn start<BSE, BRE>(mut self, boundaries: (BSE, BRE)) -> Handle<()>
     where
         BSE: Sender<PublicKey = S::PublicKey>,
@@ -171,8 +166,7 @@ where
         BSE: Sender<PublicKey = S::PublicKey>,
         BRE: Receiver<PublicKey = S::PublicKey>,
     {
-        // Replies must reach both the trust point and the persisted floor's
-        // epoch. Discovery tracks the committee at the bootstrap epoch alone.
+        // Ignore replies below the bootstrap epoch or the persisted floor's epoch.
         let minimum = self
             .floor
             .map_or(self.bootstrap.epoch, |floor| floor.epoch())

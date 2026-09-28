@@ -2,8 +2,8 @@
 
 use crate::{
     application::App,
+    bootstrap,
     config::{NetworkConfig, NodeConfig},
-    dkg,
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, IO_BUFFER_SIZE, LogReporter, MAILBOX_SIZE,
@@ -80,10 +80,10 @@ pub async fn run(context: tokio::Context, args: Validator) {
     network.validate().expect("invalid network config");
     let genesis_info = types::read_genesis(&args.node_dir).expect("genesis is required");
 
-    // A player's genesis comes only from its own `dkg`, which hands the
+    // A player's genesis comes only from its own `bootstrap`, which hands the
     // epoch-0 share to `secrets` before writing genesis. Nothing in the
     // bootstrap store is needed after that, so erase it.
-    Secrets::init(context.child("dkg"), dkg::PARTITION)
+    Secrets::init(context.child("bootstrap"), bootstrap::PARTITION)
         .await
         .destroy()
         .await;
@@ -301,6 +301,9 @@ pub async fn run(context: tokio::Context, args: Validator) {
             reveal: REVEAL,
             mailbox_size: MAILBOX_SIZE,
             partition_prefix: format!("{partition_prefix}-reshare"),
+            page_cache: page_cache.clone(),
+            write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
             max_participants: MAX_PARTICIPANTS,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
             batch_verifier: PhantomData::<ed25519::Batch>,

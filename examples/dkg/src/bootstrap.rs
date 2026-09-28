@@ -1,11 +1,12 @@
-//! `dkg` subcommand: one-shot glue DKG bootstrap for the epoch-0 committee.
+//! `bootstrap` subcommand: one-shot glue DKG for the epoch-0 committee.
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
-        DKG_CHANNEL, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE, MESSAGE_RATE, NAMESPACE,
-        Participants, Partition, RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
+        DKG_CHANNEL, IO_BUFFER_SIZE, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE,
+        MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition,
+        RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
     },
     validator,
 };
@@ -17,7 +18,7 @@ use commonware_glue::dkg::{
     types::{EpochInfo, EpochOutcome},
 };
 use commonware_p2p::authenticated::{self, discovery};
-use commonware_runtime::{Handle, Strategizer, Supervisor as _, tokio};
+use commonware_runtime::{Handle, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_stream::encrypted::Handshake;
 use commonware_utils::{NZUsize, sequence::Unit};
 use std::{
@@ -28,21 +29,21 @@ use tracing::{error, info};
 
 type ReshareEpochInfo = EpochInfo<MinSig, PublicKey>;
 
-/// Partition of the bootstrap ceremony's [`Secrets`] store.
-pub const PARTITION: Partition = Partition::Dkg;
+/// Partition of the bootstrap's [`Secrets`] store.
+pub const PARTITION: Partition = Partition::Bootstrap;
 
-/// Run the one-shot DKG bootstrap, write the resulting genesis, and keep
-/// serving until stopped.
+/// Run the one-shot DKG, write the resulting genesis, and keep serving until
+/// stopped.
 #[derive(Args)]
-pub struct Dkg {
+pub struct Bootstrap {
     /// Validator node directory containing config and runtime storage.
     #[arg(long, default_value = "./data/validator-0")]
     pub node_dir: PathBuf,
 }
 
-/// Run the bootstrap engine, distribute the genesis artifact on completion, and
-/// keep serving peers that have not completed.
-pub async fn run(context: tokio::Context, args: Dkg) {
+/// Run the [`bootstrap::Engine`], distribute the genesis artifact on completion,
+/// and keep serving peers that have not completed.
+pub async fn run(context: tokio::Context, args: Bootstrap) {
     let node = NodeConfig::load(&args.node_dir).expect("failed to load node config");
     let network = NetworkConfig::load(&args.node_dir).expect("failed to load network config");
     network.validate().expect("invalid network config");
@@ -87,6 +88,9 @@ pub async fn run(context: tokio::Context, args: Dkg) {
             reveal: REVEAL,
             max_supported_mode: MAX_SUPPORTED_MODE,
             partition_prefix: "bootstrap".to_string(),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
             participants: participants.get(Epoch::zero()),
             directory: Unit,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
@@ -120,12 +124,12 @@ pub async fn run(context: tokio::Context, args: Dkg) {
         players = genesis.players.len(),
         next_players = genesis.next_players.len(),
         directories = written,
-        "dkg complete, serving peers until stopped"
+        "bootstrap complete, serving peers until stopped"
     );
 
     // Keep serving the one-shot chain so participants that have not completed
-    // can catch up. Stop every `dkg` process only after each one has logged
-    // "dkg complete".
+    // can catch up. Stop every `bootstrap` process only after each one has
+    // logged "bootstrap complete".
     if let Err(err) = Handle::select([p2p_handle, engine_handle]).await {
         error!(?err, "bootstrap task failed");
     }
@@ -135,7 +139,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
 /// `network`, except those of players other than `local`, or into `node_dir`
 /// alone when none are found.
 ///
-/// A player's directory gets `genesis.json` only from that player's own `dkg`.
+/// A player's directory gets `genesis.json` only from that player's own `bootstrap`.
 fn write_genesis_to_sibling_validators(
     node_dir: &Path,
     local: &PublicKey,
@@ -185,9 +189,9 @@ mod tests {
     use commonware_utils::{N3f1, ordered::Set, test_rng};
 
     #[test]
-    fn writes_dkg_genesis_to_own_and_non_player_validators() {
+    fn writes_bootstrap_genesis_to_own_and_non_player_validators() {
         let root =
-            std::env::temp_dir().join(format!("commonware-reshare-dkg-{}", std::process::id()));
+            std::env::temp_dir().join(format!("commonware-dkg-bootstrap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 

@@ -1,29 +1,23 @@
-//! Discover the public epoch material a joining node needs before consensus starts.
+//! Discovery of the public epoch material a joining node needs before consensus starts.
 //!
 //! A node that is starting fresh cannot construct epoch-scoped state until it learns the current
 //! epoch's participant set. That set lives in the [`EpochInfo`] of a finalized boundary block.
 //! The [`Actor`] discovers that block, publishes the resulting [`Artifact`] (which also carries
 //! the sampled state-sync floor), and then serves the same boundary material to other joining peers.
 //!
-//! This protocol is an extension of [`stateful::probe`](crate::stateful::probe): it begins with
-//! the same solicit-and-sample floor discovery (built on the same shared sample core) and adds
-//! requests for the floor epoch's boundary finalization and block, which carry the epoch's
-//! public [`EpochInfo`].
+//! This protocol extends [`stateful::probe`](crate::stateful::probe): it begins with the same
+//! solicit-and-sample floor discovery and adds requests for the floor epoch's boundary
+//! finalization and block, which carry the epoch's public [`EpochInfo`].
 //!
-//! At startup the node knows a canonical participant snapshot (the complete dealer, player, and
-//! next-player sets of a configured bootstrap epoch), a constant certificate verifier valid
-//! across all epochs, and the epoch length. When discovery begins, the actor tracks the
-//! snapshot's canonical peer set at the bootstrap epoch's own peer-set ID; the orchestrator
-//! tracks identical contents if it later enters that epoch, so the registrations never
-//! conflict. Solicitation, membership, and the fault budgets below all apply to the snapshot's
-//! dealers: the epoch's active committee of share holders and certificate signers.
+//! At startup the node knows a [`Bootstrap`] checkpoint (the complete participant snapshot of a
+//! configured bootstrap epoch and its transport [`Directory`]), a constant certificate verifier
+//! valid across all epochs, and the epoch length. Solicitation, membership checks, and the fault
+//! budgets below apply to the snapshot's dealers, which are the epoch's share holders and
+//! certificate signers.
 //!
-//! Addressable deployments seed the snapshot's transport [`Directory`] alongside this
-//! weak-subjectivity checkpoint through [`Bootstrap::directory`]. The actor activates the
-//! snapshot only when its first subscriber appears. If activation fails, the actor shuts down
-//! before sending a request and drops all pending subscribers. The discovered [`Artifact`]
-//! carries the target epoch's own directory in its [`EpochInfo`], so the joining node needs no
-//! out-of-band address source for the epoch it syncs into.
+//! The actor activates the snapshot only when its first subscriber appears. If activation fails,
+//! the actor shuts down before sending a request and drops all pending subscribers. The
+//! discovered [`Artifact`] carries the target epoch's own directory in its [`EpochInfo`].
 //!
 //! # Trust Model
 //!
@@ -35,24 +29,26 @@
 //! keeps running an honest, chain-following node at its configured identity costs nothing. What
 //! matters is what members do after rotating. At bootstrap time:
 //!
-//! - At most `f` members may be Byzantine or stale, where "stale" means honest but no longer
+//! - At most `f` members may be Byzantine or stale, where _stale_ means honest but no longer
 //!   following the chain. A frozen node replies honestly with an old finalization, which is
 //!   indistinguishable from an adversarial replay, so it spends the same budget.
 //! - At most `f` members may be unreachable (shut down, address changed, identity retired).
-//!   These cost liveness only; they cannot inject anything.
+//!   These cost liveness only and cannot inject anything.
 //! - The remaining `f + 1` honest, current, reachable members guarantee both liveness (the
 //!   sample completes) and recency (every `f + 1` sample contains at least one of them).
 //!
 //! Both budgets may be fully spent simultaneously. Operators should refresh the configured set
 //! once they can no longer vouch that `f + 1` members remain live and current, exactly as one
 //! refreshes a weak-subjectivity checkpoint. Passing a subset of the committee mis-derives `f`
-//! and cannot be detected at startup; it is the same trust class as a wrong genesis.
+//! and cannot be detected at startup. It is the same trust class as a wrong genesis.
 //!
-//! Certificate forgery is impossible regardless of these budgets: the threshold group key is
-//! reshare-invariant and finalizations are self-certifying, so an old committee can never sign
-//! for a round it did not finalize. Recency is the only weak-subjectivity dimension, and the
-//! sample supplies exactly that. See [`stateful::probe`](crate::stateful::probe) for the
-//! extended `f + 1` recency argument this actor inherits.
+//! The budgets bound recency, not validity. Every accepted reply verifies under the constant
+//! group key, so it names a block the network finalized provided no adversary holds a threshold
+//! of shares from any committee. The group key is reshare-invariant, so this assumption covers
+//! every past committee as well as the current one: a threshold of shares from an earlier epoch
+//! can sign for any round. Under that assumption, the sample supplies recency. See
+//! [`stateful::probe`](crate::stateful::probe) for the `f + 1` recency argument this actor
+//! inherits.
 //!
 //! # Protocol
 //!
@@ -60,7 +56,8 @@
 //!
 //! ## Discovery: solicit and sample
 //!
-//! Once a subscriber appears, [`Actor`] solicits every configured peer's latest finalization:
+//! Once a subscriber appears, the [`Actor`] asks every dealer in the snapshot for its latest
+//! finalization:
 //!
 //! ```text
 //!                +-- LatestRequest --> peer 1
@@ -72,11 +69,12 @@
 //!   peer 2 --LatestResponse(finalization)--> Actor
 //! ```
 //!
-//! Replies are verified with the all-epoch verifier. At most one reply is counted per peer, only
-//! configured members may reply, and replies below the bootstrap epoch or below the epoch of a
-//! persisted [`Config::floor`] are ignored without blocking (the chain reached both epochs, so an
-//! older reply is stale rather than proof of misbehavior). Once `f + 1` distinct peers have
-//! replied, the highest finalization becomes the sampled floor and names the target epoch:
+//! Replies are verified with the all-epoch verifier. At most one reply is counted per peer, a
+//! reply from a peer that is not a dealer is blocked, and replies below the bootstrap epoch or
+//! below the epoch of a persisted [`Config::floor`] are ignored without blocking (the chain
+//! reached both epochs, so an older reply is stale rather than proof of misbehavior). Once
+//! `f + 1` distinct dealers have replied, the highest finalization becomes the sampled floor and
+//! names the target epoch:
 //!
 //! ```text
 //!   peer 1 --LatestResponse(round 10)-->\               replies
@@ -126,9 +124,9 @@
 //!
 //! ## Serving
 //!
-//! After a source of finalized blocks is attached, the actor enters service and answers peers'
-//! latest-finalization, boundary finalization, and boundary block requests for the rest of the
-//! process lifetime:
+//! Once marshal is attached and no subscriber is pending, the actor enters service and answers
+//! peers' latest-finalization, boundary finalization, and boundary block requests for the rest of
+//! the process lifetime:
 //!
 //! ```text
 //!   peer --LatestRequest---------------> Actor --lookup--> LatestResponse -------> peer
@@ -172,25 +170,13 @@ pub struct Bootstrap<P: PublicKey, D: Directory<P> = Unit> {
     pub epoch: Epoch,
     /// The complete participant snapshot of [`Bootstrap::epoch`].
     ///
-    /// Discovery solicits and samples `f + 1` of the snapshot's dealers,
-    /// which are the epoch's active committee (its share holders and
-    /// certificate signers), so the dealers must be that complete committee:
-    /// a subset mis-derives `f`. See the module docs for the trust model and
-    /// the budgets on faulty, stale, and unreachable members.
-    ///
-    /// The snapshot must match the epoch's canonical [`Participants`]: when
-    /// discovery begins, the actor tracks the snapshot's
-    /// [`tracked_peers`](Participants::tracked_peers) at the epoch's own
-    /// peer-set ID, and all peers must track the same set contents at the
-    /// same ID. The orchestrator tracks the identical contents if it later
-    /// enters the bootstrap epoch, so the duplicate registration is benign.
+    /// Discovery samples `f + 1` of the snapshot's dealers, so the dealers
+    /// must be the epoch's complete committee (a subset mis-derives `f`). The
+    /// snapshot must equal the epoch's canonical [`Participants`] because it is
+    /// activated at that epoch's peer-set ID. See the
+    /// [trust model](crate::dkg::probe#trust-model) for the fault budgets.
     pub participants: Participants<P>,
-    /// Transport directory for [`Bootstrap::participants`], seeded alongside
-    /// the checkpoint.
-    ///
-    /// Discovery runs before any application state exists, so the directory
-    /// is part of the weak-subjectivity configuration rather than resolved
-    /// from a registry.
+    /// Transport directory for [`Bootstrap::participants`].
     pub directory: D,
 }
 
@@ -215,16 +201,15 @@ where
     ///
     /// Epoch zero is anchored by genesis and has no boundary finalization.
     pub finalization: Option<Finalization<S, D>>,
-    /// Public epoch information from the finalized boundary block.
-    ///
-    /// Carries the epoch's transport directory, so a joining node can activate
-    /// the discovered epoch's peers without any application state.
+    /// Public epoch information for the epoch of [`Artifact::floor`] (the genesis
+    /// information for epoch zero).
     pub info: EpochInfo<V, S::PublicKey, Dir>,
     /// Highest finalization from the `f + 1` peer sample.
     ///
-    /// This is the sampled state-sync floor. It is at least as recent as the
-    /// freshest honest reply in the sample. A node resuming a persisted
-    /// [`Config::floor`] keeps that floor unless this one is newer.
+    /// This is the sampled state-sync floor, at least as recent as the freshest
+    /// honest reply in the sample. A node resuming a persisted [`Config::floor`]
+    /// should keep whichever floor is newer: [`Artifact::info`] describes the
+    /// epoch of the newer one.
     pub floor: Finalization<S, D>,
 }
 

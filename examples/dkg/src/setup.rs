@@ -125,14 +125,19 @@ fn port(args: &Setup, i: usize) -> anyhow::Result<u16> {
 }
 
 fn print_commands(args: &Setup, network: &NetworkConfig) -> anyhow::Result<()> {
-    println!("Run DKG with:");
-    println!("mprocs {}", commands(args, "dkg", dkg_indexes(network)?));
-    println!("Once every dkg logs \"dkg complete\", stop them all and run the cluster with:");
+    println!("Run bootstrap with:");
+    println!(
+        "mprocs {}",
+        commands(args, "bootstrap", bootstrap_indexes(network)?)
+    );
+    println!(
+        "Once every bootstrap logs \"bootstrap complete\", stop them all and run the cluster with:"
+    );
     println!("mprocs {}", commands(args, "validator", 0..args.peers));
     Ok(())
 }
 
-fn dkg_indexes(network: &NetworkConfig) -> anyhow::Result<Vec<usize>> {
+fn bootstrap_indexes(network: &NetworkConfig) -> anyhow::Result<Vec<usize>> {
     let players = Participants::new(network)?.get(Epoch::zero());
     Ok(network
         .participants
@@ -152,7 +157,7 @@ fn commands(args: &Setup, command: &str, indexes: impl IntoIterator<Item = usize
         .into_iter()
         .map(|i| {
             format!(
-                "\"cargo run --bin commonware-reshare -- {command} --node-dir {}\"",
+                "\"cargo run --bin commonware-dkg -- {command} --node-dir {}\"",
                 args.node_dir.join(format!("validator-{i}")).display()
             )
         })
@@ -167,7 +172,7 @@ mod tests {
     #[test]
     fn setup_writes_only_node_and_network_configs() {
         let node_dir =
-            std::env::temp_dir().join(format!("commonware-reshare-setup-{}", std::process::id()));
+            std::env::temp_dir().join(format!("commonware-dkg-setup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&node_dir);
         run_inner(Setup {
             node_dir: node_dir.clone(),
@@ -185,7 +190,7 @@ mod tests {
         assert_eq!(network.committee_size, 2);
         assert_eq!(node.listen.port(), 4100);
 
-        // Genesis and secret material come only from `dkg`.
+        // Genesis and secret material come only from `bootstrap`.
         let mut files = std::fs::read_dir(&first)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -220,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn dkg_commands_only_include_epoch_zero_players() {
+    fn bootstrap_commands_only_include_epoch_zero_players() {
         let mut rng = rand::make_rng::<StdRng>();
         let participants = (0..4)
             .map(|_| PrivateKey::random(&mut rng).public_key())
@@ -231,13 +236,13 @@ mod tests {
             peers: Vec::new(),
         };
 
-        assert_eq!(dkg_indexes(&network).unwrap(), vec![0, 1]);
+        assert_eq!(bootstrap_indexes(&network).unwrap(), vec![0, 1]);
     }
 
     #[test]
     fn setup_rejects_non_empty_directory() {
         let node_dir = std::env::temp_dir().join(format!(
-            "commonware-reshare-setup-non-empty-{}",
+            "commonware-dkg-setup-non-empty-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&node_dir);

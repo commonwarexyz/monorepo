@@ -1,14 +1,14 @@
 [package]
-name = "commonware-reshare"
+name = "commonware-dkg"
 edition.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
-description = "Reshare a threshold secret over an epoched log."
+description = "Generate and reshare a threshold secret over an epoched log."
 readme = "README.md"
 homepage.workspace = true
-repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"
-documentation = "https://docs.rs/commonware-reshare"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/dkg"
+documentation = "https://docs.rs/commonware-dkg"
 
 [lints]
 workspace = true
@@ -45,5 +45,5 @@ commonware-p2p = { workspace = true, features = ["mocks"] }
 tracing-subscriber.workspace = true
 
 [[bin]]
-name = "commonware-reshare"
+name = "commonware-dkg"
 bench = false

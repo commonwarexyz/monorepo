@@ -35,14 +35,16 @@ pub use plan::SyncPlan;
 const SYNC_METADATA_SUFFIX: &str = "state_sync_metadata";
 const SYNC_STATE_KEY: FixedBytes<1> = fixed_bytes!("C0");
 
-/// Durable sync progress.
+/// Durable state sync progress.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SyncState<S, C>
 where
     S: Scheme,
     C: Digest,
 {
+    /// A floor is selected and state sync has not completed.
     InProgress(Finalization<S, C>),
+    /// Completion is recorded at this height, and peer state sync never runs again.
     Complete(Height),
 }
 
@@ -117,9 +119,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// The database handle set.
     pub databases: A::Databases,
-    /// The anchor the databases reflect.
     pub anchor: Anchor<BlockDigest<A, E>>,
 }
 
@@ -136,7 +136,7 @@ where
     }
 }
 
-/// Durable state-sync metadata.
+/// Durable state sync metadata.
 ///
 /// Mutating functions consume the metadata and return it only on success. Storage failures
 /// panic.
@@ -155,7 +155,7 @@ where
     S: Scheme,
     C: Digest,
 {
-    /// Load the durable state-sync metadata partition, creating it if needed.
+    /// Loads the state sync metadata stored under `partition_prefix`, creating it if needed.
     pub(crate) async fn init(context: E, partition_prefix: impl AsRef<str>) -> Self {
         let partition_prefix = partition_prefix.as_ref();
         let metadata = Metadata::init(
@@ -170,7 +170,7 @@ where
         Self { metadata }
     }
 
-    /// Returns the completed state sync height, if state sync has finished.
+    /// Returns the recorded completion height, if any.
     pub(crate) fn completed(&self) -> Option<Height> {
         match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::Complete(height)) => Some(*height),
@@ -186,18 +186,13 @@ where
         }
     }
 
-    /// Marks state sync as in progress for the selected floor.
+    /// Persists `finalization` as the in-progress state sync floor.
     ///
-    /// This must be persisted before marshal starts from the floor or any state sync database
-    /// mutation begins. A crash then resumes state sync instead of recovering from marshal, and
-    /// the database sync engine can reopen partial sync state and validate the next selected floor.
-    /// The storage target may still advance to marshal's durable processed height during startup.
+    /// Must complete before marshal starts from the floor or state sync mutates any database, so a
+    /// crash resumes state sync instead of recovering from marshal.
     ///
-    /// If a floor is already persisted, whether or not its sync has started, the
-    /// new floor must be at the same or a later consensus round, and a floor at
-    /// the same round must have the same payload. Unlike [`SyncPlan::set_floor`],
-    /// which ignores a floor that is not newer, this panics on a backward or
-    /// conflicting floor.
+    /// Panics if state sync has completed, if `finalization` is at an earlier round than the
+    /// persisted floor, or if it has the persisted floor's round with a different payload.
     pub(crate) async fn set_floor(mut self, finalization: Finalization<S, C>) -> Self {
         match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::InProgress(existing)) => {
@@ -226,11 +221,10 @@ where
         self
     }
 
-    /// Records that one-time state sync completed at the given height.
+    /// Records completion at `height`, which permanently disables peer state sync.
     ///
-    /// Once this height is set, future startups skip peer state sync and initialize
-    /// from the later of this height and marshal's processed height instead. This
-    /// action is irreversible.
+    /// Later startups recover from the later of this height and marshal's processed height.
+    /// Panics if `height` is below the recorded completion height.
     pub(crate) async fn set_completed(mut self, height: Height) -> Self {
         if let Some(SyncState::Complete(existing)) = self.metadata.get(&SYNC_STATE_KEY) {
             assert!(
@@ -248,8 +242,12 @@ where
     }
 }
 
-/// Resolves the state sync anchor block, which covers both the selected finalization and
-/// marshal's durable processed height.
+/// Returns the block state sync starts from.
+///
+/// This is the block of `finalization` unless marshal's processed position has passed it, in
+/// which case it is the block backing marshal's current processed height: marshal does not
+/// redeliver blocks at or below that height, so starting lower would leave a gap. Panics if
+/// marshal cannot return its processed position or the floor block.
 pub(crate) async fn resolve<S, V>(
     marshal: &MarshalMailbox<S, V>,
     floor: Floor,
@@ -259,19 +257,18 @@ where
     S: Scheme,
     V: Variant,
 {
-    // Marshal skips installing a startup floor whose round is already processed. Its block may
-    // have been pruned, so apply the same rule before registering a local-only waiter.
+    // Marshal skips a startup floor at or below its durable round floor, and that floor block may
+    // be pruned, so a local wait for it could hang. Resolve from marshal's current position, since
+    // a live floor may also have pruned the startup snapshot's anchor.
     if floor.processed().is_some() && floor.round() >= finalization.round() {
-        // A live floor can advance the processed position after marshal's startup snapshot and
-        // prune the snapshot's anchor, so resolve from the current position.
         let (processed, anchor) = marshal
             .get_anchor()
             .await
             .expect("marshal must report the processed position it started with");
 
-        // A retained successor can be the selected floor block. Prefer it to its processed
-        // predecessor so the resolved target covers the selected finalization. An absent
-        // block is already backed by the floor block at the next height.
+        // Prefer the selected floor block when it is the retained successor of the processed
+        // block, so the result covers the selected finalization. A `Processed::Absent` anchor is
+        // already the floor block.
         if let Processed::Block(height) = processed
             && let Some(next) = height.get().checked_add(1)
             && let Some(block) = marshal
@@ -284,8 +281,8 @@ where
             V::into_shared(anchor)
         }
     } else {
-        // Marshal's configured startup floor fetches its anchor when needed. This local-only
-        // subscription observes that result without starting a separate fetch.
+        // Marshal fetches the configured floor block itself, so wait for it without starting
+        // another fetch.
         let selected = {
             let block = marshal
                 .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
@@ -294,8 +291,8 @@ where
             V::into_shared(block)
         };
 
-        // Marshal does not redeliver blocks at or below its durable processed position.
-        // A newly installed floor records its predecessor, leaving the anchor for delivery.
+        // A newly installed floor records its predecessor as processed, leaving the floor block
+        // for delivery.
         match marshal.get_anchor().await {
             Some((processed, block)) if processed.height() > selected.height() => {
                 V::into_shared(block)
@@ -305,14 +302,13 @@ where
     }
 }
 
-/// Opens databases at the later of `completed` and marshal's processed height.
+/// Opens the database set at the later of `completed` and marshal's processed height (genesis
+/// when neither exists).
 ///
-/// Startup uses this route to recover from marshal instead of running peer state
-/// sync. When neither height exists, this opens at marshal's genesis block, so fresh
-/// boots and post-sync restarts share the same path.
-///
-/// The marshal target constrains recovery before database publication. Startup panics
-/// if any recovered database does not match its complete target.
+/// A crash can leave databases ahead of that height or at different checkpoints. Each database is
+/// opened at the targets of the block at that height, discarding any suffix beyond them, before
+/// the set is returned. Panics if marshal cannot return that block or a database cannot be opened
+/// at its target (for example, because corruption or excessive pruning lost it).
 pub(crate) async fn open<E, A, S, V>(
     context: E,
     marshal: &MarshalMailbox<S, V>,
@@ -325,8 +321,6 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    // A completed state sync may be ahead of marshal's processed height. Recover from the
-    // later anchor while marshal catches up.
     let anchor = marshal.get_anchor().await;
     let height = completed
         .into_iter()
@@ -346,9 +340,6 @@ where
         )
     };
 
-    // A crash can leave databases ahead of marshal or at different checkpoints. Opening each
-    // at this target discards its extra suffix before the set is exposed. A missing target,
-    // including one lost to corruption or excessive pruning, makes startup fail.
     let processed_targets = A::sync_targets(&block);
     let databases = A::Databases::init(context, db_config, Some(processed_targets)).await;
     Artifact {

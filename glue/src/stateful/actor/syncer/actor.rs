@@ -35,7 +35,6 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    /// Runtime context used for metadata and database initialization.
     pub context: E,
 
     /// Database configuration for the managed set.
@@ -47,16 +46,18 @@ where
     /// Per-database resolvers used to fetch state from peers.
     pub resolvers: R,
 
-    /// Finalized floor marshal should resolve before sync starts.
+    /// Selected state sync floor.
     pub finalization: Finalization<S, V::Commitment>,
 
     /// Marshal mailbox and the durable floor returned with it during initialization.
     pub marshal: (MarshalMailbox<S, V>, Floor),
 
-    /// Notifies the stateful actor when state sync has produced an artifact.
+    /// Delivers the converged [`Artifact`] to [`Stateful`](crate::stateful::Stateful).
     pub completion: oneshot::Sender<Artifact<E, A>>,
 }
 
+/// Runs state sync from the block returned by [`resolve`], accepts target updates, and publishes
+/// the converged [`Artifact`] to [`Stateful`](crate::stateful::Stateful).
 pub struct Syncer<E, A, R, S, V>
 where
     E: Rng + Spawner + Context,
@@ -65,31 +66,14 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    /// Runtime context.
     context: ContextCell<E>,
-
-    /// The mailbox.
     mailbox: Receiver<Message<E, A>>,
-
-    /// The produced state sync artifact, if complete.
     artifact: Option<Artifact<E, A>>,
-
-    /// Database configuration for the managed set.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
-
-    /// Per-database sync engine parameters.
     sync_config: SyncEngineConfig,
-
-    /// Per-database resolvers used to fetch state from peers.
     resolvers: R,
-
-    /// Finalized floor marshal should resolve before sync starts.
     finalization: Finalization<S, V::Commitment>,
-
-    /// Marshal mailbox and the durable floor returned with it during initialization.
     marshal: (MarshalMailbox<S, V>, Floor),
-
-    /// Notifies the stateful actor when state sync has produced an artifact.
     completion: Option<oneshot::Sender<Artifact<E, A>>>,
 }
 
@@ -156,10 +140,8 @@ where
                     );
                     task = None.into();
 
-                    // A tip update enqueued after the coordinator's final drain has no
-                    // receiver left to record it or release its observation barrier.
-                    // Dropping the sender frees the ring buffer, so the observer of any
-                    // queued update retries and receives the artifact.
+                    // No coordinator remains to record a queued update. Dropping the sender
+                    // drops that update, so its caller retries and receives the artifact.
                     tip_updates_tx = None;
                 }
                 Err(err) => {
@@ -176,16 +158,12 @@ where
                         continue;
                     }
 
-                    // If sync had already completed, the state-sync branch above would
-                    // have published `self.artifact` before this mailbox branch ran.
                     let tip_updates = tip_updates_tx
                         .as_mut()
                         .expect("ring sender lives until the artifact is published");
                     if tip_updates.send(update).await.is_err() {
-                        // Tuple sync closes the live tip-update receiver as soon as the
-                        // coordinator converges, before the database tasks have necessarily
-                        // finished. Treat that close as "wait for the in-flight sync task to
-                        // publish its artifact", not as a hard failure.
+                        // A closed target channel means state sync accepts no more targets. Wait
+                        // for its result instead of failing.
                         match (&mut task).await {
                             Ok((databases, anchor)) => {
                                 Self::publish(

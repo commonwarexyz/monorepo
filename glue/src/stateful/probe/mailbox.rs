@@ -13,18 +13,12 @@ where
     S: Scheme,
     V: Variant,
 {
-    /// Subscribe for the receipt of the floor finalization from peers.
+    /// A subscription to the floor (see [`Mailbox::subscribe`]).
     Subscribe {
-        /// The response channel to send the finalization to.
         response: oneshot::Sender<Finalization<S, V::Commitment>>,
     },
-    /// Attach a marshal mailbox, moving the actor from discovery to service once any
-    /// discovered floor has been consumed. Service answers peers' `Request` from the
-    /// attached marshal and never issues outbound requests.
-    Attach {
-        /// The marshal mailbox to serve the latest finalization from.
-        marshal: MarshalMailbox<S, V>,
-    },
+    /// A marshal from which to serve peers (see [`Mailbox::attach`]).
+    Attach { marshal: MarshalMailbox<S, V> },
 }
 
 impl<S, V> Policy for Message<S, V>
@@ -58,30 +52,30 @@ where
         Self { sender }
     }
 
-    /// Open a subscription to the receipt of the floor finalization from peers.
+    /// Subscribes to the floor.
     ///
-    /// While the actor is still discovering, this requests discovery if no floor has been selected
-    /// yet. Dropping the receiver cancels this subscription; if all subscribers are dropped before
-    /// a floor is selected, discovery may be abandoned. If marshal is later attached, the actor
-    /// transitions to service without a cached floor and later subscriptions will not restart
-    /// discovery.
+    /// The receiver resolves immediately if a floor has been selected. Otherwise, while the actor
+    /// is discovering, the subscription starts a request round if no other subscriber is waiting,
+    /// and the receiver resolves once a floor is selected.
     ///
-    /// Callers that need a floor must keep the receiver alive until it resolves and should attach
-    /// only after consuming that floor.
+    /// Dropping the receiver cancels the subscription. If every subscriber is dropped before a
+    /// floor is selected, discovery pauses until the next subscription. Once the actor serves peers
+    /// without a floor, later receivers close without resolving.
     ///
-    /// If a floor has already been selected, the receiver resolves immediately.
+    /// Callers that need a floor must keep the receiver alive until it resolves and should attach a
+    /// marshal only after consuming the floor. See the
+    /// [module documentation](crate::stateful::probe#lifecycle).
     pub fn subscribe(&self) -> oneshot::Receiver<Finalization<S, V::Commitment>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Subscribe { response: tx });
         rx
     }
 
-    /// Attach a marshal mailbox so the actor can serve the latest finalization to peers.
+    /// Attaches a marshal from which the actor answers peers' requests.
     ///
-    /// This moves the actor from discovery to service. It is applied only after any
-    /// discovered floor has been delivered to its subscribers. If no floor was ever requested, or
-    /// every pending subscriber was dropped before a floor was selected, the actor serves without a
-    /// cached floor.
+    /// The actor stops discovery once no subscriber awaits a floor: after a selected floor has been
+    /// delivered, or after every pending subscriber has been dropped. If no floor was selected, it
+    /// serves peers without one. Attachments made after the actor starts serving are ignored.
     pub fn attach(&self, marshal: MarshalMailbox<S, V>) {
         let _ = self.sender.enqueue(Message::Attach { marshal });
     }

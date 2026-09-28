@@ -1,13 +1,10 @@
 //! One-shot engine for generating an initial BLS threshold output.
 //!
-//! The engine runs an independent Ed25519 Simplex chain for one epoch and uses
-//! the reshare actor's crate-private DKG mode to perform the ceremony.
-//! The resulting [`EpochInfo`] describes only the ceremony participants. An
-//! application using it to start continuous resharing must supply the next
-//! players and a transport directory covering the resulting participant union.
-//!
-//! See [`reshare`] for the protocol flow that this engine reuses and for the
-//! application contract of a continuously reshared chain.
+//! The engine runs an independent Ed25519 Simplex chain for one epoch and
+//! performs a single ceremony among the configured participants, using the
+//! dealing and inclusion protocol of [`reshare`]. The resulting [`EpochInfo`]
+//! describes only the ceremony participants (see [`Completion::info`] before
+//! using it as the genesis of a continuously reshared chain).
 
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
@@ -54,7 +51,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
-    NZU16, NZU32, NZU64, NZUsize, TryCollect,
+    NZU32, NZU64, NZUsize, TryCollect,
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
     sequence::Unit,
@@ -63,14 +60,11 @@ use commonware_utils::{
 use rand_core::{CryptoRng, Rng};
 use std::{
     marker::PhantomData,
-    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     time::Duration,
 };
 
 const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
-const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
-const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(16);
-const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 const ARCHIVE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 
 type ConsensusScheme = simplex::scheme::ed25519::Scheme;
@@ -86,13 +80,12 @@ pub struct Config<M, X, SS, T, D = Unit> {
     /// Blocker used for invalid peer behavior.
     pub blocker: X,
 
-    /// User-owned store for private DKG material.
+    /// Application-owned store for this ceremony's secret material.
     ///
-    /// Must not be the store a [`reshare`] actor uses. Both ceremonies persist
-    /// dealer seeds and received dealings for epoch zero under the same keys. A
-    /// shared store makes the first reshare deal from this ceremony's seed, and
-    /// a crash during that reshare can make it recover this ceremony's dealings
-    /// as its own. Carry over only the resulting epoch-zero share. The engine
+    /// MUST NOT be the store a [`reshare`] actor uses. Both write epoch-zero
+    /// dealer seeds and dealings, so a shared store can make the first reshare
+    /// deal from this ceremony's seed or, after a crash, recover this ceremony's
+    /// dealings as its own. Copy only the resulting epoch-zero share. The engine
     /// never prunes this store.
     pub secret_store: SS,
 
@@ -114,26 +107,35 @@ pub struct Config<M, X, SS, T, D = Unit> {
     /// Runtime-storage partition prefix.
     pub partition_prefix: String,
 
+    /// Page cache for the one-shot chain's journals and archives.
+    pub page_cache: CacheRef,
+
+    /// The size of the write buffer to use for each blob in the one-shot chain's storage.
+    pub write_buffer: NonZeroUsize,
+
+    /// Number of bytes to buffer when replaying the one-shot chain's storage during startup.
+    pub replay_buffer: NonZeroUsize,
+
     /// Participants in the DKG.
     pub participants: Set<ed25519::PublicKey>,
 
     /// Transport directory for the participants.
     ///
     /// Used to activate the one-shot chain's peer set and embedded verbatim in
-    /// the emitted genesis artifact. Every participant must configure the same
-    /// directory.
+    /// the resulting [`EpochInfo`]. It must contain exactly `participants`, and
+    /// every participant must configure the same directory.
     pub directory: D,
 
     /// Length of the one-shot consensus epoch.
     pub blocks_per_epoch: NonZeroU64,
 }
 
-/// Completion produced when this node processes the one-shot DKG chain's final
-/// block, at startup when a prior run already persisted this node's share or
-/// processed that block, or without an artifact when the ceremony cannot
-/// activate its peer set.
+/// Outcome of the one-shot ceremony, reported at most once per engine start.
 ///
-/// The [`Engine`] keeps running after reporting it.
+/// The engine reports it when this node processes the one-shot chain's final
+/// block, or at startup if a previous run already persisted this node's share
+/// or processed that block. It reports a completion without an artifact if the
+/// ceremony cannot activate its peer set.
 pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     /// Final DKG artifact, if the ceremony succeeded.
     ///
@@ -272,6 +274,14 @@ where
     V: Variant,
 {
     /// Creates a new engine.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_supported_mode` does not support `sharing_mode`. The
+    /// started engine panics if `participants` is empty, does not contain
+    /// `signer`, or needs more dealer logs than one epoch of `blocks_per_epoch`
+    /// can include, if a successful ceremony's `directory` does not contain
+    /// exactly `participants`, or if one of its components fails.
     pub const fn new(context: E, config: Config<M, X, SS, T, D>) -> Self {
         assert!(
             config.max_supported_mode.supports(&config.sharing_mode),
@@ -296,7 +306,11 @@ where
     D: Directory<ed25519::PublicKey>,
     ed25519::Batch: BatchVerifier<PublicKey = ed25519::PublicKey> + Send + 'static,
 {
-    /// Starts consensus, marshal, broadcast, and the private reshare DKG actor.
+    /// Starts the engine and returns its handle and a receiver for its
+    /// [`Completion`].
+    ///
+    /// The receiver closes without a value if the engine stops before
+    /// reporting a completion.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
@@ -391,7 +405,9 @@ where
         let block_codec_config = (max_participants, self.config.max_supported_mode);
 
         let context = self.context.into_present();
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_PAGES);
+        let page_cache = self.config.page_cache;
+        let write_buffer = self.config.write_buffer;
+        let replay_buffer = self.config.replay_buffer;
         let public_key = self.config.signer.public_key();
         let consensus_namespace = [self.config.namespace, b"_INITIAL_CONSENSUS"].concat();
         let scheme = ConsensusScheme::signer(
@@ -444,6 +460,8 @@ where
                 &self.config.partition_prefix,
                 "finalizations",
                 page_cache.clone(),
+                write_buffer,
+                replay_buffer,
                 ConsensusScheme::certificate_codec_config_unbounded(),
             ),
         )
@@ -455,6 +473,8 @@ where
                 &self.config.partition_prefix,
                 "blocks",
                 page_cache.clone(),
+                write_buffer,
+                replay_buffer,
                 block_codec_config,
             ),
         )
@@ -474,9 +494,9 @@ where
                 view_retention: ViewDelta::new(10),
                 prunable_items_per_section: ARCHIVE_ITEMS_PER_SECTION,
                 page_cache: page_cache.clone(),
-                replay_buffer: IO_BUFFER_SIZE,
-                key_write_buffer: IO_BUFFER_SIZE,
-                value_write_buffer: IO_BUFFER_SIZE,
+                replay_buffer,
+                key_write_buffer: write_buffer,
+                value_write_buffer: write_buffer,
                 block_codec_config,
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(1),
@@ -485,11 +505,7 @@ where
         )
         .await;
 
-        // The one-shot chain never extends past the epoch-zero final block.
-        // Fetch that block's finalization from the other participants so this
-        // node catches up from peers that only serve the chain, without relying
-        // on consensus traffic. Marshal skips the fetch when the finalization is
-        // already stored, and retries targets that do not have it yet.
+        // The one-shot chain ends at the epoch-zero final block.
         let last = FixedEpocher::new(self.config.blocks_per_epoch)
             .last(Epoch::zero())
             .expect("epocher must know epoch zero");
@@ -526,6 +542,9 @@ where
                 reveal: self.config.reveal,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}-reshare", self.config.partition_prefix),
+                page_cache: page_cache.clone(),
+                write_buffer,
+                replay_buffer,
                 max_participants,
                 blocks_per_epoch: self.config.blocks_per_epoch,
                 batch_verifier: PhantomData::<ed25519::Batch>,
@@ -564,8 +583,8 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 epoch: Epoch::zero(),
                 floor: Floor::Genesis(genesis.digest()),
-                replay_buffer: IO_BUFFER_SIZE,
-                write_buffer: IO_BUFFER_SIZE,
+                replay_buffer,
+                write_buffer,
                 page_cache,
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
@@ -635,8 +654,9 @@ where
         _: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
-        // The reshare application wrapper validates payload placement and the
-        // final block's epoch info before delegating to this stateless leaf.
+        // reshare::Application already rejects a mismatched final block and an
+        // earlier block carrying any payload except a dealer log from the
+        // midpoint onward. The chain has no other state.
         true
     }
 }
@@ -682,6 +702,8 @@ fn archive_config<C>(
     prefix: &str,
     name: &str,
     page_cache: CacheRef,
+    write_buffer: NonZeroUsize,
+    replay_buffer: NonZeroUsize,
     codec_config: C,
 ) -> prunable::Config<TwoCap, C> {
     prunable::Config {
@@ -693,9 +715,9 @@ fn archive_config<C>(
         compression: None,
         codec_config,
         items_per_section: ARCHIVE_ITEMS_PER_SECTION,
-        key_write_buffer: IO_BUFFER_SIZE,
-        value_write_buffer: IO_BUFFER_SIZE,
-        replay_buffer: IO_BUFFER_SIZE,
+        key_write_buffer: write_buffer,
+        value_write_buffer: write_buffer,
+        replay_buffer,
     }
 }
 
@@ -703,26 +725,34 @@ fn archive_config<C>(
 mod tests {
     use super::*;
     use commonware_cryptography::bls12381::primitives::variant::MinPk;
+    use commonware_runtime::{Runner, deterministic};
+    use commonware_utils::NZU16;
 
     #[test]
     #[should_panic(expected = "sharing mode must be supported by max supported mode")]
     fn rejects_unsupported_sharing_mode() {
-        let config = Config {
-            signer: ed25519::PrivateKey::from_seed(0),
-            manager: (),
-            blocker: (),
-            secret_store: (),
-            strategy: (),
-            namespace: b"test",
-            sharing_mode: SharingMode::RootsOfUnity,
-            reveal: Reveal::V1,
-            max_supported_mode: ModeVersion::v0(),
-            partition_prefix: "test".into(),
-            participants: Set::default(),
-            directory: Unit,
-            blocks_per_epoch: NZU64!(1),
-        };
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let config = Config {
+                signer: ed25519::PrivateKey::from_seed(0),
+                manager: (),
+                blocker: (),
+                secret_store: (),
+                strategy: (),
+                namespace: b"test",
+                sharing_mode: SharingMode::RootsOfUnity,
+                reveal: Reveal::V1,
+                max_supported_mode: ModeVersion::v0(),
+                partition_prefix: "test".into(),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(1)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+                participants: Set::default(),
+                directory: Unit,
+                blocks_per_epoch: NZU64!(1),
+            };
 
-        let _ = Engine::<_, MinPk, _, _, _, _, _>::new((), config);
+            let _ = Engine::<_, MinPk, _, _, _, _, _>::new((), config);
+        });
     }
 }

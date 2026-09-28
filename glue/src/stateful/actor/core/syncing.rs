@@ -32,11 +32,17 @@ use rand_core::Rng;
 use std::{collections::VecDeque, mem, sync::Arc};
 use tracing::{Instrument as _, debug, error, info_span};
 
-/// Finalized work needed to transition from syncing to processing.
+/// A retained finalization classified against the converged sync anchor.
+///
+/// Covered and reflected blocks are already in the synced state and are acknowledged without
+/// running application hooks.
 enum FinalizedHandoff<B> {
+    /// A block below the anchor.
     Covered(B, Exact),
+    /// The block at the anchor.
     Reflected(B, Exact),
-    /// A report above the artifact, including duplicates, awaiting handoff durability.
+    /// A block above the anchor, or a duplicate report of one. Each block is applied once, and
+    /// every receipt is acknowledged after the handoff barrier completes.
     Apply(B, Exact),
 }
 
@@ -58,47 +64,29 @@ where
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
 {
-    /// Runtime context.
     pub(super) context: ContextCell<E>,
-
-    /// Actor ingress.
     pub(super) mailbox: actor_mailbox::Receiver<Message<E, A>>,
-
-    /// Inner application.
     pub(super) application: A,
-
-    /// Provider cloned into each proposal after state sync.
     pub(super) provider: A::Provider,
-
-    /// Marshal actor mailbox.
     pub(super) marshal: MarshalMailbox<S, V>,
-
-    /// Durable state-sync metadata.
     pub(super) metadata: StateSyncMetadata<E, S, V::Commitment>,
-
-    /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
 
     /// Verification requests deferred until state sync completes.
     pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 
-    /// Open subscriptions to the synced databases.
+    /// Database subscribers awaiting the handoff.
     pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
 
-    /// The state sync resolvers used for state sync fetching and post-bootstrap
-    /// serving.
     pub(super) resolvers: R,
 
-    /// Receives the artifact once the syncer produces it.
+    /// Receives the converged [`Artifact`] from the syncer.
     pub(super) completion: oneshot::Receiver<Artifact<E, A>>,
 
     /// Unacknowledged finalizations retained until the window retargets or sync completes.
     pub(super) pending_finalizations: VecDeque<PendingFinalization<Arc<A::Block>>>,
 
-    /// Periodic pruning state.
     pub(super) pruning: Option<Pruning<SyncTargets<A, E>>>,
-
-    /// Metrics shared across syncing and processing.
     pub(super) metrics: StatefulMetrics,
 }
 
@@ -197,10 +185,13 @@ where
         }
     }
 
-    /// Handles a finalized block during state sync.
+    /// Retains `block` with its acknowledgement and advances the sync target once marshal's
+    /// pending acknowledgement window is full.
     ///
-    /// Returns the artifact with its classified handoffs when the syncer answers the
-    /// retarget with a completed sync.
+    /// A full window records its newest block as the sync target and then acknowledges every
+    /// retained block. Returns the converged [`Artifact`] with the classified handoffs if state
+    /// sync finished first, and no handoff otherwise (including when the actor stops while
+    /// retargeting). Panics if marshal delivers more blocks than its window.
     async fn finalized(
         mut self,
         block: Arc<A::Block>,
@@ -230,7 +221,6 @@ where
             .block
             .clone();
 
-        // Record the newest block as the live sync target.
         let artifact = select! {
             _ = self.context.stopped() => return (self, None),
             artifact = self.syncer.retarget(
@@ -249,8 +239,9 @@ where
         (self, None)
     }
 
-    /// Transitions to [`Processing`] state once the database set has converged
-    /// on the state sync [`Anchor`].
+    /// Hands the converged state to [`Processing`].
+    ///
+    /// Returns without recording completion if shutdown interrupts the handoff barrier.
     async fn transition(
         mut self,
         artifact: Artifact<E, A>,
@@ -289,8 +280,8 @@ where
             }
         }
 
-        // Applied handoffs extend beyond the state-sync artifact. Release their acknowledgements
-        // only after one barrier makes the entire suffix durable.
+        // Acknowledge applied handoffs only after one barrier makes the whole applied suffix
+        // durable.
         if !pending_acknowledgements.is_empty() {
             let barrier = processor.databases().finalize().await;
             if !barrier.durable().await {
@@ -312,14 +303,10 @@ where
             prune.run(processor.databases(), &self.marshal).await;
         }
 
-        // Attach the resolvers to the initialized databases before starting the processor,
-        // so that this instance can serve peers database operations and proofs.
+        // Attach the resolvers before replying to subscribers, as `subscribe_databases` promises.
         self.resolvers
             .attach_databases(processor.databases().clone())
             .await;
-
-        // `subscribe_databases` promises a database set that is already attached to the
-        // serving actor, so keep subscribers waiting until the resolver handoff is complete.
         for subscriber in self.database_subscribers.drain(..) {
             subscriber.send_lossy(processor.databases().clone());
         }
@@ -337,11 +324,13 @@ where
     }
 }
 
-/// Classify finalized messages relative to the completed sync artifact's anchor.
+/// Classifies retained finalizations against the converged sync anchor, in height order.
 ///
-/// Live floor changes can redeliver a suffix. Order those receipts by height so each
-/// unique block extends the artifact consecutively. Duplicate receipts wait for the
-/// same durability barrier as their applied block.
+/// A live floor change can redeliver a suffix, so a block above the anchor may appear more than
+/// once. Every copy is classified as [`FinalizedHandoff::Apply`].
+///
+/// Panics if the block at the anchor height has a different digest, a duplicate differs from its
+/// original, or blocks above the anchor do not ascend consecutively.
 fn classify<B>(
     anchor: Anchor<<B as Digestible>::Digest>,
     mut finalized: VecDeque<PendingFinalization<Arc<B>>>,
@@ -947,7 +936,7 @@ mod tests {
                 anchor: anchor(1, 1),
             };
 
-            // Report blocks 2 and 3. Glue retains both receipts because the window is not full.
+            // Report blocks 2 and 3. Stateful retains both receipts because the window is not full.
             for block in [&second, &third] {
                 assert!(
                     ingress

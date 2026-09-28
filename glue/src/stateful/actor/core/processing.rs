@@ -32,13 +32,12 @@ use rand_core::Rng;
 use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
 
-/// Work selected for one iteration of the processing actor.
+/// Work selected for one iteration of the processing loop.
 enum Step<M, P> {
-    /// A message received from the actor mailbox.
     Message(M),
-    /// Deferred pruning work ready for its database mutation boundary.
+    /// A pending prune selected to run.
     Prune(P),
-    /// Completion of the active database durability barrier.
+    /// Completion of the active barrier (see [`Durability::completion`]).
     Barrier(Option<Height>),
 }
 
@@ -56,7 +55,6 @@ struct Durability {
 }
 
 impl Durability {
-    /// Initialize tracking at a height already known to be durable.
     const fn new(height: Height) -> Self {
         Self {
             durable: height,
@@ -65,22 +63,25 @@ impl Durability {
         }
     }
 
-    /// Return the highest applied height, or the durable floor when none are pending.
+    /// Returns the highest applied height (the durable height when no acknowledgement is pending).
     fn applied(&self) -> Height {
         self.acknowledgements
             .back()
             .map_or(self.durable, |(height, _)| *height)
     }
 
-    /// Record a newly applied height and retain its acknowledgement until durability.
+    /// Holds the acknowledgement for a newly applied `height` until it is durable.
     ///
-    /// Heights must be recorded in strictly increasing order.
+    /// Panics unless `height` is above every applied height.
     fn record(&mut self, height: Height, acknowledgement: Exact) {
         assert!(height > self.applied(), "finalized heights must increase");
         self.acknowledgements.push_back((height, acknowledgement));
     }
 
-    /// Bind another receipt for an applied height to its existing durability boundary.
+    /// Holds a duplicate receipt until its height is durable (acknowledging it at once if it
+    /// already is).
+    ///
+    /// Panics if `height` is neither durable nor applied.
     fn record_duplicate(&mut self, height: Height, acknowledgement: Exact) {
         if self.covers(height) {
             acknowledgement.acknowledge();
@@ -95,15 +96,15 @@ impl Durability {
             .insert(index + 1, (height, acknowledgement));
     }
 
-    /// Return whether applied state remains uncovered and no barrier is active.
+    /// Returns whether applied state is not yet durable and no barrier is active.
     fn needs_barrier(&self) -> bool {
         self.barrier.is_none() && self.durable < self.applied()
     }
 
-    /// Record a barrier covering applied state through `height`.
+    /// Tracks `barrier` as covering applied state through `height`.
     ///
-    /// Only one barrier may be active, and `height` must extend the durable prefix without
-    /// exceeding the latest applied height.
+    /// Panics if a barrier is active or `height` is not above the durable height and at or below
+    /// the applied height.
     fn set_barrier(&mut self, height: Height, barrier: Barrier) {
         assert!(self.barrier.is_none(), "barrier already active");
         assert!(height > self.durable && height <= self.applied());
@@ -112,10 +113,10 @@ impl Durability {
         }));
     }
 
-    /// Await the active barrier, remaining pending so callers can select unconditionally when
-    /// none exists.
+    /// Awaits the active barrier, staying pending when none is active so callers can select on it
+    /// unconditionally.
     ///
-    /// Resolves to the captured height when the barrier made it durable.
+    /// Resolves to the covered height, or `None` if shutdown interrupted the barrier.
     async fn completion(&mut self) -> Option<Height> {
         let Some(barrier) = &mut self.barrier else {
             return pending().await;
@@ -123,9 +124,10 @@ impl Durability {
         barrier.await.expect("internal barrier handle cannot fail")
     }
 
-    /// Complete the active barrier and acknowledge every height it made durable.
+    /// Clears the active barrier and acknowledges every height it made durable.
     ///
-    /// Returns false without advancing the durable prefix when durability was not established.
+    /// Returns `false` without advancing the durable height if `completion` is `None`. Panics if no
+    /// barrier is active.
     fn complete(&mut self, completion: Option<Height>) -> bool {
         assert!(self.barrier.take().is_some(), "barrier not active");
         let Some(height) = completion else {
@@ -144,17 +146,15 @@ impl Durability {
         true
     }
 
-    /// Return whether `height` lies within the known durable prefix.
     fn covers(&self, height: Height) -> bool {
         self.durable >= height
     }
 }
 
-/// Start a durability barrier for pending applied state.
+/// Starts a barrier covering all applied state.
 ///
-/// Callers must only start a barrier when [`Durability::needs_barrier`] holds. Verification work
-/// remains driven while the database writer is acquired. Returns false if the actor stops before
-/// the barrier starts.
+/// Verifications keep running while the barrier waits for database access. Returns `false` if the
+/// actor stops before the barrier starts. Panics unless [`Durability::needs_barrier`] holds.
 async fn start_barrier<E, A, S, V>(
     context: &E,
     durability: &mut Durability,
@@ -173,8 +173,6 @@ where
         "barrier requires uncovered applied state and no active barrier",
     );
 
-    // Capture the dirty prefix before waiting for the database writer. Drive verification readers
-    // until the barrier starts, then bind its completion to exactly the prefix it captured.
     let height = durability.applied();
     let barrier = select! {
         _ = context.stopped() => return false,
@@ -184,6 +182,10 @@ where
     true
 }
 
+/// Re-enqueues each live request at the back of the mailbox.
+///
+/// Messages enqueued before the requeue are handled before the next attempt, and later messages
+/// after it. Cancelled requests are dropped.
 fn requeue<E, A>(
     mailbox: &(dyn Fn(Message<E, A>) + Send + Sync),
     requests: Vec<VerificationRequest<E, A>>,
@@ -191,8 +193,6 @@ fn requeue<E, A>(
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    // Re-enter each live request through FIFO. Work accepted during the mutation
-    // precedes its next attempt, while later arrivals remain behind it.
     for VerificationRequest {
         span,
         context,
@@ -212,6 +212,7 @@ fn requeue<E, A>(
     }
 }
 
+/// Serves proposals, verifications, and finalizations against the live database set.
 pub(super) struct Processing<E, A, S, V>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -219,19 +220,10 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    /// Runtime context.
     pub(super) context: ContextCell<E>,
-
-    /// Actor ingress.
     pub(super) mailbox: actor_mailbox::Receiver<Message<E, A>>,
-
-    /// Provider cloned into each proposal.
     pub(super) provider: A::Provider,
-
-    /// Marshal mailbox used for lazy block lookup.
     pub(super) marshal: MarshalMailbox<S, V>,
-
-    /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
 
     /// Verification requests deferred until processing starts.
@@ -246,6 +238,11 @@ where
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
+    /// Serves requests until the mailbox closes or the actor stops.
+    ///
+    /// At most one barrier is active, and blocks finalized while it runs are covered by a later
+    /// barrier. A marshal acknowledgement is released only once its block is durable. If shutdown
+    /// interrupts a barrier, processing stops and every pending acknowledgement is cancelled.
     pub async fn run(mut self) {
         let mut pending_prune = None;
         let mut deferred_message = None;
@@ -254,20 +251,17 @@ where
             verifications.schedule(self.processor.verifier(), request);
         }
 
-        // One database barrier stays active while later finalized state accumulates behind it.
-        // Completion starts a successor for that suffix unless a pending prune must establish
-        // the next storage-mutation boundary first.
-        let mut durability = Durability::new(self.processor.last_processed().height);
+        let mut durability = Durability::new(self.processor.processed().height);
         select_loop! {
             self.context,
             on_start => {
-                // Observe completed durability before taking more work. A queued prune suppresses
-                // an automatic dirty-suffix successor until it has released database readers.
                 if let Some(completion) = durability.completion().now_or_never()
                     && !durability.complete(completion)
                 {
                     return;
                 }
+
+                // A pending prune suppresses successor barriers.
                 if pending_prune.is_none()
                     && durability.needs_barrier()
                     && !start_barrier(
@@ -284,12 +278,10 @@ where
                 // A later finalization cannot retroactively invalidate them.
                 verifications.complete_ready();
 
-                // A message deferred by an active proposal is the FIFO barrier
-                // for subsequent mailbox work, so handle it before later arrivals.
+                // While applied state is not durable, a pending prune runs before the next message
+                // so durability does not wait for an empty mailbox. Otherwise it waits for one.
                 let prune_needs_barrier = pending_prune.is_some() && durability.needs_barrier();
                 let message = if prune_needs_barrier {
-                    // The prune must release verification readers before this barrier can acquire
-                    // its writer. Run that boundary now so durability does not wait for idle.
                     Err(TryRecvError::Empty)
                 } else {
                     match deferred_message.take() {
@@ -298,7 +290,6 @@ where
                     }
                 };
 
-                // A prune remains idle work unless it owns the next dirty-suffix mutation boundary.
                 let next = match message {
                     Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
                     Err(TryRecvError::Empty) => match pending_prune.take() {
@@ -385,9 +376,9 @@ where
                                         },
                                     ),
                                     Some(message) => {
-                                        // Only verification may overtake an active proposal. The
-                                        // first other message becomes a FIFO barrier for later
-                                        // mailbox work.
+                                        // Only verifications overtake an active proposal. The
+                                        // first other message waits for it, and later messages
+                                        // wait behind that one.
                                         deferred_message = Some(message);
                                         receive_messages = false;
                                     }
@@ -425,10 +416,9 @@ where
                     acknowledgement,
                     retry_mailbox,
                 }) => {
-                    if block.height() < self.processor.last_processed().height {
-                        // Older receipts need neither application nor a finalization boundary.
-                        // Their blocks are already reflected, and children of the current anchor
-                        // remain valid verification candidates.
+                    if block.height() < self.processor.processed().height {
+                        // A block below the applied height is already reflected, so its receipt
+                        // skips application and leaves verifications running.
                         durability.record_duplicate(block.height(), acknowledgement);
                     } else {
                         let process = info_span!(parent: &span, "stateful.actor.finalized");
@@ -446,7 +436,6 @@ where
                                 ))
                                 .await;
                             let Some(Applied { barrier, prune }) = applied else {
-                                // Duplicate reports share their original durability boundary.
                                 durability.record_duplicate(block.height(), acknowledgement);
                                 return;
                             };
@@ -455,18 +444,15 @@ where
                                 "applied finalized database batch"
                             );
 
-                            // Retain marshal acknowledgements until a barrier makes their database
-                            // prefix durable. This keeps marshal's processed floor within
-                            // recoverable database state while later work proceeds. A barrier that
-                            // returns false leaves the suffix unacknowledged for restart replay.
+                            // Acknowledge only once a barrier covers this height, so marshal's
+                            // processed height never passes durable state and an unsynced suffix
+                            // is replayed after restart.
                             let height = block.height();
                             durability.record(height, acknowledgement);
                             if let Some(barrier) = barrier {
                                 durability.set_barrier(height, barrier);
                             }
 
-                            // Defer pruning to the loop so it can settle durability and quiesce
-                            // verification readers at one database mutation boundary.
                             if let Some(prune) = prune {
                                 pending_prune = Some((prune, retry_mailbox.clone()));
                             }
@@ -483,9 +469,8 @@ where
                     response.send_lossy(self.processor.databases().clone());
                 }
                 Step::Prune((prune, retry_mailbox)) => {
-                    // Pruning owns a strict database mutation boundary. Observe an existing
-                    // barrier before quiescing readers, then run storage maintenance with no
-                    // barrier active.
+                    // Pruning requires a durable prune target and no active barrier. It stops
+                    // every verification because it can remove history any branch may read.
                     while durability.barrier.is_some() {
                         select! {
                             completion = durability.completion() => {
@@ -502,7 +487,7 @@ where
                         "verification replay remained active after quiescence"
                     );
 
-                    // A prune target applied behind an earlier barrier may still need durability.
+                    // A prune target applied after the last barrier started is not yet durable.
                     if !durability.covers(prune.barrier_height) {
                         assert!(
                             durability.needs_barrier(),
@@ -2889,7 +2874,7 @@ mod tests {
             }
             assert!(control.pruned.lock().is_empty());
 
-            // Releasing block 1 makes the prune target durable. Glue prunes before starting the
+            // Releasing block 1 makes the prune target durable. Stateful prunes before starting the
             // tracked successor for replayable block 2.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
@@ -3229,7 +3214,8 @@ mod tests {
                 Some(Processed::Block(Height::new(floor_height - 1)))
             );
 
-            // Release the observer's copies of the fresh receipts. Glue still holds F+1 and F+2.
+            // Release the observer's copies of the fresh receipts. Stateful still holds F+1 and
+            // F+2.
             for height in floor_height..=floor_height + 2 {
                 assert_eq!(observer.acknowledge_next(), Some(Height::new(height)));
             }

@@ -8,28 +8,11 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_storage::Context;
 use tracing::warn;
 
-/// Startup plan that determines whether one-time peer state sync may still run.
+/// Durable startup decision between peer state sync and recovery from marshal.
 ///
-/// Construction is two-phase so the caller can avoid fetching a finalized
-/// floor from peers when state sync has already completed:
-///
-/// 1. [`SyncPlan::init`] reads the durable state sync state.
-/// 2. If [`SyncPlan::may_sync`] returns `true`, the caller may fetch a
-///    finalized floor and persist it via [`SyncPlan::set_floor`]. An interrupted
-///    sync already has a persisted floor, while a fresh sync needs one from the
-///    caller. Otherwise the caller skips floor selection entirely.
-///
-/// Marshal (via [`SyncPlan::marshal_start`]) and [`Stateful`](crate::stateful::Stateful)
-/// only use the persisted floor, so a crash before either actor starts still resumes
-/// state sync on the next startup.
-///
-/// The plan owns the opened metadata store and is later consumed by
-/// [`Stateful`](crate::stateful::Stateful), so startup does not reopen the same
-/// metadata partition from multiple places.
-///
-/// Once state sync completes, this node never performs peer state sync
-/// again. Future startups must recover from the later of that synced height
-/// and marshal's processed height instead.
+/// Marshal (via [`SyncPlan::marshal_start`]) and [`Stateful`](crate::stateful::Stateful) (via
+/// [`Config::plan`](crate::stateful::Config::plan)) both start from the persisted floor. See
+/// [Startup](crate::stateful#startup) for the sequence.
 pub struct SyncPlan<E, S, V>
 where
     E: Context,
@@ -45,7 +28,7 @@ where
     S: Scheme,
     V: Variant,
 {
-    /// Load the durable state sync metadata for this partition prefix.
+    /// Loads the state sync metadata stored under `partition_prefix`.
     ///
     /// # Panics
     ///
@@ -61,44 +44,33 @@ where
         Self { metadata }
     }
 
-    /// Returns whether state sync can still run on this node.
+    /// Returns whether peer state sync can still run on this node.
     ///
-    /// When `false`, the caller should skip floor selection: any floor passed
-    /// to [`SyncPlan::set_floor`] would be ignored. The node already has a
-    /// durable completed state sync height, so future boots must recover from that
-    /// height or marshal's processed height instead of running peer state sync again.
-    ///
-    /// When `true`, the caller can optionally persist a finalized floor via
-    /// [`SyncPlan::set_floor`]. If no floor is persisted, the node will
-    /// attempt to sync from genesis via marshal.
+    /// Returns `false` once completion is recorded, which happens when state sync converges and
+    /// when [`Stateful`](crate::stateful::Stateful) starts without a persisted floor.
+    /// [`SyncPlan::set_floor`] then has no effect.
     pub fn may_sync(&self) -> bool {
         self.metadata.completed().is_none()
     }
 
-    /// Returns the durable completed state sync height, if one has been stored.
+    /// Returns the recorded completion height, if any.
     pub fn completed(&self) -> Option<Height> {
         self.metadata.completed()
     }
 
-    /// Returns the persisted in-progress state sync floor.
+    /// Returns the persisted state sync floor, if any.
     ///
-    /// The floor is present from the time [`Self::set_floor`] persists it until
-    /// state sync completes, including across restarts. While it is present,
-    /// [`Self::may_sync`] is also `true` and every startup runs state sync instead
-    /// of recovery, so partially synced database state stays on the state sync path.
+    /// A floor persists from [`Self::set_floor`] until state sync completes, across restarts. While
+    /// one is persisted, [`Self::may_sync`] returns `true` and every startup runs state sync.
     pub fn floor(&self) -> Option<&Finalization<S, V::Commitment>> {
         self.metadata.floor()
     }
 
-    /// Persist a finalized floor to state sync from.
+    /// Persists `finalization` as the state sync floor and returns the updated plan.
     ///
-    /// Once persisted, every startup runs state sync until it completes,
-    /// whether or not it is requested. Has no effect if state sync has already
-    /// completed. A floor that is not newer than the persisted floor is ignored,
-    /// so a lagging selection cannot move it backward. The metadata write
-    /// underneath panics on a backward or conflicting floor instead.
-    ///
-    /// The durable write consumes the plan, so callers reassign the returned plan.
+    /// Once a floor is persisted, every startup runs state sync until it completes, whether or not
+    /// it is requested. Has no effect once completion is recorded. A floor that is not newer than
+    /// the persisted floor is ignored, so a lagging selection cannot move it backward.
     ///
     /// # Panics
     ///
@@ -137,14 +109,14 @@ where
 
     /// Returns whether this startup should run peer state sync.
     ///
-    /// A caller can request peer state sync for a fresh node. A persisted floor
-    /// always requires peer state sync, even if the caller did not explicitly
-    /// request it on this startup.
+    /// Returns `true` if [`Self::may_sync`] holds and either `requested` is set or a floor is
+    /// persisted. If this returns `true` without a persisted floor, the caller should select one
+    /// with [`Self::set_floor`]: [`Stateful`](crate::stateful::Stateful) started without a floor
+    /// recovers from marshal and records completion.
     pub fn should_sync(&self, requested: bool) -> bool {
         self.may_sync() && (requested || self.floor().is_some())
     }
 
-    /// Consumes this plan and returns its durable state-sync metadata handle.
     pub(crate) fn into_metadata(self) -> StateSyncMetadata<E, S, V::Commitment> {
         self.metadata
     }

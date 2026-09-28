@@ -1,8 +1,8 @@
-//! Stateful application that manages the pending-tip DAG of merkleized batches on behalf of an [`Application`].
+//! The [`Stateful`] actor and its two modes.
 //!
-//! The [`Stateful`] actor is split into two control loops:
-//! - [`Syncing`] manages the state sync process.
-//! - [`Processing`] manages the pending-tip DAG and drives the inner application.
+//! - [`Syncing`] serves requests while state sync runs and hands the converged state to
+//!   [`Processing`].
+//! - [`Processing`] serves proposals, verifications, and finalizations against the live databases.
 
 use crate::stateful::{
     Application,
@@ -66,7 +66,11 @@ pub struct PruneConfig {
 }
 
 impl PruneConfig {
-    /// Ensure marshal is never pruned more aggressively than QMDB.
+    /// Checks that marshal retains at least as many blocks as QMDB.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `retained_marshal_blocks` is less than `retained_qmdb_blocks`.
     pub const fn assert_valid(self) {
         assert!(
             self.retained_marshal_blocks >= self.retained_qmdb_blocks,
@@ -95,31 +99,34 @@ where
     /// Marshal mailbox and the durable floor returned with it during initialization.
     pub marshal: (MarshalMailbox<S, V>, Floor),
 
-    /// Capacity of the stateful actor mailbox channel.
+    /// Capacity of the actor's mailbox.
     pub mailbox_size: NonZeroUsize,
 
-    /// Startup plan loaded via [`SyncPlan::init`], optionally given a persisted
-    /// floor via [`SyncPlan::set_floor`]. Carries the durable metadata handle
-    /// and the startup decision shared with marshal.
+    /// Startup plan from [`SyncPlan::init`] (and [`SyncPlan::set_floor`] when a floor is
+    /// selected).
+    ///
+    /// Marshal must start from [`SyncPlan::marshal_start`] of the same plan.
     pub plan: SyncPlan<E, S, V>,
 
-    /// Resolver(s) for state sync fetches and post-bootstrap serving.
+    /// Resolvers that fetch state sync data from peers and serve the local databases to them.
     pub resolvers: R,
 
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
 
-    /// Periodic database and marshal pruning configuration.
+    /// Periodic database and marshal pruning configuration (no pruning when `None`).
     ///
-    /// When enabled, glue retains `max_pending_acks + 1` finalized blocks plus
-    /// the configured retained block windows before pruning. Marshal must retain
-    /// at least as many blocks as QMDB.
+    /// When set, [`Stateful`] retains the last `max_pending_acks + 1` finalized blocks (marshal's
+    /// pending acknowledgement window plus one) and the configured retained block windows beyond
+    /// them. Marshal must retain at least as many blocks as QMDB (see
+    /// [`PruneConfig::assert_valid`]).
     pub prune_config: Option<PruneConfig>,
 }
 
-/// Stateful application that manages the pending-tip DAG of merkleized
-/// batches on behalf of an [`Application`], implementing the consensus
-/// application and verifying traits.
+/// Actor that maintains speculative and finalized state for an [`Application`].
+///
+/// Consensus and marshal reach it through its [`Mailbox`]. See the [module docs](crate::stateful)
+/// for the protocol.
 pub struct Stateful<E, A, S, V, R>
 where
     E: Rng + Spawner + Context,
@@ -127,34 +134,17 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    /// Runtime context providing RNG, task spawning, metrics, and clock.
     context: ContextCell<E>,
-
-    /// The receiver for messages.
     mailbox: actor_mailbox::Receiver<Message<E, A>>,
-
-    /// The inner application that drives state transitions.
     application: A,
-
-    /// Provider cloned into each proposal.
     provider: A::Provider,
-
-    /// Marshal mailbox and the durable floor returned with it during initialization.
     marshal: (MarshalMailbox<S, V>, Floor),
-
-    /// Configuration used to initialize the database set at startup.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
-
-    /// Startup plan carrying the metadata handle and floor decision.
     plan: SyncPlan<E, S, V>,
-
-    /// Resolver(s) for state sync fetches and post-bootstrap serving.
     resolvers: R,
-
-    /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
 
-    /// Periodic pruning state.
+    /// Pruning schedule from [`Config::prune_config`], with a random phase.
     pruning: Option<Pruning<SyncTargets<A, E>>>,
 }
 
@@ -168,10 +158,13 @@ where
     R: AttachableResolverSet<A::Databases>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
-    /// Construct a [`Stateful`] actor and its [`Mailbox`].
+    /// Creates a [`Stateful`] actor and its [`Mailbox`].
     ///
-    /// This only wires dependencies and allocates the mailbox. The actor does
-    /// not process messages until [`Stateful::start`] is called.
+    /// The actor handles no messages until [`Stateful::start`] is called.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`Config::prune_config`] fails [`PruneConfig::assert_valid`].
     pub fn new(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
@@ -199,6 +192,11 @@ where
         )
     }
 
+    /// Spawns the actor and returns its handle.
+    ///
+    /// With a persisted floor, the actor runs state sync first: proposals return `None` and
+    /// verifications wait until it completes. Otherwise it recovers from marshal before handling
+    /// any message. See [Startup](crate::stateful#startup).
     pub fn start(mut self) -> Handle<()> {
         spawn_cell!(self.context, self.run())
     }
@@ -211,8 +209,7 @@ where
         }
     }
 
-    /// Starts the application in [`Syncing`] mode, kicking off a state sync process
-    /// towards the finalized floor specified in the [`SyncPlan`].
+    /// Runs state sync toward `finalization`, then processing.
     async fn sync(self, finalization: Finalization<S, V::Commitment>) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
@@ -246,8 +243,7 @@ where
         let _ = join!(syncer.start(), syncing.run());
     }
 
-    /// Starts the application in [`Processing`] mode after opening the database set at
-    /// the later of the completed state sync height and marshal's processed height.
+    /// Opens the database set from marshal, records completion, then runs processing.
     async fn recover(self) {
         let (marshal, _) = self.marshal;
         let metadata = self.plan.into_metadata();
@@ -259,15 +255,8 @@ where
         )
         .await;
 
-        // Once startup has aligned databases with marshal, future boots should skip peer
-        // state sync and recover from the later of this anchor and marshal's durable
-        // processed height.
         metadata.set_completed(anchor.height).await;
 
-        // Attach the resolvers to the initialized databases before starting the processor,
-        // so that this instance can serve peers database operations and proofs. The
-        // resolver handles can be dropped after this: serving runs on the resolver
-        // actors' own contexts.
         self.resolvers.attach_databases(databases.clone()).await;
 
         let metrics = StatefulMetrics::new(self.context.as_present());

@@ -35,13 +35,12 @@ pub(crate) enum Phase {
     Inclusion = 3,
 }
 
-/// Metrics for the reshare actor.
 pub(crate) struct Metrics<P: PublicKey> {
     /// Number of successful epochs.
     pub(crate) successful_epochs: Counter,
     /// Number of failed epochs.
     pub(crate) failed_epochs: Counter,
-    /// Number of epochs where our share was revealed.
+    /// Number of successful epochs that revealed the local share.
     pub(crate) our_reveals: Counter,
     /// Total revealed shares across successful epochs.
     pub(crate) all_reveals: Counter,
@@ -105,8 +104,8 @@ impl<P: PublicKey> Metrics<P> {
         let _ = self.latest_ack.get_or_create(&peer).try_set_max(epoch);
     }
 
-    /// Records a successful ceremony and the shares it revealed, noting whether
-    /// our own share (`ours`) was among them.
+    /// Records a successful ceremony and its reveals, including whether `ours`
+    /// was revealed.
     pub(crate) fn record_success<V: Variant>(&self, output: &Output<V, P>, ours: &P) {
         self.successful_epochs.inc();
         let revealed = output.revealed();

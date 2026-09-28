@@ -1,9 +1,9 @@
-//! Journaled [`ManagedDb`] implementation for QMDB
+//! Journaled [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
-//! Immutable databases support adding new keyed values but not updates or
-//! deletions. The wrapper types here capture a [`Shared`] database handle
-//! so the batch API can read through to applied state.
+//! Immutable databases accept new keyed values but no updates or deletions. Batch reads fall back
+//! to the database's applied state at the time of the read, not to a snapshot taken when the
+//! batch was created.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -35,11 +35,9 @@ use commonware_storage::{
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
-/// Shared handle to an immutable database.
 type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Immutable<F, E, K, V, C, H, T, S>>;
 
-/// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
+/// A speculative batch of new keyed values over a shared immutable database.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -89,44 +87,41 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Set commit metadata included in the next
-    /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
     pub fn with_metadata(mut self, metadata: V::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Set the inactivity floor to include within the next [`merkleize`](UnmerkleizedTrait::merkleize) call.
-    ///
-    /// If unset, [`merkleize`](UnmerkleizedTrait::merkleize) will use the [`Default`] of [`Location`].
+    /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
+    /// (location 0 when unset).
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = Some(floor);
         self
     }
 
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
 
-    /// Set `key` to `value` in the speculative batch.
+    /// Sets `key` to `value` in the batch.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.batch = self.batch.set(key, value);
         self
     }
 }
 
-/// Wraps an immutable [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](crate::stateful::db::Merkleized) trait.
+/// A sealed immutable batch with a computed root.
 pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -194,15 +189,15 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await

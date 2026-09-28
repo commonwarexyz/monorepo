@@ -1,16 +1,34 @@
-//! Gather a recent finalization to sync from.
+//! Peer-sampled discovery of a recent finalization from which to begin state sync.
 //!
-//! A node that is starting fresh (or recovering from far behind) needs a recent, trustworthy
-//! finalization, the "floor", as the point to begin state sync from. It cannot trust any
-//! single peer to name that point, so the [`Probe`] asks many peers and adopts the
-//! highest valid finalization from `f + 1` distinct peer replies.
+//! A node starting fresh, or recovering from far behind, needs a recent and trustworthy
+//! finalization (the _floor_) from which to begin state sync. It cannot trust any single peer to
+//! name that point, so a [`Probe`] solicits a committee and adopts the highest verified
+//! finalization among `f + 1` distinct replies.
+//!
+//! # Lifecycle
+//!
+//! A [`Probe`] starts in _discovery_. It solicits peers only while a subscriber awaits a floor, and
+//! it never answers requests. Once a floor is selected, every waiting and later subscription
+//! resolves with it. If every subscriber is dropped before a floor is selected, discovery pauses:
+//! no retry is scheduled, and replies are still verified but not recorded. The next subscription
+//! starts a new request round.
+//!
+//! The probe enters _service_ once a marshal is attached and no subscriber awaits a floor. It then
+//! answers each `Request` with the attached marshal's latest finalization, if any, ignores
+//! replies, blocks peers that send a message with an invalid tag, and never solicits peers. A
+//! subscription made in service closes without resolving if no floor was selected. A node that
+//! attaches a marshal without subscribing (a _source_) enters service without soliciting peers.
+//!
+//! _Callers that need a floor must keep a subscription alive until it resolves, and should attach a
+//! marshal only after consuming the floor._
 //!
 //! # Protocol
 //!
 //! ## Solicit
 //!
-//! Once a floor subscriber appears, [`Probe`] sends a `Request` to each participant in the
-//! configured minimum epoch's committee:
+//! Upon a subscription while no floor is selected and no other subscriber waits, the probe starts a
+//! request round. It clears the collected replies and sends a `Request` to each participant of the
+//! [`Config::minimum_epoch`] committee:
 //!
 //! ```text
 //!                    +-- Request --> peer 1
@@ -22,83 +40,72 @@
 //!                    +-- Request --> peer 4
 //! ```
 //!
-//! A subscription is the request to discover a floor. If all floor subscribers are dropped before
-//! a floor is selected, discovery is cancelled. Attaching marshal after that makes the node a
-//! source: it enters service without a cached floor. Callers that need a floor must keep a
-//! subscription alive until it resolves and attach marshal only after consuming that floor.
+//! If the minimum epoch has no known scheme, nothing is sent and no reply is recorded.
 //!
 //! ## Collect and select
 //!
-//! Each peer answers with its own latest finalization (or nothing, if it has none). Every response
-//! is verified against the certificate scheme for its epoch, and its sender must be a participant
-//! in the committee that was solicited. At most one finalization is counted per peer, so no single
-//! peer can inflate the sample on its own. Once `f + 1` distinct peers have replied, the highest
-//! finalized round becomes the floor:
+//! Each peer answers with its latest finalization, or not at all if it has none. Upon receiving a
+//! message from a peer that has not replied in the current round, while no floor is selected:
+//!
+//! * Ignore a `Request`. Ignore a finalization below the minimum epoch, or in an epoch with no
+//!   known scheme, without decoding its certificate.
+//! * Block the peer if the message cannot be decoded, if the peer is not a participant of the
+//!   solicited committee, or if the finalization does not verify under its own epoch's scheme.
+//! * Otherwise, record the finalization as the peer's reply for the round.
+//!
+//! Once `f + 1` distinct peers have recorded replies whose epochs still have a known scheme, the
+//! highest of those replies becomes the floor and is delivered to every waiting subscriber:
 //!
 //! ```text
-//!   peer 1 --Response(view 10)-->\                 replies
+//!   peer 1 --Response(view 10)-->\            replies
 //!   peer 2 --Response(view 12)--> +-> Probe {10, 12, 13}
-//!   peer 3 --Response(view 13)-->/                        |
-//!                                                             v
-//!                                      sample reached, highest view becomes the floor: 13
+//!   peer 3 --Response(view 13)-->/               |
+//!                                                v
+//!                       sample reached, highest view becomes the floor: 13
 //! ```
-//!
-//! A non-participant or a peer that sends an undecodable or unverifiable first finalization in a
-//! request round is blocked. After a peer has already contributed a verified response for that
-//! round, later messages from that peer are ignored before validation.
 //!
 //! ## Retry
 //!
-//! If too few peers reply, the collected responses are cleared and the request is re-issued after
-//! a configurable `retry_timeout`. Retry is not required for safety. It is a liveness mechanism
-//! for request rounds that fail to collect enough usable replies because messages were dropped,
-//! peers were slow or offline, or a finalization's epoch could not yet be judged.
+//! Upon `retry_timeout` elapsing after a request round starts, while no floor is selected and a
+//! subscriber waits, the probe starts a new request round. Retry is not required for safety. It is
+//! a liveness mechanism for request rounds that fail to collect enough usable replies because
+//! messages were dropped, peers were slow or offline, or a finalization's epoch could not yet be
+//! judged.
 //!
 //! ```text
-//!   request --> collect --> sample reached? --yes--> highest floor
+//!   request --> collect --> sample reached? --yes--> floor
 //!      ^                         |
 //!      |                         no
 //!      +----- clear + re-request +
 //!            (retry_timeout elapsed)
 //! ```
 //!
-//! # Why the sample is `f + 1`
+//! # Properties
 //!
-//! The `f` used here comes from the configured minimum epoch's committee: the committee that
-//! received the request. Returned finalizations are still verified against their own epoch's
-//! certificate scheme, so an old-committee member may safely report a newer finalization from a
-//! later epoch where it no longer participates.
+//! ## Validity
 //!
-//! Assume at most `f` of the `n` participants in that epoch are faulty. In this protocol, `f` makes
-//! no distinction between Byzantine and crashed nodes: a peer that does not answer and a peer that
-//! answers adversarially both count against the same fault budget.
+//! A finalization is self-certifying: it carries a quorum certificate. Provided the committee of
+//! the finalization's epoch stays within its `3f + 1` fault budget, a finalization that verifies
+//! under that epoch's scheme names a block the network finalized. Under that assumption, accepting
+//! any single verified reply is _safe_, but the reply is not necessarily _recent_. A Byzantine peer
+//! can replay an old, still valid finalization to drag a joining node's floor far behind the tip,
+//! forcing it to sync from a stale point.
 //!
-//! A finalization is self-certifying: it carries a quorum certificate, so any one that verifies
-//! proves the network truly finalized that block. Accepting a single peer's finalization is
-//! therefore always *safe* (it names a real block), but it is not necessarily *recent*.
+//! ## Recency
 //!
-//! That recency gap is the attack. A Byzantine peer can replay an old (but still valid)
-//! finalization to drag a joining node's floor far behind the real tip of the chain, forcing it
-//! to re-sync a huge range or to settle on a stale view.
+//! The selected floor is no older than the reply of some honest participant of the solicited
+//! committee. This follows from the fault model and the protocol rules:
 //!
-//! Under [`simplex`](commonware_consensus::simplex)'s synchrony assumptions, after one honest node
-//! advances to a new view, other honest nodes may remain in the previous view until that transition
-//! is delivered within the network-delay bound (`delta`). Waiting for `f + 1` replies guarantees at
-//! least one honest response in the sample: at most `f` responders can be Byzantine, and crashed
-//! nodes do not respond. The selected finalization is therefore at least as recent as that honest
-//! response. Byzantine peers can still replay old certificates, but old certificates lose to newer
-//! honest replies. If they report something higher, it must still be a valid finalization, so it is
-//! a real finalized block rather than a rollback.
+//! 1. At most `f` participants of the solicited committee are faulty, where `f` is its maximum
+//!    fault count under the `3f + 1` model. A peer that does not answer and a peer that answers
+//!    adversarially count against the same budget.
+//! 2. Each recorded reply comes from a distinct participant of the solicited committee.
+//! 3. The floor is selected only once `f + 1` recorded replies can be judged, and it is the
+//!    highest of them.
 //!
-//! If fewer than `f + 1` solicited peers can answer for that epoch, probe cannot resolve that
-//! request round and will retry. This is a liveness tradeoff, not a safety one: using the
-//! solicited committee's `f + 1` threshold preserves the assumption that every completed sample
-//! includes at least one honest response from the relevant historical committee.
-//!
-//! [`Config::minimum_epoch`] bounds that historical search. A caller that initializes peers from a
-//! known epoch can set it to that lower bound; responses from earlier epochs are ignored. Probe
-//! sizes accepted samples from that lower-bound committee while accepting newer verifiable
-//! finalizations reported by its participants.
+//! Therefore, the sample includes a reply from an honest participant, and a stale certificate
+//! replayed by a Byzantine peer cannot displace it. A higher Byzantine reply must still verify, so
+//! under the validity assumption it names a finalized block rather than a rollback.
 //!
 //! ```text
 //!   any f + 1 sample:
@@ -110,13 +117,27 @@
 //!       => floor is no older than the freshest honest reply in the sample
 //! ```
 //!
+//! Honest replies may themselves trail the tip. Under [`simplex`](commonware_consensus::simplex)'s
+//! synchrony assumptions, an honest participant can remain in the previous view until a view
+//! transition is delivered within the network-delay bound (`delta`).
+//!
+//! The solicited committee is the minimum epoch's committee: it received the request, so it sets
+//! `f`. Replies are still verified under their own epoch's scheme, so a participant of an older
+//! committee may report a finalization from a later epoch in which it no longer participates. If
+//! fewer than `f + 1` solicited participants can answer, the request round cannot complete and is
+//! retried. This costs liveness, not recency: every completed sample still includes an honest
+//! reply from the solicited committee.
+//!
+//! [`Config::minimum_epoch`] bounds the historical search. A caller that initializes peers from a
+//! known epoch can set it to that epoch. Finalizations from earlier epochs are ignored without
+//! penalty.
+//!
 //! # Resource Bounds
 //!
-//! The actor retains at most one finalization candidate per peer per request round. Additional
-//! messages from the same peer are ignored before validation, preserving correctness when network
-//! delivery lags across request rounds without wasting certificate work or allowing one peer to
-//! inflate a sample. The p2p channel supplies rate limiting and maximum encoded message size
-//! enforcement.
+//! The actor retains at most one reply per peer per request round and skips later messages from
+//! that peer in the round before decoding them. A peer therefore cannot inflate the sample, and a
+//! peer whose reply was recorded cannot force further certificate verification in that round. Rate
+//! limits and the maximum encoded message size are enforced by the p2p channel.
 
 mod actor;
 pub use actor::{Config, Probe};
@@ -320,8 +341,18 @@ mod test {
     }
 
     impl MaybeEnumerableScheme {
-        const fn new(inner: Scheme, enumerable: bool) -> Self {
-            Self { inner, enumerable }
+        const fn enumerable(inner: Scheme) -> Self {
+            Self {
+                inner,
+                enumerable: true,
+            }
+        }
+
+        const fn participantless(inner: Scheme) -> Self {
+            Self {
+                inner,
+                enumerable: false,
+            }
         }
 
         fn wrap_attestation(attestation: Attestation<Scheme>) -> Attestation<Self> {
@@ -687,7 +718,7 @@ mod test {
                     context: node_ctx.child("probe"),
                     provider: make_provider(&scheme),
                     strategy: Sequential,
-                    capacity: NZUsize!(100),
+                    mailbox_size: NZUsize!(100),
                     blocker: oracle.control(public_key.clone()),
                     minimum_epoch,
                     retry_timeout,
@@ -1535,11 +1566,11 @@ mod test {
             } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_FD_ALL_VERIFIER", 4);
             let schemes: Vec<_> = schemes
                 .into_iter()
-                .map(|scheme| MaybeEnumerableScheme::new(scheme, true))
+                .map(MaybeEnumerableScheme::enumerable)
                 .collect();
             let provider = ParticipantlessAllProvider {
-                verifier: Arc::new(MaybeEnumerableScheme::new(verifier.clone(), false)),
-                scheme: Arc::new(MaybeEnumerableScheme::new(verifier, true)),
+                verifier: Arc::new(MaybeEnumerableScheme::participantless(verifier.clone())),
+                scheme: Arc::new(MaybeEnumerableScheme::enumerable(verifier)),
             };
 
             let (network, oracle) = Network::new_with_peers(
@@ -1582,7 +1613,7 @@ mod test {
                 context: context.child("probe"),
                 provider,
                 strategy: Sequential,
-                capacity: NZUsize!(100),
+                mailbox_size: NZUsize!(100),
                 blocker: oracle.control(participants[0].clone()),
                 minimum_epoch: Epoch::zero(),
                 retry_timeout: NZDuration!(Duration::from_secs(3600)),

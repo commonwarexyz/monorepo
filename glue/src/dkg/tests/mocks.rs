@@ -3,7 +3,8 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     network::{Addresses, Directory as DkgDirectory, Manager as DkgManager},
-    orchestrator, reshare,
+    orchestrator,
+    reshare::{self, store::Store},
     types::{Payload, SchemeInfo},
 };
 use bytes::BufMut;
@@ -43,10 +44,12 @@ use commonware_p2p::{
     utils::mux,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_runtime::{
+    BufferPooler, Clock, Metrics, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
+};
 use commonware_storage::archive::immutable;
 use commonware_utils::{
-    Acknowledgement, NZU16, NZU64, NZUsize,
+    Acknowledgement, NZU16, NZU32, NZU64, NZUsize,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
@@ -56,7 +59,7 @@ use commonware_utils::{
 use std::{
     collections::{BTreeMap, HashSet},
     marker::PhantomData,
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
@@ -653,6 +656,39 @@ pub(crate) fn child(parent: &TestBlock) -> TestBlock {
 /// Reads through the returned mailbox resolve as unavailable, which is useful
 /// for phase tests that need a marshal handle but drive finalized blocks
 /// directly.
+/// Write and replay buffer size for reshare recovery journals in unit tests.
+pub(crate) const IO_BUFFER: NonZeroUsize = NZUsize!(2048);
+
+/// Returns a one-page cache for a reshare recovery journal in unit tests.
+pub(crate) fn page_cache(context: &impl BufferPooler) -> CacheRef {
+    CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(1))
+}
+
+/// Opens a reshare recovery store under `partition`.
+pub(crate) async fn store<E, SS, V, P>(
+    context: E,
+    partition: &str,
+    secret_store: SS,
+) -> Store<E, SS, V, P>
+where
+    E: BufferPooler + Clock + Storage + Metrics,
+    SS: SecretStore,
+    V: Variant,
+    P: CryptoPublicKey,
+{
+    let page_cache = page_cache(&context);
+    Store::init(
+        context,
+        partition,
+        NZU32!(16),
+        page_cache,
+        IO_BUFFER,
+        IO_BUFFER,
+        secret_store,
+    )
+    .await
+}
+
 pub(crate) async fn closed_marshal_mailbox(
     context: deterministic::Context,
     signer: &TestSigner,

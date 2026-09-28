@@ -57,13 +57,10 @@ where
         // after completion, so this node can fetch and serve the one-shot chain.
         let tracked = self.track_dkg();
 
-        // This node applied the outcome in a prior run once it persisted its
-        // share or processed the final block. Either implies marshal stores the
-        // final block: the share is written only while handling that block,
-        // marshal delivers a block only after durably storing it, and the
-        // bootstrap never installs a floor or prunes marshal, so the block at
-        // the processed height is always stored. Report the outcome from that
-        // block and keep serving instead of running the ceremony again.
+        // A persisted share or a tip at the final height means a prior run
+        // applied the final block, which marshal stores before delivering it.
+        // The bootstrap chain is never pruned or floored, so the block is still
+        // stored. Report its outcome instead of running the ceremony again.
         let last = self
             .epocher
             .last(epoch)
@@ -157,7 +154,12 @@ where
         )
     }
 
-    /// Activates the complete epoch-zero snapshot with its configured directory.
+    /// Validates the configured participants and tracks them for epoch zero,
+    /// returning them as both dealers and players.
+    ///
+    /// Returns the manager's error if tracking fails. Panics outside DKG mode
+    /// or if the participants exceed `max_participants` or the epoch's
+    /// dealer-log capacity.
     fn track_dkg(&mut self) -> Result<Participants<C::PublicKey>, M::Error> {
         let participants = self
             .dkg_participants()
@@ -179,7 +181,10 @@ where
         Ok(snapshot)
     }
 
-    /// Returns the outcome carried by the stored final DKG block.
+    /// Returns the outcome carried by the stored final DKG block (`None` for a
+    /// failed DKG).
+    ///
+    /// Panics if marshal does not store the block.
     async fn final_info(
         &mut self,
         last: Height,
@@ -194,9 +199,7 @@ where
                  DKG block: bootstrap storage does not match the secret store",
             );
 
-        // A failed one-shot DKG finalizes a final block without EpochInfo.
-        // Final-block verification admits only the derived EpochInfo or no
-        // payload, so the final block never carries a dealer log.
+        // Final-block verification admits only the derived EpochInfo or no payload.
         match block.payload() {
             Some(Payload::EpochInfo(info)) => Some(info),
             None => None,
@@ -204,6 +207,8 @@ where
         }
     }
 
+    /// Serves requests and acknowledges finalized blocks after the ceremony ends,
+    /// until shutdown or the mailbox closes.
     async fn terminal(&mut self) {
         select_loop! {
             self.context,

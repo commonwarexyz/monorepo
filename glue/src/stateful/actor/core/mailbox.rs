@@ -32,9 +32,8 @@ type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
 
 /// A non-owning reference to ancestry owned by the verification caller.
 ///
-/// Queued and deferred requests carry this handle so caller cancellation
-/// releases the ancestry's backing blocks. Each active attempt clones an
-/// independent cursor from the same caller-owned ancestry.
+/// Queued and deferred requests carry this handle, so caller cancellation releases the ancestry's
+/// blocks.
 pub(in crate::stateful::actor) struct WeakAncestry<B: Block>(Weak<Mutex<BoxedAncestry<B>>>);
 
 impl<B: Block> WeakAncestry<B> {
@@ -45,15 +44,13 @@ impl<B: Block> WeakAncestry<B> {
         (owner, reference)
     }
 
-    /// Upgrades to an independent cursor while the caller still owns the ancestry.
-    ///
-    /// Returns `None` once caller cancellation releases the strong owner.
+    /// Returns an independent cursor over the ancestry, or `None` once the caller has cancelled.
     pub(in crate::stateful::actor) fn upgrade(&self) -> Option<BoxedAncestry<B>> {
         self.0.upgrade().map(|ancestry| ancestry.lock().clone())
     }
 }
 
-/// A verification is scoped to its caller.
+/// Response channel for a caller-scoped verification request.
 pub(in crate::stateful::actor) struct Verification {
     response: oneshot::Sender<bool>,
 }
@@ -95,7 +92,7 @@ where
         verification: Verification,
     },
 
-    /// A reporting of a new finalized block.
+    /// A finalized block and its marshal acknowledgement.
     Finalized {
         span: Span,
         block: Arc<A::Block>,
@@ -103,10 +100,7 @@ where
         retry_mailbox: RetryMailbox<E, A>,
     },
 
-    /// Requests the attached database set.
-    ///
-    /// The actor replies once the database set has been attached to the
-    /// serving stateful actor, or immediately if that has already happened.
+    /// Requests the database set (see [`Mailbox::subscribe_databases`]).
     SubscribeDatabases {
         response: oneshot::Sender<A::Databases>,
     },
@@ -186,10 +180,11 @@ where
     }
 }
 
-/// Channel-based proxy to the [`Stateful`](super::Stateful) actor.
+/// Handle to the [`Stateful`](super::Stateful) actor.
 ///
-/// Implements the consensus application and verifying traits by forwarding
-/// each call to the actor via a message and awaiting the response.
+/// Implements the consensus [`Application`](commonware_consensus::Application) and receives
+/// finalized blocks from marshal as a [`Reporter`]. If the actor stops before responding,
+/// `propose` returns `None` and `verify` panics.
 pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -217,7 +212,6 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// Create a mailbox from the send half of the actor's message channel.
     pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
         let retry_sender = sender.clone();
         let retry_mailbox = Arc::new(move |message| {
@@ -229,20 +223,18 @@ where
         }
     }
 
-    /// Wait for the attached database set.
+    /// Returns the database set once startup completes.
     ///
-    /// This resolves once startup handoff has attached the database set to the
-    /// serving actor. Late callers receive the current database set
-    /// immediately.
+    /// Resolves after the set is attached to the resolvers that serve peers (and after state sync,
+    /// if it runs). After startup, each call resolves when the actor reaches it in mailbox order.
     ///
-    /// ## Safety
+    /// Holders MUST NOT prune these databases. [`Stateful`](super::Stateful) prunes according to
+    /// [`Config::prune_config`](crate::stateful::Config::prune_config) and never past the history
+    /// needed for crash recovery.
     ///
-    /// Holders must never manually prune these databases. Stateful uses
-    /// [`Config::prune_config`](crate::stateful::Config::prune_config) to
-    /// schedule safe pruning without pruning past the recovery window needed for
-    /// crash reconciliation. With pruning enabled, glue keeps a
-    /// `max_pending_acks + 1` finalized-target window plus the configured
-    /// extra block windows before pruning.
+    /// # Panics
+    ///
+    /// Panics if the actor stops before replying.
     pub async fn subscribe_databases(&self) -> A::Databases {
         let (response, receiver) = oneshot::channel();
         let _ = self
@@ -291,8 +283,8 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
-        // Scope the strong ancestry owner to this caller. Queued work receives only a weak
-        // handle, so cancellation releases backing blocks before the actor drains the request.
+        // The actor holds only a weak handle, so dropping this future releases the ancestry's
+        // blocks even while the request is queued.
         let (response, receiver) = oneshot::channel();
         let (ancestry_owner, ancestry) = WeakAncestry::new(ancestry);
         let span = info_span!(
@@ -307,7 +299,6 @@ where
             verification: Verification { response },
         });
 
-        // Retain ancestry through the application verdict. Actor shutdown remains an error.
         let result = receiver
             .await
             .expect("stateful actor dropped during verify");

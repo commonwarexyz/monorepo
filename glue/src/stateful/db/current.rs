@@ -1,10 +1,8 @@
-//! [`ManagedDb`] implementation for QMDB [`current`](commonware_storage::qmdb::current) databases.
+//! [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
+//! [`current`](commonware_storage::qmdb::current) databases.
 //!
-//! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to applied state. This module provides wrapper types
-//! that capture a [`Shared`] database handle alongside the raw batch so the
-//! [`Unmerkleized`](super::Unmerkleized) and [`Merkleized`](super::Merkleized)
-//! traits can be implemented without a DB parameter.
+//! Batch reads fall back to the database's applied state at the time of the read, not to a
+//! snapshot taken when the batch was created.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -48,8 +46,7 @@ use std::{
     sync::Arc,
 };
 
-/// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
+/// A speculative batch of updates and deletes over a shared `current` database.
 pub struct CurrentUnmerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
@@ -66,8 +63,7 @@ where
     metadata: Option<U::Value>,
 }
 
-/// Staged batch returned by [`CurrentUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
-/// reference to the parent database.
+/// A staged batch returned by [`CurrentUnmerkleized::stage`].
 ///
 /// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
 /// stays valid only while every batch finalized on the database is an ancestor of this batch
@@ -88,7 +84,6 @@ where
     metadata: Option<U::Value>,
 }
 
-/// Key-value operations shared by both `current` update kinds.
 impl<F, E, C, I, H, U, const N: usize, S> CurrentUnmerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
@@ -100,30 +95,31 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Set commit metadata included in the next
-    /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
+    ///
+    /// The metadata carries over to a batch returned by [`Self::stage`].
     pub fn with_metadata(mut self, metadata: U::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
 
-    /// Read multiple values and return a staged batch for the same keys.
+    /// Reads multiple values and returns a staged batch for the same keys.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn stage(
         self,
         keys: &[&U::Key],
@@ -147,15 +143,14 @@ where
         ))
     }
 
-    /// Record a mutation. `Some(value)` for upsert, `None` for delete.
+    /// Records an upsert (`Some`) or a delete (`None`) of `key`.
     pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
     }
 }
 
-/// Wraps a QMDB [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](super::Merkleized) trait.
+/// A sealed `current` batch with a computed root.
 pub struct CurrentMerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
@@ -226,7 +221,6 @@ where
     }
 }
 
-/// Read-expansion operations for the `current` staged batch.
 impl<F, E, C, I, H, U, const N: usize, S> CurrentStaged<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
@@ -238,14 +232,14 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Set commit metadata included in the [`merkleize`](Self::merkleize) call, replacing any
-    /// metadata set before staging.
+    /// Sets the metadata committed by [`merkleize`](Self::merkleize), replacing any metadata set
+    /// before staging.
     pub fn with_metadata(mut self, metadata: U::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Expand this staged batch with more reads.
+    /// Expands this staged batch with more reads.
     ///
     /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
     /// assigned the returned range. Expansion does not deduplicate against previously staged keys
@@ -276,7 +270,6 @@ where
     }
 }
 
-/// Staged merkleize for the `current` unordered update kind.
 impl<F, E, C, I, H, K, V, const N: usize, S>
     CurrentStaged<F, E, C, I, H, unordered::Update<K, V>, N, S>
 where
@@ -290,19 +283,16 @@ where
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Writes `updates` against staged reads and `upserts` against unread keys, then merkleizes.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](CurrentStaged::expand)
-    /// before this method if more keys must be read into the staged index space.
-    ///
-    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](CurrentStaged::expand) ranges.
-    /// Metadata set via [`with_metadata`](CurrentStaged::with_metadata) (or before staging) is
-    /// committed with the returned batch.
+    /// A `Some` value is an upsert and `None` is a delete. Each index in `updates` addresses the
+    /// staged read set: the keys passed to `stage` followed by each [`expand`](Self::expand) range.
+    /// Metadata set through [`with_metadata`](Self::with_metadata), or before staging, is committed
+    /// with the batch.
     ///
     /// # Panics
     ///
-    /// Panics if any update's `read_index` is out of the staged read range.
+    /// Panics if an index in `updates` is outside the staged read set.
     pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -321,7 +311,6 @@ where
     }
 }
 
-/// Staged merkleize for the `current` ordered update kind.
 impl<F, E, C, I, H, K, V, const N: usize, S>
     CurrentStaged<F, E, C, I, H, ordered::Update<K, V>, N, S>
 where
@@ -335,19 +324,16 @@ where
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Writes `updates` against staged reads and `upserts` against unread keys, then merkleizes.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](CurrentStaged::expand)
-    /// before this method if more keys must be read into the staged index space.
-    ///
-    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](CurrentStaged::expand) ranges.
-    /// Metadata set via [`with_metadata`](CurrentStaged::with_metadata) (or before staging) is
-    /// committed with the returned batch.
+    /// A `Some` value is an upsert and `None` is a delete. Each index in `updates` addresses the
+    /// staged read set: the keys passed to `stage` followed by each [`expand`](Self::expand) range.
+    /// Metadata set through [`with_metadata`](Self::with_metadata), or before staging, is committed
+    /// with the batch.
     ///
     /// # Panics
     ///
-    /// Panics if any update's `read_index` is out of the staged read range.
+    /// Panics if an index in `updates` is outside the staged read set.
     pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -366,7 +352,6 @@ where
     }
 }
 
-/// Read-through operations for the `current` merkleized batch.
 impl<F, E, C, I, H, U, const N: usize, S> CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
@@ -378,22 +363,21 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await
     }
 }
 
-/// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `current` unordered update kind.
 impl<F, E, C, I, H, K, V, const N: usize, S> UnmerkleizedTrait
     for CurrentUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>
 where
@@ -420,7 +404,6 @@ where
     }
 }
 
-/// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `current` ordered update kind.
 impl<F, E, C, I, H, K, V, const N: usize, S> UnmerkleizedTrait
     for CurrentUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>
 where
@@ -447,7 +430,6 @@ where
     }
 }
 
-/// Implement [`Merkleized`](MerkleizedTrait) for all supported `current` update kinds.
 impl<F, E, C, I, H, U, const N: usize, S> MerkleizedTrait
     for CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
@@ -477,7 +459,6 @@ where
     }
 }
 
-/// Implement [`ManagedDb`] for unordered current QMDB databases with fixed-size values.
 impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     for Db<
         F,
@@ -581,7 +562,6 @@ where
     }
 }
 
-/// Implement [`ManagedDb`] for ordered current QMDB databases with fixed-size values.
 impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     for Db<
         F,
@@ -685,14 +665,10 @@ where
     }
 }
 
-/// Workaround for <https://github.com/rust-lang/rust/issues/115188>.
-///
-/// Inside a `ManagedDb` trait impl, `<Self>::init(...)` in a non-async `fn`
-/// resolves to the *trait* method (infinite recursion), while in an
-/// `async fn` it resolves correctly to the inherent method but the compiler
-/// cannot verify the RPITIT future is `Send`. By placing the call in this
-/// module -- which does not import `ManagedDb` -- the compiler
-/// unambiguously picks the inherent `Db::init`.
+// Workaround for <https://github.com/rust-lang/rust/issues/115188>. In the variable `current`
+// `ManagedDb` impls below, `<Self>::init` in a non-async `fn` resolves to the trait method, and
+// in an `async fn` the compiler cannot prove the returned future `Send`. This module does not
+// import `ManagedDb`, so `Db::init` here resolves to the inherent method.
 mod open {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
@@ -758,7 +734,6 @@ mod open {
     }
 }
 
-/// Implement [`ManagedDb`] for unordered current QMDB databases with variable-size values.
 impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     for Db<
         F,
@@ -867,7 +842,6 @@ where
     }
 }
 
-/// Implement [`ManagedDb`] for ordered current QMDB databases with variable-size values.
 impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     for Db<
         F,
@@ -976,7 +950,6 @@ where
     }
 }
 
-/// Implement [`StateSyncDb`] for unordered current QMDB databases with fixed-size values.
 impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     for Db<
         F,
@@ -1024,7 +997,6 @@ where
     }
 }
 
-/// Implement [`StateSyncDb`] for ordered current QMDB databases with fixed-size values.
 impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     for Db<
         F,
@@ -1072,7 +1044,6 @@ where
     }
 }
 
-/// Implement [`StateSyncDb`] for unordered current QMDB databases with variable-size values.
 impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     for Db<
         F,
@@ -1121,7 +1092,6 @@ where
     }
 }
 
-/// Implement [`StateSyncDb`] for ordered current QMDB databases with variable-size values.
 impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     for Db<
         F,

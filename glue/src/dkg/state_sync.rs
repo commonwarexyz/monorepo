@@ -58,8 +58,8 @@ pub struct Config {
 /// marshal a block from which to resume delivery.
 ///
 /// The info must describe the epoch containing the floor, and [`Plan::init`]
-/// panics otherwise. See [`crate::dkg`] for how startup pairs a probe artifact
-/// with a persisted floor.
+/// panics otherwise. See [State Sync](crate::dkg#state-sync) for how startup
+/// pairs a probe artifact with a persisted floor.
 pub struct StateSync<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,
@@ -68,9 +68,6 @@ where
     Dir: Directory<S::PublicKey>,
 {
     /// Public information for the epoch containing the state-sync floor.
-    ///
-    /// Carries the epoch's transport directory, so a state-synced node can
-    /// activate the epoch's peers without any application state.
     pub info: EpochInfo<V, S::PublicKey, Dir>,
 
     /// Finalized floor selected for application state sync.
@@ -193,7 +190,8 @@ where
     }
 }
 
-/// Returns the epoch containing marshal's next unprocessed height.
+/// Returns the epoch containing marshal's next unprocessed height (`None` if
+/// marshal reports no processed position).
 pub(crate) async fn recovered_epoch<S, V>(
     marshal: &MarshalMailbox<S, V>,
     epocher: &FixedEpocher,
@@ -277,9 +275,9 @@ where
 {
     /// Initializes and durably records a DKG state-sync recovery candidate.
     ///
-    /// Provided material replaces any existing record. Without provided
-    /// material, the existing record is loaded. The store is closed before this
-    /// method returns, making the plan safe to pass to actors immediately.
+    /// Provided material replaces any existing record and is durable when this
+    /// method returns. Without provided material, the existing record (if any)
+    /// is loaded. The returned plan may be passed to the actors immediately.
     ///
     /// # Panics
     ///
@@ -327,6 +325,12 @@ where
         }
     }
 
+    /// Returns the persisted material if `recovered_epoch` is `None` or not past
+    /// the floor's epoch, and `None` if there is no material. Otherwise deletes
+    /// the material and returns `None`.
+    ///
+    /// The first call decides the result for every clone of the plan. Panics if
+    /// storage fails while deleting stale material.
     pub(crate) async fn resolve<E: Context>(
         &self,
         context: E,

@@ -1,25 +1,32 @@
-//! Orchestrate [`Epoch`]-specific Simplex engines.
+//! Epoch-scoped Simplex engines driven by finalized epoch artifacts.
 //!
 //! The orchestrator is the bridge between finalized epoch material and
-//! [`simplex`](commonware_consensus::simplex) consensus. It starts one Simplex
-//! engine for the locally resolved epoch, watches marshal's finalized block
-//! stream, and moves to the next epoch whenever the current epoch's final block
-//! is finalized with the next [`EpochInfo`](crate::dkg::types::EpochInfo).
+//! [`simplex`](commonware_consensus::simplex) consensus. It runs one Simplex
+//! engine for the active epoch, watches marshal's finalized block stream, and
+//! moves to the next epoch when the active epoch's final block is finalized with
+//! the next [`EpochInfo`].
 //!
 //! # Epoch Lifecycle
 //!
-//! Epoch changes are driven by finalized blocks:
+//! Upon startup, the orchestrator reads the active epoch, its [`EpochInfo`], and
+//! the certified root its Simplex engine starts from: from the
+//! [`state_sync::Plan`] if it resolves to material, and otherwise from marshal (see
+//! [Marshal Boundary](#marshal-boundary)).
 //!
-//! 1. Startup resolves an epoch, peer set, and floor from marshal or state sync.
-//! 2. After the epoch gate opens, the orchestrator resolves and tracks the peer
-//!    set, loads the epoch scheme from its
-//!    [`Provider`](commonware_cryptography::certificate::Provider), opens
-//!    epoch-specific P2P subchannels, and starts Simplex.
-//! 3. Marshal reports finalized blocks through [`Mailbox`].
-//! 4. When the finalized block is the final block of the active epoch, the
-//!    orchestrator extracts the next epoch's public `EpochInfo`, tracks the next
-//!    peer set, aborts the old Simplex engine, and starts the next one from the
-//!    boundary commitment.
+//! Upon entering an epoch, the orchestrator:
+//!
+//! 1. Waits for the [`Gate`] to reach the epoch.
+//! 2. Activates the epoch's peers from its [`EpochInfo`].
+//! 3. Loads the epoch's scheme from its [`Provider`].
+//! 4. Opens the epoch's vote, certificate, and resolver subchannels and starts
+//!    its Simplex engine.
+//!
+//! Upon a finalized block reported by marshal through [`Mailbox`]:
+//!
+//! - If it is not the active epoch's final block, acknowledge it.
+//! - Otherwise, read the next epoch's [`EpochInfo`] from it, enter the next epoch
+//!   from the block's commitment, stop the previous engine, and only then
+//!   acknowledge the block.
 //!
 //! ```text
 //! marshal boundary or state-sync artifact
@@ -37,34 +44,46 @@
 //! final block of epoch N carries EpochInfo(N + 1)
 //!        |
 //!        v
-//! abort epoch N + start epoch N + 1
+//! start epoch N + 1, stop epoch N, acknowledge the block
 //! ```
 //!
 //! # Marshal Boundary
 //!
-//! Epoch zero is anchored by marshal's height-zero block. Later epochs are
-//! anchored by the last finalized block of the previous epoch. Ordinary restart
-//! expects that boundary block to remain in marshal's local finalized block
-//! archive; see [`crate::dkg`] for the marshal retention requirement.
-//! The recovered epoch also selects the peer snapshot, so restart and state-sync
-//! entry use the same epoch-scoped addresses as an uninterrupted node.
+//! Epoch zero is anchored by marshal's height-zero block, and each later epoch by
+//! the final block of the previous epoch. Without state-sync material, the
+//! orchestrator recovers the epoch containing marshal's next unprocessed height
+//! and reads that epoch's [`EpochInfo`] and Simplex root from its boundary block,
+//! which must remain in marshal's finalized block archive (see the
+//! [retention requirement](crate::dkg#marshal-retention)).
 //!
 //! # Catching Up
 //!
-//! Consensus votes are multiplexed by epoch. If the vote mux receives a message
-//! for a future epoch that has not been registered locally, the node is behind.
-//! The orchestrator hints marshal to fetch the boundary finalization needed to
-//! reach that epoch, allowing normal marshal delivery to drive the transition.
+//! Upon receiving a vote or certificate for an epoch later than the active one,
+//! the orchestrator asks its sender for the finalization of the active epoch's
+//! final block. Marshal delivery of that block then drives the transition.
+//! Messages for earlier epochs are ignored.
+//!
+//! # Failures
+//!
+//! The actor exits cleanly if the gate closes, peer activation fails, marshal
+//! cannot supply a boundary block, its mailbox or a consensus muxer closes, the
+//! active Simplex engine stops without error, or the runtime stops. It panics if
+//! a boundary block does not carry the [`EpochInfo`] of the epoch it introduces,
+//! if the [`Provider`] has no scheme for an entered epoch, if the
+//! [`SimplexConfig`] is invalid, if an epoch's Simplex engine fails, or if the
+//! [`state_sync::Plan`] cannot access storage.
 //!
 //! # Configuration
 //!
-//! [`Config`] wires together marshal, the application automaton/relay, the
-//! scheme provider, P2P manager/blocker, optional state-sync material, network
-//! channels, and persistence partitions. [`SimplexConfig`] contains the
-//! per-epoch Simplex tunables; callers must provide these explicitly rather
-//! than relying on hidden defaults.
+//! [`Config`] connects the actor to marshal, the application, the scheme
+//! [`Provider`], and the network. [`SimplexConfig`] holds the per-epoch Simplex
+//! settings, which callers must provide explicitly rather than relying on hidden
+//! defaults.
 //!
-//! [`Epoch`]: commonware_consensus::types::Epoch
+//! [`EpochInfo`]: crate::dkg::types::EpochInfo
+//! [`state_sync::Plan`]: crate::dkg::state_sync::Plan
+//! [`Gate`]: crate::dkg::fence::Gate
+//! [`Provider`]: commonware_cryptography::certificate::Provider
 
 mod mailbox;
 pub use mailbox::{Mailbox, Message};
