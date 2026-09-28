@@ -48,6 +48,7 @@ use std::{
     cell::UnsafeCell,
     collections::VecDeque,
     future::Future,
+    marker::PhantomData,
     mem::{self, ManuallyDrop},
     ops::Deref,
     pin::Pin,
@@ -401,14 +402,17 @@ impl Task {
         Self(ptr)
     }
 
-    /// A waker borrowing this reference for one poll.
-    fn waker(&self) -> ManuallyDrop<Waker> {
+    /// A waker borrowing this reference for as long as `self` is borrowed.
+    fn waker(&self) -> WakerRef<'_> {
         // SAFETY: the vtable expects a header pointer carrying a reference.
-        // This one is borrowed from `self` and never released by the waker,
-        // which `ManuallyDrop` keeps from dropping.
-        ManuallyDrop::new(unsafe {
-            Waker::from_raw(RawWaker::new(self.0.as_ptr().cast(), &WAKER_VTABLE))
-        })
+        // This one is borrowed from `self`, which outlives the wrapper, and
+        // `ManuallyDrop` keeps the waker from releasing it.
+        let waker =
+            unsafe { Waker::from_raw(RawWaker::new(self.0.as_ptr().cast(), &WAKER_VTABLE)) };
+        WakerRef {
+            waker: ManuallyDrop::new(waker),
+            _task: PhantomData,
+        }
     }
 
     /// Wake with this reference, which a published token takes over.
@@ -520,6 +524,22 @@ impl Header {
             u32::try_from(slot).expect("arena slot overflow"),
             Ordering::Relaxed,
         );
+    }
+}
+
+/// A waker that borrows a task's reference instead of counting its own, so
+/// it lives no longer than the borrow of that task. Cloning it counts a
+/// reference as usual.
+struct WakerRef<'a> {
+    waker: ManuallyDrop<Waker>,
+    _task: PhantomData<&'a Task>,
+}
+
+impl Deref for WakerRef<'_> {
+    type Target = Waker;
+
+    fn deref(&self) -> &Waker {
+        &self.waker
     }
 }
 
@@ -821,10 +841,11 @@ mod tests {
         }
     }
 
-    /// Future aligned beyond the header that must not move once pinned. It
+    /// Future aligned beyond the padded header, above every padding unit
+    /// crossbeam uses (at most 256 bytes), that must not move once pinned. It
     /// records its address on every poll and when dropped, since a failed
     /// assertion inside either would be contained by the poll.
-    #[repr(align(128))]
+    #[repr(align(512))]
     struct OverAligned {
         /// Polls left until ready.
         remaining: AtomicUsize,
@@ -1305,6 +1326,8 @@ mod tests {
     /// teardown clears it.
     #[test]
     fn test_over_aligned_future_is_polled_and_dropped_in_place() {
+        let align = std::mem::align_of::<OverAligned>();
+        assert!(align > std::mem::align_of::<Padded>());
         for complete in [true, false] {
             let mailbox = mailbox();
             let mut tasks = Tasks::default();
@@ -1339,7 +1362,7 @@ mod tests {
             // Every poll and the destructor saw the same aligned address.
             let addresses = addresses.lock();
             assert_eq!(addresses.len(), if complete { 4 } else { 3 });
-            assert_eq!(addresses[0] % 128, 0, "future is not aligned");
+            assert_eq!(addresses[0] % align, 0, "future is not aligned");
             assert!(
                 addresses.iter().all(|address| *address == addresses[0]),
                 "future moved: {addresses:?}"
