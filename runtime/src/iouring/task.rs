@@ -578,7 +578,7 @@ impl Task {
             return;
         }
         if let Some(mailbox) = self.mailbox.upgrade() {
-            let _ = mailbox.send(Message::Schedule(self));
+            let _ = mailbox.send(Message::Wake(Target::Task(self)));
         }
     }
 
@@ -729,6 +729,14 @@ unsafe fn waker_drop(ptr: *const ()) {
     drop(unsafe { task(ptr) });
 }
 
+/// Root or task named by a wake that travels through a worker's mailbox.
+pub enum Target {
+    /// The root future pinned separately on the worker's stack.
+    Root,
+    /// A task, carrying its ready token.
+    Task(Task),
+}
+
 /// Build the waker for the root future of the worker behind `mailbox`.
 pub fn root_waker(mailbox: Weak<Mailbox>) -> Waker {
     Arc::new(RootWaker { mailbox }).into()
@@ -757,7 +765,7 @@ impl Wake for RootWaker {
         }
 
         if let Some(mailbox) = self.mailbox.upgrade() {
-            let _ = mailbox.send(Message::WakeRoot);
+            let _ = mailbox.send(Message::Wake(Target::Root));
         }
     }
 }
@@ -1015,7 +1023,7 @@ mod tests {
         messages
             .into_iter()
             .map(|message| match message {
-                Message::Schedule(task) => task,
+                Message::Wake(Target::Task(task)) => task,
                 _ => panic!("expected only ready tokens"),
             })
             .collect()

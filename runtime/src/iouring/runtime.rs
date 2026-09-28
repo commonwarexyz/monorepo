@@ -108,7 +108,7 @@ use super::{
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
-    task::{Outcome, Task, Tasks, root_waker},
+    task::{Outcome, Target, Task, Tasks, root_waker},
     timeout::TimeoutWheel,
     waker::SUBMISSION_SEQ_MASK,
 };
@@ -1537,9 +1537,14 @@ impl Worker {
                 break;
             };
             match message {
-                Message::WakeRoot => self.local.borrow_mut().root_ready = true,
-                Message::Schedule(task) => self.local.borrow_mut().tasks.push(task),
                 Message::Spawn(task) => self.local.borrow_mut().tasks.insert(task),
+                Message::Wake(target) => {
+                    let mut local = self.local.borrow_mut();
+                    match target {
+                        Target::Root => local.root_ready = true,
+                        Target::Task(task) => local.tasks.push(task),
+                    }
+                }
                 Message::Forward(forward) => {
                     let mut local = self.local.borrow_mut();
                     let Local {
