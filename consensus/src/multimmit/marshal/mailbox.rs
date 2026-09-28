@@ -8,12 +8,13 @@ use super::{
     actors::{backfill, catalog, metrics::FetchReason},
     bodies::Bodies,
     relay::Staged,
-    types::{Custody, Error, Floor, MarshalProgress, MaybeLqc, Prune, Reply},
+    types::{Custody, Error, Floor, MarshalProgress, MaybeFloor, MaybeLqc, Reply},
 };
 use crate::{
     Reporter, Viewable as _,
     multimmit::{
         actors::util::ask_unreliable,
+        marshal::OutputIndex,
         types::{Activity, Artifact, BlockRef, Body, CertificateId, Lqc, TransactionBlock},
     },
     types::View,
@@ -256,6 +257,7 @@ where
     subscriptions: Arc<SubscriptionSlots>,
     /// Blocks staged through this mailbox, kept for the [`Relay`](super::Relay) when one exists.
     staged: Option<Arc<Mutex<Staged<H, B>>>>,
+    max_pending_acks: NonZeroUsize,
 }
 
 impl<H, V, B> Clone for Mailbox<H, V, B>
@@ -272,6 +274,7 @@ where
             backfill: self.backfill.clone(),
             subscriptions: Arc::clone(&self.subscriptions),
             staged: self.staged.clone(),
+            max_pending_acks: self.max_pending_acks,
         }
     }
 }
@@ -289,6 +292,7 @@ where
         backfill: backfill::Mailbox<H, V, B>,
         subscriptions: Arc<SubscriptionSlots>,
         staged: Option<Arc<Mutex<Staged<H, B>>>>,
+        max_pending_acks: NonZeroUsize,
     ) -> Self {
         Self {
             router,
@@ -297,7 +301,13 @@ where
             backfill,
             subscriptions,
             staged,
+            max_pending_acks,
         }
+    }
+
+    /// Returns the most delivered outputs that may await application acknowledgement at once.
+    pub const fn max_pending_acks(&self) -> NonZeroUsize {
+        self.max_pending_acks
     }
 
     /// Sends a request to the router, failing with [`Error::Busy`] when its queue rejects it.
@@ -436,6 +446,16 @@ where
         Ok(block)
     }
 
+    /// Gets the retained floor with the highest index at or below `at`, with that index.
+    ///
+    /// Only durably committed floors are returned. Another node can resume from the floor with
+    /// [`Self::install_floor`], which verifies it, and then receives the outputs after its
+    /// index. Returns `None` if no floor at or below `at` is retained.
+    #[tracing::instrument(name = "multimmit.marshal.mailbox.floor_at", level = "debug", skip_all)]
+    pub async fn floor_at(&self, at: OutputIndex) -> Result<MaybeFloor<V, H::Digest>, Error> {
+        self.catalog.floor_at(at).await.map_err(Error::from)
+    }
+
     /// Verifies and installs a state-sync floor before allowing its prefix to be pruned.
     #[tracing::instrument(
         name = "multimmit.marshal.mailbox.install_floor",
@@ -447,13 +467,19 @@ where
             .await
     }
 
-    /// Requests pruning for one already installed floor generation.
+    /// Prunes what the newest retained floor at or below `below` makes obsolete.
+    ///
+    /// That floor, and every output after it, stay retained: [`Self::floor_at`] still answers
+    /// for every index from `below` on, and peers that install the floor can fetch every later
+    /// output. So does each chain's newest block at or below the floor, which the chain's next
+    /// block builds on, and every block the engine may still verify: a chain keeps its blocks
+    /// above the height its latest [`Activity::CertificateRecorded`] released, and all of them
+    /// until the engine reports one. Unacknowledged outputs are never pruned, because `below` is
+    /// first lowered to the acknowledgement cursor. Indices are canonical across floor
+    /// installations, so a delayed request cannot prune data a newer floor still needs.
     #[tracing::instrument(name = "multimmit.marshal.mailbox.prune", level = "info", skip_all)]
-    pub async fn prune(&self, request: Prune) -> Result<(), Error> {
-        self.catalog
-            .prune(request.floor_generation())
-            .await
-            .map_err(Error::from)
+    pub async fn prune(&self, below: OutputIndex) -> Result<(), Error> {
+        self.catalog.prune(below).await.map_err(Error::from)
     }
 
     /// Returns marshal's compact durable progress.
@@ -472,6 +498,15 @@ where
     type Activity = Activity<V, H::Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
+        // A release bounds pruning, so it goes straight to the catalog's coalescing cursor lane
+        // rather than the router's lossy hint queue.
+        if let Activity::CertificateRecorded {
+            certified,
+            released,
+        } = activity
+        {
+            return self.catalog.release(certified.chain(), released);
+        }
         // No span here: hints are fire-and-forget, the enqueue never awaits, and `Message::new`
         // already snapshots `Span::current()` so the router can link back to the caller.
         match self

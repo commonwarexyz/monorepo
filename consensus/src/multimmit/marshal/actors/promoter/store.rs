@@ -6,12 +6,12 @@
 
 use crate::multimmit::{
     marshal::{
+        OutputIndex,
         storage::{
             Error,
             archive::FinalBody,
             record::{DurableRecord, OnMissing},
         },
-        types::OutputIndex,
     },
     types::{BlockRef, Body, ChainId, Frontier, TransactionBlock},
 };
@@ -35,8 +35,9 @@ struct ChainCursor<D: Digest> {
 /// Durable immutable-promotion progress.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PromotionState<D: Digest> {
-    /// Highest output whose body is immutable.
-    through: Option<OutputIndex>,
+    /// Highest output whose body is immutable, or the committed output the namespace was seeded
+    /// at.
+    through: OutputIndex,
     /// One cursor per producer chain, in chain order.
     cursors: Vec<ChainCursor<D>>,
 }
@@ -44,7 +45,7 @@ pub(crate) struct PromotionState<D: Digest> {
 /// The promotion state stored when a namespace has none.
 pub(crate) struct PromotionSeed<D: Digest> {
     /// Committed output of the catalog checkpoint.
-    pub(crate) through: Option<OutputIndex>,
+    pub(crate) through: OutputIndex,
     /// Emitted frontier of the catalog checkpoint.
     pub(crate) frontier: Frontier<D>,
     /// Floor generation of the catalog checkpoint.
@@ -180,8 +181,9 @@ where
         })
     }
 
-    /// Returns the highest output whose body is immutable.
-    pub(crate) const fn through(&self) -> Option<OutputIndex> {
+    /// Returns the highest output whose body is immutable, or the committed output the namespace
+    /// was seeded at.
+    pub(crate) const fn through(&self) -> OutputIndex {
         self.state.through
     }
 
@@ -228,14 +230,23 @@ where
     }
 
     /// Promotes one dense output batch and advances the cursor only after body durability.
+    ///
+    /// The batch continues after `after`: the cursor, or an installed floor's index once the rows
+    /// of earlier generations below it are promoted.
     pub(crate) async fn promote(
         &mut self,
+        after: OutputIndex,
         outputs: Vec<PromotedBody<H, B>>,
     ) -> Result<Vec<BlockRef<H::Digest>>, Error> {
         let Some(last) = outputs.last().map(|output| output.index) else {
             return Ok(self.state.frontiers());
         };
-        check_batch(self.state.through, &outputs)?;
+        if after < self.state.through {
+            return Err(Error::Inconsistent(
+                "immutable promotion batch starts below the promotion cursor",
+            ));
+        }
+        check_batch(after, &outputs)?;
         let mut bodies = self.bodies.take().ok_or(Error::Poisoned)?;
         let mut state = self.state.clone();
         for output in outputs {
@@ -245,31 +256,28 @@ where
                 .await?;
         }
         self.bodies = Some(bodies.sync().await?);
-        state.through = Some(last);
+        state.through = last;
         self.record.put_sync(state.clone()).await?;
         self.state = state;
         Ok(self.state.frontiers())
     }
 }
 
-/// Checks that `outputs` continue densely after `through`, each carrying the block its row
-/// names.
-fn check_batch<H, B>(
-    through: Option<OutputIndex>,
-    outputs: &[PromotedBody<H, B>],
-) -> Result<(), Error>
+/// Checks that `outputs` continue densely after `after`, each carrying the block its row names.
+fn check_batch<H, B>(after: OutputIndex, outputs: &[PromotedBody<H, B>]) -> Result<(), Error>
 where
     H: Hasher,
     B: Body<H>,
 {
-    let mut expected = OutputIndex::after(through);
+    let mut previous = after;
     for output in outputs {
-        if Some(output.index) != expected || output.block.reference() != output.reference {
+        if output.index.previous() != Some(previous) || output.block.reference() != output.reference
+        {
             return Err(Error::Inconsistent(
                 "immutable promotion batch is not dense and exact",
             ));
         }
-        expected = output.index.next();
+        previous = output.index;
     }
     Ok(())
 }
@@ -306,7 +314,7 @@ impl<D: Digest> Read for PromotionState<D> {
         if version != STATE_VERSION {
             return Err(CodecError::InvalidEnum(version));
         }
-        let through = Option::<OutputIndex>::read(buf)?;
+        let through = OutputIndex::read(buf)?;
         let cursors = Vec::<ChainCursor<D>>::read_cfg(buf, &(RangeCfg::exact(*chains), ()))?;
         if cursors.iter().enumerate().any(|(chain, cursor)| {
             u32::try_from(chain).map(ChainId::new) != Ok(cursor.frontier.chain())
@@ -377,7 +385,7 @@ mod tests {
 
     fn state(frontier: BlockRef<Sha256Digest>, generation: u64) -> PromotionState<Sha256Digest> {
         PromotionState::seed(&PromotionSeed {
-            through: None,
+            through: OutputIndex::zero(),
             frontier: Frontier::new(vec![frontier]).unwrap(),
             generation,
         })
@@ -481,22 +489,23 @@ mod tests {
                 .map(|&index| promoted(index))
                 .collect::<Vec<_>>()
         };
-        assert!(check_batch(None, &batch(&[0, 1, 2])).is_ok());
-        assert!(check_batch(Some(OutputIndex::new(1)), &batch(&[2])).is_ok());
-        assert!(check_batch(None, &batch(&[1])).is_err());
-        assert!(check_batch(None, &batch(&[0, 2])).is_err());
-        assert!(check_batch(None, &batch(&[0, 1, 1])).is_err());
-        assert!(check_batch(Some(OutputIndex::new(u64::MAX)), &batch(&[0])).is_err());
+        let genesis = OutputIndex::zero();
+        assert!(check_batch(genesis, &batch(&[1, 2, 3])).is_ok());
+        assert!(check_batch(OutputIndex::new(1), &batch(&[2])).is_ok());
+        assert!(check_batch(genesis, &batch(&[2])).is_err());
+        assert!(check_batch(genesis, &batch(&[1, 3])).is_err());
+        assert!(check_batch(genesis, &batch(&[1, 2, 2])).is_err());
+        assert!(check_batch(OutputIndex::new(u64::MAX), &batch(&[0])).is_err());
 
-        let mut wrong = batch(&[0]);
-        wrong[0].reference = promoted(1).reference;
-        assert!(check_batch(None, &wrong).is_err());
+        let mut wrong = batch(&[1]);
+        wrong[0].reference = promoted(2).reference;
+        assert!(check_batch(genesis, &wrong).is_err());
     }
 
     #[test]
     fn state_codec_is_versioned_and_chain_indexed() {
         let mut state = state(reference(0, 3, b"tip"), 2);
-        state.through = Some(OutputIndex::new(9));
+        state.through = OutputIndex::new(9);
         let encoded = state.encode();
         assert_eq!(encoded.len(), state.encode_size());
         assert_eq!(
@@ -513,7 +522,7 @@ mod tests {
         ));
 
         let misplaced = PromotionState {
-            through: None,
+            through: OutputIndex::zero(),
             cursors: vec![ChainCursor {
                 frontier: reference(1, 3, b"misplaced"),
                 generation: 0,

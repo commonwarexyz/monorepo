@@ -1,6 +1,6 @@
 //! Delivery metrics.
 
-use crate::multimmit::marshal::{actors::metrics::saturating_u64, types::OutputIndex};
+use crate::multimmit::marshal::{OutputIndex, actors::metrics::saturating_u64};
 use commonware_runtime::{
     Clock, Metrics as RuntimeMetrics,
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _, histogram},
@@ -114,7 +114,7 @@ impl Metrics {
     }
 
     /// Publishes the durable acknowledgement cursor.
-    pub(super) fn progress(&self, through: Option<OutputIndex>) {
-        let _ = self.acknowledged_count.try_set(OutputIndex::count(through));
+    pub(super) fn progress(&self, through: OutputIndex) {
+        let _ = self.acknowledged_count.try_set(through.get());
     }
 }

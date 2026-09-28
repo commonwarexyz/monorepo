@@ -3,8 +3,8 @@
 use crate::{
     multimmit::{
         marshal::{
+            OutputIndex,
             storage::{blocks::BlockMeta, catalog_state::Checkpoint},
-            types::OutputIndex,
         },
         types::{BlockRef, CertificateId, Lqc, TipRecord},
     },
