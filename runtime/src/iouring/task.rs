@@ -1,4 +1,4 @@
-//! Worker-local tasks, each one allocation.
+//! Single-allocation tasks that double as their wakers.
 //!
 //! A spawned task is one [`Cell`]: a type-erased [`Header`] followed by the
 //! concrete future. The header holds the task's [`State`], a vtable for the
