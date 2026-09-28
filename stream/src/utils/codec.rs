@@ -59,6 +59,13 @@ pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Res
         return Err(Error::RecvTooLarge(len));
     }
 
+    // Consume the prefix separately if the combined read length would overflow.
+    let skip = if skip.checked_add(len).is_some() {
+        skip
+    } else {
+        stream.recv(skip).await.map_err(Error::RecvFailed)?;
+        0
+    };
     stream
         .recv(skip + len)
         .await
@@ -70,36 +77,32 @@ pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Res
 }
 
 /// Receives and decodes the varint length prefix from the stream.
-/// Returns (payload_len, bytes_to_skip) where bytes_to_skip is:
-/// - varint_len if decoded from peek buffer (bytes not yet consumed)
-/// - 0 if decoded via recv (bytes already consumed)
+/// Returns the payload length and number of unconsumed prefix bytes.
 async fn recv_length<T: Stream>(stream: &mut T) -> Result<(usize, usize), Error> {
     let mut decoder = Decoder::<u32>::new();
 
-    // Fast path: decode from peek buffer without blocking
-    let peeked = {
-        let peeked = stream.peek(MAX_U32_VARINT_SIZE);
-        for (i, byte) in peeked.iter().enumerate() {
-            match decoder.feed(*byte) {
-                Ok(Some(len)) => return Ok((len as usize, i + 1)),
-                Ok(None) => continue,
-                Err(_) => return Err(Error::InvalidVarint),
-            }
-        }
-        peeked.len()
-    };
-
-    // Slow path: fetch bytes one at a time (skipping already-decoded peek bytes)
-    let mut buf = stream.recv(peeked + 1).await.map_err(Error::RecvFailed)?;
-    buf.advance(peeked);
-
     loop {
+        // Use buffered prefix bytes before requesting another byte from the stream.
+        let peeked = {
+            let peeked = stream.peek(MAX_U32_VARINT_SIZE);
+            for (i, byte) in peeked.iter().enumerate() {
+                match decoder.feed(*byte) {
+                    Ok(Some(len)) => return Ok((len as usize, i + 1)),
+                    Ok(None) => continue,
+                    Err(_) => return Err(Error::InvalidVarint),
+                }
+            }
+            peeked.len()
+        };
+
+        // Consume the decoded prefix and request one more byte to make progress.
+        let mut buf = stream.recv(peeked + 1).await.map_err(Error::RecvFailed)?;
+        buf.advance(peeked);
         match decoder.feed(buf.get_u8()) {
             Ok(Some(len)) => return Ok((len as usize, 0)),
             Ok(None) => {}
             Err(_) => return Err(Error::InvalidVarint),
         }
-        buf = stream.recv(1).await.map_err(Error::RecvFailed)?;
     }
 }
 
@@ -107,11 +110,114 @@ async fn recv_length<T: Stream>(stream: &mut T) -> Result<(usize, usize), Error>
 mod tests {
     use super::*;
     use commonware_runtime::{
-        BufMut, IoBufMut, Runner, Spawner, Supervisor as _, deterministic, mocks,
+        BufMut, Error as RuntimeError, IoBufMut, Runner, Spawner, Supervisor as _, deterministic,
+        mocks,
     };
+    use futures::FutureExt as _;
     use rand::RngExt as _;
+    use std::time::Duration;
 
     const MAX_MESSAGE_SIZE: u32 = 1024;
+
+    /// Records receive request sizes while preserving the mock stream's buffering behavior.
+    struct RecordingStream {
+        inner: mocks::Stream,
+        /// Requested byte counts, including reads that remain pending.
+        recv_lengths: Vec<usize>,
+    }
+
+    impl Stream for RecordingStream {
+        async fn recv(&mut self, len: usize) -> Result<IoBufs, RuntimeError> {
+            self.recv_lengths.push(len);
+            self.inner.recv(len).await
+        }
+
+        fn peek(&self, max_len: usize) -> &[u8] {
+            self.inner.peek(max_len)
+        }
+    }
+
+    /// Reuses buffered prefix bytes after a refill and preserves the following frame.
+    #[test]
+    fn test_recv_frame_reuses_buffered_prefix() {
+        for len in [0u32, 127, 128, 300, 16_383, 16_384] {
+            deterministic::Runner::default().start(|_| async move {
+                // Queue both frames with enough receive capacity to buffer them in the first read.
+                let payload = vec![7; len as usize];
+                let prefix_len = UInt(len).encode().len();
+                let (mut sink, inner) =
+                    mocks::Channel::init_with_buffer_size(prefix_len + payload.len() + 5);
+                let mut stream = RecordingStream {
+                    inner,
+                    recv_lengths: Vec::new(),
+                };
+                send_frame(&mut sink, payload.clone(), u32::MAX)
+                    .await
+                    .unwrap();
+                send_frame(&mut sink, &b"next"[..], u32::MAX).await.unwrap();
+                assert!(stream.peek(MAX_U32_VARINT_SIZE).is_empty());
+
+                // Only the first prefix byte needs its own read. The rest accompanies the payload.
+                let received = recv_frame(&mut stream, u32::MAX).await.unwrap();
+                assert_eq!(received.coalesce(), payload.as_slice());
+                assert_eq!(stream.recv_lengths, [1, prefix_len - 1 + payload.len()]);
+
+                // The next frame is already buffered and must arrive intact in a single read.
+                stream.recv_lengths.clear();
+                let received = recv_frame(&mut stream, u32::MAX).await.unwrap();
+                assert_eq!(received.coalesce(), b"next");
+                assert_eq!(stream.recv_lengths, [5]);
+            });
+        }
+    }
+
+    /// Decodes one- through five-byte prefixes across varying refill boundaries.
+    #[test]
+    fn test_recv_length_across_refills() {
+        for len in [0u32, 127, 128, 300, 16_384, 1 << 21, 0x1234_5678, u32::MAX] {
+            for buffer_size in 0..=MAX_U32_VARINT_SIZE {
+                deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+                    // Send concurrently so prefixes larger than the channel capacity can progress.
+                    let (mut sink, mut stream) = mocks::Channel::init_with_buffer_size(buffer_size);
+                    let prefix = UInt(len).encode();
+                    let sender = context.child("sender").spawn(|_| async move {
+                        sink.send(prefix).await.unwrap();
+                    });
+
+                    // The decoded length must survive refills. Consume any prefix still buffered.
+                    let (decoded, skip) = recv_length(&mut stream).await.unwrap();
+                    assert_eq!(decoded, len as usize);
+                    stream.recv(skip).await.unwrap();
+                    sender.await.unwrap();
+                });
+            }
+        }
+    }
+
+    /// Accepts the largest u32 frame length without overflowing receive requests.
+    #[test]
+    fn test_recv_frame_max_length() {
+        for buffered in [true, false] {
+            deterministic::Runner::default().start(|_| async move {
+                let (mut sink, inner) = mocks::Channel::init();
+                let mut stream = RecordingStream {
+                    inner,
+                    recv_lengths: Vec::new(),
+                };
+
+                // Queue only the prefix, optionally making it visible to peek before the first read.
+                sink.send(UInt(u32::MAX).encode()).await.unwrap();
+                if buffered {
+                    stream.inner.recv(0).await.unwrap();
+                }
+
+                // Keep the sink open so the body stays pending without allocating its declared length.
+                assert!(recv_frame(&mut stream, u32::MAX).now_or_never().is_none());
+                let requested: u64 = stream.recv_lengths.iter().map(|&len| len as u64).sum();
+                assert_eq!(requested, u64::from(u32::MAX) + MAX_U32_VARINT_SIZE as u64);
+            });
+        }
+    }
 
     #[test]
     fn test_send_recv_at_max_message_size() {

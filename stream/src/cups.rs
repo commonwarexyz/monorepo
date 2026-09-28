@@ -57,7 +57,7 @@
 
 use crate::utils::codec::{build_frame, recv_frame, send_frame, validate_frame_len};
 use commonware_codec::{
-    Copying, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Write, varint::UInt,
+    DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Write, varint::UInt,
 };
 use commonware_cryptography::{
     Signer,
@@ -68,8 +68,8 @@ use commonware_cryptography::{
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Buf as _, BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut,
-    IoBufs, Sink, Stream,
+    BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink,
+    Stream,
 };
 use commonware_utils::{DurationExt, SystemTimeExt, Widen};
 use rand_core::CryptoRng;
@@ -196,54 +196,34 @@ impl Version {
         self,
         stream: &mut impl Stream,
         cipher: &mut RecvCipher,
+        pool: &BufferPool,
         max_message_size: u32,
     ) -> Result<IoBufs, Error> {
         match self {
             Self::V0 => recv_frame(stream, max_message_size.saturating_add(TAG_SIZE)).await,
             Self::V1 => {
-                // Decode the header from buffered bytes when possible, so the payload arrives in
-                // the same read.
-                let mut header = [0u8; V1_HEADER_SIZE];
-                let peeked = stream.peek(V1_HEADER_SIZE);
-                let skip = if peeked.len() == V1_HEADER_SIZE {
-                    header.copy_from_slice(peeked);
-                    V1_HEADER_SIZE
-                } else {
-                    stream
-                        .recv(V1_HEADER_SIZE)
-                        .await
-                        .map_err(Error::RecvFailed)?
-                        .copy_to_slice(&mut header);
-                    0
-                };
+                // Request the fixed-size header before trusting the payload length, reusing
+                // its allocation for in-place decryption when possible.
+                let header = stream
+                    .recv(V1_HEADER_SIZE)
+                    .await
+                    .map_err(Error::RecvFailed)?;
+                let mut header = mutable_frame(pool, header);
 
                 // Authenticate the header before decoding its length or requesting the payload.
-                let plaintext_len = cipher.recv_in_place(&mut header)?;
+                let plaintext_len = cipher.recv_in_place(header.as_mut())?;
                 assert_eq!(plaintext_len, V1_HEADER_PLAINTEXT_SIZE);
-                let len = u32::decode(Copying(&header[..V1_HEADER_PLAINTEXT_SIZE]))?;
+                header.truncate(plaintext_len);
+                let len = u32::decode(header)?;
                 if len > max_message_size {
                     return Err(Error::RecvTooLarge(
                         Widen::<usize>::widen(len).saturating_add(sake::TAG_SIZE),
                     ));
                 }
-                let body_len = Widen::<usize>::widen(len) + sake::TAG_SIZE;
 
-                // Consume a buffered header on its own when it and the payload do not fit in one
-                // read request.
-                let skip = if skip.checked_add(body_len).is_some() {
-                    skip
-                } else {
-                    stream.recv(skip).await.map_err(Error::RecvFailed)?;
-                    0
-                };
-                stream
-                    .recv(skip + body_len)
-                    .await
-                    .map(|mut bufs| {
-                        bufs.advance(skip);
-                        bufs
-                    })
-                    .map_err(Error::RecvFailed)
+                // Receive the payload and tag only after authenticating and checking the length.
+                let body_len = Widen::<usize>::widen(len) + sake::TAG_SIZE;
+                stream.recv(body_len).await.map_err(Error::RecvFailed)
             }
         }
     }
@@ -677,7 +657,12 @@ impl<I: Stream> Receiver<I> {
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
         let encrypted = self
             .version
-            .recv_frame(&mut self.stream, &mut self.cipher, self.max_message_size)
+            .recv_frame(
+                &mut self.stream,
+                &mut self.cipher,
+                &self.pool,
+                self.max_message_size,
+            )
             .await?;
         let mut decryption_buf = mutable_frame(&self.pool, encrypted);
 
@@ -756,17 +741,12 @@ mod test {
         assert_eq!(Version::V1.sake(), sake::Version::V1);
     }
 
-    /// Checks that a version 1 receiver acts on a header before any payload arrives.
-    ///
-    /// Corrupted headers and lengths above the limit are rejected immediately. Valid lengths,
-    /// including zero, wait for the payload.
+    /// Checks that a version 1 receiver rejects an invalid header before any payload arrives.
     #[test]
-    fn test_header_handled_before_payload() {
+    fn test_invalid_header_rejected_before_body() {
         for (length, corrupt) in [
             (0, Some(0)),
             (0, Some(V1_HEADER_PLAINTEXT_SIZE)),
-            (0, None),
-            (MAX_MESSAGE_SIZE, None),
             (MAX_MESSAGE_SIZE + 1, None),
             (u32::MAX, None),
         ] {
@@ -787,72 +767,24 @@ mod test {
                 sink.send(header).await.unwrap();
 
                 // Keep the sink open without sending a payload: rejection must not wait for it.
-                let result = receiver.recv().now_or_never();
+                let result = receiver
+                    .recv()
+                    .now_or_never()
+                    .expect("header rejection must be immediate");
                 if corrupt.is_some() {
                     assert!(matches!(
                         result,
-                        Some(Err(Error::HandshakeError(HandshakeError::DecryptionFailed)))
-                    ));
-                } else if length > MAX_MESSAGE_SIZE {
-                    assert!(matches!(
-                        result,
-                        Some(Err(Error::RecvTooLarge(n)))
-                            if n == Widen::<usize>::widen(length) + sake::TAG_SIZE
+                        Err(Error::HandshakeError(HandshakeError::DecryptionFailed))
                     ));
                 } else {
-                    assert!(result.is_none(), "a valid header must wait for its payload");
+                    assert!(matches!(
+                        result,
+                        Err(Error::RecvTooLarge(n))
+                            if n == Widen::<usize>::widen(length) + sake::TAG_SIZE
+                    ));
                 }
             });
         }
-    }
-
-    /// Checks that version 1 headers split across reads are received intact.
-    ///
-    /// A header whose bytes have not reached the stream's buffer, and one only partly in the
-    /// buffer, both make the receiver read the rest from the stream before authenticating it.
-    #[test]
-    fn test_header_split_across_reads() {
-        deterministic::Runner::default().start(|context| async move {
-            let (mut sink, stream) = mocks::Channel::init();
-            let mut receiver = Receiver {
-                cipher: RecvCipher::new(TestRng::new(0)),
-                stream,
-                max_message_size: MAX_MESSAGE_SIZE,
-                pool: context.network_buffer_pool().clone(),
-                version: Version::V1,
-            };
-
-            // Encode two records the way a version 1 sender does.
-            let mut cipher = SendCipher::new(TestRng::new(0));
-            let mut encode = |message: &[u8]| {
-                let mut record = cipher.send(&(message.len() as u32).to_be_bytes()).unwrap();
-                record.extend(cipher.send(message).unwrap());
-                record
-            };
-            let first = encode(b"hello");
-            let second = encode(b"world");
-            let half = V1_HEADER_SIZE / 2;
-
-            // Deliver half of the first header: nothing is buffered yet, so the receiver waits.
-            // Then deliver the rest of the first record with half of the second header.
-            sink.send(first[..half].to_vec()).await.unwrap();
-            {
-                let mut recv = std::pin::pin!(receiver.recv());
-                assert!(futures::poll!(recv.as_mut()).is_pending());
-                let mut rest = first[half..].to_vec();
-                rest.extend_from_slice(&second[..half]);
-                sink.send(rest).await.unwrap();
-                assert_eq!(recv.await.unwrap().coalesce(), b"hello");
-            }
-
-            // The second header is now only partly buffered, so the receiver waits again. Then
-            // deliver the remainder: the second record decrypts intact.
-            assert_eq!(receiver.stream.peek(V1_HEADER_SIZE).len(), half);
-            let mut recv = std::pin::pin!(receiver.recv());
-            assert!(futures::poll!(recv.as_mut()).is_pending());
-            sink.send(second[half..].to_vec()).await.unwrap();
-            assert_eq!(recv.await.unwrap().coalesce(), b"world");
-        });
     }
 
     #[test]
@@ -1162,9 +1094,8 @@ mod test {
 
                 let (_, _, mut listener_receiver) = listener_handle.await.unwrap()?;
 
-                // Send both messages before receiving so the second record's length is decoded
-                // from the peek buffer, exercising in-place decryption of a sliced frame in
-                // addition to a full one.
+                // Buffer both records so V0 also exercises in-place decryption of a frame sliced
+                // past its length prefix.
                 dialer_sender.send(&b"hello"[..]).await?;
                 dialer_sender.send(&b"world"[..]).await?;
 
