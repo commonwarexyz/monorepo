@@ -1626,7 +1626,7 @@ impl Worker {
 
                 // The inner wrapper handles user polling policy. The poll also
                 // contains the destruction of a finished or cancelled future.
-                match task.poll(|_| {}) {
+                match task.poll() {
                     AfterPoll::Done => {}
                     // Join the tail so self-waking tasks cannot skip other ready work.
                     AfterPoll::Requeue(task) => self.local.borrow_mut().tasks.push(task),

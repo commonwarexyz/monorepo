@@ -474,15 +474,15 @@ impl Header {
 ///
 /// `repr(C)` puts the header at offset zero, so the cell and header pointers
 /// are one address. The whole cell is aligned with [`CachePadded`], so no two
-/// tasks share a line. The header and the start of the future share the first
-/// one.
+/// tasks share a line. Depending on the future's layout, its start can share
+/// the first line with the header.
 #[repr(C)]
 struct Cell<F> {
     /// Type-erased state shared by every reference.
     header: Header,
     /// The future, `None` once completed or cleared.
     future: UnsafeCell<Option<F>>,
-    /// Aligns the cell without adding to its size.
+    /// Sets the cell's alignment with a zero-sized field.
     _align: [CachePadded<()>; 0],
 }
 
@@ -556,14 +556,13 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
 /// frees the cell, whose future must already be gone.
 pub struct Task(NonNull<Header>);
 
-// SAFETY: `Task::new` requires `F: Send`, so the future may be polled or
-// dropped on any thread. The rest of the cell is atomic or immutable after
-// construction, and only the thread that wins the running state or clears the
-// task touches the future.
+// SAFETY: `Task::new` requires `F: Send`, and the header (including its
+// `Weak<Mailbox>`) is `Send + Sync`. Only the thread that wins the running
+// state or clears a nonrunning task accesses the future.
 unsafe impl Send for Task {}
-// SAFETY: see above. Methods on a shared reference touch atomics, except
-// `clear`, which drops the future only after its state exchange excludes every
-// poll. No `&F` is ever shared, so `F: Sync` is not needed.
+// SAFETY: the header is `Sync`, and `F: Send` permits `clear` to drop the
+// future on another thread. Its state transition grants exclusive access,
+// and no `&F` is shared, so `F: Sync` is not needed.
 unsafe impl Sync for Task {}
 
 impl Deref for Task {
@@ -728,12 +727,7 @@ impl Task {
     ///
     /// The caller holds no worker borrow, since the poll and the destructors it
     /// runs are user code.
-    ///
-    /// `finish` runs after a future that returned pending and before the poll
-    /// is published as over. No wake can start another poll of the task until
-    /// it returns. A completed task skips it. `finish` must not panic: the task
-    /// would stay running, and teardown could never drop its future.
-    pub fn poll(self, finish: impl FnOnce(&Header)) -> AfterPoll {
+    pub fn poll(self) -> AfterPoll {
         // A token of a task teardown already cleared is released here.
         if !self.state.start_poll() {
             return AfterPoll::Done;
@@ -754,7 +748,6 @@ impl Task {
         // A pending poll leaves the task idle or requeues this token, unless
         // teardown cleared the task meanwhile, which completes it below.
         if matches!(polled, Some(Poll::Pending)) {
-            finish(&self);
             match self.state.finish_pending() {
                 AfterPending::Done => {
                     // The exchange released this token's reference.
@@ -1052,6 +1045,31 @@ pub mod tests {
         }
     }
 
+    /// Future whose destructor records its invocation and panics.
+    struct PanicsOnDrop {
+        complete: bool,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Future for PanicsOnDrop {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+            if self.complete {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Drop for PanicsOnDrop {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+            panic!("future drop panic");
+        }
+    }
+
     /// Future that keeps its own waker and wakes it when dropped. It finishes
     /// on its first poll when `complete` is set.
     struct WakesOnDrop {
@@ -1190,6 +1208,14 @@ pub mod tests {
         }
     }
 
+    /// The shared header, including its mailbox handle, can cross threads.
+    #[test]
+    fn test_header_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<Header>();
+    }
+
     #[test]
     fn test_wakers_hold_references_until_the_cell_is_freed() {
         let mailbox = mailbox();
@@ -1198,7 +1224,7 @@ pub mod tests {
         assert_eq!(Arc::weak_count(&mailbox), 1);
 
         // Polling borrows the token's reference for the waker it passes in.
-        assert!(matches!(task.clone().poll(|_| {}), AfterPoll::Done));
+        assert!(matches!(task.clone().poll(), AfterPoll::Done));
         assert_eq!(refs(&task), 1);
 
         // Cloned wakers count, and dropped ones release.
@@ -1228,7 +1254,7 @@ pub mod tests {
         let mailbox = mailbox();
         let mut tasks = Tasks::default();
         let task = insert(&mut tasks, &mailbox, pending());
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
+        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
 
         // Wakes from a thread without a worker travel through the mailbox, and
         // duplicates publish one token. The coalesced wake by value releases
@@ -1247,9 +1273,23 @@ pub mod tests {
 
         // The token polls the task again, which leaves it idle once more.
         tasks.push(tokens.pop().unwrap());
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
+        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
         assert!(scheduled(&mailbox).is_empty());
         task.clear();
+    }
+
+    /// A running poll keeps exclusive access before and after a wake.
+    #[test]
+    fn test_running_poll_cannot_be_claimed_again() {
+        let state = State::queued();
+        assert!(state.start_poll());
+
+        // A running poll cannot be claimed again.
+        assert!(!state.start_poll());
+
+        // A wake during the poll records a requeue without publishing a token.
+        assert!(!state.notify_by_ref());
+        assert!(!state.start_poll());
     }
 
     #[test]
@@ -1269,59 +1309,20 @@ pub mod tests {
 
         // Wakes during the poll leave exactly one successor token, returned
         // to the poller rather than published.
-        let AfterPoll::Requeue(token) = tasks.pop().unwrap().poll(|_| {}) else {
+        let AfterPoll::Requeue(token) = tasks.pop().unwrap().poll() else {
             panic!("self-woken pending poll must requeue");
         };
         assert!(Task::ptr_eq(&token, &task));
         assert!(scheduled(&mailbox).is_empty());
 
         // The final poll wakes itself again, which the terminal state discards.
-        let AfterPoll::Retire(token) = token.poll(|_| {}) else {
+        let AfterPoll::Retire(token) = token.poll() else {
             panic!("final poll must complete");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         tasks.retire(token);
         assert!(scheduled(&mailbox).is_empty());
         assert_eq!(refs(&task), 1);
-    }
-
-    #[test]
-    fn test_finalizer_runs_while_the_poll_still_owns_the_task() {
-        // The finalizer sees the task before its poll is published as over: a
-        // wake arriving during it cannot start another poll, and is not lost.
-        let drops = Arc::new(AtomicUsize::new(0));
-        let mailbox = mailbox();
-        let mut tasks = Tasks::default();
-        let task = insert(
-            &mut tasks,
-            &mailbox,
-            SelfWaker {
-                wakes: 0,
-                polls: 2,
-                _drops: DropCount(drops.clone()),
-            },
-        );
-        let waker = Waker::clone(&task.waker());
-        let mut finalized = 0;
-        let outcome = tasks.pop().unwrap().poll(|header| {
-            finalized += 1;
-            // Still running: no token can start a poll now.
-            assert!(!header.state.start_poll());
-            // A wake now is kept for the requeue that follows, not published.
-            waker.wake_by_ref();
-            assert!(scheduled(&mailbox).is_empty());
-        });
-        assert_eq!(finalized, 1);
-        let AfterPoll::Requeue(token) = outcome else {
-            panic!("the wake during the finalizer must requeue the task");
-        };
-        assert!(Task::ptr_eq(&token, &task));
-
-        // The completing poll skips the finalizer.
-        let outcome = token.poll(|_| finalized += 1);
-        assert!(matches!(outcome, AfterPoll::Retire(_)));
-        assert_eq!(finalized, 1);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1336,11 +1337,7 @@ pub mod tests {
         });
         let waker = Waker::clone(&first.waker());
 
-        let AfterPoll::Retire(token) = tasks
-            .pop()
-            .unwrap()
-            .poll(|_| panic!("a completed poll skips the finalizer"))
-        else {
+        let AfterPoll::Retire(token) = tasks.pop().unwrap().poll() else {
             panic!("panicking poll must complete the task");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -1353,7 +1350,7 @@ pub mod tests {
             first.slot.load(Ordering::Relaxed),
             second.slot.load(Ordering::Relaxed)
         );
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
+        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
         waker.wake_by_ref();
         assert!(scheduled(&mailbox).is_empty());
         drop(waker);
@@ -1413,7 +1410,7 @@ pub mod tests {
         let first = insert(&mut tasks, &closed, pending());
         let second = insert(&mut tasks, &dropped, pending());
         for _ in 0..2 {
-            assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
+            assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
         }
 
         // Each wake publishes a token no worker will take, and releases it,
@@ -1449,7 +1446,7 @@ pub mod tests {
                 },
             );
 
-            match tasks.pop().unwrap().poll(|_| {}) {
+            match tasks.pop().unwrap().poll() {
                 AfterPoll::Retire(token) => tasks.retire(token),
                 AfterPoll::Done => task.clear(),
                 _ => panic!("the poll must complete or leave the task idle"),
@@ -1475,8 +1472,8 @@ pub mod tests {
 
         // Leave one task idle, one queued with its token held outside the
         // worker, and one queued with its token still in the ready queue.
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
+        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
+        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
         handles[1].wake_by_ref();
         let mut tokens = scheduled(&mailbox);
         assert_eq!(tokens.len(), 1);
@@ -1501,10 +1498,7 @@ pub mod tests {
             task.wake_by_ref();
         }
         assert!(scheduled(&mailbox).is_empty());
-        assert!(matches!(
-            tokens.pop().unwrap().poll(|_| {}),
-            AfterPoll::Done
-        ));
+        assert!(matches!(tokens.pop().unwrap().poll(), AfterPoll::Done));
         assert_eq!(refs(&handles[1]), 2);
 
         // A cleared arena has already released every slot.
@@ -1545,13 +1539,9 @@ pub mod tests {
             });
             *cell.lock() = Some(task.clone());
 
-            // The poll returned pending, so the finalizer runs before the
-            // poller sees the clear.
-            let mut finalized = 0;
-            let AfterPoll::Retire(token) = tasks.pop().unwrap().poll(|_| finalized += 1) else {
+            let AfterPoll::Retire(token) = tasks.pop().unwrap().poll() else {
                 panic!("a task cleared during its poll must complete");
             };
-            assert_eq!(finalized, 1);
             assert_eq!(drops.load(Ordering::Relaxed), 1);
             tasks.retire(token);
             task.wake_by_ref();
@@ -1574,7 +1564,7 @@ pub mod tests {
             pending::<()>().await;
         });
         let waker = Waker::clone(&task.waker());
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
+        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
 
         // Clear the future and retire the arena entry, leaving the caller's
         // reference and the cloned waker's.
@@ -1613,7 +1603,7 @@ pub mod tests {
         });
         let waker = Waker::clone(&task.waker());
 
-        let AfterPoll::Retire(token) = tasks.pop().unwrap().poll(|_| {}) else {
+        let AfterPoll::Retire(token) = tasks.pop().unwrap().poll() else {
             panic!("ready future must complete");
         };
         tasks.retire(token);
@@ -1624,6 +1614,48 @@ pub mod tests {
         waker.wake();
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert_eq!(Arc::weak_count(&mailbox), baseline);
+    }
+
+    /// Completion and teardown free the cell after containing a destructor panic.
+    #[test]
+    fn test_panicking_destructor_releases_the_cell() {
+        for complete in [false, true] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let mailbox = mailbox();
+            let baseline = Arc::weak_count(&mailbox);
+            let mut tasks = Tasks::default();
+            let task = insert(
+                &mut tasks,
+                &mailbox,
+                PanicsOnDrop {
+                    complete,
+                    drops: drops.clone(),
+                },
+            );
+            let waker = Waker::clone(&task.waker());
+            let outcome = tasks.pop().unwrap().poll();
+
+            if complete {
+                let AfterPoll::Retire(token) = outcome else {
+                    panic!("ready future must complete despite its destructor panic");
+                };
+                tasks.retire(token);
+            } else {
+                assert!(matches!(outcome, AfterPoll::Done));
+                for retired in tasks.clear() {
+                    assert!(Panics::contain(|| retired.clear()).is_none());
+                }
+            }
+
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+            assert_eq!(refs(&task), 2);
+            drop(task);
+
+            // The last waker frees a cell whose future has already been dropped.
+            waker.wake();
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+            assert_eq!(Arc::weak_count(&mailbox), baseline);
+        }
     }
 
     #[test]
@@ -1649,12 +1681,12 @@ pub mod tests {
 
             // Two polls leave the task idle, and each wake queues it again.
             for _ in 0..2 {
-                assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
+                assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
                 task.wake_by_ref();
                 tasks.push(scheduled(&mailbox).pop().unwrap());
             }
             if complete {
-                let AfterPoll::Retire(token) = tasks.pop().unwrap().poll(|_| {}) else {
+                let AfterPoll::Retire(token) = tasks.pop().unwrap().poll() else {
                     panic!("the third poll must complete");
                 };
                 tasks.retire(token);
@@ -1781,6 +1813,41 @@ mod loom_tests {
         });
     }
 
+    /// A last consuming wake acquires writes published by an earlier release.
+    #[test]
+    fn test_completed_wake_racing_release_finds_one_last() {
+        loom::model(|| {
+            let state = Arc::new(State::queued());
+            assert!(state.start_poll());
+            state.complete();
+            state.retain();
+            let payload = Arc::new(AtomicUsize::new(0));
+
+            let releaser = thread::spawn({
+                let state = Arc::clone(&state);
+                let payload = Arc::clone(&payload);
+                move || {
+                    payload.store(1, Ordering::Relaxed);
+                    state.release()
+                }
+            });
+
+            let wake_was_last = match state.notify_by_value() {
+                AfterWake::Dealloc => {
+                    // Check before joining so only the wake can acquire the write.
+                    assert_eq!(payload.load(Ordering::Relaxed), 1);
+                    true
+                }
+                AfterWake::Done => false,
+                AfterWake::Schedule => panic!("completed task cannot be scheduled"),
+            };
+            let release_was_last = releaser.join().unwrap();
+
+            assert_ne!(wake_was_last, release_was_last);
+            assert_eq!(refs(&state), 0);
+        });
+    }
+
     #[test]
     fn test_clear_racing_a_poll_drops_the_future_once() {
         // Teardown racing a poll never touches the future while the poller does,
@@ -1808,6 +1875,7 @@ mod loom_tests {
                         AfterPending::Done => {}
                         AfterPending::Complete => {
                             state.complete();
+
                             // SAFETY: exclusive access continues past
                             // `complete`.
                             future.with_mut(|value| unsafe { *value = usize::MAX });
