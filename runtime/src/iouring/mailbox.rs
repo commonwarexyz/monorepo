@@ -23,7 +23,7 @@ use std::mem;
 pub enum Message {
     /// Wake the root future or a task.
     Wake(Target),
-    /// Register a task spawned on another thread and queue its first poll.
+    /// Place a spawned task on this worker.
     Spawn(Task),
     /// Transfer observation of an operation or timer to a channel.
     Forward(Forward),
