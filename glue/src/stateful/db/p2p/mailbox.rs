@@ -1,4 +1,4 @@
-//! Mailbox and wire types for the QMDB sync resolver service.
+//! Mailbox for the QMDB sync resolver.
 
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::Digest;
@@ -23,7 +23,7 @@ where
     F: Family,
     D: Digest,
 {
-    /// Fetch operations from a remote peer via the P2P resolver engine.
+    /// A request to fetch the response to `request` from peers.
     GetOperations {
         request: Request<F>,
         response: Reply<Response<F, Op, D>>,
@@ -42,6 +42,9 @@ where
     }
 }
 
+/// Messages retained while the mailbox is full.
+///
+/// Fetches whose caller dropped its reply receiver are discarded.
 pub(super) struct Pending<F, Op, D>
 where
     F: Family,

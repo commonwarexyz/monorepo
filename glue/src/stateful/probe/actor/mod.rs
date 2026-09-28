@@ -32,24 +32,21 @@ where
     /// The strategy to use for signature verification.
     pub strategy: T,
     /// The mailbox capacity.
-    pub capacity: NonZeroUsize,
+    pub mailbox_size: NonZeroUsize,
     /// Blocker used to block malicious peers.
     pub blocker: B,
-    /// Finalizations below this epoch are ignored when discovering a floor. Discovery requests are
-    /// sent to this epoch's participants.
+    /// Lowest epoch whose finalizations are accepted.
+    ///
+    /// Requests go to this epoch's participants, only they may contribute replies, and its
+    /// committee size sets the `f + 1` sample threshold.
     pub minimum_epoch: Epoch,
-    /// How long to wait for enough finalization replies before clearing the pending
-    /// responses and re-requesting.
+    /// Time to wait for a complete sample before starting a new request round.
     pub retry_timeout: NonZeroDuration,
 }
 
-/// Discovers a sync floor by adopting the highest finalization from a peer sample.
+/// Discovers a floor from a peer sample, then serves this node's latest finalization to peers.
 ///
-/// The actor is a two-phase state machine. It starts in discovery, waits until a subscriber needs
-/// a floor, then solicits and samples peers' finalizations without answering any of its own. Once a
-/// marshal is attached, it hands off to service, answering peers' requests from that marshal and
-/// never issuing outbound requests. A source node that never needed a floor attaches a marshal
-/// without consuming one and enters service without soliciting peers.
+/// See the [module documentation](crate::stateful::probe#lifecycle) for when each phase runs.
 pub struct Probe<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -79,10 +76,10 @@ where
     P: PublicKey,
     B: Blocker<PublicKey = P>,
 {
-    /// Create a probe actor and mailbox.
+    /// Creates a probe actor and its mailbox.
     pub fn new(config: Config<E, D, T, P, B>) -> (Self, Mailbox<S, V>) {
         let (sender, receiver) =
-            commonware_actor::mailbox::new(config.context.child("mailbox"), config.capacity);
+            commonware_actor::mailbox::new(config.context.child("mailbox"), config.mailbox_size);
         let mailbox = Mailbox::new(sender);
         (
             Self {
@@ -98,7 +95,7 @@ where
         )
     }
 
-    /// Start the probe actor.
+    /// Starts the actor on the probe channel `net`.
     pub fn start(
         mut self,
         net: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -118,7 +115,7 @@ where
             blocker: self.blocker,
             retry_timeout: self.retry_timeout,
             sample: Sample::new(self.minimum_epoch),
-            floor_subscribers: Vec::new(),
+            subscribers: Vec::new(),
         }
         .run(&mut sender, &mut receiver)
         .await;

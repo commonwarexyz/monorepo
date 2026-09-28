@@ -41,15 +41,13 @@ impl<B: Block> WeakAncestry<B> {
         (owner, reference)
     }
 
-    /// Upgrades to an independent cursor while the caller still owns the ancestry.
-    ///
-    /// Returns `None` once caller cancellation releases the strong owner.
+    /// Returns an independent cursor over the ancestry, or `None` once the caller has cancelled.
     pub(in crate::stateful::actor) fn upgrade(&self) -> Option<BoxedAncestry<B>> {
         self.0.upgrade().map(|ancestry| ancestry.lock().clone())
     }
 }
 
-/// A verification is scoped to its caller.
+/// Response channel for a caller-scoped verification request.
 pub(in crate::stateful::actor) struct Verification {
     response: oneshot::Sender<bool>,
 }
@@ -91,7 +89,7 @@ where
         verification: Verification,
     },
 
-    /// A reporting of a new finalized block.
+    /// A finalized block and its marshal acknowledgement.
     Finalized {
         span: Span,
         block: Arc<A::Block>,
@@ -172,10 +170,11 @@ where
     }
 }
 
-/// Channel-based proxy to the [`Stateful`](super::Stateful) actor.
+/// Handle to the [`Stateful`](super::Stateful) actor.
 ///
-/// Implements the consensus application and verifying traits by forwarding
-/// each call to the actor via a message and awaiting the response.
+/// Implements the consensus [`Application`](commonware_consensus::Application) and receives
+/// finalized blocks from marshal as a [`Reporter`]. If the actor stops before responding,
+/// `propose` returns `None` and `verify` never resolves.
 pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -201,7 +200,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// Create a mailbox from the send half of the actor's message channel.
+    /// Creates a mailbox from the send half of the actor's message channel.
     pub(super) const fn new(sender: Sender<Message<E, A>>) -> Self {
         Self { sender }
     }
@@ -244,8 +243,8 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
-        // Scope the strong ancestry owner to this caller. Queued work receives only a weak
-        // handle, so cancellation releases backing blocks before the actor drains the request.
+        // The actor holds only a weak handle, so dropping this future releases the ancestry's
+        // blocks even while the request is queued.
         let (response, receiver) = oneshot::channel();
         let (_ancestry_owner, ancestry) = WeakAncestry::new(ancestry);
         let span = info_span!(

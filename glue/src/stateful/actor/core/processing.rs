@@ -8,9 +8,9 @@
 //! answered from the canonical chain.
 //!
 //! Each finalized block is applied immediately. Snapshots are captured and
-//! published when a durability sync starts, and one active sync covers every
+//! published when a barrier starts, and one active barrier covers every
 //! block applied behind it (see [`Publisher`]). The block is acknowledged to
-//! marshal only once a sync proves it durable. A queued prune owns the next
+//! marshal only once a barrier proves it durable. A queued prune owns the next
 //! storage-mutation boundary. It waits until the pruned range is durable,
 //! prunes, and publishes fresh snapshots right away.
 
@@ -46,59 +46,59 @@ use rand_core::Rng;
 use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span, warn};
 
-/// Work selected for one iteration of the processing actor.
+/// Work selected for one iteration of the processing loop.
 enum Step<M, P> {
-    /// A message received from the actor mailbox.
+    /// A message from the actor mailbox.
     Message(M),
-    /// Deferred pruning work ready for its database mutation boundary.
+    /// A pending prune selected to run.
     Prune(P),
-    /// Completion of the active database durability barrier.
-    Sync((Height, bool)),
+    /// Completion of the active barrier (see [`Durability::completion`]).
+    Barrier(Option<Height>),
 }
 
 /// Tracks the durable database prefix and marshal acknowledgements awaiting it.
 ///
-/// At most one sync covers a captured prefix. Applied heights beyond that prefix remain queued
-/// for a successor sync.
+/// At most one barrier covers a captured prefix. Applied heights beyond that prefix remain queued
+/// for a successor barrier.
 struct Durability {
     /// Highest applied height known to be durable.
     durable: Height,
     /// Applied heights whose marshal acknowledgements await durability, in nondecreasing order.
     acknowledgements: VecDeque<(Height, Exact)>,
-    /// Active barrier, whose output includes the height of its captured prefix.
-    sync: Option<Handle<(Height, bool)>>,
+    /// Active barrier, whose output is the height of its captured prefix once durable.
+    barrier: Option<Handle<Option<Height>>>,
 }
 
 impl Durability {
-    /// Initialize tracking at a height already known to be durable.
+    /// Initializes tracking at a height already known to be durable.
     const fn new(height: Height) -> Self {
         Self {
             durable: height,
             acknowledgements: VecDeque::new(),
-            sync: None,
+            barrier: None,
         }
     }
 
-    /// Return the highest applied height, or the durable floor when none are pending.
-    fn latest_applied(&self) -> Height {
+    /// Returns the highest applied height (the durable height when no acknowledgement is pending).
+    fn applied(&self) -> Height {
         self.acknowledgements
             .back()
             .map_or(self.durable, |(height, _)| *height)
     }
 
-    /// Record a newly applied height and retain its acknowledgement until durability.
+    /// Holds the acknowledgement for a newly applied `height` until it is durable.
     ///
-    /// Heights must be recorded in strictly increasing order.
-    fn applied(&mut self, height: Height, acknowledgement: Exact) {
-        assert!(
-            height > self.latest_applied(),
-            "finalized heights must increase"
-        );
+    /// Panics unless `height` is above every applied height.
+    fn record(&mut self, height: Height, acknowledgement: Exact) {
+        assert!(height > self.applied(), "finalized heights must increase");
         self.acknowledgements.push_back((height, acknowledgement));
     }
 
-    /// Bind another receipt for an applied height to its existing durability boundary.
-    fn retain_duplicate(&mut self, height: Height, acknowledgement: Exact) {
+    /// Holds a duplicate receipt until its height is durable (acknowledging it at once if it
+    /// already is).
+    ///
+    /// Panics if `height` is neither durable nor applied.
+    fn record_duplicate(&mut self, height: Height, acknowledgement: Exact) {
         if self.covers(height) {
             acknowledgement.acknowledge();
             return;
@@ -112,32 +112,44 @@ impl Durability {
             .insert(index + 1, (height, acknowledgement));
     }
 
-    /// Return whether applied state remains uncovered and no sync is active.
-    fn needs_sync(&self) -> bool {
-        self.sync.is_none() && self.durable < self.latest_applied()
+    /// Returns whether applied state is not yet durable and no barrier is active.
+    fn needs_barrier(&self) -> bool {
+        self.barrier.is_none() && self.durable < self.applied()
     }
 
-    /// Record a barrier covering applied state through `height`.
+    /// Tracks `barrier` as covering applied state through `height`.
     ///
-    /// Only one barrier may be active, and `height` must extend the durable prefix without
-    /// exceeding the latest applied height.
-    fn started(&mut self, height: Height, barrier: Barrier) {
-        assert!(self.sync.is_none(), "sync already active");
-        assert!(height > self.durable && height <= self.latest_applied());
-        self.sync = Some(Handle::from_future(async move {
-            Ok((height, barrier.durable().await))
+    /// Panics if a barrier is active or `height` is not above the durable height and at or below
+    /// the applied height.
+    fn set_barrier(&mut self, height: Height, barrier: Barrier) {
+        assert!(self.barrier.is_none(), "barrier already active");
+        assert!(height > self.durable && height <= self.applied());
+        self.barrier = Some(Handle::from_future(async move {
+            Ok(barrier.durable().await.then_some(height))
         }));
     }
 
-    /// Complete the active sync and acknowledge every height it made durable.
+    /// Awaits the active barrier, staying pending when none is active so callers can select on it
+    /// unconditionally.
     ///
-    /// Returns false without advancing the durable prefix when durability was not established.
-    fn complete(&mut self, (height, durable): (Height, bool)) -> bool {
-        assert!(self.sync.take().is_some(), "sync not active");
-        if !durable {
+    /// Resolves to the covered height, or `None` if shutdown interrupted the barrier.
+    async fn completion(&mut self) -> Option<Height> {
+        let Some(barrier) = &mut self.barrier else {
+            return pending().await;
+        };
+        barrier.await.expect("internal barrier handle cannot fail")
+    }
+
+    /// Clears the active barrier and acknowledges every height it made durable.
+    ///
+    /// Returns `false` without advancing the durable height if `completion` is `None`. Panics if no
+    /// barrier is active.
+    fn complete(&mut self, completion: Option<Height>) -> bool {
+        assert!(self.barrier.take().is_some(), "barrier not active");
+        let Some(height) = completion else {
             return false;
-        }
-        assert!(height > self.durable && height <= self.latest_applied());
+        };
+        assert!(height > self.durable && height <= self.applied());
         self.durable = height;
         let covered = self
             .acknowledgements
@@ -150,25 +162,18 @@ impl Durability {
         true
     }
 
-    /// Return whether `height` lies within the known durable prefix.
+    /// Returns whether `height` lies within the known durable prefix.
     fn covers(&self, height: Height) -> bool {
         self.durable >= height
     }
 }
 
-/// Await the active sync, remaining pending so callers can select unconditionally when none exists.
-async fn sync_completion(sync: &mut Option<Handle<(Height, bool)>>) -> (Height, bool) {
-    let Some(sync) = sync else {
-        return pending().await;
-    };
-    sync.await.expect("internal sync handle cannot fail")
-}
-
-/// Start a durability barrier for pending applied state.
+/// Starts a barrier covering all applied state.
 ///
-/// Verification work remains driven while the database writer is acquired. Returns None if the
-/// actor stops before the barrier starts, dropping the in-flight capture.
-async fn start_sync<E, A, S, V>(
+/// Verifications keep running while the barrier waits for database access. Returns `None` if the
+/// actor stops before the barrier starts, dropping the in-flight capture. Panics unless
+/// [`Durability::needs_barrier`] holds.
+async fn start_barrier<E, A, S, V>(
     shutdown: &mut (impl Future + Unpin),
     durability: &mut Durability,
     verifications: &mut Verifications<S, V>,
@@ -182,14 +187,12 @@ where
     V: Variant<ApplicationBlock = A::Block> + 'static,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
-    // A requested successor is a no-op when no applied suffix remains uncovered.
-    if !durability.needs_sync() {
-        return Some(processor);
-    }
+    assert!(
+        durability.needs_barrier(),
+        "barrier requires uncovered applied state and no active barrier",
+    );
 
-    // Capture the dirty prefix before waiting for the database writer. Drive verification readers
-    // until the barrier starts, then bind its completion to exactly the prefix it captured.
-    let height = durability.latest_applied();
+    let height = durability.applied();
     let (processor, snapshots, barrier) = select! {
         _ = &mut *shutdown => return None,
         result = verifications.drive(processor.sync()) => result,
@@ -198,10 +201,11 @@ where
     // The snapshots serve immediately; peers verify what they fetch against a
     // finalized root, so serving safely runs ahead of disk.
     publisher.publish(height, snapshots);
-    durability.started(height, barrier);
+    durability.set_barrier(height, barrier);
     Some(processor)
 }
 
+/// Serves proposals, verifications, and finalizations against the live database set.
 pub(super) struct Processing<E, A, S, V>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -211,16 +215,12 @@ where
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
-
     /// Actor ingress.
     pub(super) mailbox: actor_mailbox::Receiver<Message<E, A>>,
-
     /// Provider cloned into each proposal.
     pub(super) provider: A::Provider,
-
     /// Marshal mailbox used for lazy block lookup.
     pub(super) marshal: MarshalMailbox<S, V>,
-
     /// Publishes the latest snapshots for serving.
     pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 }
@@ -233,11 +233,14 @@ where
     V: Variant<ApplicationBlock = A::Block> + 'static,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
-    /// Run the loop until shutdown.
+    /// Serves requests with `processor` until the mailbox closes or the actor stops.
     ///
-    /// `deferred` holds verification requests that arrived during state sync
-    /// and have not started yet.
-    pub async fn start(
+    /// `deferred` holds verification requests that arrived during state sync and have not started
+    /// yet. At most one barrier is active, and blocks finalized while it runs are covered by a
+    /// later barrier. A marshal acknowledgement is released only once its block is durable. If
+    /// shutdown interrupts a barrier, processing stops and every pending acknowledgement is
+    /// cancelled.
+    pub async fn run(
         mut self,
         mut processor: Processor<E, A>,
         deferred: Vec<VerificationRequest<E, A>>,
@@ -249,9 +252,6 @@ where
             verifications.schedule(processor.verifier(), request);
         }
 
-        // One database sync stays active while later finalized state accumulates behind it.
-        // Completion starts a successor for that suffix unless a pending prune must establish
-        // the next storage-mutation boundary first.
         let mut durability = Durability::new(processor.processed_height());
 
         // `select_loop!` creates one shutdown signal for the actor's whole life.
@@ -260,16 +260,15 @@ where
         select_loop! {
             self.context,
             on_start => {
-                // Observe completed durability before taking more work. A queued prune suppresses
-                // the automatic dirty-suffix successor until the prune has run at its own
-                // mutation boundary.
-                if let Some(completion) = sync_completion(&mut durability.sync).now_or_never()
+                if let Some(completion) = durability.completion().now_or_never()
                     && !durability.complete(completion)
                 {
                     return;
                 }
-                if pending_prune.is_none() {
-                    let Some(driven) = start_sync(
+
+                // A pending prune suppresses successor barriers.
+                if pending_prune.is_none() && durability.needs_barrier() {
+                    let Some(driven) = start_barrier(
                         &mut shutdown,
                         &mut durability,
                         &mut verifications,
@@ -287,12 +286,10 @@ where
                 // mailbox traffic cannot starve them.
                 verifications.complete_ready();
 
-                // A message deferred by an active proposal is the FIFO barrier
-                // for subsequent mailbox work, so handle it before later arrivals.
-                let prune_needs_sync = pending_prune.is_some() && durability.needs_sync();
-                let message = if prune_needs_sync {
-                    // The suppressed successor sync would defer durability, and the acks
-                    // behind it, until the mailbox went idle. Run the prune's boundary now.
+                // While applied state is not durable, a pending prune runs before the next message
+                // so durability does not wait for an empty mailbox. Otherwise it waits for one.
+                let prune_needs_barrier = pending_prune.is_some() && durability.needs_barrier();
+                let message = if prune_needs_barrier {
                     Err(TryRecvError::Empty)
                 } else {
                     match deferred_message.take() {
@@ -301,17 +298,15 @@ where
                     }
                 };
 
-                // A prune remains idle work unless it owns the next dirty-suffix mutation boundary.
                 let next = match message {
-                    // A message is ready. Handle it now, regardless of any queued prune.
                     Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
                     Err(TryRecvError::Empty) => match pending_prune.take() {
                         Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
                         // No message and nothing to prune. Wait on the mailbox, driving
-                        // the active sync and verification jobs while idle.
+                        // the active barrier and verification jobs while idle.
                         None => {
                             let mailbox = &mut self.mailbox;
-                            let sync = &mut durability.sync;
+                            let durability = &mut durability;
                             let verifications = &mut verifications;
                             Either::Right(async move {
                                 loop {
@@ -322,10 +317,10 @@ where
                                             }
                                             break message.map(Step::Message);
                                         },
-                                        completion = sync_completion(sync) => {
-                                            break Some(Step::Sync(completion));
+                                        completion = durability.completion() => {
+                                            break Some(Step::Barrier(completion));
                                         },
-                                        _ = verifications.next_completed() => {
+                                        _ = verifications.complete_next() => {
                                             continue;
                                         },
                                     }
@@ -398,15 +393,15 @@ where
                                             },
                                         ),
                                         Some(message) => {
-                                            // Only verification may overtake an active proposal. The
-                                            // first other message becomes a FIFO barrier for later
-                                            // mailbox work.
+                                            // Only verifications overtake an active proposal. The
+                                            // first other message waits for it, and later messages
+                                            // wait behind that one.
                                             deferred_message = Some(message);
                                             receive_messages = false;
                                         }
                                         None => receive_messages = false,
                                     },
-                                    _ = verifications.next_completed() => {},
+                                    _ = verifications.complete_next() => {},
                                 }
                             } else {
                                 select! {
@@ -415,7 +410,7 @@ where
                                         return;
                                     },
                                     _ = &mut proposal => break,
-                                    _ = verifications.next_completed() => {},
+                                    _ = verifications.complete_next() => {},
                                 }
                             }
                         }
@@ -441,9 +436,10 @@ where
                         block,
                         acknowledgement,
                     }) => {
-                        if block.height() < processor.processed_height() {
-                            // Older receipts share the durability boundary of their applied block.
-                            durability.retain_duplicate(block.height(), acknowledgement);
+                        // Redelivery still waits for durability but leaves active verifications
+                        // running.
+                        if processor.redelivered(block.as_ref()) {
+                            durability.record_duplicate(block.height(), acknowledgement);
                             continue;
                         }
                         let process = info_span!(parent: &span, "stateful.actor.finalized");
@@ -452,7 +448,7 @@ where
                         // pausing at their next batch read. Exiting on stop drops
                         // the un-applied batches, and marshal redelivers the
                         // unacknowledged block after restart.
-                        let should_start_sync = durability.sync.is_none();
+                        let barrier_idle = durability.barrier.is_none();
                         let applied;
                         select! {
                             _ = &mut shutdown => {
@@ -466,7 +462,7 @@ where
                                 .drive(processor.finalize(
                                     self.context.as_present(),
                                     block.as_ref(),
-                                    should_start_sync,
+                                    barrier_idle,
                                 ))
                                 .instrument(process.clone()) => {
                                 (processor, applied) = driven;
@@ -475,35 +471,29 @@ where
 
                         // Keep the publication bookkeeping under the same span.
                         let _span = process.entered();
-                        let Some(Applied {
+                        let Applied {
                             snapshots,
                             barrier,
                             prune,
-                        }) = applied
-                        else {
-                            // Duplicate reports share their original durability boundary.
-                            durability.retain_duplicate(block.height(), acknowledgement);
-                            continue;
-                        };
+                        } = applied;
                         debug!(
                             height = block.height().get(),
                             "applied finalized database batch"
                         );
 
-                        // Snapshots are captured when a sync starts; they serve
-                        // immediately, ahead of that sync completing.
+                        // Snapshots are captured when a barrier starts; they serve
+                        // immediately, ahead of that barrier completing.
                         let height = block.height();
                         if let Some(snapshots) = snapshots {
                             self.snapshot_publisher.publish(height, snapshots);
                         }
 
-                        // Retain marshal acknowledgements until a barrier makes their database
-                        // prefix durable. This keeps marshal's processed floor within
-                        // recoverable database state while later work proceeds. A barrier that
-                        // returns false leaves the suffix unacknowledged for restart replay.
-                        durability.applied(height, acknowledgement);
+                        // Acknowledge only once a barrier covers this height, so marshal's
+                        // processed height never passes durable state and an unsynced suffix
+                        // is replayed after restart.
+                        durability.record(height, acknowledgement);
                         if let Some(barrier) = barrier {
-                            durability.started(height, barrier);
+                            durability.set_barrier(height, barrier);
                         }
 
                         // Defer pruning to the loop so it can settle durability at one
@@ -513,26 +503,25 @@ where
                         }
                     }
                     Step::Prune(prune) => {
-                        // Pruning owns a strict database mutation boundary. Observe an existing sync
-                        // before quiescing readers, then run storage maintenance with no sync active.
-                        while durability.sync.is_some() {
+                        // Pruning requires a durable prune target and no active barrier.
+                        while durability.barrier.is_some() {
                             select! {
-                                completion = sync_completion(&mut durability.sync) => {
+                                completion = durability.completion() => {
                                     if !durability.complete(completion) {
                                         return;
                                     }
                                 },
-                                _ = verifications.next_completed() => {},
+                                _ = verifications.complete_next() => {},
                             }
                         }
 
-                        // A prune target applied behind an earlier sync may still need durability.
+                        // A prune target applied after the last barrier started is not yet durable.
                         if !durability.covers(prune.barrier_height) {
                             assert!(
-                                durability.needs_sync(),
+                                durability.needs_barrier(),
                                 "uncovered prune target must have unapplied durability",
                             );
-                            let Some(driven) = start_sync(
+                            let Some(driven) = start_barrier(
                                 &mut shutdown,
                                 &mut durability,
                                 &mut verifications,
@@ -550,13 +539,13 @@ where
                                         debug!("shutdown signal received, stopping processing");
                                         return;
                                     },
-                                    completion = sync_completion(&mut durability.sync) => {
+                                    completion = durability.completion() => {
                                         if !durability.complete(completion) {
                                             return;
                                         }
                                         break;
                                     },
-                                    _ = verifications.next_completed() => {},
+                                    _ = verifications.complete_next() => {},
                                 }
                             }
                             assert!(durability.covers(prune.barrier_height));
@@ -586,7 +575,7 @@ where
                             },
                         }
                     }
-                    Step::Sync(completion) => {
+                    Step::Barrier(completion) => {
                         if !durability.complete(completion) {
                             return;
                         }
@@ -639,13 +628,15 @@ mod tests {
         channel::oneshot,
         sync::Mutex,
     };
-    use futures::{StreamExt as _, poll};
+    use futures::{Stream, StreamExt as _, poll};
     use std::{
         collections::VecDeque,
+        pin::Pin,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        task::{Context, Poll},
         time::Duration,
     };
 
@@ -1090,7 +1081,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
             let mut mailbox = Mailbox::new(sender);
 
             // Verifying the child reconstructs the parent's state with `apply`.
@@ -1187,7 +1178,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.start(processor, Vec::new()));
+            .spawn(move |_| processing.run(processor, Vec::new()));
         (Mailbox::new(sender), reader, marshal.guards, actor)
     }
 
@@ -1234,8 +1225,8 @@ mod tests {
         .await;
         let control = FlushControl::default();
         let databases = Single::from(TestDb::gated(control.clone()));
-        let pruning = prune_config
-            .map(|config| Pruning::build(config, marshal.mailbox.max_pending_acks(), 0));
+        let pruning =
+            prune_config.map(|config| Pruning::new(config, marshal.mailbox.max_pending_acks(), 0));
         let app = GatedApp {
             verify_gates: Arc::new(Mutex::new(verify_gates)),
             proposal_gate: Arc::new(Mutex::new(None)),
@@ -1262,7 +1253,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.start(processor, Vec::new()));
+            .spawn(move |_| processing.run(processor, Vec::new()));
         (Mailbox::new(sender), control, reader, marshal.guards, actor)
     }
 
@@ -1309,8 +1300,8 @@ mod tests {
             verify_gate_height: Height::new(3),
             verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
         };
-        let pruning = prune_config
-            .map(|config| Pruning::build(config, marshal.mailbox.max_pending_acks(), 0));
+        let pruning =
+            prune_config.map(|config| Pruning::new(config, marshal.mailbox.max_pending_acks(), 0));
         let processor = Processor::new(
             app,
             databases,
@@ -1330,7 +1321,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.start(processor, Vec::new()));
+            .spawn(move |_| processing.run(processor, Vec::new()));
         (Mailbox::new(sender), control, marshal.guards, actor)
     }
 
@@ -1835,7 +1826,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             // Verifying the child replays its missing parent through apply.
             assert!(
@@ -1922,7 +1913,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             // A parent that cannot be executed invalidates the child's ancestry
             // before the application is asked to verify the child.
@@ -1960,7 +1951,7 @@ mod tests {
                 .lock()
                 .remove(0)
                 .send(Ok(()))
-                .expect("finalized block sync should remain pending");
+                .expect("finalized block barrier should remain pending");
             waiter
                 .await
                 .expect("finalized block should be acknowledged");
@@ -2394,7 +2385,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             let mut verifier = mailbox.clone();
             let mut verify_child = Box::pin(verifier.verify(
@@ -2479,7 +2470,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(genesis), acknowledgement));
@@ -2568,7 +2559,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, vec![request]));
+                .spawn(move |_| processing.run(processor, vec![request]));
 
             started.await.expect("deferred verification should resume");
             release
@@ -2639,7 +2630,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             let consensus_context = first_child.context();
             let mut first_verifier = mailbox.clone();
@@ -2754,25 +2745,27 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             // The candidate's verification parks inside the shared replay of its
             // unknown parent.
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), candidate.context()),
-                ancestry::from_iter([Arc::new(candidate.clone()), Arc::new(parent)]),
+                ancestry::from_iter([Arc::new(candidate.clone()), Arc::new(parent.clone())]),
             ));
             assert!(poll!(&mut verify).is_pending());
             apply_started.await.expect("parent replay should start");
 
-            // The candidate itself finalizes (reconstructed by the finalization,
-            // since the parked replay has not cached its parent).
-            let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(candidate), acknowledgement));
-            waiter
-                .await
-                .expect("finalized candidate should be acknowledged");
+            // The parent and then the candidate itself finalize (each reconstructed
+            // by its finalization, since the parked replay has not cached the parent).
+            for block in [parent, candidate] {
+                let (acknowledgement, waiter) = Exact::handle();
+                let _ = mailbox.report(Update::Block(Arc::new(block), acknowledgement));
+                waiter
+                    .await
+                    .expect("finalized block should be acknowledged");
+            }
 
             // The replay resumes, resolves as invalid ancestry (its parent is
             // below the new anchor), and the verifier answers from the canonical
@@ -2838,7 +2831,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             // The candidate's verification parks inside the shared replay of its
             // unknown parent.
@@ -2924,7 +2917,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
@@ -3017,7 +3010,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
@@ -3134,7 +3127,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             let mut first_verifier = mailbox.clone();
             let mut first_attempt = Box::pin(first_verifier.verify(
@@ -3234,7 +3227,7 @@ mod tests {
             let control = FlushControl::default();
             let (prune_started, prune_release) = control.gate_prune();
             let databases = Single::from(TestDb::gated(control.clone()));
-            let pruning = Pruning::build(
+            let pruning = Pruning::new(
                 PruneConfig {
                     maintenance_interval: NZUsize!(1),
                     retained_marshal_blocks: 0,
@@ -3263,7 +3256,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             let (acknowledgement, waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
@@ -3336,7 +3329,7 @@ mod tests {
 
     /// Pruning waits for the flush that covers its target without waiting for newer state.
     #[test]
-    fn prune_starts_after_target_sync() {
+    fn prune_starts_after_target_barrier() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Marshal only receives prune requests here. Its actor never runs.
             let (verify_gate, verify_started, verify_release) = application_gate();
@@ -3410,7 +3403,7 @@ mod tests {
             }
             assert!(control.pruned.lock().is_empty());
 
-            // Releasing block 1 makes the prune target durable. Glue prunes before starting the
+            // Releasing block 1 makes the prune target durable. Stateful prunes before starting the
             // tracked successor for replayable block 2.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
@@ -3550,7 +3543,7 @@ mod tests {
             ));
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(2, 2)),
+                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
             while control.applied.load(Ordering::Relaxed) < 2 {
@@ -3588,17 +3581,17 @@ mod tests {
     }
 
     #[test]
-    fn finalized_handoff_survives_pending_sync() {
+    fn finalized_handoff_survives_pending_barrier() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let block1 = TestBlock::child(&genesis, 1);
             let block2 = TestBlock::child(&block1, 2);
             let mut signing = context.child("signing");
             let scheme =
-                scheme_mocks::fixture(&mut signing, b"handoff-sync-order", 1).schemes[0].clone();
+                scheme_mocks::fixture(&mut signing, b"handoff-barrier-order", 1).schemes[0].clone();
             let marshal = fixtures::marshal_fixture(
                 context.child("marshal"),
-                "handoff-sync-order",
+                "handoff-barrier-order",
                 scheme,
                 None,
                 NZUsize!(2),
@@ -3640,7 +3633,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             let (acknowledgement, mut waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
@@ -3676,7 +3669,7 @@ mod tests {
                 .lock()
                 .remove(0)
                 .send(Ok(()))
-                .expect("first sync should remain pending");
+                .expect("first barrier should remain pending");
             waiter1.await.expect("block 1 should be acknowledged");
             assert!(poll!(&mut waiter2).is_pending());
 
@@ -3688,7 +3681,7 @@ mod tests {
                 .lock()
                 .remove(0)
                 .send(Ok(()))
-                .expect("successor sync should remain pending");
+                .expect("successor barrier should remain pending");
             waiter2.await.expect("block 2 should be acknowledged");
 
             actor.abort();
@@ -3837,7 +3830,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             // Marshal reports genesis on startup. Cases with a processed genesis acknowledge it.
             assert_eq!(marshal.mailbox.get_processed().await, None);
@@ -3937,7 +3930,8 @@ mod tests {
                 Some(Processed::Block(Height::new(floor_height - 1)))
             );
 
-            // Release the observer's copies of the fresh receipts. Glue still holds F+1 and F+2.
+            // Release the observer's copies of the fresh receipts. Stateful still holds F+1 and
+            // F+2.
             for height in floor_height..=floor_height + 2 {
                 assert_eq!(observer.acknowledge_next(), Some(Height::new(height)));
             }
@@ -3975,11 +3969,84 @@ mod tests {
         });
     }
 
+    /// A live floor above the successor of the applied tip makes marshal deliver a block that
+    /// skips an unapplied height. Processing panics instead of applying it.
     #[test]
-    fn stable_leader_finalizations_coalesce_while_sync_pending() {
+    #[should_panic(expected = "finalized block skips unapplied heights")]
+    fn live_floor_skip_panics() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let mut signing = context.child("signing");
+            let fixture =
+                scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_PROCESSING_SKIP", 1);
+
+            // Build the chain through the floor block, two heights above genesis.
+            let genesis = TestBlock::new(0, 0);
+            let floor = TestBlock::child(&TestBlock::child(&genesis, 1), 2);
+
+            // Marshal delivers finalized blocks to processing anchored at genesis.
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mailbox = Mailbox::<_, GatedApp>::new(sender);
+            let marshal = fixtures::marshal_fixture_with_reporter(
+                context.child("marshal"),
+                "live-floor-skip",
+                fixture.schemes[0].clone(),
+                NZUsize!(1),
+                mailbox.clone(),
+            )
+            .await;
+            let processor = Processor::new(
+                GatedApp {
+                    verify_gates: Arc::default(),
+                    proposal_gate: Arc::default(),
+                    verify_valid: true,
+                    stale_verifies: Arc::default(),
+                    observed_contexts: Arc::default(),
+                },
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox.clone(),
+                snapshot_publisher: Publisher::new(&context).0,
+            };
+            let _actor = context
+                .child("loop")
+                .spawn(move |_| processing.run(processor, Vec::new()));
+
+            // Genesis is the applied tip, so its startup delivery is acknowledged.
+            while marshal.mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {}
+
+            // Installing the floor records the never-stored height 1 as processed, then delivers
+            // the floor block.
+            assert!(
+                marshal
+                    .mailbox
+                    .verified(floor.context().round, Arc::new(floor.clone()))
+                    .await
+            );
+            marshal
+                .mailbox
+                .set_floor(fixtures::finalization(&fixture, 2, floor.digest()));
+            assert_eq!(
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(1)))
+            );
+
+            // Processing handles the floor block before this request and panics.
+            processing_fence(&context, &mailbox).await;
+        });
+    }
+
+    #[test]
+    fn stable_leader_finalizations_coalesce_while_barrier_pending() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (mut mailbox, control, _subscriber, _marshal, _actor) =
-                spawn_processing(&context, "gated-coalesced-sync", None).await;
+                spawn_processing(&context, "gated-coalesced-barrier", None).await;
 
             const BLOCKS: u64 = 3;
 
@@ -3993,13 +4060,13 @@ mod tests {
             }
 
             let mut waiters = Vec::with_capacity(BLOCKS as usize - 1);
+            let mut parent = TestBlock::new(1, 1);
             for height in 2..=BLOCKS {
+                let block = TestBlock::child(&parent, height as u8);
                 let (acknowledgement, waiter) = Exact::handle();
-                let _ = mailbox.report(Update::Block(
-                    Arc::new(TestBlock::new(height, height as u8)),
-                    acknowledgement,
-                ));
+                let _ = mailbox.report(Update::Block(Arc::new(block.clone()), acknowledgement));
                 waiters.push(waiter);
+                parent = block;
             }
             while control.applied.load(Ordering::Relaxed) < BLOCKS as usize {
                 context.sleep(Duration::from_millis(10)).await;
@@ -4008,7 +4075,7 @@ mod tests {
             assert_eq!(
                 control.flushes.lock().len(),
                 1,
-                "a pending sync must coalesce later finalized state instead of starting a second sync",
+                "a pending barrier must coalesce later finalized state instead of starting a second barrier",
             );
             assert!(poll!(&mut waiter1).is_pending());
             for waiter in &mut waiters {
@@ -4020,7 +4087,7 @@ mod tests {
                 .lock()
                 .remove(0)
                 .send(Ok(()))
-                .expect("first sync should remain pending");
+                .expect("first barrier should remain pending");
             waiter1.await.expect("first block acknowledgement");
             for waiter in &mut waiters {
                 assert!(poll!(waiter).is_pending());
@@ -4035,7 +4102,7 @@ mod tests {
                 .lock()
                 .remove(0)
                 .send(Ok(()))
-                .expect("successor sync should remain pending");
+                .expect("successor barrier should remain pending");
             for acknowledgement in futures::future::join_all(waiters).await {
                 acknowledgement.expect("stable-leader block acknowledgement");
             }
@@ -4044,12 +4111,12 @@ mod tests {
     }
 
     #[test]
-    fn successor_sync_drives_verification_holding_database_read() {
+    fn successor_barrier_drives_verification_holding_database_read() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (verify_gate, verify_started, verify_release) = application_gate();
             let (mut mailbox, control, _marshal, _actor) = spawn_read_gated_processing(
                 &context,
-                "successor-sync-read-owner",
+                "successor-barrier-read-owner",
                 verify_gate,
                 None,
             )
@@ -4093,7 +4160,7 @@ mod tests {
                 .lock()
                 .remove(0)
                 .send(Ok(()))
-                .expect("first sync should remain pending");
+                .expect("first barrier should remain pending");
             waiter1.await.expect("first block acknowledgement");
             assert!(poll!(&mut waiter2).is_pending());
 
@@ -4103,7 +4170,7 @@ mod tests {
             select! {
                 result = &mut verify => assert!(result),
                 _ = context.sleep(Duration::from_millis(100)) => {
-                    panic!("successor sync stopped polling the verification that owned its read lock");
+                    panic!("successor barrier stopped polling the verification that owned its read lock");
                 },
             }
 
@@ -4115,18 +4182,22 @@ mod tests {
                 .lock()
                 .remove(0)
                 .send(Ok(()))
-                .expect("successor sync should remain pending");
+                .expect("successor barrier should remain pending");
             waiter2.await.expect("second block acknowledgement");
         });
     }
 
     #[test]
-    fn shutdown_preempts_successor_sync_waiting_for_verification_reader() {
+    fn shutdown_preempts_successor_barrier_waiting_for_verification_reader() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (verify_gate, verify_started, _verify_release) = application_gate();
-            let (mut mailbox, control, _marshal, actor) =
-                spawn_read_gated_processing(&context, "successor-sync-shutdown", verify_gate, None)
-                    .await;
+            let (mut mailbox, control, _marshal, actor) = spawn_read_gated_processing(
+                &context,
+                "successor-barrier-shutdown",
+                verify_gate,
+                None,
+            )
+            .await;
 
             let genesis = TestBlock::new(0, 0);
             let block1 = TestBlock::child(&genesis, 1);
@@ -4160,7 +4231,7 @@ mod tests {
                 .lock()
                 .remove(0)
                 .send(Ok(()))
-                .expect("first sync should remain pending");
+                .expect("first barrier should remain pending");
             waiter1.await.expect("first block acknowledgement");
 
             let stopper = context.child("stopper");
@@ -4169,7 +4240,7 @@ mod tests {
                 .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
             assert!(
                 stop.await.expect("stop task should finish").is_ok(),
-                "shutdown must preempt successor sync acquisition",
+                "shutdown must preempt successor barrier acquisition",
             );
             actor.await.expect("processing actor should stop cleanly");
             assert!(
@@ -4201,7 +4272,7 @@ mod tests {
             ));
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(2, 2)),
+                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
             while control.applied.load(Ordering::Relaxed) < 2 {
@@ -4245,7 +4316,7 @@ mod tests {
             ));
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(2, 2)),
+                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
             while control.applied.load(Ordering::Relaxed) < 2 {
@@ -4308,7 +4379,7 @@ mod tests {
             let _ = release.send(Ok(()));
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(2, 2)),
+                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
             waiter1.await.expect("block 1 acknowledgement");
@@ -4350,7 +4421,7 @@ mod tests {
 
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(2, 2)),
+                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
             while control.applied.load(Ordering::Relaxed) < 2 {
@@ -4421,7 +4492,7 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Err(RuntimeError::WriteFailed));
 
-            // The active sync panics when the loop next polls it.
+            // The active barrier panics when the loop next polls it.
             loop {
                 context.sleep(Duration::from_millis(100)).await;
             }
@@ -4534,7 +4605,7 @@ mod tests {
             };
             let _actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new()));
 
             let genesis = TestBlock::new(0, 0);
             let proposal_context = TestBlock::child(&genesis, 1).context();
@@ -4666,7 +4737,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.start(processor, Vec::new()));
+            .spawn(move |_| processing.run(processor, Vec::new()));
         (Mailbox::new(sender), started, marshal.guards, actor)
     }
 
@@ -4747,6 +4818,64 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
             drop(guards);
+        });
+    }
+
+    /// Ancestry that never yields a block and counts its clones (one per verification attempt).
+    struct PendingAncestry(Arc<AtomicUsize>);
+
+    impl Clone for PendingAncestry {
+        fn clone(&self) -> Self {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Self(self.0.clone())
+        }
+    }
+
+    impl Stream for PendingAncestry {
+        type Item = Arc<TestBlock>;
+
+        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+
+    impl Ancestry<TestBlock> for PendingAncestry {
+        fn peek(&self) -> Option<&TestBlock> {
+            None
+        }
+    }
+
+    /// A redelivered applied tip leaves a verification that is still acquiring its block running.
+    #[test]
+    fn tip_redelivery_keeps_acquiring_verification() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, _control, _subscriber, _marshal, actor) =
+                spawn_processing(&context, "tip-redelivery-acquiring", None).await;
+
+            // Start a verification whose ancestry never yields its block.
+            let clones = Arc::new(AtomicUsize::new(0));
+            let block = TestBlock::child(&TestBlock::new(0, 0), 1);
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), block.context()),
+                PendingAncestry(clones.clone()),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            processing_fence(&context, &mailbox).await;
+            let attempts = clones.load(Ordering::SeqCst);
+
+            // Redeliver the applied tip, then fence behind any requeued verification.
+            let (ack, waiter) = Exact::handle();
+            mailbox.report(Update::Block(Arc::new(TestBlock::new(0, 0)), ack));
+            waiter.await.expect("redelivered tip must be acknowledged");
+            processing_fence(&context, &mailbox).await;
+            assert_eq!(
+                clones.load(Ordering::SeqCst),
+                attempts,
+                "tip redelivery must not restart an acquiring verification",
+            );
+            assert!(poll!(&mut verify).is_pending());
+            actor.abort();
         });
     }
 }

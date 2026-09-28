@@ -38,10 +38,10 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [battleware](https://github.com/commonwarexyz/battleware): An onchain battle secured by a VRF, Timelock Encryption, and MMRs.
 * [bridge](./examples/bridge/README.md): Send succinct consensus certificates between two networks.
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends.
+* [dkg](./examples/dkg/README.md): Generate and reshare a threshold secret over an epoched log.
 * [estimator](./examples/estimator/README.md): Simulate mechanism performance under realistic network conditions.
 * [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
-* [reshare](./examples/reshare/README.md): Reshare a threshold secret over an epoched log.
 
 ## Miscellaneous
 

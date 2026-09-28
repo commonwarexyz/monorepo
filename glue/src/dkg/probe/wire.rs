@@ -1,3 +1,5 @@
+//! Wire format of DKG probe messages.
+
 use bytes::BufMut;
 use commonware_codec::{
     Buf, Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
@@ -77,8 +79,8 @@ where
 {
     /// Boundary finalization response.
     Boundary(Finalization<S, V::Commitment>),
-    /// Finalized block response. The body remains encoded until the epoch and
-    /// responding peer match the outstanding request.
+    /// Block response whose body remains encoded until the epoch and responding
+    /// peer match the outstanding request.
     Block {
         /// Epoch echoed from the request.
         epoch: Epoch,
@@ -95,22 +97,22 @@ where
     S: Scheme<V::Commitment>,
     V: Variant,
 {
-    /// Request the boundary finalization for `epoch`.
+    /// Request for the finalization of `epoch`'s boundary block.
     BoundaryRequest(Epoch),
-    /// Respond with a boundary finalization.
+    /// Finalization of a requested boundary block.
     BoundaryResponse(Finalization<S, V::Commitment>),
-    /// Request the boundary block for `epoch`.
+    /// Request for `epoch`'s boundary block.
     BlockRequest(Epoch),
-    /// Respond with a finalized block.
+    /// A requested boundary block.
     BlockResponse {
         /// Epoch echoed from the request.
         epoch: Epoch,
-        /// Requested finalized block.
+        /// Boundary block of `epoch`.
         block: V::Block,
     },
-    /// Request the receiver's latest finalization.
+    /// Request for the receiver's latest finalization.
     LatestRequest,
-    /// Respond with the receiver's latest finalization.
+    /// The receiver's latest finalization.
     LatestResponse(Finalization<S, V::Commitment>),
 }
 
@@ -191,7 +193,7 @@ where
     }
 }
 
-/// Decode a boundary protocol request.
+/// Decodes a request, returning `Ok(None)` if the tag names a response.
 pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Request>, Error> {
     let tag = Tag::read(&mut reader)?;
     match tag {
@@ -202,7 +204,9 @@ pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Request>, Erro
     }
 }
 
-/// Decode a boundary protocol response.
+/// Decodes a response, returning `Ok(None)` if the tag names a request.
+///
+/// A block response's body stays encoded (see [`read_block`]).
 pub(crate) fn read_response<S, V, R>(
     mut reader: R,
     certificate_cfg: &<S::Certificate as Read>::Cfg,
@@ -230,7 +234,8 @@ where
     }
 }
 
-/// Decode the body of a block response using the payload of a verified finalization.
+/// Decodes a block response body against `commitment`, the payload of a verified
+/// finalization.
 pub(crate) fn read_block<V>(
     reader: impl Buf,
     commitment: V::Commitment,

@@ -10,18 +10,19 @@
 use crate::stateful::{
     Application,
     actor::{
+        SyncTargets,
         core::{
             mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
-        processor::{Applied, PendingSyncTargets, Processor, Pruning},
-        syncer::{self, StateSyncMetadata, SyncResult},
+        processor::{Processor, Pruning},
+        syncer::{self, Artifact, SyncPlan},
     },
     db::{Anchor, Publisher, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
-    Epochable, Heightable, Viewable,
+    CertifiableBlock, Epochable, Heightable, Viewable,
     marshal::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
@@ -37,14 +38,20 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
 };
 use rand_core::Rng;
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, mem, sync::Arc};
 use tracing::{Instrument as _, debug, error, info_span, warn};
 
-/// Finalized work needed to transition from syncing to processing.
+/// A retained finalization classified against the converged sync anchor.
+///
+/// Covered and reflected blocks are already in the synced state and are acknowledged without
+/// running application hooks.
 enum FinalizedHandoff<B> {
+    /// A block below the anchor.
     Covered(B, Exact),
+    /// The block at the anchor.
     Reflected(B, Exact),
-    /// A report above the artifact, including duplicates, awaiting handoff durability.
+    /// A block above the anchor, or a duplicate report of one. Each block is applied once, and
+    /// every receipt is acknowledged after the handoff barrier completes.
     Apply(B, Exact),
 }
 
@@ -67,43 +74,33 @@ where
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
-
     /// Actor ingress.
     pub(super) mailbox: actor_mailbox::Receiver<Message<E, A>>,
-
     /// Inner application.
     pub(super) application: A,
-
     /// Provider cloned into each proposal after state sync.
     pub(super) provider: A::Provider,
-
     /// Marshal actor mailbox.
     pub(super) marshal: MarshalMailbox<S, V>,
-
-    /// Durable state-sync metadata.
-    pub(super) sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
-
+    /// Startup plan carrying the durable sync decision and selected floor.
+    pub(super) plan: SyncPlan<E, S, V>,
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
 
     /// Verification requests deferred until state sync completes.
     pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 
-    /// The cached [`SyncResult`], populated when sync completes.
-    pub(super) artifact: Option<SyncResult<E, A>>,
-
     /// Publishes the latest snapshots.
     pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
-    /// Signals that the syncer has produced a usable artifact.
-    pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
+    /// Receives the converged [`Artifact`] from the syncer.
+    pub(super) completion: oneshot::Receiver<Artifact<E, A>>,
 
     /// Unacknowledged finalizations retained until the window retargets or sync completes.
     pub(super) pending_finalizations: VecDeque<PendingFinalization<Arc<A::Block>>>,
 
-    /// Periodic pruning state.
-    pub(super) pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
-
+    /// Periodic pruning state, if enabled.
+    pub(super) pruning: Option<Pruning<SyncTargets<A, E>>>,
     /// Metrics shared across syncing and processing.
     pub(super) metrics: StatefulMetrics,
 }
@@ -116,7 +113,7 @@ where
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
-    pub async fn start(mut self) {
+    pub async fn run(mut self) {
         select_loop! {
             self.context,
             on_start => {
@@ -126,14 +123,13 @@ where
             on_stopped => {
                 debug!("syncing loop received shutdown signal");
             },
-            Ok(artifact) = &mut self.sync_completed else {
+            Ok(artifact) = &mut self.completion else {
                 error!("syncer stopped before publishing state sync artifact");
                 break;
             } => {
-                self.artifact = Some(artifact);
-                let finalized = std::mem::take(&mut self.pending_finalizations);
-                let handoffs = self.prepare_handoffs(finalized);
-                self.transition(handoffs).await;
+                let handoffs =
+                    classify(artifact.anchor, mem::take(&mut self.pending_finalizations));
+                self.transition(artifact, handoffs).await;
                 return;
             },
             Some(message) = self.mailbox.recv() else {
@@ -179,13 +175,13 @@ where
                     acknowledgement,
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
-                    let handoffs;
-                    (self, handoffs) = self
-                        .process_finalized(block, acknowledgement)
+                    let handoff;
+                    (self, handoff) = self
+                        .finalized(block, acknowledgement)
                         .instrument(process)
                         .await;
-                    if let Some(handoffs) = handoffs {
-                        self.transition(handoffs).await;
+                    if let Some((artifact, handoffs)) = handoff {
+                        self.transition(artifact, handoffs).await;
                         return;
                     }
                 }
@@ -193,16 +189,21 @@ where
         }
     }
 
-    /// Processes a finalized block during state sync.
-    async fn process_finalized(
+    /// Retains `block` with its acknowledgement and advances the sync target once marshal's
+    /// pending acknowledgement window is full.
+    ///
+    /// A full window records its newest block as the sync target and then acknowledges every
+    /// retained block. Returns the converged [`Artifact`] with the classified handoffs if state
+    /// sync finished first, and no handoff otherwise (including when the actor stops while
+    /// retargeting). Panics if marshal delivers more blocks than its window.
+    async fn finalized(
         mut self,
         block: Arc<A::Block>,
         acknowledgement: Exact,
-    ) -> (Self, Option<VecDeque<FinalizedHandoff<Arc<A::Block>>>>) {
-        assert!(
-            self.artifact.is_none(),
-            "cached sync artifact must transition immediately",
-        );
+    ) -> (
+        Self,
+        Option<(Artifact<E, A>, VecDeque<FinalizedHandoff<Arc<A::Block>>>)>,
+    ) {
         self.pending_finalizations.push_back(PendingFinalization {
             block,
             acknowledgement,
@@ -223,15 +224,31 @@ where
             .expect("full acknowledgement window must contain a block")
             .block
             .clone();
-        let observed;
-        (self, observed) = self.update_target(&newest).await;
-        if !observed {
-            return (self, None);
-        }
-        if self.artifact.is_some() {
-            let finalized = std::mem::take(&mut self.pending_finalizations);
-            let handoffs = self.prepare_handoffs(finalized);
-            return (self, Some(handoffs));
+
+        let outcome = select! {
+            _ = self.context.stopped() => return (self, None),
+            outcome = self.syncer.retarget(
+                Anchor::from(newest.as_ref()),
+                A::sync_targets(newest.as_ref()),
+            ) => outcome,
+        };
+        if outcome == syncer::UpdateOutcome::SyncCompleted {
+            // The syncer sent the artifact on the completion channel. Collect it here so the
+            // retained finalizations are handed off under the newest recorded target.
+            let artifact = select! {
+                _ = self.context.stopped() => return (self, None),
+                artifact = &mut self.completion => match artifact {
+                    Ok(artifact) => artifact,
+                    Err(_) => {
+                        // The consumed receiver must not be polled again. Leave a dead one so
+                        // the loop's completion arm logs and stops.
+                        self.completion = oneshot::channel().1;
+                        return (self, None);
+                    }
+                },
+            };
+            let handoffs = classify(artifact.anchor, mem::take(&mut self.pending_finalizations));
+            return (self, Some((artifact, handoffs)));
         }
 
         for pending in self.pending_finalizations.drain(..) {
@@ -240,120 +257,37 @@ where
         (self, None)
     }
 
-    /// Record `block` as the live sync target.
-    async fn update_target(mut self, block: &Arc<A::Block>) -> (Self, bool) {
-        let outcome = select! {
-            _ = self.context.stopped() => return (self, false),
-            outcome = self.syncer.update_targets(
-                Anchor::from(block.as_ref()),
-                A::sync_targets(block.as_ref()),
-            ) => outcome,
-        };
-        match outcome {
-            syncer::UpdateOutcome::Observed => {}
-            syncer::UpdateOutcome::SyncCompleted => {
-                // The syncer sent the artifact on the completion channel. Collect it
-                // here so the pending finalizations are handed off under the newest
-                // recorded target.
-                let artifact = select! {
-                    _ = self.context.stopped() => return (self, false),
-                    artifact = &mut self.sync_completed => match artifact {
-                        Ok(artifact) => artifact,
-                        Err(_) => {
-                            // The consumed receiver must not be polled again. Leave a
-                            // dead one so the loop's completion arm logs and stops.
-                            self.sync_completed = oneshot::channel().1;
-                            return (self, false);
-                        }
-                    },
-                };
-                self.artifact = Some(artifact);
-            }
-        }
-        (self, true)
-    }
-
-    /// Classify finalized messages relative to the completed sync artifact.
+    /// Hands the converged state to [`Processing`].
     ///
-    /// Live floor changes can redeliver a suffix. Order those receipts by height so each
-    /// unique block extends the artifact consecutively. Duplicate receipts wait for the
-    /// same durability barrier as their applied block.
-    fn prepare_handoffs(
-        &self,
-        mut finalized: VecDeque<PendingFinalization<Arc<A::Block>>>,
-    ) -> VecDeque<FinalizedHandoff<Arc<A::Block>>> {
-        let artifact = self
-            .artifact
-            .as_ref()
-            .expect("sync artifact must exist after sync handoff");
-        finalized
-            .make_contiguous()
-            .sort_unstable_by_key(|pending| pending.block.height());
-        let mut previous = artifact.anchor;
-        let mut handoffs = VecDeque::with_capacity(finalized.len());
-
-        for PendingFinalization {
-            block,
-            acknowledgement,
-        } in finalized
-        {
-            if block.height() < artifact.anchor.height {
-                handoffs.push_back(FinalizedHandoff::Covered(block, acknowledgement));
-                continue;
-            }
-            if block.height() == artifact.anchor.height {
-                assert_eq!(
-                    block.digest(),
-                    artifact.anchor.digest,
-                    "finalized block at sync anchor height must match sync anchor digest",
-                );
-                handoffs.push_back(FinalizedHandoff::Reflected(block, acknowledgement));
-                continue;
-            }
-
-            if block.height() == previous.height {
-                assert_eq!(
-                    block.digest(),
-                    previous.digest,
-                    "duplicate finalized block must match its original digest"
-                );
-            } else {
-                assert_eq!(
-                    block.height(),
-                    previous.height.next(),
-                    "finalized blocks must ascend consecutively from the sync anchor",
-                );
-                previous = Anchor::from(block.as_ref());
-            }
-            handoffs.push_back(FinalizedHandoff::Apply(block, acknowledgement));
-        }
-        handoffs
-    }
-
-    /// Transitions to [`Processing`] state once the database set has converged
-    /// on the state sync [`Anchor`].
-    async fn transition(self, handoffs: impl IntoIterator<Item = FinalizedHandoff<Arc<A::Block>>>) {
+    /// Returns without recording completion if shutdown interrupts the handoff.
+    async fn transition(
+        self,
+        artifact: Artifact<E, A>,
+        handoffs: impl IntoIterator<Item = FinalizedHandoff<Arc<A::Block>>>,
+    ) {
         let Self {
             context,
             mailbox,
             application,
             provider,
             marshal,
-            sync_metadata,
+            plan,
             syncer: _,
             deferred_verifications,
-            artifact,
             mut snapshot_publisher,
-            sync_completed: _,
+            completion: _,
             pending_finalizations: _,
             pruning,
             metrics,
         } = self;
-        let SyncResult { databases, anchor } = artifact.expect("transition must have artifact");
+        let Artifact { databases, anchor } = artifact;
         let mut completed_height = anchor.height;
 
-        let _ = metrics.sync_done.try_set(1);
-        let mut processor = Processor::new(application, databases, anchor, metrics, pruning);
+        let mut processor =
+            Processor::new(application, databases, anchor, metrics.clone(), pruning);
+
+        // Serving must not wait for the next finalization, so the synced state
+        // alone publishes first.
         processor = processor.publish_snapshot(&mut snapshot_publisher).await;
 
         let mut pending_prune = None;
@@ -370,23 +304,23 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    // Exiting on stop leaves the block unacknowledged, and
-                    // marshal redelivers it after a restart.
-                    let applied;
-                    select! {
-                        _ = &mut shutdown => {
-                            warn!(
-                                height = block.height().get(),
-                                "exiting mid-handoff on shutdown"
-                            );
-                            return;
-                        },
-                        driven = processor.finalize(context.as_present(), block.as_ref(), false) => {
-                            (processor, applied) = driven;
-                        },
-                    }
-                    if let Some(Applied { prune, .. }) = applied {
-                        pending_prune = prune.or(pending_prune);
+                    if !processor.redelivered(block.as_ref()) {
+                        // Exiting on stop leaves the block unacknowledged, and
+                        // marshal redelivers it after a restart.
+                        let applied;
+                        select! {
+                            _ = &mut shutdown => {
+                                warn!(
+                                    height = block.height().get(),
+                                    "exiting mid-handoff on shutdown"
+                                );
+                                return;
+                            },
+                            driven = processor.finalize(context.as_present(), block.as_ref(), false) => {
+                                (processor, applied) = driven;
+                            },
+                        }
+                        pending_prune = applied.prune.or(pending_prune);
                         completed_height = block.height();
                     }
                     pending_acknowledgements.push(acknowledgement);
@@ -394,8 +328,8 @@ where
             }
         }
 
-        // Applied handoffs extend beyond the state-sync artifact. Release their acknowledgements
-        // only after one barrier makes the entire suffix durable.
+        // Acknowledge applied handoffs only after one barrier makes the whole applied suffix
+        // durable.
         if !pending_acknowledgements.is_empty() {
             let (snapshots, barrier);
             select! {
@@ -428,7 +362,8 @@ where
 
         // Completion is an irreversible startup floor. Persist it only after every handoff through
         // `completed_height` is durable and before pruning or exposing the databases.
-        let _ = sync_metadata.set_complete(completed_height).await;
+        let _ = plan.set_completed(completed_height).await;
+        let _ = metrics.sync_done.try_set(1);
         // Defensive only. The handoff applies at most a full ack window, one short of
         // what the prune cadence needs, so this fires only in tests that feed
         // more handoffs than the window holds.
@@ -447,22 +382,82 @@ where
             marshal,
             snapshot_publisher,
         }
-        .start(processor, deferred_verifications)
+        .run(processor, deferred_verifications)
         .await
     }
+}
+
+/// Classifies retained finalizations against the converged sync anchor, in height order.
+///
+/// A live floor change can redeliver a suffix, so a block above the anchor may appear more than
+/// once. Every copy is classified as [`FinalizedHandoff::Apply`].
+///
+/// Panics if the block at the anchor height has a different digest, a duplicate differs from its
+/// original, or a block above the anchor skips a height.
+fn classify<B>(
+    anchor: Anchor<<B as Digestible>::Digest>,
+    mut finalized: VecDeque<PendingFinalization<Arc<B>>>,
+) -> VecDeque<FinalizedHandoff<Arc<B>>>
+where
+    B: CertifiableBlock,
+    B::Context: Epochable + Viewable,
+{
+    finalized
+        .make_contiguous()
+        .sort_unstable_by_key(|pending| pending.block.height());
+    let mut previous = anchor;
+    let mut handoffs = VecDeque::with_capacity(finalized.len());
+
+    for PendingFinalization {
+        block,
+        acknowledgement,
+    } in finalized
+    {
+        if block.height() < anchor.height {
+            handoffs.push_back(FinalizedHandoff::Covered(block, acknowledgement));
+            continue;
+        }
+        if block.height() == anchor.height {
+            assert_eq!(
+                block.digest(),
+                anchor.digest,
+                "finalized block at sync anchor height must match sync anchor digest",
+            );
+            handoffs.push_back(FinalizedHandoff::Reflected(block, acknowledgement));
+            continue;
+        }
+
+        if block.height() == previous.height {
+            assert_eq!(
+                block.digest(),
+                previous.digest,
+                "duplicate finalized block must match its original digest"
+            );
+        } else {
+            assert_eq!(
+                block.height(),
+                previous.height.next(),
+                "finalized block skips unapplied heights",
+            );
+            previous = Anchor::from(block.as_ref());
+        }
+        handoffs.push_back(FinalizedHandoff::Apply(block, acknowledgement));
+    }
+    handoffs
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         super::Mailbox as StatefulMailbox, FinalizedHandoff, Message, PendingFinalization, Syncing,
+        classify,
     };
     use crate::stateful::{
         PruneConfig,
         actor::{
             metrics::Metrics as StatefulMetrics,
             processor::Pruning,
-            syncer::{self, StateSyncMetadata, SyncResult},
+            syncer::{self, Artifact, SyncPlan},
         },
         db::{Anchor, Publisher, Single, Subscriber},
         tests::{
@@ -518,7 +513,10 @@ mod tests {
     }
 
     impl TestHarness<deterministic::Context> {
-        async fn new(context: deterministic::Context, anchor: Anchor<Sha256Digest>) -> Self {
+        async fn new(
+            context: deterministic::Context,
+            anchor: Anchor<Sha256Digest>,
+        ) -> (Self, Artifact<deterministic::Context, TestApp>) {
             let marshal = harness_marshal(context.child("marshal")).await;
             Self::new_on(context.child("harness"), marshal, anchor).await
         }
@@ -532,7 +530,7 @@ mod tests {
             Self,
             StatefulMailbox<deterministic::Context, TestApp>,
             actor_mailbox::Receiver<syncer::mailbox::Message<deterministic::Context, TestApp>>,
-            oneshot::Sender<SyncResult<deterministic::Context, TestApp>>,
+            oneshot::Sender<Artifact<deterministic::Context, TestApp>>,
         ) {
             Self::new_syncing_on(context.child("harness"), marshal).await
         }
@@ -547,11 +545,10 @@ mod tests {
             let mut waiters = Vec::new();
             for (height, digest) in [(8, 10), (9, 11)] {
                 let (acknowledgement, mut waiter) = Exact::handle();
-                let mut process =
-                    Box::pin(self.syncing.process_finalized(
-                        Arc::new(TestBlock::new(height, digest)),
-                        acknowledgement,
-                    ));
+                let mut process = Box::pin(
+                    self.syncing
+                        .finalized(Arc::new(TestBlock::new(height, digest)), acknowledgement),
+                );
                 let std::task::Poll::Ready((syncing, handoff)) = poll!(process.as_mut()) else {
                     panic!("a partial acknowledgement window must not retarget");
                 };
@@ -566,9 +563,9 @@ mod tests {
             let subscriber = self.subscriber.clone();
             let process = context.child("full_window").spawn(move |_| {
                 self.syncing
-                    .process_finalized(Arc::new(TestBlock::new(10, 12)), acknowledgement)
+                    .finalized(Arc::new(TestBlock::new(10, 12)), acknowledgement)
             });
-            let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
+            let Some(syncer::mailbox::Message::Retarget { update, response }) =
                 syncer_receiver.recv().await
             else {
                 panic!("a full acknowledgement window must retarget");
@@ -612,13 +609,13 @@ mod tests {
             Self,
             StatefulMailbox<E, TestApp>,
             actor_mailbox::Receiver<syncer::mailbox::Message<E, TestApp>>,
-            oneshot::Sender<SyncResult<E, TestApp>>,
+            oneshot::Sender<Artifact<E, TestApp>>,
         ) {
             let (mailbox_sender, mailbox) =
                 actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let (syncer_sender, syncer_receiver) =
                 actor_mailbox::new(context.child("syncer"), NZUsize!(1));
-            let (sync_complete, sync_completed) = oneshot::channel();
+            let (sender, completion) = oneshot::channel();
             let publication_context = context.child("publication");
             let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&publication_context);
             let harness = Self {
@@ -628,16 +625,11 @@ mod tests {
                     application: TestApp::default(),
                     provider: (),
                     marshal,
-                    sync_metadata: StateSyncMetadata::init(
-                        context.child("metadata"),
-                        "syncing-test",
-                    )
-                    .await,
+                    plan: SyncPlan::init(context.child("plan"), "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
                     deferred_verifications: Vec::new(),
-                    artifact: None,
                     snapshot_publisher,
-                    sync_completed,
+                    completion,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
@@ -648,24 +640,24 @@ mod tests {
                 harness,
                 StatefulMailbox::new(mailbox_sender),
                 syncer_receiver,
-                sync_complete,
+                sender,
             )
         }
 
         /// Build the harness with `context` owning the syncing actor and its state-sync
-        /// metadata, holding a completed sync artifact at `anchor`.
+        /// metadata, and return a completed sync artifact at `anchor` to transition with.
         async fn new_on(
             context: E,
             marshal: MarshalMailbox<TestScheme, TestVariant>,
             anchor: Anchor<Sha256Digest>,
-        ) -> Self {
-            let (mut harness, _mailbox, _syncer_receiver, _sync_complete) =
+        ) -> (Self, Artifact<E, TestApp>) {
+            let (harness, _mailbox, _syncer_receiver, _completion) =
                 Self::new_syncing_on(context, marshal).await;
-            harness.syncing.artifact = Some(SyncResult {
+            let artifact = Artifact {
                 databases: test_databases(),
                 anchor,
-            });
-            harness
+            };
+            (harness, artifact)
         }
     }
 
@@ -681,112 +673,106 @@ mod tests {
 
     #[test]
     fn handoff_classification_orders_mixed_terminal_sequence() {
-        deterministic::Runner::default().start(|context| async move {
-            let harness = TestHarness::new(context, anchor(u64::MAX - 2, 9)).await;
-            assert!(harness.syncing.prepare_handoffs(VecDeque::new()).is_empty());
+        assert!(classify::<TestBlock>(anchor(u64::MAX - 2, 9), VecDeque::new()).is_empty());
 
-            let mut finalized = VecDeque::new();
-            for (height, digest) in [
-                (u64::MAX - 3, 8),
-                (u64::MAX - 2, 9),
-                (u64::MAX - 1, 10),
-                (u64::MAX, 11),
-                (u64::MAX - 1, 10),
-                (u64::MAX, 11),
-            ] {
-                finalized.push_back(pending(TestBlock::new(height, digest)));
-            }
-            let mut handoffs = harness.syncing.prepare_handoffs(finalized);
+        let mut finalized = VecDeque::new();
+        for (height, digest) in [
+            (u64::MAX - 3, 8),
+            (u64::MAX - 2, 9),
+            (u64::MAX - 1, 10),
+            (u64::MAX, 11),
+            (u64::MAX - 1, 10),
+            (u64::MAX, 11),
+        ] {
+            finalized.push_back(pending(TestBlock::new(height, digest)));
+        }
+        let mut handoffs = classify(anchor(u64::MAX - 2, 9), finalized);
+        assert!(matches!(
+            handoffs.pop_front(),
+            Some(FinalizedHandoff::Covered(block, _))
+                if block.height() == Height::new(u64::MAX - 3)
+        ));
+        assert!(matches!(
+            handoffs.pop_front(),
+            Some(FinalizedHandoff::Reflected(block, _))
+                if block.height() == Height::new(u64::MAX - 2)
+        ));
+        for height in [u64::MAX - 1, u64::MAX - 1, u64::MAX, u64::MAX] {
             assert!(matches!(
                 handoffs.pop_front(),
-                Some(FinalizedHandoff::Covered(block, _))
-                    if block.height() == Height::new(u64::MAX - 3)
+                Some(FinalizedHandoff::Apply(block, _))
+                    if block.height() == Height::new(height)
             ));
-            assert!(matches!(
-                handoffs.pop_front(),
-                Some(FinalizedHandoff::Reflected(block, _))
-                    if block.height() == Height::new(u64::MAX - 2)
-            ));
-            for height in [u64::MAX - 1, u64::MAX - 1, u64::MAX, u64::MAX] {
-                assert!(matches!(
-                    handoffs.pop_front(),
-                    Some(FinalizedHandoff::Apply(block, _))
-                        if block.height() == Height::new(height)
-                ));
-            }
-            assert!(handoffs.is_empty());
-        });
+        }
+        assert!(handoffs.is_empty());
     }
 
     #[test]
     #[should_panic(expected = "sync anchor digest")]
     fn anchor_height_block_with_conflicting_digest_panics() {
-        deterministic::Runner::default().start(|context| async move {
-            let harness = TestHarness::new(context, anchor(7, 9)).await;
-            let _ = harness
-                .syncing
-                .prepare_handoffs(VecDeque::from([pending(TestBlock::new(7, 10))]));
-        });
+        let _ = classify(
+            anchor(7, 9),
+            VecDeque::from([pending(TestBlock::new(7, 10))]),
+        );
     }
 
     #[test]
     #[should_panic(expected = "duplicate finalized block must match its original digest")]
     fn duplicate_handoff_with_conflicting_digest_panics() {
-        deterministic::Runner::default().start(|context| async move {
-            let harness = TestHarness::new(context, anchor(7, 9)).await;
-            let _ = harness.syncing.prepare_handoffs(VecDeque::from([
+        let _ = classify(
+            anchor(7, 9),
+            VecDeque::from([
                 pending(TestBlock::new(8, 10)),
                 pending(TestBlock::new(8, 11)),
-            ]));
-        });
+            ]),
+        );
     }
 
     #[test]
-    #[should_panic(expected = "ascend consecutively from the sync anchor")]
+    #[should_panic(expected = "finalized block skips unapplied heights")]
     fn non_anchor_non_next_block_panics() {
-        deterministic::Runner::default().start(|context| async move {
-            let harness = TestHarness::new(context, anchor(7, 9)).await;
-            let _ = harness
-                .syncing
-                .prepare_handoffs(VecDeque::from([pending(TestBlock::new(9, 10))]));
-        });
+        let _ = classify(
+            anchor(7, 9),
+            VecDeque::from([pending(TestBlock::new(9, 10))]),
+        );
     }
 
     #[test]
     fn handoff_classification_retains_block_covered_by_artifact() {
-        deterministic::Runner::default().start(|context| async move {
-            let harness = TestHarness::new(context, anchor(7, 9)).await;
-            let handoffs = harness
-                .syncing
-                .prepare_handoffs(VecDeque::from([pending(TestBlock::new(6, 8))]));
-            assert!(matches!(
-                handoffs.front(),
-                Some(FinalizedHandoff::Covered(block, _)) if block.height() == Height::new(6)
-            ));
-        });
+        let handoffs = classify(
+            anchor(7, 9),
+            VecDeque::from([pending(TestBlock::new(6, 8))]),
+        );
+        assert!(matches!(
+            handoffs.front(),
+            Some(FinalizedHandoff::Covered(block, _)) if block.height() == Height::new(6)
+        ));
     }
 
     #[test]
     fn transition_skips_hooks_for_reflected_handoffs() {
         deterministic::Runner::default().start(|context| async move {
             let (application, hooks) = TestApp::observe_finalization();
-            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+            let (mut harness, artifact) = TestHarness::new(context, anchor(7, 9)).await;
             harness.syncing.application = application;
 
             let (covered_acknowledgement, covered_waiter) = Exact::handle();
             let (reflected_acknowledgement, reflected_waiter) = Exact::handle();
             harness
                 .syncing
-                .transition([
-                    FinalizedHandoff::Covered(
-                        Arc::new(TestBlock::new(6, 8)),
-                        covered_acknowledgement,
-                    ),
-                    FinalizedHandoff::Reflected(
-                        Arc::new(TestBlock::new(7, 9)),
-                        reflected_acknowledgement,
-                    ),
-                ])
+                .transition(
+                    artifact,
+                    [
+                        FinalizedHandoff::Covered(
+                            Arc::new(TestBlock::new(6, 8)),
+                            covered_acknowledgement,
+                        ),
+                        FinalizedHandoff::Reflected(
+                            Arc::new(TestBlock::new(7, 9)),
+                            reflected_acknowledgement,
+                        ),
+                    ],
+                )
                 .await;
 
             assert!(covered_waiter.await.is_ok());
@@ -805,8 +791,9 @@ mod tests {
                 pending: pending.clone(),
             };
             let marshal = harness_marshal(context.child("marshal")).await;
-            let mut harness = TestHarness::new_on(delayed, marshal, anchor(7, 9)).await;
-            harness.syncing.pruning = Some(Pruning::build(
+            let (mut harness, mut artifact) =
+                TestHarness::new_on(delayed, marshal, anchor(7, 9)).await;
+            harness.syncing.pruning = Some(Pruning::new(
                 PruneConfig {
                     maintenance_interval: NZUsize!(1),
                     retained_marshal_blocks: 0,
@@ -816,12 +803,7 @@ mod tests {
                 0,
             ));
             let control = FlushControl::default();
-            harness
-                .syncing
-                .artifact
-                .as_mut()
-                .expect("harness must contain a sync artifact")
-                .databases = Single::from(TestDb::gated(control.clone()));
+            artifact.databases = Single::from(TestDb::gated(control.clone()));
             let (application, hooks) = TestApp::observe_finalization();
             harness.syncing.application = application;
 
@@ -831,19 +813,22 @@ mod tests {
             let (reflected_acknowledgement, mut reflected_waiter) = Exact::handle();
             let (first_acknowledgement, mut first_waiter) = Exact::handle();
             let (second_acknowledgement, mut second_waiter) = Exact::handle();
+            let first = TestBlock::child(&TestBlock::new(7, 9), 10);
+            let second = TestBlock::child(&first, 11);
+            let sync_done = harness.syncing.metrics.sync_done.clone();
             let subscriber = harness.subscriber.clone();
             let transition = context.child("transition").spawn(move |_| {
-                harness.syncing.transition([
-                    FinalizedHandoff::Reflected(
-                        Arc::new(TestBlock::new(7, 9)),
-                        reflected_acknowledgement,
-                    ),
-                    FinalizedHandoff::Apply(Arc::new(TestBlock::new(8, 10)), first_acknowledgement),
-                    FinalizedHandoff::Apply(
-                        Arc::new(TestBlock::new(9, 11)),
-                        second_acknowledgement,
-                    ),
-                ])
+                harness.syncing.transition(
+                    artifact,
+                    [
+                        FinalizedHandoff::Reflected(
+                            Arc::new(TestBlock::new(7, 9)),
+                            reflected_acknowledgement,
+                        ),
+                        FinalizedHandoff::Apply(Arc::new(first), first_acknowledgement),
+                        FinalizedHandoff::Apply(Arc::new(second), second_acknowledgement),
+                    ],
+                )
             });
             while control.flushes.lock().is_empty() {
                 context.sleep(Duration::from_millis(10)).await;
@@ -879,11 +864,17 @@ mod tests {
             gate.blocked
                 .await
                 .expect("transition must persist sync completion after the database flush");
+            assert_eq!(
+                sync_done.get(),
+                0,
+                "completion must not be reported before it is recorded",
+            );
             gate.release
                 .send(Ok(()))
                 .expect("transition must be waiting on the metadata flush");
 
             transition.await.expect("transition failed");
+            assert_eq!(sync_done.get(), 1);
             assert!(reflected_waiter.await.is_ok());
             assert!(first_waiter.await.is_ok());
             assert!(second_waiter.await.is_ok());
@@ -895,35 +886,32 @@ mod tests {
             );
 
             // The completed height is durable: reopen the metadata partition.
-            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
-                "syncing-test",
-            )
-            .await;
-            assert_eq!(reopened.sync_height(), Some(Height::new(9)));
+            let reopened =
+                SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), "syncing-test")
+                    .await;
+            assert_eq!(reopened.completed(), Some(Height::new(9)));
         });
     }
 
     #[test]
     fn aborted_handoff_flush_cancels_ack_and_keeps_sync_incomplete() {
         deterministic::Runner::default().start(|context| async move {
-            let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
-            let databases =
+            let (harness, mut artifact) =
+                TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+            artifact.databases =
                 Single::from(TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))));
-            harness
-                .syncing
-                .artifact
-                .as_mut()
-                .expect("harness must contain a sync artifact")
-                .databases = databases;
 
             let (acknowledgement, waiter) = Exact::handle();
+            let sync_done = harness.syncing.metrics.sync_done.clone();
             harness
                 .syncing
-                .transition(Some(FinalizedHandoff::Apply(
-                    Arc::new(TestBlock::new(8, 10)),
-                    acknowledgement,
-                )))
+                .transition(
+                    artifact,
+                    Some(FinalizedHandoff::Apply(
+                        Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
+                        acknowledgement,
+                    )),
+                )
                 .await;
 
             assert!(
@@ -935,12 +923,15 @@ mod tests {
                 "an aborted handoff must never serve, and the subscriber must decline \
                  once the writer is gone",
             );
-            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
-                "syncing-test",
-            )
-            .await;
-            assert_eq!(reopened.sync_height(), None);
+            assert_eq!(
+                sync_done.get(),
+                0,
+                "an aborted handoff must not report completion",
+            );
+            let reopened =
+                SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), "syncing-test")
+                    .await;
+            assert_eq!(reopened.completed(), None);
         });
     }
 
@@ -1009,22 +1000,18 @@ mod tests {
             // Start syncing from block 1.
             let (mut harness, _mailbox, mut coordinator, complete) =
                 TestHarness::new_syncing(context.child("harness"), marshal.mailbox.clone()).await;
-            harness.syncing.sync_metadata = harness
-                .syncing
-                .sync_metadata
-                .begin_sync(first_finalization)
-                .await;
-            assert!(harness.syncing.sync_metadata.in_progress());
+            harness.syncing.plan = harness.syncing.plan.set_floor(first_finalization).await;
+            assert!(harness.syncing.plan.floor().is_some());
 
             // The interrupted sync has a recoverable artifact at 1, but has not recorded Complete.
             // Its coordinator can finish before a later target update is recorded.
             let control = FlushControl::default();
-            let artifact = SyncResult {
+            let artifact = Artifact {
                 databases: Single::from(TestDb::gated(control.clone())),
                 anchor: anchor(1, 1),
             };
 
-            // Report blocks 2 and 3. Glue retains both receipts because the window is not full.
+            // Report blocks 2 and 3. Stateful retains both receipts because the window is not full.
             for block in [&second, &third] {
                 assert!(
                     ingress
@@ -1045,10 +1032,7 @@ mod tests {
                     panic!("marshal must report the original suffix");
                 };
                 assert_eq!(reported.height(), block.height());
-                let (syncing, handoff) = harness
-                    .syncing
-                    .process_finalized(reported, acknowledgement)
-                    .await;
+                let (syncing, handoff) = harness.syncing.finalized(reported, acknowledgement).await;
                 assert!(handoff.is_none());
                 harness.syncing = syncing;
             }
@@ -1069,10 +1053,7 @@ mod tests {
                 panic!("floor installation must report its anchor again");
             };
             assert_eq!(block.height(), Height::new(2));
-            let (syncing, handoff) = harness
-                .syncing
-                .process_finalized(block, acknowledgement)
-                .await;
+            let (syncing, handoff) = harness.syncing.finalized(block, acknowledgement).await;
             assert!(handoff.is_none());
             harness.syncing = syncing;
             assert!(coordinator.try_recv().is_err());
@@ -1091,8 +1072,8 @@ mod tests {
             harness.syncing.mailbox = reports;
             let process = context
                 .child("full_window")
-                .spawn(move |_| harness.syncing.process_finalized(block, acknowledgement));
-            let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
+                .spawn(move |_| harness.syncing.finalized(block, acknowledgement));
+            let Some(syncer::mailbox::Message::Retarget { update, response }) =
                 coordinator.recv().await
             else {
                 panic!("four actual receipts must fill the acknowledgement window");
@@ -1100,13 +1081,14 @@ mod tests {
             assert!(complete.send(artifact).is_ok());
             assert!(response.send(syncer::UpdateOutcome::SyncCompleted).is_ok());
             drop(update);
-            let (syncing, handoffs) = process.await.unwrap();
+            let (syncing, handoff) = process.await.unwrap();
+            let (artifact, handoffs) = handoff.expect("completed artifact must hand off reports");
 
             // The handoff applies blocks 2 and 3 once and holds all four receipts behind one
             // flush.
-            let transition = context.child("transition").spawn(move |_| {
-                syncing.transition(handoffs.expect("completed artifact must hand off reports"))
-            });
+            let transition = context
+                .child("transition")
+                .spawn(move |_| syncing.transition(artifact, handoffs));
             while control.flushes.lock().is_empty() {
                 reschedule().await;
             }
@@ -1135,13 +1117,13 @@ mod tests {
                     restarted.floor.processed(),
                     Some(Processed::Block(Height::new(1)))
                 );
-                let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                    context.child("metadata"),
+                let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
+                    context.child("plan"),
                     "syncing-test",
                 )
                 .await;
-                assert!(metadata.in_progress());
-                assert_eq!(metadata.sync_height(), None);
+                assert!(plan.floor().is_some());
+                assert_eq!(plan.completed(), None);
                 restarted.abort().await;
                 return;
             }
@@ -1164,7 +1146,7 @@ mod tests {
     }
 
     #[test]
-    fn target_update_returning_artifact_hands_off_pending_block() {
+    fn retarget_returning_artifact_hands_off_pending_block() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
             let block = TestBlock::new(8, 10);
@@ -1186,12 +1168,10 @@ mod tests {
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
 
             let (acknowledgement, mut waiter) = Exact::handle();
-            let process = context.child("process_finalized").spawn(move |_| {
-                harness
-                    .syncing
-                    .process_finalized(Arc::new(block), acknowledgement)
-            });
-            let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
+            let process = context
+                .child("finalized")
+                .spawn(move |_| harness.syncing.finalized(Arc::new(block), acknowledgement));
+            let Some(syncer::mailbox::Message::Retarget { update, response }) =
                 syncer_receiver.recv().await
             else {
                 panic!("finalized block must update the sync target");
@@ -1199,7 +1179,7 @@ mod tests {
             assert!(poll!(&mut waiter).is_pending());
             assert!(
                 sync_complete
-                    .send(SyncResult {
+                    .send(Artifact {
                         databases: test_databases(),
                         anchor: anchor(7, 9),
                     })
@@ -1212,8 +1192,10 @@ mod tests {
             );
             drop(update);
 
-            let (_syncing, handoffs) = process.await.expect("target update failed");
-            let mut handoffs = handoffs.expect("returned artifact must hand off the block");
+            let (_syncing, handoff) = process.await.expect("target update failed");
+            let (artifact, mut handoffs) =
+                handoff.expect("returned artifact must hand off the block");
+            assert_eq!(artifact.anchor, anchor(7, 9));
             assert_eq!(handoffs.len(), 1);
             let Some(FinalizedHandoff::Apply(block, acknowledgement)) = handoffs.pop_front() else {
                 panic!("block above the artifact must be applied during handoff");
@@ -1244,21 +1226,21 @@ mod tests {
                 true,
             )
             .await;
-            let (harness, mut mailbox, mut syncer_receiver, sync_complete) =
+            let (harness, mut mailbox, mut syncer_receiver, completion) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
             let actor = context
                 .child("syncing_actor")
-                .spawn(move |_| harness.syncing.start());
+                .spawn(move |_| harness.syncing.run());
             let mut waiters = Vec::new();
+            let mut parent = TestBlock::new(7, 9);
             for (height, digest) in [(8, 10), (9, 11)] {
+                let block = TestBlock::child(&parent, digest);
                 let (acknowledgement, mut waiter) = Exact::handle();
                 assert!(matches!(
-                    mailbox.report(Update::Block(
-                        Arc::new(TestBlock::new(height, digest)),
-                        acknowledgement,
-                    )),
+                    mailbox.report(Update::Block(Arc::new(block.clone()), acknowledgement)),
                     Feedback::Ok
                 ));
+                parent = block;
                 let proposal = TestBlock::new(height + 10, digest + 10);
                 assert!(
                     mailbox
@@ -1279,8 +1261,8 @@ mod tests {
             assert!(syncer_receiver.try_recv().is_err());
 
             assert!(
-                sync_complete
-                    .send(SyncResult {
+                completion
+                    .send(Artifact {
                         databases: test_databases(),
                         anchor: anchor(7, 9),
                     })
@@ -1293,12 +1275,10 @@ mod tests {
                 assert!(waiter.await.is_ok());
             }
 
-            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
-                "syncing-test",
-            )
-            .await;
-            assert_eq!(reopened.sync_height(), Some(Height::new(9)));
+            let reopened =
+                SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), "syncing-test")
+                    .await;
+            assert_eq!(reopened.completed(), Some(Height::new(9)));
         });
     }
 
@@ -1332,27 +1312,23 @@ mod tests {
                 inner: context.child("queue_context"),
                 pending: pending.clone(),
             };
-            let (mut harness, mut mailbox, _syncer_receiver, sync_complete) =
+            let (mut harness, mut mailbox, _syncer_receiver, completion) =
                 TestHarness::new_syncing_on(syncing_context, marshal).await;
-            harness.syncing.sync_metadata = harness
-                .syncing
-                .sync_metadata
-                .begin_sync(initial.clone())
-                .await;
+            harness.syncing.plan = harness.syncing.plan.set_floor(initial.clone()).await;
             let actor = context
                 .child("syncing_actor")
-                .spawn(move |_| harness.syncing.start());
+                .spawn(move |_| harness.syncing.run());
 
             let mut waiters = Vec::new();
+            let mut parent = TestBlock::new(7, 9);
             for (height, digest) in [(8, 10), (9, 11)] {
+                let block = TestBlock::child(&parent, digest);
                 let (acknowledgement, mut waiter) = Exact::handle();
                 assert!(matches!(
-                    mailbox.report(Update::Block(
-                        Arc::new(TestBlock::new(height, digest)),
-                        acknowledgement,
-                    )),
+                    mailbox.report(Update::Block(Arc::new(block.clone()), acknowledgement)),
                     Feedback::Ok
                 ));
+                parent = block;
                 let proposal = TestBlock::new(height + 10, digest + 10);
                 assert!(
                     mailbox
@@ -1371,8 +1347,8 @@ mod tests {
             pending.arm();
             let completion_gate = next_pending_sync(&pending);
             assert!(
-                sync_complete
-                    .send(SyncResult {
+                completion
+                    .send(Artifact {
                         databases: test_databases(),
                         anchor: anchor(7, 9),
                     })
@@ -1396,12 +1372,10 @@ mod tests {
             drop(mailbox);
             actor.await.expect("syncing actor failed");
 
-            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
-                "syncing-test",
-            )
-            .await;
-            assert_eq!(reopened.sync_height(), Some(Height::new(9)));
+            let reopened =
+                SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), "syncing-test")
+                    .await;
+            assert_eq!(reopened.completed(), Some(Height::new(9)));
         });
     }
 
@@ -1424,17 +1398,17 @@ mod tests {
                 true,
             )
             .await;
-            let (harness, mailbox, mut syncer_receiver, sync_complete) =
+            let (harness, mailbox, mut syncer_receiver, completion) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
             let harness = harness
                 .advance_full_ack_window(&context, &mut syncer_receiver)
                 .await;
             let actor = context
                 .child("syncing_actor")
-                .spawn(move |_| harness.syncing.start());
+                .spawn(move |_| harness.syncing.run());
             assert!(
-                sync_complete
-                    .send(SyncResult {
+                completion
+                    .send(Artifact {
                         databases: test_databases(),
                         anchor: anchor(10, 12),
                     })
@@ -1443,12 +1417,10 @@ mod tests {
             drop(mailbox);
             actor.await.expect("syncing actor failed");
 
-            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
-                "syncing-test",
-            )
-            .await;
-            assert_eq!(reopened.sync_height(), Some(Height::new(10)));
+            let reopened =
+                SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), "syncing-test")
+                    .await;
+            assert_eq!(reopened.completed(), Some(Height::new(10)));
         });
     }
 
@@ -1472,20 +1444,13 @@ mod tests {
                 true,
             )
             .await;
-            let (mut harness, _mailbox, mut syncer_receiver, _sync_complete) =
+            let (mut harness, _mailbox, mut syncer_receiver, _completion) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
-            harness.syncing.sync_metadata = harness
-                .syncing
-                .sync_metadata
-                .begin_sync(initial.clone())
-                .await;
+            harness.syncing.plan = harness.syncing.plan.set_floor(initial.clone()).await;
             let harness = harness
                 .advance_full_ack_window(&context, &mut syncer_receiver)
                 .await;
-            assert_eq!(
-                harness.syncing.sync_metadata.in_progress_floor(),
-                Some(&initial),
-            );
+            assert_eq!(harness.syncing.plan.floor(), Some(&initial));
 
             // Drop all volatile retarget state after marshal has acknowledged the window.
             drop(harness);
@@ -1496,7 +1461,7 @@ mod tests {
             )
             .await;
             assert!(
-                plan.should_state_sync(false),
+                plan.should_sync(false),
                 "an interrupted sync must restart peer state sync",
             );
             let floor = plan
@@ -1531,21 +1496,15 @@ mod tests {
                 true,
             )
             .await;
-            let (mut harness, _mailbox, mut syncer_receiver, _sync_complete) =
+            let (mut harness, _mailbox, mut syncer_receiver, _completion) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
-            harness.syncing.sync_metadata = harness
-                .syncing
-                .sync_metadata
-                .begin_sync(initial.clone())
-                .await;
+            harness.syncing.plan = harness.syncing.plan.set_floor(initial.clone()).await;
 
             let (acknowledgement, mut waiter) = Exact::handle();
-            let process = context.child("process_finalized").spawn(move |_| {
-                harness
-                    .syncing
-                    .process_finalized(Arc::new(block), acknowledgement)
-            });
-            let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
+            let process = context
+                .child("finalized")
+                .spawn(move |_| harness.syncing.finalized(Arc::new(block), acknowledgement));
+            let Some(syncer::mailbox::Message::Retarget { update, response }) =
                 syncer_receiver.recv().await
             else {
                 panic!("retarget should reach target observation");
@@ -1564,7 +1523,7 @@ mod tests {
             let (syncing, handoff) = process.await.expect("retarget task should stop cleanly");
             assert!(handoff.is_none());
             assert_eq!(
-                syncing.sync_metadata.in_progress_floor(),
+                syncing.plan.floor(),
                 Some(&initial),
                 "target observation must not update durable state-sync metadata",
             );

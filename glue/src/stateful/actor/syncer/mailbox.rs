@@ -2,18 +2,15 @@
 
 use crate::stateful::{
     Application,
-    db::{Anchor, DatabaseSet, TipUpdate},
+    actor::{BlockDigest, SyncTargets},
+    db::{Anchor, TipUpdate},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::channel::oneshot;
 use rand_core::Rng;
 
-type SyncTargets<E, A> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
-type BlockDigest<E, A> = <<A as Application<E>>::Block as Digestible>::Digest;
-
-/// Reply to [`Mailbox::update_targets`].
+/// Reply to [`Mailbox::retarget`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UpdateOutcome {
     /// The live sync coordinator recorded the update, so the eventual sync
@@ -29,8 +26,8 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    UpdateTargets {
-        update: TipUpdate<BlockDigest<E, A>, SyncTargets<E, A>>,
+    Retarget {
+        update: TipUpdate<BlockDigest<A, E>, SyncTargets<A, E>>,
         /// Reports whether the update was recorded or sync already completed.
         response: oneshot::Sender<UpdateOutcome>,
     },
@@ -57,6 +54,8 @@ where
     }
 }
 
+// Replacing a queued update drops its response sender. `Mailbox::retarget` has one caller, which
+// awaits each update before sending the next, so a live response is never dropped.
 impl<E, A> Policy for Message<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -87,24 +86,23 @@ where
         Self { sender }
     }
 
-    /// Sends a target update and waits until the live sync coordinator records it.
+    /// Sends a target update and waits until the sync coordinator records it.
     ///
-    /// If sync already completed, the artifact arrives on the completion channel.
-    pub async fn update_targets(
+    /// Returns [`UpdateOutcome::Observed`] once the update is recorded, or
+    /// [`UpdateOutcome::SyncCompleted`] if state sync finished first. The converged artifact then
+    /// arrives on the completion channel.
+    ///
+    /// Panics if the syncer has stopped.
+    pub async fn retarget(
         &self,
-        anchor: Anchor<BlockDigest<E, A>>,
-        targets: SyncTargets<E, A>,
+        anchor: Anchor<BlockDigest<A, E>>,
+        targets: SyncTargets<A, E>,
     ) -> UpdateOutcome {
         loop {
             let (update, observed) = TipUpdate::with_observation(anchor, targets.clone());
             let (response, receiver) = oneshot::channel();
-            let feedback = self
-                .sender
-                .enqueue(Message::UpdateTargets { update, response });
-            assert!(
-                feedback.accepted(),
-                "syncer must outlive update_targets callers",
-            );
+            let feedback = self.sender.enqueue(Message::Retarget { update, response });
+            assert!(feedback.accepted(), "syncer must outlive retarget callers",);
 
             let Ok(outcome) = receiver.await else {
                 // A newer queued update displaced this one before the syncer saw
@@ -140,15 +138,15 @@ mod tests {
     use futures::FutureExt;
 
     #[test]
-    fn update_targets_retries_when_observation_is_dropped() {
+    fn retarget_retries_when_observation_is_dropped() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
-            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), 7));
+            let mut retarget = Box::pin(mailbox.retarget(anchor(7, 9), 7));
 
-            assert!(update_targets.as_mut().now_or_never().is_none());
+            assert!(retarget.as_mut().now_or_never().is_none());
 
-            let Some(Message::UpdateTargets { update, response }) = receiver.recv().await else {
+            let Some(Message::Retarget { update, response }) = receiver.recv().await else {
                 panic!("first update should be sent");
             };
             assert!(
@@ -157,9 +155,9 @@ mod tests {
             );
             drop(update);
 
-            assert!(update_targets.as_mut().now_or_never().is_none());
+            assert!(retarget.as_mut().now_or_never().is_none());
 
-            let Some(Message::UpdateTargets { response, .. }) = receiver.recv().await else {
+            let Some(Message::Retarget { response, .. }) = receiver.recv().await else {
                 panic!("dropped observation should trigger a retry");
             };
             assert!(
@@ -168,7 +166,7 @@ mod tests {
             );
 
             assert_eq!(
-                update_targets.await,
+                retarget.await,
                 UpdateOutcome::SyncCompleted,
                 "retry should report the completed sync"
             );
@@ -176,13 +174,13 @@ mod tests {
     }
 
     #[test]
-    fn update_targets_retries_when_response_is_displaced() {
+    fn retarget_retries_when_response_is_displaced() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
-            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), 7));
+            let mut retarget = Box::pin(mailbox.retarget(anchor(7, 9), 7));
 
-            assert!(update_targets.as_mut().now_or_never().is_none());
+            assert!(retarget.as_mut().now_or_never().is_none());
 
             // Drop the message without responding, as overflow displacement does.
             let Some(message) = receiver.recv().await else {
@@ -190,9 +188,9 @@ mod tests {
             };
             drop(message);
 
-            assert!(update_targets.as_mut().now_or_never().is_none());
+            assert!(retarget.as_mut().now_or_never().is_none());
 
-            let Some(Message::UpdateTargets { response, .. }) = receiver.recv().await else {
+            let Some(Message::Retarget { response, .. }) = receiver.recv().await else {
                 panic!("displaced response should trigger a retry");
             };
             assert!(
@@ -201,7 +199,7 @@ mod tests {
             );
 
             assert_eq!(
-                update_targets.await,
+                retarget.await,
                 UpdateOutcome::SyncCompleted,
                 "retry should report the completed sync"
             );
@@ -209,15 +207,15 @@ mod tests {
     }
 
     #[test]
-    fn update_targets_resolves_only_after_observation_is_recorded() {
+    fn retarget_resolves_only_after_observation_is_recorded() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
-            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), 7));
+            let mut retarget = Box::pin(mailbox.retarget(anchor(7, 9), 7));
 
-            assert!(update_targets.as_mut().now_or_never().is_none());
+            assert!(retarget.as_mut().now_or_never().is_none());
 
-            let Some(Message::UpdateTargets { update, response }) = receiver.recv().await else {
+            let Some(Message::Retarget { update, response }) = receiver.recv().await else {
                 panic!("update should be sent");
             };
             assert!(
@@ -225,12 +223,12 @@ mod tests {
                 "response receiver should be alive"
             );
 
-            assert!(update_targets.as_mut().now_or_never().is_none());
+            assert!(retarget.as_mut().now_or_never().is_none());
 
             update.record(|_, _| {});
 
             assert_eq!(
-                update_targets.await,
+                retarget.await,
                 UpdateOutcome::Observed,
                 "recorded update should report observation"
             );

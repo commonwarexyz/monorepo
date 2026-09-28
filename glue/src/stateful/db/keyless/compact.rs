@@ -1,8 +1,8 @@
-//! Compact [`ManagedDb`] implementation for QMDB
+//! Compact [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`keyless`](commonware_storage::qmdb::keyless) databases.
 //!
-//! These compact databases retain only the current Merkle peaks, so the glue
-//! adapters expose append and merkleization operations but no historical reads.
+//! Compact databases retain only the current Merkle peaks. Batches support `append` and
+//! merkleization but no historical reads.
 
 use crate::stateful::db::{
     InitError, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
@@ -29,7 +29,7 @@ use commonware_storage::{
 use commonware_utils::channel::mpsc;
 use std::{ops::Deref, sync::Arc};
 
-/// Wraps an unjournaled keyless batch before merkleization.
+/// A speculative batch of appended values over a shared compact keyless database.
 pub struct KeylessUnjournaledUnmerkleized<F, E, V, H, S, C = ()>
 where
     F: Family,
@@ -76,26 +76,27 @@ where
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
-    /// Set commit metadata included in the next merkleization.
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
     pub fn with_metadata(mut self, metadata: V::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Set the inactivity floor included in the next merkleization.
+    /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
+    /// (inherited from the parent batch or database when unset).
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self
     }
 
-    /// Append a value to the speculative batch.
+    /// Appends `value` to the batch.
     pub fn append(mut self, value: V::Value) -> Self {
         self.batch = self.batch.append(value);
         self
     }
 }
 
-/// Wraps an unjournaled keyless batch after merkleization.
+/// A sealed compact keyless batch with a computed root.
 pub struct KeylessUnjournaledMerkleized<F, E, V, H, S, C = ()>
 where
     F: Family,

@@ -95,18 +95,18 @@ where
         }
     }
 
-    pub(super) async fn next_completed(&mut self) {
+    pub(super) async fn complete_next(&mut self) {
         let result = self.jobs.next_completed().await;
         Self::respond(result);
     }
 
-    /// Runs `operation` while still answering verification jobs.
+    /// Awaits `operation` while continuing to complete verification attempts.
     pub(super) async fn drive<T>(&mut self, operation: impl Future<Output = T>) -> T {
         futures::pin_mut!(operation);
         loop {
             select! {
                 output = &mut operation => break output,
-                _ = self.next_completed() => {},
+                _ = self.complete_next() => {},
             }
         }
     }

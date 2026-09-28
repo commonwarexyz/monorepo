@@ -1239,7 +1239,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
         let plan = SyncPlan::init(context.child("plan"), "certify-qmdb-stateful".to_string()).await;
         let publication_context = context.child("publication");
         let (snapshot_publisher, _snapshot_subscriber) = Publisher::new(&publication_context);
-        let (stateful, stateful_mailbox) = StatefulActor::init(
+        let (stateful, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application: App::new(genesis),
@@ -1389,7 +1389,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         db_config.merkle_config.items_per_blob = NZU64!(1024);
         let publication_context = delayed.child("publication");
         let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&publication_context);
-        let (stateful, mut stateful_mailbox) = StatefulActor::init(
+        let (stateful, mut stateful_mailbox) = StatefulActor::new(
             delayed.child("stateful"),
             StatefulConfig {
                 application: App::new(genesis),
@@ -1586,7 +1586,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         .await;
         let publication_context = context.child("publication");
         let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&publication_context);
-        let (stateful, stateful_mailbox) = StatefulActor::init(
+        let (stateful, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application,
