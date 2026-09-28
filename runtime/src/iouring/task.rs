@@ -138,6 +138,7 @@ impl State {
 
     /// Count one more reference. Like `Arc`, the process aborts before the
     /// count can wrap, which takes a leak of `isize::MAX` references.
+    #[inline]
     fn retain(&self) {
         if self.0.fetch_add(REF_ONE, Ordering::Relaxed) > isize::MAX as usize {
             std::process::abort();
@@ -145,6 +146,7 @@ impl State {
     }
 
     /// Release one reference, returning whether it was the last.
+    #[inline]
     fn release(&self) -> bool {
         self.0.fetch_sub(REF_ONE, Ordering::Release) & REFS == REF_ONE
     }
@@ -157,6 +159,7 @@ impl State {
 
     /// Record a wake that keeps its reference. Returns whether the caller
     /// must publish a ready token, whose reference the exchange counted.
+    #[inline]
     fn notify_by_ref(&self) -> bool {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
@@ -186,6 +189,7 @@ impl State {
 
     /// Record a wake that gives up its reference. A published token takes the
     /// reference over, and otherwise the exchange releases it.
+    #[inline]
     fn notify_by_value(&self) -> Notify {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
@@ -215,6 +219,7 @@ impl State {
 
     /// Claim the ready token for polling, whose reference the poll now holds.
     /// Fails for a cleared task.
+    #[inline]
     fn start_poll(&self) -> bool {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
@@ -235,6 +240,7 @@ impl State {
 
     /// Finish a pending poll. Going idle releases the polled token's
     /// reference in the same exchange.
+    #[inline]
     fn finish_pending(&self) -> Finish {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
@@ -265,6 +271,7 @@ impl State {
     }
 
     /// Mark the task terminal after its final poll, keeping every reference.
+    #[inline]
     fn complete(&self) {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
@@ -447,6 +454,7 @@ impl Deref for Task {
 }
 
 impl Clone for Task {
+    #[inline]
     fn clone(&self) -> Self {
         self.state.retain();
         Self(self.0)
@@ -454,6 +462,7 @@ impl Clone for Task {
 }
 
 impl Drop for Task {
+    #[inline]
     fn drop(&mut self) {
         // The count sits in an atomic, so no reference into the rest of the
         // header is live across the decrement while another thread frees the
@@ -820,11 +829,13 @@ impl Tasks {
     }
 
     /// Queue a ready token.
+    #[inline]
     pub fn push(&mut self, task: Task) {
         self.ready.push_back(task);
     }
 
     /// Take the oldest ready token.
+    #[inline]
     pub fn pop(&mut self) -> Option<Task> {
         self.ready.pop_front()
     }
