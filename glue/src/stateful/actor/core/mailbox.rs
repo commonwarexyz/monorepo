@@ -246,7 +246,7 @@ where
         // The actor holds only a weak handle, so dropping this future releases the ancestry's
         // blocks even while the request is queued.
         let (response, receiver) = oneshot::channel();
-        let (_ancestry_owner, ancestry) = WeakAncestry::new(ancestry);
+        let (ancestry_owner, ancestry) = WeakAncestry::new(ancestry);
         let span = info_span!(
             "stateful.mailbox.verify",
             epoch = context.1.epoch().traced(),
@@ -266,7 +266,7 @@ where
             // The actor exited without answering. Never fabricate a verdict.
             // Release the ancestry and park until this future is dropped.
             Err(_) => {
-                drop(_ancestry_owner);
+                drop(ancestry_owner);
                 std::future::pending().await
             }
         }

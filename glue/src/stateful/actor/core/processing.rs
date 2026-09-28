@@ -45,7 +45,7 @@ use futures::{
 };
 use rand_core::Rng;
 use std::{collections::VecDeque, sync::mpsc::TryRecvError};
-use tracing::{Instrument as _, debug, info_span, warn};
+use tracing::{Instrument as _, debug, error, info_span, warn};
 
 /// Work selected for one iteration of the processing loop.
 enum Step<M, P> {
@@ -143,11 +143,18 @@ impl Durability {
 
     /// Clears the active barrier and acknowledges every height it made durable.
     ///
-    /// Returns `false` without advancing the durable height if `completion` is `None`. Panics if no
-    /// barrier is active.
-    fn complete(&mut self, completion: Option<Height>) -> bool {
+    /// Returns `false` without advancing the durable height if `completion` is `None`, logging an
+    /// error unless `shutdown` has fired. Panics if no barrier is active.
+    fn complete(
+        &mut self,
+        completion: Option<Height>,
+        shutdown: &mut (impl Future + Unpin),
+    ) -> bool {
         assert!(self.barrier.take().is_some(), "barrier not active");
         let Some(height) = completion else {
+            if shutdown.now_or_never().is_none() {
+                error!("database barrier aborted without shutdown, stopping processing");
+            }
             return false;
         };
         assert!(height > self.durable && height <= self.applied());
@@ -269,7 +276,7 @@ where
                     return;
                 }
                 if let Some(completion) = durability.completion().now_or_never()
-                    && !durability.complete(completion)
+                    && !durability.complete(completion, &mut shutdown)
                 {
                     return;
                 }
@@ -518,7 +525,7 @@ where
                                     return;
                                 },
                                 completion = durability.completion() => {
-                                    if !durability.complete(completion) {
+                                    if !durability.complete(completion, &mut shutdown) {
                                         return;
                                     }
                                 },
@@ -551,7 +558,7 @@ where
                                         return;
                                     },
                                     completion = durability.completion() => {
-                                        if !durability.complete(completion) {
+                                        if !durability.complete(completion, &mut shutdown) {
                                             return;
                                         }
                                         break;
@@ -587,7 +594,7 @@ where
                         }
                     }
                     Step::Barrier(completion) => {
-                        if !durability.complete(completion) {
+                        if !durability.complete(completion, &mut shutdown) {
                             return;
                         }
                     }

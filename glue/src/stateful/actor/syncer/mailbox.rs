@@ -11,7 +11,7 @@ use commonware_utils::channel::oneshot;
 use rand_core::Rng;
 
 /// Reply to [`Mailbox::retarget`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum UpdateOutcome {
     /// The live sync coordinator recorded the update, so the eventual sync
     /// artifact reflects this target or a newer one.
