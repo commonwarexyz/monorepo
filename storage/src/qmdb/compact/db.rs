@@ -433,7 +433,7 @@ where
             open = open.append(&self.tip.witness).await?;
         }
         self.storage = Storage::Open(open);
-        debug_assert_eq!(self.commitment(), batch.bounds.tip);
+        assert_eq!(self.commitment(), batch.bounds.tip);
         Ok((self, start_loc..batch.bounds.tip.size))
     }
 
