@@ -81,11 +81,9 @@ pub struct Config<M, X, SS, T, D = Unit> {
 
     /// Application-owned store for this ceremony's secret material.
     ///
-    /// MUST NOT be the store a [`reshare`] actor uses. Both write epoch-zero
-    /// dealer seeds and dealings, so a shared store can make the first reshare
-    /// deal from this ceremony's seed or, after a crash, recover this ceremony's
-    /// dealings as its own. Copy only the resulting epoch-zero share. The engine
-    /// never prunes this store.
+    /// Do not share this store with a [`reshare`] actor: both write epoch-zero
+    /// dealer seeds and dealings. Copy only the resulting epoch-zero share.
+    /// The engine never prunes this store.
     pub secret_store: SS,
 
     /// Parallel verification strategy.
