@@ -70,13 +70,13 @@
 //!
 //! # Parallel appends
 //!
-//! [`UnmerkleizedBatch::add_many`] splits its leaves into contiguous ranges, one per worker. A
-//! range's positions run from its first leaf up to the next range's first leaf. Each worker hashes
-//! its leaves and then, from the lowest height up, computes every node in its positions whose
-//! leaves all belong to its range. The remaining nodes in its positions depend on earlier leaves
-//! (at most two per height) and are computed by [`UnmerkleizedBatch::merkleize`]. In an MMB,
-//! delayed merging can also place a node built only from one range's leaves after the next range
-//! starts, so that node is left for `merkleize` too.
+//! With `std`, `UnmerkleizedBatch::add_many` splits its leaves into contiguous ranges, up to one
+//! per worker. A range's positions run from its first leaf up to the next range's first leaf. Each
+//! worker hashes its leaves and then, from the lowest height up, computes every node in its
+//! positions whose leaves all belong to its range. The remaining nodes in its positions depend on
+//! earlier leaves (at most two per height) and are computed by [`UnmerkleizedBatch::merkleize`]. In
+//! an MMB, delayed merging can also place a node built only from one range's leaves after the next
+//! range starts, so that node is left for `merkleize` too.
 //!
 //! # Example (MMR)
 //!
@@ -109,17 +109,11 @@ use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
 #[cfg(feature = "std")]
-use commonware_utils::NZUsize;
-#[cfg(feature = "std")]
 use core::num::NonZeroUsize;
 use core::ops::Range;
 
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
-
-/// Fewest leaves each `add_many` worker hashes. Smaller ranges leave more nodes to `merkleize`.
-#[cfg(feature = "std")]
-const MIN_RANGE_LEAVES: NonZeroUsize = NZUsize!(64);
 
 /// Push a dirty node position into its height bucket, growing the outer Vec as needed.
 fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
@@ -221,11 +215,12 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ///
     /// Walks from peak to leaf (top-down) using [`path::Iterator`], then inserts dirty markers
     /// bottom-up. Bottom-up ordering enables a best-effort early exit: if the node at a given
-    /// height matches the most recently pushed entry for that bucket, we stop walking since
-    /// the walk that pushed it already marked everything above. This catches consecutive
-    /// shared-path walks in O(1); non-consecutive duplicates (a prior walk for a different
-    /// subtree landed in the bucket after the shared ancestors) are not detected here and are
-    /// collapsed by the per-bucket sort+dedup in `merkleize`.
+    /// height matches the most recently pushed entry for that bucket, we stop walking since a
+    /// dirty node's ancestors are always dirty too (walks, appends, and `add_many`'s deferred
+    /// nodes all keep this true). This catches consecutive shared-path walks in O(1);
+    /// non-consecutive duplicates (a prior walk for a different subtree landed in the bucket after
+    /// the shared ancestors) are not detected here and are collapsed by the per-bucket sort+dedup
+    /// in `merkleize`.
     fn mark_dirty(&mut self, loc: Location<F>) {
         let mut first_leaf = Location::new(0);
         for (peak_pos, height) in F::peaks(self.size()) {
@@ -309,7 +304,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Encode and hash `items` across the strategy, adding their leaf digests in order.
     ///
-    /// Equivalent to calling [`add`](Self::add) with each item's encoding.
+    /// Equivalent to calling [`add`](Self::add) with each item's encoding. Unlike `add`, it also
+    /// computes internal nodes with `hasher`, so [`merkleize`](Self::merkleize) must use a hasher
+    /// that computes node digests the same way.
     ///
     /// # Panics
     ///
@@ -335,7 +332,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             .resize((*size - *parent_size) as usize, D::EMPTY);
         let nodes = &mut self.appended[(*start - *parent_size) as usize..];
 
-        let deferred = strategy.run_batches(items.len(), MIN_RANGE_LEAVES, 1, |batches| {
+        let deferred = strategy.run_batches(items.len(), NonZeroUsize::MIN, 1, |batches| {
             let Some(batches) = batches else {
                 return vec![build_range(hasher, items, first, nodes)];
             };
@@ -614,6 +611,7 @@ fn build_range<F: Family, D: Digest, Item: Write>(
                 break;
             }
             if birth <= leaves_end {
+                // Its ancestors start no later and are born no earlier, so they are deferred too.
                 deferred.push((height, F::subtree_root_position(loc, height)));
             }
         }
@@ -870,6 +868,7 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::{Manual, Rayon};
     use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::NZUsize;
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;

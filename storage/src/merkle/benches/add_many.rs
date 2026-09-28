@@ -16,7 +16,7 @@ type StandardHasher<H> = merkle::hasher::Standard<H>;
 /// Leaves already in the tree (deliberately not a power of two).
 const COMMITTED: u64 = 100_003;
 
-/// Batch sizes for small items, including sizes on either side of the smallest split.
+/// Batch sizes for small items.
 const OPS: [usize; 5] = [100, 128, 1_000, 8_192, 65_536];
 
 /// Size of each small item.
