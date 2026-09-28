@@ -297,6 +297,73 @@ fn remote_da_certificate_retires_vote_without_rebroadcast_and_replays() {
     );
 }
 
+/// Returns every durable certificate record `activities` reports, as `(chain, height, released)`.
+fn recorded(activities: &[Activity<MinPk, Digest>]) -> Vec<(u32, u64, u64)> {
+    activities
+        .iter()
+        .filter_map(|activity| match activity {
+            Activity::CertificateRecorded {
+                certified,
+                released,
+            } => Some((
+                certified.chain().get(),
+                certified.height().get(),
+                released.get(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn durable_da_certificates_release_what_the_engine_no_longer_verifies() {
+    let profile = Harness::validator(3)
+        .participants(6)
+        .producers(vec![Participant::new(1), Participant::new(4)])
+        .profile();
+    // Starting reports every chain's record, which releases nothing at genesis.
+    let starting = Machine::<Sha256, MinPk>::new(profile.clone())
+        .step(Input::Start)
+        .unwrap();
+    assert_eq!(recorded(starting.activities()), vec![(0, 0, 0), (1, 0, 0)]);
+
+    let (mut machine, mut step) = start_profile(profile.clone());
+    while let Some(job) = step.find(|effect| match effect {
+        Capability::Journal(PersistDirective { job, .. }) => Some(job.clone()),
+        _ => None,
+    }) {
+        step = machine.persist(&job, Until::CursorAdvance);
+    }
+
+    // A certificate is reported only once its record is durable, and releases the heights one
+    // pipeline depth below it.
+    let depth = machine.profile().codec().pipeline_depth() as u64;
+    let height = depth + 2;
+    let header = TransactionBlockHeader::new(
+        machine.profile().protocol().epoch(),
+        ChainId::new(1),
+        Height::new(height),
+        digest(b"certified parent"),
+        digest(b"certified block"),
+    )
+    .unwrap();
+    let certificate = Artifact::DaCertificate(symbolic_da_certificate(header, 4));
+    let verification = observe(&mut machine, certificate);
+    let advanced = machine.verify(&verification, true, Until::CursorAdvance);
+    assert!(recorded(advanced.activities()).is_empty());
+    let persisted = machine.persist(&advanced.persist_job(), Until::CursorAdvance);
+    assert_eq!(recorded(persisted.activities()), vec![(1, height, 2)]);
+
+    // A restart reports each chain's newest durable record again.
+    let mut restored =
+        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+    let recovery = restored.step(Input::RecoveryComplete).unwrap();
+    assert_eq!(
+        recorded(recovery.activities()),
+        vec![(0, 0, 0), (1, height, 2)]
+    );
+}
+
 #[test]
 fn full_outbox_exit_replacement_uses_the_retired_slot() {
     let resources = TEST_RESOURCES

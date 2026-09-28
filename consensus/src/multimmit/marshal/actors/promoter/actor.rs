@@ -8,9 +8,9 @@ use super::{
 use crate::multimmit::{
     actors::util::gated,
     marshal::{
+        OutputIndex,
         actors::{catalog, delivery::HotOutput},
         storage::Error as StorageError,
-        types::OutputIndex,
     },
     types::{BlockRef, Body},
 };
@@ -89,7 +89,9 @@ where
     /// The receiving half of [`super::channel`].
     pub(crate) mailbox: Receiver<H, B>,
     /// Committed output of the recovered catalog checkpoint.
-    pub(crate) committed: Option<OutputIndex>,
+    pub(crate) committed: OutputIndex,
+    /// Floor index of the recovered catalog checkpoint.
+    pub(crate) floor_index: OutputIndex,
     /// Floor of the recovered catalog checkpoint, applied once promotion catches up.
     pub(crate) floor: PendingFloor<H::Digest>,
     pub(crate) bounds: Bounds,
@@ -110,7 +112,12 @@ where
     store: PromotionStore<T, E, H, B>,
     mailbox: Receiver<H, B>,
     /// Newest committed output to promote through.
-    target: Option<OutputIndex>,
+    target: OutputIndex,
+    /// Floor index of the newest floor installation. Promotion first copies the rows earlier
+    /// generations committed below it, skipping the indices each floor jumped over.
+    floor_index: OutputIndex,
+    /// Whether promotion passed every row of earlier generations below `floor_index`.
+    floor_reached: bool,
     /// Bodies of the newest publication, by output.
     hot: HashMap<OutputIndex, HotOutput<H, B>>,
     /// The newest floor installation not yet applied.
@@ -135,6 +142,7 @@ where
             store,
             mailbox,
             committed,
+            floor_index,
             floor,
             bounds,
         } = config;
@@ -145,6 +153,8 @@ where
             store,
             mailbox,
             target: committed,
+            floor_index,
+            floor_reached: false,
             hot: HashMap::new(),
             pending_floor: Some(floor),
             bounds,
@@ -168,7 +178,7 @@ where
         select_loop! {
             self.context,
             on_start => {
-                let working = self.store.through() < self.target || self.pending_floor.is_some();
+                let working = self.promoted() < self.target || self.pending_floor.is_some();
                 if !open && !working {
                     break;
                 }
@@ -190,12 +200,18 @@ where
         Ok(())
     }
 
+    /// Returns the output promotion continues after.
+    fn promoted(&self) -> OutputIndex {
+        if self.floor_reached {
+            self.store.through().max(self.floor_index)
+        } else {
+            self.store.through()
+        }
+    }
+
     async fn step(&mut self) -> Result<(), Error> {
-        if let Some(target) = self
-            .target
-            .filter(|target| self.store.through() < Some(*target))
-        {
-            return self.promote(target).await;
+        if self.promoted() < self.target {
+            return self.promote(self.target).await;
         }
         if let Some(PendingFloor {
             generation,
@@ -216,8 +232,7 @@ where
         fields(target = target.get())
     )]
     async fn promote(&mut self, target: OutputIndex) -> Result<(), Error> {
-        let next = OutputIndex::after(self.store.through())
-            .ok_or(Error::Invariant("immutable output index exhausted"))?;
+        let next = self.promoted().next();
         let available = target
             .get()
             .checked_sub(next.get())
@@ -230,9 +245,16 @@ where
             .catalog
             .output_refs(next, max_items, self.bounds.max_bytes)
             .await?;
-        if refs.is_empty() {
+        // Rows of earlier generations resume after each gap an installed floor left, and end
+        // below the newest floor's index.
+        let Some(after) = refs.first().map(|output| output.index.previous()) else {
+            if next <= self.floor_index {
+                self.floor_reached = true;
+                return Ok(());
+            }
             return Err(Error::Missing(next));
-        }
+        };
+        let after = after.expect("output index zero is never committed");
         let mut resolved = Vec::with_capacity(refs.len());
         let mut missing = Vec::new();
         let mut hot_count = 0usize;
@@ -283,7 +305,7 @@ where
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let output_count = outputs.len();
-        let frontiers = self.store.promote(outputs).await?;
+        let frontiers = self.store.promote(after, outputs).await?;
         self.metrics.batch(output_count, encoded_bytes, hot_count);
         self.metrics.progress(self.store.through());
         self.catalog.promoted(frontiers).await?;
@@ -293,7 +315,7 @@ where
     async fn handle(&mut self, message: Message<H, B>) -> Result<(), Error> {
         match message {
             Message::Published { through, hot } => {
-                self.target = self.target.max(Some(through));
+                self.target = self.target.max(through);
                 // A publication coalesced under pressure carries no bodies; keep the ones held.
                 if !hot.is_empty() {
                     self.hot.clear();
@@ -307,6 +329,10 @@ where
                 frontiers,
             } => {
                 self.target = self.target.max(through);
+                if through > self.floor_index {
+                    self.floor_index = through;
+                    self.floor_reached = false;
+                }
                 if self
                     .pending_floor
                     .as_ref()
@@ -370,11 +396,11 @@ mod tests {
                 _catalog,
                 mut promoter,
                 ..
-            } = stalled(&context, "promoter_hot_bodies").await;
+            } = Box::pin(stalled(&context, "promoter_hot_bodies")).await;
             promoter
                 .handle(Message::Published {
-                    through: OutputIndex::ZERO,
-                    hot: vec![hot_output(0)],
+                    through: OutputIndex::new(1),
+                    hot: vec![hot_output(1)],
                 })
                 .await
                 .unwrap();
@@ -382,23 +408,73 @@ mod tests {
             // A publication coalesced under pressure carries no bodies.
             promoter
                 .handle(Message::Published {
-                    through: OutputIndex::new(1),
+                    through: OutputIndex::new(2),
                     hot: Vec::new(),
                 })
                 .await
                 .unwrap();
-            assert_eq!(promoter.target, Some(OutputIndex::new(1)));
-            assert!(promoter.hot.contains_key(&OutputIndex::ZERO));
+            assert_eq!(promoter.target, OutputIndex::new(2));
+            assert!(promoter.hot.contains_key(&OutputIndex::new(1)));
 
             promoter
                 .handle(Message::Published {
-                    through: OutputIndex::new(2),
-                    hot: vec![hot_output(2)],
+                    through: OutputIndex::new(3),
+                    hot: vec![hot_output(3)],
                 })
                 .await
                 .unwrap();
-            assert!(!promoter.hot.contains_key(&OutputIndex::ZERO));
-            assert!(promoter.hot.contains_key(&OutputIndex::new(2)));
+            assert!(!promoter.hot.contains_key(&OutputIndex::new(1)));
+            assert!(promoter.hot.contains_key(&OutputIndex::new(3)));
+        });
+    }
+
+    #[test]
+    fn installation_promotes_earlier_rows_before_skipping_to_its_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let Stalled {
+                _catalog,
+                mut promoter,
+                ..
+            } = Box::pin(stalled(&context, "promoter_installed_floor")).await;
+            assert_eq!(promoter.promoted(), OutputIndex::zero());
+            promoter
+                .handle(Message::Installed {
+                    floor_generation: 1,
+                    through: OutputIndex::new(9),
+                    frontiers: Vec::new(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(promoter.target, OutputIndex::new(9));
+
+            // Rows an earlier generation committed below the floor are still promoted, until the
+            // catalog reports none at the next index.
+            assert_eq!(promoter.promoted(), OutputIndex::zero());
+            promoter.floor_reached = true;
+            assert_eq!(promoter.promoted(), OutputIndex::new(9));
+
+            // An older installation neither lowers the floor nor the target.
+            promoter
+                .handle(Message::Installed {
+                    floor_generation: 0,
+                    through: OutputIndex::new(4),
+                    frontiers: Vec::new(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(promoter.target, OutputIndex::new(9));
+            assert_eq!(promoter.promoted(), OutputIndex::new(9));
+
+            // A newer one leaves the rows below it to promote first.
+            promoter
+                .handle(Message::Installed {
+                    floor_generation: 2,
+                    through: OutputIndex::new(12),
+                    frontiers: Vec::new(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(promoter.promoted(), OutputIndex::zero());
         });
     }
 }
