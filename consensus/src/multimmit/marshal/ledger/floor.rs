@@ -22,14 +22,14 @@ use crate::{
                 meta::{Ack, State},
                 proofs::CutEntry,
             },
-            types::{Cause, Floor, LqcVerifier, OutputIndex, Update},
+            types::{Cause, Floor, LqcVerifier, Update},
             wire::Key,
         },
         order::{FinalSweep, SweepFact},
         scheme::Scheme,
         types::{Artifact, BlockRef, Body, CertificateId, LqcProof, TransactionBlock},
     },
-    types::Height,
+    types::{Height, OutputIndex},
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_resolver::Resolver;

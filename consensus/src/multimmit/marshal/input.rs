@@ -2,7 +2,7 @@
 
 use super::{
     store::blocks::Block,
-    types::{Custody, Error, Floor, MarshalProgress, OutputIndex},
+    types::{Custody, Error, Floor, MarshalProgress},
     wire::{self, Committed, Key, Records},
 };
 use crate::{
@@ -13,7 +13,7 @@ use crate::{
             LqcProof, Placement, TipRecord, artifact_digest,
         },
     },
-    types::Height,
+    types::{Height, OutputIndex},
 };
 use bytes::Bytes;
 use commonware_actor::Feedback;
