@@ -46,14 +46,10 @@ where
     pub bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
     /// State-sync floor persisted by an interrupted sync, if any.
     ///
-    /// A node resuming a persisted floor must pass it here: replies below its
-    /// epoch are then ignored, so
-    /// [`Artifact::info`](crate::dkg::probe::Artifact::info) describes the epoch
-    /// of whichever of this floor and
-    /// [`Artifact::floor`](crate::dkg::probe::Artifact::floor) is later. Without
-    /// it, the discovered info can describe an earlier epoch, and
-    /// [`state_sync::Plan::init`](crate::dkg::state_sync::Plan::init) panics on
-    /// the pair.
+    /// Pass it on restart so discovery ignores earlier epochs and returns info
+    /// for the later of this floor and the sampled floor. Otherwise
+    /// [`state_sync::Plan::init`](crate::dkg::state_sync::Plan::init) may panic
+    /// on a floor paired with info from an older epoch.
     pub floor: Option<Finalization<S, V::Commitment>>,
     /// All-epoch certificate verifier built from the constant BLS identity.
     pub verifier: S,

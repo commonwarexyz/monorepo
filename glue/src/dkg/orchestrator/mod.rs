@@ -30,22 +30,25 @@
 //!   acknowledge the block.
 //!
 //! ```text
-//! marshal boundary or state-sync artifact
-//!        |
-//!        v
-//! Provider::scheme(epoch)
-//!        |
-//!        v
-//! Simplex engine for epoch N
-//!        |
-//!        v
-//! marshal finalized block stream
-//!        |
-//!        v
-//! final block of epoch N carries EpochInfo(N + 1)
-//!        |
-//!        v
-//! start epoch N + 1, stop epoch N, acknowledge the block
+//! finalized boundary or state-sync artifact: EpochInfo(N)
+//!                         |
+//!                         v
+//!              Gate(N) -> activate peers
+//!                         |
+//!                         v
+//!              Provider::scheme(N)
+//!                         |
+//!                         v
+//!              Simplex engine for epoch N
+//!                         |
+//!                         v
+//!              marshal finalized block stream
+//!                         |
+//!                         v
+//!              final block carries EpochInfo(N + 1)
+//!                         |
+//!                         v
+//!              enter N + 1 -> stop N -> acknowledge
 //! ```
 //!
 //! Once started, the orchestrator requires marshal to deliver every finalized

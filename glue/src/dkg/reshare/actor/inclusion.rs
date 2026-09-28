@@ -163,8 +163,9 @@ where
 }
 
 /// Queued epoch-info requests in arrival order.
-// Queued ancestries stay unread so waiting requests do not each hold a full
-// dealer-log map while the verifier is busy.
+///
+/// Ancestries stay unread until selected, so waiting requests do not each hold
+/// a dealer-log map while the verifier is busy.
 struct ArtifactRequests<B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -394,8 +395,9 @@ struct PendingLogScan<'a, V: BlsVariant, P, D> {
 }
 
 /// Owned inputs for one dealer-log verification.
-// It holds no store, provider, registrar, or metrics handle, so aborting it has
-// no side effects.
+///
+/// Holds no store, provider, registrar, or metrics handle, so cancellation
+/// cannot partially update protocol state.
 struct VerificationTask<V, C, T>
 where
     V: BlsVariant,

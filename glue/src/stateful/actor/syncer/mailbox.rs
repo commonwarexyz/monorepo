@@ -94,8 +94,7 @@ where
             match receiver.await.expect("Syncer should respond to retarget") {
                 Some(artifact) => return Some(artifact),
                 None => {
-                    // Only the coordinator's record, not enqueueing, proves the converged state
-                    // covers this target.
+                    // Enqueueing can race with convergence, so wait for the coordinator to record it.
                     if observed.await.is_ok() {
                         return None;
                     }

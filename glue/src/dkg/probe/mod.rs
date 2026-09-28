@@ -25,9 +25,8 @@
 //! For `n` configured members, `f` is the maximum fault count under the `3f + 1` model and the
 //! discovery sample threshold is `f + 1`.
 //!
-//! Rotation out of the active committee is not what the budgets bound: a rotated-out member that
-//! keeps running an honest, chain-following node at its configured identity costs nothing. What
-//! matters is what members do after rotating. At bootstrap time:
+//! A rotated-out member remains current if it follows the chain at its configured identity.
+//! At discovery time:
 //!
 //! - At most `f` members may be Byzantine or stale, where _stale_ means honest but no longer
 //!   following the chain. A frozen node replies honestly with an old finalization, which is
@@ -37,10 +36,9 @@
 //! - The remaining `f + 1` honest, current, reachable members guarantee both liveness (the
 //!   sample completes) and recency (every `f + 1` sample contains at least one of them).
 //!
-//! Both budgets may be fully spent simultaneously. Operators should refresh the configured set
-//! once they can no longer vouch that `f + 1` members remain live and current, exactly as one
-//! refreshes a weak-subjectivity checkpoint. Passing a subset of the committee mis-derives `f`
-//! and cannot be detected at startup. It is the same trust class as a wrong genesis.
+//! Both budgets may be fully spent simultaneously. Refresh the checkpoint when fewer than
+//! `f + 1` members remain live and current. Configure the complete snapshot: a subset gives the
+//! wrong fault threshold and cannot be detected at startup.
 //!
 //! The budgets bound recency, not validity. Every accepted reply verifies under the constant
 //! group key, so it names a block the network finalized provided no adversary holds a threshold
@@ -60,13 +58,13 @@
 //! finalization:
 //!
 //! ```text
-//!                +-- LatestRequest --> peer 1
+//!                +-- LatestRequest --> dealer 1
 //!                |
-//!   Actor -------+-- LatestRequest --> peer 2
+//!   Actor -------+-- LatestRequest --> dealer 2
 //!                |
-//!                +-- LatestRequest --> peer 3
-//!
-//!   peer 2 --LatestResponse(finalization)--> Actor
+//!                +-- LatestRequest --> dealer 3
+//!                |
+//!                +-- LatestRequest --> dealer 4
 //! ```
 //!
 //! Replies are verified with the all-epoch verifier. At most one reply is counted per peer, a
@@ -74,24 +72,24 @@
 //! below the epoch of a persisted [`Config::floor`] are ignored without blocking (the chain
 //! reached both epochs, so an older reply is stale rather than proof of misbehavior). Once
 //! `f + 1` distinct dealers have replied, the highest finalization becomes the sampled floor and
-//! names the target epoch:
+//! names the target epoch.
+//!
+//! With four dealers (`f = 1`), two verified `(epoch, view)` replies suffice:
 //!
 //! ```text
-//!   peer 1 --LatestResponse(round 10)-->\               replies
-//!   peer 2 --LatestResponse(round 12)--> +-> Actor {10, 12, 13}
-//!   peer 3 --LatestResponse(round 13)-->/                     |
-//!                                                             v
-//!                          sample reached, highest reply becomes the floor: 13
+//!   dealer 1 --LatestResponse(5, 10)-->\
+//!                                      +-> Actor --> floor = (6, 1)
+//!   dealer 2 --LatestResponse(6, 1)--->/
 //! ```
 //!
 //! If too few peers reply before `retry_timeout`, collected replies are cleared and the
-//! solicitation is re-issued. Retry is a liveness mechanism only.
+//! solicitation is re-issued.
 //!
 //! ## Discovery: boundary fetch
 //!
-//! The floor's epoch identifies the target epoch, but not its boundary block. The actor asks
-//! every peer for the boundary finalization. These responses are small, so peers can answer in
-//! parallel without duplicating the boundary block:
+//! The actor requests the floor epoch's boundary finalization from every peer, verifies replies,
+//! then requests the committed block from one verified responder. Other verified responders
+//! remain available if that fetch fails.
 //!
 //! ```text
 //!                +-- BoundaryRequest(epoch) --> peer 1
@@ -101,24 +99,16 @@
 //!                +-- BoundaryRequest(epoch) --> peer 3
 //!
 //!   peer 2 --BoundaryResponse(finalization)--> Actor
-//! ```
-//!
-//! After verifying a boundary finalization, the actor requests its committed block only from that
-//! responder. Other verified responders are retained as failover candidates:
-//!
-//! ```text
-//!   Actor --BlockRequest(epoch)-------> peer 2
-//!   peer 2 --BlockResponse(epoch, block)--> Actor
+//!                                               |
+//!                                      verify finalization
+//!                                               |
+//!                                               v
+//!   peer 2 <---------BlockRequest(epoch)------ Actor
+//!   peer 2 --BlockResponse(epoch, block)-----> Actor
 //! ```
 //!
 //! The block's [`EpochInfo`] is packaged into an [`Artifact`] together with the sampled floor and
-//! published to subscribers. The info is fetched for the sampled floor's own epoch, so
-//! [`Artifact::info`] always describes the epoch of [`Artifact::floor`]:
-//!
-//! ```text
-//!   floor + boundary finalization + boundary block
-//!       --> Artifact { finalization, info, floor }
-//! ```
+//! published to subscribers. [`Artifact::info`] always describes the epoch of [`Artifact::floor`].
 //!
 //! A floor in epoch zero resolves from the locally known genesis info without a boundary fetch.
 //!
@@ -126,13 +116,7 @@
 //!
 //! Once marshal is attached and no subscriber is pending, the actor enters service and answers
 //! peers' latest-finalization, boundary finalization, and boundary block requests for the rest of
-//! the process lifetime:
-//!
-//! ```text
-//!   peer --LatestRequest---------------> Actor --lookup--> LatestResponse -------> peer
-//!   peer --BoundaryRequest(epoch)-----> Actor --lookup--> BoundaryResponse -----> peer
-//!   peer --BlockRequest(epoch)---------> Actor --lookup--> BlockResponse --------> peer
-//! ```
+//! the process lifetime.
 //!
 //! An epoch with no known boundary block is answered with nothing, as is a latest-finalization
 //! request when marshal has no finalization yet.

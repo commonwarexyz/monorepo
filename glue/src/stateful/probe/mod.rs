@@ -54,14 +54,13 @@
 //! * Otherwise, record the finalization as the peer's reply for the round.
 //!
 //! Once `f + 1` distinct peers have recorded replies whose epochs still have a known scheme, the
-//! highest of those replies becomes the floor and is delivered to every waiting subscriber:
+//! highest of those replies becomes the floor and is delivered to every waiting subscriber.
+//! With four peers (`f = 1`), two verified `(epoch, view)` replies suffice:
 //!
 //! ```text
-//!   peer 1 --Response(view 10)-->\            replies
-//!   peer 2 --Response(view 12)--> +-> Probe {10, 12, 13}
-//!   peer 3 --Response(view 13)-->/               |
-//!                                                v
-//!                       sample reached, highest view becomes the floor: 13
+//!   peer 1 --Response(E, 10)-->\
+//!                              +-> Probe --> floor = (E, 13)
+//!   peer 3 --Response(E, 13)-->/
 //! ```
 //!
 //! ## Retry
@@ -93,19 +92,10 @@
 //!
 //! ## Recency
 //!
-//! The selected floor is no older than the reply of some honest participant of the solicited
-//! committee. This follows from the fault model and the protocol rules:
-//!
-//! 1. At most `f` participants of the solicited committee are faulty, where `f` is its maximum
-//!    fault count under the `3f + 1` model. A peer that does not answer and a peer that answers
-//!    adversarially count against the same budget.
-//! 2. Each recorded reply comes from a distinct participant of the solicited committee.
-//! 3. The floor is selected only once `f + 1` recorded replies can be judged, and it is the
-//!    highest of them.
-//!
-//! Therefore, the sample includes a reply from an honest participant, and a stale certificate
-//! replayed by a Byzantine peer cannot displace it. A higher Byzantine reply must still verify, so
-//! under the validity assumption it names a finalized block rather than a rollback.
+//! Under the `3f + 1` fault model, at most `f` solicited committee members are silent or
+//! Byzantine. Each recorded reply comes from a distinct member, so `f + 1` judgeable replies
+//! include an honest one. The highest verified reply cannot be older than that honest reply.
+//! A higher Byzantine reply still names a finalized block under the validity assumption.
 //!
 //! ```text
 //!   any f + 1 sample:
@@ -134,10 +124,8 @@
 //!
 //! # Resource Bounds
 //!
-//! The actor retains at most one reply per peer per request round and skips later messages from
-//! that peer in the round before decoding them. A peer therefore cannot inflate the sample, and a
-//! peer whose reply was recorded cannot force further certificate verification in that round. Rate
-//! limits and the maximum encoded message size are enforced by the p2p channel.
+//! The actor retains one reply per peer per request round and skips later messages from that peer
+//! before decoding or verifying them. The p2p channel bounds message size and rate.
 
 mod actor;
 pub use actor::{Config, Probe};

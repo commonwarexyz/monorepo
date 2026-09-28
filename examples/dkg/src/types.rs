@@ -404,8 +404,7 @@ pub enum Partition {
 /// for this example only. Every put and prune is synced before it returns, and
 /// every get reads from memory.
 pub struct Secrets<E: StorageContext> {
-    // Taken while a sync runs, so this is empty only after a sync panicked or
-    // was dropped.
+    /// Taken during writes and destruction. Interrupted writes leave the store unusable.
     metadata: Arc<AsyncMutex<Option<Store<E>>>>,
 }
 

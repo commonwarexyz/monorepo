@@ -417,9 +417,8 @@ where
                     acknowledgement,
                     retry_mailbox,
                 }) => {
+                    // Redelivery still waits for durability but leaves active verifications running.
                     if self.processor.redelivered(block.as_ref()) {
-                        // A block at or below the applied height is already reflected, so its
-                        // receipt skips application and leaves verifications running.
                         durability.record_duplicate(block.height(), acknowledgement);
                     } else {
                         let process = info_span!(parent: &span, "stateful.actor.finalized");

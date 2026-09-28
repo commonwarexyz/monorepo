@@ -14,23 +14,21 @@ epoch-0 `EpochInfo`.
 
 ## Usage
 
-The example has one binary with three subcommands:
+Generate the node configurations:
 
 ```sh
 cargo run --bin commonware-dkg -- setup --node-dir ./data --peers 6 --committee-size 4 --base-port 3000
-cargo run --bin commonware-dkg -- bootstrap --node-dir ./data/validator-0
-cargo run --bin commonware-dkg -- validator --node-dir ./data/validator-0
 ```
 
 `setup` creates every `validator-*` directory with node and network config,
-then prints the `bootstrap` commands for the epoch-0 committee and the
-`validator` commands for every participant.
+then prints `mprocs` commands to run the epoch-0 bootstrap players and the
+validators. Use `mprocs` or run its enclosed commands in separate terminals.
 
 `bootstrap` runs the one-shot glue DKG among the epoch-0 players, which
 generates the initial threshold secret and the genesis `EpochInfo`. Only the
 epoch-0 players run it because only they receive shares. To bootstrap:
 
-1. Start `bootstrap` for every epoch-0 player.
+1. Start `bootstrap` concurrently for every epoch-0 player.
 2. When a player completes, it writes `genesis.json` into its own directory and
    every non-player validator directory, then logs `bootstrap complete, serving
    peers until stopped`. It keeps serving so players that have not completed

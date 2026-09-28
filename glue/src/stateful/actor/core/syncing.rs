@@ -303,7 +303,7 @@ where
             prune.run(processor.databases(), &self.marshal).await;
         }
 
-        // Attach the resolvers before replying to subscribers, as `subscribe_databases` promises.
+        // Attach the databases to peer resolvers before giving subscribers access.
         self.resolvers
             .attach_databases(processor.databases().clone())
             .await;

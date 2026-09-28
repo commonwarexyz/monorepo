@@ -153,16 +153,10 @@ where
             .await
             .expect("marshal must report the processed position it started with");
 
-        // Starting from the processed block would also be correct, since marshal delivers its
-        // successor next. Prefer the successor when it is the selected floor block, so state sync
-        // targets the selected finalization. Marshal then delivers that block at the anchor
-        // height, where it is reflected rather than applied and its application hooks do not
-        // run. A `Processed::Absent` anchor is already the floor block.
+        // Prefer the selected floor when it is the retained successor, so its delivery skips
+        // application hooks. A `Processed::Absent` anchor already holds the floor.
         if let Processed::Block(height) = processed
-            && let Some(next) = height.get().checked_add(1)
-            && let Some(block) = marshal
-                .get_block(Identifier::Height(Height::new(next)))
-                .await
+            && let Some(block) = marshal.get_block(Identifier::Height(height.next())).await
             && V::commitment(&block) == finalization.proposal.payload
         {
             V::into_shared(block)

@@ -334,8 +334,6 @@ pub trait Merkleized: Sized + Send + Sync {
 /// Mutating methods take the database by value and return it on success. If a mutating method
 /// returns an error or its future is dropped, the instance is lost. Durable state remains
 /// recoverable on restart. State that was not yet durable may or may not be recovered.
-// `E` is a trait generic (not an associated type), so one database type can work across
-// runtimes that satisfy the bounds.
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// A batch of mutations that has not been merkleized.
     type Unmerkleized: Unmerkleized;
