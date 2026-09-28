@@ -2887,9 +2887,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch
-    /// has no operations (a [`Db::to_batch`] snapshot).
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is off this batch's chain,
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
+    /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
+    /// operations (a [`Db::to_batch`] snapshot).
     pub fn proof<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -2900,6 +2901,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         db.log
             .speculative_proof(&self.journal_batch, inactive_peaks)
@@ -2918,8 +2920,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor.
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is off this batch's chain, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
+    /// dropped unapplied ancestor.
     pub fn pinned_nodes<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -2930,6 +2933,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         db.log
             .speculative_pinned_nodes(&self.journal_batch)
             .map_err(Into::into)
@@ -4579,6 +4583,55 @@ mod tests {
                 Err(crate::qmdb::Error::StaleBatch)
             ));
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A batch's proof and pinned nodes are refused once a sibling is applied.
+    #[test]
+    fn proof_refused_after_sibling_apply() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("proof-sibling", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+
+            // Two siblings write the same key with different values.
+            let key = Sha256::hash(&[b"key"]);
+            let batch = db
+                .new_batch()
+                .write(key, Some(Sha256::hash(&[b"batch"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let sibling = db
+                .new_batch()
+                .write(key, Some(Sha256::hash(&[b"sibling"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            assert!(batch.proof(&db).is_ok());
+            assert!(batch.pinned_nodes(&db).is_ok());
+
+            // Applying the sibling moves the database off the batch's chain.
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+            assert!(matches!(
+                batch.proof(&db),
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            assert!(matches!(
+                batch.pinned_nodes(&db),
+                Err(crate::qmdb::Error::StaleRead)
+            ));
             db.destroy().await.unwrap();
         });
     }

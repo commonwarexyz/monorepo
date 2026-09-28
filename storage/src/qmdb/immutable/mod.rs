@@ -941,6 +941,41 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
+    /// A batch's proof and pinned nodes are refused once a sibling is applied.
+    #[boxed]
+    pub(crate) async fn run_proof_refused_after_sibling_apply<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+        let batch = db
+            .new_batch()
+            .set(Sha256::fill(1u8), Sha256::fill(101u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let sibling = db
+            .new_batch()
+            .set(Sha256::fill(1u8), Sha256::fill(102u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        assert!(batch.proof(&db).is_ok());
+        assert!(batch.pinned_nodes(&db).is_ok());
+
+        // Applying the sibling moves the database off the batch's chain.
+        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        assert!(matches!(batch.proof(&db), Err(Error::StaleRead)));
+        assert!(matches!(batch.pinned_nodes(&db), Err(Error::StaleRead)));
+        db.destroy().await.unwrap();
+    }
+
     /// Batch reads cover only operations at or above the chain's inactivity floor, so a long-lived,
     /// a pruned, and a reopened instance at the same commitment all answer alike.
     #[boxed]

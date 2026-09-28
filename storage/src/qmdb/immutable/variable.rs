@@ -272,6 +272,7 @@ mod tests {
         test_variable_merkleize_across_prune => run_merkleize_across_prune, open;
         test_variable_stale_fork_refuses => run_stale_fork_refuses, open;
         test_variable_reads_ignore_inactive_operations => run_reads_ignore_inactive_operations, open;
+        test_variable_proof_refused_after_sibling_apply => run_proof_refused_after_sibling_apply, open;
         test_variable_bounded_initialization_preserves_collision_bucket =>
             run_bounded_initialization_preserves_collision_bucket, open_with_max;
         test_variable_bounded_initialization_after_reopen_repeated_key_gap =>
