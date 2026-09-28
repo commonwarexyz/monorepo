@@ -1,7 +1,7 @@
 //! Floor installation and the delivery resets it drives.
 
 use super::*;
-use crate::multimmit::testing::expect_within;
+use crate::multimmit::{marshal::OutputIndex, testing::expect_within};
 
 #[test]
 fn delivery_reset_preempts_cold_materialization() {
@@ -63,7 +63,7 @@ fn delivery_reset_preempts_cold_materialization() {
         .start();
         gate.blocked.await.unwrap();
         let reset = control
-            .reset(current.floor_generation(), Some(OutputIndex::ZERO))
+            .reset(current.floor_generation(), OutputIndex::new(1))
             .unwrap();
         select! {
             applied = reset.wait() => assert!(matches!(applied, Err(Error::DeliveryClosed))),
@@ -75,8 +75,11 @@ fn delivery_reset_preempts_cold_materialization() {
         for _ in 0..10 {
             context.sleep(std::time::Duration::from_millis(1)).await;
         }
-        assert!(!reporter.contains(OutputIndex::ZERO));
-        assert_eq!(client.progress().await.unwrap().acknowledged, None);
+        assert!(!reporter.contains(OutputIndex::new(1)));
+        assert_eq!(
+            client.progress().await.unwrap().acknowledged,
+            OutputIndex::zero()
+        );
         assert!(delivery_handle.await.unwrap().is_err());
         drop(control);
         drop(client);
@@ -147,7 +150,7 @@ fn floor_install_supersedes_queued_committed_body_read() {
         let batch = output_commit(&current, &blocks);
         let emitted = batch.checkpoint.emitted().to_vec();
         let handoff = vec![hot_output(
-            OutputIndex::ZERO,
+            OutputIndex::new(1),
             &blocks[0],
             current.floor_generation(),
         )];
@@ -155,7 +158,7 @@ fn floor_install_supersedes_queued_committed_body_read() {
             .await
             .unwrap();
         drive_pending_syncs(&syncs, token.wait()).await.unwrap();
-        wait_for_report(&context, &reporter, OutputIndex::ZERO).await;
+        wait_for_report(&context, &reporter, OutputIndex::new(1)).await;
 
         let genesis = committee.config.genesis();
         let base = TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
@@ -180,7 +183,7 @@ fn floor_install_supersedes_queued_committed_body_read() {
             record.commitment::<Sha256>(),
             0,
             emitted,
-            Some(OutputIndex::new(1)),
+            OutputIndex::new(2),
         );
 
         syncs.arm();
@@ -200,9 +203,9 @@ fn floor_install_supersedes_queued_committed_body_read() {
             _ = &mut install => panic!("installation overtook admission durability"),
             _ = context.sleep(std::time::Duration::from_millis(1)) => {},
         }
-        assert!(reporter.acknowledge(OutputIndex::ZERO));
+        assert!(reporter.acknowledge(OutputIndex::new(1)));
         context.sleep(std::time::Duration::from_millis(1)).await;
-        assert!(!reporter.contains(OutputIndex::new(1)));
+        assert!(!reporter.contains(OutputIndex::new(2)));
         syncs.unblock();
         expect_within(
             &context,
@@ -215,8 +218,8 @@ fn floor_install_supersedes_queued_committed_body_read() {
         staged.wait().await.unwrap();
         let progress = client.progress().await.unwrap();
         assert_eq!(progress.floor_generation, 1);
-        assert_eq!(progress.acknowledged, Some(OutputIndex::new(1)));
-        assert!(!reporter.contains(OutputIndex::new(1)));
+        assert_eq!(progress.acknowledged, OutputIndex::new(2));
+        assert!(!reporter.contains(OutputIndex::new(2)));
         delivery_handle.abort();
         let _ = delivery_handle.await;
         drop(install);
@@ -252,18 +255,18 @@ fn queued_generation_reset_preempts_acknowledgement_refill() {
             .await
             .unwrap();
 
-        wait_for_report(&context, &reporter, OutputIndex::ZERO).await;
-        let reset = delivery_control.reset(1, None).unwrap();
-        assert!(reporter.acknowledge(OutputIndex::ZERO));
+        wait_for_report(&context, &reporter, OutputIndex::new(1)).await;
+        let reset = delivery_control.reset(1, OutputIndex::zero()).unwrap();
+        assert!(reporter.acknowledge(OutputIndex::new(1)));
         let mut reset = Box::pin(reset.wait());
-        let mut next_report = Box::pin(wait_for_report(&context, &reporter, OutputIndex::new(1)));
+        let mut next_report = Box::pin(wait_for_report(&context, &reporter, OutputIndex::new(2)));
         commonware_macros::select! {
             applied = &mut reset => assert!(matches!(applied, Err(Error::DeliveryClosed))),
             _ = &mut next_report => {
                 panic!("delivery refilled before applying a queued generation reset")
             },
         }
-        assert!(!reporter.contains(OutputIndex::new(1)));
+        assert!(!reporter.contains(OutputIndex::new(2)));
 
         let _ = delivery_handle.await;
         drop(delivery_control);
@@ -302,7 +305,15 @@ fn oversized_install_intent_is_rejected_before_archive_mutation() {
         );
         assert_eq!(proof.leader().history(), history);
         let id = proof.id::<Sha256>();
-        let target = checkpoint(&committee, 1, id, history, 0, genesis.tips().to_vec(), None);
+        let target = checkpoint(
+            &committee,
+            1,
+            id,
+            history,
+            0,
+            genesis.tips().to_vec(),
+            OutputIndex::zero(),
+        );
         let prune = PendingFloors {
             lqc: View::new(proof.view().get() + 1),
             history: View::new(proof.view().get() + 1),
@@ -321,7 +332,7 @@ fn oversized_install_intent_is_rejected_before_archive_mutation() {
             history_index: None,
             ordered: genesis.tips().to_vec(),
             emitted: genesis.tips().to_vec(),
-            committed: None,
+            floor_index: OutputIndex::zero(),
         })
         .unwrap();
         let ready = CatalogState::ready(current, None);
@@ -418,7 +429,7 @@ fn floor_install_resets_delivery_then_prunes_the_old_generation() {
             floor_history,
             1,
             lifecycle.emitted(),
-            Some(OutputIndex::ZERO),
+            OutputIndex::new(1),
         );
         let stale_history_index = checkpoint(
             committee,
@@ -427,12 +438,13 @@ fn floor_install_resets_delivery_then_prunes_the_old_generation() {
             floor_history,
             0,
             lifecycle.emitted(),
-            Some(OutputIndex::ZERO),
+            OutputIndex::new(1),
         );
         assert!(matches!(
             client.install(request(stale_history_index)).await,
             Err(error) if error.is_rejected()
         ));
+        // A floor below the committed index would leave outputs without rows.
         let phantom_output = checkpoint(
             committee,
             1,
@@ -440,13 +452,16 @@ fn floor_install_resets_delivery_then_prunes_the_old_generation() {
             floor_history,
             1,
             lifecycle.emitted(),
-            Some(OutputIndex::new(1)),
+            OutputIndex::zero(),
         );
         assert!(matches!(
             client.install(request(phantom_output)).await,
             Err(error) if error.is_rejected()
         ));
 
+        // The engine no longer verifies the other chain's block, so the installation reclaims it.
+        let other = lifecycle.other_chain.reference();
+        assert!(client.release(other.chain(), other.height()).accepted());
         let mut installation = Box::pin(client.install(request(installed.clone())));
         let reset = select! {
             result = &mut installation => {
@@ -463,7 +478,7 @@ fn floor_install_resets_delivery_then_prunes_the_old_generation() {
             unreachable!("next_reset returns a reset");
         };
         assert_eq!(floor_generation, 1);
-        assert_eq!(acknowledged, Some(OutputIndex::ZERO));
+        assert_eq!(acknowledged, OutputIndex::new(1));
         assert_eq!(reset.len(), 1);
         client
             .reset_delivery_cursor(floor_generation, acknowledged)
@@ -473,13 +488,14 @@ fn floor_install_resets_delivery_then_prunes_the_old_generation() {
             let _ = acknowledgement.send(Ok(()));
         }
         installation.await.unwrap();
+        assert!(client.block(other).await.unwrap().is_none());
         assert_eq!(
             client.progress().await.unwrap(),
             MarshalProgress {
                 floor_generation: 1,
                 floor: floor_id,
-                committed: Some(OutputIndex::ZERO),
-                acknowledged: Some(OutputIndex::ZERO),
+                committed: OutputIndex::new(1),
+                acknowledged: OutputIndex::new(1),
             }
         );
         assert_eq!(
@@ -490,7 +506,7 @@ fn floor_install_resets_delivery_then_prunes_the_old_generation() {
         assert!(client.lqc(proof_id).await.unwrap().is_some());
         assert_eq!(
             client
-                .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024 * 1024))
+                .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024 * 1024))
                 .await
                 .unwrap()[0]
                 .reference,
@@ -504,33 +520,35 @@ fn floor_install_resets_delivery_then_prunes_the_old_generation() {
             client.install(request(installed)).await,
             Err(error) if error.is_rejected()
         ));
+        // The installed floor ends at the same index as the old generation's, and supersedes it.
+        let (index, floor) = client.floor_at(OutputIndex::new(1)).await.unwrap().unwrap();
+        assert_eq!(index, OutputIndex::new(1));
+        assert_eq!(floor.anchor().id::<Sha256>(), floor_id);
 
-        // Pruning the new generation reclaims every artifact of the old one.
-        assert!(matches!(client.prune(0).await, Err(error) if error.is_rejected()));
-        client.prune(1).await.unwrap();
-        client.prune(1).await.unwrap();
+        // A delayed request below the installed floor finds no floor to prune to.
+        client.prune(OutputIndex::zero()).await.unwrap();
+        assert!(client.lqc(proof_id).await.unwrap().is_some());
+
+        // Pruning at the installed floor reclaims every artifact of the old generation, except
+        // the block its chain builds on next, which the floor's frontier names.
+        client.prune(OutputIndex::new(1)).await.unwrap();
+        client.prune(OutputIndex::new(1)).await.unwrap();
         assert!(client.lqc(proof_id).await.unwrap().is_none());
-        assert!(client.block(reference).await.unwrap().is_none());
-        assert!(
-            client
-                .block(lifecycle.other_chain.reference())
-                .await
-                .unwrap()
-                .is_none()
-        );
+        let (_, floor) = client.floor_at(OutputIndex::new(1)).await.unwrap().unwrap();
+        assert_eq!(floor.anchor().id::<Sha256>(), floor_id);
+        assert!(client.block(reference).await.unwrap().is_some());
 
-        // The committed row is gone with its generation, so reading it stops the catalog.
-        assert!(matches!(
+        // Outputs at the pruning index stay retained, even where the floor ends there.
+        assert_eq!(
             client
-                .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024 * 1024))
-                .await,
-            Err(Error::Closed)
-        ));
-        assert!(matches!(
-            handle.await,
-            Ok(Err(Fatal::Storage(StorageError::Inconsistent(_))))
-        ));
+                .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024 * 1024))
+                .await
+                .unwrap()[0]
+                .reference,
+            reference
+        );
         drop(client);
+        assert!(handle.await.is_ok());
 
         let (client, handle, _delivery) = open(&context, "installed_reopen", committee).await;
         assert_eq!(client.progress().await.unwrap().floor, floor_id);

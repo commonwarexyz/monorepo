@@ -5,7 +5,7 @@
 //! against one hot-byte budget.
 
 use crate::multimmit::{
-    marshal::{storage::catalog::StoredRef, types::OutputIndex},
+    marshal::{OutputIndex, storage::catalog::StoredRef},
     types::{Body, TransactionBlock},
 };
 use commonware_cryptography::{Digest, Hasher};

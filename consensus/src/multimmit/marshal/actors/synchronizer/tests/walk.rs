@@ -29,12 +29,12 @@ fn full_commit_window_consumes_header_input_before_durability() {
         actor.catalog.commit_waiters = Some(Arc::clone(&waiters));
 
         actor
-            .commit(publication(vec![planned(0, &blocks[0])]))
+            .commit(publication(vec![planned(1, &blocks[0])]))
             .await
             .unwrap();
         assert_eq!(waiters.lock().len(), 1);
         actor
-            .commit(publication(vec![planned(1, &blocks[0])]))
+            .commit(publication(vec![planned(2, &blocks[0])]))
             .await
             .unwrap();
         assert_eq!(waiters.lock().len(), 2);
@@ -66,7 +66,7 @@ fn full_commit_window_consumes_header_input_before_durability() {
             }),
             Feedback::Ok
         );
-        let mut third = Box::pin(actor.commit(publication(vec![planned(2, &blocks[0])])));
+        let mut third = Box::pin(actor.commit(publication(vec![planned(3, &blocks[0])])));
         assert_eq!(waiters.lock().len(), COMMIT_WINDOW);
         let release = async {
             commonware_runtime::utils::reschedule().await;
