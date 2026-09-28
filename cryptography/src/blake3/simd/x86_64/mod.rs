@@ -136,19 +136,44 @@ impl Nodes<8> for Avx2 {
 pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     if supports_avx512() {
         let pack = |messages: &[&[u8]], digests: &mut _| Avx512(()).pack(messages, digests);
-        return Some(batch(messages, avx512::MINIMUM, pack, |inputs, _| {
-            // SAFETY: AVX-512F availability was established above.
-            unsafe { avx512::hash_x16(inputs) }
+        return Some(batch(messages, avx512::MINIMUM, pack, |inputs, active| {
+            pair_batch(inputs, active).unwrap_or_else(|| {
+                // SAFETY: AVX-512F availability was established above.
+                unsafe { avx512::hash_x16(inputs) }
+            })
         }));
     }
     if supports_avx2() {
         let pack = |messages: &[&[u8]], digests: &mut _| Avx2(()).pack(messages, digests);
-        return Some(batch(messages, avx2::MINIMUM, pack, |inputs, _| {
-            // SAFETY: AVX2 availability was established above.
-            unsafe { avx2::hash_x8(inputs) }
+        return Some(batch(messages, avx2::MINIMUM, pack, |inputs, active| {
+            pair_batch(inputs, active).unwrap_or_else(|| {
+                // SAFETY: AVX2 availability was established above.
+                unsafe { avx2::hash_x8(inputs) }
+            })
         }));
     }
     None
+}
+
+/// Hash a batch whose only active lanes are the first two with the two-message
+/// kernel, when both messages fit it.
+///
+/// A pass of the batch kernel costs as much with idle lanes as with full ones,
+/// while the two-message kernel holds each message's state in one vector and
+/// does a fraction of that work. Spare outputs are zero.
+fn pair_batch<const L: usize>(inputs: [&[u8]; L], active: usize) -> Option<[[u8; OUT_LEN]; L]> {
+    let len = inputs[0].len();
+    if active != 2 || len > PAIR_LEN {
+        return None;
+    }
+    let mut left = [0u8; PAIR_LEN];
+    let mut right = [0u8; PAIR_LEN];
+    left[..len].copy_from_slice(inputs[0]);
+    right[..len].copy_from_slice(inputs[1]);
+    let pair = hash_pair(&left, &right, len)?;
+    let mut outputs = [[0u8; OUT_LEN]; L];
+    outputs[..2].copy_from_slice(&pair);
+    Some(outputs)
 }
 
 #[cfg(test)]
@@ -186,9 +211,11 @@ mod tests {
         }
         let pack = |messages: &[&[u8]], digests: &mut _| Avx2(()).pack(messages, digests);
         check_batch(|messages| {
-            batch(messages, avx2::MINIMUM, pack, |inputs, _| {
-                // SAFETY: AVX2 availability was checked above.
-                unsafe { avx2::hash_x8(inputs) }
+            batch(messages, avx2::MINIMUM, pack, |inputs, active| {
+                pair_batch(inputs, active).unwrap_or_else(|| {
+                    // SAFETY: AVX2 availability was checked above.
+                    unsafe { avx2::hash_x8(inputs) }
+                })
             })
         });
     }
@@ -200,9 +227,11 @@ mod tests {
         }
         let pack = |messages: &[&[u8]], digests: &mut _| Avx512(()).pack(messages, digests);
         check_batch(|messages| {
-            batch(messages, avx512::MINIMUM, pack, |inputs, _| {
-                // SAFETY: AVX-512F availability was checked above.
-                unsafe { avx512::hash_x16(inputs) }
+            batch(messages, avx512::MINIMUM, pack, |inputs, active| {
+                pair_batch(inputs, active).unwrap_or_else(|| {
+                    // SAFETY: AVX-512F availability was checked above.
+                    unsafe { avx512::hash_x16(inputs) }
+                })
             })
         });
     }

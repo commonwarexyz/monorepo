@@ -35,7 +35,6 @@ use blake3::{BLOCK_LEN, CHUNK_LEN, OUT_LEN, hazmat::HasherExt as _};
 mod aarch64;
 #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
 pub(super) use aarch64::subtree;
-#[cfg(any(test, target_arch = "aarch64"))]
 mod portable;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
@@ -471,12 +470,14 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
 /// Hash one message, with its chunks and parents in SIMD lanes when it spans
 /// at least two full chunks and a kernel is available.
 ///
-/// On aarch64, the [blake3] crate compresses a message of at most one chunk
-/// with portable code behind its incremental chunk state, so such a message
-/// is compressed with the portable words directly.
+/// A message of at most one chunk is one chain of dependent compressions, so
+/// it is compressed with the portable words directly, in general-purpose
+/// registers. The [blake3] crate compresses it behind its incremental chunk
+/// state, with portable code on aarch64 and with the state rows in vectors on
+/// x86_64, where vector instruction latency (two cycles on Zen 5) lengthens
+/// the chain.
 #[inline]
 pub(super) fn hash_one(message: &[u8]) -> Digest {
-    #[cfg(target_arch = "aarch64")]
     if message.len() <= CHUNK_LEN {
         // SAFETY: The portable words require no target features.
         let [digest] = unsafe {
@@ -892,9 +893,17 @@ mod tests {
     }
 
     /// Check `hash_many` against the reference for every count up to 33 at
-    /// lengths that pack, fall back, or end in a partial chunk.
+    /// lengths that fit the two-message kernel, pack, fall back, or end in a
+    /// partial chunk.
     pub(super) fn check_batch(hash_many: impl Fn(&[Vec<u8>]) -> Vec<Digest>) {
         for len in [
+            0,
+            1,
+            64,
+            65,
+            72,
+            128,
+            129,
             1025,
             2048,
             3072,
