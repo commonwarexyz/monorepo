@@ -1,7 +1,7 @@
 //! Finalized publication batching and restart reconciliation tests.
 
 use super::*;
-use crate::types::View;
+use crate::{multimmit::marshal::OutputIndex, types::View};
 
 #[test]
 fn finalized_publication_does_not_reload_custodied_bodies() {
@@ -66,9 +66,10 @@ fn long_gap_uses_capped_dense_batches() {
         );
         assert!(actor.catalog.batches.iter().all(|size| *size <= BATCH));
         assert_eq!(actor.catalog.batches.iter().sum::<usize>(), GAP);
+        // The base sits at height 10,000 on the only chain.
         assert_eq!(
             actor.catalog.checkpoint.committed(),
-            Some(OutputIndex::new(511))
+            OutputIndex::new(10_000 + GAP as u64)
         );
         assert_eq!(actor.block_stack.writes_since_reset, GAP);
     });

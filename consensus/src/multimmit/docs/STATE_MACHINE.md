@@ -207,21 +207,24 @@ actor.
 
 The public `Mailbox` implements best-effort `Reporter<Activity>`. It also supports durable block
 submission, eager buffered complete-block broadcast, local get, network fetch, local subscription,
-authenticated floor installation, generation-bound pruning, and compact progress inspection. A
-subscription waits for local admission and does not start network work; a fetch does.
+authenticated floor installation, floor lookup and pruning by output index, and compact progress
+inspection. A subscription waits for local admission and does not start network work; a fetch does.
 
 Finalized L-QCs, history openings, and dense producer blocks use independently configurable prunable
 or immutable archives. Unfinalized same-view and same-position candidates use prunable
 `MultiArchive`; successful commits and floor installation advance their prune frontier internally.
-Application pruning is explicit through `Mailbox::prune(Prune::new(generation))`. Immutable final
-archives retain old values and treat pruning as a no-op.
+Application pruning is explicit through `Mailbox::prune(below)`, which drops what the newest floor
+at or below `below` (and the acknowledgement cursor) makes obsolete and keeps that floor servable.
+Immutable final archives retain old values and treat pruning as a no-op.
 
 `Start::Genesis` opens or resumes the namespace at protocol genesis. `Start::Floor` seeds only an
 empty namespace and trusts the caller to authenticate the application snapshot, signature, and
 generation that justify the supplied floor. Runtime state sync uses `install_floor`, which verifies
 the L-QC, its opening, non-regressing ordering frontiers, and internal sweep consistency before
 durably installing a new generation. Delivery resumes strictly after the application-owned emitted
-frontier.
+frontier, at the index that frontier's heights sum to. `floor_at` serves the newest retained floor at
+or below an output index: each floor-establishing L-QC is recorded with the frontier its final
+sweep ends at, so another node can install that floor and resume at the same indices.
 
 ### Startup and recovery
 
@@ -644,9 +647,12 @@ Marshal checks a separate invariant set after every durable commit and recovery:
 - **M-INV-02:** The selected finalized L-QC, history index, ordered frontier, emitted frontier,
   committed output, and acknowledged output are one canonical checkpoint. Every frontier is chain
   ordered and monotone within its generation.
-- **M-INV-03:** Dense outputs are contiguous by `OutputIndex`; each index names one complete
-  transaction block. History is processed oldest first. Each sweep visits every chain's proposed
-  region before any chain's extension region, preserving offset-major order within each pass.
+- **M-INV-03:** Dense outputs are contiguous by `OutputIndex` above the floor index; each index
+  names one complete transaction block. Every output advances one chain by one height, so the
+  committed index is the sum of the emitted frontier's heights and is the same on every node,
+  whichever floor it started from. History is processed oldest first. Each sweep visits every
+  chain's proposed region before any chain's extension region, preserving offset-major order
+  within each pass.
 - **M-INV-04:** Evidence, openings, blocks, and output rows are durable before checkpoint exposure. An
   ordinary checkpoint carries its remaining temporary-cleanup obligation, which startup completes
   before serving reads. Delivery advances only through a contiguous FIFO prefix whose `Exact`
@@ -654,8 +660,8 @@ Marshal checks a separate invariant set after every durable commit and recovery:
 - **M-INV-05:** A runtime floor first persists one bounded intent containing the verified L-QC,
   opening, target checkpoint, and cleanup floors. Catalog completes that intent before serving reads,
   keeps it durable while both finalized archives sync and temporary data is pruned, then publishes
-  the target checkpoint by replacing the intent with one ready state. Delayed generation-bound prune
-  requests cannot affect a newer floor.
+  the target checkpoint by replacing the intent with one ready state. Output indices are canonical
+  across installations, so a delayed prune request cannot affect a newer floor.
 - **M-INV-06:** Backfill fetches recheck Catalog before peer work. Deliveries are bounded,
   generation-scoped, matched to their request key, decoded under protocol limits, and independently
   verified before Catalog admission. Buffered broadcast is only an eager complete-block cache.

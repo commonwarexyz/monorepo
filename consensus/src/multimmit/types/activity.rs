@@ -2,7 +2,7 @@
 
 use crate::{
     multimmit::types::{Artifact, ArtifactId, BlockRef, FinalityFact, TipRecord},
-    types::{Epoch, View},
+    types::{Epoch, Height, View},
 };
 use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
 use std::sync::Arc;
@@ -55,10 +55,12 @@ impl<D: Digest> SelectedCommitments<D> {
     }
 }
 
-/// A local proposal, contextually admitted artifact, or consensus finality observation.
+/// A local proposal, contextually admitted artifact, consensus finality observation, or durable
+/// record.
 ///
-/// Activities are idempotent, best-effort observations. They do not acknowledge delivery,
-/// authorize protocol progress, or control retention.
+/// Activities are idempotent, best-effort observations. They do not acknowledge delivery or
+/// authorize protocol progress. Only [`Activity::CertificateRecorded`] bounds what an application
+/// retains for the engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activity<V: Variant, D: Digest> {
     /// Selected producer paths reconstructed from authenticated consensus evidence.
@@ -98,6 +100,21 @@ pub enum Activity<V: Variant, D: Digest> {
         commitment: D,
         /// Opening reconstructed from the retained parent state.
         record: Arc<TipRecord<D>>,
+    },
+    /// The engine durably recorded `certified` as the newest certified block of its chain: a DA
+    /// certificate for it, or the chain's genesis tip when the engine starts without one.
+    ///
+    /// The engine never again depends on the application's verdict for a block of that chain at
+    /// or below `released`, including after a restart; a verification it already dispatched may
+    /// still arrive, and its verdict is ignored. `released` trails `certified` by the pipeline
+    /// depth, because the engine keeps its DA votes for blocks just below a certificate. The
+    /// engine reports this once each record is durable, and for every chain's newest record when
+    /// it starts, so an application can prune what the engine no longer needs.
+    CertificateRecorded {
+        /// The newest block of its chain whose DA certificate is durably recorded.
+        certified: BlockRef<D>,
+        /// The highest height of the chain that the engine no longer verifies.
+        released: Height,
     },
 }
 

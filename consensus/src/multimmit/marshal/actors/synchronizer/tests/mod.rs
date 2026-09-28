@@ -12,6 +12,7 @@ use crate::{
     Epochable as _, Viewable as _,
     multimmit::{
         marshal::{
+            OutputIndex,
             actors::{
                 backfill::{CustodiedBlock, SharedHeaders, SharedHistory},
                 delivery,
@@ -23,11 +24,11 @@ use crate::{
                 order::{self, Slot, SlotStream},
             },
             storage::{
-                catalog_state::{Checkpoint, CheckpointParts, PendingFloors},
+                catalog_state::{Checkpoint, CheckpointParts, PendingFloors, frontier_index},
                 commit::{Commit, CustodyRef, OutputRow},
                 scratch::{BlockStack, HistoryLink, HistoryStack},
             },
-            types::{CustodyValues, Floor, LqcVerifier, OutputIndex},
+            types::{CustodyValues, Floor, LqcVerifier},
             wire::max_block_segment_items,
         },
         mocks::Committee,
@@ -269,6 +270,8 @@ fn checkpoint(
     ordered: Vec<BlockRef<Sha256Digest>>,
     emitted: Vec<BlockRef<Sha256Digest>>,
 ) -> Checkpoint<Sha256Digest> {
+    // Every test starts from a floor, with no output rows below its frontier.
+    let floor_index = frontier_index(&emitted).unwrap();
     Checkpoint::try_from(CheckpointParts {
         epoch,
         floor_generation: 0,
@@ -282,7 +285,7 @@ fn checkpoint(
         history_index: None,
         ordered,
         emitted,
-        committed: None,
+        floor_index,
     })
     .unwrap()
 }

@@ -14,12 +14,14 @@ use super::{
 use crate::{
     multimmit::{
         marshal::{
+            OutputIndex,
             storage::{
                 Error as StorageError,
                 catalog::CatalogStore,
+                catalog_state::Checkpoint,
                 pending::{BODY_READ_CONCURRENCY, BodyReadGroup},
             },
-            types::{BodyValues, OutputIndex, Reply},
+            types::{BodyValues, Reply},
         },
         types::{BlockRef, Body, ChainId, TransactionBlock},
     },
@@ -553,7 +555,7 @@ where
 /// within `max_bytes` (one larger row is returned alone).
 pub(super) async fn read_output_refs<T, E, H, V, B>(
     stores: &CatalogStore<T, E, H, V, B>,
-    committed: OutputIndex,
+    durable: &Checkpoint<H::Digest>,
     start: OutputIndex,
     max_items: NonZeroUsize,
     max_bytes: NonZeroUsize,
@@ -567,10 +569,34 @@ where
     B: Body<H>,
     B::Cfg: Clone,
 {
+    let retained = match outcome(stores.first_output_row())? {
+        Ok(first) => first.unwrap_or(u64::MAX),
+        Err(error) => {
+            reply.send_lossy(Err(error));
+            return Ok(());
+        }
+    };
+    // Rows at or below the floor index were committed by earlier generations, each ending where
+    // the next installed floor skipped ahead of it, or were pruned, so a read that begins there
+    // resumes at the next retained row.
+    let mut start = start.get();
+    if start <= durable.floor_index().get() {
+        match outcome(stores.next_output_row(start))? {
+            Ok(Some(next)) => start = next,
+            Ok(None) => {
+                reply.send_lossy(Ok(Vec::new()));
+                return Ok(());
+            }
+            Err(error) => {
+                reply.send_lossy(Err(error));
+                return Ok(());
+            }
+        }
+    }
     let max_bytes = u64::try_from(max_bytes.get()).unwrap_or(u64::MAX);
     let mut encoded_bytes = 0u64;
     let mut outputs = Vec::new();
-    for index in start.get()..=committed.get() {
+    for index in start..=durable.committed().get() {
         if outputs.len() == max_items.get() {
             break;
         }
@@ -578,7 +604,23 @@ where
             return Ok(());
         }
         let output = match outcome(stores.stored_ref(index).await)? {
-            Ok(output) => output,
+            Ok(Some(output)) => output,
+            // Rows below the first retained row were pruned, and a run of rows below the floor
+            // index ends where an installed floor skipped ahead of it.
+            Ok(None) if index < retained || index <= durable.floor_index().get() => {
+                if outputs.is_empty() {
+                    reply.send_lossy(Err(Error::Invalid(
+                        "output range does not begin at a retained row",
+                    )));
+                    return Ok(());
+                }
+                break;
+            }
+            Ok(None) => {
+                return Err(Fatal::Storage(StorageError::Inconsistent(
+                    "committed output row is missing",
+                )));
+            }
             Err(error) => {
                 reply.send_lossy(Err(error));
                 return Ok(());

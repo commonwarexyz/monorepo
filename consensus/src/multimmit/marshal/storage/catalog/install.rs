@@ -7,7 +7,7 @@ use crate::{
         marshal::storage::{
             Error,
             catalog_state::{Checkpoint, PendingFloors},
-            pending::ChainFloors,
+            floors::FloorRecord,
         },
         types::{Body, Lqc, TipRecord},
     },
@@ -101,7 +101,7 @@ where
         Ok(())
     }
 
-    /// Makes the floor L-QC and history opening durable in the finalized archives.
+    /// Makes the floor L-QC, its floor, and the history opening durable in the finalized archives.
     pub(super) async fn archive_install(
         &mut self,
         checkpoint: &Checkpoint<H::Digest>,
@@ -116,15 +116,15 @@ where
             .history_index()
             .ok_or(Error::Inconsistent("installed floor has no history index"))?;
         let InstallArtifacts { proof, history } = artifacts;
+        let id = proof.id::<H>().get();
+        let floor = FloorRecord::new(history_index, checkpoint.emitted_frontier().clone())
+            .expect("a checkpoint's emitted frontier fits the output index");
         let lqc = self.final_lqc.take()?;
+        let floors = self.final_floors.take()?;
         let histories = self.final_history.take()?;
-        let (lqc, histories) = futures::try_join!(
-            async move {
-                lqc.put(lqc_index, proof.id::<H>().get(), proof)
-                    .await?
-                    .sync()
-                    .await
-            },
+        let (lqc, floors, histories) = futures::try_join!(
+            async move { lqc.put(lqc_index, id, proof).await?.sync().await },
+            async move { floors.put(lqc_index, id, floor).await?.sync().await },
             async move {
                 histories
                     .put(history_index, history.commitment::<H>(), history)
@@ -134,6 +134,7 @@ where
             },
         )?;
         self.final_lqc.restore(lqc);
+        self.final_floors.restore(floors);
         self.final_history.restore(histories);
         Ok(())
     }
@@ -187,9 +188,10 @@ where
     /// Prunes pending archives to the installation's floors.
     ///
     /// A prunable namespace keeps a chain's pending blocks when the current emitted block is
-    /// already a finalized row, because application pruning still owns those bodies. Immutable
-    /// promotion may still be copying a pre-install output, so an immutable namespace keeps every
-    /// chain; retaining custody is safe across every crash cut, and the durable promotion cursor
+    /// already a finalized row, because application pruning still owns those bodies, and keeps
+    /// every block the engine may still verify (see [`Self::release`]). Immutable promotion may
+    /// still be copying a pre-install output, so an immutable namespace keeps every chain;
+    /// retaining custody is safe across every crash cut, and the durable promotion cursor
     /// reclaims it after restart.
     async fn prune_install(&mut self, floors: PendingFloors) -> Result<(), Error> {
         let retained = if self.prunable_blocks {
@@ -206,12 +208,13 @@ where
         } else {
             vec![true; self.pending_blocks.chain_count()]
         };
-        let block_floors = floors
-            .blocks
-            .into_iter()
-            .zip(retained)
-            .map(|(floor, retained)| (!retained).then_some(floor))
-            .collect::<ChainFloors>();
+        let block_floors = self.verifiable(
+            floors
+                .blocks
+                .into_iter()
+                .zip(retained)
+                .map(|(floor, retained)| (!retained).then_some(floor)),
+        );
         let unpinned = BTreeSet::new();
         let lqc = self.pending_lqc.take()?;
         let history = self.pending_history.take()?;

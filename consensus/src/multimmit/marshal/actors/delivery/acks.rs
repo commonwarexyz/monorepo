@@ -5,7 +5,7 @@
 //! window of unacknowledged outputs never waits on storage, and only one sync is in flight.
 
 use super::actor::Error;
-use crate::multimmit::marshal::types::OutputIndex;
+use crate::multimmit::marshal::OutputIndex;
 use commonware_macros::select;
 use commonware_runtime::telemetry::metrics::histogram::Timer;
 use commonware_utils::acknowledgement::{Canceled, ExactWaiter};
@@ -84,24 +84,18 @@ impl PendingAcks {
         NonZeroUsize::new(self.max - self.queue.len()).expect("delivery window has capacity")
     }
 
-    pub(super) fn next(
-        &self,
-        acknowledged: Option<OutputIndex>,
-    ) -> Result<Option<OutputIndex>, Error> {
+    /// Returns the index of the next output to report, given the durable cursor.
+    pub(super) fn next(&self, acknowledged: OutputIndex) -> OutputIndex {
         if let Some(pending) = self.queue.back() {
-            return Ok(pending.index.next());
+            return pending.index.next();
         }
         if let Some(ready) = &self.ready {
-            return Ok(ready.through.next());
+            return ready.through.next();
         }
-        self.syncing.as_ref().map_or_else(
-            || {
-                OutputIndex::after(acknowledged)
-                    .map(Some)
-                    .ok_or(Error::IndexExhausted)
-            },
-            |syncing| Ok(syncing.through.next()),
-        )
+        self.syncing
+            .as_ref()
+            .map_or(acknowledged, |syncing| syncing.through)
+            .next()
     }
 
     pub(super) fn push(&mut self, index: OutputIndex, waiter: ExactWaiter) {
@@ -138,11 +132,10 @@ impl PendingAcks {
         let Acknowledged { through, outputs } = acknowledged;
         debug_assert_ne!(outputs, 0);
         if let Some(ready) = &mut self.ready {
-            let first = through
-                .get()
-                .checked_sub(u64::try_from(outputs - 1).unwrap_or(u64::MAX))
-                .map(OutputIndex::new);
-            debug_assert_eq!(ready.through.next(), first);
+            debug_assert_eq!(
+                ready.through.get().checked_add(outputs as u64),
+                Some(through.get())
+            );
             ready.through = through;
             ready.outputs = ready.outputs.saturating_add(outputs);
         } else {

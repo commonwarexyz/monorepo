@@ -5,6 +5,7 @@ use crate::{
     Epochable as _, Viewable as _,
     multimmit::{
         marshal::{
+            OutputIndex,
             actors::delivery,
             open::{Opened, storage as open_storage},
             storage::{
@@ -108,7 +109,7 @@ fn genesis_checkpoint(committee: &Committee<MinPk>) -> Checkpoint<Sha256Digest> 
         history_index: None,
         ordered: genesis.tips().to_vec(),
         emitted: genesis.tips().to_vec(),
-        committed: None,
+        floor_index: OutputIndex::zero(),
     })
     .unwrap()
 }
@@ -124,7 +125,7 @@ fn parts(checkpoint: &Checkpoint<Sha256Digest>) -> CheckpointParts<Sha256Digest>
         history_index: checkpoint.history_index(),
         ordered: checkpoint.ordered().to_vec(),
         emitted: checkpoint.emitted().to_vec(),
-        committed: checkpoint.committed(),
+        floor_index: checkpoint.floor_index(),
     }
 }
 
@@ -255,6 +256,13 @@ fn commit_crash_cuts_recover_the_last_published_checkpoint(
         let history = record.commitment::<Sha256>();
 
         let store = open(&context, "recovered", &config).await;
+        // The commit's floor is served only once its checkpoint is published, even when a crash
+        // left its record durable.
+        let floor = store
+            .floor_at(OutputIndex::new(u64::MAX), store.state().lqc_index())
+            .await
+            .unwrap();
+        assert_eq!(floor.is_some(), cut >= CommitCut::Published);
         if cut >= CommitCut::Published {
             assert_eq!(store.checkpoint(), &committed);
             assert_eq!(
@@ -515,7 +523,6 @@ fn restart_with_a_pending_install_seeds_the_delivery_cursor_at_the_install(
             history: base_history,
             history_index: Some(0),
             emitted,
-            committed: Some(OutputIndex::ZERO),
             ..parts(&genesis_checkpoint(&committee))
         })
         .unwrap();
@@ -526,7 +533,7 @@ fn restart_with_a_pending_install_seeds_the_delivery_cursor_at_the_install(
                 record: Arc::clone(&base),
             }],
             outputs: vec![OutputRow::new(
-                OutputIndex::ZERO,
+                OutputIndex::new(1),
                 CustodyRef::for_test(&block),
             )],
             checkpoint: committed.clone(),
@@ -598,6 +605,7 @@ fn restart_with_a_pending_install_seeds_the_delivery_cursor_at_the_install(
             floor: proof.id::<Sha256>(),
             history,
             history_index: Some(1),
+            floor_index: committed.committed(),
             ..parts(&committed)
         })
         .unwrap();
@@ -631,12 +639,12 @@ fn restart_with_a_pending_install_seeds_the_delivery_cursor_at_the_install(
         .await
         .unwrap();
         assert_eq!(cursor.floor_generation(), 1);
-        assert_eq!(cursor.acknowledged(), Some(OutputIndex::ZERO));
+        assert_eq!(cursor.acknowledged(), OutputIndex::new(1));
         let progress = client.progress().await.unwrap();
         assert_eq!(progress.floor_generation, 1);
         assert_eq!(progress.floor, proof.id::<Sha256>());
-        assert_eq!(progress.committed, Some(OutputIndex::ZERO));
-        assert_eq!(progress.acknowledged, Some(OutputIndex::ZERO));
+        assert_eq!(progress.committed, OutputIndex::new(1));
+        assert_eq!(progress.acknowledged, OutputIndex::new(1));
         assert_eq!(client.checkpoint().await.unwrap(), target);
         drop(cursor);
         drop(client);

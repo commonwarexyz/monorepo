@@ -146,7 +146,12 @@ fn dependency_blocked_artifact_is_not_reported_before_admission() {
             }
         }
 
-        let activities = reporter.activities();
+        // The engine reports its durable certificate records on start; nothing else is reported.
+        let activities: Vec<_> = reporter
+            .activities()
+            .into_iter()
+            .filter(|activity| !matches!(activity, Activity::CertificateRecorded { .. }))
+            .collect();
         assert!(
             activities.is_empty(),
             "dependency-blocked activity was reported before admission: {activities:?}"
