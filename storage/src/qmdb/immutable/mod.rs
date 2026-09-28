@@ -331,8 +331,9 @@ where
         self.bounds().end
     }
 
-    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
-    /// retained operations respectively.
+    /// Return the retained operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> Range<Location<F>> {
         Location::new(self.journal.bounds().start)..Location::new(self.journal.bounds().end)
     }
@@ -485,11 +486,11 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [crate::merkle::Error::LocationOverflow] if `op_count` or `start_loc` >
-    /// [crate::merkle::Family::MAX_LEAVES].
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
-    /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
+    /// Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+    /// with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
+    /// been pruned.
     /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
     /// commit op, either because the caller passed a non-commit-boundary `op_count` or
     /// because pruning removed the commit that would have governed `op_count`.
@@ -528,16 +529,17 @@ where
         self.historical_proof(op_count, start_index, max_ops).await
     }
 
-    /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
-    /// affect retrieval of any keys that were set prior to `prune_loc`.
+    /// Prune operations prior to `loc` without changing the db's root. Keys whose operations
+    /// are no longer retained cannot be retrieved.
+    ///
+    /// The retained start in [`Self::bounds`] can remain below `loc`.
     ///
     /// Pruning is irreversible and requires no prior commit. After a crash, the database remains
     /// recoverable; uncommitted operations are not guaranteed to survive.
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::merkle::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
+    /// - Returns [Error::PruneBeyondMinRequired] if `loc` > inactivity floor.
     #[tracing::instrument(name = "qmdb.immutable.db.prune", level = "info", skip_all)]
     #[boxed]
     pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
@@ -805,7 +807,7 @@ pub(super) mod tests {
                 #[test_traced]
                 fn $name() {
                     deterministic::Runner::default().start(|ctx| async move {
-                        tests::$scenario(ctx, $open::<mmr::Family>).await;
+                        immutable_tests!(@fixture $open, $scenario, mmr, ctx);
                     });
                 }
             )*
@@ -814,11 +816,23 @@ pub(super) mod tests {
                     #[test_traced]
                     fn [<$name _mmb>]() {
                         deterministic::Runner::default().start(|ctx| async move {
-                            tests::$scenario(ctx, $open::<mmb::Family>).await;
+                            immutable_tests!(@fixture $open, $scenario, mmb, ctx);
                         });
                     }
                 )*
             }
+        };
+        (@fixture pair, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db = Db::<$family::Family, _, Digest, Digest, Sha256, TwoCap, Sequential>::init(
+                $ctx.child("db"), config("db", &$ctx), None,
+            ).await.unwrap();
+            let foreign = Db::<$family::Family, _, Digest, Digest, Sha256, TwoCap, Sequential>::init(
+                $ctx.child("foreign"), config("foreign", &$ctx), None,
+            ).await.unwrap();
+            tests::$scenario(db, foreign).await;
+        };
+        (@fixture $open:ident, $scenario:ident, $family:ident, $ctx:ident) => {
+            tests::$scenario($ctx, $open::<$family::Family>).await;
         };
     }
 
@@ -971,8 +985,8 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Once a sibling batch is applied, reads and merkleization through the losing fork
-    /// refuse with [`Error::StaleRead`], while applying it is separately rejected.
+    /// Once a sibling batch is applied, losing-fork reads return `StaleRead`, while
+    /// merkleization and application return `StaleBatch`.
     #[boxed]
     pub(crate) async fn run_stale_fork_refuses<F: Family, V, C>(
         context: deterministic::Context,
@@ -1014,7 +1028,7 @@ pub(super) mod tests {
         assert!(matches!(loser.get(&k1, &db).await, Err(Error::StaleRead)));
         assert!(matches!(
             child.merkleize(&db, None, floor).await,
-            Err(Error::StaleRead)
+            Err(Error::StaleBatch)
         ));
         assert!(matches!(db.validate_batch(&loser), Err(Error::StaleBatch)));
         db.destroy().await.unwrap();
@@ -2815,6 +2829,97 @@ pub(super) mod tests {
     }
 
     #[boxed]
+    pub(crate) async fn run_merkleize_foreign_db<F: Family, V, C>(
+        db: TestDb<F, V, C>,
+        foreign: TestDb<F, V, C>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let key = Sha256::fill(1);
+        let batch = db
+            .new_batch()
+            .set(key, Sha256::fill(11))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let batch = foreign
+            .new_batch()
+            .set(key, Sha256::fill(99))
+            .merkleize(&foreign, None, Location::new(0))
+            .await
+            .unwrap();
+        let (foreign, _) = foreign.apply_batch(batch).await.unwrap();
+        assert_eq!(db.size(), foreign.size());
+        assert_ne!(db.root(), foreign.root());
+
+        let direct = db.new_batch().set(Sha256::fill(2), Sha256::fill(22));
+        let direct = direct.merkleize(&foreign, None, Location::new(0)).await;
+        let parent = db
+            .new_batch()
+            .set(Sha256::fill(3), Sha256::fill(33))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(4), Sha256::fill(44));
+        let child = child.merkleize(&foreign, None, Location::new(0)).await;
+        assert!(matches!(direct, Err(Error::StaleBatch)));
+        assert!(matches!(child, Err(Error::StaleBatch)));
+        db.destroy().await.unwrap();
+        foreign.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_merkleize_stale_sibling<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+
+        let direct = db.new_batch().set(Sha256::fill(1), Sha256::fill(11));
+        let sibling = db
+            .new_batch()
+            .set(Sha256::fill(2), Sha256::fill(22))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        let direct = direct.merkleize(&db, None, Location::new(0)).await;
+        assert!(matches!(direct, Err(Error::StaleBatch)));
+
+        let parent = db
+            .new_batch()
+            .set(Sha256::fill(3), Sha256::fill(33))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(4), Sha256::fill(44));
+        let sibling = db
+            .new_batch()
+            .set(Sha256::fill(5), Sha256::fill(55))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        let child = child.merkleize(&db, None, Location::new(0)).await;
+        assert!(matches!(child, Err(Error::StaleBatch)));
+
+        db.destroy().await.unwrap();
+    }
+
+    #[boxed]
     pub(crate) async fn run_stale_batch_rejected<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
@@ -3023,11 +3128,35 @@ pub(super) mod tests {
             .merkleize(&db, None, Location::new(0))
             .await
             .unwrap();
+        let pending = b
+            .new_batch::<Sha256>()
+            .set(key3, v3)
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let expected_root = pending.root();
         let c = b.new_batch::<Sha256>().set(key3, v3);
 
-        let (db, _) = db.apply_batch(a).await.unwrap();
+        // The database may advance to a live intermediate ancestor.
+        let (db, _) = db.apply_batch(Arc::clone(&a)).await.unwrap();
+        let live = b
+            .new_batch::<Sha256>()
+            .set(key3, v3)
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        assert_eq!(live.root(), expected_root);
+
+        // Retiring that ancestor advances the effective database boundary.
+        drop(a);
+        let retired = c.merkleize(&db, None, Location::new(0)).await.unwrap();
+        assert_eq!(retired.bounds().db, db.commitment());
+        assert_eq!(retired.root(), expected_root);
+
+        let c = b.new_batch::<Sha256>().set(key3, v3);
+        let (db, _) = db.apply_batch(b).await.unwrap();
         let c = c.merkleize(&db, None, Location::new(0)).await.unwrap();
-        let expected_root = c.root();
+        assert_eq!(c.root(), expected_root);
         let (db, _) = db.apply_batch(c).await.unwrap();
 
         assert_eq!(db.root(), expected_root);

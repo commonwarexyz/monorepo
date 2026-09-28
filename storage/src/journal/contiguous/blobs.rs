@@ -4,7 +4,7 @@ use crate::{
     Context, SyncCompletion,
     journal::{
         Error,
-        frame::{FrameReader, decode_item, decode_length_prefix},
+        frame::{FrameReader, Limited, decode_item, decode_length_prefix},
     },
 };
 use bytes::Bytes;
@@ -663,7 +663,9 @@ impl<'a, B: RBlob> Replay<'a, B> {
         compressed: bool,
     ) -> Result<V, Error> {
         match &mut self.inner {
-            ReplayInner::Paged(replay) => decode_item::<V>(replay.take(len), cfg, compressed),
+            ReplayInner::Paged(replay) => {
+                decode_item::<V>(Limited::new(replay, len), cfg, compressed)
+            }
             ReplayInner::View(replay) => decode_item::<V>(replay.take(len), cfg, compressed),
         }
     }
@@ -862,7 +864,7 @@ impl<E: Context> Writable<E> {
         if blob < self.oldest_blob_index || blob >= self.tail_blob_index() {
             return Ok(());
         }
-        self.partition.open(blob).await?.sync().await?;
+        self.drain_tail_predecessor_sync().await?;
         Ok(())
     }
 }
@@ -890,6 +892,56 @@ mod tests {
             result,
             Err(Error::Runtime(RError::BlobInsufficientLength))
         ));
+    }
+
+    #[test]
+    fn test_paged_replay_decodes_bulk_fields_at_page_boundaries() {
+        const PAGE_SIZE: std::num::NonZeroU16 = NZU16!(64);
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // The first frame fills the first page, and the second frame's payload ends one
+            // byte into the third page.
+            let exact_page = [0x11; 63];
+            let cross_page = [0x22; 64];
+            let mut encoded = Vec::new();
+            encode_frame_into(None, &exact_page, &mut encoded).unwrap();
+            encode_frame_into(None, &cross_page, &mut encoded).unwrap();
+
+            // Replay a sealed snapshot so payloads are copied out of the paged replay buffer.
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(3));
+            let (blob, size) = context
+                .open("paged-replay-bulk-fields", b"blob")
+                .await
+                .unwrap();
+            let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
+            writer.append(&encoded).await.unwrap();
+            let source = Blob::Sealed(writer.snapshot().await.unwrap());
+            let mut replay = source
+                .replay_from(0, NZUsize!(128), ReadOptions::default())
+                .unwrap();
+
+            // A payload ending exactly at a page boundary is copied from one page.
+            assert!(replay.ensure(1).await.unwrap());
+            let (len, _) = replay.read_length().unwrap();
+            assert_eq!(len, exact_page.len());
+            assert!(replay.ensure(len).await.unwrap());
+            assert_eq!(
+                replay.decode::<[u8; 63]>(len, &(), false).unwrap(),
+                exact_page
+            );
+
+            // The next frame starts on the second page, and its payload crosses into the third.
+            assert!(replay.ensure(1).await.unwrap());
+            let (len, _) = replay.read_length().unwrap();
+            assert_eq!(len, cross_page.len());
+            assert!(replay.ensure(len).await.unwrap());
+            assert_eq!(
+                replay.decode::<[u8; 64]>(len, &(), false).unwrap(),
+                cross_page
+            );
+            assert_eq!(replay.remaining(), 0);
+        });
     }
 
     #[test]
