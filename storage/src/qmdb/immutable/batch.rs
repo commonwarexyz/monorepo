@@ -32,6 +32,18 @@ pub(crate) struct DiffEntry<F: Family, V> {
     pub(crate) loc: Location<F>,
 }
 
+/// Look up `key` in `diff`, ignoring an entry below the inactivity `floor`.
+///
+/// A reopened database indexes only operations at or above its floor, so reads skip inactive
+/// entries to answer the same way on every node.
+fn lookup_active<'a, K: Ord, F: Family, V>(
+    diff: &'a [(K, DiffEntry<F, V>)],
+    key: &K,
+    floor: Location<F>,
+) -> Option<&'a DiffEntry<F, V>> {
+    lookup_sorted(diff, key).filter(|entry| entry.loc >= floor)
+}
+
 /// Result of merkleizing a batch.
 type MerkleizeResult<F, D, K, V, S> = Result<Arc<MerkleizedBatch<F, D, K, V, S>>, Error<F>>;
 
@@ -82,7 +94,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: St
     pub(super) parent: Option<Weak<Self>>,
 
     /// Arc refs to each ancestor's diff, collected during `merkleize()` while the parent
-    /// is alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
+    /// is alive. Reads consult them, and `apply_batch` applies the uncommitted ones.
     /// 1:1 with `bounds.ancestors` (same length, same ordering).
     pub(super) ancestor_diffs: Vec<Arc<DiffVec<K, F, V::Value>>>,
 
@@ -126,6 +138,21 @@ where
             .map_or(self.base, |parent| parent.bounds.db)
     }
 
+    /// The inactivity floor this batch builds on: its parent's, or `db`'s for a batch with no
+    /// parent.
+    fn floor<E, C, T>(&self, db: &Immutable<F, E, K, V, C, H, T, S>) -> Location<F>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>>,
+        C::Item: EncodeShared,
+        T: Translator,
+    {
+        self.parent.as_ref().map_or_else(
+            || db.inactivity_floor_loc(),
+            |parent| parent.bounds.inactivity_floor,
+        )
+    }
+
     /// Prove the live database is on this chain's own states, returning the witness
     /// committed reads require (see [`Bounds::on_chain`]).
     #[allow(clippy::type_complexity)]
@@ -155,6 +182,13 @@ where
     }
 
     /// Read through: mutations -> ancestor diffs -> committed DB.
+    ///
+    /// Only operations at or above the inactivity floor this batch builds on are read, so every
+    /// node answers alike however far it has pruned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain.
     pub async fn get<E, C, T>(
         &self,
         key: &K,
@@ -171,23 +205,28 @@ where
         if let Some(value) = self.mutations.get(key) {
             return Ok(Some(value.clone()));
         }
+        let floor = self.floor(&*db);
         if let Some(parent) = self.parent.as_ref() {
-            if let Some(entry) = lookup_sorted(parent.diff.as_slice(), key) {
+            if let Some(entry) = lookup_active(parent.diff.as_slice(), key, floor) {
                 return Ok(Some(entry.value.clone()));
             }
             for diff in &parent.ancestor_diffs {
-                if let Some(entry) = lookup_sorted(diff.as_slice(), key) {
+                if let Some(entry) = lookup_active(diff.as_slice(), key, floor) {
                     return Ok(Some(entry.value.clone()));
                 }
             }
         }
         // Fall through to base DB.
-        db.get(key).await
+        db.get_from(key, floor).await
     }
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as the input keys, each as [`Self::get`] would.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain.
     pub async fn get_many<E, C, T>(
         &self,
         keys: &[&K],
@@ -203,6 +242,7 @@ where
         if keys.is_empty() {
             return Ok(Vec::new());
         }
+        let floor = self.floor(&*db);
 
         let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
         let mut db_indices = Vec::new();
@@ -218,13 +258,13 @@ where
             // Check the parent's retained diff chain.
             let mut found = false;
             if let Some(parent) = self.parent.as_ref() {
-                if let Some(entry) = lookup_sorted(parent.diff.as_slice(), *key) {
+                if let Some(entry) = lookup_active(parent.diff.as_slice(), *key, floor) {
                     results.push(Some(entry.value.clone()));
                     found = true;
                 }
                 if !found {
                     for diff in &parent.ancestor_diffs {
-                        if let Some(entry) = lookup_sorted(diff.as_slice(), *key) {
+                        if let Some(entry) = lookup_active(diff.as_slice(), *key, floor) {
                             results.push(Some(entry.value.clone()));
                             found = true;
                             break;
@@ -244,7 +284,7 @@ where
         }
 
         if !db_keys.is_empty() {
-            let db_results = db.get_many(&db_keys).await?;
+            let db_results = db.get_many_from(&db_keys, floor).await?;
             for (slot, value) in zip_eq(db_indices, db_results) {
                 results[slot] = value;
             }
@@ -256,12 +296,15 @@ where
     /// Resolve mutations into operations and return a merkleized batch.
     ///
     /// `inactivity_floor` declares that all operations before this location are inactive.
-    /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
+    /// It must be at least the floor this batch builds on (its parent's, or the database's) and
+    /// at most this batch's own commit location.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or
-    /// a live ancestor commitment (both size and root).
+    /// - Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or
+    ///   a live ancestor commitment (both size and root).
+    /// - Returns [`Error::FloorRegressed`] if `inactivity_floor` is below the floor this batch
+    ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
     #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C, T>(
@@ -276,7 +319,6 @@ where
         C::Item: EncodeShared,
         T: Translator,
     {
-        let db = self.on_chain(db).map_err(|_| Error::StaleBatch)?;
         let base = self.base.size;
 
         let live_ancestors: Vec<_> =
@@ -297,7 +339,8 @@ where
                 state: batch.commitment(),
             });
         }
-        chain::validate_batch_applicable(
+        let db = chain::merkleizable(
+            db,
             db.commitment(),
             boundary,
             ancestors.iter().map(|ancestor| ancestor.state),
@@ -318,6 +361,14 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = base + ops.len() as u64;
+        chain::validate_merkleize_floor::<F, H::Digest>(
+            self.parent.as_ref().map_or_else(
+                || db.inactivity_floor_loc(),
+                |parent| parent.bounds.inactivity_floor,
+            ),
+            inactivity_floor,
+            total_size - 1,
+        )?;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job through the
@@ -325,8 +376,7 @@ where
         let (journal, root) = db
             .journal
             .merkleize(self.journal_batch, ops, inactive_peaks)
-            .await
-            .expect("inactive_peaks computed from batch size");
+            .await?;
 
         // Keep ancestor batches alive until the journal has captured their operations and nodes.
         drop(live_ancestors);
@@ -382,8 +432,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor.
+    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
+    /// dropped unapplied ancestor.
     pub fn proof<E, C, H, T>(
         &self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
@@ -394,6 +445,7 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         db.journal
             .speculative_proof(&self.journal_batch, inactive_peaks)
@@ -412,8 +464,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor.
+    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
+    /// dropped unapplied ancestor.
     pub fn pinned_nodes<E, C, H, T>(
         &self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
@@ -424,6 +477,7 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         db.journal
             .speculative_pinned_nodes(&self.journal_batch)
             .map_err(Into::into)
@@ -440,6 +494,13 @@ where
     }
 
     /// Read through: local diff -> ancestor diffs -> committed DB.
+    ///
+    /// Only operations at or above this batch's inactivity floor are read, so every node answers
+    /// alike however far it has pruned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain.
     pub async fn get<E, C, H, T>(
         &self,
         key: &K,
@@ -453,20 +514,25 @@ where
         T: Translator,
     {
         let db = self.bounds.on_chain(db, db.commitment())?;
-        if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
+        let floor = self.bounds.inactivity_floor;
+        if let Some(entry) = lookup_active(self.diff.as_slice(), key, floor) {
             return Ok(Some(entry.value.clone()));
         }
         for diff in &self.ancestor_diffs {
-            if let Some(entry) = lookup_sorted(diff.as_slice(), key) {
+            if let Some(entry) = lookup_active(diff.as_slice(), key, floor) {
                 return Ok(Some(entry.value.clone()));
             }
         }
-        db.get(key).await
+        db.get_from(key, floor).await
     }
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as the input keys, each as [`Self::get`] would.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain.
     pub async fn get_many<E, C, H, T>(
         &self,
         keys: &[&K],
@@ -483,6 +549,7 @@ where
         if keys.is_empty() {
             return Ok(Vec::new());
         }
+        let floor = self.bounds.inactivity_floor;
 
         let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
         let mut db_indices = Vec::new();
@@ -490,7 +557,7 @@ where
 
         for (i, key) in keys.iter().enumerate() {
             // Check local diff.
-            if let Some(entry) = lookup_sorted(self.diff.as_slice(), *key) {
+            if let Some(entry) = lookup_active(self.diff.as_slice(), *key, floor) {
                 results.push(Some(entry.value.clone()));
                 continue;
             }
@@ -498,7 +565,7 @@ where
             // Check the retained ancestor diffs.
             let mut found = false;
             for diff in &self.ancestor_diffs {
-                if let Some(entry) = lookup_sorted(diff.as_slice(), *key) {
+                if let Some(entry) = lookup_active(diff.as_slice(), *key, floor) {
                     results.push(Some(entry.value.clone()));
                     found = true;
                     break;
@@ -516,7 +583,7 @@ where
         }
 
         if !db_keys.is_empty() {
-            let db_results = db.get_many(&db_keys).await?;
+            let db_results = db.get_many_from(&db_keys, floor).await?;
             for (slot, value) in zip_eq(db_indices, db_results) {
                 results[slot] = value;
             }

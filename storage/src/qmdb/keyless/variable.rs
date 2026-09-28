@@ -181,6 +181,10 @@ mod tests {
         test_keyless_variable_get_many => run_get_many, db;
         test_keyless_variable_partial_ancestor_commit => run_partial_ancestor_commit, db;
         test_keyless_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, db;
+        test_keyless_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, db;
+        test_keyless_variable_merkleize_across_prune => run_merkleize_across_prune, db;
+        test_keyless_variable_stale_fork_refuses => run_stale_fork_refuses, db;
+        test_keyless_variable_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 
     /// Regression: when pruning leaves `bounds.start` mid-blob ahead of the first retained commit,

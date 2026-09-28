@@ -385,19 +385,6 @@ pub(crate) type RetainedMerkleizeResult<F, D, U, S> = Result<
     crate::qmdb::Error<F>,
 >;
 
-/// Validate `current` against an effective database boundary and retained ancestor chain.
-fn validate_ancestor_chain<F: Family, D: Digest, U: update::Update, S: Strategy>(
-    current: Commitment<F, D>,
-    db_state: Commitment<F, D>,
-    ancestors: &[AncestorBatch<F, D, U, S>],
-) -> Result<(), crate::qmdb::Error<F>> {
-    chain::validate_batch_applicable(
-        current,
-        db_state,
-        ancestors.iter().map(|ancestor| ancestor.commitment()),
-    )
-}
-
 /// Batch-infrastructure state used during merkleization.
 ///
 /// Created by [`UnmerkleizedBatch::into_parts()`], which separates the pending mutations
@@ -791,13 +778,6 @@ where
     Operation<F, U>: Codec,
 {
     /// Validate `current` against the boundary and ancestor chain retained by this merkleizer.
-    fn validate_commitment(
-        &self,
-        current: Commitment<F, H::Digest>,
-    ) -> Result<(), crate::qmdb::Error<F>> {
-        validate_ancestor_chain(current, self.db_state, &self.ancestors)
-    }
-
     /// Returns `Some(op)` if `loc` falls in the batch or ancestor regions, and `None` when `loc` is
     /// in the committed region (`loc < db_size`).
     fn try_read_op_from_uncommitted(
@@ -1817,11 +1797,16 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let db = self
-            .on_chain(db)
-            .map_err(|_| crate::qmdb::Error::StaleBatch)?;
         let (mutations, merkleizer) = self.into_parts();
-        merkleizer.validate_commitment(db.commitment())?;
+        let db = chain::merkleizable(
+            db,
+            db.commitment(),
+            merkleizer.db_state,
+            merkleizer
+                .ancestors
+                .iter()
+                .map(|ancestor| ancestor.commitment()),
+        )?;
         Ok(Prepared {
             db,
             mutations,

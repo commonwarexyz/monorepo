@@ -146,10 +146,10 @@ impl<F: Family, D: Digest> Bounds<F, D> {
     /// or the database was reinitialized off the chain, so the read is refused with
     /// [`Error::StaleRead`] rather than mixing two forks.
     ///
-    /// A passing read is exact, since member states are reachable only by applying this
-    /// chain's own batches, whose retained diffs shadow every key they touched.
-    /// Membership compares size and root together, since a sibling fork can commit the
-    /// same operation count with different contents.
+    /// A passing read is exact: the live state is one of this chain's own states, and the
+    /// chain's retained diffs shadow every key its unapplied batches touched. Membership
+    /// compares size and root together, since a sibling fork can commit the same operation
+    /// count with different contents.
     pub(crate) fn on_chain<'a, T>(
         &self,
         db: &'a T,
@@ -243,8 +243,12 @@ where
         .collect()
 }
 
-/// Advance the inherited DB boundary past applied ancestors no longer reachable
-/// through the weak parent chain.
+/// Advance the inherited DB boundary past ancestors no longer reachable through the weak parent
+/// chain.
+///
+/// A dropped ancestor may be applied or not. Either way the batch can no longer read its state
+/// through the chain, so the boundary moves up to the oldest live ancestor's base, and a database
+/// still below that base fails [`validate_batch_applicable`].
 pub(crate) fn effective_boundary<F: Family, D: Digest>(
     inherited: Commitment<F, D>,
     oldest_live_base: Option<Commitment<F, D>>,
@@ -258,7 +262,8 @@ pub(crate) fn effective_boundary<F: Family, D: Digest>(
 ///
 /// A batch is applicable if the database has not advanced since the batch was created, if all
 /// ancestors are already applied, or if the database has advanced to one of the batch's ancestor
-/// [`Commitment`]s, given by `ancestors`.
+/// [`Commitment`]s, given by `ancestors`. The check runs at merkleize (see [`merkleizable`]) and
+/// again at apply.
 pub(crate) fn validate_batch_applicable<F: Family, D: Digest>(
     current: Commitment<F, D>,
     batch_db: Commitment<F, D>,
@@ -271,6 +276,44 @@ pub(crate) fn validate_batch_applicable<F: Family, D: Digest>(
     }
 
     Err(Error::StaleBatch)
+}
+
+/// Validate that a batch whose live chain is `ancestors` can be merkleized against `db` at
+/// `current`, and return the witness committed reads require.
+///
+/// This is [`validate_batch_applicable`] with `boundary` from [`effective_boundary`], and it is
+/// the only staleness check merkleize needs. The witness alone does not keep ancestors alive, so
+/// callers hold their strong ancestor references until merkleization finishes.
+///
+/// # Errors
+///
+/// Returns [`Error::StaleBatch`] if `current` is neither `boundary` nor a live ancestor state.
+pub(crate) fn merkleizable<'a, T, F: Family, D: Digest>(
+    db: &'a T,
+    current: Commitment<F, D>,
+    boundary: Commitment<F, D>,
+    ancestors: impl IntoIterator<Item = Commitment<F, D>>,
+) -> Result<OnChain<'a, T>, Error<F>> {
+    validate_batch_applicable(current, boundary, ancestors)?;
+    Ok(OnChain(db))
+}
+
+/// Validate the inactivity floor of a batch at merkleize time.
+///
+/// `start` is the floor the batch builds on: its parent's, or the database's for a batch with no
+/// parent. Each ancestor's floor was checked when it was merkleized, so only the new floor is
+/// checked here. [`Bounds::validate_apply_to`] repeats the whole check at apply.
+///
+/// # Errors
+///
+/// Returns [`Error::FloorRegressed`] if `floor < start` and [`Error::FloorBeyondSize`] if
+/// `floor > commit_loc`.
+pub(crate) fn validate_merkleize_floor<F: Family, D: Digest>(
+    start: Location<F>,
+    floor: Location<F>,
+    commit_loc: Location<F>,
+) -> Result<(), Error<F>> {
+    validate_commit_floors::<F, D>(start, Location::new(0), &[], floor, commit_loc)
 }
 
 /// Validate commit-floor monotonicity for a batch chain.
