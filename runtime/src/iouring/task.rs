@@ -1,12 +1,11 @@
 //! Worker-local tasks, each one allocation.
 //!
-//! A spawned task is one [`Cell`]: a type-erased [`Header`], padded to its own
-//! cache line, followed by the concrete future. The header holds a state word
-//! that coalesces wakes into at most one ready token, a reference count, and
-//! the mailbox of the worker that owns the task. A [`Task`] is a thin owning
-//! pointer to the header, and the header is also the waker, so a wake is an
-//! atomic transition on the header, plus a queue push when it publishes a
-//! token.
+//! A spawned task is one [`Cell`]: a type-erased [`Header`] followed by the
+//! concrete future. The header holds a state word that coalesces wakes into
+//! at most one ready token and counts references, and the mailbox of the
+//! worker that owns the task. A [`Task`] is a thin owning pointer to the
+//! header, and the header is also the waker, so a wake is an atomic
+//! transition on the header, plus a queue push when it publishes a token.
 //!
 //! A wake that arrives during a poll is recorded in the state and becomes a
 //! ready token only if that poll returns pending. The token joins the tail of
@@ -29,12 +28,18 @@
 //!
 //! # Ownership
 //!
-//! Every ready token, cloned waker, and arena entry holds one reference. The
-//! waker passed to a poll borrows its token's. The owning worker's arena
-//! retains every registered task so teardown can drop its future. A future is
-//! dropped in place when its task completes or is cleared, and freeing a cell
-//! whose future is still present panics, so releasing a reference runs no user
-//! code. A stale waker keeps the cell's allocation, not its future, alive.
+//! Every ready token, cloned waker, and arena entry holds one reference,
+//! counted in the state word above the lifecycle bits. Transitions that
+//! create or consume a reference change the count in the same exchange: a
+//! wake that publishes a token counts the token's, a wake by value that
+//! publishes nothing releases the waker's, and a poll that ends idle releases
+//! its token's. The waker passed to a poll borrows its token's.
+//!
+//! The owning worker's arena retains every registered task so teardown can
+//! drop its future. A future is dropped in place when its task completes or
+//! is cleared, and freeing a cell whose future is still present panics, so
+//! releasing a reference runs no user code. A stale waker keeps the cell's
+//! allocation, not its future, alive.
 //!
 //! Wakes on the owning worker queue the token directly. Wakes and spawns from
 //! other threads travel through its mailbox.
@@ -66,83 +71,159 @@ cfg_if::cfg_if! {
 }
 
 /// Dormant without a ready token.
-const IDLE: u32 = 0;
+const IDLE: usize = 0;
 /// Exactly one ready token exists.
-const QUEUED: u32 = 1;
+const QUEUED: usize = 1;
 /// A worker is polling the task.
-const RUNNING: u32 = 2;
+const RUNNING: usize = 2;
 /// A wake arrived during the current poll.
-const NOTIFIED: u32 = 3;
+const NOTIFIED: usize = 3;
 /// The future completed or teardown cleared it.
-const COMPLETE: u32 = 4;
+const COMPLETE: usize = 4;
 /// Mask of the lifecycle values above.
-const LIFECYCLE: u32 = 0b111;
+const LIFECYCLE: usize = 0b111;
 /// Teardown asked the running poller to drop the future when its poll ends.
-const CANCELLED: u32 = 0b1000;
+const CANCELLED: usize = 0b1000;
+/// One reference. The low byte holds the lifecycle and flags, and the bits
+/// above it count references.
+const REF_ONE: usize = 1 << 8;
+/// Mask of the reference count.
+const REFS: usize = !(REF_ONE - 1);
+
+/// `state` with its lifecycle replaced by `lifecycle`, keeping flags and
+/// references.
+const fn with_lifecycle(state: usize, lifecycle: usize) -> usize {
+    (state & !LIFECYCLE) | lifecycle
+}
 
 /// How a pending poll ends.
 enum Finish {
-    /// No wake arrived. The task is idle.
+    /// No wake arrived. The task is idle, and the token's reference is gone.
     Idle,
-    /// A wake arrived. The caller publishes the successor token.
+    /// A wake arrived. The caller publishes the successor token, which keeps
+    /// the polled token's reference.
     Requeue,
     /// Teardown cleared the task during the poll. The caller drops the future.
     Cancelled,
 }
 
-/// Scheduling state of one task.
+/// How a wake that gives up its reference ends.
+enum Notify {
+    /// The caller publishes a ready token, which takes over the reference.
+    Publish,
+    /// The exchange released the reference. The caller frees the cell if it
+    /// was the last.
+    Released {
+        /// Whether no reference remains.
+        last: bool,
+    },
+}
+
+/// Scheduling state and reference count of one task, in one word.
 ///
 /// A ready token owns the right to poll while the lifecycle is `QUEUED`.
 /// Polling moves to `RUNNING`, a concurrent wake moves to `NOTIFIED` without a
 /// second token, and the poller publishes the successor token only after
 /// observing pending. `COMPLETE` is terminal.
-struct State(AtomicU32);
+struct State(AtomicUsize);
 
 impl State {
-    /// State of a task whose first poll is already queued.
+    /// State of a task whose first poll is queued, holding that token's
+    /// reference.
     // Loom's atomics have no const constructor.
     #[allow(clippy::missing_const_for_fn)]
     fn queued() -> Self {
-        Self(AtomicU32::new(QUEUED))
+        Self(AtomicUsize::new(QUEUED | REF_ONE))
     }
 
-    /// Record a wake. Returns whether the caller must publish a ready token.
-    fn notify(&self) -> bool {
+    /// Count one more reference. Like `Arc`, the process aborts before the
+    /// count can wrap, which takes a leak of `isize::MAX` references.
+    fn retain(&self) {
+        if self.0.fetch_add(REF_ONE, Ordering::Relaxed) > isize::MAX as usize {
+            std::process::abort();
+        }
+    }
+
+    /// Release one reference, returning whether it was the last.
+    fn release(&self) -> bool {
+        self.0.fetch_sub(REF_ONE, Ordering::Release) & REFS == REF_ONE
+    }
+
+    /// References held.
+    #[cfg(test)]
+    fn refs(&self) -> usize {
+        (self.0.load(Ordering::Acquire) & REFS) / REF_ONE
+    }
+
+    /// Record a wake that keeps its reference. Returns whether the caller
+    /// must publish a ready token, whose reference the exchange counted.
+    fn notify_by_ref(&self) -> bool {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
-            let flags = state & !LIFECYCLE;
             let (next, publish) = match state & LIFECYCLE {
-                IDLE => (QUEUED, true),
+                IDLE => {
+                    if state > isize::MAX as usize {
+                        std::process::abort();
+                    }
+                    (with_lifecycle(state, QUEUED) + REF_ONE, true)
+                }
                 // Coalesced wakes still exchange, so writes made before them
                 // are published to the poller's next acquiring transition.
-                QUEUED => (QUEUED, false),
-                RUNNING | NOTIFIED => (NOTIFIED, false),
+                QUEUED => (state, false),
+                RUNNING | NOTIFIED => (with_lifecycle(state, NOTIFIED), false),
                 COMPLETE => return false,
                 other => unreachable!("invalid task state {other}"),
             };
-            match self.0.compare_exchange_weak(
-                state,
-                flags | next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match self
+                .0
+                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => return publish,
                 Err(actual) => state = actual,
             }
         }
     }
 
-    /// Claim the ready token for polling. Fails for a cleared task.
+    /// Record a wake that gives up its reference. A published token takes the
+    /// reference over, and otherwise the exchange releases it.
+    fn notify_by_value(&self) -> Notify {
+        let mut state = self.0.load(Ordering::Acquire);
+        loop {
+            let (next, publish) = match state & LIFECYCLE {
+                IDLE => (with_lifecycle(state, QUEUED), true),
+                // Coalesced wakes still exchange, as above.
+                QUEUED | COMPLETE => (state - REF_ONE, false),
+                RUNNING | NOTIFIED => (with_lifecycle(state, NOTIFIED) - REF_ONE, false),
+                other => unreachable!("invalid task state {other}"),
+            };
+            match self
+                .0
+                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) if publish => return Notify::Publish,
+                // The acquiring exchange orders every earlier release before
+                // the caller frees the cell.
+                Ok(_) => {
+                    return Notify::Released {
+                        last: next & REFS == 0,
+                    };
+                }
+                Err(actual) => state = actual,
+            }
+        }
+    }
+
+    /// Claim the ready token for polling, whose reference the poll now holds.
+    /// Fails for a cleared task.
     fn start_poll(&self) -> bool {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
             if state & LIFECYCLE != QUEUED {
                 return false;
             }
-            let flags = state & !LIFECYCLE;
             match self.0.compare_exchange_weak(
                 state,
-                flags | RUNNING,
+                with_lifecycle(state, RUNNING),
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
@@ -152,7 +233,8 @@ impl State {
         }
     }
 
-    /// Finish a pending poll.
+    /// Finish a pending poll. Going idle releases the polled token's
+    /// reference in the same exchange.
     fn finish_pending(&self) -> Finish {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
@@ -160,8 +242,16 @@ impl State {
                 return Finish::Cancelled;
             }
             let (next, finish) = match state & LIFECYCLE {
-                RUNNING => (IDLE, Finish::Idle),
-                NOTIFIED => (QUEUED, Finish::Requeue),
+                RUNNING => {
+                    // The arena holds a reference to every task that can go
+                    // idle, so the token's is never the last.
+                    assert!(
+                        state & REFS > REF_ONE,
+                        "idle task would release its last reference"
+                    );
+                    (with_lifecycle(state, IDLE) - REF_ONE, Finish::Idle)
+                }
+                NOTIFIED => (with_lifecycle(state, QUEUED), Finish::Requeue),
                 other => unreachable!("task left poll in invalid state {other}"),
             };
             match self
@@ -174,23 +264,34 @@ impl State {
         }
     }
 
-    /// Mark the task terminal after its final poll.
+    /// Mark the task terminal after its final poll, keeping every reference.
     fn complete(&self) {
-        let previous = self.0.swap(COMPLETE, Ordering::AcqRel);
-        assert!(
-            matches!(previous & LIFECYCLE, RUNNING | NOTIFIED),
-            "completed task was not running"
-        );
+        let mut state = self.0.load(Ordering::Acquire);
+        loop {
+            assert!(
+                matches!(state & LIFECYCLE, RUNNING | NOTIFIED),
+                "completed task was not running"
+            );
+            match self.0.compare_exchange_weak(
+                state,
+                (state & REFS) | COMPLETE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => state = actual,
+            }
+        }
     }
 
-    /// Mark the task terminal for teardown. Returns whether the caller drops
-    /// the future now. A running task is marked cancelled instead, and its
-    /// poller drops the future.
+    /// Mark the task terminal for teardown, keeping every reference. Returns
+    /// whether the caller drops the future now. A running task is marked
+    /// cancelled instead, and its poller drops the future.
     fn clear(&self) -> bool {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
             let (next, drop_now) = match state & LIFECYCLE {
-                IDLE | QUEUED => (COMPLETE, true),
+                IDLE | QUEUED => ((state & REFS) | COMPLETE, true),
                 RUNNING | NOTIFIED => (state | CANCELLED, false),
                 COMPLETE => return false,
                 other => unreachable!("invalid task state {other}"),
@@ -222,46 +323,45 @@ pub enum Outcome {
 /// Operations that need the concrete future type behind a header.
 struct Vtable {
     /// Poll the future in place. The caller holds the running state.
-    poll: unsafe fn(NonNull<Padded>, &mut Context<'_>) -> Poll<()>,
+    poll: unsafe fn(NonNull<Header>, &mut Context<'_>) -> Poll<()>,
     /// Drop the future in place. The caller has exclusive access to it.
-    drop_future: unsafe fn(NonNull<Padded>),
+    drop_future: unsafe fn(NonNull<Header>),
     /// Free the allocation, whose future is already gone.
-    dealloc: unsafe fn(NonNull<Padded>),
+    dealloc: unsafe fn(NonNull<Header>),
 }
 
 /// Type-erased front of every task allocation.
 #[repr(C)]
 pub struct Header {
-    /// Scheduling state, changed by wakers on any thread and by the poller.
+    /// Scheduling state and reference count, changed on any thread by
+    /// wakers and references and by the poller.
     state: State,
-    /// Arena slot on the owning worker, `u32::MAX` until assigned before the
-    /// first poll.
-    slot: AtomicU32,
-    /// References to the cell: tokens, cloned wakers, and the arena entry.
-    refs: AtomicUsize,
     /// Operations on the concrete future behind this header.
     vtable: &'static Vtable,
     /// Worker that owns the task, without extending its lifetime.
     mailbox: Weak<Mailbox>,
+    /// Arena slot on the owning worker, `u32::MAX` until assigned before the
+    /// first poll.
+    slot: AtomicU32,
 }
-
-/// The header padded to the unit crossbeam uses against false sharing on the
-/// target (128 bytes on x86_64 and aarch64, whose prefetchers fetch cache
-/// lines in pairs). A wake from another thread, which writes the state and
-/// reference count, then never invalidates the line holding the start of the
-/// future. Every task pointer points at one, at the start of its cell.
-type Padded = CachePadded<Header>;
 
 // Every function below that takes a header pointer requires one derived from
 // the allocation `Task::new` leaked, as a `Task` or a waker carries it. A
 // pointer made from a `&Header` covers only the header, not the future.
 
-/// A task allocation: the padded header followed by the concrete future.
+/// A task allocation: the erased header followed by the concrete future.
+///
+/// The whole cell is aligned like [`CachePadded`] (128 bytes on x86_64 and
+/// aarch64, whose prefetchers fetch cache lines in pairs), as tokio aligns
+/// its task cells, so no two tasks share a line. The header and the start of
+/// the future share the first one.
 #[repr(C)]
 struct Cell<F> {
-    header: Padded,
+    header: Header,
     /// The future, `None` once completed or cleared.
     future: UnsafeCell<Option<F>>,
+    /// Aligns the cell without adding to its size.
+    _align: [CachePadded<()>; 0],
 }
 
 impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
@@ -281,7 +381,7 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
     /// `header` must point to a live `Cell<F>` with the allocation's
     /// provenance, and the caller must hold the running state, which gives it
     /// exclusive access to the future.
-    unsafe fn poll(header: NonNull<Padded>, cx: &mut Context<'_>) -> Poll<()> {
+    unsafe fn poll(header: NonNull<Header>, cx: &mut Context<'_>) -> Poll<()> {
         // SAFETY: the header starts a `Cell<F>` per the contract, and the
         // running state gives this thread exclusive access to the future.
         let future = unsafe { &mut *header.cast::<Self>().as_ref().future.get() };
@@ -297,7 +397,7 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
     ///
     /// `header` must point to a live `Cell<F>` with the allocation's
     /// provenance, and the caller must have exclusive access to the future.
-    unsafe fn drop_future(header: NonNull<Padded>) {
+    unsafe fn drop_future(header: NonNull<Header>) {
         // SAFETY: per the contract. The old value drops in place, and the
         // slot holds `None` even if its destructor panics.
         unsafe { *header.cast::<Self>().as_ref().future.get() = None };
@@ -309,7 +409,7 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
     ///
     /// `header` must point to a `Cell<F>` allocated by [`Task::new`], with
     /// the allocation's provenance, that nothing references any more.
-    unsafe fn dealloc(header: NonNull<Padded>) {
+    unsafe fn dealloc(header: NonNull<Header>) {
         let cell = header.cast::<Self>();
         // Dropping the future here would run user code wherever the last
         // reference happened to go, possibly under a worker borrow. Checking
@@ -325,7 +425,7 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
 }
 
 /// An owning reference to a task.
-pub struct Task(NonNull<Padded>);
+pub struct Task(NonNull<Header>);
 
 // SAFETY: `Task::new` requires `F: Send`, so the future may be polled or
 // dropped on any thread. The rest of the cell is atomic or immutable after
@@ -348,17 +448,17 @@ impl Deref for Task {
 
 impl Clone for Task {
     fn clone(&self) -> Self {
-        self.retain_ref();
+        self.state.retain();
         Self(self.0)
     }
 }
 
 impl Drop for Task {
     fn drop(&mut self) {
-        // Decrement through the counter alone, as `Arc` does. A `&Header`
-        // held by a callee across the decrement would still be live when
-        // another thread frees the cell.
-        if self.refs.fetch_sub(1, Ordering::Release) == 1 {
+        // The count sits in an atomic, so no reference into the rest of the
+        // header is live across the decrement while another thread frees the
+        // cell.
+        if self.state.release() {
             fence(Ordering::Acquire);
             // SAFETY: the last reference is gone, so nothing else reaches the
             // cell, and the vtable frees the allocation `new` made.
@@ -375,14 +475,14 @@ impl Task {
         F: Future<Output = ()> + Send + 'static,
     {
         let cell = Box::new(Cell {
-            header: CachePadded::new(Header {
+            header: Header {
                 state: State::queued(),
-                slot: AtomicU32::new(u32::MAX),
-                refs: AtomicUsize::new(1),
                 vtable: Cell::<F>::vtable(),
                 mailbox,
-            }),
+                slot: AtomicU32::new(u32::MAX),
+            },
             future: UnsafeCell::new(Some(future)),
+            _align: [],
         });
         Self(NonNull::from(Box::leak(cell)).cast())
     }
@@ -398,7 +498,7 @@ impl Task {
     ///
     /// `ptr` must carry a reference the caller gives up, with the
     /// allocation's provenance.
-    const unsafe fn from_raw(ptr: NonNull<Padded>) -> Self {
+    const unsafe fn from_raw(ptr: NonNull<Header>) -> Self {
         Self(ptr)
     }
 
@@ -415,17 +515,28 @@ impl Task {
         }
     }
 
-    /// Wake with this reference, which a published token takes over.
+    /// Wake with this reference. A published token takes it over, and
+    /// otherwise the state exchange releases it.
     fn wake(self) {
-        if self.state.notify() {
-            self.schedule();
+        let this = ManuallyDrop::new(self);
+        match this.state.notify_by_value() {
+            Notify::Publish => ManuallyDrop::into_inner(this).schedule(),
+            Notify::Released { last: true } => {
+                // SAFETY: the exchange released the last reference and
+                // acquired every earlier release, so nothing else reaches the
+                // cell, and the vtable frees the allocation `new` made.
+                unsafe { (this.vtable.dealloc)(this.0) };
+            }
+            Notify::Released { last: false } => {}
         }
     }
 
     /// Wake without giving up this reference.
     fn wake_by_ref(&self) {
-        if self.state.notify() {
-            self.clone().schedule();
+        if self.state.notify_by_ref() {
+            // SAFETY: the exchange counted a reference for the published
+            // token, which the new `Task` owns.
+            unsafe { Self::from_raw(self.0) }.schedule();
         }
     }
 
@@ -487,7 +598,11 @@ impl Task {
         if matches!(polled, Some(Poll::Pending)) {
             finish(&self);
             match self.state.finish_pending() {
-                Finish::Idle => return Outcome::Idle,
+                Finish::Idle => {
+                    // The exchange released this token's reference.
+                    mem::forget(self);
+                    return Outcome::Idle;
+                }
                 Finish::Requeue => return Outcome::Requeue(self),
                 Finish::Cancelled => {}
             }
@@ -504,18 +619,10 @@ impl Task {
 }
 
 impl Header {
-    /// Count one more reference. Like `Arc`, the process aborts before the
-    /// count can wrap, which takes a leak of `isize::MAX` references.
-    fn retain_ref(&self) {
-        if self.refs.fetch_add(1, Ordering::Relaxed) > isize::MAX as usize {
-            std::process::abort();
-        }
-    }
-
     /// References held, including the caller's.
     #[cfg(test)]
     fn refs(&self) -> usize {
-        self.refs.load(Ordering::Acquire)
+        self.state.refs()
     }
 
     /// Record the arena slot assigned by the owning worker.
@@ -552,9 +659,9 @@ static WAKER_VTABLE: RawWakerVTable =
 /// # Safety
 ///
 /// `ptr` must be a header pointer carrying a reference that outlives `'a`.
-unsafe fn header<'a>(ptr: *const ()) -> &'a Header {
+const unsafe fn header<'a>(ptr: *const ()) -> &'a Header {
     // SAFETY: per the contract, the reference keeps the cell alive.
-    unsafe { &*ptr.cast::<Padded>() }
+    unsafe { &*ptr.cast::<Header>() }
 }
 
 /// Take over the reference behind a waker's data pointer.
@@ -575,7 +682,7 @@ const unsafe fn task(ptr: *const ()) -> Task {
 /// `ptr` must be the data pointer of a waker built on [`WAKER_VTABLE`].
 unsafe fn waker_clone(ptr: *const ()) -> RawWaker {
     // SAFETY: waker vtables receive the pointer their waker was built from.
-    unsafe { header(ptr) }.retain_ref();
+    unsafe { header(ptr) }.state.retain();
     RawWaker::new(ptr, &WAKER_VTABLE)
 }
 
@@ -841,8 +948,8 @@ mod tests {
         }
     }
 
-    /// Future aligned beyond the padded header, above every padding unit
-    /// crossbeam uses (at most 256 bytes), that must not move once pinned. It
+    /// Future aligned beyond the cell's own alignment, above every padding
+    /// unit crossbeam uses (at most 256 bytes), that must not move once pinned. It
     /// records its address on every poll and when dropped, since a failed
     /// assertion inside either would be contained by the poll.
     #[repr(align(512))]
@@ -902,18 +1009,19 @@ mod tests {
             .collect()
     }
 
-    /// The header is written by wakers and read by the poller on every poll,
-    /// and the future starts right after its padding. Its fields fit one
-    /// 64-byte line, leaving room for the fields later PRs add. Where the
-    /// padding unit holds that line (128 bytes on x86_64 and aarch64), the
-    /// padded header takes exactly one unit, and a second would only enlarge
-    /// every task.
+    /// The whole cell is aligned like `CachePadded`, and the header, which
+    /// fits one 64-byte line with room for the fields later PRs add, shares
+    /// the first line with the future. Where the unit holds that line (128
+    /// bytes on x86_64 and aarch64), a small future and its header take
+    /// exactly one unit.
     #[test]
-    fn test_header_fits_one_padded_unit() {
+    fn test_cell_is_aligned_as_a_whole() {
+        type Small = Cell<std::future::Pending<()>>;
         assert!(std::mem::size_of::<Header>() <= 64);
-        let unit = std::mem::align_of::<Padded>();
+        let unit = std::mem::align_of::<CachePadded<()>>();
+        assert_eq!(std::mem::align_of::<Small>(), unit);
         if unit >= 64 {
-            assert_eq!(std::mem::size_of::<Padded>(), unit);
+            assert_eq!(std::mem::size_of::<Small>(), unit);
         }
     }
 
@@ -1321,13 +1429,13 @@ mod tests {
         assert_eq!(Arc::weak_count(&mailbox), baseline);
     }
 
-    /// A future aligned beyond the header, which must not move once pinned,
-    /// is polled and dropped at one aligned address, whether it completes or
-    /// teardown clears it.
+    /// A future aligned beyond the cell's own alignment, which must not move
+    /// once pinned, is polled and dropped at one aligned address, whether it
+    /// completes or teardown clears it.
     #[test]
     fn test_over_aligned_future_is_polled_and_dropped_in_place() {
         let align = std::mem::align_of::<OverAligned>();
-        assert!(align > std::mem::align_of::<Padded>());
+        assert!(align > std::mem::align_of::<CachePadded<()>>());
         for complete in [true, false] {
             let mailbox = mailbox();
             let mut tasks = Tasks::default();
@@ -1373,9 +1481,10 @@ mod tests {
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    //! Exhaustive weak-memory checks for the notification handoff.
+    //! Exhaustive weak-memory checks for the notification handoff and the
+    //! reference count sharing its word.
 
-    use super::{Finish, State};
+    use super::{Finish, Notify, State};
     use loom::{
         cell::UnsafeCell,
         sync::{
@@ -1385,17 +1494,25 @@ mod loom_tests {
         thread,
     };
 
+    /// State of a registered task whose first poll is queued: the token's
+    /// reference and the arena's.
+    fn registered() -> State {
+        let state = State::queued();
+        state.retain();
+        state
+    }
+
     /// A wake racing the end of a pending poll transfers exactly one token,
     /// regardless of which side wins the handoff.
     #[test]
     fn test_pending_wake_handoff_publishes_once() {
         loom::model(|| {
-            let state = Arc::new(State::queued());
+            let state = Arc::new(registered());
             assert!(state.start_poll());
 
             let wake = thread::spawn({
                 let state = Arc::clone(&state);
-                move || state.notify()
+                move || state.notify_by_ref()
             });
             let poll_publishes = matches!(state.finish_pending(), Finish::Requeue);
             let wake_publishes = wake.join().unwrap();
@@ -1403,6 +1520,29 @@ mod loom_tests {
             assert_ne!(poll_publishes, wake_publishes);
             assert!(state.start_poll());
             state.complete();
+        });
+    }
+
+    /// A wake that gives up its reference, racing the end of a pending poll,
+    /// leaves exactly one token and the right count, whichever side wins.
+    #[test]
+    fn test_wake_by_value_racing_a_pending_poll_keeps_the_count() {
+        loom::model(|| {
+            // References: the polled token, the arena's, and the waker's.
+            let state = Arc::new(registered());
+            state.retain();
+            assert!(state.start_poll());
+
+            let wake = thread::spawn({
+                let state = Arc::clone(&state);
+                move || matches!(state.notify_by_value(), Notify::Publish)
+            });
+            let requeued = matches!(state.finish_pending(), Finish::Requeue);
+            let published = wake.join().unwrap();
+
+            // One token remains, holding one reference beside the arena's.
+            assert_ne!(requeued, published);
+            assert_eq!(state.refs(), 2);
         });
     }
 
@@ -1415,13 +1555,30 @@ mod loom_tests {
 
             let wake = thread::spawn({
                 let state = Arc::clone(&state);
-                move || state.notify()
+                move || state.notify_by_ref()
             });
             state.complete();
 
             assert!(!wake.join().unwrap());
-            assert!(!state.notify());
+            assert!(!state.notify_by_ref());
             assert!(!state.start_poll());
+        });
+    }
+
+    /// Two references released at once: exactly one release is the last.
+    #[test]
+    fn test_concurrent_releases_find_one_last() {
+        loom::model(|| {
+            let state = Arc::new(State::queued());
+            state.retain();
+
+            let other = thread::spawn({
+                let state = Arc::clone(&state);
+                move || state.release()
+            });
+            let mine = state.release();
+
+            assert_ne!(mine, other.join().unwrap());
         });
     }
 
@@ -1431,7 +1588,7 @@ mod loom_tests {
     #[test]
     fn test_clear_racing_a_poll_drops_the_future_once() {
         loom::model(|| {
-            let state = Arc::new(State::queued());
+            let state = Arc::new(registered());
             let future = Arc::new(UnsafeCell::new(0_usize));
             let drops = Arc::new(AtomicUsize::new(0));
 
@@ -1473,19 +1630,19 @@ mod loom_tests {
     #[test]
     fn test_wake_racing_clear_of_an_idle_task_leaves_nothing_to_poll() {
         loom::model(|| {
-            let state = Arc::new(State::queued());
+            let state = Arc::new(registered());
             assert!(state.start_poll());
             assert!(matches!(state.finish_pending(), Finish::Idle));
 
             let wake = thread::spawn({
                 let state = Arc::clone(&state);
-                move || state.notify()
+                move || state.notify_by_ref()
             });
             assert!(state.clear());
             let _ = wake.join().unwrap();
 
             assert!(!state.start_poll());
-            assert!(!state.notify());
+            assert!(!state.notify_by_ref());
         });
     }
 
@@ -1495,7 +1652,7 @@ mod loom_tests {
     #[test]
     fn test_wake_handoff_publishes_payload() {
         loom::model(|| {
-            let state = Arc::new(State::queued());
+            let state = Arc::new(registered());
             let payload = Arc::new(AtomicUsize::new(0));
             let done = Arc::new(AtomicBool::new(false));
 
@@ -1505,7 +1662,7 @@ mod loom_tests {
                 let done = Arc::clone(&done);
                 move || {
                     payload.store(1, Ordering::Relaxed);
-                    state.notify();
+                    state.notify_by_ref();
                     done.store(true, Ordering::Release);
                 }
             });
