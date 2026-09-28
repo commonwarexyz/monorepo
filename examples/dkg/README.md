@@ -4,7 +4,15 @@
 
 Generate and reshare a threshold secret over an epoched log.
 
-## CLI
+Committees rotate deterministically: for epoch `E`, the committee starts at
+offset `E % participants.len()` and takes `committee_size` consecutive
+participants with wraparound.
+
+The application state is one `any::unordered::fixed` QMDB with one fixed key,
+and each non-genesis block writes its height to that key. Genesis carries the
+epoch-0 `EpochInfo`.
+
+## Usage
 
 The example has one binary with three subcommands:
 
@@ -34,7 +42,7 @@ epoch-0 players run it because only they receive shares. To bootstrap:
 application chain, stateful QMDB, continuous reshare, DKG orchestrator, and DKG
 probe.
 
-## Node Layout
+## Storage
 
 Each validator owns one directory under the configured data directory:
 
@@ -59,14 +67,6 @@ one, into `secrets`. `validator` uses `secrets` for that share and for the
 shares, dealer seeds, and received dealings of every reshare, and erases
 `bootstrap-secrets` when it starts. The bootstrap and the first reshare both
 store epoch-0 seeds and dealings, so they must not share a partition.
-
-Committees rotate deterministically: for epoch `E`, the committee starts at
-offset `E % participants.len()` and takes `committee_size` consecutive
-participants with wraparound.
-
-The application state is one `any::unordered::fixed` QMDB with one fixed key,
-and each non-genesis block writes its height to that key. Genesis carries the
-epoch-0 `EpochInfo`.
 
 ## State Sync
 
