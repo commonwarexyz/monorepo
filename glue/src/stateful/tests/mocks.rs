@@ -59,7 +59,23 @@ impl Merkleized for TestMerkleized {
 }
 
 /// Completes one parked flush when released by the test.
-pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
+///
+/// Sending or dropping it also settles the flush for the database's next capture, which waits
+/// for an in-flight flush as real storage does.
+pub(crate) struct FlushRelease {
+    release: oneshot::Sender<Result<(), RuntimeError>>,
+    _settled: oneshot::Sender<()>,
+}
+
+impl FlushRelease {
+    /// Completes the flush with `result`.
+    pub(crate) fn send(
+        self,
+        result: Result<(), RuntimeError>,
+    ) -> Result<(), Result<(), RuntimeError>> {
+        self.release.send(result)
+    }
+}
 
 /// Signals that pruning has started, then blocks it until the test releases it.
 struct PruneGate {
@@ -114,22 +130,29 @@ pub(crate) struct TestDb {
     sync: Mutex<Option<Handle<()>>>,
     control: Option<FlushControl>,
     finalized: u64,
+    /// Resolves once the latest gated flush is released or dropped.
+    flushing: Option<oneshot::Receiver<()>>,
 }
 
 impl TestDb {
     pub(crate) fn with_sync(handle: Handle<()>) -> Self {
         Self {
             sync: Mutex::new(Some(handle)),
-            control: None,
-            finalized: 0,
+            ..Self::default()
         }
     }
 
     pub(crate) fn gated(control: FlushControl) -> Self {
         Self {
-            sync: Mutex::new(None),
             control: Some(control),
-            finalized: 0,
+            ..Self::default()
+        }
+    }
+
+    /// Waits for the latest gated flush to settle, as real storage does before a capture.
+    async fn settle(&mut self) {
+        if let Some(settled) = self.flushing.take() {
+            let _ = settled.await;
         }
     }
 
@@ -161,7 +184,8 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type SyncTarget = u64;
     type Snapshot = u64;
 
-    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+    async fn snapshot(mut self) -> Result<(Self, Self::Snapshot), Self::Error> {
+        self.settle().await;
         if let Some(mut gate) = SNAPSHOT_GATE.with(|gate| gate.borrow_mut().take()) {
             gate.started
                 .send(())
@@ -200,11 +224,17 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(self)
     }
 
-    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
+    async fn finalize(mut self) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
+        self.settle().await;
         let snapshot = self.finalized;
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
-            control.flushes.lock().push(release);
+            let (settled_tx, settled) = oneshot::channel();
+            control.flushes.lock().push(FlushRelease {
+                release,
+                _settled: settled_tx,
+            });
+            self.flushing = Some(settled);
             return Ok((self, snapshot, Handle::from_receiver(released)));
         }
         let handle = self

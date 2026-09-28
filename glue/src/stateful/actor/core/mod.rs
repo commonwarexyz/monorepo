@@ -310,13 +310,14 @@ mod tests {
         db::{Publisher, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
-            mocks::{TestApp, TestBlock, TestDb},
+            mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
         },
     };
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Reporter as _,
         marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
+        types::Height,
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
@@ -395,7 +396,15 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
+            // Recovery records its anchor as completed before serving.
             handle.abort();
+            let _ = handle.await;
+            let reopened = SyncPlan::<_, TestScheme, TestVariant>::init(
+                context.child("reopened_plan"),
+                "startup-serve-stateful".to_string(),
+            )
+            .await;
+            assert_eq!(reopened.completed(), Some(Height::zero()));
         });
     }
 

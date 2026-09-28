@@ -1872,7 +1872,7 @@ mod tests {
     };
 
     mod managed_db_lifecycle {
-        use super::{ManagedDb, split};
+        use super::{DatabaseSet, ManagedDb, Single, split};
         use crate::stateful::{db::Unmerkleized, tests::mocks::apply_and_finalize};
         use commonware_cryptography::{Sha256, sha256::Digest};
         use commonware_parallel::Sequential;
@@ -2259,6 +2259,34 @@ mod tests {
                     crate::stateful::ExecutionError::Stale,
                 ));
                 assert!(T::new_batch(reader).await.merkleize().await.is_ok());
+            });
+        }
+
+        /// A consuming apply that storage refuses, here with `StaleBatch` for a sibling of the
+        /// applied batch, panics instead of surfacing as a recoverable `Stale`.
+        #[test]
+        #[should_panic(expected = "database apply failed")]
+        fn refused_apply_panics_instead_of_going_stale() {
+            deterministic::Runner::default().start(|context| async move {
+                let config = any_fixed_config(&context, "db");
+                let database =
+                    <AnyFixed as ManagedDb<Context>>::init(context.child("db"), config, None)
+                        .await
+                        .unwrap();
+                let set = Single::from(database);
+                let reader = DatabaseSet::<Context>::readers(&set);
+                let winner = <AnyFixed as ManagedDb<Context>>::new_batch(reader.clone())
+                    .await
+                    .merkleize()
+                    .await
+                    .unwrap();
+                let loser = <AnyFixed as ManagedDb<Context>>::new_batch(reader)
+                    .await
+                    .merkleize()
+                    .await
+                    .unwrap();
+                let set = DatabaseSet::<Context>::apply(set, winner).await;
+                let _ = DatabaseSet::<Context>::apply(set, loser).await;
             });
         }
 

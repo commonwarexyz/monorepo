@@ -2339,6 +2339,10 @@ mod tests {
         });
     }
 
+    /// A verification on a finalized-away fork answers its branch-relative verdict. The mock
+    /// databases never refuse, which models a losing branch whose state matches the winner's.
+    /// Real storage refuses a distinct-state branch as stale instead (see the processor test
+    /// `finalized_away_fork_refuses_unless_state_matches`).
     #[test]
     fn finalized_away_fork_verification_answers_true() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -2413,8 +2417,8 @@ mod tests {
         });
     }
 
-    /// A verification whose fork a finalization dropped still answers its
-    /// branch-relative verdict.
+    /// A verification whose fork a finalization dropped still answers its branch-relative
+    /// verdict, under the same mock caveat as `finalized_away_fork_verification_answers_true`.
     #[test]
     fn pruned_deep_fork_verification_answers_true() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -3978,6 +3982,33 @@ mod tests {
             assert_eq!(control.applied.load(Ordering::Relaxed), 1);
             assert_eq!(subscriber.latest(), Some(1));
             assert_eq!(publications(&context), 2);
+            actor.abort();
+            let _ = actor.await;
+        });
+    }
+
+    /// A redelivered receipt for a durable height acknowledges at once and starts no barrier.
+    #[test]
+    fn durable_duplicate_acknowledges_without_barrier() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, _subscriber, _marshal, actor) =
+                spawn_processing(&context, "durable-duplicate", None).await;
+
+            let first = TestBlock::child(&TestBlock::new(0, 0), 1);
+            let (ack, original) = Exact::handle();
+            mailbox.report(Update::Block(Arc::new(first.clone()), ack));
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            control.flushes.lock().remove(0).send(Ok(())).unwrap();
+            original.await.unwrap();
+
+            let (ack, duplicate) = Exact::handle();
+            mailbox.report(Update::Block(Arc::new(first), ack));
+            duplicate.await.expect("a durable duplicate acknowledges");
+            processing_fence(&context, &mailbox).await;
+            assert!(control.flushes.lock().is_empty());
+            assert_eq!(control.applied.load(Ordering::Relaxed), 1);
             actor.abort();
             let _ = actor.await;
         });

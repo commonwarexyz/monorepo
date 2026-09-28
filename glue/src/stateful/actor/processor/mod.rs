@@ -2182,7 +2182,34 @@ mod tests {
         }
 
         async fn stage_pending_child(&mut self, parent: &Block, view: View) -> Block {
-            let (block, merkleized) = self.build_child(parent, view).await;
+            self.stage_pending_child_with_state(parent, view, view)
+                .await
+        }
+
+        /// Stages a child at `view` whose execution writes `state_view`, so siblings built with
+        /// the same `state_view` commit to identical state.
+        async fn stage_pending_child_with_state(
+            &mut self,
+            parent: &Block,
+            view: View,
+            state_view: View,
+        ) -> Block {
+            let context = consensus_context(parent.digest(), view);
+            let height = parent.height().next();
+            let batches = self.fork_from(parent).await;
+            let merkleized = ExecutionApp::execute(height, state_view, batches)
+                .await
+                .unwrap();
+            let block = Block {
+                context,
+                parent: parent.digest(),
+                height,
+                state_root: merkleized.root(),
+                range: non_empty_range!(
+                    merkleized.bounds().inactivity_floor,
+                    merkleized.bounds().tip.size
+                ),
+            };
             let round = Round::new(Epoch::zero(), view);
             assert!(self.processor.cache_pending(
                 block.digest(),
@@ -2582,6 +2609,67 @@ mod tests {
                 ExecutionApp::execute(Height::new(1), View::new(1), stale).await,
                 Err(ExecutionError::Stale)
             ));
+            drop(harness);
+        });
+    }
+
+    /// A verification batch forked from a branch that a finalization dropped refuses as stale,
+    /// so the verifier re-checks the candidate against the canonical chain instead of answering
+    /// from dead state. A losing branch with the winner's exact state (`identical`) is the same
+    /// state by commitment, so its execution proceeds and matches the winner's branch.
+    #[rstest::rstest]
+    #[case::distinct_parent(1, false)]
+    #[case::identical_parent(1, true)]
+    #[case::distinct_grandparent(2, false)]
+    #[case::identical_grandparent(2, true)]
+    fn finalized_away_fork_refuses_unless_state_matches(
+        #[case] depth: u64,
+        #[case] identical: bool,
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+
+            // The losing branch starts at the winner's height. Every block on it shares the
+            // winner's state view when `identical` is set.
+            let state_view = |view: u64| View::new(if identical { 1 } else { view });
+            let mut losing = harness
+                .stage_pending_child_with_state(&genesis, View::new(2), state_view(2))
+                .await;
+            for view in 3..2 + depth {
+                losing = harness
+                    .stage_pending_child_with_state(&losing, View::new(view), state_view(view))
+                    .await;
+            }
+            let candidate = harness.fork_from(&losing).await;
+            let winner = harness
+                .stage_pending_child_with_state(&genesis, View::new(1), View::new(1))
+                .await;
+
+            let applied;
+            (harness, applied) = harness.finalize(winner.clone()).await;
+            assert!(applied);
+            assert!(!harness.processor.pending_contains(&losing.digest()));
+
+            let height = Height::new(depth + 1);
+            let result = ExecutionApp::execute(height, state_view(2 + depth), candidate).await;
+            if identical {
+                let mut expected = harness.fork_from(&winner).await;
+                for level in 2..=depth {
+                    let merkleized =
+                        ExecutionApp::execute(Height::new(level), state_view(level), expected)
+                            .await
+                            .expect("the winner's branch executes");
+                    expected = merkleized.new_batch();
+                }
+                let expected = ExecutionApp::execute(height, state_view(2 + depth), expected)
+                    .await
+                    .expect("the winner's branch executes");
+                let result = result.expect("identical state is not stale");
+                assert_eq!(result.root(), expected.root());
+            } else {
+                assert!(matches!(result, Err(ExecutionError::Stale)));
+            }
             drop(harness);
         });
     }
