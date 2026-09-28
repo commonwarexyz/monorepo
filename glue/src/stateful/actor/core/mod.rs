@@ -264,11 +264,8 @@ where
     /// Starts the application by initializing the database set at marshal's current floor.
     async fn start_from_marshal(self) {
         let (marshal, _) = self.marshal;
-        let syncer::StartupResult {
-            sync: SyncResult { databases, anchor },
-            skip_finalized_until,
-        } = syncer::init_databases_from_marshal::<E, A, S, V>(
-            self.context.as_present(),
+        let SyncResult { databases, anchor } = syncer::init_databases_from_marshal::<E, A, S, V>(
+            self.context.child("databases"),
             &marshal,
             self.db_config,
             self.plan.into_sync_metadata(),
@@ -291,7 +288,6 @@ where
             processor,
             snapshot_publisher,
             deferred_verifications: Vec::new(),
-            skip_finalized_until,
         }
         .start()
         .await
@@ -358,7 +354,8 @@ mod tests {
             )
             .await;
 
-            let plan = SyncPlan::init(&context, "startup-serve-stateful".to_string()).await;
+            let plan =
+                SyncPlan::init(context.child("plan"), "startup-serve-stateful".to_string()).await;
             let publication_context = context.child("publication");
             let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&publication_context);
             let (stateful, _mailbox) = Stateful::init(
@@ -410,7 +407,8 @@ mod tests {
             )
             .await;
 
-            let plan = SyncPlan::init(&context, "pending-floor-stateful".to_string()).await;
+            let plan =
+                SyncPlan::init(context.child("plan"), "pending-floor-stateful".to_string()).await;
             let publication_context = context.child("publication");
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
@@ -471,7 +469,7 @@ mod tests {
             .await;
 
             let (startup_started, startup_release) = TestDb::gate_next_snapshot();
-            let plan = SyncPlan::init(&context, format!("{prefix}-stateful")).await;
+            let plan = SyncPlan::init(context.child("plan"), format!("{prefix}-stateful")).await;
             let publication_context = context.child("publication");
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),

@@ -14,7 +14,8 @@ use super::{
     sockaddr::SockAddr,
     waiter::{WaiterId, WaiterState},
 };
-use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::hold::Held};
+use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
+use commonware_utils::sync::AsyncMutex;
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
@@ -203,6 +204,28 @@ impl Request {
         matches!(self, Self::WriteAt(_) | Self::Sync(_))
     }
 
+    /// Gate shared by every durability operation on this open.
+    pub fn durability(&self) -> Option<&Arc<AsyncMutex<()>>> {
+        match self {
+            Self::Sync(r) => Some(&r.file.durability),
+            Self::WriteAt(r) if r.state != WriteAtState::Writing => Some(&r.file.durability),
+            _ => None,
+        }
+    }
+
+    /// Resolve a durability request that needs no SQE, with its permit held.
+    pub fn prepare_durability(&self) -> Option<Result<(), Error>> {
+        match self {
+            Self::Sync(r) => match r.file.needs_sync() {
+                Ok(true) => None,
+                Ok(false) => Some(Ok(())),
+                Err(error) => Some(Err(error)),
+            },
+            Self::WriteAt(r) => r.file.tracker.failure().map(Err),
+            _ => unreachable!("durability permit for another request kind"),
+        }
+    }
+
     /// Build the next SQE for this request, tagged with `waiter_id`.
     pub fn build_sqe(&mut self, waiter_id: WaiterId) -> SqueueEntry {
         let sqe = match self {
@@ -269,27 +292,49 @@ impl Request {
                     RequestOutput::ReadAt(result),
                     RetiredResources::File {
                         _file: r.file,
-                        _cache: Some(r.cache),
                         _write: None,
                     },
                 )
             }
-            Self::WriteAt(r) => (
-                RequestOutput::WriteAt(result),
-                RetiredResources::File {
-                    _file: r.file,
-                    _cache: Some(r.cache),
-                    _write: Some(r.write),
-                },
-            ),
-            Self::Sync(r) => (
-                RequestOutput::Sync(result),
-                RetiredResources::File {
-                    _file: r.file,
-                    _cache: None,
-                    _write: None,
-                },
-            ),
+            Self::WriteAt(r) => {
+                // Only plain writes stay in `Writing`. Settle here so a caller that stopped
+                // waiting still leaves the open's debt correct.
+                let result = r.file.wrote(
+                    r.state != WriteAtState::Writing,
+                    matches!(r.state, WriteAtState::WritingSync | WriteAtState::Syncing),
+                    result,
+                );
+
+                // A successful trailing sync also covers the mutations completed before the
+                // request. Credit them before the durability permit is released.
+                let result = match result {
+                    Ok(()) if r.state == WriteAtState::Syncing => r.file.tracker.end_sync(r.seen),
+                    result => result,
+                };
+                (
+                    RequestOutput::WriteAt(result),
+                    RetiredResources::File {
+                        _file: r.file,
+                        _write: Some(r.write),
+                    },
+                )
+            }
+            Self::Sync(r) => {
+                let result = match result {
+                    Ok(()) => r.file.tracker.end_sync(r.seen),
+                    Err(error) => {
+                        r.file.sync_failed(&error);
+                        Err(error)
+                    }
+                };
+                (
+                    RequestOutput::Sync(result),
+                    RetiredResources::File {
+                        _file: r.file,
+                        _write: None,
+                    },
+                )
+            }
             Self::Connect(r) => (
                 RequestOutput::Connect(result),
                 RetiredResources::Connect {
@@ -345,12 +390,10 @@ pub enum RetiredResources {
         /// Original byte owners, including consumed chunks.
         _write: WriteBuffers,
     },
-    /// File, directory hold, and any positioned I/O buffer/cache owners.
+    /// Storage open, directory hold, and any positioned write buffers.
     File {
-        /// File owner carrying its original storage directory hold.
-        _file: Arc<Held>,
-        /// Shared capability state retained by positioned I/O.
-        _cache: Option<Cache>,
+        /// Storage open carrying its file, directory hold, and durability debt.
+        _file: Arc<Shared>,
         /// Original write owners, absent for reads and standalone sync.
         _write: Option<WriteBuffers>,
     },
@@ -530,8 +573,8 @@ impl RecvRequest {
 
 /// Logical positioned file read request and its in-loop state.
 pub struct ReadAtRequest {
-    /// File used by the current read SQE.
-    pub file: Arc<Held>,
+    /// Open whose file the current read SQE uses.
+    pub file: Arc<Shared>,
     /// Starting file offset for the logical read.
     pub offset: u64,
     /// Bytes already read into `buf`.
@@ -556,7 +599,7 @@ impl ReadAtRequest {
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.read) };
         let remaining = len - self.read;
         let offset = self.offset + self.read as u64;
-        let rw_flags = self.cache.rw_flag();
+        let rw_flags = self.cache.rw_flag(&self.file.dont_cache_supported);
         opcode::Read::new(fd, ptr, scalar_len(remaining))
             .offset(offset)
             .rw_flags(rw_flags)
@@ -568,7 +611,11 @@ impl ReadAtRequest {
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
-            CqeResult::Error(code) if self.cache.fallback(code) => None,
+            CqeResult::Error(code)
+                if self.cache.fallback(&self.file.dont_cache_supported, code) =>
+            {
+                None
+            }
             CqeResult::Cancelled | CqeResult::Error(_) => Some(Err(Error::ReadFailed)),
             CqeResult::Zero => Some(Err(Error::BlobInsufficientLength)),
             CqeResult::Positive(n) => {
@@ -593,17 +640,17 @@ pub enum Cache {
     /// Use the operating system's normal page-cache behavior.
     Enabled,
     /// Best-effort bypass of the page cache while the backend supports it.
-    Disabled(Arc<AtomicBool>),
+    Disabled,
 }
 
 #[allow(clippy::missing_const_for_fn)]
 impl Cache {
     /// Return the flag for this request, falling back to normal caching if another request has
     /// already found the hint unsupported.
-    fn rw_flag(&mut self) -> i32 {
+    fn rw_flag(&mut self, supported: &AtomicBool) -> i32 {
         match self {
-            Self::Disabled(supported) if supported.load(Ordering::Relaxed) => libc::RWF_DONTCACHE,
-            Self::Disabled(_) => {
+            Self::Disabled if supported.load(Ordering::Relaxed) => libc::RWF_DONTCACHE,
+            Self::Disabled => {
                 *self = Self::Enabled;
                 0
             }
@@ -612,7 +659,7 @@ impl Cache {
     }
 
     /// Retry without cache bypass if the kernel rejected the hint.
-    fn fallback(&mut self, code: i32) -> bool {
+    fn fallback(&mut self, supported: &AtomicBool, code: i32) -> bool {
         if code != -libc::EOPNOTSUPP {
             return false;
         }
@@ -620,7 +667,7 @@ impl Cache {
         // Each request that submitted the hint must retry, even if a sibling
         // has already updated the shared capability flag.
         match std::mem::replace(self, Self::Enabled) {
-            Self::Disabled(supported) => {
+            Self::Disabled => {
                 supported.store(false, Ordering::Relaxed);
                 true
             }
@@ -667,8 +714,8 @@ fn on_sync_cqe(state: WaiterState, result: i32) -> Option<Result<(), Error>> {
 
 /// Logical positioned file write request and its in-loop state.
 pub struct WriteAtRequest {
-    /// File used by the current write SQE.
-    pub file: Arc<Held>,
+    /// Open whose file the current write SQE uses.
+    pub file: Arc<Shared>,
     /// File offset for the next write SQE.
     pub offset: u64,
     /// Write cursor and buffers that still need to be written.
@@ -677,9 +724,30 @@ pub struct WriteAtRequest {
     pub state: WriteAtState,
     /// Page-cache policy for this request.
     pub cache: Cache,
+    /// Completed mutations that preceded this request, which a trailing sync covers.
+    seen: u64,
 }
 
 impl WriteAtRequest {
+    /// Record the mutation frontier a trailing sync can cover before ring submission.
+    pub fn new(
+        file: Arc<Shared>,
+        offset: u64,
+        write: WriteBuffers,
+        state: WriteAtState,
+        cache: Cache,
+    ) -> Self {
+        let seen = file.tracker.begin_sync();
+        Self {
+            file,
+            offset,
+            write,
+            state,
+            cache,
+            seen,
+        }
+    }
+
     /// Use `RWF_DSYNC` because the write contract does not require timestamp-only metadata.
     fn rw_flags(&mut self) -> i32 {
         let sync = if self.state == WriteAtState::WritingSync {
@@ -687,7 +755,7 @@ impl WriteAtRequest {
         } else {
             0
         };
-        sync | self.cache.rw_flag()
+        sync | self.cache.rw_flag(&self.file.dont_cache_supported)
     }
 
     /// Build the next positioned write SQE for the remaining bytes.
@@ -733,7 +801,14 @@ impl WriteAtRequest {
 
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
-            CqeResult::Error(code) if self.cache.fallback(code) => None,
+            CqeResult::Error(code)
+                if self.cache.fallback(&self.file.dont_cache_supported, code) =>
+            {
+                None
+            }
+            CqeResult::Error(code) if self.state == WriteAtState::WritingSync => Some(Err(
+                Error::Io(std::io::Error::from_raw_os_error(-code).into()),
+            )),
             CqeResult::Cancelled | CqeResult::Error(_) | CqeResult::Zero => {
                 Some(Err(Error::WriteFailed))
             }
@@ -758,11 +833,19 @@ impl WriteAtRequest {
 
 /// Logical fsync request and its in-loop state.
 pub struct SyncRequest {
-    /// File descriptor to sync.
-    pub file: Arc<Held>,
+    /// Open whose file the fsync SQE uses.
+    pub file: Arc<Shared>,
+    /// Completed mutations that preceded this request's construction.
+    seen: u64,
 }
 
 impl SyncRequest {
+    /// Record the mutation frontier this sync can cover before ring submission.
+    pub fn new(file: Arc<Shared>) -> Self {
+        let seen = file.tracker.begin_sync();
+        Self { file, seen }
+    }
+
     /// Build the fsync SQE for this request.
     fn build_sqe(&self) -> SqueueEntry {
         build_datasync_sqe(&self.file)
@@ -865,7 +948,7 @@ mod tests {
     }
 
     /// Retain a descriptor and directory hold for simulated storage requests.
-    fn make_file_fd() -> Arc<Held> {
+    fn make_file() -> Arc<Shared> {
         let (left, _right) = UnixStream::pair().expect("failed to create unix socket pair");
         let file = File::from(OwnedFd::from(left));
 
@@ -878,7 +961,7 @@ mod tests {
             )
             .unwrap()
         });
-        Held::new(file, hold.clone())
+        Shared::detached(file, hold.clone())
     }
 
     /// Create a five-byte send with no deadline.
@@ -903,9 +986,9 @@ mod tests {
     }
 
     /// Create a five-byte positioned read with the requested cache policy.
-    fn make_read_request(cache: Cache) -> ReadAtRequest {
+    fn make_read_request(file: Arc<Shared>, cache: Cache) -> ReadAtRequest {
         ReadAtRequest {
-            file: make_file_fd(),
+            file,
             offset: 0,
             read: 0,
             buf: IoBufMut::zeroed(5),
@@ -914,14 +997,14 @@ mod tests {
     }
 
     /// Create a five-byte positioned write with no durability requirement.
-    fn make_write_request(cache: Cache) -> WriteAtRequest {
-        WriteAtRequest {
-            file: make_file_fd(),
-            offset: 0,
-            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            state: WriteAtState::Writing,
+    fn make_write_request(file: Arc<Shared>, cache: Cache) -> WriteAtRequest {
+        WriteAtRequest::new(
+            file,
+            0,
+            IoBufs::from(IoBuf::from(b"hello")).into(),
+            WriteAtState::Writing,
             cache,
-        }
+        )
     }
 
     /// Create a connection request with stable storage for a native address.
@@ -1209,21 +1292,19 @@ mod tests {
                 (Request::Send(send), opcode::Send::CODE, deadline, false),
                 (Request::Recv(recv), opcode::Recv::CODE, deadline, false),
                 (
-                    Request::ReadAt(make_read_request(Cache::Enabled)),
+                    Request::ReadAt(make_read_request(make_file(), Cache::Enabled)),
                     opcode::Read::CODE,
                     None,
                     false,
                 ),
                 (
-                    Request::WriteAt(make_write_request(Cache::Enabled)),
+                    Request::WriteAt(make_write_request(make_file(), Cache::Enabled)),
                     opcode::Write::CODE,
                     None,
                     true,
                 ),
                 (
-                    Request::Sync(SyncRequest {
-                        file: make_file_fd(),
-                    }),
+                    Request::Sync(SyncRequest::new(make_file())),
                     opcode::Fsync::CODE,
                     None,
                     true,
@@ -1257,7 +1338,7 @@ mod tests {
             assert!(catch_unwind(AssertUnwindSafe(|| recv.build_sqe())).is_err());
         }
 
-        let mut read = make_read_request(Cache::Enabled);
+        let mut read = make_read_request(make_file(), Cache::Enabled);
         read.read = 6;
         assert!(catch_unwind(AssertUnwindSafe(|| read.build_sqe())).is_err());
     }
@@ -1290,7 +1371,7 @@ mod tests {
             exact: true,
             deadline,
         };
-        let mut read = make_read_request(Cache::Enabled);
+        let mut read = make_read_request(make_file(), Cache::Enabled);
         read.offset = 7;
 
         // Real buffers remain valid while each builder advances to its suffix.
@@ -1391,7 +1472,7 @@ mod tests {
 
     #[test]
     fn test_active_read_at_paths() {
-        let mut request = Request::ReadAt(make_read_request(Cache::Enabled));
+        let mut request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
         assert!(request.on_cqe(ACTIVE, -libc::EAGAIN).is_none());
 
         // Positioned reads accumulate progress until the full range is available.
@@ -1401,20 +1482,20 @@ mod tests {
             RequestOutput::ReadAt(Ok(_))
         ));
 
-        let request = Request::ReadAt(make_read_request(Cache::Enabled));
+        let request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
         assert!(matches!(
             complete(request, ACTIVE, 0),
             RequestOutput::ReadAt(Err((_, Error::BlobInsufficientLength)))
         ));
 
-        let request = Request::ReadAt(make_read_request(Cache::Enabled));
+        let request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
         assert!(matches!(
             complete(request, ACTIVE, -libc::EIO),
             RequestOutput::ReadAt(Err((_, Error::ReadFailed)))
         ));
 
         // An orphaned read may be cancelled while its SQE is still in flight.
-        let request = Request::ReadAt(make_read_request(Cache::Enabled));
+        let request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
         assert!(matches!(
             complete(request, WaiterState::CancelRequested, -libc::ECANCELED),
             RequestOutput::ReadAt(Err((_, Error::ReadFailed)))
@@ -1423,54 +1504,69 @@ mod tests {
 
     #[test]
     fn test_uncached_read_fallback_preserves_progress_and_is_shared_with_writes() {
-        let supported = Arc::new(AtomicBool::new(true));
-        let mut read = make_read_request(Cache::Disabled(supported.clone()));
+        let file = make_file();
+        let mut read = make_read_request(file.clone(), Cache::Disabled);
 
         // Preserve completed bytes while retrying without the rejected cache hint.
-        assert_eq!(read.cache.rw_flag(), libc::RWF_DONTCACHE);
+        assert_eq!(
+            read.cache.rw_flag(&file.dont_cache_supported),
+            libc::RWF_DONTCACHE
+        );
         assert!(read.on_cqe(ACTIVE, 2).is_none());
         assert_eq!(read.read, 2);
-        assert_eq!(read.cache.rw_flag(), libc::RWF_DONTCACHE);
+        assert_eq!(
+            read.cache.rw_flag(&file.dont_cache_supported),
+            libc::RWF_DONTCACHE
+        );
 
         assert!(read.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
         assert_eq!(read.read, 2);
-        assert!(!supported.load(Ordering::Relaxed));
-        assert_eq!(read.cache.rw_flag(), 0);
+        assert!(!file.dont_cache_supported.load(Ordering::Relaxed));
+        assert_eq!(read.cache.rw_flag(&file.dont_cache_supported), 0);
 
         // Capability loss is shared in both directions across sibling requests.
-        let mut sibling_write = make_write_request(Cache::Disabled(supported));
+        let mut sibling_write = make_write_request(file, Cache::Disabled);
         assert_eq!(sibling_write.rw_flags(), 0);
 
-        let supported = Arc::new(AtomicBool::new(true));
-        let mut write = make_write_request(Cache::Disabled(supported.clone()));
+        let file = make_file();
+        let mut write = make_write_request(file.clone(), Cache::Disabled);
         assert_eq!(write.rw_flags(), libc::RWF_DONTCACHE);
         assert!(write.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
-        let mut sibling_read = make_read_request(Cache::Disabled(supported));
-        assert_eq!(sibling_read.cache.rw_flag(), 0);
+        let mut sibling_read = make_read_request(file.clone(), Cache::Disabled);
+        assert_eq!(sibling_read.cache.rw_flag(&file.dont_cache_supported), 0);
 
         // Unrelated I/O failures must not disable the hint for future requests.
-        let supported = Arc::new(AtomicBool::new(true));
-        let mut failing_read = make_read_request(Cache::Disabled(supported.clone()));
-        assert_eq!(failing_read.cache.rw_flag(), libc::RWF_DONTCACHE);
+        let file = make_file();
+        let mut failing_read = make_read_request(file.clone(), Cache::Disabled);
+        assert_eq!(
+            failing_read.cache.rw_flag(&file.dont_cache_supported),
+            libc::RWF_DONTCACHE
+        );
         let result = failing_read.on_cqe(ACTIVE, -libc::EIO);
-        assert!(supported.load(Ordering::Relaxed));
+        assert!(file.dont_cache_supported.load(Ordering::Relaxed));
         assert!(matches!(result, Some(Err(Error::ReadFailed))));
     }
 
     #[test]
     fn test_queued_cache_fallbacks_retry() {
-        let supported = Arc::new(AtomicBool::new(true));
-        let mut first = make_read_request(Cache::Disabled(supported.clone()));
-        let mut second = make_read_request(Cache::Disabled(supported.clone()));
+        let file = make_file();
+        let mut first = make_read_request(file.clone(), Cache::Disabled);
+        let mut second = make_read_request(file.clone(), Cache::Disabled);
 
         // Requests queued before the shared downgrade must each requeue without the hint.
-        assert_eq!(first.cache.rw_flag(), libc::RWF_DONTCACHE);
-        assert_eq!(second.cache.rw_flag(), libc::RWF_DONTCACHE);
+        assert_eq!(
+            first.cache.rw_flag(&file.dont_cache_supported),
+            libc::RWF_DONTCACHE
+        );
+        assert_eq!(
+            second.cache.rw_flag(&file.dont_cache_supported),
+            libc::RWF_DONTCACHE
+        );
         assert!(first.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
         assert!(second.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
-        assert!(!supported.load(Ordering::Relaxed));
-        assert_eq!(first.cache.rw_flag(), 0);
-        assert_eq!(second.cache.rw_flag(), 0);
+        assert!(!file.dont_cache_supported.load(Ordering::Relaxed));
+        assert_eq!(first.cache.rw_flag(&file.dont_cache_supported), 0);
+        assert_eq!(second.cache.rw_flag(&file.dont_cache_supported), 0);
     }
 
     #[test]
@@ -1486,13 +1582,13 @@ mod tests {
             WriteAtState::WritingBeforeSync,
         ] {
             let trailing_sync = state == WriteAtState::WritingBeforeSync;
-            let mut write = WriteAtRequest {
-                file: make_file_fd(),
-                offset: 17,
-                write: IoBufs::from(buf.clone()).into(),
+            let mut write = WriteAtRequest::new(
+                make_file(),
+                17,
+                IoBufs::from(buf.clone()).into(),
                 state,
-                cache: Cache::Enabled,
-            };
+                Cache::Enabled,
+            );
 
             // A signed CQE cannot report the entire u32-sized prefix at once.
             for _ in 0..2 {
@@ -1518,7 +1614,7 @@ mod tests {
 
     #[test]
     fn test_active_write_at_paths() {
-        let mut write = make_write_request(Cache::Enabled);
+        let mut write = make_write_request(make_file(), Cache::Enabled);
         assert_eq!(write.rw_flags(), 0);
         let mut request = Request::WriteAt(write);
         assert!(request.on_cqe(ACTIVE, -libc::EAGAIN).is_none());
@@ -1531,7 +1627,7 @@ mod tests {
         ));
 
         // The same completion path handles progress spanning several chunks.
-        let mut write = make_write_request(Cache::Enabled);
+        let mut write = make_write_request(make_file(), Cache::Enabled);
         let mut bufs = IoBufs::from(IoBuf::from(b"abc"));
         bufs.append(IoBuf::from(b"de"));
         write.write = bufs.into();
@@ -1543,55 +1639,79 @@ mod tests {
         ));
 
         for result in [0, -libc::EIO, -libc::ECANCELED] {
-            let request = Request::WriteAt(make_write_request(Cache::Enabled));
+            let request = Request::WriteAt(make_write_request(make_file(), Cache::Enabled));
             assert!(matches!(
                 complete(request, ACTIVE, result),
                 RequestOutput::WriteAt(Err(Error::WriteFailed))
             ));
         }
 
-        // Per-write durability changes the flags but keeps the same error mapping.
-        let mut write = make_write_request(Cache::Enabled);
-        write.state = WriteAtState::WritingSync;
-        assert_eq!(write.rw_flags(), libc::RWF_DSYNC);
+        let mut write = make_write_request(make_file(), Cache::Enabled);
+        write.state = WriteAtState::WritingBeforeSync;
         assert!(matches!(
-            complete(Request::WriteAt(write), ACTIVE, -libc::EINVAL),
+            complete(Request::WriteAt(write), ACTIVE, -libc::EIO),
             RequestOutput::WriteAt(Err(Error::WriteFailed))
         ));
+
+        // A fused write retains the kernel errno through its durability failure.
+        let mut write = make_write_request(make_file(), Cache::Enabled);
+        write.state = WriteAtState::WritingSync;
+        assert_eq!(write.rw_flags(), libc::RWF_DSYNC);
+        let file = write.file.clone();
+        assert!(matches!(
+            complete(Request::WriteAt(write), ACTIVE, -libc::EINVAL),
+            RequestOutput::WriteAt(Err(Error::Io(error)))
+                if error.raw_os_error() == Some(libc::EINVAL)
+        ));
+        assert!(matches!(
+            file.tracker.failure(),
+            Some(Error::BlobSyncFailed(_, _, error))
+                if error.raw_os_error() == Some(libc::EINVAL)
+        ));
+
+        for (state, result) in [
+            (ACTIVE, 0),
+            (WaiterState::CancelRequested, -libc::ECANCELED),
+        ] {
+            let mut write = make_write_request(make_file(), Cache::Enabled);
+            write.state = WriteAtState::WritingSync;
+            assert!(matches!(
+                complete(Request::WriteAt(write), state, result),
+                RequestOutput::WriteAt(Err(Error::WriteFailed))
+            ));
+        }
     }
 
     #[test]
     fn test_uncached_sync_write_retries_without_hint_when_unsupported() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-
-        let mut request = WriteAtRequest {
-            file: make_file_fd(),
-            offset: 0,
-            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            state: WriteAtState::WritingSync,
-            cache: Cache::Disabled(dont_cache_supported.clone()),
-        };
+        let mut request = WriteAtRequest::new(
+            make_file(),
+            0,
+            IoBufs::from(IoBuf::from(b"hello")).into(),
+            WriteAtState::WritingSync,
+            Cache::Disabled,
+        );
 
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC | libc::RWF_DONTCACHE);
         assert!(request.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
-        assert!(!dont_cache_supported.load(Ordering::Relaxed));
-        request.cache = Cache::Disabled(dont_cache_supported);
+        assert!(!request.file.dont_cache_supported.load(Ordering::Relaxed));
+        request.cache = Cache::Disabled;
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC);
-        assert!(!request.cache.fallback(-libc::EOPNOTSUPP));
+        assert!(
+            !request
+                .cache
+                .fallback(&request.file.dont_cache_supported, -libc::EOPNOTSUPP)
+        );
     }
 
     #[test]
     fn test_active_sync_paths() {
-        let mut request = Request::Sync(SyncRequest {
-            file: make_file_fd(),
-        });
+        let mut request = Request::Sync(SyncRequest::new(make_file()));
         assert!(request.on_cqe(ACTIVE, -libc::EINTR).is_none());
 
         // A sync exposes the kernel error code, including unsolicited ECANCELED.
         for code in [libc::ECANCELED, libc::EIO] {
-            let request = Request::Sync(SyncRequest {
-                file: make_file_fd(),
-            });
+            let request = Request::Sync(SyncRequest::new(make_file()));
             let RequestOutput::Sync(Err(Error::Io(error))) = complete(request, ACTIVE, -code)
             else {
                 panic!("expected sync I/O error");
@@ -1600,13 +1720,141 @@ mod tests {
         }
 
         for result in [0, 1] {
-            let request = Request::Sync(SyncRequest {
-                file: make_file_fd(),
-            });
+            let request = Request::Sync(SyncRequest::new(make_file()));
             assert!(matches!(
                 complete(request, ACTIVE, result),
                 RequestOutput::Sync(Ok(()))
             ));
+        }
+    }
+
+    #[test]
+    fn test_sync_completion_credits_only_its_successful_barrier() {
+        for trailing in [false, true] {
+            for success in [false, true] {
+                for later_write in [false, true] {
+                    let file = make_file();
+                    file.tracker.write();
+                    file.tracker.complete();
+
+                    // A multi-batch write reaches its trailing sync after its last batch.
+                    let mut request = if trailing {
+                        Request::WriteAt(WriteAtRequest::new(
+                            file.clone(),
+                            0,
+                            IoBufs::from(IoBuf::from(b"hello")).into(),
+                            WriteAtState::WritingBeforeSync,
+                            Cache::Enabled,
+                        ))
+                    } else {
+                        Request::Sync(SyncRequest::new(file.clone()))
+                    };
+                    if trailing {
+                        assert!(request.on_cqe(ACTIVE, 5).is_none());
+                    }
+
+                    // A write completing during the barrier stays dirty.
+                    if later_write {
+                        file.tracker.write();
+                        file.tracker.complete();
+                    }
+                    let result = if success { Ok(()) } else { Err(Error::Timeout) };
+                    let (_, retired) = request.complete(result);
+                    drop(retired);
+                    assert_eq!(file.tracker.is_dirty(), !success || later_write);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_durability_completion_retains_failure() {
+        for state in [
+            None,
+            Some(WriteAtState::WritingSync),
+            Some(WriteAtState::Syncing),
+        ] {
+            for failure_first in [false, true] {
+                let file = make_file();
+                file.tracker.write();
+                file.tracker.complete();
+                let mut failed = Request::Sync(SyncRequest::new(file.clone()));
+                let mut successful = state.as_ref().map_or_else(
+                    || Request::Sync(SyncRequest::new(file.clone())),
+                    |state| {
+                        Request::WriteAt(WriteAtRequest::new(
+                            file.clone(),
+                            0,
+                            IoBufs::from(IoBuf::from(b"hello")).into(),
+                            if *state == WriteAtState::Syncing {
+                                WriteAtState::WritingBeforeSync
+                            } else {
+                                WriteAtState::WritingSync
+                            },
+                            Cache::Enabled,
+                        ))
+                    },
+                );
+                if state == Some(WriteAtState::Syncing) {
+                    assert!(successful.on_cqe(ACTIVE, 5).is_none());
+                }
+
+                // Exercise terminal accounting directly, independently of driver admission.
+                // Discarding the output cannot discard a retained durability failure.
+                let finish_failure = || {
+                    let result = failed.on_cqe(ACTIVE, -libc::EIO).unwrap();
+                    let (output, retired) = failed.complete(result);
+                    assert!(matches!(output, RequestOutput::Sync(Err(Error::Io(_)))));
+                    assert!(matches!(
+                        file.tracker.failure(),
+                        Some(Error::BlobSyncFailed(_, _, error))
+                            if error.raw_os_error() == Some(libc::EIO)
+                    ));
+                    drop(retired);
+                };
+                let finish_success = || {
+                    let result = successful
+                        .on_cqe(
+                            ACTIVE,
+                            if state == Some(WriteAtState::WritingSync) {
+                                5
+                            } else {
+                                0
+                            },
+                        )
+                        .unwrap();
+                    let (output, retired) = successful.complete(result);
+                    let result = match output {
+                        RequestOutput::Sync(result) | RequestOutput::WriteAt(result) => result,
+                        _ => unreachable!(),
+                    };
+                    if failure_first {
+                        assert!(
+                            matches!(&result, Err(Error::BlobSyncFailed(_, _, error))
+                                if error.raw_os_error() == Some(libc::EIO)),
+                            "acknowledged after a retained failure: {result:?}"
+                        );
+                        assert!(file.tracker.is_dirty());
+                    } else {
+                        result.unwrap();
+
+                        // A trailing sync credits the write completed before the request. A
+                        // fused write covers only its own range.
+                        assert_eq!(
+                            file.tracker.is_dirty(),
+                            state == Some(WriteAtState::WritingSync)
+                        );
+                    }
+                    drop(retired);
+                };
+                if failure_first {
+                    finish_failure();
+                    finish_success();
+                } else {
+                    finish_success();
+                    finish_failure();
+                }
+            }
         }
     }
 
@@ -1629,7 +1877,7 @@ mod tests {
         assert_eq!(buf.as_mut_ptr(), pointer);
         drop(retired);
 
-        let mut read = make_read_request(Cache::Enabled);
+        let mut read = make_read_request(make_file(), Cache::Enabled);
         let pointer = read.buf.as_mut_ptr();
         let (output, retired) = Request::ReadAt(read).complete(Err(Error::Timeout));
         let RequestOutput::ReadAt(Err((mut buf, Error::Timeout))) = output else {
@@ -1638,7 +1886,7 @@ mod tests {
         assert_eq!(buf.as_mut_ptr(), pointer);
         drop(retired);
 
-        let request = Request::WriteAt(make_write_request(Cache::Enabled));
+        let request = Request::WriteAt(make_write_request(make_file(), Cache::Enabled));
         let (output, retired) = request.complete(Err(Error::Timeout));
         assert!(matches!(
             output,
@@ -1646,9 +1894,7 @@ mod tests {
         ));
         drop(retired);
 
-        let request = Request::Sync(SyncRequest {
-            file: make_file_fd(),
-        });
+        let request = Request::Sync(SyncRequest::new(make_file()));
         let (output, retired) = request.complete(Err(Error::Timeout));
         assert!(matches!(output, RequestOutput::Sync(Err(Error::Timeout))));
         drop(retired);
