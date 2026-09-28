@@ -219,7 +219,7 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Heightable as _, Reporter as _,
+        Heightable, Reporter as _,
         ancestry::Ancestry,
         simplex::{
             marshal::core::Processed,
@@ -229,7 +229,7 @@ mod tests {
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
-        Digest, Digestible as _, ed25519,
+        Digestible as _, ed25519,
         sha256::{Digest as Sha256Digest, Sha256},
     };
     use commonware_parallel::Sequential;
@@ -305,15 +305,15 @@ mod tests {
     impl StateSyncSet<deterministic::Context, ()> for WedgeSet {
         type Error = Infallible;
 
-        async fn sync<D: Digest>(
+        async fn sync<P: Heightable + Clone + Send + Sync + 'static>(
             context: deterministic::Context,
             _config: Self::Config,
             _resolvers: (),
-            anchor: Anchor<D>,
+            anchor: P,
             _targets: Self::SyncTargets,
-            tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
+            tip_updates: ring::Receiver<TipUpdate<P, Self::SyncTargets>>,
             _sync_config: SyncEngineConfig,
-        ) -> Result<(Self, Anchor<D>), Self::Error> {
+        ) -> Result<(Self, P), Self::Error> {
             // Hold the ring receiver without draining it. The deterministic clock advances
             // only at quiescence, so the sleep fires only once every other task has parked,
             // which includes the actor forwarding a tip update into the ring buffer.
