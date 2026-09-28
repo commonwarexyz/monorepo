@@ -57,8 +57,8 @@
 //!    [`Config::plan`].
 //!
 //! With a persisted floor, [`Stateful`] runs [state sync](#state-sync). Without one, it _recovers_:
-//! before handling any message, it opens the databases at the later of marshal's processed height
-//! and the recorded completion height (genesis on a new node).
+//! before handling any message, it opens the databases at the later of the block at the recorded
+//! completion height and the block backing marshal's processed position (genesis on a new node).
 //!
 //! _Completion_ is recorded when state sync converges and on every recovery. Once it is recorded,
 //! peer state sync never runs on the node again.
@@ -99,8 +99,9 @@
 //! * Once the databases are ready, the _applied tip_ is the latest block they reflect. [`Stateful`]
 //!   requires marshal to deliver every finalized block above its applied tip in height order. It
 //!   acknowledges a redelivered block at or below the tip without repeating its effects and panics
-//!   on a block that skips heights. The startup floor is the only permitted jump, so a live marshal
-//!   floor must not leave an unapplied height below it.
+//!   on a block above the tip that skips heights or whose parent is not the tip. The startup floor
+//!   is the only permitted jump, so a live marshal floor must not leave an unapplied height below
+//!   it.
 //! * During state sync, retained blocks are acknowledged before the databases reach them.
 //!   Following [Startup](#startup), the floor is durable before marshal starts from it, so a crash
 //!   before completion resumes [state sync](#state-sync) from that floor or from a newer
@@ -127,11 +128,12 @@
 //! # Failures
 //!
 //! [`Stateful`] panics if a proposal does not match its sync targets, if [`Application::apply`]
-//! cannot execute or reproduce a finalized block, if marshal delivers a finalized block that skips
-//! heights above the applied tip (see [Persistence](#persistence)), if state sync fails, if a
-//! database operation fails (see [Failures](db#failures)), if a state sync metadata write fails, or
-//! if marshal cannot return a block needed at startup. If shutdown interrupts a database barrier,
-//! [`Stateful`] stops without acknowledging the blocks that barrier covers.
+//! cannot execute or reproduce a finalized block, if marshal delivers a finalized block above the
+//! applied tip that skips heights or whose parent is not the tip (see [Persistence](#persistence)),
+//! if state sync fails, if a database operation fails (see [Failures](db#failures)), if a state
+//! sync metadata write fails, or if marshal cannot return a block needed at startup. If shutdown
+//! interrupts a database barrier, [`Stateful`] stops without acknowledging the blocks that barrier
+//! covers.
 //!
 //! # Compatibility
 //!

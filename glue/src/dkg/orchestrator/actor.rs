@@ -443,7 +443,11 @@ where
             <MV::ApplicationBlock as ReshareBlock>::Directory,
         >,
     > {
-        let recovered_epoch = state_sync::recovered_epoch(&self.marshal, epocher).await;
+        let recovered_epoch = self
+            .marshal
+            .get_processed()
+            .await
+            .map(|processed| state_sync::recovered_epoch(processed, epocher));
         if let Some(state_sync) = self
             .state_sync
             .resolve(

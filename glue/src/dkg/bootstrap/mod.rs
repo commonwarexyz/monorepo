@@ -72,6 +72,15 @@ pub struct Config<M, X, SS, T, D = Unit> {
     pub signer: ed25519::PrivateKey,
 
     /// P2P manager used for peer tracking.
+    ///
+    /// The engine activates the participants as peer set zero on every start.
+    /// Peer set IDs must increase monotonically on a network (see
+    /// [`commonware_p2p::Manager::track`]), so this manager MUST own the
+    /// peer-set lifecycle of a network on which no other component activates
+    /// peers. Otherwise the network can ignore this engine's activation or
+    /// another component's, and the [`network`](crate::dkg::network) adapters
+    /// do not report it. A clone of another component's manager shares that
+    /// component's network and does not isolate the two.
     pub manager: M,
 
     /// Blocker used for invalid peer behavior.
@@ -119,8 +128,8 @@ pub struct Config<M, X, SS, T, D = Unit> {
     /// Maximum number of messages to buffer in the DKG channel muxer.
     pub muxer_size: usize,
 
-    /// Number of finalized blocks and certificates per archive section (the granularity of
-    /// pruning).
+    /// Number of items per section in each of the one-shot chain's archives, including
+    /// marshal's cache.
     pub items_per_section: NonZeroU64,
 
     /// Participants in the DKG.
@@ -288,7 +297,10 @@ where
     /// started engine panics if `participants` is empty, does not contain
     /// `signer`, or needs more dealer logs than one epoch of `blocks_per_epoch`
     /// can include, if a successful ceremony's `directory` does not contain
-    /// exactly `participants`, or if one of its components fails.
+    /// exactly `participants`, or if one of its components fails. It also
+    /// panics at startup if `secret_store` holds an epoch-zero share but the
+    /// storage under `partition_prefix` does not hold the one-shot chain's
+    /// final block.
     pub const fn new(context: E, config: Config<M, X, SS, T, D>) -> Self {
         assert!(
             config.max_supported_mode.supports(&config.sharing_mode),

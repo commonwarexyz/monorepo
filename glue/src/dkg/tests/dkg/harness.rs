@@ -10,7 +10,7 @@ use crate::{
     },
     simulate::{
         action::{Crash, Schedule},
-        engine::{EngineDefinition, InitContext},
+        engine::{ChannelPair, EngineDefinition, InitContext},
         exit::{ExitCondition as _, ProcessedHeightAtLeast},
         plan::PlanBuilder,
         processed::ProcessedHeight,
@@ -38,8 +38,8 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _, buffer::paged::CacheRef,
-    deterministic, reschedule, telemetry::metrics::count_running_tasks,
+    Clock as _, Handle, Metrics as _, Quota, Runner as _, Spawner as _, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, reschedule, telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{
     NZU16, NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, probability,
@@ -61,6 +61,10 @@ const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
 const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+
+/// Partition prefix of the single participant's storage, shared across its
+/// restarts.
+const PREFIX: &str = "dkg-single";
 
 const VOTES: u64 = 0;
 const CERTIFICATES: u64 = 1;
@@ -422,69 +426,24 @@ pub(super) fn run_closed_network_receiver() {
     let runner = deterministic::Runner::timed(Duration::from_secs(5));
     runner.start(|context| async move {
         let engine = DkgEngine::new(1);
-        let participants = engine.participants_set();
-        let (network, oracle) = Network::<_, ed25519::PublicKey>::new(
-            context.child("network"),
-            simulated::Config {
-                max_size: 1024 * 1024,
-                max_peers_per_set: NZUsize!(participants.len()),
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            },
-        );
-        network.start();
+        let oracle = network(&context);
+        oracle.manager().track(0, engine.participants_set());
+        let channels = register(&oracle, &engine).await;
 
-        let public_key = engine.participant(0);
-        oracle.manager().track(0, participants.clone());
-
-        let control = oracle.control(public_key.clone());
-        let mut channels = Vec::new();
-        for (channel, quota) in engine.channels() {
-            channels.push(
-                control
-                    .register(channel, quota)
-                    .await
-                    .expect("channel registration failed"),
-            );
-        }
-
-        let _replacement_broadcast = control
+        // Registering the broadcast channel again closes the receiver in
+        // `channels` before the engine starts.
+        let _replacement_broadcast = oracle
+            .control(engine.participant(0))
             .register(BROADCAST, TEST_QUOTA)
             .await
             .expect("replacement channel registration failed");
-
-        let store = engine.store(&public_key);
-        let bootstrap = bootstrap::Engine::<_, MinPk, _, _, _, _, _>::new(
-            context.child("dkg"),
-            bootstrap::Config {
-                signer: engine.signer(&public_key),
-                manager: oracle.manager(),
-                blocker: oracle.control(public_key),
-                secret_store: store,
-                strategy: Sequential,
-                namespace: NAMESPACE,
-                sharing_mode: Mode::NonZeroCounter,
-                reveal: Reveal::V1,
-                max_supported_mode: max_supported_mode(),
-                partition_prefix: "dkg-closed-receiver".into(),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: IO_BUFFER_SIZE,
-                replay_buffer: IO_BUFFER_SIZE,
-                mailbox_size: MAILBOX_SIZE,
-                muxer_size: 128,
-                items_per_section: ITEMS_PER_SECTION,
-                participants,
-                directory: Unit,
-                blocks_per_epoch: EPOCH_LENGTH,
-            },
-        );
-        let (mut handle, completion) = bootstrap.start(
-            channels.remove(0),
-            channels.remove(0),
-            channels.remove(0),
-            channels.remove(0),
-            channels.remove(0),
-            channels.remove(0),
+        let (mut handle, completion) = boot(
+            &context,
+            &oracle,
+            &engine,
+            "dkg-closed-receiver",
+            oracle.manager(),
+            channels,
         );
 
         select! {
@@ -508,63 +467,18 @@ pub(super) fn run_closed_network_receiver() {
 }
 
 pub(super) fn run_activation_failure_completes_empty() {
-    let runner = deterministic::Runner::timed(Duration::from_secs(5));
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|context| async move {
-        let (network, oracle) = Network::<_, ed25519::PublicKey>::new(
-            context.child("network"),
-            simulated::Config {
-                max_size: 1024 * 1024,
-                max_peers_per_set: NZUsize!(1),
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            },
-        );
-        network.start();
-
         let engine = DkgEngine::new(1);
-        let public_key = engine.participant(0);
-        let control = oracle.control(public_key.clone());
-        let mut channels = Vec::new();
-        for (channel, quota) in engine.channels() {
-            channels.push(
-                control
-                    .register(channel, quota)
-                    .await
-                    .expect("channel registration failed"),
-            );
-        }
-
-        let bootstrap = bootstrap::Engine::<_, MinPk, _, _, _, _, _>::new(
-            context.child("dkg"),
-            bootstrap::Config {
-                signer: engine.signer(&public_key),
-                manager: FailingManager(oracle.manager()),
-                blocker: oracle.control(public_key),
-                secret_store: engine.store(&engine.participant(0)),
-                strategy: Sequential,
-                namespace: NAMESPACE,
-                sharing_mode: Mode::NonZeroCounter,
-                reveal: Reveal::V1,
-                max_supported_mode: max_supported_mode(),
-                partition_prefix: "dkg-activation-failure".into(),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: IO_BUFFER_SIZE,
-                replay_buffer: IO_BUFFER_SIZE,
-                mailbox_size: MAILBOX_SIZE,
-                muxer_size: 128,
-                items_per_section: ITEMS_PER_SECTION,
-                participants: engine.participants_set(),
-                directory: Unit,
-                blocks_per_epoch: EPOCH_LENGTH,
-            },
-        );
-        let (handle, completion) = bootstrap.start(
-            channels.remove(0),
-            channels.remove(0),
-            channels.remove(0),
-            channels.remove(0),
-            channels.remove(0),
-            channels.remove(0),
+        let oracle = network(&context);
+        let channels = register(&oracle, &engine).await;
+        let (handle, completion) = boot(
+            &context,
+            &oracle,
+            &engine,
+            "dkg-activation-failure",
+            FailingManager(oracle.manager()),
+            channels,
         );
 
         let completion = select! {
@@ -576,9 +490,24 @@ pub(super) fn run_activation_failure_completes_empty() {
             },
         };
         assert!(completion.info.is_none());
-        context.sleep(Duration::from_millis(10)).await;
+
+        // The actor cannot derive the final block's payload, so the chain
+        // advances to the height before the final block and stops there.
+        context.sleep(Duration::from_secs(30)).await;
+        assert_eq!(processed_height(&context), EPOCH_LENGTH.get() - 2);
         handle.abort();
     });
+}
+
+/// Returns the processed height reported by the `dkg` engine's marshal.
+fn processed_height(context: &deterministic::Context) -> u64 {
+    context
+        .encode()
+        .lines()
+        .find_map(|line| line.strip_prefix("dkg_marshal_processed_height "))
+        .expect("marshal should report its processed height")
+        .parse()
+        .expect("processed height should be an integer")
 }
 
 type Info = EpochInfo<MinPk, ed25519::PublicKey>;
@@ -600,7 +529,15 @@ where
         let engine = engine.clone();
         move |context| async move {
             let oracle = network(&context);
-            let (_handle, completion) = boot(&context, &oracle, &engine, manager(&oracle)).await;
+            let channels = register(&oracle, &engine).await;
+            let (_handle, completion) = boot(
+                &context,
+                &oracle,
+                &engine,
+                PREFIX,
+                manager(&oracle),
+                channels,
+            );
             let info = completion.await.expect("DKG should report completion").info;
             context.sleep(idle).await;
             info
@@ -609,23 +546,25 @@ where
 }
 
 /// Restarts the single participant from `checkpoint` on a fresh network and
-/// returns its report and whether it activated peer set zero. Fails if the
-/// engine stops after reporting.
+/// returns its report, whether it activated peer set zero, and a checkpoint
+/// taken after an unclean shutdown. Fails if the engine stops after reporting.
 fn restart<M>(
     engine: &DkgEngine,
     checkpoint: deterministic::Checkpoint,
     manager: impl FnOnce(&simulated::Oracle<ed25519::PublicKey, deterministic::Context>) -> M
     + Send
     + 'static,
-) -> (Option<Info>, bool)
+) -> (Option<Info>, bool, deterministic::Checkpoint)
 where
     M: crate::dkg::network::Manager<PublicKey = ed25519::PublicKey, Directory = Unit> + Clone,
 {
     let runner = deterministic::Runner::from(checkpoint);
     let engine = engine.clone();
-    runner.start(|context| async move {
+    let ((info, tracked), checkpoint) = runner.start_and_recover(|context| async move {
         let oracle = network(&context);
-        let (mut handle, completion) = boot(&context, &oracle, &engine, manager(&oracle)).await;
+        let channels = register(&oracle, &engine).await;
+        let (mut handle, completion) =
+            boot(&context, &oracle, &engine, PREFIX, manager(&oracle), channels);
         let restarted = select! {
             restarted = completion => restarted.expect("restart should report completion"),
             _ = context.sleep(Duration::from_secs(30)) => panic!("restart did not report completion"),
@@ -637,7 +576,8 @@ where
         let tracked = oracle.manager().peer_set(0).await.is_some();
         handle.abort();
         (restarted.info, tracked)
-    })
+    });
+    (info, tracked, checkpoint)
 }
 
 pub(super) fn run_restart_after_completion() {
@@ -653,7 +593,15 @@ pub(super) fn run_restart_after_completion() {
         let engine = engine.clone();
         move |context| async move {
             let oracle = network(&context);
-            let (_handle, _completion) = boot(&context, &oracle, &engine, oracle.manager()).await;
+            let channels = register(&oracle, &engine).await;
+            let (_handle, _completion) = boot(
+                &context,
+                &oracle,
+                &engine,
+                PREFIX,
+                oracle.manager(),
+                channels,
+            );
             while !store.has_share(Epoch::zero()) {
                 reschedule().await;
             }
@@ -663,7 +611,7 @@ pub(super) fn run_restart_after_completion() {
     // Running the ceremony again could not activate its peer set and would
     // report no artifact. The restart reports the finalized artifact from the
     // stored final block instead and keeps running.
-    let (restarted, _) = restart(&engine, checkpoint, |oracle| {
+    let (restarted, _, _) = restart(&engine, checkpoint, |oracle| {
         FailingManager(oracle.manager())
     });
     assert!(
@@ -687,7 +635,7 @@ pub(super) fn run_restart_without_share() {
 
     // The restart reports the finalized artifact and re-activates peer set
     // zero on a network that has never seen it.
-    let (restarted, tracked) = restart(&engine, checkpoint, |oracle| oracle.manager());
+    let (restarted, tracked, _) = restart(&engine, checkpoint, |oracle| oracle.manager());
     assert_eq!(restarted, Some(info));
     assert!(tracked, "restart should activate peer set zero");
 }
@@ -696,7 +644,7 @@ pub(super) fn run_restart_after_failure() {
     let engine = DkgEngine::new(1);
 
     // Activation fails, so the ceremony reports no artifact, and the chain
-    // finalizes a final block without one while the actor idles.
+    // stops below the final block while the actor idles.
     let (info, checkpoint) = complete(
         &engine,
         |oracle| FailingManager(oracle.manager()),
@@ -704,8 +652,14 @@ pub(super) fn run_restart_after_failure() {
     );
     assert!(info.is_none());
 
-    // The restart reports the failed outcome from the final block.
-    let (restarted, tracked) = restart(&engine, checkpoint, |oracle| oracle.manager());
+    // The first restart joins after the dealing window, so the ceremony fails
+    // and the chain finalizes a final block without an artifact.
+    let (restarted, tracked, checkpoint) = restart(&engine, checkpoint, |oracle| oracle.manager());
+    assert!(restarted.is_none());
+    assert!(tracked, "restart should activate peer set zero");
+
+    // The second restart reports the failed outcome from the final block.
+    let (restarted, tracked, _) = restart(&engine, checkpoint, |oracle| oracle.manager());
     assert!(restarted.is_none());
     assert!(tracked, "restart should activate peer set zero");
 }
@@ -721,7 +675,15 @@ pub(super) fn run_share_without_final_block() {
     let runner = deterministic::Runner::timed(Duration::from_secs(5));
     runner.start(|context| async move {
         let oracle = network(&context);
-        let (handle, _) = boot(&context, &oracle, &engine, oracle.manager()).await;
+        let channels = register(&oracle, &engine).await;
+        let (handle, _) = boot(
+            &context,
+            &oracle,
+            &engine,
+            PREFIX,
+            oracle.manager(),
+            channels,
+        );
         let _ = handle.await;
     });
 }
@@ -743,19 +705,13 @@ fn network(
     oracle
 }
 
-/// Starts the first participant's bootstrap engine on freshly registered
-/// channels, reusing its storage partitions and secret store.
-async fn boot<M>(
-    context: &deterministic::Context,
+/// Registers the first participant's channels on `oracle`, replacing any
+/// channels it registered before.
+async fn register(
     oracle: &simulated::Oracle<ed25519::PublicKey, deterministic::Context>,
     engine: &DkgEngine,
-    manager: M,
-) -> (Handle<()>, oneshot::Receiver<bootstrap::Completion<MinPk>>)
-where
-    M: crate::dkg::network::Manager<PublicKey = ed25519::PublicKey, Directory = Unit> + Clone,
-{
-    let public_key = engine.participant(0);
-    let control = oracle.control(public_key.clone());
+) -> Vec<ChannelPair<ed25519::PublicKey>> {
+    let control = oracle.control(engine.participant(0));
     let mut channels = Vec::new();
     for (channel, quota) in engine.channels() {
         channels.push(
@@ -765,20 +721,36 @@ where
                 .expect("channel registration failed"),
         );
     }
+    channels
+}
 
+/// Starts the first participant's bootstrap engine on `channels`, with its
+/// storage under `prefix` and its secret store.
+fn boot<M>(
+    context: &deterministic::Context,
+    oracle: &simulated::Oracle<ed25519::PublicKey, deterministic::Context>,
+    engine: &DkgEngine,
+    prefix: &str,
+    manager: M,
+    mut channels: Vec<ChannelPair<ed25519::PublicKey>>,
+) -> (Handle<()>, oneshot::Receiver<bootstrap::Completion<MinPk>>)
+where
+    M: crate::dkg::network::Manager<PublicKey = ed25519::PublicKey, Directory = Unit> + Clone,
+{
+    let public_key = engine.participant(0);
     let bootstrap = bootstrap::Engine::<_, MinPk, _, _, _, _, _>::new(
         context.child("dkg"),
         bootstrap::Config {
             signer: engine.signer(&public_key),
             manager,
-            blocker: control,
+            blocker: oracle.control(public_key.clone()),
             secret_store: engine.store(&public_key),
             strategy: Sequential,
             namespace: NAMESPACE,
             sharing_mode: Mode::NonZeroCounter,
             reveal: Reveal::V1,
             max_supported_mode: max_supported_mode(),
-            partition_prefix: "dkg-single".into(),
+            partition_prefix: prefix.into(),
             page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,

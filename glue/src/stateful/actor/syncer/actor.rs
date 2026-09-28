@@ -207,7 +207,7 @@ mod tests {
     use super::{Config, Syncer, resolve};
     use crate::stateful::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful,
-        actor::syncer::{StateSyncMetadata, SyncPlan, open},
+        actor::syncer::{SyncPlan, open},
         db::{
             Anchor, AttachableResolverSet, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig,
             TipUpdate,
@@ -520,14 +520,14 @@ mod tests {
                 fixtures::finalization(&fixture, selected_height, selected_block.digest());
             let selected = if selected_height == height {
                 let partition = format!("retained-floor-plan-{height}");
-                let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                    context.child("metadata"),
+                let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
+                    context.child("select"),
                     &partition,
                 )
                 .await
                 .set_floor(selected)
                 .await;
-                drop(metadata);
+                drop(plan);
 
                 let plan =
                     SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), &partition)
@@ -688,8 +688,8 @@ mod tests {
             assert!(marshal.get_block(Height::new(1)).await.is_none());
             assert!(marshal.get_block(Height::new(2)).await.is_some());
 
-            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
+            let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
+                context.child("plan"),
                 "syncer-floor-install",
             )
             .await;
@@ -697,7 +697,7 @@ mod tests {
                 context.child("databases"),
                 &marshal,
                 2,
-                metadata.completed(),
+                plan.completed(),
             )
             .await;
 

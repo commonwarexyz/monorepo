@@ -651,11 +651,6 @@ pub(crate) fn child(parent: &TestBlock) -> TestBlock {
     )
 }
 
-/// Builds a marshal mailbox whose actor is dropped before it starts.
-///
-/// Reads through the returned mailbox resolve as unavailable, which is useful
-/// for phase tests that need a marshal handle but drive finalized blocks
-/// directly.
 /// Write and replay buffer size for reshare recovery journals in unit tests.
 pub(crate) const IO_BUFFER: NonZeroUsize = NZUsize!(2048);
 
@@ -689,6 +684,11 @@ where
     .await
 }
 
+/// Builds a marshal mailbox whose actor is dropped before it starts.
+///
+/// Reads through the returned mailbox resolve as unavailable, which is useful
+/// for phase tests that need a marshal handle but drive finalized blocks
+/// directly.
 pub(crate) async fn closed_marshal_mailbox(
     context: deterministic::Context,
     signer: &TestSigner,

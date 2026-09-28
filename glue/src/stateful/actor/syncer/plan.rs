@@ -1,25 +1,34 @@
-use super::StateSyncMetadata;
+use super::SyncState;
 use commonware_consensus::{
     marshal::{Start, core::Variant},
     simplex::types::Finalization,
     types::Height,
 };
 use commonware_cryptography::certificate::Scheme;
-use commonware_storage::Context;
+use commonware_storage::{
+    Context,
+    metadata::{self, Metadata},
+};
+use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use tracing::warn;
+
+const SYNC_METADATA_SUFFIX: &str = "state_sync_metadata";
+const SYNC_STATE_KEY: FixedBytes<1> = fixed_bytes!("C0");
 
 /// Durable startup decision between peer state sync and recovery from marshal.
 ///
 /// Marshal (via [`SyncPlan::marshal_start`]) and [`Stateful`](crate::stateful::Stateful) (via
 /// [`Config::plan`](crate::stateful::Config::plan)) both start from the persisted floor. See
 /// [Startup](crate::stateful#startup) for the sequence.
+///
+/// Mutating functions consume the plan and return it only on success. Storage failures panic.
 pub struct SyncPlan<E, S, V>
 where
     E: Context,
     S: Scheme,
     V: Variant,
 {
-    metadata: StateSyncMetadata<E, S, V::Commitment>,
+    metadata: Metadata<E, FixedBytes<1>, SyncState<S, V::Commitment>>,
 }
 
 impl<E, S, V> SyncPlan<E, S, V>
@@ -28,7 +37,7 @@ where
     S: Scheme,
     V: Variant,
 {
-    /// Loads the state sync metadata stored under `partition_prefix`.
+    /// Loads the state sync metadata stored under `partition_prefix`, creating it if needed.
     ///
     /// # Panics
     ///
@@ -36,11 +45,16 @@ where
     /// determine whether state sync already completed cannot safely choose a
     /// startup path.
     pub async fn init(context: E, partition_prefix: impl AsRef<str>) -> Self {
-        let metadata = StateSyncMetadata::<E, S, V::Commitment>::init(
+        let partition_prefix = partition_prefix.as_ref();
+        let metadata = Metadata::init(
             context.child("metadata"),
-            partition_prefix,
+            metadata::Config {
+                partition: format!("{partition_prefix}{SYNC_METADATA_SUFFIX}"),
+                codec_config: S::certificate_codec_config_unbounded(),
+            },
         )
-        .await;
+        .await
+        .expect("failed to load sync metadata");
         Self { metadata }
     }
 
@@ -50,12 +64,15 @@ where
     /// when [`Stateful`](crate::stateful::Stateful) starts without a persisted floor.
     /// [`SyncPlan::set_floor`] then has no effect.
     pub fn may_sync(&self) -> bool {
-        self.metadata.completed().is_none()
+        self.completed().is_none()
     }
 
     /// Returns the recorded completion height, if any.
     pub fn completed(&self) -> Option<Height> {
-        self.metadata.completed()
+        match self.metadata.get(&SYNC_STATE_KEY) {
+            Some(SyncState::Complete(height)) => Some(*height),
+            _ => None,
+        }
     }
 
     /// Returns the persisted state sync floor, if any.
@@ -63,14 +80,17 @@ where
     /// A floor persists from [`Self::set_floor`] until state sync completes, across restarts. While
     /// one is persisted, [`Self::may_sync`] returns `true` and every startup runs state sync.
     pub fn floor(&self) -> Option<&Finalization<S, V::Commitment>> {
-        self.metadata.floor()
+        match self.metadata.get(&SYNC_STATE_KEY) {
+            Some(SyncState::InProgress(finalization)) => Some(finalization),
+            _ => None,
+        }
     }
 
     /// Persists `finalization` as the state sync floor and returns the updated plan.
     ///
     /// Once a floor is persisted, every startup runs state sync until it completes, whether or not
-    /// it is requested. Has no effect once completion is recorded. A floor that is not newer than
-    /// the persisted floor is ignored, so a lagging selection cannot move it backward.
+    /// it is requested. Has no effect once completion is recorded. A floor that is not at a later
+    /// round than the persisted floor is ignored, so a lagging selection cannot move it backward.
     ///
     /// # Panics
     ///
@@ -92,7 +112,36 @@ where
             return self;
         }
 
-        self.metadata = self.metadata.set_floor(finalization).await;
+        self.metadata = self
+            .metadata
+            .put_sync(SYNC_STATE_KEY, SyncState::InProgress(finalization))
+            .await
+            .expect("failed to set state sync state to in-progress");
+        self
+    }
+
+    /// Records completion at `height`, which permanently disables peer state sync.
+    ///
+    /// Later startups recover from the later of the block at this height and the block backing
+    /// marshal's processed position.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `height` is below the recorded completion height or completion cannot be
+    /// persisted.
+    pub(crate) async fn set_completed(mut self, height: Height) -> Self {
+        if let Some(existing) = self.completed() {
+            assert!(
+                height >= existing,
+                "completed state sync height cannot move backward",
+            );
+        }
+
+        self.metadata = self
+            .metadata
+            .put_sync(SYNC_STATE_KEY, SyncState::Complete(height))
+            .await
+            .expect("failed to set state sync state to complete");
         self
     }
 
@@ -116,19 +165,12 @@ where
     pub fn should_sync(&self, requested: bool) -> bool {
         self.may_sync() && (requested || self.floor().is_some())
     }
-
-    pub(crate) fn into_metadata(self) -> StateSyncMetadata<E, S, V::Commitment> {
-        self.metadata
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::SyncPlan;
-    use crate::stateful::{
-        actor::syncer::StateSyncMetadata,
-        tests::mocks::{TestScheme, TestVariant},
-    };
+    use crate::stateful::tests::mocks::{TestScheme, TestVariant};
     use commonware_consensus::{
         marshal::Start,
         simplex::{
@@ -216,14 +258,7 @@ mod tests {
             assert!(plan.should_sync(true));
             assert!(!plan.should_sync(false));
             assert_eq!(plan.completed(), None);
-            drop(plan);
-
-            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
-                partition_prefix,
-            )
-            .await;
-            metadata.set_completed(Height::new(7)).await;
+            plan.set_completed(Height::new(7)).await;
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
                 context.child("plan"),
@@ -243,35 +278,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "completed state sync cannot be marked in-progress")]
-    fn completed_sync_cannot_be_marked_in_progress() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let partition_prefix = "completed_sync_cannot_be_marked_in_progress";
-            let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
-            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
-                partition_prefix,
-            )
-            .await;
-            let metadata = metadata.set_completed(Height::new(7)).await;
-            metadata
-                .set_floor(finalization(&fixture.schemes, 8, 8))
-                .await;
-        });
-    }
-
-    #[test]
     #[should_panic(expected = "completed state sync height cannot move backward")]
     fn complete_height_cannot_move_backward() {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "complete_height_cannot_move_backward";
-            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
+            let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
+                context.child("plan"),
                 partition_prefix,
             )
             .await;
-            let metadata = metadata.set_completed(Height::new(7)).await;
-            metadata.set_completed(Height::new(6)).await;
+            let plan = plan.set_completed(Height::new(7)).await;
+            plan.set_completed(Height::new(6)).await;
         });
     }
 
@@ -281,12 +298,12 @@ mod tests {
             let partition_prefix = "in_progress_sync_requires_compatible_floor";
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
             let stored = finalization(&fixture.schemes, 7, 7);
-            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
+            let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
+                context.child("plan"),
                 partition_prefix,
             )
             .await;
-            metadata.set_floor(stored.clone()).await;
+            drop(plan.set_floor(stored.clone()).await);
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
                 context.child("plan"),
@@ -296,10 +313,10 @@ mod tests {
             assert!(plan.may_sync());
             assert!(plan.floor().is_some());
             assert!(plan.should_sync(false));
-            let metadata = plan.metadata.set_floor(stored).await;
+            let plan = plan.set_floor(stored).await;
             let newer = finalization(&fixture.schemes, 9, 9);
-            let metadata = metadata.set_floor(newer.clone()).await;
-            assert_eq!(metadata.floor(), Some(&newer));
+            let plan = plan.set_floor(newer.clone()).await;
+            assert_eq!(plan.floor(), Some(&newer));
         });
     }
 
@@ -310,12 +327,12 @@ mod tests {
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
             let stored = finalization(&fixture.schemes, 7, 7);
 
-            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
+            let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
+                context.child("plan"),
                 partition_prefix,
             )
             .await;
-            metadata.set_floor(stored.clone()).await;
+            drop(plan.set_floor(stored.clone()).await);
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
                 context.child("plan"),
@@ -378,45 +395,24 @@ mod tests {
         });
     }
 
+    /// A selection at the persisted floor's round is ignored, even with a different payload.
     #[test]
-    #[should_panic(
-        expected = "selected state sync floor cannot move behind the persisted in-progress floor"
-    )]
-    fn in_progress_sync_panics_for_backward_floor() {
+    fn set_floor_ignores_selection_at_persisted_round() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
-            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
-                "in_progress_sync_panics_for_backward_floor",
-            )
-            .await;
-            let metadata = metadata
-                .set_floor(finalization(&fixture.schemes, 7, 7))
-                .await;
-            metadata
-                .set_floor(finalization(&fixture.schemes, 6, 6))
-                .await;
-        });
-    }
+            let stored = finalization(&fixture.schemes, 7, 7);
 
-    #[test]
-    #[should_panic(
-        expected = "selected state sync floor conflicts with the persisted in-progress round"
-    )]
-    fn in_progress_sync_panics_for_conflicting_round() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
-            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                context.child("metadata"),
-                "in_progress_sync_panics_for_conflicting_round",
+            // Persist a floor at round 7.
+            let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
+                context.child("plan"),
+                "set_floor_ignores_selection_at_persisted_round",
             )
             .await;
-            let metadata = metadata
-                .set_floor(finalization(&fixture.schemes, 7, 7))
-                .await;
-            metadata
-                .set_floor(finalization(&fixture.schemes, 7, 8))
-                .await;
+            let plan = plan.set_floor(stored.clone()).await;
+
+            // A selection at round 7 with another payload leaves the persisted floor unchanged.
+            let plan = plan.set_floor(finalization(&fixture.schemes, 7, 8)).await;
+            assert_eq!(plan.floor(), Some(&stored));
         });
     }
 }

@@ -50,7 +50,7 @@ where
     /// Returns `Break` on shutdown or when the mailbox closes.
     ///
     /// Panics as described on [`Self::covered`], or if the final block carries
-    /// no [`EpochInfo`](crate::dkg::types::EpochInfo).
+    /// no [`EpochInfo`](crate::dkg::types::EpochInfo) for the next epoch.
     pub(super) async fn follow(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
@@ -108,6 +108,11 @@ where
                                     epoch_info.epoch()
                                 );
                             };
+                            assert_eq!(
+                                info.epoch,
+                                epoch_info.epoch().next(),
+                                "final block carried epoch info for wrong epoch"
+                            );
 
                             let rng_seed = store
                                 .seed_or_random(info.epoch, self.context.as_present_mut())

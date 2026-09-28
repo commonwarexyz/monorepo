@@ -2039,6 +2039,62 @@ mod tests {
         });
     }
 
+    /// Marshal delivers a parent-linked finalized chain, so a block at the height after the
+    /// applied tip whose parent is not the tip is a contract violation. The actor panics instead
+    /// of applying a block from a history it has not followed.
+    #[test]
+    #[should_panic(expected = "finalized block does not extend the applied tip")]
+    fn unlinked_inclusion_successor_panics() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "unlinked-inclusion", NZU64!(6)).await;
+
+            // Epoch zero spans heights 0..=5 with its midpoint at 3.
+            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            while blocks.len() < 3 {
+                blocks.push(Arc::new(child(blocks.last().unwrap())));
+            }
+
+            // Dealing applies every block below the midpoint.
+            let receipts = [0, 1, 2].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::zero(),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt.await.expect("early receipt must be acknowledged");
+            }
+
+            // Inclusion receives a midpoint that extends height one instead of the tip.
+            let unlinked = Arc::new(TestBlock::new::<Sha256>(
+                blocks[1].context().clone(),
+                blocks[1].digest(),
+                Height::new(3),
+                u64::MAX,
+            ));
+            let _receipt = deliver(&mut mailbox, &unlinked);
+            let _ = actor
+                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .await;
+        });
+    }
+
     /// A follower covers the boundary it commits, so setup resumes in the next epoch and that
     /// epoch acknowledges a redelivered boundary without handling it as a block of its own. The
     /// harness is built in DKG mode although follow and setup run only in reshare mode. None of
@@ -2123,6 +2179,56 @@ mod tests {
                     .await
                     .expect("next-epoch receipt must be acknowledged");
             }
+        });
+    }
+
+    /// A follower cannot derive the final block's [`EpochInfo`], so info for an epoch other than
+    /// the next is a contract violation. The actor panics instead of committing, registering, or
+    /// fencing that epoch.
+    #[test]
+    #[should_panic(expected = "final block carried epoch info for wrong epoch")]
+    fn follower_wrong_epoch_info_panics() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "follower-wrong-epoch", NZU64!(4)).await;
+
+            // Epoch zero's final block carries epoch two's info instead of epoch one's.
+            let participants = Set::from_iter_dedup([public_key.clone()]);
+            let (output, _) = deal::<TestBlsVariant, _, N3f1>(
+                TestRng::new(0),
+                SharingMode::NonZeroCounter,
+                participants.clone(),
+            )
+            .expect("trusted sharing");
+            let wrong = EpochInfo {
+                outcome: EpochOutcome::Success,
+                epoch: Epoch::new(2),
+                output,
+                players: participants.clone(),
+                next_players: participants,
+                directory: Unit,
+            };
+            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key))];
+            while blocks.len() < 3 {
+                blocks.push(Arc::new(child(blocks.last().unwrap())));
+            }
+            blocks.push(Arc::new(
+                child(&blocks[2]).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                    NZU32!(16),
+                    Payload::EpochInfo(wrong),
+                ),
+            ));
+
+            // Following reaches the final block and panics on its epoch.
+            let _receipts = [0, 1, 2, 3].map(|height| deliver(&mut mailbox, &blocks[height]));
+            let _ = actor.follow(&mut store).await;
         });
     }
 

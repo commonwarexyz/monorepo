@@ -135,7 +135,9 @@ pub trait Manager: Provider {
     ///
     /// The orchestrator and the probe stop when this error is returned. The
     /// one-shot bootstrap keeps running and, if its ceremony has not completed,
-    /// reports a completion without an artifact.
+    /// reports a completion without an artifact. It then never proposes the
+    /// one-shot chain's final block and leaves that block's verification
+    /// unresolved.
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Activates `peers` for `epoch` using the epoch's `directory`.

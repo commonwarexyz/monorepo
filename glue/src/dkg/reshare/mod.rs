@@ -194,11 +194,11 @@
 //!
 //! Once started, the actor requires marshal to deliver every finalized block
 //! above its applied tip in height order. It acknowledges a redelivered block
-//! at or below the tip without repeating its effects and panics on a block that
-//! skips heights above the tip. The startup state-sync floor is the only
-//! permitted jump, so a live marshal floor must not leave an unapplied height
-//! below it. The actor has no state for skipped blocks, which may include
-//! dealer logs or an epoch's final block.
+//! at or below the tip without repeating its effects and panics on a block
+//! above the tip that skips heights or whose parent is not the tip. The
+//! startup state-sync floor is the only permitted jump, so a live marshal
+//! floor must not leave an unapplied height below it. The actor has no state
+//! for skipped blocks, which may include dealer logs or an epoch's final block.
 //!
 //! # Failures
 //!
@@ -206,8 +206,9 @@
 //! closes, or when its P2P channel closes during a dealing window. It panics on
 //! recovery-journal failures, on a boundary or final block without a valid
 //! [`EpochInfo`](crate::dkg::types::EpochInfo) for the expected epoch, on a
-//! finalized block that conflicts with its applied tip or skips heights above
-//! it, on [`ParticipantsProvider`](crate::dkg::ParticipantsProvider) contract
+//! finalized block that conflicts with its applied tip or sits above it without
+//! extending it, on
+//! [`ParticipantsProvider`](crate::dkg::ParticipantsProvider) contract
 //! violations, on a P2P channel that closed outside a dealing window (when it
 //! registers the next epoch it participates in), and on otherwise inconsistent
 //! recovered local state.
@@ -220,7 +221,8 @@
 //! [`EpochInfo`](crate::dkg::types::EpochInfo) from which to build the genesis
 //! block of a reshare-enabled chain. Once it reports the ceremony's outcome,
 //! the actor acknowledges each further finalized block of that chain without
-//! effects or checks.
+//! effects or checks and answers each final-block request with
+//! [`EpochInfoResponse::Following`].
 
 mod mailbox;
 pub use mailbox::{EpochInfoResponse, LogReservation, Mailbox, Message};

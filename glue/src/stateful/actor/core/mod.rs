@@ -213,7 +213,6 @@ where
     async fn sync(self, finalization: Finalization<S, V::Commitment>) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
-        let metadata = self.plan.into_metadata();
         let (sender, receiver) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
@@ -230,7 +229,7 @@ where
             application: self.application,
             provider: self.provider,
             marshal,
-            metadata,
+            plan: self.plan,
             syncer: syncer_mailbox,
             deferred_verifications: Vec::new(),
             database_subscribers: Vec::new(),
@@ -246,16 +245,15 @@ where
     /// Opens the database set from marshal, records completion, then runs processing.
     async fn recover(self) {
         let (marshal, _) = self.marshal;
-        let metadata = self.plan.into_metadata();
         let Artifact { databases, anchor } = syncer::open::<E, A, S, V>(
             self.context.child("databases"),
             &marshal,
             self.db_config,
-            metadata.completed(),
+            self.plan.completed(),
         )
         .await;
 
-        metadata.set_completed(anchor.height).await;
+        self.plan.set_completed(anchor.height).await;
 
         self.resolvers.attach_databases(databases.clone()).await;
 

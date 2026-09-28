@@ -13,7 +13,7 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Epochable as _,
-    marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
+    marshal::core::Processed,
     simplex::{scheme::Scheme, types::Finalization},
     types::{Epoch, Epocher, FixedEpocher},
 };
@@ -190,23 +190,12 @@ where
     }
 }
 
-/// Returns the epoch containing marshal's next unprocessed height (`None` if
-/// marshal reports no processed position).
-pub(crate) async fn recovered_epoch<S, V>(
-    marshal: &MarshalMailbox<S, V>,
-    epocher: &FixedEpocher,
-) -> Option<Epoch>
-where
-    S: commonware_cryptography::certificate::Scheme,
-    V: MarshalVariant,
-{
-    let height = marshal.get_processed().await?.height().next();
-    Some(
-        epocher
-            .containing(height)
-            .expect("epocher must know recovered height")
-            .epoch(),
-    )
+/// Returns the epoch containing the first height after `processed`.
+pub(crate) fn recovered_epoch(processed: Processed, epocher: &FixedEpocher) -> Epoch {
+    epocher
+        .containing(processed.height().next())
+        .expect("epocher must know recovered height")
+        .epoch()
 }
 
 enum PlanState<S, D, V, Dir>

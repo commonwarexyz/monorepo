@@ -855,6 +855,21 @@ where
             .await
     }
 
+    /// Returns whether `block` is at or below the processed height.
+    ///
+    /// Panics if `block` conflicts with the processed anchor at the same height.
+    pub(super) fn redelivered(&self, block: &A::Block) -> bool {
+        let processed = self.execution.processed();
+        if block.height() == processed.height {
+            assert_eq!(
+                block.digest(),
+                processed.digest,
+                "received conflicting finalized block at processed height",
+            );
+        }
+        block.height() <= processed.height
+    }
+
     /// Applies the finalized `block` and discards cached state that does not descend from it.
     ///
     /// Returns `None` without side effects if `block` is the processed anchor (a duplicate
@@ -863,8 +878,9 @@ where
     /// advances to `block` after the application's `finalized` hook returns.
     ///
     /// Panics if `block` is below the processed height, if it conflicts with the processed anchor
-    /// at the same height, if it skips a height above the processed anchor, or if an uncached
-    /// `block` fails to execute or to match its commitments.
+    /// at the same height, if it skips a height above the processed anchor, if its parent is not
+    /// the processed anchor, or if an uncached `block` fails to execute or to match its
+    /// commitments.
     pub(super) async fn finalize(
         &mut self,
         context: &E,
@@ -881,17 +897,18 @@ where
                 processed.height.get(),
             );
         }
-        if height == processed.height {
-            assert_eq!(
-                digest, processed.digest,
-                "received conflicting finalized block at processed height",
-            );
+        if self.redelivered(block) {
             return None;
         }
         assert_eq!(
             height,
             processed.height.next(),
             "finalized block skips unapplied heights",
+        );
+        assert_eq!(
+            block.parent(),
+            processed.digest,
+            "finalized block does not extend the applied tip",
         );
 
         let timer = self.execution.metrics.finalize_duration.timer(context);
@@ -3787,6 +3804,32 @@ mod tests {
             assert!(harness.finalize(canonical).await);
 
             let _ = harness.finalize(conflicting).await;
+        });
+    }
+
+    /// Marshal delivers a finalized chain, so a block at the next height whose parent is not the
+    /// processed anchor is a contract violation. Its commitments can still match the applied
+    /// state, so finalization panics instead of applying it to a state it does not extend.
+    #[test]
+    #[should_panic(expected = "finalized block does not extend the applied tip")]
+    fn execution_finalize_panics_on_unlinked_successor() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+
+            // Finalize one of two siblings at height 1.
+            let canonical = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let sibling = harness.stage_pending_child(&genesis, View::new(2)).await;
+            assert!(harness.finalize(canonical.clone()).await);
+
+            // Build a height 2 block on the canonical state, then point it at the sibling.
+            let (child, _) = harness.build_child(&canonical, View::new(3)).await;
+            let unlinked = Block {
+                context: consensus_context(sibling.digest(), View::new(3)),
+                parent: sibling.digest(),
+                ..child
+            };
+            let _ = harness.finalize(unlinked).await;
         });
     }
 

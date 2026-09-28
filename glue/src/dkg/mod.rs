@@ -99,16 +99,23 @@
 //! - Upon its gate reaching an epoch, the [`orchestrator`] activates that epoch from its
 //!   [`types::EpochInfo`] before starting the epoch's Simplex engine and channels.
 //!
+//! The [`network`] adapters use the epoch as the peer set ID, and peer set IDs must increase
+//! monotonically on a network (see [`commonware_p2p::Manager::track`]). The [`bootstrap`]
+//! engine activates peer set zero on every start, so its manager MUST own the peer-set
+//! lifecycle of a network on which no other component activates peers. A clone of another
+//! component's manager shares that component's network and does not isolate the two.
+//!
 //! # Marshal Delivery
 //!
 //! Once started, the [`reshare::Actor`] and the [`orchestrator::Actor`] require marshal to
 //! deliver every finalized block above the latest one they acknowledged in height order. Each
 //! acknowledges a redelivered block without repeating its effects. The reshare actor panics
-//! on a block that skips heights, and the orchestrator panics on a block above the active
-//! epoch's final block. The startup floor from the [`state_sync::Plan`] is the only
-//! permitted jump, so a live marshal floor must not leave a height below it that they have
-//! not acknowledged. A skipped block may carry a dealer log or be an epoch's final block,
-//! which the actors need to derive the same [`types::EpochInfo`] and to enter each epoch.
+//! on a block above the latest one it acknowledged that skips heights or does not extend it,
+//! and the orchestrator panics on a block above the active epoch's final block. The startup floor
+//! from the [`state_sync::Plan`] is the only permitted jump, so a live marshal floor must not
+//! leave a height below it that they have not acknowledged. A skipped block may carry a
+//! dealer log or be an epoch's final block, which the actors need to derive the same
+//! [`types::EpochInfo`] and to enter each epoch.
 //!
 //! # Marshal Retention
 //!

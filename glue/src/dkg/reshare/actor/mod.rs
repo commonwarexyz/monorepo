@@ -349,7 +349,13 @@ where
             Muxer::new(self.context.child("mux"), sender, receiver, self.muxer_size);
         mux.start();
 
-        let recovered_epoch = state_sync::recovered_epoch(&self.marshal, &self.epocher).await;
+        // Plan resolution and the startup tip read one processed position. A
+        // state-sync floor that marshal installs after this read is covered by
+        // the floor passed to `startup`.
+        let anchor = self.marshal.get_anchor().await;
+        let recovered_epoch = anchor
+            .as_ref()
+            .map(|(processed, _)| state_sync::recovered_epoch(*processed, &self.epocher));
         let state_sync = self
             .state_sync
             .resolve(
@@ -380,7 +386,7 @@ where
             (None, None)
         };
 
-        self.tip = startup(self.marshal.get_anchor().await, floor);
+        self.tip = startup(anchor, floor);
 
         if matches!(self.mode, Mode::Dkg { .. }) {
             self.run_dkg(&mut store, &mut dealing_mux).await;
@@ -435,13 +441,14 @@ where
     /// or by completing its effects.
     ///
     /// A block at or below the tip is a redelivery. A block above the tip must
-    /// be at the height after it. Without a tip, returns `false` and checks
-    /// nothing.
+    /// be at the height after it and have the tip as its parent. Without a tip,
+    /// returns `false` and checks nothing.
     ///
     /// # Panics
     ///
-    /// Panics if `block` conflicts with the tip at the same height or skips
-    /// heights above the tip.
+    /// Panics if `block` conflicts with the tip at the same height, skips
+    /// heights above the tip, or is at the next height without the tip as its
+    /// parent.
     fn covered(&self, block: &B) -> bool {
         self.tip.is_some_and(|tip| {
             if block.height() == tip.height {
@@ -451,6 +458,11 @@ where
                     block.height(),
                     tip.height.next(),
                     "finalized block skips unapplied heights"
+                );
+                assert_eq!(
+                    block.parent(),
+                    tip.digest,
+                    "finalized block does not extend the applied tip"
                 );
             }
             block.height() <= tip.height

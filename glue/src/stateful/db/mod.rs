@@ -298,8 +298,10 @@ where
 /// Concrete types expose reads and writes (`get`, `write`, `set`, `append`, and so on) as
 /// inherent methods.
 pub trait Unmerkleized: Sized + Send {
+    /// The sealed batch returned by [`Self::merkleize`].
     type Merkleized: Merkleized;
 
+    /// Error returned by [`Self::merkleize`].
     type Error: Send;
 
     /// Computes the state root over every mutation and seals the batch.
@@ -308,8 +310,10 @@ pub trait Unmerkleized: Sized + Send {
 
 /// A sealed batch with a computed state root.
 pub trait Merkleized: Sized + Send + Sync {
+    /// Digest type of the state root returned by [`Self::root`].
     type Digest: Digest;
 
+    /// The child batch returned by [`Self::new_batch`].
     type Unmerkleized: Unmerkleized;
 
     /// Returns the state root of the database with this batch applied.
@@ -341,6 +345,8 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Cloning must preserve the same sealed branch state and should be cheap.
     type Merkleized: Clone + Merkleized<Unmerkleized = Self::Unmerkleized>;
 
+    /// Error returned by [`Self::apply`], [`Self::finalize`], and [`Self::prune`], and carried by
+    /// [`InitError::Database`] from [`Self::init`].
     type Error: Debug + Send;
 
     /// Configuration passed to [`Self::init`].
@@ -597,6 +603,7 @@ pub struct SyncEngineConfig {
 
 /// A [`ManagedDb`] that can be built by syncing it from peers.
 pub trait StateSyncDb<E, R>: ManagedDb<E> {
+    /// Error returned by [`Self::sync_db`].
     type SyncError: Debug + Send;
 
     /// Syncs a new database from `source` to `target` and returns it.
@@ -721,8 +728,10 @@ where
 /// An error opening a [`ManagedDb`].
 #[derive(Debug, thiserror::Error)]
 pub enum InitError<E: Debug, T: Debug> {
+    /// The database failed to open or recover.
     #[error("database initialization failed: {0:?}")]
     Database(E),
+    /// The opened database's [`ManagedDb::sync_target`] is not the expected target.
     #[error("database target mismatch: expected {expected:?}, recovered {recovered:?}")]
     TargetMismatch {
         /// The target requested by the caller.

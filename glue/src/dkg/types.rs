@@ -93,14 +93,20 @@ pub struct Participants<P: PublicKey> {
 /// Reasons [`Participants::validate`] rejects a participant set.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParticipantsError {
+    /// The dealer set is empty.
     #[error("dealers must not be empty")]
     EmptyDealers,
+    /// The player set is empty.
     #[error("players must not be empty")]
     EmptyPlayers,
+    /// A participant set (dealers, players, or next players) has `actual` members, more than
+    /// `max`.
     #[error("too many participants: {actual} > {max}")]
     TooManyParticipants { actual: usize, max: usize },
+    /// In reshare round zero, the dealers are not exactly the previous output's players.
     #[error("round-zero reshare dealers must equal previous output players")]
     InitialReshareDealers,
+    /// In a later reshare round, a dealer is not one of the previous output's players.
     #[error("reshare dealer is not a previous player")]
     UnknownReshareDealer,
 }
@@ -597,7 +603,8 @@ where
 /// A public reshare artifact carried by an application block.
 #[allow(clippy::large_enum_variant)]
 pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
-    /// A signed dealer log, carried from the epoch midpoint up to the final block.
+    /// A signed dealer log, carried from the epoch midpoint up to, but not including, the
+    /// final block.
     DealerLog(SignedDealerLog<V, C>),
     /// An epoch's [`EpochInfo`]: epoch zero's in genesis (and in a one-shot DKG's final
     /// block), and otherwise the next epoch's in the final block of the current epoch.

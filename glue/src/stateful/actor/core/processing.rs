@@ -34,6 +34,7 @@ use tracing::{Instrument as _, debug, info_span};
 
 /// Work selected for one iteration of the processing loop.
 enum Step<M, P> {
+    /// A message from the actor mailbox.
     Message(M),
     /// A pending prune selected to run.
     Prune(P),
@@ -416,9 +417,9 @@ where
                     acknowledgement,
                     retry_mailbox,
                 }) => {
-                    if block.height() < self.processor.processed().height {
-                        // A block below the applied height is already reflected, so its receipt
-                        // skips application and leaves verifications running.
+                    if self.processor.redelivered(block.as_ref()) {
+                        // A block at or below the applied height is already reflected, so its
+                        // receipt skips application and leaves verifications running.
                         durability.record_duplicate(block.height(), acknowledgement);
                     } else {
                         let process = info_span!(parent: &span, "stateful.actor.finalized");
@@ -428,17 +429,14 @@ where
                             .await;
                         drop(boundary);
                         async {
-                            let applied = verifications
+                            let Applied { barrier, prune } = verifications
                                 .drive(self.processor.finalize(
                                     &self.context,
                                     block.as_ref(),
                                     durability.barrier.is_none(),
                                 ))
-                                .await;
-                            let Some(Applied { barrier, prune }) = applied else {
-                                durability.record_duplicate(block.height(), acknowledgement);
-                                return;
-                            };
+                                .await
+                                .expect("finalized block above the applied height must apply");
                             debug!(
                                 height = block.height().get(),
                                 "applied finalized database batch"
@@ -564,13 +562,15 @@ mod tests {
         channel::oneshot,
         sync::Mutex,
     };
-    use futures::{StreamExt as _, poll};
+    use futures::{Stream, StreamExt as _, poll};
     use std::{
         collections::VecDeque,
+        pin::Pin,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        task::{Context, Poll},
         time::Duration,
     };
 
@@ -3341,13 +3341,13 @@ mod tests {
             }
 
             let mut waiters = Vec::with_capacity(BLOCKS as usize - 1);
+            let mut parent = TestBlock::new(1, 1);
             for height in 2..=BLOCKS {
+                let block = TestBlock::child(&parent, height as u8);
                 let (acknowledgement, waiter) = Exact::handle();
-                let _ = mailbox.report(Update::Block(
-                    Arc::new(TestBlock::new(height, height as u8)),
-                    acknowledgement,
-                ));
+                let _ = mailbox.report(Update::Block(Arc::new(block.clone()), acknowledgement));
                 waiters.push(waiter);
+                parent = block;
             }
             while control.applied.load(Ordering::Relaxed) < BLOCKS as usize {
                 context.sleep(Duration::from_millis(10)).await;
@@ -3553,7 +3553,7 @@ mod tests {
             ));
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(2, 2)),
+                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
             while control.applied.load(Ordering::Relaxed) < 2 {
@@ -3606,7 +3606,7 @@ mod tests {
             let _ = release.send(Ok(()));
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(2, 2)),
+                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
             waiter1.await.expect("block 1 acknowledgement");
@@ -3644,7 +3644,7 @@ mod tests {
 
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(2, 2)),
+                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
             while control.applied.load(Ordering::Relaxed) < 2 {
@@ -3715,6 +3715,64 @@ mod tests {
             loop {
                 context.sleep(Duration::from_millis(100)).await;
             }
+        });
+    }
+
+    /// Ancestry that never yields a block and counts its clones (one per verification attempt).
+    struct PendingAncestry(Arc<AtomicUsize>);
+
+    impl Clone for PendingAncestry {
+        fn clone(&self) -> Self {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Self(self.0.clone())
+        }
+    }
+
+    impl Stream for PendingAncestry {
+        type Item = Arc<TestBlock>;
+
+        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+
+    impl Ancestry<TestBlock> for PendingAncestry {
+        fn peek(&self) -> Option<&TestBlock> {
+            None
+        }
+    }
+
+    /// A redelivered applied tip leaves a verification that is still acquiring its block running.
+    #[test]
+    fn tip_redelivery_keeps_acquiring_verification() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, _control, _marshal, actor) =
+                spawn_processing(&context, "tip-redelivery-acquiring", None).await;
+
+            // Start a verification whose ancestry never yields its block.
+            let clones = Arc::new(AtomicUsize::new(0));
+            let block = TestBlock::child(&TestBlock::new(0, 0), 1);
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), block.context()),
+                PendingAncestry(clones.clone()),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            drop(mailbox.subscribe_databases().await);
+            let attempts = clones.load(Ordering::SeqCst);
+
+            // Redeliver the applied tip, then fence behind any requeued verification.
+            let (ack, waiter) = Exact::handle();
+            mailbox.report(Update::Block(Arc::new(TestBlock::new(0, 0)), ack));
+            waiter.await.expect("redelivered tip must be acknowledged");
+            drop(mailbox.subscribe_databases().await);
+            assert_eq!(
+                clones.load(Ordering::SeqCst),
+                attempts,
+                "tip redelivery must not restart an acquiring verification",
+            );
+            assert!(poll!(&mut verify).is_pending());
+            actor.abort();
         });
     }
 }

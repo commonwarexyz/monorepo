@@ -210,7 +210,9 @@ where
     /// Serves requests and acknowledges finalized blocks once the ceremony's
     /// outcome is reported, until shutdown or the mailbox closes.
     ///
-    /// A finalized block has no effects here, so it is acknowledged without
+    /// No payload is derived here, so a dealer-log request receives no log and
+    /// a final-block request receives [`EpochInfoResponse::Following`]. A
+    /// finalized block has no effects here, so it is acknowledged without
     /// checking it against the tip.
     async fn terminal(&mut self) {
         select_loop! {
@@ -239,7 +241,7 @@ where
                         "dkg.reshare.actor.dkg_terminal.epoch_info"
                     );
                     process.in_scope(|| {
-                        let _ = response.send(EpochInfoResponse::Available(None));
+                        let _ = response.send(EpochInfoResponse::Following);
                     });
                 }
                 Message::Finalized {
