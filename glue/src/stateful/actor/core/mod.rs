@@ -134,14 +134,23 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
+    /// Runtime context.
     context: ContextCell<E>,
+    /// The receiver for messages.
     mailbox: actor_mailbox::Receiver<Message<E, A>>,
+    /// The inner application that drives state transitions.
     application: A,
+    /// Provider cloned into each proposal.
     provider: A::Provider,
+    /// Marshal mailbox and the durable floor returned during initialization.
     marshal: (MarshalMailbox<S, V>, Floor),
+    /// Configuration used to initialize the database set at startup.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
+    /// Startup plan carrying the metadata handle and floor decision.
     plan: SyncPlan<E, S, V>,
+    /// Resolvers for state sync fetches and post-bootstrap serving.
     resolvers: R,
+    /// Sync engine settings.
     sync_config: SyncEngineConfig,
 
     /// Pruning schedule from [`Config::prune_config`], with a random phase.

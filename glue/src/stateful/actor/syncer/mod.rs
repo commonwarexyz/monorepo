@@ -112,7 +112,9 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
+    /// The database handle set.
     pub databases: A::Databases,
+    /// Anchor of the block reflected by `databases`.
     pub anchor: Anchor<BlockDigest<A, E>>,
 }
 

@@ -56,6 +56,7 @@ struct Durability {
 }
 
 impl Durability {
+    /// Initializes tracking at a height already known to be durable.
     const fn new(height: Height) -> Self {
         Self {
             durable: height,
@@ -147,6 +148,7 @@ impl Durability {
         true
     }
 
+    /// Returns whether `height` lies within the known durable prefix.
     fn covers(&self, height: Height) -> bool {
         self.durable >= height
     }
@@ -221,10 +223,15 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
+    /// Runtime context.
     pub(super) context: ContextCell<E>,
+    /// Actor ingress.
     pub(super) mailbox: actor_mailbox::Receiver<Message<E, A>>,
+    /// Provider cloned into each proposal.
     pub(super) provider: A::Provider,
+    /// Marshal mailbox used for lazy block lookup.
     pub(super) marshal: MarshalMailbox<S, V>,
+    /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
 
     /// Verification requests deferred until processing starts.

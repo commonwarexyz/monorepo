@@ -15,6 +15,7 @@ where
 {
     /// A subscription to the floor (see [`Mailbox::subscribe`]).
     Subscribe {
+        /// The response channel for the selected finalization.
         response: oneshot::Sender<Finalization<S, V::Commitment>>,
     },
     /// A marshal from which to serve peers (see [`Mailbox::attach`]).

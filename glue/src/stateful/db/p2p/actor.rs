@@ -139,6 +139,7 @@ where
         spawn_cell!(self.context, self.run(net))
     }
 
+    /// Multiplexes mailbox messages and resolver engine callbacks.
     async fn run(
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -202,6 +203,7 @@ where
         }
     }
 
+    /// Processes database attachments and fetch requests.
     fn handle_mailbox_message<R>(&mut self, resolver: &mut R, message: SyncMessage<F, DB>)
     where
         R: Resolver<Key = Request<F>, Subscriber = Subscriber<F, DB>>,

@@ -35,6 +35,7 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
+    /// Runtime context.
     pub context: E,
 
     /// Database configuration for the managed set.
@@ -66,13 +67,21 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
+    /// Runtime context.
     context: ContextCell<E>,
+    /// The mailbox.
     mailbox: Receiver<Message<E, A>>,
+    /// The produced state sync artifact, if complete.
     artifact: Option<Artifact<E, A>>,
+    /// Database configuration for the managed set.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
+    /// Per-database sync engine parameters.
     sync_config: SyncEngineConfig,
+    /// Per-database resolvers used to fetch state from peers.
     resolvers: R,
+    /// Requested state sync floor used to select the starting block.
     finalization: Finalization<S, V::Commitment>,
+    /// Marshal mailbox and the durable floor returned during initialization.
     marshal: (MarshalMailbox<S, V>, Floor),
     completion: Option<oneshot::Sender<Artifact<E, A>>>,
 }

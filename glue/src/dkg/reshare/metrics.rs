@@ -35,6 +35,7 @@ pub(crate) enum Phase {
     Inclusion = 3,
 }
 
+/// Metrics for the reshare actor.
 pub(crate) struct Metrics<P: PublicKey> {
     /// Number of successful epochs.
     pub(crate) successful_epochs: Counter,

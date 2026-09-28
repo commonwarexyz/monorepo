@@ -739,6 +739,7 @@ pub enum InitError<E: Debug, T: Debug> {
     },
 }
 
+/// Validates the requested sync target before returning the database.
 fn validate_initialization<E, T>(
     db: T,
     expected: Option<T::SyncTarget>,

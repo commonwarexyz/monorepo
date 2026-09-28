@@ -64,12 +64,19 @@ where
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
 {
+    /// Runtime context.
     pub(super) context: ContextCell<E>,
+    /// Actor ingress.
     pub(super) mailbox: actor_mailbox::Receiver<Message<E, A>>,
+    /// Inner application.
     pub(super) application: A,
+    /// Provider cloned into each proposal after state sync.
     pub(super) provider: A::Provider,
+    /// Marshal actor mailbox.
     pub(super) marshal: MarshalMailbox<S, V>,
+    /// Startup plan carrying the durable sync decision and selected floor.
     pub(super) plan: SyncPlan<E, S, V>,
+    /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
 
     /// Verification requests deferred until state sync completes.
@@ -78,6 +85,7 @@ where
     /// Database subscribers awaiting the handoff.
     pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
 
+    /// Resolvers used for state sync fetching and post-bootstrap serving.
     pub(super) resolvers: R,
 
     /// Receives the converged [`Artifact`] from the syncer.
@@ -86,7 +94,9 @@ where
     /// Unacknowledged finalizations retained until the window retargets or sync completes.
     pub(super) pending_finalizations: VecDeque<PendingFinalization<Arc<A::Block>>>,
 
+    /// Periodic pruning state, if enabled.
     pub(super) pruning: Option<Pruning<SyncTargets<A, E>>>,
+    /// Metrics shared across syncing and processing.
     pub(super) metrics: StatefulMetrics,
 }
 

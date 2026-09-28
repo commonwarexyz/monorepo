@@ -212,6 +212,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
+    /// Creates a mailbox from the send half of the actor's message channel.
     pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
         let retry_sender = sender.clone();
         let retry_mailbox = Arc::new(move |message| {

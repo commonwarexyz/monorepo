@@ -679,6 +679,7 @@ where
         }
     }
 
+    /// Returns a reference to the database set.
     pub(super) const fn databases(&self) -> &A::Databases {
         &self.execution.databases
     }
@@ -806,6 +807,7 @@ where
         response.send_lossy(Some(block));
     }
 
+    /// Ensures parent state exists, then prepares unmerkleized batches for execution.
     #[tracing::instrument(
         name = "stateful.processor.prepare_batches",
         level = "info",

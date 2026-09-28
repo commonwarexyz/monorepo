@@ -14,11 +14,17 @@ use commonware_consensus::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub(crate) enum Tag {
+    /// Request the boundary finalization for an epoch.
     BoundaryRequest,
+    /// Response carrying a boundary finalization.
     BoundaryResponse,
+    /// Request the boundary block for an epoch.
     BlockRequest,
+    /// Response carrying a finalized block.
     BlockResponse,
+    /// Request the receiver's latest finalization.
     LatestRequest,
+    /// Response carrying the receiver's latest finalization.
     LatestResponse,
 }
 
@@ -57,8 +63,11 @@ impl Read for Tag {
 
 /// Request decoded from a peer.
 pub(crate) enum Request {
+    /// Request the boundary finalization for an epoch.
     Boundary(Epoch),
+    /// Request the boundary block for an epoch.
     Block(Epoch),
+    /// Request the receiver's latest finalization.
     Latest,
 }
 
@@ -68,6 +77,7 @@ where
     S: Scheme<V::Commitment>,
     V: Variant,
 {
+    /// Boundary finalization response.
     Boundary(Finalization<S, V::Commitment>),
     /// Block response whose body remains encoded until the epoch and responding
     /// peer match the outstanding request.
@@ -77,6 +87,7 @@ where
         /// Encoded block body.
         body: R,
     },
+    /// Latest finalization response.
     Latest(Finalization<S, V::Commitment>),
 }
 

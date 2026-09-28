@@ -327,6 +327,8 @@ where
         spawn_cell!(self.context, self.run(votes, certificates, resolver,))
     }
 
+    /// Drives epoch consensus from finalized blocks and future-epoch traffic
+    /// until shutdown.
     async fn run<S, R>(
         mut self,
         (vote_sender, vote_receiver): (S, R),
@@ -512,6 +514,7 @@ where
         })
     }
 
+    /// Starts the consensus muxers and returns their epoch-scoped channel handles.
     fn create_channels<S, R>(
         &self,
         (vote_sender, vote_receiver): (S, R),

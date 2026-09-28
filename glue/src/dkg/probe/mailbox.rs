@@ -17,12 +17,16 @@ where
     V::ApplicationBlock: ReshareBlock,
     <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
 {
-    /// See [`Mailbox::subscribe`].
+    /// Subscribe to the probe artifact (see [`Mailbox::subscribe`]).
     Subscribe {
+        /// Channel used to resolve the subscriber.
         response: oneshot::Sender<ActorArtifact<S, V>>,
     },
-    /// See [`Mailbox::attach`].
-    Attach { marshal: MarshalMailbox<S, V> },
+    /// Attach marshal to serve boundary requests (see [`Mailbox::attach`]).
+    Attach {
+        /// Marshal mailbox used to serve boundary requests.
+        marshal: MarshalMailbox<S, V>,
+    },
 }
 
 impl<S, V> Policy for Message<S, V>

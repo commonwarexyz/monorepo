@@ -35,6 +35,7 @@ use commonware_storage::{
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
+/// Shared handle to an immutable database.
 type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Immutable<F, E, K, V, C, H, T, S>>;
 
 /// A speculative batch of new keyed values over a shared immutable database.

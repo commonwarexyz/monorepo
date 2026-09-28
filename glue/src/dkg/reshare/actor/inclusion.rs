@@ -52,8 +52,13 @@ use std::{
 };
 use tracing::{Instrument as _, Span, debug, info, info_span, warn};
 
+/// Dealer logs indexed by dealer for an epoch-info request or verification.
 type PendingLogs<V, P> = BTreeMap<P, DealerLog<V, P>>;
+
+/// One interruptible pending-log scan.
 type ArtifactScanTask<'a, V, P> = OptionFuture<BoxFuture<'a, Option<PendingLogs<V, P>>>>;
+
+/// Shared log view used by verification and artifact assembly.
 type LogView<V, P> = Arc<PendingLogs<V, P>>;
 
 /// A queued epoch-info request whose ancestry has not been read.
@@ -194,6 +199,7 @@ where
     V: BlsVariant,
     C: Signer,
 {
+    /// Retains a request without consuming its ancestry stream.
     fn push(
         &mut self,
         span: Span,
@@ -207,6 +213,7 @@ where
         });
     }
 
+    /// Restores the oldest request after its scan is invalidated by finalization.
     fn push_front(&mut self, request: ArtifactRequest<B, V, C>) {
         self.inner.push_front(request);
     }

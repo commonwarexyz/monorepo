@@ -48,6 +48,7 @@ where
 {
     /// Parent block taken from the candidate's ancestry.
     block: Arc<A::Block>,
+    /// Digest of `block`.
     digest: BlockDigest<A, E>,
     /// Batches forked from the parent's speculative or applied state.
     batches: Unmerkleized<A, E>,
