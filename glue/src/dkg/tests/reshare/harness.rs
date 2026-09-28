@@ -1122,6 +1122,7 @@ impl EngineDefinition for ReshareEngine {
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 max_serve_ops: NZU64!(16),
+                serve_timeout: Duration::from_secs(10),
                 priority_requests: false,
                 priority_responses: false,
             },

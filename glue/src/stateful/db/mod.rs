@@ -199,6 +199,12 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Owned immutable snapshot of applied state.
     type Snapshot: Clone + Send + Sync + 'static;
 
+    /// Whether [`Self::snapshot`] is cheap enough to capture after every applied batch.
+    ///
+    /// A set made only of such databases publishes a snapshot for every finalized block. Other
+    /// sets publish when a barrier starts (see [`DatabaseSet::CHEAP_SNAPSHOT`]).
+    const CHEAP_SNAPSHOT: bool = false;
+
     /// Opens the database at `expected`, or at its latest checkpoint when `expected` is `None`.
     ///
     /// State beyond the selected checkpoint must be durably discarded before this returns.
@@ -350,6 +356,13 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// One [`ManagedDb::Merkleized`] per database in the set.
     type Merkleized: Clone + Send + Sync;
 
+    /// Whether [`Self::snapshot`] is cheap enough to capture after every applied batch.
+    ///
+    /// Holds only if every member's [`ManagedDb::CHEAP_SNAPSHOT`] does. A set with any member
+    /// that snapshots at real cost publishes only when a barrier starts, so its served state can
+    /// trail the applied tip by up to one active barrier.
+    const CHEAP_SNAPSHOT: bool = false;
+
     /// One [`Reader`] per database.
     type Readers: Clone + Send + Sync + 'static;
 
@@ -484,6 +497,8 @@ where
     type Snapshots = T::Snapshot;
     type Config = T::Config;
     type SyncTargets = T::SyncTarget;
+
+    const CHEAP_SNAPSHOT: bool = T::CHEAP_SNAPSHOT;
 
     async fn init(context: E, config: Self::Config, expected: Option<Self::SyncTargets>) -> Self {
         match T::init(context.child("db"), config, expected).await {
@@ -896,6 +911,8 @@ macro_rules! impl_database_set {
             type Snapshots = ($($T::Snapshot,)+);
             type Config = ($($T::Config,)+);
             type SyncTargets = ($($T::SyncTarget,)+);
+
+            const CHEAP_SNAPSHOT: bool = $($T::CHEAP_SNAPSHOT)&&+;
 
             async fn init(context: E, config: Self::Config, expected: Option<Self::SyncTargets>) -> Self {
                 join!($(
@@ -2466,6 +2483,62 @@ mod tests {
         ready_apply!();
 
         fn sync_target(&self) -> Self::SyncTarget {}
+    }
+
+    /// A [`TestDb`] whose snapshots are cheap.
+    struct CheapSnapshotDb;
+
+    impl<E: Send> ManagedDb<E> for CheapSnapshotDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = ();
+        type Snapshot = ();
+
+        const CHEAP_SNAPSHOT: bool = true;
+
+        async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+            Ok((self, ()))
+        }
+
+        fn initial_sync_target() -> Self::SyncTarget {}
+
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
+            Ok(Self)
+        }
+
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        ready_apply!();
+
+        fn sync_target(&self) -> Self::SyncTarget {}
+    }
+
+    /// A set's snapshots are cheap only if every member's are.
+    #[test]
+    fn cheap_snapshot_requires_every_member() {
+        type Ctx = deterministic::Context;
+        const {
+            assert!(<Single<CheapSnapshotDb> as DatabaseSet<Ctx>>::CHEAP_SNAPSHOT);
+            assert!(!<Single<TestDb> as DatabaseSet<Ctx>>::CHEAP_SNAPSHOT);
+            assert!(
+                <(Single<CheapSnapshotDb>, Single<CheapSnapshotDb>) as DatabaseSet<Ctx>>::CHEAP_SNAPSHOT
+            );
+            assert!(
+                !<(Single<CheapSnapshotDb>, Single<TestDb>) as DatabaseSet<Ctx>>::CHEAP_SNAPSHOT
+            );
+        }
     }
 
     impl<E: Send> ManagedDb<E> for InitializationDb {

@@ -320,6 +320,8 @@ where
                                 (processor, applied) = driven;
                             },
                         }
+                        // A cheap snapshot is not published here: the handoff publishes once
+                        // when its barrier starts.
                         pending_prune = applied.prune.or(pending_prune);
                         completed_height = block.height();
                     }

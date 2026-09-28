@@ -2,7 +2,7 @@
 //!
 //! Contains the implementation of [crate::qmdb::sync::Database] for
 //! [Db](crate::qmdb::current::db::Db), covering every variant (ordered/unordered,
-//! fixed/variable, any snapshot index).
+//! fixed/variable, any key index).
 //!
 //! The canonical root of a `current` database combines the ops root, grafted root, and optional
 //! pending and partial chunk digests into a single hash (see the [Root structure](super) section in
@@ -130,7 +130,7 @@ where
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
-    let index_context = context.child("index");
+    let index_context = context.child("index_build");
     let any_metrics = AnyMetrics::new(context.child("any"));
     let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(
         index_context,

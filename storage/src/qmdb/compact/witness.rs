@@ -105,7 +105,7 @@ pub struct Tip<F: Family, Op, D: Digest> {
 }
 
 impl<F: Family, Op, D: Digest> Tip<F, Op, D> {
-    /// The committed size, which also identifies the last commit's location.
+    /// The committed size. The last commit is at location `size - 1`.
     pub const fn size(&self) -> Location<F> {
         self.witness.size
     }
@@ -244,7 +244,8 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
         &self.tip
     }
 
-    /// Apply the current compact state to the witness journal.
+    /// Record the commit just applied to `merkle`, whose commit operation is `op`, as the new tip
+    /// and append its witness to the journal.
     pub(crate) async fn apply<H, S>(
         mut self,
         merkle: &compact::Merkle<F, D, S>,
@@ -279,52 +280,34 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
     ///
     /// First waits for any sync pipelined by [`Self::start_sync`], surfacing its failure, then
     /// commits every applied witness.
-    pub(crate) async fn commit<H, S>(
+    pub(crate) async fn commit<S: Strategy>(
         self,
         merkle: &compact::Merkle<F, D, S>,
-        op: Op,
-    ) -> Result<Self, Error<F>>
-    where
-        H: Hasher<Digest = D>,
-        S: Strategy,
-        Op: Floored<F> + Encode,
-    {
+    ) -> Result<Self, Error<F>> {
         self.wait_for_sync().await?;
-        self.persist::<H, S>(merkle, op, Durability::Commit).await
+        self.persist(merkle, Durability::Commit).await
     }
 
     /// Persist the current compact state as a new witness journal entry, syncing the journal and
     /// all of its metadata to minimize recovery work on reopen.
     ///
     /// This also settles any sync pipelined by [`Self::start_sync`].
-    pub(crate) async fn sync<H, S>(
+    pub(crate) async fn sync<S: Strategy>(
         self,
         merkle: &compact::Merkle<F, D, S>,
-        op: Op,
-    ) -> Result<Self, Error<F>>
-    where
-        H: Hasher<Digest = D>,
-        S: Strategy,
-        Op: Floored<F> + Encode,
-    {
-        self.persist::<H, S>(merkle, op, Durability::Sync).await
+    ) -> Result<Self, Error<F>> {
+        self.persist(merkle, Durability::Sync).await
     }
 
-    /// Apply the current state and persist the journal according to `durability`.
-    async fn persist<H, S>(
+    /// Write a pending import's tip, then persist the journal according to `durability`.
+    async fn persist<S: Strategy>(
         mut self,
         merkle: &compact::Merkle<F, D, S>,
-        op: Op,
         durability: Durability,
-    ) -> Result<Self, Error<F>>
-    where
-        H: Hasher<Digest = D>,
-        S: Strategy,
-        Op: Floored<F> + Encode,
-    {
-        // Compact-sync imports enter with a tip that is absent from the journal. Apply the
-        // current state before making the requested durability guarantee.
-        self = self.apply::<H, S>(merkle, op).await?;
+    ) -> Result<Self, Error<F>> {
+        // Compact-sync imports enter with a tip that is absent from the journal. Write it
+        // before making the requested durability guarantee.
+        self = self.write_import(merkle).await?;
 
         // Full sync includes recovery metadata even when every witness is already committed.
         match durability {
@@ -350,16 +333,10 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
     /// plus a best-effort attempt to bound the recovery needed on reopen. When nothing new must
     /// be appended, the handle still proves the current tip durable and resurfaces any retained
     /// sync failure.
-    pub(crate) async fn start_sync<H, S>(
+    pub(crate) async fn start_sync<S: Strategy>(
         mut self,
         merkle: &compact::Merkle<F, D, S>,
-        op: Op,
-    ) -> Result<(Self, Handle<()>), Error<F>>
-    where
-        H: Hasher<Digest = D>,
-        S: Strategy,
-        Op: Floored<F> + Encode,
-    {
+    ) -> Result<(Self, Handle<()>), Error<F>> {
         // Match the deferred-failure convention used by the journal: return a prior completion's
         // error through a ready handle before a later completion can replace it. Errors while
         // staging or initiating this sync continue to use the outer result.
@@ -367,9 +344,10 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
             return Ok((self, Handle::ready(Err(err))));
         }
 
-        // Apply before starting the journal sync so the returned handle covers the current tip.
-        // A later apply remains uncommitted and requires a successor durability operation.
-        self = self.apply::<H, S>(merkle, op).await?;
+        // Write a pending import before starting the journal sync so the returned handle covers
+        // the current tip. A later apply remains uncommitted and requires a successor durability
+        // operation.
+        self = self.write_import(merkle).await?;
 
         // Share one completion between the caller and the store. Retaining a clone keeps a
         // dropped handle's failure observable by the next durability operation.
@@ -392,7 +370,33 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
         pending.await
     }
 
-    /// Decide what a persist must write, clearing the journal first when an import is pending.
+    /// Write the tip to the journal if it came from a compact-sync import that has not been
+    /// written yet.
+    ///
+    /// Every applied commit updates the tip, so a tip that does not match `merkle` is
+    /// [`Error::DataCorrupted`].
+    async fn write_import<S: Strategy>(
+        mut self,
+        merkle: &compact::Merkle<F, D, S>,
+    ) -> Result<Self, Error<F>> {
+        if self.tip.size() != merkle.leaves() {
+            return Err(Error::DataCorrupted(
+                "witness does not match in-memory state",
+            ));
+        }
+        if !self.import_pending {
+            return Ok(self);
+        }
+        self = self.clear_for_import().await?;
+        let tip = Arc::clone(&self.tip);
+        (self.journal, _) = self.journal.append(&tip.witness).await?;
+        self.import_pending = false;
+        self.uncommitted = true;
+        Ok(self)
+    }
+
+    /// Decide what [`Self::apply`] must write, clearing the journal first when an import is
+    /// pending.
     ///
     /// Returns `None` if the tip already matches the in-memory Merkle and no import is
     /// pending, otherwise the tip to append and install.
@@ -582,7 +586,7 @@ where
 /// The inactivity floor of a commit must sit at or below the commit's own location. A higher
 /// floor would reference operations that do not exist yet, which indicates disk corruption in
 /// the persisted witness.
-pub(crate) fn validate_inactivity_floor<F: Family>(
+fn validate_inactivity_floor<F: Family>(
     inactivity_floor_loc: Location<F>,
     last_commit_loc: Location<F>,
 ) -> Result<(), Error<F>> {
@@ -650,7 +654,6 @@ where
     let inactivity_floor_loc = op
         .has_floor()
         .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
 
     let hasher = qmdb::hasher::<H>();
     merkle

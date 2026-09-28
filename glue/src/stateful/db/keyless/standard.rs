@@ -701,21 +701,25 @@ mod tests {
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
-            let fork = MerkleizedTrait::new_batch(&merkleized);
-            let (writer, _, durability) = apply_and_finalize(writer, merkleized).await;
-            durability.await.expect("database sync failed");
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&*reader.read().await);
-            assert_eq!(target.range.start(), mmr::Location::new(1));
-
-            // The same holds for a batch forked from a merkleized parent.
-            let fork = fork.append(U64::new(9));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(fork)
-                .await
-                .unwrap();
             let (_writer, _, durability) = apply_and_finalize(writer, merkleized).await;
             durability.await.expect("database sync failed");
             let target = <FixedDb as ManagedDb<_>>::sync_target(&*reader.read().await);
             assert_eq!(target.range.start(), mmr::Location::new(1));
+
+            // A batch forked from a merkleized parent carries the parent's floor, which here is
+            // above the database's.
+            let parent = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
+                .await
+                .append(U64::new(9))
+                .with_inactivity_floor(mmr::Location::new(3));
+            let parent = crate::stateful::db::Unmerkleized::merkleize(parent)
+                .await
+                .unwrap();
+            let fork = MerkleizedTrait::new_batch(&parent).append(U64::new(10));
+            let fork = crate::stateful::db::Unmerkleized::merkleize(fork)
+                .await
+                .unwrap();
+            assert_eq!(fork.bounds().inactivity_floor, mmr::Location::new(3));
         });
     }
 }

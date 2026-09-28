@@ -5,7 +5,7 @@ use crate::stateful::db::Subscriber as SnapshotSubscriber;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Delivery, Fetch, Resolver, p2p};
 use commonware_runtime::{
@@ -61,6 +61,11 @@ where
 
     /// Largest `max_ops` served in a peer's operations request. Larger requests go unanswered.
     pub max_serve_ops: NonZeroU64,
+
+    /// Longest a peer's request may be served for. A serve holds a published snapshot, and so
+    /// the storage it pins, until it finishes, so this bounds how long a slow serve can pin it.
+    /// A request not served in time goes unanswered.
+    pub serve_timeout: Duration,
 
     /// Whether fetch requests are sent with network priority.
     pub priority_requests: bool,
@@ -315,21 +320,34 @@ where
     }
 
     /// Serves a peer's request from the latest published snapshot.
-    fn handle_produce(&mut self, key: Request<F>, response_tx: oneshot::Sender<bytes::Bytes>) {
-        let Some(source) = self.subscriber.latest() else {
-            self.metrics.serve_requests.inc(status::Status::Dropped);
-            return;
-        };
+    fn handle_produce(&mut self, key: Request<F>, mut response_tx: oneshot::Sender<bytes::Bytes>) {
         if let Request::Operations { max_ops, .. } = key
             && max_ops > self.config.max_serve_ops
         {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
+        let Some(source) = self.subscriber.latest() else {
+            self.metrics.serve_requests.inc(status::Status::Dropped);
+            return;
+        };
         let serve_requests = self.metrics.serve_requests.clone();
+        let deadline = self.context.sleep(self.config.serve_timeout);
 
         self.serves.push(async move {
-            let result = source.serve(key).await;
+            // The deadline bounds how long the serve pins its snapshot: the resolver drops a
+            // response receiver only at shutdown. A closed receiver means the requester is gone.
+            let result = select! {
+                _ = deadline => {
+                    serve_requests.inc(status::Status::Timeout);
+                    return;
+                },
+                _ = response_tx.closed() => {
+                    serve_requests.inc(status::Status::Dropped);
+                    return;
+                },
+                result = source.serve(key) => result,
+            };
 
             let Ok((response, _feedback)) = result else {
                 serve_requests.inc(status::Status::Failure);
@@ -583,6 +601,7 @@ mod tests {
             timeout: Duration::from_millis(10),
             fetch_retry_timeout: Duration::from_millis(10),
             max_serve_ops: NZU64!(16),
+            serve_timeout: Duration::from_secs(10),
             priority_requests: false,
             priority_responses: false,
         }
@@ -747,6 +766,7 @@ mod tests {
                     timeout: Duration::from_secs(5),
                     fetch_retry_timeout: Duration::from_millis(10),
                     max_serve_ops: NZU64!(16),
+                    serve_timeout: Duration::from_secs(10),
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -1025,6 +1045,54 @@ mod tests {
             actor.serves.next_completed().await;
             assert_eq!(response_rx.await.unwrap(), expected);
             assert!(verdict_rx.await.is_err());
+        });
+    }
+
+    /// A source whose serves never finish.
+    struct StalledSource;
+
+    impl Source for StalledSource {
+        type Family = mmr::Family;
+        type Digest = sha256::Digest;
+        type Op = TestOp;
+        type Error = sync::ServeError<mmr::Family>;
+
+        async fn serve(&self, _request: Request<mmr::Family>) -> sync::source::Result<Self> {
+            future::pending().await
+        }
+    }
+
+    /// A stalled serve releases the snapshot it holds at its deadline, or as soon as its
+    /// requester goes away, and the actor keeps serving afterwards.
+    #[test]
+    fn stalled_serve_releases_snapshot() {
+        deterministic::Runner::default().start(|context| async move {
+            let source = Arc::new(StalledSource);
+            let publication_context = context.child("publication");
+            let (mut publisher, subscriber) = Publisher::new(&publication_context);
+            publisher.publish(Height::zero(), source.clone());
+            let mut config = test_config();
+            config.serve_timeout = Duration::from_secs(1);
+            let (mut actor, _mailbox) = Actor::new(context.child("actor"), config, subscriber);
+            let request = test_request_at(Location::new(1));
+
+            // The publisher, this test, and the serve each hold the snapshot.
+            let (response_tx, response_rx) = oneshot::channel();
+            actor.handle_produce(request, response_tx);
+            assert_eq!(Arc::strong_count(&source), 3);
+            actor.serves.next_completed().await;
+            assert_eq!(Arc::strong_count(&source), 2);
+            assert!(response_rx.await.is_err());
+
+            // Dropping the response receiver ends the serve before its deadline.
+            let (response_tx, response_rx) = oneshot::channel();
+            actor.handle_produce(request, response_tx);
+            assert_eq!(Arc::strong_count(&source), 3);
+            let start = context.current();
+            drop(response_rx);
+            actor.serves.next_completed().await;
+            assert_eq!(Arc::strong_count(&source), 2);
+            assert!(context.current() < start + Duration::from_secs(1));
         });
     }
 
@@ -1946,6 +2014,7 @@ mod tests {
                         timeout: Duration::from_secs(2),
                         fetch_retry_timeout: Duration::from_millis(50),
                         max_serve_ops: NZU64!(16),
+                        serve_timeout: Duration::from_secs(10),
                         priority_requests: false,
                         priority_responses: false,
                     },
@@ -1971,6 +2040,7 @@ mod tests {
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(50),
                     max_serve_ops: NZU64!(16),
+                    serve_timeout: Duration::from_secs(10),
                     priority_requests: false,
                     priority_responses: false,
                 },

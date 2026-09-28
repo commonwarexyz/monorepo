@@ -409,14 +409,22 @@ impl Cancellation for Verification {
     }
 }
 
+/// What serving receives from one finalization.
+pub(super) enum Publication<S> {
+    /// Nothing new: no barrier was requested, and the set's snapshots are not cheap.
+    None,
+    /// A snapshot of the applied state, captured without a barrier because the set's snapshots
+    /// are cheap (see [`DatabaseSet::CHEAP_SNAPSHOT`]).
+    Snapshot(S),
+    /// A snapshot of the applied state and the barrier started with it, which covers the block
+    /// and every earlier applied block.
+    WithBarrier(S, Barrier),
+}
+
 /// Result of applying a newly finalized block.
 pub(super) struct Applied<T, S> {
-    /// A snapshot of the database set, captured when the barrier started. `None` without a
-    /// barrier.
-    pub(super) snapshots: Option<S>,
-
-    /// Barrier covering the block, present only when the caller requested one.
-    pub(super) barrier: Option<Barrier>,
+    /// Snapshots to serve, with the barrier covering the block when the caller requested one.
+    pub(super) publication: Publication<S>,
 
     /// Prune that became due with this finalization.
     pub(super) prune: Option<Prune<T>>,
@@ -684,9 +692,10 @@ where
 
     /// Applies the next finalized `block` and discards cached state that does not descend from it.
     ///
-    /// Returns the processor, the prune that became due, if any, and, if `start_barrier` is set,
-    /// the snapshot to publish and a barrier covering `block` and every earlier applied block. The
-    /// processed anchor advances to `block` after the application's `finalized` hook returns.
+    /// Returns the processor, the prune that became due, if any, and the [`Publication`] for
+    /// serving, which carries a barrier covering `block` and every earlier applied block if
+    /// `start_barrier` is set. The processed anchor advances to `block` after the application's
+    /// `finalized` hook returns.
     ///
     /// The block's state comes from its verification when that is cached, and
     /// a cached block stays reachable as a parent until the anchor moves. A
@@ -773,12 +782,16 @@ where
             )
             .await;
         self.databases = self.databases.apply(batch).await;
-        let (snapshots, barrier) = if start_barrier {
+        let publication = if start_barrier {
             let (snapshots, barrier);
             (self.databases, snapshots, barrier) = self.databases.finalize().await;
-            (Some(snapshots), Some(barrier))
+            Publication::WithBarrier(snapshots, barrier)
+        } else if A::Databases::CHEAP_SNAPSHOT {
+            let snapshots;
+            (self.databases, snapshots) = self.databases.snapshot().await;
+            Publication::Snapshot(snapshots)
         } else {
-            (None, None)
+            Publication::None
         };
         self.app
             .finalized(
@@ -799,14 +812,7 @@ where
         });
         timer.observe(context);
 
-        (
-            self,
-            Applied {
-                snapshots,
-                barrier,
-                prune,
-            },
-        )
+        (self, Applied { publication, prune })
     }
 
     /// Prepare parent-relative batches and delegate to the application to
@@ -1467,8 +1473,8 @@ where
 mod tests {
     use super::{
         Applied, BlockDigest, Clock, Metrics, PendingBatches, PendingEntry, PrepareBatchesError,
-        Processor, Provenance, Prune, Pruning, ReplayClaim, ReplayFlights, Rng, Spawner,
-        fetch_ancestor,
+        Processor, Provenance, Prune, Pruning, Publication, ReplayClaim, ReplayFlights, Rng,
+        Spawner, fetch_ancestor,
     };
 
     impl<D: Copy + Ord> ReplayFlights<D> {
@@ -1549,6 +1555,16 @@ mod tests {
         },
         time::Duration,
     };
+
+    impl<S> Publication<S> {
+        /// The barrier this publication started, if any.
+        fn into_barrier(self) -> Option<Barrier> {
+            match self {
+                Self::WithBarrier(_, barrier) => Some(barrier),
+                Self::None | Self::Snapshot(_) => None,
+            }
+        }
+    }
 
     async fn assert_durable(barrier: Option<Barrier>) {
         assert!(
@@ -2160,7 +2176,7 @@ mod tests {
                 .processor
                 .finalize(self.context_cell.as_present(), &block, true)
                 .await;
-            assert_durable(applied.barrier).await;
+            assert_durable(applied.publication.into_barrier()).await;
             (self, true)
         }
 
@@ -2177,7 +2193,8 @@ mod tests {
                 .processor
                 .finalize(self.context_cell.as_present(), &block, true)
                 .await;
-            let Applied { barrier, prune, .. } = applied;
+            let Applied { publication, prune } = applied;
+            let barrier = publication.into_barrier();
             assert_durable(barrier).await;
             (self, prune)
         }
@@ -2453,7 +2470,7 @@ mod tests {
 
             release.send(()).expect("finalize is parked");
             let (processor, applied) = finalize.await;
-            assert_durable(applied.barrier).await;
+            assert_durable(applied.publication.into_barrier()).await;
             drop(processor);
         });
     }
@@ -2577,7 +2594,7 @@ mod tests {
                 .send(())
                 .expect("finalized hook should remain active");
             let (_processor, applied) = finalize.await;
-            let Applied { barrier, .. } = applied;
+            let barrier = applied.publication.into_barrier();
             assert_durable(barrier).await;
         });
     }
@@ -2610,7 +2627,7 @@ mod tests {
                 .send(())
                 .expect("finalized hook should remain active");
             let (_processor, applied) = finalize.await;
-            let Applied { barrier, .. } = applied;
+            let barrier = applied.publication.into_barrier();
             assert_durable(barrier).await;
         });
     }
