@@ -1013,7 +1013,8 @@ pub(super) fn record_protocol_acceptances(
         Activity::ProtocolAccepted { artifact_id, .. } => Some(*artifact_id),
         Activity::CommitmentsAccepted { .. }
         | Activity::HistoryAccepted { .. }
-        | Activity::TransactionProposed { .. } => None,
+        | Activity::TransactionProposed { .. }
+        | Activity::CertificateRecorded { .. } => None,
         Activity::LeaderFinalized { .. } | Activity::LeaderFinalityUpdated { .. } => None,
     }));
 }

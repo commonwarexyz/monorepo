@@ -697,6 +697,15 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         // Every recovered event was replayed from the synced journal, so any recovered signature
         // exposure is acknowledged already.
         self.pipeline.own_exposure = self.durable.state.cursor;
+        // Every recovered certificate is durable, so the application learns each chain's release
+        // before the engine verifies anything new; recovery verified what it retained already.
+        let recorded = self
+            .durable
+            .state
+            .certified_tips
+            .iter()
+            .map(|block| self.certificate_recorded(*block))
+            .collect::<Vec<_>>();
         let mut step = Step::new(
             StepStatus::Accepted,
             self.reserve_change(Change::GenerationAdvanced(generation))?,
@@ -704,6 +713,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         // State transitions happen at staging; the acknowledgement releases the recovered
         // outbox once the new generation is durable.
         self.lifecycle = Lifecycle::Live;
+        step.activities.extend(recorded);
         step.activities.extend(self.restore_ready_artifacts()?);
         if recovery {
             // Retained exits advance startup without peer input. Resolve the first remaining

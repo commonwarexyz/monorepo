@@ -1,6 +1,6 @@
 //! Catalog metrics.
 
-use crate::multimmit::marshal::{actors::metrics::saturating_u64, types::OutputIndex};
+use crate::multimmit::marshal::{OutputIndex, actors::metrics::saturating_u64};
 use commonware_runtime::{
     Clock, Metrics as RuntimeMetrics,
     telemetry::metrics::{
@@ -59,6 +59,7 @@ pub(super) enum Operation {
     FinalLqc,
     LatestLqc,
     History,
+    FloorAt,
     HistorySegment,
     WaitForCustody,
     Bodies,
@@ -77,6 +78,8 @@ pub(super) enum Operation {
     CommitArchives,
     /// Delivery's durable cursor moved.
     DeliveryCursor,
+    /// The engine released a chain's blocks.
+    Release,
     /// A body read finished.
     Materialization,
     /// Full pending segments finished retiring.
@@ -96,6 +99,7 @@ impl Operation {
             Self::FinalLqc => "final_lqc",
             Self::LatestLqc => "latest_lqc",
             Self::History => "history",
+            Self::FloorAt => "floor_at",
             Self::HistorySegment => "history_segment",
             Self::WaitForCustody => "wait_for_custody",
             Self::Bodies => "bodies",
@@ -111,6 +115,7 @@ impl Operation {
             Self::Admission => "admission",
             Self::CommitArchives => "commit_archives",
             Self::DeliveryCursor => "delivery_cursor",
+            Self::Release => "release",
             Self::Materialization => "materialization",
             Self::Retire => "retire",
             Self::AdmissionStart => "admission_start",
@@ -335,8 +340,8 @@ impl Metrics {
     }
 
     /// Publishes the durable commit high-water.
-    pub(super) fn progress(&self, committed: Option<OutputIndex>) {
-        let _ = self.committed_count.try_set(OutputIndex::count(committed));
+    pub(super) fn progress(&self, committed: OutputIndex) {
+        let _ = self.committed_count.try_set(committed.get());
     }
 
     /// Starts timing one owner turn, including its inline waits.

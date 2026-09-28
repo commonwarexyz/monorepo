@@ -50,6 +50,8 @@ mod tally;
 mod vote;
 
 pub use activity::*;
+#[cfg(feature = "arbitrary")]
+pub(crate) use arbitrary::codec_config as arbitrary_codec_config;
 pub use artifact::{Artifact, ArtifactId};
 pub use block::*;
 pub use certificate::*;

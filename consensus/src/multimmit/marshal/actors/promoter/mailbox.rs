@@ -4,8 +4,9 @@ use super::actor::Error;
 use crate::multimmit::{
     actors::util::ask,
     marshal::{
+        OutputIndex,
         actors::delivery::HotOutput,
-        types::{BodyValues, OutputIndex, Reply},
+        types::{BodyValues, Reply},
     },
     types::{BlockRef, Body, TransactionBlock},
 };
@@ -33,8 +34,8 @@ where
     /// A floor installation moved every chain to at least `frontiers`.
     Installed {
         floor_generation: u64,
-        /// Committed output of the installed checkpoint.
-        through: Option<OutputIndex>,
+        /// Committed output of the installed checkpoint, which is also its floor index.
+        through: OutputIndex,
         /// Installed frontier, one reference per chain in chain order.
         frontiers: Vec<BlockRef<H::Digest>>,
     },
@@ -137,7 +138,7 @@ where
     pub(crate) fn installed(
         &self,
         floor_generation: u64,
-        through: Option<OutputIndex>,
+        through: OutputIndex,
         frontiers: Vec<BlockRef<H::Digest>>,
     ) -> Feedback {
         self.sender.enqueue(Message::Installed {
