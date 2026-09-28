@@ -1,0 +1,227 @@
+//! The executor's view of the ordered [`Stateful`](super::Stateful) actor.
+
+use crate::{
+    executor::{Context, Execute, Update},
+    stateful::{
+        db::DatabaseSet,
+        ordered::{Application, Execution},
+    },
+};
+use commonware_actor::{
+    Feedback,
+    mailbox::{Policy, Sender},
+};
+use commonware_consensus::{Reporter, ancestry::Ancestry, marshal::Finalized, types::Height};
+use commonware_cryptography::{Digested, Digestible};
+use commonware_parallel::Strategy;
+use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_utils::channel::{oneshot, ring};
+use rand_core::Rng;
+use std::{collections::VecDeque, future};
+
+type Digest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
+type SyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
+type Unmerkleized<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Unmerkleized;
+pub(super) type Merkleized<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
+
+/// A request to the actor.
+pub(super) enum Message<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    /// The executor resumes from `tip`, the newest block it recorded as applied.
+    Resume(Digested<A::Block>),
+    /// State-syncs the databases to `target`, following newer targets from `updates`, and
+    /// returns the block they reached.
+    Sync {
+        target: Digested<A::Block>,
+        updates: ring::Receiver<Update<A::Block>>,
+        response: oneshot::Sender<Digested<A::Block>>,
+    },
+    /// A checkpoint certified an executed block.
+    Certified(Digested<A::Block>),
+    /// Returns batches holding the state after the block at `height - 1`.
+    Fork {
+        height: Height,
+        response: oneshot::Sender<Unmerkleized<A, E>>,
+    },
+    /// The block at `height` was executed on the batches forked for it.
+    Executed {
+        height: Height,
+        digest: Digest<A, E>,
+        targets: SyncTargets<A, E>,
+        /// The batches the block commits to, or `None` if it left state unchanged.
+        merkleized: Option<Merkleized<A, E>>,
+    },
+    /// The executor delivered an executed block to apply.
+    Finalized(Finalized<A::Block>),
+    /// Returns the databases once they are open.
+    Databases {
+        response: oneshot::Sender<A::Databases>,
+    },
+}
+
+/// Keeps every message in order, and drops requests whose caller left.
+impl<E, A> Policy for Message<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
+        let abandoned = match &message {
+            Self::Fork { response, .. } => response.is_closed(),
+            Self::Sync { response, .. } => response.is_closed(),
+            Self::Databases { response } => response.is_closed(),
+            Self::Resume(_) | Self::Certified(_) | Self::Executed { .. } | Self::Finalized(_) => {
+                false
+            }
+        };
+        if !abandoned {
+            overflow.push_back(message);
+        }
+    }
+}
+
+/// The executor's application and consumer, backed by the ordered
+/// [`Stateful`](super::Stateful) actor.
+///
+/// Pass one clone as the executor's `execute` and another as its `consumer`.
+pub struct Mailbox<E, A, T>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+    T: Strategy,
+{
+    sender: Sender<Message<E, A>>,
+    application: A,
+    /// Strategy for computing the digests of executed blocks.
+    strategy: T,
+}
+
+impl<E, A, T> Clone for Mailbox<E, A, T>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+    T: Strategy,
+{
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            application: self.application.clone(),
+            strategy: self.strategy.clone(),
+        }
+    }
+}
+
+impl<E, A, T> Mailbox<E, A, T>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+    T: Strategy,
+{
+    pub(super) const fn new(sender: Sender<Message<E, A>>, application: A, strategy: T) -> Self {
+        Self {
+            sender,
+            application,
+            strategy,
+        }
+    }
+
+    /// Returns the databases once the actor opens them, or `None` if it stops first.
+    ///
+    /// Holders may read the databases but must not apply, finalize, or prune them: the actor owns
+    /// every mutation.
+    pub async fn subscribe_databases(&self) -> Option<A::Databases> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::Databases { response });
+        receiver.await.ok()
+    }
+}
+
+impl<E, A, T> Execute<E> for Mailbox<E, A, T>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+    T: Strategy,
+{
+    type Input = A::Input;
+    type Block = A::Block;
+
+    fn genesis(&mut self) -> impl Future<Output = A::Block> + Send {
+        self.application.genesis()
+    }
+
+    fn resume(&mut self, tip: Digested<A::Block>) {
+        let _ = self.sender.enqueue(Message::Resume(tip));
+    }
+
+    fn certified(&mut self, block: Digested<A::Block>) {
+        let _ = self.sender.enqueue(Message::Certified(block));
+    }
+
+    async fn sync(
+        &mut self,
+        target: Digested<A::Block>,
+        updates: ring::Receiver<Update<A::Block>>,
+    ) -> Digested<A::Block> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::Sync {
+            target,
+            updates,
+            response,
+        });
+        match receiver.await {
+            Ok(base) => base,
+            // The actor stopped, and the executor stops without a base.
+            Err(_) => future::pending().await,
+        }
+    }
+
+    /// Executes `input` in the caller's task, on batches the actor forks from the parent's state.
+    async fn execute(
+        mut self,
+        context: (E, Context<<A::Input as Digestible>::Digest>),
+        ancestry: impl Ancestry<A::Block>,
+        input: Digested<A::Input>,
+    ) -> Digested<A::Block> {
+        let height = context.1.height;
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::Fork { height, response });
+        let Ok(batches) = receiver.await else {
+            // The actor stopped, and the executor stops without this block.
+            return future::pending().await;
+        };
+        let (block, merkleized) = match self
+            .application
+            .execute(context, ancestry, input, batches)
+            .await
+        {
+            Execution::Changed { block, merkleized } => (block, Some(merkleized)),
+            Execution::Unchanged { block } => (block, None),
+        };
+        let block = Digested::compute(block, &self.strategy).await;
+        let _ = self.sender.enqueue(Message::Executed {
+            height,
+            digest: block.digest(),
+            targets: A::sync_targets(block.inner()),
+            merkleized,
+        });
+        block
+    }
+}
+
+impl<E, A, T> Reporter for Mailbox<E, A, T>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+    T: Strategy,
+{
+    type Activity = Finalized<A::Block>;
+
+    fn report(&mut self, block: Self::Activity) -> Feedback {
+        self.sender.enqueue(Message::Finalized(block))
+    }
+}
