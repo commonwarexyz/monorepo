@@ -11,13 +11,17 @@ pub(in crate::qmdb) mod sealed {
 }
 
 /// The operation type a compact db is built over.
+///
+/// Sealed: implemented by [`crate::qmdb::keyless::Operation`] and
+/// [`crate::qmdb::immutable::Operation`].
 pub trait Operation<F: Family>:
     sealed::Sealed + Floored<F> + CodecShared + Clone + 'static
 {
     /// The commit metadata type.
     type Metadata: Clone + Send + Sync + 'static;
 
-    /// The mutations a batch accumulates before merkleization, in application order.
+    /// The mutations a batch accumulates before merkleization. Their iteration order is the order
+    /// their operations are appended.
     type Mutations: Default + Send + IntoIterator<IntoIter: ExactSizeIterator + Send>;
 
     /// The name recorded on tracing spans.

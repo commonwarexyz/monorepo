@@ -1,35 +1,4 @@
-//! A compact authenticated db that discards historical operations, retaining only a witness
-//! for each applied batch.
-//!
-//! One implementation serves the keyless and immutable variants. [`crate::qmdb::keyless`] and
-//! [`crate::qmdb::immutable`] pin the operation type through aliases and add `append` and `set`.
-//!
-//! Mirrors the API of the full dbs ([`crate::qmdb::keyless::Keyless`],
-//! [`crate::qmdb::immutable::Immutable`]): `new_batch -> merkleize -> apply_batch -> commit /
-//! sync / start_sync`, pipelined batch chains, `StaleBatch` validation. It is backed by the peak-only
-//! [`crate::merkle::compact`]. Because history is discarded, the db has no `get` / `proof` /
-//! `bounds` methods. A merkleized batch can prove only its own operations, and only until it is
-//! applied. Use a full db for historical proofs.
-//!
-//! # Witness journal
-//!
-//! The witness journal is the single durable source of truth. Each entry is a complete witness
-//! of one applied state, so bounded [`Db::init`] can restore a retained applied state
-//! (history is bounded by [`Db::prune`]). Initialization rebuilds the in-memory Merkle
-//! from an entry's pinned nodes and commit operation. An entry whose commit or pinned nodes fail
-//! to decode fails the open with [`Error::Journal`]; one that decodes but cannot rebuild
-//! surfaces as [`Error::DataCorrupted`]. The witness is also what lets compact nodes serve
-//! compact sync without retaining historical operations.
-//!
-//! Entries are strictly increasing in committed size, so a size uniquely identifies an
-//! initialization or prune target. An appended entry becomes durable when [`Db::commit`] or [`Db::sync`]
-//! completes, or, for [`Db::start_sync`], when the returned handle completes. Before that point
-//! recovery may fall back to the previous entry. The tip entry is never pruned.
-//!
-//! # Inactivity floor
-//!
-//! Commits carry the inactivity floor so the compact db's commit leaves and root match the full
-//! db's: the root is computed over the peaks the floor leaves active.
+//! The compact db and its batches. See [`crate::qmdb::compact`].
 
 use super::{
     Config, Operation, batch as compact_batch,
@@ -77,7 +46,7 @@ where
     /// The journal of witnesses, one per applied state.
     journal: witness::Journal<E, F, D, O>,
 
-    /// Whether the tip is durable.
+    /// Whether a durability operation covers the tip.
     tip_state: TipState,
 
     /// The sync pipelined by the last [`Db::start_sync`], cleared by the next full journal sync.

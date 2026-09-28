@@ -153,8 +153,9 @@ where
 /// Validate `witness`, materialize its Merkle, and derive its root and commit proof.
 ///
 /// The Merkle is built from the pinned nodes one operation below the commit plus the commit
-/// itself, then pruned back to its frontier. A non-commit operation returns
-/// [`Error::UnexpectedData`]. Merkle errors propagate unchanged.
+/// itself, then pruned back to its frontier. A zero size or a floor beyond the commit returns
+/// [`Error::DataCorrupted`], and a non-commit operation returns [`Error::UnexpectedData`].
+/// Merkle errors propagate unchanged.
 pub(super) fn restore<F, O, H, S>(
     strategy: S,
     witness: Witness<F, H::Digest, O>,
@@ -186,7 +187,7 @@ where
     Ok(Rebuilt { merkle, tip })
 }
 
-/// Validate a journaled witness, then restore it. Any failure is [`Error::DataCorrupted`]: the
+/// Restore a journaled witness, reporting any failure as [`Error::DataCorrupted`] since the
 /// entry came from this db's own journal.
 pub(super) fn rebuild<F, O, H, S>(
     strategy: S,
