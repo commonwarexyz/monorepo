@@ -20,8 +20,8 @@ use crate::multimmit::types::ChainId;
 use crate::{
     multimmit::{
         marshal::{
+            OutputIndex,
             config::{ArchiveMode, Retention},
-            types::OutputIndex,
         },
         types::{BlockRef, CertificateId, Frontier, FrontierError},
     },
@@ -68,7 +68,14 @@ pub(crate) struct PendingFloors {
 /// tip-history commitment opened at that anchor. `ordered` holds the highest block ordered on each
 /// chain. `emitted` holds the highest block handed to the application on each chain; it may be
 /// ahead of `ordered` because an L-QC's final sweep emits blocks beyond the ordering its parent
-/// established. The committed output index is optional because index zero is a valid output.
+/// established.
+///
+/// Every committed output advances exactly one chain by one height, and producer chains start at
+/// height zero, so the canonical index of the highest committed output is the sum of the emitted
+/// frontier's heights. It is derived rather than stored, which makes it the same on every node.
+/// `floor_index` is the committed index at the last floor installation (zero from genesis). Output
+/// rows are dense above it; below it, rows of earlier generations may remain, each run ending where
+/// the next installed floor skipped ahead of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Checkpoint<D: Digest> {
     epoch: Epoch,
@@ -79,7 +86,9 @@ pub(crate) struct Checkpoint<D: Digest> {
     history_index: Option<u64>,
     ordered: Frontier<D>,
     emitted: Frontier<D>,
-    committed: Option<OutputIndex>,
+    floor_index: OutputIndex,
+    /// Derived from `emitted`; not encoded.
+    committed: OutputIndex,
 }
 
 /// The fields of a [`Checkpoint`] before validation.
@@ -100,8 +109,8 @@ pub(crate) struct CheckpointParts<D: Digest> {
     pub(crate) ordered: Vec<BlockRef<D>>,
     /// Highest emitted block on every chain, in chain order.
     pub(crate) emitted: Vec<BlockRef<D>>,
-    /// Dense committed high-water, if any output has been committed.
-    pub(crate) committed: Option<OutputIndex>,
+    /// Committed index at the last floor installation, zero from genesis.
+    pub(crate) floor_index: OutputIndex,
 }
 
 /// A checkpoint's frontiers are not canonical.
@@ -110,6 +119,12 @@ pub(crate) enum CheckpointError {
     /// A frontier is empty, out of chain order, behind, or conflicting.
     #[error("checkpoint frontier is not canonical: {0}")]
     Frontier(#[from] FrontierError),
+    /// The emitted frontier's heights sum past the output index space.
+    #[error("checkpoint emitted frontier overflows the output index")]
+    IndexOverflow,
+    /// The floor index lies above the committed index.
+    #[error("checkpoint floor index exceeds its committed index")]
+    FloorIndex,
 }
 
 /// A floor installation was rejected before any durable change.
@@ -136,9 +151,9 @@ pub(crate) enum InstallReject {
     /// The target history index does not follow the current one.
     #[error("floor history index is not the next index")]
     HistoryIndex,
-    /// The target changes the committed output.
-    #[error("floor installation changes the committed output")]
-    Committed,
+    /// The target's floor index is not its committed index.
+    #[error("floor installation does not start at its committed index")]
+    FloorIndex,
     /// The pending floors cover another chain count.
     #[error("pending floors cover another chain count")]
     Floors,
@@ -222,11 +237,17 @@ impl<D: Digest> TryFrom<CheckpointParts<D>> for Checkpoint<D> {
     type Error = CheckpointError;
 
     /// Enforces the relationships decidable from the checkpoint alone: both frontiers are
-    /// canonical and emission dominates ordering. Authentication belongs to the floor installer.
+    /// canonical, emission dominates ordering, and the floor index is at or below the committed
+    /// index. Authentication belongs to the floor installer.
     fn try_from(parts: CheckpointParts<D>) -> Result<Self, CheckpointError> {
         let ordered = Frontier::new(parts.ordered)?;
         let emitted = Frontier::new(parts.emitted)?;
         emitted.dominates(&ordered)?;
+        let committed =
+            frontier_index(emitted.references()).ok_or(CheckpointError::IndexOverflow)?;
+        if parts.floor_index > committed {
+            return Err(CheckpointError::FloorIndex);
+        }
         Ok(Self {
             epoch: parts.epoch,
             floor_generation: parts.floor_generation,
@@ -236,7 +257,8 @@ impl<D: Digest> TryFrom<CheckpointParts<D>> for Checkpoint<D> {
             history_index: parts.history_index,
             ordered,
             emitted,
-            committed: parts.committed,
+            floor_index: parts.floor_index,
+            committed,
         })
     }
 }
@@ -292,9 +314,17 @@ impl<D: Digest> Checkpoint<D> {
         &self.emitted
     }
 
-    /// Returns the dense committed high-water, if any output has been committed.
-    pub(crate) const fn committed(&self) -> Option<OutputIndex> {
+    /// Returns the canonical index of the highest committed output, or the stream's genesis if
+    /// none has been committed.
+    pub(crate) const fn committed(&self) -> OutputIndex {
         self.committed
+    }
+
+    /// Returns the committed index at the last floor installation, zero from genesis.
+    ///
+    /// Output rows exist, densely, from the index after it through [`Self::committed`].
+    pub(crate) const fn floor_index(&self) -> OutputIndex {
+        self.floor_index
     }
 
     /// Returns whether both of `next`'s frontiers dominate this checkpoint's.
@@ -497,7 +527,7 @@ impl<D: Digest> Write for Checkpoint<D> {
         self.history_index.write(buf);
         self.ordered().write(buf);
         self.emitted().write(buf);
-        self.committed.write(buf);
+        self.floor_index.write(buf);
     }
 }
 
@@ -511,7 +541,7 @@ impl<D: Digest> EncodeSize for Checkpoint<D> {
             + self.history_index.encode_size()
             + self.ordered().encode_size()
             + self.emitted().encode_size()
-            + self.committed.encode_size()
+            + self.floor_index.encode_size()
     }
 }
 
@@ -534,7 +564,7 @@ impl<D: Digest> Read for Checkpoint<D> {
         let frontier = (RangeCfg::exact(config.chains()), ());
         let ordered = Vec::<BlockRef<D>>::read_cfg(buf, &frontier)?;
         let emitted = Vec::<BlockRef<D>>::read_cfg(buf, &frontier)?;
-        let committed = Option::<OutputIndex>::read(buf)?;
+        let floor_index = OutputIndex::read(buf)?;
         Self::try_from(CheckpointParts {
             epoch,
             floor_generation,
@@ -544,7 +574,7 @@ impl<D: Digest> Read for Checkpoint<D> {
             history_index,
             ordered,
             emitted,
-            committed,
+            floor_index,
         })
         .map_err(|_| {
             Error::Invalid(
@@ -641,6 +671,18 @@ impl<D: Digest> Read for CatalogState<D> {
     }
 }
 
+/// Returns the canonical index of the last output emitted through `frontier`: the sum of its
+/// heights, or `None` if the sum overflows.
+///
+/// Producer chains start at height zero and every output advances one chain by one height, so
+/// this counts the outputs the frontier covers.
+pub(crate) fn frontier_index<D: Digest>(frontier: &[BlockRef<D>]) -> Option<OutputIndex> {
+    frontier
+        .iter()
+        .try_fold(0u64, |sum, tip| sum.checked_add(tip.height().get()))
+        .map(OutputIndex::new)
+}
+
 /// Returns the finalized archive ordinal for the next selected L-QC.
 ///
 /// The ordinal is `max(current + 1, view)`: it follows the previous ordinal so certificates at the
@@ -673,8 +715,8 @@ fn validate_install<D: Digest>(
     if target.history_index() != next_history {
         return Err(InstallReject::HistoryIndex);
     }
-    if target.committed() != current.committed() {
-        return Err(InstallReject::Committed);
+    if target.floor_index() != target.committed() {
+        return Err(InstallReject::FloorIndex);
     }
     if floors.blocks.len() != current.chains() {
         return Err(InstallReject::Floors);
@@ -709,11 +751,14 @@ where
         let history = u.arbitrary()?;
         let history_index = u.arbitrary()?;
         let chains = u.int_in_range(1..=8u32)?;
+        // Bound every height so the emitted frontier's sum fits the output index space.
+        let max_height = u64::MAX / u64::from(chains);
         let mut ordered = Vec::with_capacity(chains as usize);
         let mut emitted = Vec::with_capacity(chains as usize);
+        let mut committed = 0u64;
         for chain in 0..chains {
-            let ordered_height: u64 = u.arbitrary()?;
-            let delta = u.int_in_range(0..=u64::MAX - ordered_height)?;
+            let ordered_height = u.int_in_range(0..=max_height)?;
+            let delta = u.int_in_range(0..=max_height - ordered_height)?;
             let emitted_height = ordered_height + delta;
             let ordered_digest = u.arbitrary()?;
             let emitted_digest = if delta == 0 {
@@ -722,6 +767,7 @@ where
                 u.arbitrary()?
             };
             let chain = ChainId::new(chain);
+            committed += emitted_height;
             emitted.push(BlockRef::new(
                 chain,
                 Height::new(emitted_height),
@@ -733,7 +779,7 @@ where
                 ordered_digest,
             ));
         }
-        let committed = u.arbitrary()?;
+        let floor_index = OutputIndex::new(u.int_in_range(0..=committed)?);
         Ok(Self::try_from(CheckpointParts {
             epoch,
             floor_generation,
@@ -743,7 +789,7 @@ where
             history_index,
             ordered,
             emitted,
-            committed,
+            floor_index,
         })
         .expect("generated checkpoint is canonical"))
     }
@@ -783,7 +829,7 @@ mod tests {
             history_index: Some(4),
             ordered: vec![reference(0, 5, b"ordered 0"), reference(1, 9, b"shared 1")],
             emitted: vec![reference(0, 7, b"emitted 0"), reference(1, 9, b"shared 1")],
-            committed: Some(OutputIndex::new(12)),
+            floor_index: OutputIndex::new(12),
         }
     }
 
@@ -805,7 +851,7 @@ mod tests {
             history_index: Some(current.history_index().unwrap() + 1),
             ordered: current.ordered().to_vec(),
             emitted: current.emitted().to_vec(),
-            committed: current.committed(),
+            floor_index: current.committed(),
         })
         .unwrap()
     }
@@ -835,7 +881,42 @@ mod tests {
         assert_eq!(checkpoint.chains(), 2);
         assert_eq!(checkpoint.ordered().len(), 2);
         assert_eq!(checkpoint.emitted().len(), 2);
-        assert_eq!(checkpoint.committed(), Some(OutputIndex::new(12)));
+        assert_eq!(checkpoint.floor_index(), OutputIndex::new(12));
+        // Emitted heights 7 and 9: sixteen outputs through the frontier.
+        assert_eq!(checkpoint.committed(), OutputIndex::new(16));
+    }
+
+    #[test]
+    fn committed_index_is_the_emitted_frontier_sum() {
+        let mut parts = parts();
+        parts.emitted = vec![reference(0, 5, b"ordered 0"), reference(1, 9, b"shared 1")];
+        parts.floor_index = OutputIndex::zero();
+        assert_eq!(
+            TestCheckpoint::try_from(parts).unwrap().committed(),
+            OutputIndex::new(14)
+        );
+    }
+
+    #[test]
+    fn floor_index_cannot_exceed_committed_index() {
+        let mut parts = parts();
+        parts.floor_index = OutputIndex::new(17);
+        assert_eq!(
+            TestCheckpoint::try_from(parts),
+            Err(CheckpointError::FloorIndex)
+        );
+    }
+
+    #[test]
+    fn emitted_sum_overflow_is_rejected() {
+        let mut parts = parts();
+        parts.ordered = vec![reference(0, 0, b"zero"), reference(1, 0, b"zero")];
+        parts.emitted = vec![reference(0, u64::MAX, b"max 0"), reference(1, 1, b"one")];
+        parts.floor_index = OutputIndex::zero();
+        assert_eq!(
+            TestCheckpoint::try_from(parts),
+            Err(CheckpointError::IndexOverflow)
+        );
     }
 
     #[test]
@@ -926,11 +1007,24 @@ mod tests {
             begin(&ready, target, Some(7), floors),
             Err(InstallReject::Floors)
         );
+        let mut rowless = parts();
+        rowless.floor_generation += 1;
+        rowless.history_index = Some(5);
+        assert_eq!(
+            begin(
+                &ready,
+                TestCheckpoint::try_from(rowless).unwrap(),
+                Some(7),
+                install_floors()
+            ),
+            Err(InstallReject::FloorIndex)
+        );
         let mut regressed = parts();
         regressed.floor_generation += 1;
         regressed.history_index = Some(5);
         regressed.ordered[0] = reference(0, 4, b"behind");
         regressed.emitted[0] = reference(0, 7, b"emitted 0");
+        regressed.floor_index = OutputIndex::new(16);
         assert_eq!(
             begin(
                 &ready,
@@ -1051,7 +1145,7 @@ mod tests {
         fn encode_parts(
             ordered: Vec<BlockRef<Sha256Digest>>,
             emitted: Vec<BlockRef<Sha256Digest>>,
-            committed: Option<OutputIndex>,
+            floor_index: OutputIndex,
         ) -> Vec<u8> {
             let mut encoded = BytesMut::new();
             Epoch::new(7).write(&mut encoded);
@@ -1062,7 +1156,7 @@ mod tests {
             Some(4u64).write(&mut encoded);
             ordered.write(&mut encoded);
             emitted.write(&mut encoded);
-            committed.write(&mut encoded);
+            floor_index.write(&mut encoded);
             encoded.to_vec()
         }
 
@@ -1071,8 +1165,8 @@ mod tests {
 
         let duplicate_chain = encode_parts(
             vec![reference(0, 5, b"ordered 0"), reference(0, 9, b"duplicate")],
-            emitted,
-            None,
+            emitted.clone(),
+            OutputIndex::zero(),
         );
         assert!(matches!(
             TestCheckpoint::decode_cfg(duplicate_chain, &config()),
@@ -1085,9 +1179,16 @@ mod tests {
         let conflicting_same_height = encode_parts(
             ordered,
             vec![reference(0, 5, b"conflict"), reference(1, 9, b"shared 1")],
-            None,
+            OutputIndex::zero(),
         );
         assert!(TestCheckpoint::decode_cfg(conflicting_same_height, &config()).is_err());
+
+        let floor_above_committed = encode_parts(
+            vec![reference(0, 5, b"ordered 0"), reference(1, 9, b"shared 1")],
+            emitted,
+            OutputIndex::new(17),
+        );
+        assert!(TestCheckpoint::decode_cfg(floor_above_committed, &config()).is_err());
     }
 
     #[test]
@@ -1182,7 +1283,7 @@ mod tests {
                     history_index: Some(0),
                     ordered: current.ordered().to_vec(),
                     emitted: current.emitted().to_vec(),
-                    committed: current.committed(),
+                    floor_index: current.committed(),
                 })
                 .unwrap();
                 let floors = PendingFloors {

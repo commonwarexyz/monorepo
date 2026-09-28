@@ -3,7 +3,7 @@
 use super::batch::DurableBatch;
 use crate::multimmit::{
     actors::util::Completion,
-    marshal::{actors::catalog, types::OutputIndex},
+    marshal::{OutputIndex, actors::catalog},
     types::Body,
 };
 use commonware_actor::{
@@ -27,7 +27,7 @@ where
     Reset {
         floor_generation: u64,
         /// Output the new generation starts after.
-        acknowledged: Option<OutputIndex>,
+        acknowledged: OutputIndex,
         /// Resolved once delivery has applied the reset.
         waiters: Vec<oneshot::Sender<Result<(), catalog::Error>>>,
     },
@@ -125,7 +125,7 @@ where
     pub(crate) fn reset(
         &self,
         floor_generation: u64,
-        acknowledged: Option<OutputIndex>,
+        acknowledged: OutputIndex,
     ) -> Option<ResetWaiter> {
         let (acknowledgement, waiter) = Completion::channel(|| catalog::Error::DeliveryClosed);
         (self.sender.enqueue(Message::Reset {

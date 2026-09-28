@@ -174,7 +174,9 @@ pub enum Start<V: Variant, D: Digest> {
     /// The caller must authenticate the floor's anchor with the epoch's L-QC verifier and bind
     /// its emitted frontier and `floor_generation` to the application snapshot being imported.
     /// Marshal checks structure and the anchor-to-history commitment while opening storage, but
-    /// cannot verify signatures before [`super::Service::start`] receives a verifier.
+    /// cannot verify signatures before [`super::Service::start`] receives a verifier. To resume
+    /// from a floor a peer served with [`super::Mailbox::floor_at`], start from
+    /// [`Start::Genesis`] and pass it to [`super::Mailbox::install_floor`], which verifies it.
     Floor {
         /// Positive monotone generation authenticated by the state-sync owner.
         floor_generation: u64,
