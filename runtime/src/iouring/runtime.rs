@@ -108,7 +108,7 @@ use super::{
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
-    task::{Outcome, RootWaker, Target, Task, Tasks},
+    task::{AfterPoll, RootWaker, Target, Task, Tasks},
     timeout::TimeoutWheel,
     waker::SUBMISSION_SEQ_MASK,
 };
@@ -1627,10 +1627,10 @@ impl Worker {
                 // The inner wrapper handles user polling policy. The poll also
                 // contains the destruction of a finished or cancelled future.
                 match task.poll(|_| {}) {
-                    Outcome::Idle | Outcome::Stale => {}
+                    AfterPoll::Done => {}
                     // Join the tail so self-waking tasks cannot skip other ready work.
-                    Outcome::Requeue(task) => self.local.borrow_mut().tasks.push(task),
-                    Outcome::Complete(task) => self.local.borrow_mut().tasks.retire(task),
+                    AfterPoll::Requeue(task) => self.local.borrow_mut().tasks.push(task),
+                    AfterPoll::Retire(task) => self.local.borrow_mut().tasks.retire(task),
                 }
             }
 

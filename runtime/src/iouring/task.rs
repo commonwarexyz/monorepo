@@ -101,29 +101,36 @@ const REF_ONE: usize = 1 << 8;
 /// Mask of the reference count.
 const REFS: usize = !(REF_ONE - 1);
 
-/// How a pending poll ends.
-enum Finish {
-    /// No wake arrived, so the task is idle. The exchange released the polled
-    /// token's reference, and the poller forgets the token.
-    Idle,
-    /// A wake arrived during the poll. The polled token becomes the next one,
-    /// keeping its reference, and the poller queues it again.
+/// Next step for a poller whose poll returned pending.
+///
+/// `finish_pending` has already made the state and reference changes, so each
+/// variant is only what remains for the poller.
+enum AfterPending {
+    /// Nothing. No wake arrived and the task went idle. The exchange released
+    /// the polled token's reference, so the poller forgets the token.
+    Done,
+    /// Queue the polled token again. A wake arrived during the poll and
+    /// published nothing, so the token becomes the next one, keeping its
+    /// reference.
     Requeue,
-    /// Teardown cleared the task during the poll. The poller completes it and
-    /// drops the future.
-    Cancelled,
+    /// Complete the task and drop its future. Teardown cleared the task during
+    /// the poll and left the future to the poller.
+    Complete,
 }
 
-/// How a wake that gives up its reference ends.
-enum Notify {
-    /// The task was idle. The waker's reference is now the ready token, which
-    /// the waker schedules.
+/// Next step for a waker that gave up its reference.
+///
+/// `notify_by_value` has already handed the reference to a new ready token or
+/// released it.
+enum AfterWake {
+    /// Schedule the new ready token. The task was idle, and the waker's
+    /// reference is now the token's.
     Schedule,
-    /// The task had a token, was running, or was complete. The exchange
-    /// released the waker's reference, and others remain.
-    DoNothing,
-    /// As `DoNothing`, but the released reference was the last, so the waker
-    /// frees the cell.
+    /// Nothing. The task already had a token, was running, or was complete.
+    /// The exchange released the waker's reference, and others remain.
+    Done,
+    /// Free the cell. The exchange released the waker's reference, and it was
+    /// the last.
     Dealloc,
 }
 
@@ -232,7 +239,7 @@ impl State {
     /// unused reference into the exchange saves a separate decrement on every
     /// coalesced wake.
     #[inline]
-    fn notify_by_value(&self) -> Notify {
+    fn notify_by_value(&self) -> AfterWake {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
             let (next, publish) = match state & LIFECYCLE {
@@ -253,12 +260,12 @@ impl State {
                 .0
                 .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) if publish => return Notify::Schedule,
+                Ok(_) if publish => return AfterWake::Schedule,
                 // Only a completed task can lose its last reference here,
                 // since a token or a poll holds one otherwise. The acquiring
                 // exchange orders every earlier release before the free.
-                Ok(_) if next & REFS == 0 => return Notify::Dealloc,
-                Ok(_) => return Notify::DoNothing,
+                Ok(_) if next & REFS == 0 => return AfterWake::Dealloc,
+                Ok(_) => return AfterWake::Done,
                 Err(actual) => state = actual,
             }
         }
@@ -294,14 +301,14 @@ impl State {
     /// End a poll that returned pending. Going idle releases the polled
     /// token's reference in the same exchange.
     #[inline]
-    fn finish_pending(&self) -> Finish {
+    fn finish_pending(&self) -> AfterPending {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
             // Teardown cleared the task mid-poll and left the future to this
             // poller. The lifecycle stays running until `complete`, so wakes
             // meanwhile publish nothing.
             if state & CANCELLED != 0 {
-                return Finish::Cancelled;
+                return AfterPending::Complete;
             }
 
             let (next, result) = match state & LIFECYCLE {
@@ -314,11 +321,11 @@ impl State {
                         state & REFS > REF_ONE,
                         "idle task would release its last reference"
                     );
-                    (Self::with_lifecycle(state, IDLE) - REF_ONE, Finish::Idle)
+                    (Self::with_lifecycle(state, IDLE) - REF_ONE, AfterPending::Done)
                 }
                 // A wake arrived and published nothing, so the polled token
                 // becomes the next one, keeping its reference.
-                NOTIFIED => (Self::with_lifecycle(state, QUEUED), Finish::Requeue),
+                NOTIFIED => (Self::with_lifecycle(state, QUEUED), AfterPending::Requeue),
                 other => unreachable!("task left poll in invalid state {other}"),
             };
 
@@ -396,21 +403,21 @@ impl State {
     }
 }
 
-/// Result of polling a ready token.
-pub enum Outcome {
-    /// Pending, with no wake during the poll. The token is gone, and the next
-    /// wake publishes a new one.
-    Idle,
-    /// Pending, and a wake during the poll requires another poll. Carries the
-    /// token for the caller to queue again.
+/// Next step for a worker that polled a ready token.
+///
+/// [`Task::poll`] has already released a spent token and dropped a finished
+/// future.
+pub enum AfterPoll {
+    /// Nothing. The poll returned pending with no wake during it, so the next
+    /// wake publishes a new token, or the token belonged to a task teardown
+    /// already cleared. Either way the token's reference is released.
+    Done,
+    /// Queue the carried token again. A wake arrived during the pending poll,
+    /// so the task needs another poll.
     Requeue(Task),
-    /// The future returned ready, panicked, or was cleared during the poll,
-    /// and has been dropped. Carries the token for the caller to pass to
-    /// [`Tasks::retire`].
-    Complete(Task),
-    /// The token belonged to a task teardown already cleared, and has been
-    /// released.
-    Stale,
+    /// Pass the carried token to [`Tasks::retire`]. The future returned ready,
+    /// panicked, or was cleared during the poll, and has been dropped.
+    Retire(Task),
 }
 
 /// Operations that need the concrete future type behind a header, one table
@@ -647,9 +654,9 @@ impl Task {
         let this = ManuallyDrop::new(self);
 
         match this.state.notify_by_value() {
-            Notify::Schedule => ManuallyDrop::into_inner(this).schedule(),
-            Notify::DoNothing => {}
-            Notify::Dealloc => {
+            AfterWake::Schedule => ManuallyDrop::into_inner(this).schedule(),
+            AfterWake::Done => {}
+            AfterWake::Dealloc => {
                 // SAFETY: the exchange released the last reference and
                 // acquired every earlier release, so nothing else reaches the
                 // cell, and the vtable frees the allocation `new` made.
@@ -723,10 +730,10 @@ impl Task {
     /// is published as over. No wake can start another poll of the task until
     /// it returns. A completed task skips it. `finish` must not panic: the task
     /// would stay running, and teardown could never drop its future.
-    pub fn poll(self, finish: impl FnOnce(&Header)) -> Outcome {
+    pub fn poll(self, finish: impl FnOnce(&Header)) -> AfterPoll {
         // A token of a task teardown already cleared is released here.
         if !self.state.start_poll() {
-            return Outcome::Stale;
+            return AfterPoll::Done;
         }
 
         // The poll and the destructors it may run stay behind one boundary,
@@ -746,13 +753,13 @@ impl Task {
         if matches!(polled, Some(Poll::Pending)) {
             finish(&self);
             match self.state.finish_pending() {
-                Finish::Idle => {
+                AfterPending::Done => {
                     // The exchange released this token's reference.
                     mem::forget(self);
-                    return Outcome::Idle;
+                    return AfterPoll::Done;
                 }
-                Finish::Requeue => return Outcome::Requeue(self),
-                Finish::Cancelled => {}
+                AfterPending::Requeue => return AfterPoll::Requeue(self),
+                AfterPending::Complete => {}
             }
         }
 
@@ -763,7 +770,7 @@ impl Task {
         // SAFETY: exclusive access continues past `complete`, since
         // `start_poll` and `clear` both do nothing once the state is COMPLETE.
         Panics::contain(|| unsafe { (self.vtable.drop_future)(self.0) });
-        Outcome::Complete(self)
+        AfterPoll::Retire(self)
     }
 }
 
@@ -1188,7 +1195,7 @@ pub mod tests {
         assert_eq!(Arc::weak_count(&mailbox), 1);
 
         // Polling borrows the token's reference for the waker it passes in.
-        assert!(matches!(task.clone().poll(|_| {}), Outcome::Idle));
+        assert!(matches!(task.clone().poll(|_| {}), AfterPoll::Done));
         assert_eq!(refs(&task), 1);
 
         // Cloned wakers count, and dropped ones release.
@@ -1218,7 +1225,7 @@ pub mod tests {
         let mailbox = mailbox();
         let mut tasks = Tasks::default();
         let task = insert(&mut tasks, &mailbox, pending());
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), Outcome::Idle));
+        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
 
         // Wakes from a thread without a worker travel through the mailbox, and
         // duplicates publish one token. The coalesced wake by value releases
@@ -1237,7 +1244,7 @@ pub mod tests {
 
         // The token polls the task again, which leaves it idle once more.
         tasks.push(tokens.pop().unwrap());
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), Outcome::Idle));
+        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
         assert!(scheduled(&mailbox).is_empty());
         task.clear();
     }
@@ -1259,14 +1266,14 @@ pub mod tests {
 
         // Wakes during the poll leave exactly one successor token, returned
         // to the poller rather than published.
-        let Outcome::Requeue(token) = tasks.pop().unwrap().poll(|_| {}) else {
+        let AfterPoll::Requeue(token) = tasks.pop().unwrap().poll(|_| {}) else {
             panic!("self-woken pending poll must requeue");
         };
         assert!(Task::ptr_eq(&token, &task));
         assert!(scheduled(&mailbox).is_empty());
 
         // The final poll wakes itself again, which the terminal state discards.
-        let Outcome::Complete(token) = token.poll(|_| {}) else {
+        let AfterPoll::Retire(token) = token.poll(|_| {}) else {
             panic!("final poll must complete");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -1302,14 +1309,14 @@ pub mod tests {
             assert!(scheduled(&mailbox).is_empty());
         });
         assert_eq!(finalized, 1);
-        let Outcome::Requeue(token) = outcome else {
+        let AfterPoll::Requeue(token) = outcome else {
             panic!("the wake during the finalizer must requeue the task");
         };
         assert!(Task::ptr_eq(&token, &task));
 
         // The completing poll skips the finalizer.
         let outcome = token.poll(|_| finalized += 1);
-        assert!(matches!(outcome, Outcome::Complete(_)));
+        assert!(matches!(outcome, AfterPoll::Retire(_)));
         assert_eq!(finalized, 1);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
@@ -1326,7 +1333,7 @@ pub mod tests {
         });
         let waker = Waker::clone(&first.waker());
 
-        let Outcome::Complete(token) = tasks
+        let AfterPoll::Retire(token) = tasks
             .pop()
             .unwrap()
             .poll(|_| panic!("a completed poll skips the finalizer"))
@@ -1343,7 +1350,7 @@ pub mod tests {
             first.slot.load(Ordering::Relaxed),
             second.slot.load(Ordering::Relaxed)
         );
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), Outcome::Idle));
+        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
         waker.wake_by_ref();
         assert!(scheduled(&mailbox).is_empty());
         drop(waker);
@@ -1403,7 +1410,7 @@ pub mod tests {
         let first = insert(&mut tasks, &closed, pending());
         let second = insert(&mut tasks, &dropped, pending());
         for _ in 0..2 {
-            assert!(matches!(tasks.pop().unwrap().poll(|_| {}), Outcome::Idle));
+            assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
         }
 
         // Each wake publishes a token no worker will take, and releases it,
@@ -1440,8 +1447,8 @@ pub mod tests {
             );
 
             match tasks.pop().unwrap().poll(|_| {}) {
-                Outcome::Complete(token) => tasks.retire(token),
-                Outcome::Idle => task.clear(),
+                AfterPoll::Retire(token) => tasks.retire(token),
+                AfterPoll::Done => task.clear(),
                 _ => panic!("the poll must complete or leave the task idle"),
             }
             assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -1465,8 +1472,8 @@ pub mod tests {
 
         // Leave one task idle, one queued with its token held outside the
         // worker, and one queued with its token still in the ready queue.
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), Outcome::Idle));
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), Outcome::Idle));
+        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
+        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
         handles[1].wake_by_ref();
         let mut tokens = scheduled(&mailbox);
         assert_eq!(tokens.len(), 1);
@@ -1485,12 +1492,14 @@ pub mod tests {
         }
         assert_eq!(drops.load(Ordering::Relaxed), 3);
 
-        // Wakes after clearing publish nothing, and a leftover token is stale.
+        // Wakes after clearing publish nothing, and polling a leftover token
+        // only releases it, leaving the handle's and the detached arena's.
         for task in &handles {
             task.wake_by_ref();
         }
         assert!(scheduled(&mailbox).is_empty());
-        assert!(matches!(tokens.pop().unwrap().poll(|_| {}), Outcome::Stale));
+        assert!(matches!(tokens.pop().unwrap().poll(|_| {}), AfterPoll::Done));
+        assert_eq!(refs(&handles[1]), 2);
 
         // A cleared arena has already released every slot.
         tasks.retire(handles[0].clone());
@@ -1533,7 +1542,7 @@ pub mod tests {
             // The poll returned pending, so the finalizer runs before the
             // poller sees the clear.
             let mut finalized = 0;
-            let Outcome::Complete(token) = tasks.pop().unwrap().poll(|_| finalized += 1) else {
+            let AfterPoll::Retire(token) = tasks.pop().unwrap().poll(|_| finalized += 1) else {
                 panic!("a task cleared during its poll must complete");
             };
             assert_eq!(finalized, 1);
@@ -1559,7 +1568,7 @@ pub mod tests {
             pending::<()>().await;
         });
         let waker = Waker::clone(&task.waker());
-        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), Outcome::Idle));
+        assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
 
         // Clear the future and retire the arena entry, leaving the caller's
         // reference and the cloned waker's.
@@ -1598,7 +1607,7 @@ pub mod tests {
         });
         let waker = Waker::clone(&task.waker());
 
-        let Outcome::Complete(token) = tasks.pop().unwrap().poll(|_| {}) else {
+        let AfterPoll::Retire(token) = tasks.pop().unwrap().poll(|_| {}) else {
             panic!("ready future must complete");
         };
         tasks.retire(token);
@@ -1634,12 +1643,12 @@ pub mod tests {
 
             // Two polls leave the task idle, and each wake queues it again.
             for _ in 0..2 {
-                assert!(matches!(tasks.pop().unwrap().poll(|_| {}), Outcome::Idle));
+                assert!(matches!(tasks.pop().unwrap().poll(|_| {}), AfterPoll::Done));
                 task.wake_by_ref();
                 tasks.push(scheduled(&mailbox).pop().unwrap());
             }
             if complete {
-                let Outcome::Complete(token) = tasks.pop().unwrap().poll(|_| {}) else {
+                let AfterPoll::Retire(token) = tasks.pop().unwrap().poll(|_| {}) else {
                     panic!("the third poll must complete");
                 };
                 tasks.retire(token);
@@ -1663,7 +1672,7 @@ pub mod tests {
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    use super::{Finish, Notify, REF_ONE, REFS, State};
+    use super::{AfterPending, AfterWake, REF_ONE, REFS, State};
     use loom::{
         cell::UnsafeCell,
         sync::{
@@ -1698,7 +1707,7 @@ mod loom_tests {
                 let state = Arc::clone(&state);
                 move || state.notify_by_ref()
             });
-            let poll_publishes = matches!(state.finish_pending(), Finish::Requeue);
+            let poll_publishes = matches!(state.finish_pending(), AfterPending::Requeue);
             let wake_publishes = wake.join().unwrap();
 
             assert_ne!(poll_publishes, wake_publishes);
@@ -1719,9 +1728,9 @@ mod loom_tests {
 
             let wake = thread::spawn({
                 let state = Arc::clone(&state);
-                move || matches!(state.notify_by_value(), Notify::Schedule)
+                move || matches!(state.notify_by_value(), AfterWake::Schedule)
             });
-            let requeued = matches!(state.finish_pending(), Finish::Requeue);
+            let requeued = matches!(state.finish_pending(), AfterPending::Requeue);
             let published = wake.join().unwrap();
 
             // One token remains, holding one reference beside the arena's.
@@ -1790,15 +1799,15 @@ mod loom_tests {
                     future.with_mut(|value| unsafe { *value += 1 });
 
                     match state.finish_pending() {
-                        Finish::Idle => {}
-                        Finish::Cancelled => {
+                        AfterPending::Done => {}
+                        AfterPending::Complete => {
                             state.complete();
                             // SAFETY: exclusive access continues past
                             // `complete`.
                             future.with_mut(|value| unsafe { *value = usize::MAX });
                             drops.fetch_add(1, Ordering::Relaxed);
                         }
-                        Finish::Requeue => unreachable!("no wake was issued"),
+                        AfterPending::Requeue => unreachable!("no wake was issued"),
                     }
                 }
             });
@@ -1818,7 +1827,7 @@ mod loom_tests {
         loom::model(|| {
             let state = Arc::new(registered());
             assert!(state.start_poll());
-            assert!(matches!(state.finish_pending(), Finish::Idle));
+            assert!(matches!(state.finish_pending(), AfterPending::Done));
 
             let wake = thread::spawn({
                 let state = Arc::clone(&state);
