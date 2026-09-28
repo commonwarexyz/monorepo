@@ -2182,28 +2182,7 @@ mod compact_variable_mmr {
             // Drop the unpersisted import. It must not replace the previous durable witness.
             drop(imported);
 
-            // Pruning requires a persisted import; rebuild the pending import to check rejection.
-            let response = fetch_compact_state(&source, target_b.clone())
-                .await
-                .unwrap();
-            let sync::Response::Boundary {
-                op, pinned_nodes, ..
-            } = response
-            else {
-                unreachable!("boundary fetch returns a boundary response");
-            };
-            let imported = ClientDb::init_from_sync(
-                client_cfg.strategy.clone(),
-                context.child("import").with_attribute("index", 2),
-                client_cfg.witness.clone(),
-                target_b.size - 1,
-                pinned_nodes,
-                op,
-            )
-            .unwrap();
-            assert!(imported.prune(target_b.size).await.is_err());
-
-            // The dropped imports never touched the journal: state A is still there.
+            // The dropped import never touched the journal: state A is still there.
             let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();

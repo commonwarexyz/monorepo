@@ -277,12 +277,12 @@ where
     /// config (otherwise [`Error::Journal`]).
     ///
     /// The imported witness lives only in memory, and the partition `cfg` names is not opened,
-    /// until the first [`Self::apply_batch`], [`Self::commit`], [`Self::sync`], or
-    /// [`Self::start_sync`] replaces the partition's contents with it. Until one of those
-    /// succeeds, prune is rejected. A crash after the replacement starts but before a complete
-    /// witness reaches storage leaves an interrupted import, which fails to reopen until a
-    /// re-sync replaces it. A witness that reached storage in full is recovered even if the
-    /// durability operation never completed.
+    /// until the first [`Self::apply_batch`], [`Self::commit`], [`Self::sync`],
+    /// [`Self::start_sync`], or [`Self::prune`] replaces the partition's contents with it. The
+    /// replacement stages a durable reset before removing anything, so a crash before that point
+    /// reopens the previous contents. After it, a reopen recovers any complete witness that
+    /// survived the crash, and otherwise fails with [`Error::DataCorrupted`] until a re-sync
+    /// replaces the partition.
     pub(crate) fn init_from_sync(
         strategy: S,
         context: E,
@@ -504,11 +504,8 @@ where
     /// below the boundary may survive.
     ///
     /// Pruning bounds how far back bounded initialization can reach; the current commit's witness
-    /// always survives. The prune is made durable before this method returns.
-    ///
-    /// # Errors
-    ///
-    /// Fails if a compact-sync import has not yet been applied to the witness journal.
+    /// always survives. A pending compact-sync import is journaled first. The prune is made
+    /// durable before this method returns.
     #[tracing::instrument(
         name = "qmdb.compact.db.prune",
         level = "info",
@@ -516,9 +513,7 @@ where
         fields(kind = O::NAME)
     )]
     pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
-        let Storage::Open(mut open) = self.storage else {
-            return Err(Error::DataCorrupted("compact-sync import not applied"));
-        };
+        let mut open = self.storage.open(&self.tip.witness).await?;
 
         let bounds = open.journal.bounds();
         if bounds.is_empty() {
@@ -2126,6 +2121,7 @@ pub(crate) mod tests {
         Sync,
         Commit,
         StartSync,
+        Prune,
     }
 
     /// Make `db` durable with `persist`, waiting for a pipelined sync to complete.
@@ -2138,13 +2134,22 @@ pub(crate) mod tests {
                 handle.await.unwrap();
                 db
             }
+            Persist::Prune => {
+                let size = db.size();
+                db.prune(size).await.unwrap()
+            }
         }
     }
 
     /// Each durability operation replaces the partition's previous contents with a pending
     /// import, and the import survives a crash once the operation completes.
     pub(crate) fn test_compact_import_persists<O: TestOperation>() {
-        for persist_with in [Persist::Sync, Persist::Commit, Persist::StartSync] {
+        for persist_with in [
+            Persist::Sync,
+            Persist::Commit,
+            Persist::StartSync,
+            Persist::Prune,
+        ] {
             let (import, checkpoint) =
                 deterministic::Runner::default().start_and_recover(|context| async move {
                     let import =
