@@ -12,7 +12,7 @@ use crate::{
         marshal::{
             protocol::{floor, order::HistoryState},
             storage::{
-                catalog_state::{Checkpoint, CheckpointParts, PendingFloors},
+                catalog_state::{Checkpoint, CheckpointParts, PendingFloors, frontier_index},
                 scratch::{BlockStack, HistoryStack},
             },
             types::{Floor, LqcVerifier},
@@ -76,10 +76,7 @@ where
                 "floor anchor is stale or has an epoch mismatch",
             ));
         }
-        self.verifier
-            .verify(&candidate.anchor)
-            .await
-            .map_err(|error| Error::Verify(Box::new(error)))?;
+        // Check the floor's shape before paying for its anchor's signature.
         let floor::Frontiers {
             history,
             ordered,
@@ -91,6 +88,10 @@ where
             &candidate.emitted,
             self.codec,
         )?;
+        self.verifier
+            .verify(&candidate.anchor)
+            .await
+            .map_err(|error| Error::Verify(Box::new(error)))?;
         let common = self.common_frontiers(&target, &candidate.emitted).await?;
         HistoryState::new(history, ordered.clone(), candidate.emitted.clone())?
             .validate_reconciliation(&target, &common)?;
@@ -107,8 +108,9 @@ where
             history,
             history_index,
             ordered,
+            floor_index: frontier_index(&candidate.emitted)
+                .ok_or(Error::Invalid("floor frontier overflows the output index"))?,
             emitted: candidate.emitted.clone(),
-            committed: self.committed,
         })
         .map_err(|_| Error::Invalid("floor checkpoint is not canonical"))?;
         let pending = View::new(candidate.anchor.view().get().saturating_add(1));
@@ -148,6 +150,7 @@ where
         self.floor_view = view;
         self.history_index = checkpoint.history_index();
         self.committed = checkpoint.committed();
+        self.floor_index = checkpoint.floor_index();
         self.state = HistoryState::new(
             checkpoint.history(),
             checkpoint.ordered().to_vec(),

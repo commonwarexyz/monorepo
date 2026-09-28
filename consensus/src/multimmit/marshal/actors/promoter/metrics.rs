@@ -1,6 +1,6 @@
 //! Promoter metrics.
 
-use crate::multimmit::marshal::{actors::metrics::saturating_u64, types::OutputIndex};
+use crate::multimmit::marshal::{OutputIndex, actors::metrics::saturating_u64};
 use commonware_runtime::{
     Metrics as RuntimeMetrics,
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
@@ -47,8 +47,8 @@ impl Metrics {
     }
 
     /// Publishes the durable promotion cursor.
-    pub(super) fn progress(&self, through: Option<OutputIndex>) {
-        let _ = self.promoted_count.try_set(OutputIndex::count(through));
+    pub(super) fn progress(&self, through: OutputIndex) {
+        let _ = self.promoted_count.try_set(through.get());
     }
 
     /// Counts one promoted batch of `outputs` outputs, `hot` of them from handed-off bodies.
