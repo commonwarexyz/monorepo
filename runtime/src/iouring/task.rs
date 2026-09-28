@@ -137,7 +137,8 @@ impl State {
     }
 
     /// Count one more reference. Like `Arc`, the process aborts before the
-    /// count can wrap, which takes a leak of `isize::MAX` references.
+    /// count can wrap, which takes a leak of about `isize::MAX / REF_ONE`
+    /// references.
     #[inline]
     fn retain(&self) {
         if self.0.fetch_add(REF_ONE, Ordering::Relaxed) > isize::MAX as usize {
@@ -1436,6 +1437,33 @@ mod tests {
         drop(task);
         releaser.join().unwrap();
 
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(Arc::weak_count(&mailbox), baseline);
+    }
+
+    /// A waker left as the only reference to a completed task frees the cell
+    /// when `wake` consumes it.
+    #[test]
+    fn test_wake_by_value_frees_a_completed_task() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mailbox = mailbox();
+        let baseline = Arc::weak_count(&mailbox);
+        let mut tasks = Tasks::default();
+        let guard = DropCount(drops.clone());
+        let task = insert(&mut tasks, &mailbox, async move {
+            let _guard = guard;
+        });
+        let waker = Waker::clone(&task.waker());
+
+        let Outcome::Complete(token) = tasks.pop().unwrap().poll(|_| {}) else {
+            panic!("ready future must complete");
+        };
+        tasks.retire(token);
+        drop(task);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+
+        // The waker holds the last reference, which its wake releases.
+        waker.wake();
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert_eq!(Arc::weak_count(&mailbox), baseline);
     }
