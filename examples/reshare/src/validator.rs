@@ -83,7 +83,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     // A player's genesis comes only from its own `dkg`, which hands the
     // epoch-0 share to `secrets` before writing genesis. Nothing in the
     // bootstrap store is needed after that, so erase it.
-    Secrets::init(context.child("bootstrap"), dkg::PARTITION)
+    Secrets::init(context.child("dkg"), dkg::PARTITION)
         .await
         .destroy()
         .await;

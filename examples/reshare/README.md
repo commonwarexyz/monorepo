@@ -54,10 +54,10 @@ used by that node.
 
 Private DKG material lives in two partitions of `runtime/`. `dkg` keeps the
 bootstrap ceremony's share, dealer seed, and received dealings in
-`bootstrap-secrets`. When the ceremony completes, `dkg` copies only the node's
+`dkg-secrets`. When the ceremony completes, `dkg` copies only the node's
 epoch-0 share, if it has one, into `secrets`. `validator` uses `secrets` for
 that share and for the shares, dealer seeds, and received dealings of every
-reshare, and erases `bootstrap-secrets` when it starts. The bootstrap ceremony
+reshare, and erases `dkg-secrets` when it starts. The bootstrap ceremony
 and the first reshare both store epoch-0 seeds and dealings, so they must not
 share a partition.
 

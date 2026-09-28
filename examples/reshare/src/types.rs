@@ -385,8 +385,8 @@ fn epoch(key: &Key) -> Epoch {
 /// seeds and received dealings for epoch 0, so each uses its own partition.
 #[derive(Clone, Copy)]
 pub enum Partition {
-    /// `bootstrap-secrets`, used by the `dkg` bootstrap ceremony.
-    Bootstrap,
+    /// `dkg-secrets`, used by the `dkg` ceremony.
+    Dkg,
 
     /// `secrets`, used by `validator` for the epoch-0 share that `dkg` hands
     /// over and for every reshare's material.
@@ -417,7 +417,7 @@ impl<E: StorageContext> Secrets<E> {
     /// Open the store in `partition`, starting empty if nothing was stored.
     pub async fn init(context: E, partition: Partition) -> Self {
         let partition = match partition {
-            Partition::Bootstrap => "bootstrap-secrets",
+            Partition::Dkg => "dkg-secrets",
             Partition::Validator => "secrets",
         };
         let metadata = Metadata::init(
@@ -883,7 +883,7 @@ mod tests {
                 drop(bootstrap);
 
                 // Reopen and erase the partition, as `validator` does.
-                Secrets::init(context.child("bootstrap"), crate::dkg::PARTITION)
+                Secrets::init(context.child("dkg"), crate::dkg::PARTITION)
                     .await
                     .destroy()
                     .await;

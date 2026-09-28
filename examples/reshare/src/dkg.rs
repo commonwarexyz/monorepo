@@ -29,7 +29,7 @@ use tracing::{error, info};
 type ReshareEpochInfo = EpochInfo<MinSig, PublicKey>;
 
 /// Partition of the bootstrap ceremony's [`Secrets`] store.
-pub const PARTITION: Partition = Partition::Bootstrap;
+pub const PARTITION: Partition = Partition::Dkg;
 
 /// Run the one-shot DKG bootstrap, write the resulting genesis, and keep
 /// serving until stopped.
