@@ -44,8 +44,14 @@ impl<
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg).await
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    pub async fn init(
+        context: E,
+        cfg: Config<T, S>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        crate::qmdb::any::init(context, cfg, max_size).await
     }
 }
 
@@ -105,11 +111,14 @@ pub mod partitioned {
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+        /// `None` selects the latest retained state.
         pub async fn init(
             context: E,
             cfg: Config<T, S, core::num::NonZeroUsize>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg).await
+            crate::qmdb::any::init(context, cfg, max_size).await
         }
     }
 
@@ -195,14 +204,14 @@ pub(crate) mod test {
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: Family>(context: deterministic::Context) -> AnyTestGeneric<F> {
         let cfg = fixed_db_config::<TwoCap>("partition", &context);
-        crate::qmdb::any::init(context, cfg).await.unwrap()
+        crate::qmdb::any::init(context, cfg, None).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
-        AnyTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context, cfg, None).await.unwrap()
     }
 
     /// A [Db] over a delayed-sync storage backend.
@@ -223,20 +232,20 @@ pub(crate) mod test {
     /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
     /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
     fn open_delayed_db(
-        context: &Context,
-        label: &'static str,
+        context: Context,
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedTest, crate::qmdb::Error<mmr::Family>>> {
-        let mut cfg = fixed_db_config::<TwoCap>(suffix, context);
+        let mut cfg = fixed_db_config::<TwoCap>(suffix, &context);
         cfg.journal_config.items_per_blob = NZU64!(1000);
-        cfg.journal_config.page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        cfg.journal_config.page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
         DelayedTest::init(
             DelayedSyncContext {
-                inner: context.child(label),
+                inner: context,
                 pending: pending.clone(),
             },
             cfg,
+            None,
         )
     }
 
@@ -258,7 +267,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&context, "delayed", "start_sync_overlap", &pending);
+            let open = open_delayed_db(context.child("delayed"), "start_sync_overlap", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
@@ -302,7 +311,7 @@ pub(crate) mod test {
             let size = db.bounds().end;
             drop(db);
 
-            let db = open_delayed_db(&context, "reopen", "start_sync_overlap", &pending)
+            let db = open_delayed_db(context.child("reopen"), "start_sync_overlap", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -321,7 +330,7 @@ pub(crate) mod test {
             // Pass syncs through so opening the database doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&context, "delayed", "start_sync_fail", &pending)
+            let mut db = open_delayed_db(context.child("delayed"), "start_sync_fail", &pending)
                 .await
                 .unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -362,7 +371,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&context, "delayed", "start_sync_prune", &pending);
+            let open = open_delayed_db(context.child("delayed"), "start_sync_prune", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
@@ -429,7 +438,7 @@ pub(crate) mod test {
             type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
             let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
-            let db = ParTest::init(context, cfg).await.unwrap();
+            let db = ParTest::init(context, cfg, None).await.unwrap();
 
             let mut rng = TestRng::new(7);
             let mut keys = Vec::with_capacity(4300);
@@ -486,7 +495,7 @@ pub(crate) mod test {
             >;
             let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("cancel", &context, strategy);
-            let db = ParTest::init(context.child("db"), cfg).await.unwrap();
+            let db = ParTest::init(context.child("db"), cfg, None).await.unwrap();
 
             // Populate and commit so later snapshots carry committed nodes.
             let mut rng = TestRng::new(11);
@@ -649,7 +658,9 @@ pub(crate) mod test {
             // Populate a database with enough keys to drive collision resolution in the compressed
             // index, then commit and drop it.
             let cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
-            let db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
+            let db = AnyTest::init(context.child("populate"), cfg, None)
+                .await
+                .unwrap();
 
             // Track the expected key-value state alongside the applied ops. The `any` root is a
             // pure function of the immutable log, so only a state check can catch a snapshot
@@ -682,7 +693,7 @@ pub(crate) mod test {
                 let ctx = context
                     .child("reopen")
                     .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));
-                let db = AnyTest::init(ctx, cfg).await.unwrap();
+                let db = AnyTest::init(ctx, cfg, None).await.unwrap();
                 assert_eq!(
                     db.root(),
                     root,
@@ -833,7 +844,7 @@ pub(crate) mod test {
         }
 
         let cfg = fixed_db_config_partitioned::<OneCap>(partition, &context);
-        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
 
@@ -889,7 +900,7 @@ pub(crate) mod test {
             let ctx = context
                 .child("reopen")
                 .with_attribute("concurrency", concurrency);
-            let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
+            let db = PartDb::<P, Sequential>::init(ctx, cfg, None).await.unwrap();
             assert_eq!(
                 db.root(),
                 root,
@@ -929,7 +940,7 @@ pub(crate) mod test {
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
             let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_fresh", &context);
-            let db = FreshDb::<Sequential>::init(context.child("create"), cfg)
+            let db = FreshDb::<Sequential>::init(context.child("create"), cfg, None)
                 .await
                 .unwrap();
             let root = db.root();
@@ -938,7 +949,7 @@ pub(crate) mod test {
             let mut cfg =
                 fixed_db_config_partitioned::<OneCap>("unordered_parallel_fresh", &context);
             cfg.init_concurrency = NZUsize!(4);
-            let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg)
+            let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg, None)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -957,7 +968,7 @@ pub(crate) mod test {
             // Populate a db so the log has committed operations to replay.
             let cfg =
                 fixed_db_config_partitioned::<OneCap>("unordered_parallel_replay_fail", &context);
-            let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = FailDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -1077,7 +1088,7 @@ pub(crate) mod test {
             // from the log.
             let cfg =
                 fixed_db_config_partitioned::<OneCap>("unordered_parallel_worker_fail", &context);
-            let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = FailDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let merkleized = db
