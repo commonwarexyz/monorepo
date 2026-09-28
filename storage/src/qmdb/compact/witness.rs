@@ -7,7 +7,11 @@
 
 use super::operation::Operation;
 use crate::{
-    journal::contiguous::variable,
+    Context,
+    journal::{
+        authenticated::{Backing as _, BackingRecovery as _},
+        contiguous::variable,
+    },
     merkle::{Family, Location, MAX_PINNED_NODES, Proof, compact},
     qmdb::{self, Error, sync::CompactTarget},
 };
@@ -106,6 +110,46 @@ impl<F: Family, D: Digest, O: Operation<F>> VerifiedWitness<F, D, O> {
 
 /// The contiguous variable journal of a compact db's witnesses.
 pub(crate) type Journal<E, F, D, O> = variable::Journal<E, Witness<F, D, O>>;
+
+/// Recover the witness journal bounded at `max_size` when that view can settle selection, and
+/// unbounded otherwise.
+///
+/// Witness position `p` has size at least `p + 1` in an append-only journal, so positions below
+/// the cap hold every witness no larger than the cap. A compact-sync import resets the journal to
+/// position 1, so an imported state of size 1 leaves position `p` with size `p`. A retained start
+/// at or above the cap therefore opens unbounded, and a bounded view that ends at the cap with a
+/// tip size below the cap widens.
+pub(super) async fn recover<E, F, D, O>(
+    context: E,
+    config: variable::Config<O::Cfg>,
+    max_size: Option<Location<F>>,
+) -> Result<variable::Recovery<E, Witness<F, D, O>>, Error<F>>
+where
+    E: Context,
+    F: Family,
+    D: Digest,
+    O: Operation<F>,
+{
+    let Some(cap) = max_size else {
+        return Ok(Journal::<E, F, D, O>::recover(context, config, None).await?);
+    };
+    if variable::Recovery::<E, Witness<F, D, O>>::span(context.child("span"), &config)
+        .await?
+        .start
+        >= *cap
+    {
+        return Ok(Journal::<E, F, D, O>::recover(context, config, None).await?);
+    }
+    let bounded = Journal::<E, F, D, O>::recover(context, config, Some(*cap)).await?;
+    let bounds = bounded.bounds();
+
+    // The bounded view starts at the span start, below the cap, so a view that ends at the cap
+    // is non-empty.
+    if bounds.end < *cap || bounded.read(bounds.end - 1).await?.size >= cap {
+        return Ok(bounded);
+    }
+    Ok(bounded.unbounded().await?)
+}
 
 /// A Merkle materialized from a witness, with the witness verified against it.
 pub(super) struct Rebuilt<F: Family, D: Digest, O: Operation<F>, S: Strategy> {

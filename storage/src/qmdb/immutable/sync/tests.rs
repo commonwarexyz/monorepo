@@ -942,7 +942,7 @@ pub(crate) mod harnesses {
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, metadata, floor).await;
+        let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db
     }
@@ -1022,7 +1022,7 @@ pub(crate) mod harnesses {
         async fn prune(db: Self::Db, loc: Location<Self::Family>) -> Self::Db {
             // Advance the inactivity floor to `loc` via a commit before pruning,
             // since prune requires the floor to be at or beyond the prune target.
-            let merkleized = db.new_batch().merkleize(&db, None, loc).await;
+            let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             db.prune(loc).await.unwrap()
@@ -1352,7 +1352,8 @@ mod compact_variable_mmr {
                 .set(key_a, vec![1, 2, 3])
                 .set(key_b, vec![4, 5, 6])
                 .merkleize(&source, Some(metadata.clone()), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
 
@@ -1405,7 +1406,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
 
@@ -1455,7 +1457,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
 
@@ -1512,7 +1515,8 @@ mod compact_variable_mmr {
                 .set(key_a, vec![1, 2, 3])
                 .set(key_b, vec![4, 5, 6])
                 .merkleize(&source, Some(vec![7]), Location::new(2))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
 
@@ -1569,7 +1573,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
 
@@ -1617,7 +1622,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .set(sha256::Digest::from([1; 32]), vec![1, 2, 3])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
             let stale_target = sync::CompactTarget {
@@ -1629,7 +1635,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .set(sha256::Digest::from([2; 32]), vec![4, 5, 6])
                 .merkleize(&source, Some(vec![2]), Location::new(2))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.commit().await.unwrap();
             let current_target = sync::CompactTarget {
@@ -1671,7 +1678,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .set(sha256::Digest::from([10; 32]), vec![10, 11])
                 .merkleize(&source, Some(metadata1.clone()), floor1)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.sync().await.unwrap();
             let target1 = source.target();
@@ -1704,7 +1712,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .set(sha256::Digest::from([20; 32]), vec![20, 21])
                 .merkleize(&source, Some(metadata2.clone()), floor2)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.sync().await.unwrap();
             let target2 = source.target();
@@ -1744,7 +1753,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .set(sha256::Digest::from([30; 32]), vec![30, 31, 32])
                 .merkleize(&source, Some(metadata3.clone()), floor3)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch3).await.unwrap();
             let source = source.sync().await.unwrap();
             let target3 = source.target();
@@ -1824,7 +1834,8 @@ mod compact_variable_mmr {
                     .new_batch()
                     .set(sha256::Digest::from([i; 32]), vec![i])
                     .merkleize(&seeded, Some(vec![i]), floor)
-                    .await;
+                    .await
+                    .unwrap();
                 (seeded, _) = seeded.apply_batch(batch).await.unwrap();
                 seeded = seeded.sync().await.unwrap();
             }
@@ -1847,7 +1858,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .set(sha256::Digest::from([9; 32]), vec![9])
                 .merkleize(&source, Some(metadata.clone()), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
             let bounds = source.bounds();
@@ -1891,7 +1903,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .set(sha256::Digest::from([1; 32]), vec![1])
                 .merkleize(&seeded, Some(vec![1]), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
             let seeded = seeded.sync().await.unwrap();
             let target_a = seeded.target();
@@ -1910,7 +1923,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .set(sha256::Digest::from([9; 32]), vec![9])
                 .merkleize(&source, Some(vec![9]), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
             let bounds = source.bounds();
@@ -2086,7 +2100,8 @@ mod compact_variable_mmb {
                 .set(key_a, vec![1, 2, 3])
                 .set(key_b, vec![4, 5, 6])
                 .merkleize(&source, Some(metadata.clone()), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
 
@@ -2139,7 +2154,8 @@ mod compact_variable_mmb {
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
 
@@ -2189,7 +2205,8 @@ mod compact_variable_mmb {
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
 
@@ -2249,7 +2266,8 @@ mod compact_variable_mmb {
                 .set(key_a, vec![1, 2, 3])
                 .set(key_b, vec![4, 5, 6])
                 .merkleize(&source, Some(vec![7]), Location::new(2))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
 
@@ -2309,7 +2327,8 @@ mod compact_variable_mmb {
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
 
@@ -2357,7 +2376,8 @@ mod compact_variable_mmb {
                 .new_batch()
                 .set(sha256::Digest::from([1; 32]), vec![1, 2, 3])
                 .merkleize(&source, Some(vec![1]), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
             let stale_target = sync::CompactTarget {
@@ -2369,7 +2389,8 @@ mod compact_variable_mmb {
                 .new_batch()
                 .set(sha256::Digest::from([2; 32]), vec![4, 5, 6])
                 .merkleize(&source, Some(vec![2]), Location::new(2))
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.commit().await.unwrap();
             let current_target = sync::CompactTarget {
@@ -2411,7 +2432,8 @@ mod compact_variable_mmb {
                 .new_batch()
                 .set(sha256::Digest::from([10; 32]), vec![10, 11])
                 .merkleize(&source, Some(metadata1.clone()), floor1)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.sync().await.unwrap();
             let target1 = source.target();
@@ -2444,7 +2466,8 @@ mod compact_variable_mmb {
                 .new_batch()
                 .set(sha256::Digest::from([20; 32]), vec![20, 21])
                 .merkleize(&source, Some(metadata2.clone()), floor2)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.sync().await.unwrap();
             let target2 = source.target();
@@ -2484,7 +2507,8 @@ mod compact_variable_mmb {
                 .new_batch()
                 .set(sha256::Digest::from([30; 32]), vec![30, 31, 32])
                 .merkleize(&source, Some(metadata3.clone()), floor3)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch3).await.unwrap();
             let source = source.sync().await.unwrap();
             let target3 = source.target();

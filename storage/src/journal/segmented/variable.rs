@@ -46,10 +46,9 @@
 //!
 //! # Compression
 //!
-//! `Journal` supports optional compression using `zstd`. This can be enabled by setting the
-//! `compression` field in the `Config` struct to a valid `zstd` compression level. This setting can
-//! be changed between initializations of `Journal`, however, it must remain populated if any data
-//! was written with compression enabled.
+//! [Journal] supports optional zstd compression through [Config::compression]. Keep the choice
+//! between `None` and `Some(_)` fixed while stored items are retained. Only the compression level
+//! may change between initializations when compression is enabled.
 //!
 //! # Example
 //!
@@ -84,11 +83,12 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::{
     Error,
     frame::{
-        FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
+        FrameInfo, Limited, UncompressedFrame, decode_item, decode_length_prefix,
+        encode_compressed_frame_into, find_frame, read_frame_at,
     },
 };
 use bytes::Bytes;
-use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
+use commonware_codec::{Codec, CodecShared, Copying, Encode as _, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
     Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay},
@@ -190,37 +190,33 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         read_frame_at(blob, offset, cfg, compressed).await
     }
 
-    /// Encode an item.
-    ///
-    /// Returns `(buf, item_len)` where `item_len` is the length of the encoded (and
-    /// possibly compressed) payload, excluding the size prefix.
-    fn encode_item(compression: Option<u8>, item: &V) -> Result<(Vec<u8>, u32), Error> {
-        let mut buf = Vec::new();
-        let item_len = encode_frame_into(compression, item, &mut buf)?;
-        Ok((buf, item_len))
-    }
-
     /// See [Journal::append].
     async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
-        let (buf, item_len) = Self::encode_item(self.compression, item)?;
-        self.append_raw(section, IoBuf::from(buf))
-            .await
-            .map(|offset| (offset, item_len))
-    }
-
-    /// Append pre-encoded bytes to the given section, returning the byte offset
-    /// where the data was written.
-    ///
-    /// The buffer must be in the on-disk format produced by [Self::encode_item].
-    async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error> {
         assert!(
             !self.unrecovered.contains(&section),
             "section {section} must be replayed before append"
         );
-        let blob = self.manager.get_or_create(section).await?;
-        let offset = blob.append_owned(buf).await?;
+
+        // Size and validate the frame before creating the section so a rejected item leaves no
+        // empty section.
+        let (offset, item_len) = if let Some(level) = self.compression {
+            // Buffer compressed output to determine its length before appending the frame.
+            let mut buf = Vec::new();
+            let item_len = encode_compressed_frame_into(level, item, &mut buf)?;
+            let blob = self.manager.get_or_create(section).await?;
+            (blob.append_owned(IoBuf::from(buf)).await?, item_len)
+        } else {
+            // Encode directly into the write buffer when the frame fits.
+            let frame = UncompressedFrame::new(item)?;
+            let blob = self.manager.get_or_create(section).await?;
+            let offset = match blob.try_append_value(&frame) {
+                Some(offset) => offset,
+                None => blob.append_owned(frame.encode_mut().into()).await?,
+            };
+            (offset, frame.item_len)
+        };
         trace!(blob = section, offset, "appended item");
-        Ok(offset)
+        Ok((offset, item_len))
     }
 
     /// See [Journal::get].
@@ -465,10 +461,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// with the item at the given `start_section` and `start_offset` into that section.
     ///
     /// Setup flushes buffered pages so the reader observes every accepted write. It
-    /// validates the requested start bound but does not allocate `buffer` bytes per blob. Page buffers
-    /// are allocated lazily as the reader advances. Every backing blob read performed by
-    /// the returned replay uses `read_options`, including reads after advancing to
-    /// another section.
+    /// validates the requested start bound and copies each replayed section's partial tail
+    /// page, but does not allocate `buffer` bytes per blob. Read buffers are allocated
+    /// lazily as the reader advances. Every backing blob read performed by the returned
+    /// replay uses `read_options`, including reads after advancing to another section.
     ///
     /// A nonzero start must be a boundary already validated by a prior replay or a durable
     /// marker: torn-page repair treats everything below it as proven.
@@ -890,7 +886,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                 }
             }
 
-            // Decode item - use take() to limit bytes read
+            // Decode the item without reading past its frame
             let item_offset = current.offset;
             let next_offset = match current
                 .offset
@@ -904,7 +900,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                 }
             };
             match decode_item::<V>(
-                (&mut current.reader).take(item_size),
+                Limited::new(&mut current.reader, item_size),
                 &self.journal.0.codec_config,
                 self.journal.0.compression.is_some(),
             ) {
@@ -956,6 +952,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::frame::encode_frame_into;
     use commonware_codec::{EncodeSize, Write as _, varint::UInt};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -966,6 +963,14 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZUsize, probability};
     use std::num::NonZeroU16;
+
+    impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
+        /// Append raw bytes, which need not form a valid frame, to `section`.
+        async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error> {
+            let blob = self.manager.get_or_create(section).await?;
+            Ok(blob.append_owned(buf).await?)
+        }
+    }
 
     impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         async fn test_reopen_at_most(self, section: u64, end: u64) -> Result<Self, Error> {
@@ -1071,11 +1076,7 @@ mod tests {
                         let partition = format!("torn-cap-{source_section}-{cap}-{pages}");
                         let mut page = Vec::new();
                         for value in 0..8u64 {
-                            page.extend_from_slice(
-                                &Inner::<deterministic::Context, u64>::encode_item(None, &value)
-                                    .unwrap()
-                                    .0,
-                            );
+                            encode_frame_into(None, &value, &mut page).unwrap();
                         }
                         assert_eq!(page.len(), 72);
                         super::super::manager::tests::seed_torn_suffix(
@@ -1306,7 +1307,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(8), PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("storage"), cfg)
@@ -1790,6 +1791,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Attempt to initialize the journal
+            drop(blob);
             let result = Journal::<_, u64>::init(context, cfg).await;
 
             // Expect an error
@@ -1830,6 +1832,7 @@ mod tests {
                 .expect("Failed to write incomplete data");
 
             // Initialize the journal
+            drop(blob);
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
@@ -2151,6 +2154,7 @@ mod tests {
                 .expect("Failed to write incomplete item");
 
             // Initialize the journal
+            drop(blob);
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
@@ -2208,6 +2212,7 @@ mod tests {
                 .expect("Failed to write item without checksum");
 
             // Initialize the journal
+            drop(blob);
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
@@ -2269,6 +2274,7 @@ mod tests {
                 .expect("Failed to write item with bad checksum");
 
             // Initialize the journal
+            drop(blob);
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
@@ -2317,19 +2323,19 @@ mod tests {
             // lifecycle boundary: replay setup and consumption of an earlier section must not
             // read or repair this later section.
             let journal = journal_with_torn_interior_page(&context, PARTITION, false).await;
-            let (_, original_size) = context
-                .open(PARTITION, &TORN_SECTION.to_be_bytes())
-                .await
-                .unwrap();
+            let original_size = context
+                .logical_blob(PARTITION, &TORN_SECTION.to_be_bytes())
+                .unwrap()
+                .len();
             let mut replay = journal
                 .replay(FIRST_SECTION, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .unwrap();
 
-            let (_, size) = context
-                .open(PARTITION, &TORN_SECTION.to_be_bytes())
-                .await
-                .unwrap();
+            let size = context
+                .logical_blob(PARTITION, &TORN_SECTION.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(
                 size, original_size,
                 "replay setup must not repair a later section"
@@ -2337,10 +2343,10 @@ mod tests {
 
             let (section, offset, _, value) = replay.next().await.unwrap().unwrap();
             assert_eq!((section, offset, value), (FIRST_SECTION, 0, u64::MAX));
-            let (_, size) = context
-                .open(PARTITION, &TORN_SECTION.to_be_bytes())
-                .await
-                .unwrap();
+            let size = context
+                .logical_blob(PARTITION, &TORN_SECTION.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(
                 size, original_size,
                 "consuming an earlier section must not repair a later section"
@@ -2372,10 +2378,10 @@ mod tests {
             const START_OFFSET: u64 = 72;
 
             let journal = journal_with_torn_interior_page(&context, PARTITION, false).await;
-            let (_, original_size) = context
-                .open(PARTITION, &SECTION.to_be_bytes())
-                .await
-                .unwrap();
+            let original_size = context
+                .logical_blob(PARTITION, &SECTION.to_be_bytes())
+                .unwrap()
+                .len();
             let mut replay = journal
                 .replay(
                     SECTION,
@@ -2390,10 +2396,10 @@ mod tests {
                 replay.next().await,
                 Some(Err(Error::ItemOutOfRange(START_OFFSET)))
             ));
-            let (_, size) = context
-                .open(PARTITION, &SECTION.to_be_bytes())
-                .await
-                .unwrap();
+            let size = context
+                .logical_blob(PARTITION, &SECTION.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(
                 size, original_size,
                 "an unvalidated start offset must not become a repair boundary"
@@ -2519,6 +2525,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
+            drop(blob);
             let mut journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
@@ -2666,6 +2673,7 @@ mod tests {
                 .expect("Failed to add extra data");
 
             // Re-initialize the journal to simulate a restart
+            drop(blob);
             let journal = Journal::init(context.child("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
@@ -3202,6 +3210,7 @@ mod tests {
             // The first thing encountered will be the trailing corrupt bytes
             let start_offset = valid_logical_size;
             {
+                drop(blob);
                 let journal = Journal::<_, i32>::init(context.child("second"), cfg.clone())
                     .await
                     .unwrap();
@@ -3216,10 +3225,10 @@ mod tests {
             }
 
             // Verify that valid data before start_offset was NOT lost
-            let (_, physical_size_after) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
-                .await
-                .unwrap();
+            let physical_size_after = context
+                .logical_blob(&cfg.partition, &1u64.to_be_bytes())
+                .unwrap()
+                .len() as u64;
 
             // The blob should have been truncated back to the valid physical size
             // (removing the trailing corrupt bytes) but NOT to 0
@@ -3733,6 +3742,67 @@ mod tests {
                 assert_eq!(*item, exact_data, "Replay read mismatch");
             }
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_uncompressed_frames_fill_write_buffer() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: ((..).into(), ()),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(2048),
+            };
+            let direct = vec![7u8; 126];
+            let fallback = vec![9u8; 127];
+            assert_eq!(direct.encode_size(), 127);
+            assert_eq!(fallback.encode_size(), 128);
+
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Sixteen 128-byte frames exactly fill the write buffer, so the next 130-byte frame
+            // must take the owned fallback.
+            for i in 0..16 {
+                let offset;
+                let item_len;
+                (journal, offset, item_len) = journal.append(1, &direct).await.unwrap();
+                assert_eq!(offset, i * 128);
+                assert_eq!(item_len, 127);
+            }
+            let fallback_offset;
+            let fallback_len;
+            (journal, fallback_offset, fallback_len) = journal.append(1, &fallback).await.unwrap();
+            assert_eq!(fallback_offset, 2048);
+            assert_eq!(fallback_len, 128);
+
+            // Reopen the section to verify both append paths on disk.
+            journal = journal.sync(1).await.unwrap();
+            drop(journal);
+            let mut journal = Journal::<_, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.get(1, fallback_offset).await.unwrap(), fallback);
+
+            // Replay returns the direct frames followed by the fallback frame.
+            let mut replay = journal
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+            for i in 0..16 {
+                let (section, offset, item_len, item) = replay.next().await.unwrap().unwrap();
+                assert_eq!((section, offset, item_len), (1, i * 128, 127));
+                assert_eq!(item, direct);
+            }
+            let (section, offset, item_len, item) = replay.next().await.unwrap().unwrap();
+            assert_eq!((section, offset, item_len), (1, 2048, 128));
+            assert_eq!(item, fallback);
+            assert!(replay.next().await.is_none());
+            journal = replay.finish().unwrap();
             journal.destroy().await.unwrap();
         });
     }

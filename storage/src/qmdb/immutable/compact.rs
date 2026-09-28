@@ -120,7 +120,8 @@ mod tests {
                 .set(key, first)
                 .set(key, last)
                 .merkleize(&twice, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (twice, range) = twice.apply_batch(batch).await.unwrap();
             assert_eq!(range, Location::new(1)..Location::new(3));
 
@@ -129,7 +130,8 @@ mod tests {
                 .new_batch()
                 .set(key, last)
                 .merkleize(&once, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (once, _) = once.apply_batch(batch).await.unwrap();
             assert_eq!(twice.root(), once.root());
         });
@@ -149,7 +151,8 @@ mod tests {
                 .set(k1, v1)
                 .set(k2, v2)
                 .merkleize(&forward, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (forward, _) = forward.apply_batch(batch).await.unwrap();
 
             let reverse = open_db::<TestOp>(context.child("reverse"), "compact-set-reverse").await;
@@ -158,7 +161,8 @@ mod tests {
                 .set(k2, v2)
                 .set(k1, v1)
                 .merkleize(&reverse, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (reverse, _) = reverse.apply_batch(batch).await.unwrap();
             assert_eq!(forward.size(), reverse.size());
             assert_eq!(forward.root(), reverse.root());

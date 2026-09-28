@@ -388,7 +388,7 @@ mod tests {
             for (k, v) in $ops {
                 batch = batch.set(k, v);
             }
-            let merkleized = batch.merkleize(&$db, None, floor).await;
+            let merkleized = batch.merkleize(&$db, None, floor).await.unwrap();
             ($db, _) = $db.apply_batch(merkleized).await.unwrap();
         }};
     }
@@ -401,7 +401,7 @@ mod tests {
             for v in $vals {
                 batch = batch.append(v);
             }
-            let merkleized = batch.merkleize(&$db, None, floor).await;
+            let merkleized = batch.merkleize(&$db, None, floor).await.unwrap();
             ($db, _) = $db.apply_batch(merkleized).await.unwrap();
         }};
     }
@@ -1131,7 +1131,7 @@ macro_rules! assert_immutable_order_independent {
         for &(k, v) in &ops {
             batch = batch.set(k, v);
         }
-        let merkleized = batch.merkleize(&$fwd, None, fwd_floor).await;
+        let merkleized = batch.merkleize(&$fwd, None, fwd_floor).await.unwrap();
         ($fwd, _) = $fwd.apply_batch(merkleized).await.unwrap();
 
         let rev_floor = $rev.inactivity_floor_loc();
@@ -1139,7 +1139,7 @@ macro_rules! assert_immutable_order_independent {
         for &(k, v) in ops.iter().rev() {
             batch = batch.set(k, v);
         }
-        let merkleized = batch.merkleize(&$rev, None, rev_floor).await;
+        let merkleized = batch.merkleize(&$rev, None, rev_floor).await.unwrap();
         ($rev, _) = $rev.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(

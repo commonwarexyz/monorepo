@@ -145,7 +145,8 @@ mod tests {
                 .append(U64::new(1))
                 .append(U64::new(2))
                 .merkleize(&forward, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (forward, range) = forward.apply_batch(batch).await.unwrap();
             assert_eq!(range, Location::new(1)..Location::new(4));
 
@@ -156,7 +157,8 @@ mod tests {
                 .append(U64::new(2))
                 .append(U64::new(1))
                 .merkleize(&reverse, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (reverse, _) = reverse.apply_batch(batch).await.unwrap();
             assert_eq!(forward.size(), reverse.size());
             assert_ne!(forward.root(), reverse.root());

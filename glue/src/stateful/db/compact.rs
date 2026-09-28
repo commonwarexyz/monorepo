@@ -1,4 +1,8 @@
-//! [`ManagedDb`] implementations for compact QMDBs.
+//! Compact [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
+//! [`compact`](commonware_storage::qmdb::compact) databases.
+//!
+//! Compact databases retain only the current Merkle peaks. Batches support merkleization but no
+//! historical reads.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -20,7 +24,7 @@ use commonware_storage::{
 use commonware_utils::channel::mpsc;
 use std::{ops::Deref, sync::Arc};
 
-/// Wraps a compact batch before merkleization.
+/// A speculative batch over a shared compact database.
 pub struct CompactUnmerkleized<F, E, O, H, S>
 where
     F: Family,
@@ -58,13 +62,14 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Set commit metadata included in the next merkleization.
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
     pub fn with_metadata(mut self, metadata: O::Metadata) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Set the inactivity floor included in the next merkleization.
+    /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
+    /// (location 0 when unset).
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = Some(floor);
         self
@@ -91,7 +96,7 @@ where
                 self.metadata,
                 self.inactivity_floor.unwrap_or_default(),
             )
-            .await;
+            .await?;
         Ok(CompactMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -99,7 +104,7 @@ where
     }
 }
 
-/// Wraps a compact batch after merkleization.
+/// A sealed compact batch with a computed root.
 pub struct CompactMerkleized<F, E, O, H, S>
 where
     F: Family,
@@ -308,12 +313,12 @@ mod tests {
             };
             let db = <TestDb<F, O> as ManagedDb<_>>::init(context.child("seed"), cfg.clone(), None).await.unwrap();
             let batch = mutate(mutate(mutate(db.new_batch(), 1), 2), 3)
-                .merkleize(&db, Some(metadata(11)), Location::new(0)).await;
+                .merkleize(&db, Some(metadata(11)), Location::new(0)).await.unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let first = db.target();
             assert_eq!(first.size, Location::new(5));
-            let batch = mutate(db.new_batch(), 4).merkleize(&db, Some(metadata(22)), Location::new(1)).await;
+            let batch = mutate(db.new_batch(), 4).merkleize(&db, Some(metadata(22)), Location::new(1)).await.unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let latest = db.target();
@@ -342,7 +347,7 @@ mod tests {
             let db = TestDb::<F, O>::init(context.child("reopen"), cfg.clone(), None).await.unwrap();
             assert_eq!(db.target(), first);
 
-            let batch = mutate(db.new_batch(), 5).merkleize(&db, Some(metadata(33)), first.size - 1).await;
+            let batch = mutate(db.new_batch(), 5).merkleize(&db, Some(metadata(33)), first.size - 1).await.unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let latest = db.target();

@@ -7,7 +7,7 @@ use super::{
 use crate::{
     Context, SyncCompletion,
     journal::{
-        authenticated::{Backing as _, BackingRecovery as _},
+        authenticated::BackingRecovery as _,
         contiguous::{Contiguous, variable},
     },
     merkle::{self, Family, Location, Proof, batch, compact as compact_merkle},
@@ -25,6 +25,9 @@ use futures::FutureExt as _;
 use std::sync::{Arc, Weak};
 
 type MerkleizedParent<F, H, O, S> = Arc<MerkleizedBatch<F, DigestOf<H>, O, S>>;
+
+/// Result of merkleizing a batch.
+type MerkleizeResult<F, D, O, S> = Result<Arc<MerkleizedBatch<F, D, O, S>>, Error<F>>;
 
 /// The journaled tip's durability.
 #[derive(PartialEq, Eq)]
@@ -204,12 +207,10 @@ where
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
         qmdb::validate_initialization_bound(max_size)?;
-        let pending = witness::Journal::<E, F, H::Digest, O>::recover(
-            context.child("witness"),
-            cfg.witness,
-            None,
-        )
-        .await?;
+        // Keep recovery unpublished until the target witness has been selected and verified.
+        let pending =
+            witness::recover::<E, F, H::Digest, O>(context.child("witness"), cfg.witness, max_size)
+                .await?;
         let bounds = pending.bounds();
         let fresh = bounds.is_empty();
         let (entry, end) = if fresh {
@@ -617,11 +618,16 @@ where
             .map_or(self.base, |parent| parent.bounds.db)
     }
 
-    /// Resolve pending mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve pending mutations into operations, merkleize, and return the batch.
     ///
     /// `inactivity_floor` goes into the commit operation so the root matches the full db's. It
     /// must be at least the db's current floor and at most the batch's commit location
     /// (`total_size - 1`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or a
+    /// live ancestor commitment (both size and root).
     #[tracing::instrument(
         name = "qmdb.compact.batch.merkleize",
         level = "info",
@@ -633,7 +639,7 @@ where
         db: &Db<F, E, O, H, S>,
         metadata: Option<O::Metadata>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, O, S>>
+    ) -> MerkleizeResult<F, H::Digest, O, S>
     where
         E: Context,
     {
@@ -644,6 +650,17 @@ where
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
+
+        let ancestors = chain::collect_ancestor_bounds(
+            live_ancestors.iter().cloned(),
+            |batch| batch.bounds.inactivity_floor,
+            |batch| batch.commitment(),
+        );
+        chain::validate_batch_applicable(
+            db.commitment(),
+            boundary,
+            ancestors.iter().map(|ancestor| ancestor.state),
+        )?;
 
         let mutations = self.mutations.into_iter().map(O::mutation);
         let mut ops = Vec::with_capacity(mutations.len() + 1);
@@ -662,13 +679,10 @@ where
         .await
         .expect("inactive_peaks computed from batch size");
 
-        let ancestors = chain::collect_ancestor_bounds(
-            live_ancestors,
-            |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commitment(),
-        );
+        // Keep ancestor batches alive until their operations and nodes have been captured.
+        drop(live_ancestors);
 
-        Arc::new(MerkleizedBatch {
+        Ok(Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
             operations,
             parent: self.parent.as_ref().map(Arc::downgrade),
@@ -679,7 +693,7 @@ where
                 ancestors,
                 inactivity_floor,
             },
-        })
+        }))
     }
 }
 
@@ -781,6 +795,9 @@ impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> MerkleizedBatch<F, D, O
     }
 
     /// Create a new speculative batch with this one as its parent.
+    ///
+    /// All unapplied ancestors in the chain must be kept alive until the child (or any
+    /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, O, S>
     where
         H: Hasher<Digest = D>,
@@ -828,14 +845,14 @@ where
 pub(crate) mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::variable::Config as JournalConfig,
+        journal::contiguous::{fixed, variable::Config as JournalConfig},
         metadata::{Config as MetadataConfig, Metadata},
         qmdb::{compact::witness, verify_proof, verify_proof_and_pinned_nodes},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Spawner as _, Supervisor as _,
+        Blob as _, BufferPooler, Runner as _, Spawner as _, Storage as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
@@ -954,7 +971,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, Some(O::value(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let n = db.target().size;
@@ -1051,7 +1069,8 @@ pub(crate) mod tests {
             .new_batch()
             .mutate(seed)
             .merkleize(&db, Some(O::value(seed)), floor)
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(batch).await.unwrap();
         db
     }
@@ -1446,12 +1465,14 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, Some(O::value(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let batch_b = db
                 .new_batch()
                 .mutate(2)
                 .merkleize(&db, Some(O::value(22)), floor)
-                .await;
+                .await
+                .unwrap();
 
             let expected_root = batch_a.root();
             let (db, _) = db.apply_batch(batch_a).await.unwrap();
@@ -1468,16 +1489,22 @@ pub(crate) mod tests {
             let db = open_db::<O>(context.child("db"), "compact-delayed-child").await;
             let floor = db.inactivity_floor_loc();
 
-            let a = db.new_batch().mutate(1).merkleize(&db, None, floor).await;
+            let a = db
+                .new_batch()
+                .mutate(1)
+                .merkleize(&db, None, floor)
+                .await
+                .unwrap();
             let b = a
                 .new_batch::<Sha256>()
                 .mutate(2)
                 .merkleize(&db, None, floor)
-                .await;
+                .await
+                .unwrap();
             let c = b.new_batch::<Sha256>().mutate(3);
 
             let (db, _) = db.apply_batch(a).await.unwrap();
-            let c = c.merkleize(&db, None, floor).await;
+            let c = c.merkleize(&db, None, floor).await.unwrap();
             let expected_root = c.root();
             let (db, _) = db.apply_batch(c).await.unwrap();
 
@@ -1503,7 +1530,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, Some(O::value(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
 
             // Observe the applied state before making it durable.
@@ -1544,7 +1572,7 @@ pub(crate) mod tests {
             }
 
             let floor = db.inactivity_floor_loc();
-            let batch = db.new_batch().merkleize(&db, None, floor).await;
+            let batch = db.new_batch().merkleize(&db, None, floor).await.unwrap();
             let (db, range) = db.apply_batch(batch).await.unwrap();
             assert_eq!(range, target.size..target.size + 1);
             assert_eq!(db.size(), target.size + 1);
@@ -1584,17 +1612,20 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(10)
                 .merkleize(&db, Some(O::value(110)), floor)
-                .await;
+                .await
+                .unwrap();
             let sibling_a = common_parent
                 .new_batch::<Sha256>()
                 .mutate(11)
                 .merkleize(&db, Some(O::value(111)), floor)
-                .await;
+                .await
+                .unwrap();
             let sibling_b = common_parent
                 .new_batch::<Sha256>()
                 .mutate(12)
                 .merkleize(&db, Some(O::value(112)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(sibling_a).await.unwrap();
             assert!(matches!(
                 db.validate_batch(&sibling_b),
@@ -1605,17 +1636,20 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, Some(O::value(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let parent_b = db
                 .new_batch()
                 .mutate(2)
                 .merkleize(&db, Some(O::value(22)), floor)
-                .await;
+                .await
+                .unwrap();
             let child_b = parent_b
                 .new_batch::<Sha256>()
                 .mutate(3)
                 .merkleize(&db, Some(O::value(33)), floor)
-                .await;
+                .await
+                .unwrap();
 
             let (db, _) = db.apply_batch(parent_a).await.unwrap();
             assert!(matches!(
@@ -1635,12 +1669,14 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, Some(O::value(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
                 .mutate(2)
                 .merkleize(&db, Some(O::value(22)), floor)
-                .await;
+                .await
+                .unwrap();
 
             let (db, _) = db.apply_batch(child).await.unwrap();
             assert!(matches!(
@@ -1659,12 +1695,14 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, Some(O::value(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
                 .mutate(2)
                 .merkleize(&db, Some(O::value(22)), floor)
-                .await;
+                .await
+                .unwrap();
             let expected_root = child.root();
 
             let (db, _) = db.apply_batch(parent).await.unwrap();
@@ -1682,7 +1720,10 @@ pub(crate) mod tests {
             let db = open_db::<O>(context.child("db"), "compact-floor-regressed").await;
 
             let advance_floor = db.new_batch().mutate(1);
-            let advance_floor = advance_floor.merkleize(&db, None, Location::new(1)).await;
+            let advance_floor = advance_floor
+                .merkleize(&db, None, Location::new(1))
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(advance_floor).await.unwrap();
             let db = db.sync().await.unwrap();
             let target = db.target();
@@ -1691,7 +1732,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(2)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(regressed).await,
@@ -1717,13 +1759,15 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, None, Location::new(2))
-                .await;
+                .await
+                .unwrap();
             // child: one op + commit at loc 4 with floor=1 (regressed from parent's floor=2).
             let child = parent
                 .new_batch::<Sha256>()
                 .mutate(2)
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
 
             let target = db.target();
             assert!(matches!(
@@ -1751,7 +1795,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, Some(meta1.clone()), floor1)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -1763,7 +1808,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(2)
                 .merkleize(&db, Some(meta2.clone()), floor2)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             assert_eq!(db.get_metadata(), Some(meta2));
@@ -1801,7 +1847,8 @@ pub(crate) mod tests {
                     .new_batch()
                     .mutate(1)
                     .merkleize(&db, Some(meta1.clone()), floor1)
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
                 let root = db.root();
@@ -1811,7 +1858,8 @@ pub(crate) mod tests {
                     .new_batch()
                     .mutate(2)
                     .merkleize(&db, Some(meta2), floor2)
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
 
@@ -1849,7 +1897,8 @@ pub(crate) mod tests {
                     .new_batch()
                     .mutate(1)
                     .merkleize(&db, Some(meta1), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -1857,7 +1906,8 @@ pub(crate) mod tests {
                     .new_batch()
                     .mutate(2)
                     .merkleize(&db, Some(meta2.clone()), Location::new(1))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 db.root()
@@ -1886,7 +1936,8 @@ pub(crate) mod tests {
                     .new_batch()
                     .mutate(1)
                     .merkleize(&db, Some(meta1.clone()), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 let root_a = db.root();
@@ -1896,7 +1947,8 @@ pub(crate) mod tests {
                     .new_batch()
                     .mutate(2)
                     .merkleize(&db, Some(meta2), Location::new(1))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let _db = db.commit().await.unwrap();
                 (root_a, size_a)
@@ -1932,7 +1984,8 @@ pub(crate) mod tests {
                     .new_batch()
                     .mutate(1)
                     .merkleize(&db, Some(meta.clone()), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 // Sync must persist recovery metadata even when the data is already durable.
@@ -2025,7 +2078,8 @@ pub(crate) mod tests {
             .new_batch()
             .mutate(seed)
             .merkleize(&db, Some(O::value(seed)), floor)
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(batch).await.unwrap();
         db.sync().await.unwrap().target()
     }
@@ -2040,7 +2094,8 @@ pub(crate) mod tests {
             .new_batch()
             .mutate(seed)
             .merkleize(&db, Some(O::value(seed)), floor)
-            .await;
+            .await
+            .unwrap();
         let tip = batch.bounds().tip;
         let (db, _) = db.apply_batch(batch).await.unwrap();
         (db, tip)
@@ -2112,7 +2167,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(3)
                 .merkleize(&imported, Some(O::value(3)), floor)
-                .await;
+                .await
+                .unwrap();
             let root = batch.root();
             let (applied, _) = imported.apply_batch(batch).await.unwrap();
             assert_eq!(applied.root(), root);
@@ -2303,7 +2359,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(7)
                 .merkleize(&db, Some(O::value(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -2333,7 +2390,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let initialization_bound = db.target().size;
@@ -2341,7 +2399,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(2)
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let tip_target = db.target();
@@ -2400,7 +2459,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(7)
                 .merkleize(&db, Some(O::value(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -2432,7 +2492,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(7)
                 .merkleize(&db, Some(O::value(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             drop(db.sync().await.unwrap());
 
@@ -2461,7 +2522,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(7)
                 .merkleize(&db, Some(O::value(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let tampered_target = db.target();
@@ -2494,7 +2556,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, Some(O::value(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root = db.root();
@@ -2513,6 +2576,495 @@ pub(crate) mod tests {
             assert_eq!(db.root(), root);
             assert_eq!(db.size(), size);
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// Merkleizing against a db other than the batch's own is stale, even at the same size.
+    pub(crate) fn test_compact_merkleize_foreign_db<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<O>(context.child("db"), "compact-merkleize-foreign-db").await;
+            let foreign = open_db::<O>(
+                context.child("foreign"),
+                "compact-merkleize-foreign-db-foreign",
+            )
+            .await;
+            let (db, _) = apply_seed::<O>(db, 11).await;
+            let (foreign, _) = apply_seed::<O>(foreign, 99).await;
+            assert_eq!(db.size(), foreign.size());
+            assert_ne!(db.root(), foreign.root());
+
+            let batch = db.new_batch().mutate(22);
+            assert!(matches!(
+                batch.merkleize(&foreign, None, Location::new(0)).await,
+                Err(Error::StaleBatch)
+            ));
+
+            let parent = db
+                .new_batch()
+                .mutate(33)
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            let child = parent.new_batch::<Sha256>().mutate(44);
+            assert!(matches!(
+                child.merkleize(&foreign, None, Location::new(0)).await,
+                Err(Error::StaleBatch)
+            ));
+            db.destroy().await.unwrap();
+            foreign.destroy().await.unwrap();
+        });
+    }
+
+    /// A batch whose db advanced through a sibling is stale at merkleize, directly or through a
+    /// parent.
+    pub(crate) fn test_compact_merkleize_stale_sibling<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<O>(context.child("db"), "compact-merkleize-stale-sibling").await;
+
+            let direct = db.new_batch().mutate(11);
+            let sibling = db
+                .new_batch()
+                .mutate(22)
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+            assert!(matches!(
+                direct.merkleize(&db, None, Location::new(0)).await,
+                Err(Error::StaleBatch)
+            ));
+
+            let parent = db
+                .new_batch()
+                .mutate(33)
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            let child = parent.new_batch::<Sha256>().mutate(44);
+            let sibling = db
+                .new_batch()
+                .mutate(55)
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+            assert!(matches!(
+                child.merkleize(&db, None, Location::new(0)).await,
+                Err(Error::StaleBatch)
+            ));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A child merkleizes against any state its live chain passes through, and every such state
+    /// yields the same root.
+    pub(crate) fn test_compact_merkleize_ancestor_states<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<O>(context.child("db"), "compact-merkleize-ancestor-states").await;
+
+            let grandparent = db
+                .new_batch()
+                .mutate(1)
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            let parent = grandparent
+                .new_batch::<Sha256>()
+                .mutate(2)
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            let pending = parent
+                .new_batch::<Sha256>()
+                .mutate(3)
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+            let applied = parent
+                .new_batch::<Sha256>()
+                .mutate(3)
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            assert_eq!(pending.root(), applied.root());
+
+            drop(grandparent);
+            let retired = parent
+                .new_batch::<Sha256>()
+                .mutate(3)
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            assert_eq!(retired.bounds().db, db.commitment());
+            assert_eq!(pending.root(), retired.root());
+
+            let child = parent.new_batch::<Sha256>().mutate(3);
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let child = child.merkleize(&db, None, Location::new(0)).await.unwrap();
+            assert_eq!(pending.root(), child.root());
+            let expected_root = child.root();
+            let (db, _) = db.apply_batch(child).await.unwrap();
+            assert_eq!(db.root(), expected_root);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Witness config holding one witness per section, so every commit occupies its own blobs.
+    fn sectioned_witness_config<O: TestOperation>(
+        partition: &str,
+        pooler: &impl BufferPooler,
+    ) -> JournalConfig<O::Cfg> {
+        let mut cfg = witness_config::<O>(partition, pooler);
+        cfg.items_per_section = NZU64!(1);
+        cfg
+    }
+
+    /// Seed a db with the bootstrap witness plus `commits` synced metadata-only commits,
+    /// returning the size and root after each commit. Every commit appends exactly its commit
+    /// operation, so the witness at position `p` has size `p + 1`.
+    async fn seed_witness_sections<O: TestOperation>(
+        context: deterministic::Context,
+        witness: JournalConfig<O::Cfg>,
+        commits: u64,
+    ) -> Vec<(Location<O::Family>, Digest)> {
+        let cfg = Config {
+            strategy: Sequential,
+            witness,
+        };
+        let mut db = TestDb::<O>::init(context, cfg, None).await.unwrap();
+        let mut states = Vec::new();
+        for i in 1..=commits {
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .merkleize(&db, Some(O::value(i)), floor)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.sync().await.unwrap();
+            states.push((db.size(), db.root()));
+        }
+        states
+    }
+
+    /// Leave witness data blob `blob` with a partial trailing page, as a crash mid-write would.
+    /// Paged tail recovery repairs (resizes and syncs) such a tail when the blob is opened.
+    async fn tear_witness_data<C>(
+        context: &deterministic::Context,
+        witness: &JournalConfig<C>,
+        blob: u64,
+    ) {
+        // The variable journal keeps data blobs in `{partition}_data`, named by the big-endian
+        // section index.
+        let partition = format!("{}_data", witness.partition);
+        let (handle, len) = context.open(&partition, &blob.to_be_bytes()).await.unwrap();
+        handle.resize(len - 1).await.unwrap();
+        handle.sync().await.unwrap();
+    }
+
+    /// Bounded init through a delayed-sync backend, returning the db and the durability calls
+    /// initialization made.
+    async fn open_bounded_counting<O: TestOperation>(
+        context: deterministic::Context,
+        witness: JournalConfig<O::Cfg>,
+        cap: Location<O::Family>,
+    ) -> (DelayedDb<O>, usize) {
+        // Arming counts every durability call from here on. The gate blocks the first call and
+        // every later started sync parks. `drive_pending_syncs` releases them whenever
+        // initialization stalls.
+        let pending = PendingSyncs::default();
+        pending.arm();
+        let delayed = DelayedSyncContext {
+            inner: context,
+            pending: pending.clone(),
+        };
+        let cfg = Config {
+            strategy: Sequential,
+            witness,
+        };
+        let db = drive_pending_syncs(&pending, DelayedDb::<O>::init(delayed, cfg, Some(cap)))
+            .await
+            .unwrap();
+        (db, pending.calls())
+    }
+
+    /// Bounded initialization opens no witness section the bound discards, so a torn tail there
+    /// costs no repair.
+    pub(crate) fn test_compact_bounded_initialization_ignores_discarded_witness_sections<
+        O: TestOperation,
+    >() {
+        deterministic::Runner::default().start(|context| async move {
+            // Build twin journals with one witness per section, so position `p` lives in data
+            // blob `p`. Each holds the bootstrap witness (position 0, size 1), a synced commit
+            // (position 1, size 2), and a commit without sync (position 2, size 3). The control
+            // twin stays intact and sets the baseline durability count.
+            let control_cfg =
+                sectioned_witness_config::<O>("compact-skip-discarded-control", &context);
+            let torn_cfg = sectioned_witness_config::<O>("compact-skip-discarded-torn", &context);
+            let mut states = Vec::new();
+            for (label, witness) in [("control", &control_cfg), ("torn", &torn_cfg)] {
+                let context = context.child(label);
+                states.push(
+                    seed_witness_sections::<O>(context.child("seed"), witness.clone(), 1).await[0],
+                );
+
+                // Commit without syncing so the witness at position 2 lies above the recovery
+                // watermark, where a torn tail is a crash shape rather than corruption.
+                let cfg = Config {
+                    strategy: Sequential,
+                    witness: witness.clone(),
+                };
+                let db = TestDb::<O>::init(context.child("extend"), cfg, None)
+                    .await
+                    .unwrap();
+                let floor = db.inactivity_floor_loc();
+                let batch = db
+                    .new_batch()
+                    .merkleize(&db, Some(O::value(2)), floor)
+                    .await
+                    .unwrap();
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                drop(db.commit().await.unwrap());
+            }
+
+            // The twins share one history, so the synced commit's size and root are the expected
+            // recovery for both.
+            assert_eq!(states[0], states[1]);
+            let (size, root) = states[0];
+
+            // The witness at position 1 has size `size`, so the bound discards position 2 and
+            // must not open it. Tear its data blob: repairing the tail would sync it.
+            tear_witness_data(&context, &torn_cfg, 2).await;
+
+            // Both twins recover the synced commit under the bound. They differ only in data
+            // blob 2, so equal durability counts show the torn blob was not repaired.
+            let (control, control_calls) =
+                open_bounded_counting::<O>(context.child("control"), control_cfg, size).await;
+            let (torn, torn_calls) =
+                open_bounded_counting::<O>(context.child("torn"), torn_cfg, size).await;
+            assert_eq!(control.size(), size);
+            assert_eq!(control.root(), root);
+            assert_eq!(torn.size(), size);
+            assert_eq!(torn.root(), root);
+            assert_eq!(
+                torn_calls, control_calls,
+                "the discarded torn section must not be repaired"
+            );
+            control.destroy().await.unwrap();
+            torn.destroy().await.unwrap();
+        });
+    }
+
+    /// A torn tail in a retained witness section is still repaired under a bound. The witness it
+    /// held is lost and initialization falls back to the previous one.
+    pub(crate) fn test_compact_bounded_initialization_repairs_retained_witness_section<
+        O: TestOperation,
+    >() {
+        deterministic::Runner::default().start(|context| async move {
+            // Both witnesses share a section, so the bootstrap witness survives the torn tail
+            // page and ends mid-page, where recovery must rewrite rather than only shrink.
+            let clean_cfg = witness_config::<O>("compact-repair-retained-clean", &context);
+            let torn_cfg = witness_config::<O>("compact-repair-retained-torn", &context);
+            let mut states = Vec::new();
+            for (label, witness) in [("clean", &clean_cfg), ("torn", &torn_cfg)] {
+                // Fresh storage bootstraps the witness at position 0 (size 1), the state the torn
+                // twin falls back to.
+                let cfg = Config {
+                    strategy: Sequential,
+                    witness: witness.clone(),
+                };
+                let db = TestDb::<O>::init(context.child(label), cfg, None)
+                    .await
+                    .unwrap();
+                let genesis = db.root();
+
+                // Commit without syncing so the witness at position 1 lies above the recovery
+                // watermark, where a torn tail is a crash shape rather than corruption. Its 15
+                // operations give it enough pinned nodes to run past the page where the bootstrap
+                // witness ends.
+                let floor = db.inactivity_floor_loc();
+                let mut batch = db.new_batch();
+                for seed in 1..=14 {
+                    batch = batch.mutate(seed);
+                }
+                let batch = batch
+                    .merkleize(&db, Some(O::value(1)), floor)
+                    .await
+                    .unwrap();
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                states.push((genesis, db.size(), db.root()));
+            }
+            assert_eq!(states[0], states[1]);
+            let (genesis, size, root) = states[0];
+
+            // The torn twin's last page in section 0 holds only the end of the witness at
+            // position 1, so tearing it leaves that witness incomplete.
+            tear_witness_data(&context, &torn_cfg, 0).await;
+
+            // Section 0 lies below the bound, so both twins open it. The torn twin trims its
+            // tail and republishes the journal without the lost witness.
+            let (clean, clean_calls) =
+                open_bounded_counting::<O>(context.child("clean"), clean_cfg, size).await;
+            let (torn, torn_calls) =
+                open_bounded_counting::<O>(context.child("torn"), torn_cfg, size).await;
+
+            // The clean twin recovers the witness at position 1. The torn twin recovers the
+            // bootstrap witness and spends extra durability calls on the repair.
+            assert_eq!(clean.size(), size);
+            assert_eq!(clean.root(), root);
+            assert_eq!(torn.size(), Location::new(1));
+            assert_eq!(torn.root(), genesis);
+            assert!(
+                torn_calls > clean_calls,
+                "the retained torn section is repaired"
+            );
+            clean.destroy().await.unwrap();
+            torn.destroy().await.unwrap();
+        });
+    }
+
+    /// An imported state of size 1 lands at position 1, so afterwards each witness position
+    /// equals its size. Bounded initialization still selects by size, widening its view when
+    /// the positions below the bound cannot settle the selection.
+    pub(crate) fn test_compact_bounded_initialization_after_genesis_import<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            // The destination has used positions 0 through 3.
+            let dst_cfg = sectioned_witness_config::<O>("compact-genesis-import-dst", &context);
+            seed_witness_sections::<O>(context.child("dst"), dst_cfg.clone(), 3).await;
+
+            // Import the genesis state: one commit operation and no pinned nodes.
+            let imported = TestDb::<O>::init_from_sync(
+                Sequential,
+                context.child("import"),
+                dst_cfg.clone(),
+                Location::new(0),
+                Vec::new(),
+                O::commit(None, Location::new(0)),
+            )
+            .unwrap();
+            let genesis = imported.root();
+            assert_eq!(genesis, initial_root::<O::Family, O, Sha256>());
+
+            // Committing replaces the destination with the imported witness at position 1.
+            drop(imported.commit().await.unwrap());
+            let journal = witness::Journal::<_, O::Family, Digest, O>::init(
+                context.child("placed"),
+                dst_cfg.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(journal.bounds(), 1..2);
+            drop(journal);
+
+            // Three more commits occupy positions 2 through 4 with sizes 2 through 4. `states`
+            // holds the size and root at positions 1 through 4.
+            let mut states = vec![(Location::new(1), genesis)];
+            states.extend(
+                seed_witness_sections::<O>(context.child("reopen"), dst_cfg.clone(), 3).await,
+            );
+
+            // Open at each recorded size from the tip down. Caps 4, 3, and 2 open a bounded view
+            // of the positions below the cap, whose tip size is one below the cap, so recovery
+            // widens and selects the witness at the cap's own position. Cap 1 lies at the
+            // retained start, so recovery opens unbounded. Each open discards the witnesses above
+            // its selection, so the caps must descend.
+            for (size, root) in states.into_iter().rev() {
+                let db = open_bounded::<O>(
+                    context.child("bounded").with_attribute("cap", *size),
+                    dst_cfg.clone(),
+                    size,
+                )
+                .await
+                .unwrap();
+                assert_eq!(db.size(), size);
+                assert_eq!(db.root(), root);
+            }
+        });
+    }
+
+    /// A bounded initialization whose selection fails leaves the witness offsets watermark
+    /// acknowledging every synced witness.
+    pub(crate) fn test_compact_failed_bounded_selection_preserves_acknowledged_offsets<
+        O: TestOperation,
+    >() {
+        deterministic::Runner::default().start(|context| async move {
+            let cap = Location::new(5);
+            let witness = sectioned_witness_config::<O>("compact-failed-bounded-offsets", &context);
+
+            // The offsets journal, whose checkpoint persists the recovery watermark, lives in
+            // `{partition}_offsets`.
+            let offsets_partition = format!("{}_offsets", witness.partition);
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness.clone(),
+            };
+            let mut db = TestDb::<O>::init(context.child("seed"), cfg, None)
+                .await
+                .unwrap();
+
+            // The first batch holds six mutations and a commit after the bootstrap commit, so the
+            // witness at position 1 has size 8, above the cap used below.
+            let mut batch = db.new_batch();
+            for seed in 1..=6 {
+                batch = batch.mutate(seed);
+            }
+            let batch = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.sync().await.unwrap();
+            let first_retained_size = db.size();
+            assert!(first_retained_size > cap);
+
+            // Eight synced empty commits occupy positions 2 through 9 with sizes 9 through 16.
+            // One witness per section puts positions 1 through 4 in the sections the cap-5 view
+            // opens, and positions 5 through 9 in sections it discards.
+            for _ in 0..8 {
+                let floor = db.inactivity_floor_loc();
+                let batch = db.new_batch().merkleize(&db, None, floor).await.unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.sync().await.unwrap();
+            }
+            let tip = db.size();
+
+            // Pruning at the first commit removes the bootstrap section. The retained start
+            // (position 1) lies below the cap while its size lies above it. A retained start at
+            // or above the cap would open unbounded instead.
+            drop(db.prune(first_retained_size).await.unwrap());
+
+            // Sync acknowledged all ten witnesses (positions 0 through 9). The watermark lies above
+            // the cap, so any lowering to the cap is visible below.
+            let watermark = fixed::Journal::<_, u64>::persisted_watermark(
+                context.child("before"),
+                &offsets_partition,
+            )
+            .await
+            .unwrap();
+            assert_eq!(watermark, Some(10));
+
+            // No retained witness fits under the cap, so selection fails.
+            assert!(matches!(
+                open_bounded::<O>(context.child("failed"), witness.clone(), cap).await,
+                Err(Error::HistoricalFloorPruned(found)) if found == cap
+            ));
+
+            // Selection fails before publication, and inspection anchored at the ceiling skips the
+            // offsets truncate, so the failed attempt leaves the durable watermark at 10.
+            let watermark = fixed::Journal::<_, u64>::persisted_watermark(
+                context.child("after"),
+                &offsets_partition,
+            )
+            .await
+            .unwrap();
+            assert_eq!(watermark, Some(10));
+
+            // A retry at the tip recovers every retained witness.
+            let reopened = open_bounded::<O>(context.child("retry"), witness, tip)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), tip);
+            reopened.destroy().await.unwrap();
         });
     }
 
@@ -2581,7 +3133,8 @@ pub(crate) mod tests {
                 .mutate(1)
                 .mutate(2)
                 .merkleize(&db, Some(O::value(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_a = db.root();
@@ -2593,7 +3146,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(3)
                 .merkleize(&db, Some(O::value(22)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let cfg = witness_config::<O>("compact-rewind-between", &context);
@@ -2625,7 +3179,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, Some(O::value(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let target_a = db.target();
@@ -2655,7 +3210,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, Some(O::value(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_a = db.root();
@@ -2668,7 +3224,8 @@ pub(crate) mod tests {
                     .new_batch()
                     .mutate(i)
                     .merkleize(&db, Some(O::value(i * 11)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
             }
@@ -2718,7 +3275,8 @@ pub(crate) mod tests {
                     .new_batch()
                     .mutate(i)
                     .merkleize(&db, Some(O::value(i * 11)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
                 sizes.push(db.size());
@@ -2752,7 +3310,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let size_after_first = db.size();
@@ -2762,14 +3321,16 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(2)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             // Advance past that state and commit, then reopen at that state.
             let batch = db
                 .new_batch()
                 .mutate(3)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let db = {
@@ -2800,7 +3361,8 @@ pub(crate) mod tests {
                 .mutate(1)
                 .mutate(2)
                 .merkleize(&db, Some(O::value(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -2825,7 +3387,8 @@ pub(crate) mod tests {
                     .mutate(1)
                     .mutate(2)
                     .merkleize(&db, Some(O::value(11)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
                 let root = db.root();
@@ -2854,7 +3417,8 @@ pub(crate) mod tests {
                 .mutate(1)
                 .mutate(2)
                 .merkleize(&db, Some(O::value(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -2863,7 +3427,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(3)
                 .merkleize(&db, Some(O::value(22)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
 
@@ -2898,7 +3463,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let size_after_first = db.size();
@@ -2907,7 +3473,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(2)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
 
@@ -2916,7 +3483,8 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(3)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             let db = {
                 _ = db.sync().await.unwrap();
@@ -2939,7 +3507,11 @@ pub(crate) mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-floor-beyond").await;
 
-            let batch = db.new_batch().merkleize(&db, None, Location::new(2)).await;
+            let batch = db
+                .new_batch()
+                .merkleize(&db, None, Location::new(2))
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(batch).await,
@@ -2960,13 +3532,15 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(1)
                 .merkleize(&db, None, Location::new(3))
-                .await;
+                .await
+                .unwrap();
             // child: valid on its own (floor=0), but parent's floor is bad.
             let child = parent
                 .new_batch::<Sha256>()
                 .mutate(2)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(child).await,
@@ -2991,7 +3565,8 @@ pub(crate) mod tests {
             }
             let seed = seed
                 .merkleize(&db, Some(O::value(7)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.sync().await.unwrap();
             let floor = db.size();
@@ -3009,12 +3584,16 @@ pub(crate) mod tests {
             for value in 8..=12 {
                 parent = parent.mutate(value);
             }
-            let parent = parent.merkleize(&db, Some(O::value(13)), floor).await;
+            let parent = parent
+                .merkleize(&db, Some(O::value(13)), floor)
+                .await
+                .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
                 .mutate(14)
                 .merkleize(&db, Some(O::value(15)), floor)
-                .await;
+                .await
+                .unwrap();
 
             // The operation suffix is the batch's own mutations plus its commit, handed out
             // zero-copy.
@@ -3086,7 +3665,8 @@ pub(crate) mod tests {
             let commit_only = db
                 .new_batch()
                 .merkleize(&db, Some(O::value(16)), commit_floor)
-                .await;
+                .await
+                .unwrap();
             let (commit_start, commit_ops) = commit_only.operations();
             let commit_end = commit_only.bounds().tip.size;
             let commit_root = commit_only.root();
@@ -3120,12 +3700,14 @@ pub(crate) mod tests {
                 .new_batch()
                 .mutate(17)
                 .merkleize(&db, Some(O::value(18)), db.size())
-                .await;
+                .await
+                .unwrap();
             let late = late_parent
                 .new_batch::<Sha256>()
                 .mutate(19)
                 .merkleize(&db, Some(O::value(20)), db.size())
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(Arc::clone(&late_parent)).await.unwrap();
             assert!(matches!(
                 late_parent.proof(&db),
@@ -3193,6 +3775,13 @@ pub(crate) mod tests {
                 test_compact_reopen_rejects_non_commit_tip,
                 test_compact_reopen_rejects_tampered_pinned_nodes,
                 test_compact_bounded_initialization_preserves_current_state,
+                test_compact_merkleize_foreign_db,
+                test_compact_merkleize_stale_sibling,
+                test_compact_merkleize_ancestor_states,
+                test_compact_bounded_initialization_ignores_discarded_witness_sections,
+                test_compact_bounded_initialization_repairs_retained_witness_section,
+                test_compact_bounded_initialization_after_genesis_import,
+                test_compact_failed_bounded_selection_preserves_acknowledged_offsets,
                 test_compact_prune_past_tip_keeps_tip,
                 test_compact_initialization_zero_and_above_end,
                 test_compact_bounded_initialization_between_commits,

@@ -62,6 +62,10 @@ hash = "9eec5df6e9016f6d3fb2317bc0d1e0a969ee3ef6efa4ee6a04770a1e533116b8"
 n_cases = 512
 hash = "627ba252d6f69ef04e74cc493024712e8701ffc3fc27576858eb67995532e5a9"
 
+["commonware_storage::journal::conformance::StorageConformance<ContiguousVariableWorkload<true>>"]
+n_cases = 512
+hash = "217d7bef2f62ec8991f731cd3ce04aac41a774806ae1f13fd508ba77c97b6dc8"
+
 ["commonware_storage::journal::conformance::StorageConformance<ContiguousVariableWorkload>"]
 n_cases = 512
 hash = "595d3b70ca5c4482669d6d1356b63870f319a78b9365211517b03b526eb25f64"
@@ -70,13 +74,25 @@ hash = "595d3b70ca5c4482669d6d1356b63870f319a78b9365211517b03b526eb25f64"
 n_cases = 512
 hash = "2af7164a4dea99e678e70c4700ec0dafd57477b318cb7b7c0ce30a1464c19a8f"
 
+["commonware_storage::journal::conformance::StorageConformance<SegmentedGlobWorkload<true>>"]
+n_cases = 512
+hash = "f302226c6751d0248d6cca4f1f03bbb0e6d7c09be49e141af26f86e864cbee46"
+
 ["commonware_storage::journal::conformance::StorageConformance<SegmentedGlobWorkload>"]
 n_cases = 512
 hash = "4c936d130e6fe7eea71ccfc237f0d93186321ad17e0ea7d52485779326ddd654"
 
+["commonware_storage::journal::conformance::StorageConformance<SegmentedOversizedWorkload<true>>"]
+n_cases = 512
+hash = "97255652439797dab5f0579c351cba2e95acbebe3bb6fac1fa0a6d070a99de8f"
+
 ["commonware_storage::journal::conformance::StorageConformance<SegmentedOversizedWorkload>"]
 n_cases = 512
 hash = "e8eab39bfc0d5284d617f832f513c895c28771d80b2554f20611f39edce9c8c9"
+
+["commonware_storage::journal::conformance::StorageConformance<SegmentedVariableWorkload<true>>"]
+n_cases = 512
+hash = "025bf5fb6b1c6e8fcba026cdc337ad45780a545d3fc4125667507ef2d987e427"
 
 ["commonware_storage::journal::conformance::StorageConformance<SegmentedVariableWorkload>"]
 n_cases = 512
