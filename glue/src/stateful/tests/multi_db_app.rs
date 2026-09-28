@@ -21,13 +21,13 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
+    ancestry::Ancestry,
     simplex::{
         self,
         config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
         marshal::{
             self,
-            ancestry::Ancestry,
             core::{Actor as MarshalActor, CommitmentFallback},
             resolver::p2p as marshal_resolver,
             standard::{Deferred, Standard},

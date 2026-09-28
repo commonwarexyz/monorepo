@@ -12,12 +12,13 @@ use crate::{
         marshal::{
             input::{Message, Reply},
             store::blocks::{Inserted, Stream},
-            types::{LqcVerifier, MarshalProgress, OutputIndex, Update},
+            types::{LqcVerifier, MarshalProgress, Update},
             wire::Key,
         },
         scheme::Scheme,
         types::{Artifact, BlockRef, Body, CertificateId, Lqc, TransactionBlock},
     },
+    types::OutputIndex,
 };
 use commonware_codec::EncodeSize as _;
 use commonware_cryptography::{Hasher, PublicKey};
