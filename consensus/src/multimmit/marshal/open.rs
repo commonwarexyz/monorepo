@@ -95,7 +95,8 @@ where
     let delivery_store = open_delivery(&context, config, stores.state()).await?;
     let promotion = match config.retention.blocks {
         ArchiveMode::Immutable => {
-            Some(open_promotion(&context, config, stores.checkpoint()).await?)
+            let fresh = stores.first_output_row()?.is_none();
+            Some(open_promotion(&context, config, stores.checkpoint(), fresh).await?)
         }
         ArchiveMode::Prunable => None,
     };
@@ -145,6 +146,7 @@ where
             store,
             mailbox: receiver,
             committed: checkpoint.committed(),
+            floor_index: checkpoint.floor_index(),
             floor: promoter::PendingFloor {
                 generation: checkpoint.floor_generation(),
                 frontiers: checkpoint.emitted().to_vec(),
@@ -183,11 +185,13 @@ where
     let recovery = state
         .install()
         .map_or_else(|| state.checkpoint(), |install| &install.checkpoint);
-    let on_missing = if state.install().is_some() || state.checkpoint().committed().is_none() {
-        OnMissing::Initialize
-    } else {
-        OnMissing::Reject
-    };
+    let checkpoint = state.checkpoint();
+    let on_missing =
+        if state.install().is_some() || checkpoint.committed() == checkpoint.floor_index() {
+            OnMissing::Initialize
+        } else {
+            OnMissing::Reject
+        };
     delivery::DeliveryCursor::init(
         context.child("delivery"),
         format!("{}_delivery", config.partition_prefix),
@@ -202,12 +206,13 @@ where
 
 /// Opens the immutable body archive and its promotion cursor.
 ///
-/// Nothing committed means no promotion could have started, so a missing cursor is seeded from
-/// the checkpoint.
+/// Without any output row (`fresh`), no promotion could have started, so a missing cursor is
+/// seeded from the checkpoint.
 async fn open_promotion<E, T, H, V, B>(
     context: &E,
     config: &Config<T, V, B>,
     checkpoint: &Checkpoint<H::Digest>,
+    fresh: bool,
 ) -> Result<promoter::PromotionStore<T, E, H, B>, StorageError>
 where
     E: Context,
@@ -225,7 +230,7 @@ where
             .immutable(name("final_block_bodies"), config.body_codec_config.clone()),
     )
     .await?;
-    let on_missing = if checkpoint.committed().is_none() {
+    let on_missing = if fresh {
         OnMissing::Initialize
     } else {
         OnMissing::Reject
@@ -251,6 +256,7 @@ mod tests {
         Epochable as _, Viewable as _,
         multimmit::{
             marshal::{
+                OutputIndex,
                 actors::catalog::Error as CatalogError,
                 config::{ArchiveConfig, Retention, Start},
                 storage::{
@@ -441,7 +447,7 @@ mod tests {
                 history_index: None,
                 ordered: genesis.tips().to_vec(),
                 emitted: genesis.tips().to_vec(),
-                committed: None,
+                floor_index: OutputIndex::zero(),
             })
             .unwrap();
             let record =
@@ -456,7 +462,7 @@ mod tests {
                 history_index: Some(0),
                 ordered: genesis.tips().to_vec(),
                 emitted: genesis.tips().to_vec(),
-                committed: None,
+                floor_index: OutputIndex::zero(),
             })
             .unwrap();
             let ready_size = blob_size(&CatalogState::ready(checkpoint.clone(), None)).unwrap();
@@ -574,7 +580,7 @@ mod tests {
                 history_index: Some(0),
                 ordered: history.tips().to_vec(),
                 emitted: genesis.tips().to_vec(),
-                committed: None,
+                floor_index: OutputIndex::zero(),
             })
             .unwrap();
             let initial = Checkpoint::try_from(CheckpointParts {
@@ -586,7 +592,7 @@ mod tests {
                 history_index: None,
                 ordered: history.tips().to_vec(),
                 emitted: history.tips().to_vec(),
-                committed: None,
+                floor_index: OutputIndex::zero(),
             })
             .unwrap();
             let intent = CatalogState::ready(initial, None)

@@ -8,6 +8,7 @@ use super::{
 use crate::{
     multimmit::{
         marshal::{
+            OutputIndex,
             actors::{
                 catalog,
                 delivery::{self, HotOutput},
@@ -20,7 +21,6 @@ use crate::{
                 catalog::{CatalogStore, StoredRef},
                 record::OnMissing,
             },
-            types::OutputIndex,
         },
         mocks::Committee,
         testing::{SpanRecorder, TestBody},
@@ -221,7 +221,7 @@ pub(super) async fn stalled(context: &deterministic::Context, prefix: &'static s
         },
         delivery,
         promoter: Some(mailbox.clone()),
-        acknowledged: None,
+        acknowledged: OutputIndex::zero(),
     });
     let bodies: FinalBody<TwoCap, _, Sha256, TestBody> = FinalizedArchive::init_immutable(
         context.child("bodies"),
@@ -234,7 +234,7 @@ pub(super) async fn stalled(context: &deterministic::Context, prefix: &'static s
         bodies,
         format!("{prefix}_cursor"),
         PromotionSeed {
-            through: None,
+            through: OutputIndex::zero(),
             frontier: checkpoint.emitted_frontier().clone(),
             generation: 0,
         },
@@ -247,7 +247,8 @@ pub(super) async fn stalled(context: &deterministic::Context, prefix: &'static s
         catalog: catalog_mailbox,
         store,
         mailbox: receiver,
-        committed: Some(OutputIndex::new(1)),
+        committed: OutputIndex::new(1),
+        floor_index: OutputIndex::zero(),
         floor: PendingFloor {
             generation: 0,
             frontiers: checkpoint.emitted().to_vec(),
@@ -273,7 +274,7 @@ fn queued_lookups_run_before_the_next_promotion_step() {
             mailbox,
             promoter,
             reference,
-        } = stalled(&context, "promoter_preemption").await;
+        } = Box::pin(stalled(&context, "promoter_preemption")).await;
         let first = mailbox.block(reference);
         let second = mailbox.blocks(vec![reference]);
         futures::pin_mut!(first, second);
@@ -294,7 +295,7 @@ fn steady_lookups_cannot_hold_off_promotion() {
             mailbox,
             promoter,
             reference,
-        } = stalled(&context, "promoter_starvation").await;
+        } = Box::pin(stalled(&context, "promoter_starvation")).await;
         let mut lookups = (0..2 * MESSAGES_PER_STEP)
             .map(|_| Box::pin(mailbox.block(reference)))
             .collect::<Vec<_>>();
@@ -331,10 +332,10 @@ fn publication_overflow_drops_bodies_and_preserves_install_order() {
     Message::handle(
         &mut overflow,
         Message::Published {
-            through: OutputIndex::ZERO,
+            through: OutputIndex::new(1),
             hot: vec![HotOutput {
                 stored: StoredRef {
-                    index: OutputIndex::ZERO,
+                    index: OutputIndex::new(1),
                     reference: block.reference(),
                     encoded_len: u64::try_from(block.encode_size()).unwrap(),
                     floor_generation: 0,
@@ -347,14 +348,14 @@ fn publication_overflow_drops_bodies_and_preserves_install_order() {
         &mut overflow,
         Message::Installed {
             floor_generation: 1,
-            through: Some(OutputIndex::ZERO),
+            through: OutputIndex::new(1),
             frontiers: Vec::new(),
         },
     );
     Message::handle(
         &mut overflow,
         Message::Published {
-            through: OutputIndex::new(1),
+            through: OutputIndex::new(2),
             hot: Vec::new(),
         },
     );
@@ -363,7 +364,7 @@ fn publication_overflow_drops_bodies_and_preserves_install_order() {
     assert!(matches!(
         &overflow[0],
         Message::Published { through, hot }
-            if *through == OutputIndex::ZERO && hot.is_empty()
+            if *through == OutputIndex::new(1) && hot.is_empty()
     ));
     assert!(matches!(
         &overflow[1],
@@ -375,6 +376,6 @@ fn publication_overflow_drops_bodies_and_preserves_install_order() {
     assert!(matches!(
         &overflow[2],
         Message::Published { through, hot }
-            if *through == OutputIndex::new(1) && hot.is_empty()
+            if *through == OutputIndex::new(2) && hot.is_empty()
     ));
 }

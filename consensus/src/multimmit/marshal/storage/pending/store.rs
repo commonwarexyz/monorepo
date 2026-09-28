@@ -9,7 +9,7 @@ use super::{
 use crate::{
     multimmit::{
         marshal::storage::{Error, blocks::BlockMeta, record::DurableRecord},
-        types::{BlockRef, Body, ChainId, Frontier, TransactionBlock, TransactionBlockHeader},
+        types::{BlockRef, Body, ChainId, TransactionBlock, TransactionBlockHeader},
     },
     types::{Epoch, Height},
 };
@@ -215,23 +215,6 @@ impl ChainFloors {
     /// Returns floors that leave all `chains` unchanged.
     pub(crate) fn unchanged(chains: usize) -> Self {
         Self(vec![None; chains])
-    }
-
-    /// Returns floors just above every block of `frontier`.
-    pub(crate) fn above<D: Digest>(frontier: &Frontier<D>) -> Self {
-        Self(
-            frontier
-                .references()
-                .iter()
-                .map(|reference| Some(Height::new(reference.height().get().saturating_add(1))))
-                .collect(),
-        )
-    }
-
-    /// Raises `chain`'s floor to at least `floor`.
-    pub(crate) fn raise(&mut self, chain: ChainId, floor: Height) {
-        let slot = &mut self.0[chain.get() as usize];
-        *slot = Some(slot.map_or(floor, |current| current.max(floor)));
     }
 }
 
