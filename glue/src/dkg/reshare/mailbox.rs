@@ -9,10 +9,8 @@ use commonware_actor::{
 };
 use commonware_consensus::{
     Reporter,
-    simplex::marshal::{
-        Update,
-        ancestry::{Ancestry, BoxedAncestry},
-    },
+    ancestry::{Ancestry, BoxedAncestry},
+    simplex::marshal::Update,
     types::Height,
 };
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};

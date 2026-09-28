@@ -5,14 +5,16 @@ use super::{
     metrics::Metrics,
     store::{PromotedBody, PromotionStore},
 };
-use crate::multimmit::{
-    actors::util::gated,
-    marshal::{
-        OutputIndex,
-        actors::{catalog, delivery::HotOutput},
-        storage::Error as StorageError,
+use crate::{
+    multimmit::{
+        actors::util::gated,
+        marshal::{
+            actors::{catalog, delivery::HotOutput},
+            storage::Error as StorageError,
+        },
+        types::{BlockRef, Body},
     },
-    types::{BlockRef, Body},
+    types::OutputIndex,
 };
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 use commonware_macros::select_loop;

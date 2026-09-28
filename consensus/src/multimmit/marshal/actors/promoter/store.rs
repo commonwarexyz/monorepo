@@ -4,16 +4,16 @@
 //! Generation-tagged output rows make state-sync jumps explicit, so recovery can replay later
 //! outputs without depending on an in-memory install notification.
 
-use crate::multimmit::{
-    marshal::{
-        OutputIndex,
-        storage::{
+use crate::{
+    multimmit::{
+        marshal::storage::{
             Error,
             archive::FinalBody,
             record::{DurableRecord, OnMissing},
         },
+        types::{BlockRef, Body, ChainId, Frontier, TransactionBlock},
     },
-    types::{BlockRef, Body, ChainId, Frontier, TransactionBlock},
+    types::OutputIndex,
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher};

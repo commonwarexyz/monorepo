@@ -1,9 +1,12 @@
 //! A byte-bounded prefix of committed outputs waiting to be reported.
 
 use super::batch::{DeliveryOutput, DurableBatch};
-use crate::multimmit::{
-    marshal::{OutputIndex, storage::catalog::StoredRef},
-    types::{Body, TransactionBlock},
+use crate::{
+    multimmit::{
+        marshal::storage::catalog::StoredRef,
+        types::{Body, TransactionBlock},
+    },
+    types::OutputIndex,
 };
 use commonware_cryptography::Hasher;
 use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};

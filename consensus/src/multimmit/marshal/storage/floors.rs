@@ -1,12 +1,12 @@
 //! Floors established by finalized L-QCs.
 
 use super::catalog_state::frontier_index;
-use crate::multimmit::{
-    marshal::OutputIndex,
-    types::{BlockRef, Frontier},
-};
 #[cfg(feature = "arbitrary")]
 use crate::{multimmit::types::ChainId, types::Height};
+use crate::{
+    multimmit::types::{BlockRef, Frontier},
+    types::OutputIndex,
+};
 use commonware_codec::{Buf, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 

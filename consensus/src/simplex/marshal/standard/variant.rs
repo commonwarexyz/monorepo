@@ -5,10 +5,10 @@
 
 use crate::{
     Block,
+    ancestry::BlockProvider,
     simplex::{
-        marshal::{
-            ancestry::BlockProvider,
-            core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Retirement, Variant},
+        marshal::core::{
+            Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Retirement, Variant,
         },
         scheme::Scheme as SimplexScheme,
     },

@@ -11,14 +11,12 @@ use crate::{
         actors::util::Completion,
         types::{BlockRef, CertificateId, CodecConfig, Frontier, Lqc, TipRecord, TransactionBlock},
     },
-    types::{Epoch, View},
+    types::{Epoch, OutputIndex, View},
 };
 #[cfg(feature = "arbitrary")]
 use crate::{multimmit::types::ChainId, types::Height};
 use bytes::BufMut;
-use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
-};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
 use std::{error::Error as StdError, fmt, future::Future, sync::Arc};
@@ -48,81 +46,6 @@ pub trait LqcVerifier<H: Hasher, V: Variant>: Send + 'static {
         &mut self,
         proof: &Lqc<V, H::Digest>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-}
-
-/// Index of a block in the marshal's finalized stream.
-///
-/// Marshal delivers finalized blocks in order, and each delivered block takes the next index.
-/// Indices are canonical within a stream: every node assigns the same index to the same block,
-/// whether it replayed the stream from genesis or started from a state-sync floor. Index zero is
-/// the stream's genesis and is never delivered.
-///
-/// A block's height is its height in its own producer chain, so it differs from its index.
-///
-/// Indices encode as a fixed-width big-endian `u64` so they can key fixed-size records.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct OutputIndex(u64);
-
-impl OutputIndex {
-    /// Returns index zero, the stream's genesis.
-    pub const fn zero() -> Self {
-        Self(0)
-    }
-
-    /// Creates a new index from a u64 value.
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the underlying u64 value.
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-
-    /// Returns true if this is index zero.
-    pub const fn is_zero(self) -> bool {
-        self.0 == 0
-    }
-
-    /// Returns the next index.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the index would overflow u64::MAX. A stream would have to deliver more than
-    /// `u64::MAX` blocks for this to happen.
-    pub const fn next(self) -> Self {
-        Self(self.0.checked_add(1).expect("output index overflow"))
-    }
-
-    /// Returns the previous index, or `None` if this is index zero.
-    pub fn previous(self) -> Option<Self> {
-        self.0.checked_sub(1).map(Self)
-    }
-}
-
-impl fmt::Display for OutputIndex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl Write for OutputIndex {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl FixedSize for OutputIndex {
-    const SIZE: usize = <u64 as FixedSize>::SIZE;
-}
-
-impl Read for OutputIndex {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(Self(u64::read(buf)?))
-    }
 }
 
 /// One complete block in the finalized application stream, at the next output index.
@@ -457,40 +380,6 @@ pub struct MarshalProgress<D: Digest> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt as _, Encode as _};
-
-    #[test]
-    fn output_index_constructors() {
-        assert_eq!(OutputIndex::zero().get(), 0);
-        assert_eq!(OutputIndex::new(42).get(), 42);
-        assert_eq!(OutputIndex::default(), OutputIndex::zero());
-        assert!(OutputIndex::zero().is_zero());
-        assert!(!OutputIndex::new(1).is_zero());
-    }
-
-    #[test]
-    fn output_index_next_and_previous() {
-        assert_eq!(OutputIndex::zero().next(), OutputIndex::new(1));
-        assert_eq!(OutputIndex::zero().previous(), None);
-        assert_eq!(OutputIndex::new(5).previous(), Some(OutputIndex::new(4)));
-    }
-
-    #[test]
-    #[should_panic(expected = "output index overflow")]
-    fn output_index_next_overflow() {
-        OutputIndex::new(u64::MAX).next();
-    }
-
-    #[test]
-    fn output_index_encoding_is_fixed_width() {
-        for value in [0, 1, u64::MAX] {
-            let index = OutputIndex::new(value);
-            let encoded = index.encode();
-            assert_eq!(encoded.len(), OutputIndex::SIZE);
-            assert_eq!(encoded.as_ref(), value.to_be_bytes());
-            assert_eq!(OutputIndex::decode(encoded).unwrap(), index);
-        }
-    }
 
     #[test]
     fn stopped_children_are_closed_and_backfill_saturation_is_busy() {
@@ -550,7 +439,7 @@ mod tests {
         use super::*;
         use crate::multimmit::types::arbitrary_codec_config;
         use commonware_codec::{
-            Decode as _,
+            Decode as _, Encode as _,
             conformance::{CodecConformance, generate_value},
         };
         use commonware_cryptography::{
@@ -605,7 +494,6 @@ mod tests {
         }
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<OutputIndex> => 1024,
             CodecConformance<TestFloor> => 128,
         }
     }

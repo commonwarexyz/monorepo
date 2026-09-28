@@ -1,11 +1,9 @@
 use super::{Processed, Variant, durability::Durable as _};
 use crate::{
     Reporter,
+    ancestry::{AncestorStream, Ancestry, BlockProvider},
     simplex::{
-        marshal::{
-            Identifier,
-            ancestry::{AncestorStream, Ancestry, BlockProvider},
-        },
+        marshal::Identifier,
         types::{Activity, Finalization, Notarization},
     },
     types::{Height, Round},
@@ -27,6 +25,9 @@ use std::{
     sync::Arc,
 };
 use tracing::{Span, info_span};
+
+/// A finalization and the height of the block it certifies.
+type FinalizationAt<S, C> = (Height, Finalization<S, C>);
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -64,6 +65,15 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         height: Height,
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, V::Commitment>>>,
+    },
+    /// A request to retrieve the newest finalization at or below a height.
+    GetFinalizationAtOrBelow {
+        /// The span carried with this request.
+        span: Span,
+        /// The highest height the finalization may certify.
+        height: Height,
+        /// A channel to send the retrieved finalization and the height it certifies.
+        response: oneshot::Sender<Option<FinalizationAt<S, V::Commitment>>>,
     },
     /// A request to retrieve the latest processed position.
     GetProcessed {
@@ -303,6 +313,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetInfo { span, .. }
             | Self::GetBlock { span, .. }
             | Self::GetFinalization { span, .. }
+            | Self::GetFinalizationAtOrBelow { span, .. }
             | Self::GetVerified { span, .. }
             | Self::SubscribeByDigest { span, .. }
             | Self::SubscribeByCommitment { span, .. }
@@ -328,6 +339,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetInfo { .. } => "get_info",
             Self::GetBlock { .. } => "get_block",
             Self::GetFinalization { .. } => "get_finalization",
+            Self::GetFinalizationAtOrBelow { .. } => "get_finalization_at_or_below",
             Self::GetProcessed { .. } => "get_processed",
             Self::GetAnchor { .. } => "get_anchor",
             Self::HintFinalized { .. } => "hint_finalized",
@@ -374,6 +386,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             | Self::GetProcessed { .. }
             | Self::GetAnchor { .. } => false,
+            // An older finalization may still answer a read below the floor
+            Self::GetFinalizationAtOrBelow { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -394,6 +408,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 response.is_closed()
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
+            Self::GetFinalizationAtOrBelow { response, .. } => response.is_closed(),
             Self::GetProcessed { response, .. } => response.is_closed(),
             Self::GetAnchor { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
@@ -680,7 +695,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         I: IntoIterator<Item = Arc<V::ApplicationBlock>>,
         C: Clock,
     {
-        AncestorStream::new(clock, self.clone(), initial, fetch_duration)
+        AncestorStream::start(clock, self.clone(), initial, fetch_duration)
     }
 
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.
@@ -720,6 +735,25 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetFinalization {
             span: info_span!("marshal.mailbox.get_finalization", height = height.traced()),
+            height,
+            response,
+        });
+        receiver.await.ok().flatten()
+    }
+
+    /// A best-effort attempt to retrieve the newest [Finalization] at or below `height`
+    /// from local storage, with the height it certifies. It is not an indication to go fetch
+    /// a [Finalization] from the network.
+    pub async fn get_finalization_at_or_below(
+        &self,
+        height: Height,
+    ) -> Option<(Height, Finalization<S, V::Commitment>)> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::GetFinalizationAtOrBelow {
+            span: info_span!(
+                "marshal.mailbox.get_finalization_at_or_below",
+                height = height.traced()
+            ),
             height,
             response,
         });

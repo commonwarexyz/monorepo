@@ -2,13 +2,10 @@
 
 use crate::{
     multimmit::{
-        marshal::{
-            OutputIndex,
-            storage::{blocks::BlockMeta, catalog_state::Checkpoint},
-        },
+        marshal::storage::{blocks::BlockMeta, catalog_state::Checkpoint},
         types::{BlockRef, CertificateId, Lqc, TipRecord},
     },
-    types::View,
+    types::{OutputIndex, View},
 };
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 use std::sync::Arc;

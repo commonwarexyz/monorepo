@@ -16,12 +16,12 @@ use crate::stateful::{
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
-use commonware_consensus::simplex::{
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Floor, Mailbox as MarshalMailbox, Variant},
+use commonware_consensus::{
+    ancestry::BlockProvider,
+    simplex::{
+        marshal::core::{Floor, Mailbox as MarshalMailbox, Variant},
+        types::Finalization,
     },
-    types::Finalization,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
@@ -294,11 +294,8 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Reporter as _,
-        simplex::{
-            marshal::{Update, ancestry},
-            mocks::scheme as scheme_mocks,
-        },
+        Application as _, CertifiableBlock as _, Reporter as _, ancestry,
+        simplex::{marshal::Update, mocks::scheme as scheme_mocks},
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
