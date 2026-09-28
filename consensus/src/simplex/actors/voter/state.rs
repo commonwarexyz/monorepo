@@ -98,7 +98,7 @@ impl<D: Digest, P: PublicKey> ProposalRequest<D, P> {
         }
     }
 
-    /// Returns the proposal context.
+    /// Consumes the request and returns its proposal context.
     pub(super) fn into_context(self) -> Context<D, P> {
         match self {
             Self::Regular(context) | Self::Handoff(context) => context,
