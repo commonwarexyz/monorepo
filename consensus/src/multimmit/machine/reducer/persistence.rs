@@ -7,6 +7,7 @@ use crate::{
         config::Role,
         machine::{
             capability::{Capabilities, Capability, ResolverCommand, TimerCommand},
+            da::released,
             durability::{
                 BarrierAck, BatchId, Change, Cursor, DomainEvent, DurableEffect, DurableJob,
                 EffectId, PersistDirective, PersistJob, Publication, ReplayError, TransitionReason,
@@ -15,7 +16,7 @@ use crate::{
             job::{Generation, Issued},
             view::ViewTimer,
         },
-        types::{Activity, Artifact, ArtifactId},
+        types::{Activity, Artifact, ArtifactId, BlockRef},
     },
     types::{Round, View},
 };
@@ -56,6 +57,8 @@ pub(crate) struct FrozenAcknowledgement<V: Variant, D: Digest> {
     pub(crate) retention: Vec<Arc<Artifact<V, D>>>,
     pub(crate) retirements: Vec<EffectId>,
     pub(crate) forwarded_nullifications: usize,
+    /// Blocks whose DA certificates the batch records, reported once they are durable.
+    pub(crate) certified: Vec<BlockRef<D>>,
 }
 
 /// One group-commit batch of staged events awaiting durability.
@@ -416,6 +419,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let mut retention = Vec::new();
         let mut retirements = Vec::new();
         let mut forwarded_nullifications = 0usize;
+        let mut certified = Vec::new();
 
         for event in job.events() {
             match event.change() {
@@ -434,6 +438,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     retired_publications: retired,
                     ..
                 } => {
+                    if let Artifact::DaCertificate(certificate) = artifact.as_ref() {
+                        certified.push(certificate.block_ref::<H>());
+                    }
                     retention.push(Arc::clone(artifact));
                     retirements.extend(retired);
                 }
@@ -473,6 +480,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 retention,
                 retirements,
                 forwarded_nullifications,
+                certified,
             },
         )
     }
@@ -549,6 +557,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             retention,
             retirements,
             forwarded_nullifications,
+            certified,
         } = acknowledgement;
         let mut capabilities = Capabilities::new();
         if !retention.is_empty() || forwarded_nullifications != 0 {
@@ -597,7 +606,25 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         if !retirements.is_empty() {
             capabilities.push(Capability::Retire(retirements));
         }
-        Ok(Step::new(StepStatus::Accepted, capabilities))
+        let mut step = Step::new(StepStatus::Accepted, capabilities);
+        step.activities.extend(
+            certified
+                .into_iter()
+                .map(|block| self.certificate_recorded(block)),
+        );
+        Ok(step)
+    }
+
+    /// Reports that the DA certificate of `certified` is durably recorded, and which heights of
+    /// its chain the engine therefore never verifies again.
+    pub(super) const fn certificate_recorded(
+        &self,
+        certified: BlockRef<H::Digest>,
+    ) -> Activity<V, H::Digest> {
+        Activity::CertificateRecorded {
+            certified,
+            released: released(certified.height(), self.chain.pipeline_depth),
+        }
     }
 
     pub(super) fn restore_ready_artifacts(

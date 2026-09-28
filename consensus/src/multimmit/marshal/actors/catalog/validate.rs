@@ -6,13 +6,10 @@ use super::{actor::Bounds, mailbox::Error};
 use crate::{
     Epochable as _, Viewable as _,
     multimmit::{
-        marshal::{
-            storage::{
-                catalog::{Admission, InstallRequest},
-                catalog_state::Checkpoint,
-                commit::{Commit, HistoryOpening, OutputRow, SelectedLqc},
-            },
-            types::OutputIndex,
+        marshal::storage::{
+            catalog::{Admission, InstallRequest},
+            catalog_state::Checkpoint,
+            commit::{Commit, HistoryOpening, OutputRow, SelectedLqc},
         },
         types::{BlockRef, Body},
     },
@@ -101,7 +98,7 @@ where
         || checkpoint.epoch() != current.epoch()
         || checkpoint.floor_generation() <= current.floor_generation()
         || checkpoint.archive_layout() != current.archive_layout()
-        || checkpoint.committed() != current.committed()
+        || checkpoint.floor_index() != checkpoint.committed()
         || !current.advances_to(checkpoint)
     {
         return Err(Error::Invalid(
@@ -145,6 +142,7 @@ where
 {
     if next.epoch() != current.epoch()
         || next.floor_generation() != current.floor_generation()
+        || next.floor_index() != current.floor_index()
         || next.archive_layout() != current.archive_layout()
         || next.chains() != chains
         || batch.selected.len() > bounds.max_commit_outputs.get()
@@ -227,8 +225,7 @@ fn outputs<H: Hasher>(
     bounds: &Bounds,
     rows: &[OutputRow<H::Digest>],
 ) -> Result<(), Error> {
-    let mut expected =
-        OutputIndex::after(current.committed()).ok_or(Error::Invalid("output index overflow"))?;
+    let mut previous = current.committed();
     let mut emitted = current.emitted().to_vec();
     let mut output_bytes = 0usize;
     for (position, row) in rows.iter().enumerate() {
@@ -242,20 +239,13 @@ fn outputs<H: Hasher>(
         }
         output_bytes = output_bytes.saturating_add(encoded_len);
         let reference = row.reference();
-        if position > 0 {
-            expected = expected
-                .next()
-                .ok_or(Error::Invalid("output index overflow"))?;
-        }
-        if row.index != expected || !exact::<H>(row, current.epoch(), chains) {
+        if row.index.previous() != Some(previous) || !exact::<H>(row, current.epoch(), chains) {
             return Err(Error::Invalid("output rows are not dense or exact"));
         }
+        previous = row.index;
         advance(&mut emitted, reference)?;
     }
-    let committed = rows
-        .last()
-        .map_or(current.committed(), |row| Some(row.index));
-    if next.committed() != committed {
+    if next.committed() != previous {
         return Err(Error::Invalid("checkpoint does not cover output batch"));
     }
     if emitted != next.emitted() {
@@ -299,6 +289,7 @@ mod tests {
     };
     use crate::{
         multimmit::{
+            marshal::OutputIndex,
             mocks::Committee,
             testing::TestBody,
             types::{PathLimits, genesis_history},
@@ -364,7 +355,7 @@ mod tests {
             genesis_history::<Sha256>(genesis),
             0,
             genesis.tips().to_vec(),
-            None,
+            OutputIndex::zero(),
         );
         let blocks = [
             producer_block(&committee, 0, 10),
@@ -373,53 +364,94 @@ mod tests {
         let mut emitted = genesis.tips().to_vec();
         emitted[0] = blocks[0].reference();
         emitted[1] = blocks[1].reference();
-        let batch = |outputs: Vec<OutputRow<_>>, floor_generation| Commit::<Sha256, MinPk> {
-            selected: Vec::new(),
-            history: Vec::new(),
-            outputs,
-            checkpoint: checkpoint(
-                &committee,
-                floor_generation,
-                genesis.lqc(),
-                genesis_history::<Sha256>(genesis),
-                0,
-                emitted.clone(),
-                Some(OutputIndex::new(1)),
-            ),
-        };
+        let batch =
+            |outputs: Vec<OutputRow<_>>, floor_generation, floor_index| Commit::<Sha256, MinPk> {
+                selected: Vec::new(),
+                history: Vec::new(),
+                outputs,
+                checkpoint: checkpoint(
+                    &committee,
+                    floor_generation,
+                    genesis.lqc(),
+                    genesis_history::<Sha256>(genesis),
+                    0,
+                    emitted.clone(),
+                    floor_index,
+                ),
+            };
         let rows = || {
             vec![
-                output_row(OutputIndex::ZERO, &blocks[0]),
-                output_row(OutputIndex::new(1), &blocks[1]),
+                output_row(OutputIndex::new(1), &blocks[0]),
+                output_row(OutputIndex::new(2), &blocks[1]),
             ]
         };
         let block_bytes = blocks[0].encode_size();
+        let zero = OutputIndex::zero();
         assert_eq!(
-            commit(&current, 4, &bounds(2, 2 * block_bytes), &batch(rows(), 0)),
+            commit(
+                &current,
+                4,
+                &bounds(2, 2 * block_bytes),
+                &batch(rows(), 0, zero)
+            ),
             Ok(())
         );
         assert_eq!(
-            commit(&current, 4, &bounds(2, 2 * block_bytes), &batch(rows(), 1)),
+            commit(
+                &current,
+                4,
+                &bounds(2, 2 * block_bytes),
+                &batch(rows(), 1, zero)
+            ),
             Err(Error::Invalid("checkpoint context mismatch"))
         );
         assert_eq!(
-            commit(&current, 4, &bounds(1, 2 * block_bytes), &batch(rows(), 0)),
+            commit(
+                &current,
+                4,
+                &bounds(2, 2 * block_bytes),
+                &batch(rows(), 0, OutputIndex::new(1))
+            ),
             Err(Error::Invalid("checkpoint context mismatch"))
         );
         assert_eq!(
-            commit(&current, 4, &bounds(2, block_bytes), &batch(rows(), 0)),
+            commit(
+                &current,
+                4,
+                &bounds(1, 2 * block_bytes),
+                &batch(rows(), 0, zero)
+            ),
+            Err(Error::Invalid("checkpoint context mismatch"))
+        );
+        assert_eq!(
+            commit(
+                &current,
+                4,
+                &bounds(2, block_bytes),
+                &batch(rows(), 0, zero)
+            ),
             Err(Error::Invalid("commit block bytes exceed bound"))
         );
         let mut sparse = rows();
-        sparse[1] = output_row(OutputIndex::new(2), &blocks[1]);
+        sparse[1] = output_row(OutputIndex::new(3), &blocks[1]);
         assert_eq!(
-            commit(&current, 4, &bounds(2, 2 * block_bytes), &batch(sparse, 0)),
+            commit(
+                &current,
+                4,
+                &bounds(2, 2 * block_bytes),
+                &batch(sparse, 0, zero)
+            ),
             Err(Error::Invalid("output rows are not dense or exact"))
         );
         let mut short = rows();
         short.pop();
         assert_eq!(
-            commit(&current, 4, &bounds(2, 2 * block_bytes), &batch(short, 0)),
+            commit(
+                &current,
+                4,
+                &bounds(2, 2 * block_bytes),
+                &batch(short, 0, zero)
+            ),
             Err(Error::Invalid("checkpoint does not cover output batch"))
         );
     }

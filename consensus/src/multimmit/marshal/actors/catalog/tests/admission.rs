@@ -296,7 +296,7 @@ fn admission_cut_triggers_label_reply_and_eager_cuts() {
 
         syncs.unblock();
         first.wait().await.unwrap();
-        client.prune(0).await.unwrap();
+        client.prune(OutputIndex::zero()).await.unwrap();
         let metrics = context.encode();
         assert_eq!(
             metric_total(&metrics, "admission_durability_duration_count"),
@@ -361,7 +361,7 @@ fn deferred_barrier_commands_hold_intake_and_admissions_record_dwell() {
 
         // A commit-barrier command defers until admission quiescence, and the occupied
         // deferred slot holds back every later command.
-        let mut prune = Box::pin(client.prune(0));
+        let mut prune = Box::pin(client.prune(OutputIndex::zero()));
         commonware_macros::select! {
             result = &mut prune => panic!("prune completed before quiescence: {result:?}"),
             _ = context.sleep(std::time::Duration::from_millis(1)) => {},

@@ -31,6 +31,14 @@ pub(crate) struct DaChoice<D: Digest> {
     block_ref: BlockRef<D>,
 }
 
+/// Returns the highest height of a chain whose blocks the engine never verifies again once a DA
+/// certificate retires the chain through `retired`.
+///
+/// Retirement keeps the local DA votes above this height, which a restart verifies again.
+pub(crate) const fn released(retired: Height, pipeline_depth: u64) -> Height {
+    Height::new(retired.get().saturating_sub(pipeline_depth))
+}
+
 impl<D: Digest> DaChoice<D> {
     /// Returns the voted header.
     pub(crate) const fn header(&self) -> &TransactionBlockHeader<D> {
@@ -254,7 +262,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
         // travels, so a voter's own certified floor commonly passes that anchor before it votes.
         // Choices at or below the floor add no availability, but they are exactly the record a
         // vote needs to endorse the leader's payloads, so keep one pipelining depth of them.
-        let kept = Height::new(retired.get().saturating_sub(pipeline_depth));
+        let kept = released(retired, pipeline_depth);
         chain.local_da_votes.retain(|height, _| *height > kept);
         // Retirement only drops choices below the retained window, so the prefix above the new
         // floor stays contiguous; raising the cursor to the floor keeps it a valid lower bound.
