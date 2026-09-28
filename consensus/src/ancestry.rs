@@ -269,7 +269,7 @@ pub trait BlockProvider: Send + 'static {
     /// Returns `None` only when the provider can no longer obtain the parent from any source.
     /// Dropping the returned future cancels the subscription.
     ///
-    /// The child block can carry variant-specific context needed to retrieve its parent.
+    /// The child block can carry context the provider needs to retrieve its parent.
     fn subscribe_parent(
         &self,
         block: &Digested<Self::Block>,
@@ -318,7 +318,7 @@ impl<D: Digest> ExpectedParent<D> {
 // returns only a parent with the expected height and digest.
 fn timed_parent_fetch<C, M>(
     clock: &Arc<C>,
-    marshal: &M,
+    provider: &M,
     child: &Digested<M::Block>,
     bound: Option<Round>,
     fetch_duration: &Timed,
@@ -330,7 +330,7 @@ where
     let expected = ExpectedParent::from_child(child);
     let timer = fetch_duration.timer(clock.as_ref());
     let clock = clock.clone();
-    marshal
+    provider
         .subscribe_parent(child, bound)
         .map(move |parent| {
             let parent = parent?;
@@ -345,7 +345,7 @@ where
 #[pin_project]
 pub struct AncestorStream<M: BlockProvider, C: Clock> {
     buffered: Vec<Digested<M::Block>>,
-    marshal: M,
+    provider: M,
     bound: Option<Round>,
     fetch_duration: Timed,
     clock: Arc<C>,
@@ -355,7 +355,8 @@ pub struct AncestorStream<M: BlockProvider, C: Clock> {
 }
 
 impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
-    /// Creates a new [AncestorStream] starting from the given ancestry.
+    /// Creates a new [AncestorStream] starting from the given ancestry, fetching older blocks
+    /// from `provider` and recording each fetch's latency in `fetch_duration`.
     ///
     /// The stream requests each missing parent from the provider and ends if the fetched block
     /// does not have the height and digest its child names. Start only from blocks that are
@@ -370,9 +371,22 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous.
+    #[commonware_macros::stability(ALPHA)]
     pub fn new(
         clock: Arc<C>,
-        marshal: M,
+        provider: M,
+        initial: impl IntoIterator<Item = Digested<M::Block>>,
+        bound: Option<Round>,
+        fetch_duration: Timed,
+    ) -> Self {
+        Self::start(clock, provider, initial, bound, fetch_duration)
+    }
+
+    /// Creates a new [AncestorStream] as [`Self::new`] does, for callers in this crate at any
+    /// stability level.
+    pub(crate) fn start(
+        clock: Arc<C>,
+        provider: M,
         initial: impl IntoIterator<Item = Digested<M::Block>>,
         bound: Option<Round>,
         fetch_duration: Timed,
@@ -395,7 +409,7 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
         });
 
         Self {
-            marshal,
+            provider,
             buffered,
             bound,
             fetch_duration,
@@ -419,17 +433,17 @@ where
 {
     fn clone(&self) -> Self {
         let pending_child = self.pending_child.clone();
-        let marshal = self.marshal.clone();
+        let provider = self.provider.clone();
         let fetch_duration = self.fetch_duration.clone();
         let clock = self.clock.clone();
         let pending = pending_child
             .as_ref()
-            .map(|child| timed_parent_fetch(&clock, &marshal, child, self.bound, &fetch_duration))
+            .map(|child| timed_parent_fetch(&clock, &provider, child, self.bound, &fetch_duration))
             .into();
 
         Self {
             buffered: self.buffered.clone(),
-            marshal,
+            provider,
             bound: self.bound,
             fetch_duration,
             clock,
@@ -469,7 +483,7 @@ where
             if should_walk_parent && end_of_buffered {
                 let future = timed_parent_fetch(
                     this.clock,
-                    this.marshal,
+                    this.provider,
                     &block,
                     *this.bound,
                     this.fetch_duration,
@@ -515,7 +529,7 @@ where
                 if should_walk_parent {
                     let future = timed_parent_fetch(
                         this.clock,
-                        this.marshal,
+                        this.provider,
                         &block,
                         *this.bound,
                         this.fetch_duration,
@@ -704,7 +718,7 @@ mod test {
 
     fn stream<M>(
         context: &deterministic::Context,
-        marshal: M,
+        provider: M,
         initial: impl IntoIterator<Item = M::Block>,
     ) -> AncestorStream<M, deterministic::Context>
     where
@@ -714,7 +728,7 @@ mod test {
         let fetch_duration = timed(&stream_context);
         AncestorStream::new(
             Arc::new(stream_context),
-            marshal,
+            provider,
             initial.into_iter().map(digested),
             None,
             fetch_duration,

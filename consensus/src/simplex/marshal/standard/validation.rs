@@ -1,8 +1,8 @@
 use crate::{
     Application, Block, Epochable, Heightable,
+    ancestry::{AncestorStream, has_contiguous_height},
     simplex::{
         marshal::{
-            ancestry::{AncestorStream, has_contiguous_height},
             application::validation::{is_block_in_expected_epoch, is_valid_reproposal_at_verify},
             core::Mailbox,
             standard::Standard,
@@ -220,7 +220,7 @@ pub(super) async fn run_app_verify<E, S, A, B, T>(
 where
     E: Supervisor + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Codec,
 {
     let (parent_view, parent_commitment) = context.parent;

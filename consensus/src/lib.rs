@@ -137,12 +137,13 @@ stability_scope!(ALPHA, cfg(any(test, feature = "mocks")) {
     pub mod twins;
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
-    use crate::simplex::marshal::ancestry::Ancestry;
+    use crate::ancestry::Ancestry;
     use commonware_actor::Feedback;
-    use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
+    use commonware_cryptography::{Digest, PublicKey};
     use commonware_utils::channel::{fallible::OneshotExt, oneshot, ring};
     use std::future::Future;
 
+    pub mod ancestry;
     mod reporter;
     pub use reporter::*;
 
@@ -446,9 +447,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
     pub trait Application<E>: Clone + Send + 'static {
-        /// The signing scheme used by the application.
-        type SigningScheme: Scheme;
-
         /// Context is metadata provided by the consensus engine associated with a given payload.
         ///
         /// This often includes things like the proposer, view number, the height, or the epoch.
@@ -555,4 +553,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 });
 stability_scope!(ALPHA {
     pub mod aggregation;
+});
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+    pub mod marshal;
 });
