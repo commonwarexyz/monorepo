@@ -950,7 +950,6 @@ impl Tasks {
         let Some(mailbox) = task.mailbox.upgrade() else {
             return Err(task);
         };
-
         match mailbox.send(Message::Spawn(task)) {
             Ok(()) => Ok(()),
             Err(Message::Spawn(task)) => Err(task),
@@ -1193,12 +1192,12 @@ pub mod tests {
             .collect()
     }
 
+    /// The whole cell is aligned with `CachePadded`, and the header, which fits
+    /// one 64-byte line, shares the first line with the future. Where the unit
+    /// holds that line (128 bytes on x86_64 and aarch64), a small future and
+    /// its header take exactly one unit.
     #[test]
     fn test_cell_is_aligned_as_a_whole() {
-        // The whole cell is aligned with `CachePadded`, and the header, which
-        // fits one 64-byte line, shares the first line with the future. Where
-        // the unit holds that line (128 bytes on x86_64 and aarch64), a small
-        // future and its header take exactly one unit.
         type Small = Cell<std::future::Pending<()>>;
         assert!(std::mem::size_of::<Header>() <= 64);
         let unit = std::mem::align_of::<CachePadded<()>>();
@@ -1216,9 +1215,13 @@ pub mod tests {
         assert_send_sync::<Header>();
     }
 
+    /// Every waker and token counts a reference, and the last one frees the
+    /// cell.
     #[test]
     fn test_wakers_hold_references_until_the_cell_is_freed() {
         let mailbox = mailbox();
+
+        // A new task holds only its first token and one mailbox reference.
         let task = Task::new(pending::<()>(), Arc::downgrade(&mailbox));
         assert_eq!(refs(&task), 1);
         assert_eq!(Arc::weak_count(&mailbox), 1);
@@ -1249,6 +1252,8 @@ pub mod tests {
         assert_eq!(Arc::weak_count(&mailbox), 0);
     }
 
+    /// Duplicate wakes from a foreign thread deliver one token through the
+    /// mailbox.
     #[test]
     fn test_foreign_wakes_coalesce_into_one_token() {
         let mailbox = mailbox();
@@ -1292,6 +1297,8 @@ pub mod tests {
         assert!(!state.start_poll());
     }
 
+    /// Wakes during a pending poll requeue the polled token once, and wakes
+    /// during the final poll are discarded.
     #[test]
     fn test_wakes_during_poll_coalesce_into_one_requeue() {
         let drops = Arc::new(AtomicUsize::new(0));
@@ -1325,6 +1332,8 @@ pub mod tests {
         assert_eq!(refs(&task), 1);
     }
 
+    /// A panicking poll completes its task, and the freed slot is reused
+    /// without reaching the old task's waker.
     #[test]
     fn test_poll_panic_completes_the_task_and_frees_its_slot() {
         let drops = Arc::new(AtomicUsize::new(0));
@@ -1337,6 +1346,7 @@ pub mod tests {
         });
         let waker = Waker::clone(&first.waker());
 
+        // The panicking poll completes the task and drops its future.
         let AfterPoll::Retire(token) = tasks.pop().unwrap().poll() else {
             panic!("panicking poll must complete the task");
         };
@@ -1358,13 +1368,15 @@ pub mod tests {
         second.clear();
     }
 
+    /// A task registered from a thread without its worker travels through the
+    /// mailbox, and a closed or dropped mailbox returns it to the caller with
+    /// its future intact.
     #[test]
     fn test_foreign_registration_goes_through_the_mailbox() {
-        // A task registered from a thread without its worker travels through
-        // the mailbox, and a closed or dropped mailbox returns it to the caller
-        // with its future intact.
         let drops = Arc::new(AtomicUsize::new(0));
         let mailbox = mailbox();
+
+        // A foreign registration arrives as one spawn message.
         let task = Task::new(pending(), Arc::downgrade(&mailbox));
         assert!(Tasks::register(task.clone()).is_ok());
         let mut messages = Vec::new();
@@ -1402,6 +1414,8 @@ pub mod tests {
         rejected.clear();
     }
 
+    /// A wake whose mailbox is closed or gone releases its token instead of
+    /// leaking it.
     #[test]
     fn test_wake_to_a_closed_or_dropped_mailbox_releases_its_token() {
         let mut tasks = Tasks::default();
@@ -1428,10 +1442,10 @@ pub mod tests {
         }
     }
 
+    /// A future whose destructor wakes its own task finds it terminal, whether
+    /// teardown clears it or its final poll completes it.
     #[test]
     fn test_destructor_waking_its_own_task_publishes_nothing() {
-        // A future whose destructor wakes its own task finds it terminal,
-        // whether teardown clears it or its final poll completes it.
         for complete in [false, true] {
             let drops = Arc::new(AtomicUsize::new(0));
             let mailbox = mailbox();
@@ -1457,6 +1471,8 @@ pub mod tests {
         }
     }
 
+    /// Teardown detaches idle and queued tasks, drops each future once, and
+    /// leaves nothing to poll.
     #[test]
     fn test_clear_detaches_tasks_in_each_state() {
         let drops = Arc::new(AtomicUsize::new(0));
@@ -1486,6 +1502,7 @@ pub mod tests {
         assert_eq!(tasks.clear().count(), 0);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
 
+        // Clearing each detached task drops its future once, even when repeated.
         for task in &retired {
             task.clear();
             task.clear();
@@ -1509,11 +1526,10 @@ pub mod tests {
         }
     }
 
+    /// Teardown clearing a task mid-poll leaves the future to the poller, which
+    /// completes the task whether a wake arrived before or after the clear.
     #[test]
     fn test_clear_during_poll_is_finished_by_the_poller() {
-        // Teardown clearing a task mid-poll leaves the future to the poller,
-        // which completes the task whether a wake arrived before or after the
-        // clear.
         for wake_first in [false, true] {
             let drops = Arc::new(AtomicUsize::new(0));
             let mailbox = mailbox();
@@ -1539,6 +1555,8 @@ pub mod tests {
             });
             *cell.lock() = Some(task.clone());
 
+            // The poller completes the task and drops the future, and a later
+            // wake publishes nothing.
             let AfterPoll::Retire(token) = tasks.pop().unwrap().poll() else {
                 panic!("a task cleared during its poll must complete");
             };
@@ -1550,10 +1568,10 @@ pub mod tests {
         }
     }
 
+    /// The last two references, released at once on different threads, free the
+    /// cell exactly once, after its future was dropped exactly once.
     #[test]
     fn test_concurrent_final_releases_free_the_cell_once() {
-        // The last two references, released at once on different threads, free
-        // the cell exactly once, after its future was dropped exactly once.
         let drops = Arc::new(AtomicUsize::new(0));
         let mailbox = mailbox();
         let baseline = Arc::weak_count(&mailbox);
@@ -1573,6 +1591,7 @@ pub mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert_eq!(refs(&task), 2);
 
+        // Release both references at once on different threads.
         let barrier = Arc::new(Barrier::new(2));
         let releaser = thread::spawn({
             let barrier = barrier.clone();
@@ -1589,10 +1608,10 @@ pub mod tests {
         assert_eq!(Arc::weak_count(&mailbox), baseline);
     }
 
+    /// A waker left as the only reference to a completed task frees the cell
+    /// when `wake` consumes it.
     #[test]
     fn test_wake_by_value_frees_a_completed_task() {
-        // A waker left as the only reference to a completed task frees the cell
-        // when `wake` consumes it.
         let drops = Arc::new(AtomicUsize::new(0));
         let mailbox = mailbox();
         let baseline = Arc::weak_count(&mailbox);
@@ -1636,17 +1655,21 @@ pub mod tests {
             let outcome = tasks.pop().unwrap().poll();
 
             if complete {
+                // The ready future's destructor panics inside the poll.
                 let AfterPoll::Retire(token) = outcome else {
                     panic!("ready future must complete despite its destructor panic");
                 };
                 tasks.retire(token);
             } else {
+                // Teardown clears the idle task and contains its destructor panic.
                 assert!(matches!(outcome, AfterPoll::Done));
                 for retired in tasks.clear() {
                     assert!(Panics::contain(|| retired.clear()).is_none());
                 }
             }
 
+            // The future was dropped once, leaving the caller's and the
+            // waker's references.
             assert_eq!(drops.load(Ordering::Relaxed), 1);
             assert_eq!(refs(&task), 2);
             drop(task);
@@ -1658,11 +1681,11 @@ pub mod tests {
         }
     }
 
+    /// A future aligned beyond the cell's own alignment, which must not move
+    /// once pinned, is polled and dropped at one aligned address, whether it
+    /// completes or teardown clears it.
     #[test]
     fn test_over_aligned_future_is_polled_and_dropped_in_place() {
-        // A future aligned beyond the cell's own alignment, which must not move
-        // once pinned, is polled and dropped at one aligned address, whether it
-        // completes or teardown clears it.
         let align = std::mem::align_of::<OverAligned>();
         assert!(align > std::mem::align_of::<CachePadded<()>>());
         for complete in [true, false] {
@@ -1686,11 +1709,13 @@ pub mod tests {
                 tasks.push(scheduled(&mailbox).pop().unwrap());
             }
             if complete {
+                // The third poll completes the future, which drops in place.
                 let AfterPoll::Retire(token) = tasks.pop().unwrap().poll() else {
                     panic!("the third poll must complete");
                 };
                 tasks.retire(token);
             } else {
+                // Teardown drops the idle future in place.
                 for retired in tasks.clear() {
                     retired.clear();
                 }
@@ -1733,10 +1758,10 @@ mod loom_tests {
         state
     }
 
+    /// A wake racing the end of a pending poll transfers exactly one token,
+    /// regardless of which side wins the handoff.
     #[test]
     fn test_pending_wake_handoff_publishes_once() {
-        // A wake racing the end of a pending poll transfers exactly one token,
-        // regardless of which side wins the handoff.
         loom::model(|| {
             let state = Arc::new(registered());
             assert!(state.start_poll());
@@ -1754,10 +1779,10 @@ mod loom_tests {
         });
     }
 
+    /// A wake that gives up its reference, racing the end of a pending poll,
+    /// leaves exactly one token and the right count, whichever side wins.
     #[test]
     fn test_wake_by_value_racing_a_pending_poll_keeps_the_count() {
-        // A wake that gives up its reference, racing the end of a pending poll,
-        // leaves exactly one token and the right count, whichever side wins.
         loom::model(|| {
             // References: the polled token, the arena's, and the waker's.
             let state = Arc::new(registered());
@@ -1777,9 +1802,9 @@ mod loom_tests {
         });
     }
 
+    /// A wake racing a completing poll never publishes a token.
     #[test]
     fn test_ready_wake_handoff_never_publishes() {
-        // A wake racing a completing poll never publishes a token.
         loom::model(|| {
             let state = Arc::new(State::queued());
             assert!(state.start_poll());
@@ -1796,9 +1821,9 @@ mod loom_tests {
         });
     }
 
+    /// Two references released at once: exactly one release is the last.
     #[test]
     fn test_concurrent_releases_find_one_last() {
-        // Two references released at once: exactly one release is the last.
         loom::model(|| {
             let state = Arc::new(State::queued());
             state.retain();
@@ -1848,11 +1873,11 @@ mod loom_tests {
         });
     }
 
+    /// Teardown racing a poll never touches the future while the poller does,
+    /// and exactly one of them drops it: the poller if the clear saw the poll
+    /// running, the clear otherwise.
     #[test]
     fn test_clear_racing_a_poll_drops_the_future_once() {
-        // Teardown racing a poll never touches the future while the poller does,
-        // and exactly one of them drops it: the poller if the clear saw the poll
-        // running, the clear otherwise.
         loom::model(|| {
             let state = Arc::new(registered());
             let future = Arc::new(UnsafeCell::new(0_usize));
@@ -1895,9 +1920,9 @@ mod loom_tests {
         });
     }
 
+    /// A wake racing teardown of an idle task leaves no token that can poll it.
     #[test]
     fn test_wake_racing_clear_of_an_idle_task_leaves_nothing_to_poll() {
-        // A wake racing teardown of an idle task leaves no token that can poll it.
         loom::model(|| {
             let state = Arc::new(registered());
             assert!(state.start_poll());
@@ -1915,11 +1940,11 @@ mod loom_tests {
         });
     }
 
+    /// Every successful successor claim observes writes published before the
+    /// wake, including when the wake coalesces through a same-value exchange,
+    /// and a wake that has returned is never lost.
     #[test]
     fn test_wake_handoff_publishes_payload() {
-        // Every successful successor claim observes writes published before the
-        // wake, including when the wake coalesces through a same-value
-        // exchange, and a wake that has returned is never lost.
         loom::model(|| {
             let state = Arc::new(registered());
             let payload = Arc::new(AtomicUsize::new(0));
