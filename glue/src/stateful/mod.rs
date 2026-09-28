@@ -58,8 +58,7 @@
 //!
 //! With a persisted floor, [`Stateful`] runs [state sync](#state-sync). Without one, it _recovers_:
 //! before handling any message, it opens the databases at the later of marshal's processed height
-//! and the recorded completion height (genesis on a new node). While marshal is behind that height,
-//! finalized blocks at or below it are acknowledged without being applied again.
+//! and the recorded completion height (genesis on a new node).
 //!
 //! _Completion_ is recorded when state sync converges and on every recovery. Once it is recorded,
 //! peer state sync never runs on the node again.
@@ -102,12 +101,11 @@
 //!   acknowledges a redelivered block at or below the tip without repeating its effects and panics
 //!   on a block that skips heights. The startup floor is the only permitted jump, so a live marshal
 //!   floor must not leave an unapplied height below it.
-//! * During state sync, retained blocks are acknowledged before the databases reach them (see
-//!   [State Sync](#state-sync)). A crash then resumes state sync, from the block backing marshal's
-//!   processed height if marshal has passed the floor.
-//! * Following [Startup](#startup), the floor is durable before marshal starts from it. A crash
-//!   before completion resumes state sync from that floor, or from a newer selection, whether or
-//!   not state sync is requested. A lagging selection cannot move the floor backward.
+//! * During state sync, retained blocks are acknowledged before the databases reach them.
+//!   Following [Startup](#startup), the floor is durable before marshal starts from it, so a crash
+//!   before completion resumes [state sync](#state-sync) from that floor or from a newer
+//!   selection, whether or not state sync is requested. A lagging selection cannot move the floor
+//!   backward.
 //! * Completion is recorded only after the converged state and every applied handoff block are
 //!   durable, and before the databases are pruned or exposed.
 //!

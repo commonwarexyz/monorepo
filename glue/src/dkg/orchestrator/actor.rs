@@ -39,7 +39,7 @@ use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, v
 use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
-    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
@@ -92,9 +92,9 @@ where
 
 /// Simplex settings applied to every epoch engine.
 ///
-/// Fields other than the page cache settings are passed to the [`simplex::Config`]
-/// fields of the same name, which document their constraints. An invalid
-/// configuration panics when the orchestrator enters an epoch.
+/// Each field is passed to the [`simplex::Config`] field of the same name, which
+/// documents its constraints. An invalid configuration panics when the
+/// orchestrator enters an epoch.
 #[derive(Clone)]
 pub struct SimplexConfig<L> {
     /// Leader election configuration.
@@ -109,11 +109,8 @@ pub struct SimplexConfig<L> {
     /// Number of bytes to buffer when writing consensus journal blobs.
     pub write_buffer: NonZeroUsize,
 
-    /// Page size used by the consensus journal page cache.
-    pub page_cache_page_size: NonZeroU16,
-
-    /// Number of pages retained by the consensus journal page cache.
-    pub page_cache_pages: NonZeroUsize,
+    /// Page cache for the consensus journals.
+    pub page_cache: CacheRef,
 
     /// Time to wait for a leader proposal in a view.
     pub leader_timeout: Duration,
@@ -247,7 +244,6 @@ where
     blocks_per_epoch: NonZeroU64,
     muxer_size: usize,
     partition_prefix: String,
-    page_cache_ref: CacheRef,
     latest_epoch: Gauge,
     _payload: PhantomData<(DV, C)>,
 }
@@ -288,11 +284,6 @@ where
         config: Config<B, M, P, MV, DV, A, L, T>,
     ) -> (Self, Mailbox<MV::ApplicationBlock, ACK>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
-        let page_cache_ref = CacheRef::from_pooler(
-            &context,
-            config.simplex.page_cache_page_size,
-            config.simplex.page_cache_pages,
-        );
         let latest_epoch = context.gauge("latest_epoch", "current epoch");
 
         (
@@ -311,7 +302,6 @@ where
                 blocks_per_epoch: config.blocks_per_epoch,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
-                page_cache_ref,
                 latest_epoch,
                 _payload: PhantomData,
             },
@@ -737,7 +727,7 @@ where
                 floor,
                 replay_buffer: self.simplex.replay_buffer,
                 write_buffer: self.simplex.write_buffer,
-                page_cache: self.page_cache_ref.clone(),
+                page_cache: self.simplex.page_cache.clone(),
                 leader_timeout: self.simplex.leader_timeout,
                 certification_timeout: self.simplex.certification_timeout,
                 timeout_retry: self.simplex.timeout_retry,

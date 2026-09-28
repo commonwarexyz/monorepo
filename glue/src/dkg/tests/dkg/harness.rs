@@ -58,6 +58,8 @@ const EPOCH_LENGTH: NonZeroU64 = NZU64!(32);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16);
 const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
+const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
+const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
 const VOTES: u64 = 0;
@@ -242,6 +244,9 @@ impl EngineDefinition for DkgEngine {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: IO_BUFFER_SIZE,
                 replay_buffer: IO_BUFFER_SIZE,
+                mailbox_size: MAILBOX_SIZE,
+                muxer_size: 128,
+                items_per_section: ITEMS_PER_SECTION,
                 participants: self.participants_set(),
                 directory: Unit,
                 blocks_per_epoch: EPOCH_LENGTH,
@@ -465,6 +470,9 @@ pub(super) fn run_closed_network_receiver() {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: IO_BUFFER_SIZE,
                 replay_buffer: IO_BUFFER_SIZE,
+                mailbox_size: MAILBOX_SIZE,
+                muxer_size: 128,
+                items_per_section: ITEMS_PER_SECTION,
                 participants,
                 directory: Unit,
                 blocks_per_epoch: EPOCH_LENGTH,
@@ -542,6 +550,9 @@ pub(super) fn run_activation_failure_completes_empty() {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: IO_BUFFER_SIZE,
                 replay_buffer: IO_BUFFER_SIZE,
+                mailbox_size: MAILBOX_SIZE,
+                muxer_size: 128,
+                items_per_section: ITEMS_PER_SECTION,
                 participants: engine.participants_set(),
                 directory: Unit,
                 blocks_per_epoch: EPOCH_LENGTH,
@@ -771,6 +782,9 @@ where
             page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
+            mailbox_size: MAILBOX_SIZE,
+            muxer_size: 128,
+            items_per_section: ITEMS_PER_SECTION,
             participants: engine.participants_set(),
             directory: Unit,
             blocks_per_epoch: EPOCH_LENGTH,

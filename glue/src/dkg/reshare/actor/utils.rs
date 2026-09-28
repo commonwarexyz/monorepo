@@ -58,6 +58,7 @@ pub(super) async fn new_actor(
             sharing_mode: Mode::NonZeroCounter,
             reveal: Reveal::V1,
             mailbox_size: NZUsize!(16),
+            muxer_size: 16,
             partition_prefix: format!("{partition_prefix}-actor"),
             page_cache: mocks::page_cache(&context),
             write_buffer: mocks::IO_BUFFER,

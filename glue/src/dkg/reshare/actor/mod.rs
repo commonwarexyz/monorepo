@@ -163,6 +163,9 @@ where
     /// Actor mailbox capacity.
     pub mailbox_size: NonZeroUsize,
 
+    /// Maximum number of messages to buffer in the dealing channel muxer.
+    pub muxer_size: usize,
+
     /// Prefix of the recovery journal's storage partition.
     pub partition_prefix: String,
 
@@ -221,6 +224,7 @@ where
     namespace: &'static [u8],
     sharing_mode: SharingMode,
     reveal: Reveal,
+    muxer_size: usize,
     partition_prefix: String,
     page_cache: CacheRef,
     write_buffer: NonZeroUsize,
@@ -276,6 +280,7 @@ where
                 namespace: config.namespace,
                 sharing_mode: config.sharing_mode,
                 reveal: config.reveal,
+                muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 page_cache: config.page_cache,
                 write_buffer: config.write_buffer,
@@ -340,7 +345,8 @@ where
         )
         .await;
 
-        let (mux, mut dealing_mux) = Muxer::new(self.context.child("mux"), sender, receiver, 128);
+        let (mux, mut dealing_mux) =
+            Muxer::new(self.context.child("mux"), sender, receiver, self.muxer_size);
         mux.start();
 
         let recovered_epoch = state_sync::recovered_epoch(&self.marshal, &self.epocher).await;

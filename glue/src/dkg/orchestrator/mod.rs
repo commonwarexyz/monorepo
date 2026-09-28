@@ -49,12 +49,10 @@
 //! ```
 //!
 //! Once started, the orchestrator requires marshal to deliver every finalized
-//! block above the latest one it acknowledged in height order. It acknowledges a
-//! redelivered block without repeating its effects. A block above the active
-//! epoch's final block means marshal skipped that final block, and the
-//! orchestrator panics. The startup state-sync floor is the only permitted jump,
-//! so a live marshal floor must not leave a height below it that the
-//! orchestrator has not acknowledged.
+//! block above the latest one it acknowledged in height order. It acknowledges
+//! a redelivered block without repeating its effects. The startup state-sync
+//! floor is the only permitted jump, so a live marshal floor must not leave a
+//! height below it that the orchestrator has not acknowledged.
 //!
 //! # Marshal Boundary
 //!
@@ -87,8 +85,7 @@
 //!
 //! [`Config`] connects the actor to marshal, the application, the scheme
 //! [`Provider`], and the network. [`SimplexConfig`] holds the per-epoch Simplex
-//! settings, which callers must provide explicitly rather than relying on hidden
-//! defaults.
+//! settings.
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 //! [`state_sync::Plan`]: crate::dkg::state_sync::Plan
@@ -431,7 +428,7 @@ mod tests {
                     marshal: marshal.clone(),
                     application: application.clone(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(),
+                    simplex: mocks::simplex_config(&context),
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
@@ -794,7 +791,7 @@ mod tests {
                     marshal: marshal.clone(),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(),
+                    simplex: mocks::simplex_config(&context),
                     gate,
                     state_sync: StateSyncPlan::disabled(),
                     blocks_per_epoch: NZU64!(2),
@@ -1091,7 +1088,7 @@ mod tests {
                     marshal: marshal.clone(),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(),
+                    simplex: mocks::simplex_config(&context),
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),

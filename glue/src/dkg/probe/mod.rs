@@ -207,9 +207,7 @@ where
     /// Highest finalization from the `f + 1` peer sample.
     ///
     /// This is the sampled state-sync floor, at least as recent as the freshest
-    /// honest reply in the sample. A node resuming a persisted [`Config::floor`]
-    /// should keep whichever floor is newer: [`Artifact::info`] describes the
-    /// epoch of the newer one.
+    /// honest reply in the sample.
     pub floor: Finalization<S, D>,
 }
 

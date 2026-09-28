@@ -150,11 +150,11 @@
 //!
 //! # State Sync
 //!
-//! Reshare supports application state sync. A certified floor at or before an
-//! epoch's midpoint preserves the complete dealer-log inclusion window, so the
-//! actor can participate in that epoch. A floor after the midpoint has skipped
-//! part of that history, so the actor follows the reshare ceremony for the
-//! remainder of the epoch and resumes at the next boundary.
+//! A certified floor at or before an epoch's midpoint preserves the complete
+//! dealer-log inclusion window, so the actor can participate in that epoch. A
+//! floor after the midpoint has skipped part of that history, so the actor
+//! follows the reshare ceremony for the remainder of the epoch and resumes at
+//! the next boundary.
 //!
 //! State-sync startup registers the certified current-epoch consensus scheme
 //! before entering follower mode. A follower with a recovered share may sign

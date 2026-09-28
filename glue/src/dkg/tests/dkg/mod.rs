@@ -100,9 +100,8 @@ fn dkg_e2e_scheduled_restart() {
 }
 
 /// Random crashes can restart a participant that already persisted its
-/// epoch-zero share, including one that completed. The dedicated restart tests
-/// pin that path. This test runs over a seed range to try several crash
-/// schedules.
+/// epoch-zero share, including one that completed, and every participant still
+/// completes.
 #[test_group("slow")]
 #[test_traced("INFO")]
 fn dkg_e2e_random_crashes() {

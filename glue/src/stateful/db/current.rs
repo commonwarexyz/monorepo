@@ -1812,7 +1812,7 @@ mod tests {
             assert_eq!(
                 recovered == applied,
                 written,
-                "write buffer geometry no longer selects this case's history"
+                "write buffer geometry does not select this case's history"
             );
             drop(db);
 

@@ -226,8 +226,8 @@ where
     ///
     /// Returns `None` if no log is available (when this node does not deal this
     /// epoch, outside the inclusion window, while an earlier reservation is
-    /// outstanding, or once the log is included) or if the actor has stopped. See [`Message::NextLog`] for reservation
-    /// behavior.
+    /// outstanding, or once the log is included) or if the actor has stopped.
+    /// See [`Message::NextLog`] for reservation behavior.
     pub async fn next_log(&mut self, height: Height) -> Option<LogReservation<B, V, C, A>> {
         let (response_tx, response_rx) = oneshot::channel();
         let span = info_span!("dkg.reshare.mailbox.next_log", height = height.traced());

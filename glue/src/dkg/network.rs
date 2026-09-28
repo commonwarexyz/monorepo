@@ -4,8 +4,7 @@
 //! message. Transports that need more than a public key to dial a peer (like
 //! [`commonware_p2p::authenticated::lookup`]) use an epoch-scoped [`Directory`]
 //! carried in-band by [`EpochInfo`]: the final block of each epoch embeds the
-//! next epoch's directory, so the artifact that names the committee also says
-//! how to reach it.
+//! next epoch's directory.
 //!
 //! Activation never consults application state: [`Manager::track`] receives
 //! only an epoch's peer set and the directory embedded in its [`EpochInfo`].

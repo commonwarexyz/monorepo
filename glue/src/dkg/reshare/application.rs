@@ -43,13 +43,12 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
 /// Proposals from the midpoint onward carry this node's dealer log when one is
 /// available, and the final block carries the payload returned by
 /// [`Mailbox::epoch_info`]. No block is proposed at the final height when the
-/// actor cannot supply that payload. The inner application must include
-/// [`Input::payload`] in the block it builds. It does not need to call the
-/// reshare [`Mailbox`] or track epoch boundaries.
+/// actor cannot supply that payload. The inner application does not need to
+/// call the reshare [`Mailbox`] or track epoch boundaries.
 ///
-/// [`Application`] is itself a consensus application, so it composes with any
-/// other, including one adapted through [`stateful`](crate::stateful). It
-/// forwards its own input to the inner application as [`Input::upstream`].
+/// The inner application may be one adapted through
+/// [`stateful`](crate::stateful). [`Application`] forwards its own input to the
+/// inner application as [`Input::upstream`].
 pub struct Application<A, B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,

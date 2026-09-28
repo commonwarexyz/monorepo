@@ -4,9 +4,9 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
-        DKG_CHANNEL, IO_BUFFER_SIZE, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition,
-        RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
+        DKG_CHANNEL, IO_BUFFER_SIZE, ITEMS_PER_SECTION, MAILBOX_SIZE, MAX_MESSAGE_SIZE,
+        MAX_SUPPORTED_MODE, MESSAGE_RATE, MUXER_SIZE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE,
+        Participants, Partition, RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
     },
     validator,
 };
@@ -91,6 +91,9 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
+            mailbox_size: MAILBOX_SIZE,
+            muxer_size: MUXER_SIZE,
+            items_per_section: ITEMS_PER_SECTION,
             participants: participants.get(Epoch::zero()),
             directory: Unit,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
@@ -128,8 +131,7 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     );
 
     // Keep serving the one-shot chain so participants that have not completed
-    // can catch up. Stop every `bootstrap` process only after each one has
-    // logged "bootstrap complete".
+    // can catch up.
     if let Err(err) = Handle::select([p2p_handle, engine_handle]).await {
         error!(?err, "bootstrap task failed");
     }
@@ -138,8 +140,6 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
 /// Write `genesis` into every sibling validator directory that belongs to
 /// `network`, except those of players other than `local`, or into `node_dir`
 /// alone when none are found.
-///
-/// A player's directory gets `genesis.json` only from that player's own `bootstrap`.
 fn write_genesis_to_sibling_validators(
     node_dir: &Path,
     local: &PublicKey,

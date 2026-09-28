@@ -49,9 +49,8 @@ data/
 
 `node.json` contains the node's Ed25519 signing key and listen/dial addresses.
 `network.json` contains the ordered participant list, fixed committee size, and
-peer dial addresses. `genesis.json` is written by `bootstrap` and then consumed
-by `validator`. `runtime/` is the Commonware storage root for all blob
-partitions used by that node.
+peer dial addresses. `genesis.json` contains the epoch-0 `EpochInfo`. `runtime/`
+is the Commonware storage root for all blob partitions used by that node.
 
 Private DKG material lives in two partitions of `runtime/`. `bootstrap` keeps
 its share, dealer seed, and received dealings in `bootstrap-secrets`. When the
@@ -65,9 +64,9 @@ Committees rotate deterministically: for epoch `E`, the committee starts at
 offset `E % participants.len()` and takes `committee_size` consecutive
 participants with wraparound.
 
-The application state is intentionally tiny: one `any::unordered::fixed` QMDB,
-one fixed key, and each non-genesis block writes its height to that key. Genesis
-carries the epoch-0 `EpochInfo`.
+The application state is one `any::unordered::fixed` QMDB with one fixed key,
+and each non-genesis block writes its height to that key. Genesis carries the
+epoch-0 `EpochInfo`.
 
 ## State Sync
 
@@ -83,8 +82,3 @@ continues from its local blocks, so keeping the flag on restarts is harmless.
 
 A player that misses its private dealings cannot recover them by syncing. The
 ceremony completes without it and publicly reveals its share.
-
-## Limits
-
-Generated data from older versions of this example is not migrated. Recreate the
-`data/validator-*` directories when switching to this glue-based example.

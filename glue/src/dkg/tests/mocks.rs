@@ -765,14 +765,15 @@ fn archive_config<C>(
     }
 }
 
-pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
+pub(crate) fn simplex_config(
+    context: &impl BufferPooler,
+) -> orchestrator::SimplexConfig<TestElector> {
     orchestrator::SimplexConfig {
         elector: TestElector::default(),
         mailbox_size: NZUsize!(16),
         replay_buffer: NZUsize!(1024),
         write_buffer: NZUsize!(1024),
-        page_cache_page_size: NZU16!(1024),
-        page_cache_pages: NZUsize!(8),
+        page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
         leader_timeout: Duration::from_millis(100),
         certification_timeout: Duration::from_millis(200),
         timeout_retry: Duration::from_millis(500),

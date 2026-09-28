@@ -51,7 +51,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
-    NZU32, NZU64, NZUsize, TryCollect,
+    NZU32, NZUsize, TryCollect,
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
     sequence::Unit,
@@ -63,9 +63,6 @@ use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     time::Duration,
 };
-
-const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
-const ARCHIVE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 
 type ConsensusScheme = simplex::scheme::ed25519::Scheme;
 
@@ -115,6 +112,16 @@ pub struct Config<M, X, SS, T, D = Unit> {
 
     /// Number of bytes to buffer when replaying the one-shot chain's storage during startup.
     pub replay_buffer: NonZeroUsize,
+
+    /// Maximum number of messages to buffer in each of the engine's mailboxes.
+    pub mailbox_size: NonZeroUsize,
+
+    /// Maximum number of messages to buffer in the DKG channel muxer.
+    pub muxer_size: usize,
+
+    /// Number of finalized blocks and certificates per archive section (the granularity of
+    /// pruning).
+    pub items_per_section: NonZeroU64,
 
     /// Participants in the DKG.
     pub participants: Set<ed25519::PublicKey>,
@@ -408,6 +415,7 @@ where
         let page_cache = self.config.page_cache;
         let write_buffer = self.config.write_buffer;
         let replay_buffer = self.config.replay_buffer;
+        let items_per_section = self.config.items_per_section;
         let public_key = self.config.signer.public_key();
         let consensus_namespace = [self.config.namespace, b"_INITIAL_CONSENSUS"].concat();
         let scheme = ConsensusScheme::signer(
@@ -430,7 +438,7 @@ where
             context.child("buffer"),
             buffered::Config {
                 public_key: public_key.clone(),
-                mailbox_size: MAILBOX_SIZE,
+                mailbox_size: self.config.mailbox_size,
                 deque_size: 16,
                 priority: false,
                 codec_config: block_codec_config,
@@ -445,7 +453,7 @@ where
                 public_key: public_key.clone(),
                 peer_provider: self.config.manager.clone(),
                 blocker: self.config.blocker.clone(),
-                mailbox_size: MAILBOX_SIZE,
+                mailbox_size: self.config.mailbox_size,
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -462,6 +470,7 @@ where
                 page_cache.clone(),
                 write_buffer,
                 replay_buffer,
+                items_per_section,
                 ConsensusScheme::certificate_codec_config_unbounded(),
             ),
         )
@@ -475,6 +484,7 @@ where
                 page_cache.clone(),
                 write_buffer,
                 replay_buffer,
+                items_per_section,
                 block_codec_config,
             ),
         )
@@ -490,9 +500,9 @@ where
                 epocher: FixedEpocher::new(self.config.blocks_per_epoch),
                 start: Start::Genesis(genesis.clone().into()),
                 partition_prefix: format!("{}-marshal", self.config.partition_prefix),
-                mailbox_size: MAILBOX_SIZE,
+                mailbox_size: self.config.mailbox_size,
                 view_retention: ViewDelta::new(10),
-                prunable_items_per_section: ARCHIVE_ITEMS_PER_SECTION,
+                prunable_items_per_section: items_per_section,
                 page_cache: page_cache.clone(),
                 replay_buffer,
                 key_write_buffer: write_buffer,
@@ -540,7 +550,8 @@ where
                 namespace: self.config.namespace,
                 sharing_mode: self.config.sharing_mode,
                 reveal: self.config.reveal,
-                mailbox_size: MAILBOX_SIZE,
+                mailbox_size: self.config.mailbox_size,
+                muxer_size: self.config.muxer_size,
                 partition_prefix: format!("{}-reshare", self.config.partition_prefix),
                 page_cache: page_cache.clone(),
                 write_buffer,
@@ -580,7 +591,7 @@ where
                 reporter: marshal_mailbox.clone(),
                 strategy: self.config.strategy,
                 partition: format!("{}-simplex", self.config.partition_prefix),
-                mailbox_size: MAILBOX_SIZE,
+                mailbox_size: self.config.mailbox_size,
                 epoch: Epoch::zero(),
                 floor: Floor::Genesis(genesis.digest()),
                 replay_buffer,
@@ -704,6 +715,7 @@ fn archive_config<C>(
     page_cache: CacheRef,
     write_buffer: NonZeroUsize,
     replay_buffer: NonZeroUsize,
+    items_per_section: NonZeroU64,
     codec_config: C,
 ) -> prunable::Config<TwoCap, C> {
     prunable::Config {
@@ -714,7 +726,7 @@ fn archive_config<C>(
         value_partition: format!("{prefix}-{name}-value"),
         compression: None,
         codec_config,
-        items_per_section: ARCHIVE_ITEMS_PER_SECTION,
+        items_per_section,
         key_write_buffer: write_buffer,
         value_write_buffer: write_buffer,
         replay_buffer,
@@ -726,7 +738,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::bls12381::primitives::variant::MinPk;
     use commonware_runtime::{Runner, deterministic};
-    use commonware_utils::NZU16;
+    use commonware_utils::{NZU16, NZU64};
 
     #[test]
     #[should_panic(expected = "sharing mode must be supported by max supported mode")]
@@ -747,6 +759,9 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(1)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
+                mailbox_size: NZUsize!(16),
+                muxer_size: 16,
+                items_per_section: NZU64!(10),
                 participants: Set::default(),
                 directory: Unit,
                 blocks_per_epoch: NZU64!(1),

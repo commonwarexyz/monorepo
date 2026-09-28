@@ -43,8 +43,7 @@
 //! contract.
 //!
 //! The application also supplies a [`SecretStore`], a [`ParticipantsProvider`], and a
-//! [`Registrar`]. Secret storage is application-owned because deployments differ on
-//! encryption, access control, hardware isolation, backups, and pruning.
+//! [`Registrar`].
 //!
 //! # State Sync
 //!
@@ -81,9 +80,7 @@
 //! A player that missed private dealings may need public reveals to recover its share
 //! and must treat a revealed share as public. To keep its share private, a future player
 //! should state sync while it is still a next player and be online before the epoch's
-//! dealing window. This timing lets a [`ParticipantsProvider`] be backed by chain state
-//! (for example, a staking contract): the chain announces future players an epoch before
-//! their shares are needed.
+//! dealing window.
 //!
 //! # Peer Activation
 //!
@@ -91,8 +88,7 @@
 //! that need more than a public key to dial a peer read the [`network::Directory`] that
 //! each [`types::EpochInfo`] carries. The directory is agreed as part of the artifact, so
 //! activation never consults application state: restart, state sync, and uninterrupted
-//! operation activate an epoch's peers from the same finalized artifact, without an
-//! out-of-band registry.
+//! operation activate an epoch's peers from the same finalized artifact.
 //!
 //! Peers are activated through a [`network::Manager`]:
 //!
