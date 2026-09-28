@@ -277,10 +277,10 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    if let Some(Applied { prune, .. }) = processor
-                        .finalize(self.context.as_present(), block.as_ref(), false)
-                        .await
-                    {
+                    if !processor.redelivered(block.as_ref()) {
+                        let Applied { prune, .. } = processor
+                            .finalize(self.context.as_present(), block.as_ref(), false)
+                            .await;
                         pending_prune = prune.or(pending_prune);
                         completed_height = block.height();
                     }

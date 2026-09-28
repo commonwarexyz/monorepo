@@ -77,9 +77,9 @@
 //! be retried or recovered locally, but dealer logs and epoch artifacts affect
 //! durable protocol state only once they are finalized:
 //!
-//! - Upon a finalized inclusion-window block carrying a valid dealer log from
-//!   one of the epoch's dealers, record the log. Each dealer's earliest valid
-//!   log counts, and invalid logs are ignored.
+//! - Record the first correctly signed log per signer from finalized inclusion-window
+//!   blocks. During resharing, ignore non-dealers before recording. Ceremony verification
+//!   excludes non-dealers and unusable logs.
 //! - Upon the finalized final block of an epoch, commit its
 //!   [`EpochInfo`](crate::dkg::types::EpochInfo) and register the next epoch's
 //!   signer or verifier scheme. A participating node keeps the share it derived
@@ -179,13 +179,12 @@
 //! If neither is available locally, the actor follows that epoch.
 //!
 //! A player records a dealing before acknowledging it. Before acknowledging a
-//! finalized inclusion-window block, a participating actor records any valid
-//! dealer log it carries from one of the epoch's dealers and, at an epoch's
-//! final block, stores the next epoch's share and dealer seed. A dealer
-//! reuses its persisted seed, so dealings regenerated after a restart match
-//! those sent before it. A node missing its share does not deal, and a node
-//! missing a private dealing that a finalized log acknowledges continues the
-//! epoch without its player role.
+//! finalized inclusion-window block, a participating actor records any dealer log
+//! it accepts and, at an epoch's final block, stores the next epoch's share and
+//! dealer seed. A dealer reuses its persisted seed, so dealings regenerated after
+//! a restart match those sent before it. A node missing its share does not deal,
+//! and a node missing a private dealing that a finalized log acknowledges
+//! continues the epoch without its player role.
 //!
 //! Within a run, the actor has _applied_ every finalized block at or below the
 //! latest one it acknowledged, its _applied tip_. At startup it treats

@@ -987,11 +987,10 @@ where
         );
     }
 
-    /// Durably records a valid dealer log carried by a finalized block.
+    /// Durably records a correctly signed log carried by a finalized block.
     ///
-    /// Block validity does not check dealer logs, so a finalized block may carry
-    /// an invalid log, which is ignored. Once a current epoch is committed, logs
-    /// from outside its dealer set are ignored too. Once this node's own log is
+    /// Block validity does not check dealer logs. Invalid signatures and,
+    /// during resharing, non-dealers are ignored. Once this node's own log is
     /// observed, `dealer` drops its signed log.
     pub(super) async fn observe_dealer_log(
         public_key: &C::PublicKey,

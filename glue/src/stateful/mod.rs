@@ -74,9 +74,10 @@
 //! (see [`Application::finalized`]). An interrupted database barrier leaves its blocks unacknowledged.
 //!
 //! Marshal must deliver every finalized block above the applied tip in height order. Redelivered
-//! blocks are acknowledged without repeating their effects. Blocks above the tip must extend it
-//! by one height or [`Stateful`] panics. Only the startup floor may skip heights, so advancing a
-//! live marshal floor must not skip unapplied blocks.
+//! blocks are acknowledged without repeating their effects. Blocks above the tip must have the
+//! next height and name the tip as their parent, or [`Stateful`] panics. A conflicting block at
+//! the tip's height also panics. Only the startup floor may skip heights, so advancing a live
+//! marshal floor must not skip unapplied blocks.
 //!
 //! # Lazy Recovery
 //!
@@ -92,8 +93,9 @@
 //! # Failures
 //!
 //! [`Stateful`] panics on invalid proposal state, on a finalized block that cannot be executed
-//! or reproduced, on noncontiguous marshal delivery, and on state sync, storage, or metadata
-//! failures. A block needed for startup must be available from marshal. See [database
+//! or reproduced, on skipped heights, on a successor whose parent is not the applied tip, or
+//! on a conflicting block at the tip's height. It also panics on state sync, storage, or metadata
+//! failures, or if marshal cannot return a block needed for startup. See [database
 //! failures](db#failures) for the storage contract.
 //!
 //! # Compatibility

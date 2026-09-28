@@ -37,6 +37,8 @@
 //! [`probe`] discovers a finalized floor together with its epoch's [`types::EpochInfo`].
 //! Pass any persisted floor through [`probe::Config::floor`] so discovery cannot select
 //! epoch info older than the floor the node will use.
+//! Start from the later of the persisted floor and [`probe::Artifact::floor`], ordered by
+//! round, and pair it with [`probe::Artifact::info`].
 //!
 //! Before starting the actors, initialize one [`state_sync::Plan`] under a stable partition
 //! prefix and clone it into the reshare and orchestrator configurations. It persists the
@@ -58,6 +60,10 @@
 //! with the transport data needed to reach its participants. [`network::Manager`] activates
 //! peers from that artifact during normal operation, restart, and state sync. Bootstrap and
 //! probe activate their configured peer snapshots.
+//!
+//! The P2P adapters use the epoch as the peer-set ID. New sets must advance the ID;
+//! repeated IDs keep the existing peers and directory. Bootstrap uses epoch zero,
+//! including on restart.
 //!
 //! # Marshal Delivery
 //!

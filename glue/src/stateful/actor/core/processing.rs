@@ -441,8 +441,7 @@ where
                                     block.as_ref(),
                                     durability.barrier.is_none(),
                                 ))
-                                .await
-                                .expect("finalized block above the applied height must apply");
+                                .await;
                             debug!(
                                 height = block.height().get(),
                                 "applied finalized database batch"

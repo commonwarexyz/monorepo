@@ -872,36 +872,23 @@ where
         block.height() <= processed.height
     }
 
-    /// Applies the finalized `block` and discards cached state that does not descend from it.
+    /// Applies the next finalized `block` and discards cached state that does not descend from it.
     ///
-    /// Returns `None` without side effects if `block` is the processed anchor (a duplicate
-    /// report). Otherwise returns the prune that became due, if any, and, if `start_barrier` is
-    /// set, a barrier covering `block` and every earlier applied block. The processed anchor
-    /// advances to `block` after the application's `finalized` hook returns.
+    /// Returns the prune that became due, if any, and, if `start_barrier` is set, a barrier covering
+    /// `block` and every earlier applied block. The processed anchor advances to `block` after the
+    /// application's `finalized` hook returns.
     ///
-    /// Panics if `block` is below the processed height, if it conflicts with the processed anchor
-    /// at the same height, if it skips a height above the processed anchor, if its parent is not
-    /// the processed anchor, or if an uncached `block` fails to execute or to match its
-    /// commitments.
+    /// Panics if `block` does not have the next height and the processed anchor as its parent,
+    /// or if an uncached block fails to execute or match its commitments.
     pub(super) async fn finalize(
         &mut self,
         context: &E,
         block: &A::Block,
         start_barrier: bool,
-    ) -> Option<Applied<SyncTargets<A, E>>> {
+    ) -> Applied<SyncTargets<A, E>> {
         let finalized = Anchor::from(block);
         let (height, digest) = (finalized.height, finalized.digest);
         let processed = self.execution.processed();
-        if height < processed.height {
-            panic!(
-                "received finalized block below processed height: finalized={} processed={}",
-                height.get(),
-                processed.height.get(),
-            );
-        }
-        if self.redelivered(block) {
-            return None;
-        }
         assert_eq!(
             height,
             processed.height.next(),
@@ -993,7 +980,7 @@ where
         self.execution.set_processed(finalized);
         timer.observe(context);
 
-        Some(Applied { barrier, prune })
+        Applied { barrier, prune }
     }
 
     fn cache_pending(&self, digest: BlockDigest<A, E>, entry: PendingEntry<A, E>) -> bool {
@@ -2244,18 +2231,18 @@ mod tests {
             block
         }
 
-        /// Finalize `block` and wait for its database barrier.
-        /// Returns whether the block was newly applied (`false` for a
-        /// duplicate report).
+        /// Applies `block` and waits for its database barrier.
+        ///
+        /// Returns `false` without applying redelivered blocks.
         #[boxed]
         async fn finalize(&mut self, block: Block) -> bool {
-            let Some(Applied { barrier, .. }) = self
+            if self.processor.redelivered(&block) {
+                return false;
+            }
+            let Applied { barrier, .. } = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block, true)
-                .await
-            else {
-                return false;
-            };
+                .await;
             assert_durable(barrier).await;
             true
         }
@@ -2272,8 +2259,7 @@ mod tests {
             let Applied { barrier, prune } = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block, true)
-                .await
-                .expect("finalized block must apply");
+                .await;
             assert_durable(barrier).await;
             prune
         }
@@ -2605,9 +2591,7 @@ mod tests {
             release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize
-                .await
-                .expect("finalized block should be newly applied");
+            let Applied { barrier, .. } = finalize.await;
             assert_durable(barrier).await;
         });
     }
@@ -2640,9 +2624,7 @@ mod tests {
             assert!(forked.is_ok(), "finalizing winner should remain forkable");
 
             drop(read);
-            let Applied { barrier, .. } = finalize
-                .await
-                .expect("finalized block should be newly applied");
+            let Applied { barrier, .. } = finalize.await;
             assert_durable(barrier).await;
         });
     }
@@ -2693,9 +2675,7 @@ mod tests {
             release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize
-                .await
-                .expect("finalized block should be newly applied");
+            let Applied { barrier, .. } = finalize.await;
             assert_durable(barrier).await;
 
             assert!(execution.cache_pending(
@@ -2799,9 +2779,7 @@ mod tests {
             finalized_release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize
-                .await
-                .expect("finalized block should be newly applied");
+            let Applied { barrier, .. } = finalize.await;
             assert_durable(barrier).await;
         });
     }
@@ -2886,9 +2864,7 @@ mod tests {
             finalized_release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize
-                .await
-                .expect("finalized block should be newly applied");
+            let Applied { barrier, .. } = finalize.await;
             assert_durable(barrier).await;
             assert!(matches!(
                 observations.lock().as_slice(),
@@ -2948,9 +2924,7 @@ mod tests {
             assert_eq!(owner.await, Err(PrepareBatchesError::Cancelled));
             owner_release.closed().await;
 
-            let Applied { barrier, .. } = finalize
-                .await
-                .expect("finalized block should be newly applied");
+            let Applied { barrier, .. } = finalize.await;
             assert_durable(barrier).await;
             assert_eq!(
                 probe.calls(),
@@ -3015,9 +2989,7 @@ mod tests {
                 Ok(()),
                 "retained waiter should join recovery of the finalizing winner",
             );
-            let Applied { barrier, .. } = finalize
-                .await
-                .expect("finalized block should be newly applied");
+            let Applied { barrier, .. } = finalize.await;
             assert_durable(barrier).await;
             assert_eq!(probe.calls(), 1, "winner should be reconstructed once");
             assert_eq!(harness.processor.processed().digest, winner.digest());
@@ -3082,9 +3054,7 @@ mod tests {
             release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize
-                .await
-                .expect("finalized block should be newly applied");
+            let Applied { barrier, .. } = finalize.await;
             assert_durable(barrier).await;
         });
     }
@@ -3170,9 +3140,7 @@ mod tests {
             finalized_release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize
-                .await
-                .expect("finalized block should be newly applied");
+            let Applied { barrier, .. } = finalize.await;
             assert_durable(barrier).await;
         });
     }
