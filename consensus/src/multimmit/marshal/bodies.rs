@@ -5,10 +5,12 @@ use super::{
     storage::catalog::StoredRef,
     types::BodyValues,
 };
-use crate::multimmit::{
-    marshal::OutputIndex,
-    scheme::Scheme,
-    types::{BlockRef, Body, ChainId, TransactionBlock},
+use crate::{
+    multimmit::{
+        scheme::Scheme,
+        types::{BlockRef, Body, ChainId, TransactionBlock},
+    },
+    types::OutputIndex,
 };
 use commonware_cryptography::Hasher;
 use std::sync::Arc;

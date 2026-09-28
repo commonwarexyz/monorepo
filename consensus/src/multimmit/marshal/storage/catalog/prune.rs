@@ -3,14 +3,11 @@
 use super::CatalogStore;
 use crate::{
     multimmit::{
-        marshal::{
-            OutputIndex,
-            storage::{Error, pending::ChainFloors},
-        },
+        marshal::storage::{Error, pending::ChainFloors},
         scheme::Scheme,
         types::{BlockRef, Body, ChainId, Frontier},
     },
-    types::Height,
+    types::{Height, OutputIndex},
 };
 use commonware_cryptography::Hasher;
 use commonware_storage::{Context, translator::Translator};

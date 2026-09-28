@@ -11,7 +11,6 @@ use crate::{
     Viewable as _,
     multimmit::{
         marshal::{
-            OutputIndex,
             actors::metrics,
             config::Retention,
             protocol::{order::HistoryState, paths::PathCache},
@@ -22,7 +21,7 @@ use crate::{
         scheme::Scheme,
         types::{BlockRef, Body, CertificateId, CodecConfig, TransactionBlockHeader},
     },
-    types::{Epoch, View},
+    types::{Epoch, OutputIndex, View},
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::Hasher;
