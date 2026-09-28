@@ -8,7 +8,7 @@ use crate::stateful::{
     db::DatabaseSet,
 };
 use commonware_consensus::{
-    Heightable, Roundable,
+    CertifiableBlock, Heightable, Roundable,
     marshal::{
         ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
@@ -143,13 +143,6 @@ where
         };
         let block_digest = block.digest();
 
-        // A replayed state is not a verdict, so only locally built or verified blocks skip
-        // execution.
-        if self.execution.pending_verified(&block_digest) {
-            timer.observe(context);
-            return VerificationResult::Decided(true);
-        }
-
         // Each iteration classifies the candidate against the canonical chain,
         // then executes it. A stale or invalid-looking attempt means a
         // finalization landed mid-attempt, and re-classifying answers correctly
@@ -157,6 +150,13 @@ where
         // competitor. Each retry consumes an anchor move, so the loop is
         // bounded.
         loop {
+            // A replayed state is not a verdict, so only locally built or verified blocks skip
+            // execution. A concurrent request may have verified the candidate since the last
+            // attempt.
+            if self.execution.pending_verified(&block_digest) {
+                timer.observe(context);
+                return VerificationResult::Decided(true);
+            }
             let seen = self.execution.processed();
 
             // A finalized candidate cannot be re-executed against newer database
@@ -389,7 +389,7 @@ where
         verification: &mut Verification,
     ) -> Attempt {
         let block_digest = block.digest();
-        let round = consensus_context.round();
+        let round = block.context().round();
 
         // Restore the candidate and parent taken from `ancestry`, so the application receives the
         // full candidate-first ancestry.

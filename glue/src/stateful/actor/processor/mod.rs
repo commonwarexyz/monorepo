@@ -742,7 +742,11 @@ where
         // Every path from here must reach `advance_to_finalized` or take the
         // actor down -- a stranded window parks every later verification
         // forever.
-        self.execution.state.lock().finalizing = true;
+        {
+            let mut state = self.execution.state.lock();
+            assert!(!state.finalizing, "finalization must be serialized");
+            state.finalizing = true;
+        }
         let batch = match self.execution.pending_batch(&digest) {
             Some(merkleized) => merkleized,
             None => {
@@ -1233,8 +1237,10 @@ where
                     else {
                         return Err(PrepareBatchesError::Cancelled);
                     };
+                    // Staleness is judged against each request's own view of the anchor, so an
+                    // inherited `Stale` re-claims like a finished or abandoned flight.
                     match completion {
-                        Ok(Ok(())) | Err(_) => continue,
+                        Ok(Ok(())) | Ok(Err(PrepareBatchesError::Stale)) | Err(_) => continue,
                         Ok(Err(error)) => return Err(error),
                     }
                 }
@@ -1363,13 +1369,18 @@ where
 
         let depth = replay_path.len();
         for block in replay_path.into_iter().rev() {
-            if let Some(replays) = replays {
+            let result = if let Some(replays) = replays {
                 self.replay_shared(app, context, target_digest, block, cancellation, replays)
-                    .await?;
+                    .await
             } else {
                 self.replay(app, context, target_digest, block, cancellation)
-                    .await?;
+                    .await
+            };
+            // Replays before a failure stay cached.
+            if result.is_err() {
+                self.update_pending_metric();
             }
+            result?;
         }
 
         self.update_pending_metric();
@@ -1398,6 +1409,8 @@ where
     fn advance_to_finalized(&self, anchor: Anchor<BlockDigest<A, E>>) {
         let mut state = self.state.lock();
         let compatible = state.descendants(anchor.digest, anchor.round);
+        // The finalized block becomes the anchor, so its own entry is not a pruned fork.
+        state.pending.remove(&anchor.digest);
         let before = state.pending.len();
         state
             .pending
@@ -2627,6 +2640,11 @@ mod tests {
             assert!(
                 !harness.processor.pending_contains(&loser_child.digest()),
                 "descendants of the losing fork should also be pruned",
+            );
+            assert_eq!(
+                harness.processor.execution.metrics.pruned_forks.get(),
+                2,
+                "finalized blocks are not counted as pruned forks",
             );
         });
     }
