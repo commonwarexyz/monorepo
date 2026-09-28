@@ -51,10 +51,10 @@
 //!
 //! Marshal stores finalized blocks from a configurable starting height (or, floor) onward.
 //! This allows for state sync from a specific height rather than from genesis. The floor
-//! is supplied as a finalization. Marshal fetches the corresponding block asynchronously
-//! before dispatching application blocks starting at that height. Installing a floor may prune
-//! older history if [`store::Blocks`] supports pruning, but keeps the stored block preceding
-//! the floor.
+//! is supplied as a finalization. Marshal obtains the corresponding block asynchronously,
+//! from local storage, the buffer, or peers, before dispatching application blocks starting
+//! at that height. Installing a floor may prune older history if [`store::Blocks`] supports
+//! pruning, but keeps the stored block preceding the floor.
 //!
 //! _History below the starting height may be unavailable to peers. This feature is only
 //! recommended for applications that support state sync and do not require full block history to
