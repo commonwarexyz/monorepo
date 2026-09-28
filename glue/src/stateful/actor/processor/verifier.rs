@@ -1,8 +1,11 @@
 use super::{
-    Application, Cancellation, Execution, PendingDigest, PrepareBatchesError, ReplayFlights,
-    ReplayTracking, VerificationProgress, await_or_cancel, fetch_ancestor, is_already_processed,
+    Application, Cancellation, Execution, PrepareBatchesError, ReplayFlights, ReplayTracking,
+    VerificationProgress, await_or_cancel, fetch_ancestor, is_already_processed,
 };
-use crate::stateful::{actor::core::Verification, db::DatabaseSet};
+use crate::stateful::{
+    actor::{BlockDigest, core::Verification},
+    db::DatabaseSet,
+};
 use commonware_consensus::{
     Heightable, Roundable,
     marshal::{
@@ -48,7 +51,7 @@ where
     /// Parent block consumed while preparing the candidate's state.
     block: Arc<A::Block>,
     /// Digest of `block`.
-    digest: PendingDigest<A, E>,
+    digest: BlockDigest<A, E>,
     /// Batches forked from the parent's speculative or applied state.
     batches: Unmerkleized<A, E>,
 }
@@ -61,7 +64,7 @@ where
 {
     pub(super) app: A,
     pub(super) execution: Execution<E, A>,
-    pub(super) replays: ReplayFlights<PendingDigest<A, E>>,
+    pub(super) replays: ReplayFlights<BlockDigest<A, E>>,
 }
 
 impl<E, A> Clone for Verifier<E, A>
@@ -91,7 +94,7 @@ where
         marshal: MarshalMailbox<S, V>,
         consensus_context: A::Context,
         ancestry: impl Ancestry<A::Block>,
-        progress: &VerificationProgress<PendingDigest<A, E>>,
+        progress: &VerificationProgress<BlockDigest<A, E>>,
         verification: &mut Verification,
     ) -> Option<bool>
     where
@@ -222,9 +225,9 @@ where
         &mut self,
         context: &E,
         marshal: MarshalMailbox<S, V>,
-        block_digest: PendingDigest<A, E>,
+        block_digest: BlockDigest<A, E>,
         ancestry: &mut impl Ancestry<A::Block>,
-        progress: &VerificationProgress<PendingDigest<A, E>>,
+        progress: &VerificationProgress<BlockDigest<A, E>>,
         verification: &mut Verification,
     ) -> Result<PreparedParent<A, E>, PrepareFailure>
     where

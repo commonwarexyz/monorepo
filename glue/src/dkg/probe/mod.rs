@@ -1014,7 +1014,7 @@ mod tests {
                 "floor",
             )
             .await
-            .with_floor(persisted.clone())
+            .set_floor(persisted.clone())
             .await;
             drop(plan);
             let plan = SyncPlan::<_, mocks::TestScheme, mocks::TestMarshalVariant>::init(
@@ -1066,7 +1066,7 @@ mod tests {
 
             // The plan keeps the later persisted floor, and the DKG startup
             // material pairs the plan's floor with the discovered info.
-            let plan = plan.with_floor(artifact.floor.clone()).await;
+            let plan = plan.set_floor(artifact.floor.clone()).await;
             assert_eq!(plan.floor(), Some(&persisted));
             StateSyncPlan::init(
                 context.child("dkg"),

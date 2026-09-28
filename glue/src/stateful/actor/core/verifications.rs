@@ -1,8 +1,9 @@
 use crate::stateful::{
     Application,
     actor::{
+        BlockDigest,
         core::mailbox::{Verification, WeakAncestry},
-        processor::{Disposition, PendingDigest, VerificationProgress, Verifier},
+        processor::{Disposition, VerificationProgress, Verifier},
     },
 };
 use commonware_consensus::marshal::{
@@ -76,7 +77,7 @@ where
 {
     marshal: MarshalMailbox<S, V>,
     jobs: Pool<'static, JobResult<E, A>>,
-    controls: BTreeMap<u64, JobControl<PendingDigest<A, E>>>,
+    controls: BTreeMap<u64, JobControl<BlockDigest<A, E>>>,
     next_id: u64,
 }
 
@@ -153,7 +154,7 @@ where
         }
     }
 
-    pub(super) async fn next_completed(&mut self) {
+    pub(super) async fn complete_next(&mut self) {
         let result = self.jobs.next_completed().await;
         self.handle(result);
     }
@@ -163,7 +164,7 @@ where
         loop {
             select! {
                 output = &mut operation => break output,
-                _ = self.next_completed() => {},
+                _ = self.complete_next() => {},
             }
         }
     }
@@ -181,7 +182,7 @@ where
 
     pub(super) async fn quiesce_where(
         &mut self,
-        disposition: impl Fn(&VerificationProgress<PendingDigest<A, E>>) -> Disposition,
+        disposition: impl Fn(&VerificationProgress<BlockDigest<A, E>>) -> Disposition,
     ) -> (Vec<Request<E, A>>, Vec<Verification>) {
         let mut pending = BTreeMap::new();
         for (&id, control) in &mut self.controls {

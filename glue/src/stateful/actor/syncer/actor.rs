@@ -1,10 +1,11 @@
 use super::{
-    BlockDigest, SyncResult,
+    Artifact,
     mailbox::{Mailbox, Message},
-    resolve_state_sync_floor,
+    resolve,
 };
 use crate::stateful::{
     Application,
+    actor::BlockDigest,
     db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
@@ -53,7 +54,7 @@ where
     pub marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Notifies the stateful actor when state sync has produced an artifact.
-    pub sync_complete: oneshot::Sender<SyncResult<E, A>>,
+    pub completion: oneshot::Sender<Artifact<E, A>>,
 }
 
 pub struct Syncer<E, A, R, S, V>
@@ -71,7 +72,7 @@ where
     mailbox: Receiver<Message<E, A>>,
 
     /// The produced state sync artifact, if complete.
-    artifact: Option<SyncResult<E, A>>,
+    artifact: Option<Artifact<E, A>>,
 
     /// Database configuration for the managed set.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
@@ -89,7 +90,7 @@ where
     marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Notifies the stateful actor when state sync has produced an artifact.
-    sync_complete: Option<oneshot::Sender<SyncResult<E, A>>>,
+    completion: Option<oneshot::Sender<Artifact<E, A>>>,
 }
 
 impl<E, A, R, S, V> Syncer<E, A, R, S, V>
@@ -114,7 +115,7 @@ where
                 resolvers: config.resolvers,
                 finalization: config.finalization,
                 marshal: config.marshal,
-                sync_complete: Some(config.sync_complete),
+                completion: Some(config.completion),
             },
             mailbox,
         )
@@ -124,19 +125,18 @@ where
         spawn_cell!(self.context, self.run())
     }
 
-    pub async fn run(mut self) {
+    async fn run(mut self) {
         let (marshal, floor) = &self.marshal;
-        let resolved_floor =
-            resolve_state_sync_floor::<E, A, S, V>(marshal, *floor, &self.finalization).await;
+        let block = resolve(marshal, *floor, &self.finalization).await;
 
         let (tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut tip_updates_tx = Some(tip_updates_tx);
-        let mut state_sync_task = OptionFuture::from(Some(Box::pin(A::Databases::sync(
+        let mut task = OptionFuture::from(Some(Box::pin(A::Databases::sync(
             self.context.child("state_sync"),
             self.db_config,
             self.resolvers,
-            resolved_floor.anchor,
-            resolved_floor.targets,
+            Anchor::from(block.as_ref()),
+            A::sync_targets(block.as_ref()),
             tip_updates_rx,
             self.sync_config,
         ))));
@@ -146,15 +146,15 @@ where
             on_stopped => {
                 debug!("syncer received stop signal, shutting down");
             },
-            result = &mut state_sync_task => match result {
+            result = &mut task => match result {
                 Ok((databases, anchor)) => {
-                    Self::publish_artifact(
+                    Self::publish(
                         &mut self.artifact,
-                        &mut self.sync_complete,
+                        &mut self.completion,
                         databases,
                         anchor,
                     );
-                    state_sync_task = None.into();
+                    task = None.into();
 
                     // A tip update enqueued after the coordinator's final drain has no
                     // receiver left to record it or release its observation barrier.
@@ -170,7 +170,7 @@ where
                 debug!("mailbox closed, shutting down syncer");
                 break;
             } => match message {
-                Message::UpdateTargets { update, response } => {
+                Message::Retarget { update, response } => {
                     if let Some(artifact) = self.artifact.clone() {
                         response.send_lossy(Some(artifact));
                         continue;
@@ -186,15 +186,15 @@ where
                         // coordinator converges, before the database tasks have necessarily
                         // finished. Treat that close as "wait for the in-flight sync task to
                         // publish its artifact", not as a hard failure.
-                        match (&mut state_sync_task).await {
+                        match (&mut task).await {
                             Ok((databases, anchor)) => {
-                                Self::publish_artifact(
+                                Self::publish(
                                     &mut self.artifact,
-                                    &mut self.sync_complete,
+                                    &mut self.completion,
                                     databases,
                                     anchor,
                                 );
-                                state_sync_task = None.into();
+                                task = None.into();
                             }
                             Err(err) => {
                                 panic!("state sync task failed: {err:?}");
@@ -210,26 +210,26 @@ where
         }
     }
 
-    fn publish_artifact(
-        artifact: &mut Option<SyncResult<E, A>>,
-        sync_complete: &mut Option<oneshot::Sender<SyncResult<E, A>>>,
+    fn publish(
+        artifact: &mut Option<Artifact<E, A>>,
+        completion: &mut Option<oneshot::Sender<Artifact<E, A>>>,
         databases: A::Databases,
         anchor: Anchor<BlockDigest<A, E>>,
     ) {
-        let sync_result = SyncResult { databases, anchor };
-        *artifact = Some(sync_result.clone());
-        if let Some(sync_complete) = sync_complete.take() {
-            sync_complete.send_lossy(sync_result);
+        let published = Artifact { databases, anchor };
+        *artifact = Some(published.clone());
+        if let Some(completion) = completion.take() {
+            completion.send_lossy(published);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Syncer, resolve_state_sync_floor};
+    use super::{Config, Syncer, resolve};
     use crate::stateful::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful,
-        actor::syncer::{StateSyncMetadata, SyncPlan, init_databases_from_marshal},
+        actor::syncer::{StateSyncMetadata, SyncPlan, open},
         db::{
             Anchor, AttachableResolverSet, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig,
             TipUpdate,
@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_floor_covers_durable_marshal_progress() {
+    fn resolve_covers_durable_marshal_progress() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor", 1);
             let selected = fixtures::finalization(&fixture, 0, Sha256::fill(0));
@@ -442,15 +442,11 @@ mod tests {
             }
             assert!(marshal.get_finalization(Height::new(1)).await.is_none());
 
-            let resolved = resolve_state_sync_floor::<
-                deterministic::Context,
-                WedgeApp,
-                TestScheme,
-                TestVariant,
-            >(&marshal, floor, &selected)
-            .await;
-            assert_eq!(resolved.anchor.height, Height::new(1));
-            assert_eq!(resolved.targets, 1);
+            let resolved = resolve(&marshal, floor, &selected).await;
+            assert_eq!(
+                Anchor::from(resolved.as_ref()),
+                Anchor::from(&processed_block)
+            );
         });
     }
 
@@ -461,7 +457,7 @@ mod tests {
     #[case::selected_successor_at_section_boundary(4, 4, 4)]
     #[case::selected_predecessor(4, 3, 3)]
     #[case::selected_older(4, 2, 3)]
-    fn resolved_floor_selects_only_matching_retained_successor(
+    fn resolve_selects_only_matching_retained_successor(
         #[case] height: u64,
         #[case] selected_height: u64,
         #[case] expected_height: u64,
@@ -551,29 +547,25 @@ mod tests {
                     &partition,
                 )
                 .await
-                .begin_sync(selected)
+                .set_floor(selected)
                 .await;
                 drop(metadata);
 
                 let plan =
                     SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), &partition)
                         .await;
-                assert!(plan.requires_state_sync_floor());
+                assert!(plan.floor().is_some());
                 plan.floor().expect("persisted selected floor").clone()
             } else {
                 selected
             };
 
             // Only a selection of F resolves to F. Older selections resolve to F-1.
-            let resolved = resolve_state_sync_floor::<
-                deterministic::Context,
-                WedgeApp,
-                TestScheme,
-                TestVariant,
-            >(&third.mailbox, third.floor, &selected)
-            .await;
-            assert_eq!(resolved.anchor.height, Height::new(expected_height));
-            assert_eq!(resolved.targets, expected_height);
+            let resolved = resolve(&third.mailbox, third.floor, &selected).await;
+            assert_eq!(
+                Anchor::from(resolved.as_ref()),
+                Anchor::from(&blocks[expected_height as usize]),
+            );
             third.abort().await;
         });
     }
@@ -583,7 +575,7 @@ mod tests {
     #[rstest::rstest]
     #[case::pruned_snapshot_anchor(2, 4, 5, 2, 4)]
     #[case::selected_below_live_floor(4, 6, 7, 5, 6)]
-    fn resolved_floor_follows_live_floor_after_startup(
+    fn resolve_follows_live_floor_after_startup(
         #[case] acknowledged: u64,
         #[case] stored: u64,
         #[case] live_floor: u64,
@@ -679,15 +671,11 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            let resolved = resolve_state_sync_floor::<
-                deterministic::Context,
-                WedgeApp,
-                TestScheme,
-                TestVariant,
-            >(&marshal, third.floor, &finalized(selected_height))
-            .await;
-            assert_eq!(resolved.anchor.height, Height::new(expected_height));
-            assert_eq!(resolved.targets, expected_height);
+            let resolved = resolve(&marshal, third.floor, &finalized(selected_height)).await;
+            assert_eq!(
+                Anchor::from(resolved.as_ref()),
+                Anchor::from(&blocks[expected_height as usize]),
+            );
             third.abort().await;
         });
     }
@@ -727,12 +715,12 @@ mod tests {
                 "syncer-floor-install",
             )
             .await;
-            let startup = init_databases_from_marshal::<
-                deterministic::Context,
-                WedgeApp,
-                TestScheme,
-                TestVariant,
-            >(context.child("databases"), &marshal, 2, metadata)
+            let startup = open::<deterministic::Context, WedgeApp, TestScheme, TestVariant>(
+                context.child("databases"),
+                &marshal,
+                2,
+                metadata.completed(),
+            )
             .await;
 
             assert_eq!(startup.anchor.height, Height::new(2));
@@ -753,7 +741,7 @@ mod tests {
             // Select the floor, let marshal durably install it, and stop before Stateful starts.
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), prefix)
                 .await
-                .with_floor(selected)
+                .set_floor(selected)
                 .await;
             let marshal = fixtures::prunable_marshal_fixture(
                 context.child("marshal"),
@@ -785,7 +773,7 @@ mod tests {
                 false,
             )
             .await;
-            let (stateful, mailbox) = Stateful::init(
+            let (stateful, mailbox) = Stateful::new(
                 context.child("stateful"),
                 StatefulConfig {
                     application: WedgeApp,
@@ -813,13 +801,13 @@ mod tests {
             let _ = actor.await;
             let plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), prefix).await;
-            assert_eq!(plan.sync_height(), Some(block.height()));
+            assert_eq!(plan.completed(), Some(block.height()));
             marshal.abort().await;
         });
     }
 
     #[test]
-    fn resolved_floor_uses_anchor_when_processed_predecessor_is_missing() {
+    fn resolve_uses_anchor_when_processed_predecessor_is_missing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-resolve", 1);
             let selected = TestBlock::new(1, 1);
@@ -852,15 +840,7 @@ mod tests {
 
             let resolver = context.child("resolve").spawn({
                 let marshal = marshal.clone();
-                move |_| async move {
-                    resolve_state_sync_floor::<
-                        deterministic::Context,
-                        WedgeApp,
-                        TestScheme,
-                        TestVariant,
-                    >(&marshal, floor, &selected_finalization)
-                    .await
-                }
+                move |_| async move { resolve(&marshal, floor, &selected_finalization).await }
             });
             context.sleep(Duration::from_millis(1)).await;
             assert!(
@@ -870,13 +850,12 @@ mod tests {
             );
 
             let resolved = resolver.await.expect("floor resolution failed");
-            assert_eq!(resolved.anchor.height, Height::new(3));
-            assert_eq!(resolved.targets, 3);
+            assert_eq!(Anchor::from(resolved.as_ref()), Anchor::from(&floor_block));
         });
     }
 
     #[test]
-    fn resolved_floor_skips_selected_block_pruned_by_newer_floor() {
+    fn resolve_skips_selected_block_pruned_by_newer_floor() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-pruned-floor", 1);
             let selected_finalization = fixtures::finalization(&fixture, 1, Sha256::fill(1));
@@ -912,6 +891,7 @@ mod tests {
             }
 
             let newer_floor = TestBlock::new(10, 10);
+            let expected = Anchor::from(&newer_floor);
             let newer_finalization = fixtures::finalization(&fixture, 10, Sha256::fill(10));
             assert!(
                 marshal
@@ -966,23 +946,17 @@ mod tests {
             );
 
             let resolved = commonware_macros::select! {
-                resolved = resolve_state_sync_floor::<
-                    deterministic::Context,
-                    WedgeApp,
-                    TestScheme,
-                    TestVariant,
-                >(&marshal, floor, &selected_finalization) => resolved,
+                resolved = resolve(&marshal, floor, &selected_finalization) => resolved,
                 _ = context.sleep(Duration::from_millis(100)) => {
                     panic!("a superseded floor must not wait for its pruned block");
                 },
             };
-            assert_eq!(resolved.anchor.height, Height::new(10));
-            assert_eq!(resolved.targets, 10);
+            assert_eq!(Anchor::from(resolved.as_ref()), expected);
         });
     }
 
     #[test]
-    fn resolved_floor_recovers_round_after_boundary_prune() {
+    fn resolve_recovers_round_after_boundary_prune() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-boundary-floor", 1);
             let selected_block = TestBlock::new(1, 1);
@@ -1073,18 +1047,12 @@ mod tests {
             );
 
             let resolved = commonware_macros::select! {
-                resolved = resolve_state_sync_floor::<
-                    deterministic::Context,
-                    WedgeApp,
-                    TestScheme,
-                    TestVariant,
-                >(&marshal, floor, &selected_finalization) => resolved,
+                resolved = resolve(&marshal, floor, &selected_finalization) => resolved,
                 _ = context.sleep(Duration::from_millis(100)) => {
                     panic!("a superseded floor must not wait for its pruned block");
                 },
             };
-            assert_eq!(resolved.anchor.height, Height::new(8));
-            assert_eq!(resolved.targets, 8);
+            assert_eq!(Anchor::from(resolved.as_ref()), Anchor::from(&newer_block));
         });
     }
 
@@ -1110,7 +1078,7 @@ mod tests {
             )
             .await;
 
-            let (sync_complete, sync_completed) = oneshot::channel();
+            let (sender, receiver) = oneshot::channel();
             let (syncer, mailbox) =
                 Syncer::<_, WedgeApp, (), TestScheme, TestVariant>::new(Config {
                     context: context.child("syncer"),
@@ -1125,7 +1093,7 @@ mod tests {
                     resolvers: (),
                     finalization,
                     marshal: (marshal, floor),
-                    sync_complete,
+                    completion: sender,
                 });
             let actor = syncer.start();
 
@@ -1134,14 +1102,14 @@ mod tests {
             // stranded observation must resolve through a retry that returns the artifact.
             let update = context
                 .child("update")
-                .spawn(move |_| async move { mailbox.update_targets(anchor(1, 1), 1).await });
+                .spawn(move |_| async move { mailbox.retarget(anchor(1, 1), 1).await });
             let result = update.await.expect("update task failed");
             assert!(
                 matches!(&result, Some(artifact) if artifact.anchor.height == Height::zero()),
                 "stranded update must resolve to the completed artifact",
             );
 
-            let artifact = sync_completed.await.expect("artifact must publish");
+            let artifact = receiver.await.expect("artifact must publish");
             assert_eq!(artifact.anchor.height, Height::zero());
             actor.await.expect("syncer actor failed");
         });

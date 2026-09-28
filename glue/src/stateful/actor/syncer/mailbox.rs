@@ -1,27 +1,24 @@
 //! [`Syncer`](super::Syncer) actor ingress.
 
-use super::SyncResult;
+use super::Artifact;
 use crate::stateful::{
     Application,
-    db::{Anchor, DatabaseSet, TipUpdate},
+    actor::{BlockDigest, SyncTargets},
+    db::{Anchor, TipUpdate},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::channel::oneshot;
 use rand_core::Rng;
-
-type SyncTargets<E, A> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
-type BlockDigest<E, A> = <<A as Application<E>>::Block as Digestible>::Digest;
 
 pub(crate) enum Message<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    UpdateTargets {
-        update: TipUpdate<BlockDigest<E, A>, SyncTargets<E, A>>,
-        response: oneshot::Sender<Option<SyncResult<E, A>>>,
+    Retarget {
+        update: TipUpdate<BlockDigest<A, E>, SyncTargets<A, E>>,
+        response: oneshot::Sender<Option<Artifact<E, A>>>,
     },
 }
 
@@ -80,22 +77,17 @@ where
     ///
     /// If sync already completed before the update could be observed, returns the
     /// completed artifact instead.
-    pub async fn update_targets(
+    pub async fn retarget(
         &self,
-        anchor: Anchor<BlockDigest<E, A>>,
-        targets: SyncTargets<E, A>,
-    ) -> Option<SyncResult<E, A>> {
+        anchor: Anchor<BlockDigest<A, E>>,
+        targets: SyncTargets<A, E>,
+    ) -> Option<Artifact<E, A>> {
         loop {
             let (update, observed) = TipUpdate::with_observation(anchor, targets.clone());
             let (response, receiver) = oneshot::channel();
-            let _ = self
-                .sender
-                .enqueue(Message::UpdateTargets { update, response });
+            let _ = self.sender.enqueue(Message::Retarget { update, response });
 
-            match receiver
-                .await
-                .expect("Syncer should respond to update_targets")
-            {
+            match receiver.await.expect("Syncer should respond to retarget") {
                 Some(artifact) => return Some(artifact),
                 None => {
                     // Wait until the live sync coordinator has recorded the new tip update.
@@ -118,7 +110,7 @@ where
 mod tests {
     use super::{Mailbox, Message};
     use crate::stateful::{
-        actor::syncer::SyncResult,
+        actor::syncer::Artifact,
         tests::mocks::{TestApp, anchor, test_databases},
     };
     use commonware_actor::mailbox as actor_mailbox;
@@ -127,15 +119,15 @@ mod tests {
     use futures::FutureExt;
 
     #[test]
-    fn update_targets_retries_when_observation_is_dropped() {
+    fn retarget_retries_when_observation_is_dropped() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
-            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), 7));
+            let mut retarget = Box::pin(mailbox.retarget(anchor(7, 9), 7));
 
-            assert!(update_targets.as_mut().now_or_never().is_none());
+            assert!(retarget.as_mut().now_or_never().is_none());
 
-            let Some(Message::UpdateTargets { update, response }) = receiver.recv().await else {
+            let Some(Message::Retarget { update, response }) = receiver.recv().await else {
                 panic!("first update should be sent");
             };
             assert!(
@@ -144,13 +136,13 @@ mod tests {
             );
             drop(update);
 
-            assert!(update_targets.as_mut().now_or_never().is_none());
+            assert!(retarget.as_mut().now_or_never().is_none());
 
-            let expected = SyncResult::<deterministic::Context, TestApp> {
+            let expected = Artifact::<deterministic::Context, TestApp> {
                 databases: test_databases(),
                 anchor: anchor(8, 10),
             };
-            let Some(Message::UpdateTargets { response, .. }) = receiver.recv().await else {
+            let Some(Message::Retarget { response, .. }) = receiver.recv().await else {
                 panic!("dropped observation should trigger a retry");
             };
             assert!(
@@ -158,7 +150,7 @@ mod tests {
                 "response receiver should be alive"
             );
 
-            let result = update_targets.await;
+            let result = retarget.await;
             assert_eq!(
                 result.expect("retry should return artifact").anchor,
                 expected.anchor
@@ -167,15 +159,15 @@ mod tests {
     }
 
     #[test]
-    fn update_targets_returns_none_only_after_observation_is_recorded() {
+    fn retarget_returns_none_only_after_observation_is_recorded() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
-            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), 7));
+            let mut retarget = Box::pin(mailbox.retarget(anchor(7, 9), 7));
 
-            assert!(update_targets.as_mut().now_or_never().is_none());
+            assert!(retarget.as_mut().now_or_never().is_none());
 
-            let Some(Message::UpdateTargets { update, response }) = receiver.recv().await else {
+            let Some(Message::Retarget { update, response }) = receiver.recv().await else {
                 panic!("update should be sent");
             };
             assert!(
@@ -183,11 +175,11 @@ mod tests {
                 "response receiver should be alive"
             );
 
-            assert!(update_targets.as_mut().now_or_never().is_none());
+            assert!(retarget.as_mut().now_or_never().is_none());
 
             update.record(|_, _| {});
 
-            assert!(update_targets.await.is_none());
+            assert!(retarget.await.is_none());
         });
     }
 }

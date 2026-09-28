@@ -200,7 +200,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     ));
     let probe_handle = probe_actor.start(dkg_probe_network);
 
-    let should_state_sync = plan.should_state_sync(args.state_sync);
+    let should_state_sync = plan.should_sync(args.state_sync);
     let probe_artifact = if should_state_sync {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
         provider.register(
@@ -211,7 +211,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 artifact.info.output.public().clone(),
             ),
         );
-        plan = plan.with_floor(artifact.floor.clone()).await;
+        plan = plan.set_floor(artifact.floor.clone()).await;
         Some(artifact)
     } else {
         None
@@ -308,7 +308,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     );
     let reshare_handle = reshare_actor.start(dkg_network);
 
-    let (stateful_actor, stateful_mailbox) = Stateful::init(
+    let (stateful_actor, stateful_mailbox) = Stateful::new(
         context.child("stateful"),
         StatefulConfig {
             application: App::new(genesis.clone()),
@@ -571,7 +571,7 @@ mod tests {
             // Persist the floor, then reload the plan as a restarted node.
             let plan = SyncPlan::<_, Scheme, Standard<Block>>::init(context.child("plan"), "probe")
                 .await
-                .with_floor(floor.clone())
+                .set_floor(floor.clone())
                 .await;
             drop(plan);
             let plan = SyncPlan::init(context.child("restart"), "probe").await;

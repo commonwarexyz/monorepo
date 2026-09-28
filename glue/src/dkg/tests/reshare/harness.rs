@@ -977,7 +977,7 @@ impl EngineDefinition for ReshareEngine {
         });
         let probe_handle = probe_actor.start(probe_boundary_network);
 
-        let should_state_sync = plan.should_state_sync(delayed);
+        let should_state_sync = plan.should_sync(delayed);
         if should_state_sync {
             *self
                 .state_sync_starts
@@ -1050,7 +1050,7 @@ impl EngineDefinition for ReshareEngine {
                     .floor
                     .clone(),
             };
-            plan = plan.with_floor(finalization).await;
+            plan = plan.set_floor(finalization).await;
         }
         let (marshal_actor, marshal, floor) = MarshalActor::init(
             context.child("marshal"),
@@ -1187,7 +1187,7 @@ impl EngineDefinition for ReshareEngine {
         );
         let reshare_handle = reshare_actor.start(dkg_network);
 
-        let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+        let (stateful_actor, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application: App {

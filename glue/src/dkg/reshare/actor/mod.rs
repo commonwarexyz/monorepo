@@ -347,7 +347,6 @@ where
     epocher: FixedEpocher,
     metrics: ReshareMetrics<C::PublicKey>,
     mode: Mode<V, C::PublicKey, B::Directory>,
-    /// Latest finalized block the actor covers.
     tip: Option<FinalizedTip<B::Digest>>,
     batch_verifier: PhantomData<BV>,
 }

@@ -35,9 +35,9 @@
 //! Applications load a [`SyncPlan`] before constructing marshal and [`Stateful`].
 //! The plan reads the durable state sync state and keeps that metadata handle
 //! until [`Stateful`] consumes it, avoiding multiple opens of the same metadata
-//! partition during startup. Callers use [`SyncPlan::should_state_sync`] to
+//! partition during startup. Callers use [`SyncPlan::should_sync`] to
 //! decide whether to discover a finalized floor and persist it via
-//! [`SyncPlan::with_floor`]. After floor selection, the same plan drives
+//! [`SyncPlan::set_floor`]. After floor selection, the same plan drives
 //! marshal (via [`SyncPlan::marshal_start`]) and stateful (via
 //! [`Config::plan`]). Both read the floor from durable metadata, so they agree
 //! on the startup decision and a crash before either actor starts still resumes
@@ -45,10 +45,10 @@
 //! peer state sync again and must recover from the later of the stored height
 //! and marshal's processed height on future startups.
 //!
-//! The actor supports two sync paths:
+//! The actor supports two startup paths:
 //!
-//! - **Marshal sync** (no persisted floor): [`Stateful::start`] prepares the
-//!   databases before the actor is spawned. New nodes initialize from
+//! - **Recovery** (no persisted floor): the actor spawned by [`Stateful::start`]
+//!   opens the database set before it polls its mailbox. New nodes initialize from
 //!   genesis. Restarted nodes open the database set at the later of
 //!   marshal's processed anchor and the stored state sync height.
 //!   If marshal is behind that stored height, the actor acknowledges old
@@ -71,7 +71,7 @@
 //!   Journal state that has pruned the resulting range start is discarded and rebuilt.
 //!   Initialization removes state beyond the target and reuses the retained prefix.
 //!   A lagging floor sampled during restart cannot move the floor backward.
-//!   Subsequent restarts after completion take the marshal sync path to ensure a contiguous stream.
+//!   Subsequent restarts after completion take the recovery path to ensure a contiguous stream.
 //!
 //! # Lazy Recovery
 //!

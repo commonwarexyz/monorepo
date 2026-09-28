@@ -559,7 +559,7 @@ impl EngineDefinition for MultiDbEngine {
             partition_prefix.clone(),
         )
         .await;
-        let should_state_sync = plan.should_state_sync(self.enable_state_sync && delayed);
+        let should_state_sync = plan.should_sync(self.enable_state_sync && delayed);
         let provider = ConstantProvider::new(scheme.clone());
 
         let (probe, probe_mailbox) = Probe::new(ProbeConfig {
@@ -574,7 +574,7 @@ impl EngineDefinition for MultiDbEngine {
         probe.start(probe_network);
         let mut state_sync_height = if should_state_sync {
             let finalization = probe_mailbox.subscribe().await.expect("probe stopped");
-            plan = plan.with_floor(finalization).await;
+            plan = plan.set_floor(finalization).await;
             None
         } else {
             self.sync_heights.lock().get(public_key).copied()
@@ -648,7 +648,7 @@ impl EngineDefinition for MultiDbEngine {
 
         // Stateful actor
         let application = App::new(genesis_block.clone());
-        let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+        let (stateful_actor, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application,

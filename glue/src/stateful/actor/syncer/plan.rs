@@ -14,8 +14,8 @@ use tracing::warn;
 /// floor from peers when state sync has already completed:
 ///
 /// 1. [`SyncPlan::init`] reads the durable state sync state.
-/// 2. If [`SyncPlan::may_state_sync`] returns `true`, the caller may fetch a
-///    finalized floor and persist it via [`SyncPlan::with_floor`]. An interrupted
+/// 2. If [`SyncPlan::may_sync`] returns `true`, the caller may fetch a
+///    finalized floor and persist it via [`SyncPlan::set_floor`]. An interrupted
 ///    sync already has a persisted floor, while a fresh sync needs one from the
 ///    caller. Otherwise the caller skips floor selection entirely.
 ///
@@ -36,7 +36,7 @@ where
     S: Scheme,
     V: Variant,
 {
-    sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
+    metadata: StateSyncMetadata<E, S, V::Commitment>,
 }
 
 impl<E, S, V> SyncPlan<E, S, V>
@@ -53,71 +53,74 @@ where
     /// determine whether state sync already completed cannot safely choose a
     /// startup path.
     pub async fn init(context: E, partition_prefix: impl AsRef<str>) -> Self {
-        let sync_metadata = StateSyncMetadata::<E, S, V::Commitment>::init(
+        let metadata = StateSyncMetadata::<E, S, V::Commitment>::init(
             context.child("metadata"),
             partition_prefix,
         )
         .await;
-        Self { sync_metadata }
+        Self { metadata }
     }
 
     /// Returns whether state sync can still run on this node.
     ///
     /// When `false`, the caller should skip floor selection: any floor passed
-    /// to [`SyncPlan::with_floor`] would be ignored. The node already has a
+    /// to [`SyncPlan::set_floor`] would be ignored. The node already has a
     /// durable completed state sync height, so future boots must recover from that
     /// height or marshal's processed height instead of running peer state sync again.
     ///
     /// When `true`, the caller can optionally persist a finalized floor via
-    /// [`SyncPlan::with_floor`]. If no floor is persisted, the node will
+    /// [`SyncPlan::set_floor`]. If no floor is persisted, the node will
     /// attempt to sync from genesis via marshal.
-    pub fn may_state_sync(&self) -> bool {
-        self.sync_metadata.sync_height().is_none()
+    pub fn may_sync(&self) -> bool {
+        self.metadata.completed().is_none()
     }
 
     /// Returns the durable completed state sync height, if one has been stored.
-    pub fn sync_height(&self) -> Option<Height> {
-        self.sync_metadata.sync_height()
-    }
-
-    /// Returns the partition prefix to use for state sync metadata storage.
-    pub const fn partition_prefix(&self) -> &str {
-        self.sync_metadata.partition_prefix()
+    pub fn completed(&self) -> Option<Height> {
+        self.metadata.completed()
     }
 
     /// Returns the persisted in-progress state sync floor.
+    ///
+    /// The floor is present from the time [`Self::set_floor`] persists it until
+    /// state sync completes, including across restarts. While it is present,
+    /// [`Self::may_sync`] is also `true` and every startup runs state sync instead
+    /// of recovery, so partially synced database state stays on the state sync path.
     pub fn floor(&self) -> Option<&Finalization<S, V::Commitment>> {
-        self.sync_metadata.in_progress_floor()
+        self.metadata.floor()
     }
 
     /// Persist a finalized floor to state sync from.
     ///
     /// Once persisted, every startup runs state sync until it completes,
     /// whether or not it is requested. Has no effect if state sync has already
-    /// completed. A selection that is not newer than the persisted floor is
-    /// ignored.
+    /// completed. A floor that is not newer than the persisted floor is ignored,
+    /// so a lagging selection cannot move it backward. The metadata write
+    /// underneath panics on a backward or conflicting floor instead.
+    ///
+    /// The durable write consumes the plan, so callers reassign the returned plan.
     ///
     /// # Panics
     ///
-    /// Panics if the selected floor cannot be persisted.
+    /// Panics if the floor cannot be persisted.
     #[must_use]
-    pub async fn with_floor(mut self, floor: Finalization<S, V::Commitment>) -> Self {
-        if !self.may_state_sync() {
+    pub async fn set_floor(mut self, finalization: Finalization<S, V::Commitment>) -> Self {
+        if !self.may_sync() {
             return self;
         }
 
-        if let Some(selected) = self.floor()
-            && floor.round() <= selected.round()
+        if let Some(persisted) = self.floor()
+            && finalization.round() <= persisted.round()
         {
             warn!(
-                candidate = ?floor.round(),
-                selected = ?selected.round(),
-                "state sync floor not updated, candidate is not newer",
+                finalization = ?finalization.round(),
+                persisted = ?persisted.round(),
+                "state sync floor not updated, finalization is not newer",
             );
             return self;
         }
 
-        self.sync_metadata = self.sync_metadata.begin_sync(floor).await;
+        self.metadata = self.metadata.set_floor(finalization).await;
         self
     }
 
@@ -132,28 +135,18 @@ where
             .map_or_else(|| Start::Genesis(genesis), Start::Floor)
     }
 
-    /// Returns whether a state sync floor is persisted.
-    ///
-    /// This is `true` from the time [`Self::with_floor`] persists a floor until
-    /// state sync completes, including across restarts. In that case
-    /// [`Self::may_state_sync`] is also `true`, and the persisted floor keeps
-    /// partially synced database state on the same recovery path.
-    pub fn requires_state_sync_floor(&self) -> bool {
-        self.floor().is_some()
-    }
-
     /// Returns whether this startup should run peer state sync.
     ///
     /// A caller can request peer state sync for a fresh node. A persisted floor
     /// always requires peer state sync, even if the caller did not explicitly
     /// request it on this startup.
-    pub fn should_state_sync(&self, requested: bool) -> bool {
-        self.may_state_sync() && (requested || self.requires_state_sync_floor())
+    pub fn should_sync(&self, requested: bool) -> bool {
+        self.may_sync() && (requested || self.floor().is_some())
     }
 
     /// Consumes this plan and returns its durable state-sync metadata handle.
-    pub(crate) fn into_sync_metadata(self) -> StateSyncMetadata<E, S, V::Commitment> {
-        self.sync_metadata
+    pub(crate) fn into_metadata(self) -> StateSyncMetadata<E, S, V::Commitment> {
+        self.metadata
     }
 }
 
@@ -218,13 +211,13 @@ mod tests {
                 )
                 .await;
                 if let Some(previous) = previous {
-                    assert!(plan.should_state_sync(false));
+                    assert!(plan.should_sync(false));
                     assert_eq!(plan.floor(), Some(&previous));
                 }
 
                 // Select a newer floor for marshal, then stop before either actor starts.
                 let selected = finalization(&schemes, 7 + boot, 7 + boot as u8);
-                let plan = plan.with_floor(selected.clone()).await;
+                let plan = plan.set_floor(selected.clone()).await;
                 assert!(matches!(
                     plan.marshal_start(()),
                     Start::Floor(ref floor) if floor == &selected
@@ -237,9 +230,9 @@ mod tests {
     }
 
     #[test]
-    fn stored_sync_height_disables_state_sync() {
+    fn stored_completion_disables_state_sync() {
         deterministic::Runner::default().start(|mut context| async move {
-            let partition_prefix = "stored_sync_height";
+            let partition_prefix = "stored_completion";
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
@@ -247,10 +240,10 @@ mod tests {
                 partition_prefix,
             )
             .await;
-            assert!(plan.may_state_sync());
-            assert!(plan.should_state_sync(true));
-            assert!(!plan.should_state_sync(false));
-            assert_eq!(plan.sync_height(), None);
+            assert!(plan.may_sync());
+            assert!(plan.should_sync(true));
+            assert!(!plan.should_sync(false));
+            assert_eq!(plan.completed(), None);
             drop(plan);
 
             let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
@@ -258,22 +251,22 @@ mod tests {
                 partition_prefix,
             )
             .await;
-            metadata.set_complete(Height::new(7)).await;
+            metadata.set_completed(Height::new(7)).await;
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
                 context.child("plan"),
                 partition_prefix,
             )
             .await;
-            assert!(!plan.may_state_sync());
-            assert!(!plan.should_state_sync(true));
-            assert_eq!(plan.sync_height(), Some(Height::new(7)));
+            assert!(!plan.may_sync());
+            assert!(!plan.should_sync(true));
+            assert_eq!(plan.completed(), Some(Height::new(7)));
             assert!(plan.floor().is_none());
 
             // A completed sync ignores a later selection instead of persisting it.
-            let plan = plan.with_floor(finalization(&fixture.schemes, 8, 8)).await;
+            let plan = plan.set_floor(finalization(&fixture.schemes, 8, 8)).await;
             assert!(plan.floor().is_none());
-            assert_eq!(plan.sync_height(), Some(Height::new(7)));
+            assert_eq!(plan.completed(), Some(Height::new(7)));
         });
     }
 
@@ -288,9 +281,9 @@ mod tests {
                 partition_prefix,
             )
             .await;
-            let metadata = metadata.set_complete(Height::new(7)).await;
+            let metadata = metadata.set_completed(Height::new(7)).await;
             metadata
-                .begin_sync(finalization(&fixture.schemes, 8, 8))
+                .set_floor(finalization(&fixture.schemes, 8, 8))
                 .await;
         });
     }
@@ -305,8 +298,8 @@ mod tests {
                 partition_prefix,
             )
             .await;
-            let metadata = metadata.set_complete(Height::new(7)).await;
-            metadata.set_complete(Height::new(6)).await;
+            let metadata = metadata.set_completed(Height::new(7)).await;
+            metadata.set_completed(Height::new(6)).await;
         });
     }
 
@@ -321,20 +314,20 @@ mod tests {
                 partition_prefix,
             )
             .await;
-            metadata.begin_sync(stored.clone()).await;
+            metadata.set_floor(stored.clone()).await;
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
                 context.child("plan"),
                 partition_prefix,
             )
             .await;
-            assert!(plan.may_state_sync());
-            assert!(plan.requires_state_sync_floor());
-            assert!(plan.should_state_sync(false));
-            let metadata = plan.sync_metadata.begin_sync(stored).await;
+            assert!(plan.may_sync());
+            assert!(plan.floor().is_some());
+            assert!(plan.should_sync(false));
+            let metadata = plan.metadata.set_floor(stored).await;
             let newer = finalization(&fixture.schemes, 9, 9);
-            let metadata = metadata.begin_sync(newer.clone()).await;
-            assert_eq!(metadata.in_progress_floor(), Some(&newer));
+            let metadata = metadata.set_floor(newer.clone()).await;
+            assert_eq!(metadata.floor(), Some(&newer));
         });
     }
 
@@ -350,14 +343,14 @@ mod tests {
                 partition_prefix,
             )
             .await;
-            metadata.begin_sync(stored.clone()).await;
+            metadata.set_floor(stored.clone()).await;
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
                 context.child("plan"),
                 partition_prefix,
             )
             .await;
-            assert!(plan.should_state_sync(false));
+            assert!(plan.should_sync(false));
             assert_eq!(
                 plan.floor().expect("interrupted sync must have a floor"),
                 &stored,
@@ -373,7 +366,7 @@ mod tests {
                 partition_prefix,
             )
             .await;
-            let plan = plan.with_floor(finalization(&fixture.schemes, 6, 6)).await;
+            let plan = plan.set_floor(finalization(&fixture.schemes, 6, 6)).await;
             assert_eq!(
                 plan.floor().expect("interrupted sync must have a floor"),
                 &stored,
@@ -387,26 +380,26 @@ mod tests {
                 partition_prefix,
             )
             .await;
-            let plan = plan.with_floor(newer.clone()).await;
+            let plan = plan.set_floor(newer.clone()).await;
             assert_eq!(plan.floor(), Some(&newer));
         });
     }
 
     #[test]
-    fn with_floor_does_not_replace_newer_selection() {
+    fn set_floor_does_not_replace_newer_selection() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
             let newer = finalization(&fixture.schemes, 9, 9);
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
                 context.child("plan"),
-                "with_floor_does_not_replace_newer_selection",
+                "set_floor_does_not_replace_newer_selection",
             )
             .await;
             let plan = plan
-                .with_floor(newer.clone())
+                .set_floor(newer.clone())
                 .await
-                .with_floor(finalization(&fixture.schemes, 8, 8))
+                .set_floor(finalization(&fixture.schemes, 8, 8))
                 .await;
 
             assert_eq!(plan.floor(), Some(&newer));
@@ -426,10 +419,10 @@ mod tests {
             )
             .await;
             let metadata = metadata
-                .begin_sync(finalization(&fixture.schemes, 7, 7))
+                .set_floor(finalization(&fixture.schemes, 7, 7))
                 .await;
             metadata
-                .begin_sync(finalization(&fixture.schemes, 6, 6))
+                .set_floor(finalization(&fixture.schemes, 6, 6))
                 .await;
         });
     }
@@ -447,10 +440,10 @@ mod tests {
             )
             .await;
             let metadata = metadata
-                .begin_sync(finalization(&fixture.schemes, 7, 7))
+                .set_floor(finalization(&fixture.schemes, 7, 7))
                 .await;
             metadata
-                .begin_sync(finalization(&fixture.schemes, 7, 8))
+                .set_floor(finalization(&fixture.schemes, 7, 8))
                 .await;
         });
     }

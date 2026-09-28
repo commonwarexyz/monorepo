@@ -16,7 +16,7 @@
 //! - Finalization: apply the winning fork's merkleized batches to the
 //!   databases, retaining only pending descendants of the finalized winner.
 //!   The actor coordinates durability separately so multiple finalizations
-//!   can be covered by one storage sync.
+//!   can be covered by one database barrier.
 //!
 //! Verification jobs are polled independently and scoped to their callers.
 //! Verification-owned lazy recovery shares [`Application::apply`] by block
@@ -24,7 +24,7 @@
 
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
-    actor::{core::Verification, metrics::Metrics as StatefulMetrics},
+    actor::{BlockDigest, SyncTargets, core::Verification, metrics::Metrics as StatefulMetrics},
     db::{Anchor, Barrier, DatabaseSet},
 };
 use commonware_consensus::{
@@ -59,11 +59,8 @@ use tracing::{debug, warn};
 mod verifier;
 pub(super) use verifier::Verifier;
 
-pub(super) type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
-type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
-pub(super) type PendingSyncTargets<A, E> =
-    <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
+type PendingMap<A, E> = BTreeMap<BlockDigest<A, E>, PendingEntry<A, E>>;
 type DeferredPrune<T> = Option<Prune<T>>;
 type ReplayResult = Result<(), PrepareBatchesError>;
 type ReplayWaiterSlots = Vec<Option<oneshot::Sender<ReplayResult>>>;
@@ -194,7 +191,7 @@ where
     A: Application<E>,
 {
     round: Round,
-    parent: PendingDigest<A, E>,
+    parent: BlockDigest<A, E>,
     merkleized: PendingBatches<A, E>,
     verified: bool,
 }
@@ -212,21 +209,21 @@ where
     /// Merkleized state for unfinalized blocks.
     pending: PendingMap<A, E>,
     /// Latest canonical anchor whose finalization hook has completed.
-    last_processed: Anchor<PendingDigest<A, E>>,
+    last_processed: Anchor<BlockDigest<A, E>>,
     /// Winner currently being applied, if finalization is active.
-    finalizing: Option<Anchor<PendingDigest<A, E>>>,
+    finalizing: Option<Anchor<BlockDigest<A, E>>>,
     /// Winner batch retained while a clone is applied to the databases.
     finalizing_batch: Option<PendingBatches<A, E>>,
     /// Winner and descendants allowed in pending state during finalization.
-    finalizing_compatible: HashSet<PendingDigest<A, E>>,
+    finalizing_compatible: HashSet<BlockDigest<A, E>>,
 }
 
 /// Returns the winner and pending descendants whose state survives finalization.
 fn compatible_pending<A, E>(
     state: &ExecutionState<A, E>,
-    finalized_digest: PendingDigest<A, E>,
+    finalized_digest: BlockDigest<A, E>,
     finalized_round: Round,
-) -> HashSet<PendingDigest<A, E>>
+) -> HashSet<BlockDigest<A, E>>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -481,7 +478,7 @@ impl Cancellation for Verification {
 
 /// State applied for a newly finalized block.
 pub(super) struct Applied<T> {
-    /// Durability started for this block, when no earlier sync was active.
+    /// Durability started for this block, when no earlier barrier was active.
     pub(super) barrier: Option<Barrier>,
 
     /// Prune made due by this finalization.
@@ -499,9 +496,9 @@ pub(super) struct Prune<T> {
 impl<T> Prune<T> {
     /// Run database and marshal pruning.
     ///
-    /// A completed database sync covers `barrier_height`, and no database sync remains active,
-    /// before this runs. The marshal prune that follows retains every later block a restart could
-    /// replay.
+    /// A completed database barrier covers `barrier_height`, and no database barrier remains
+    /// active, before this runs. The marshal prune that follows retains every later block a
+    /// restart could replay.
     pub(super) async fn run<E, DBs, S, V>(self, databases: &DBs, marshal: &MarshalMailbox<S, V>)
     where
         E: Rng + Spawner + Metrics + Clock,
@@ -529,10 +526,10 @@ impl<T: Clone> Pruning<T> {
         let interval = u64::try_from(config.maintenance_interval.get())
             .expect("prune interval should fit in u64");
         let offset = rng.next_u64() % interval;
-        Self::build(config, max_pending_acks, offset)
+        Self::new(config, max_pending_acks, offset)
     }
 
-    pub(super) fn build(
+    pub(super) fn new(
         config: PruneConfig,
         max_pending_acks: usize,
         maintenance_offset: u64,
@@ -568,7 +565,7 @@ impl<T: Clone> Pruning<T> {
     /// plus the configured retained block windows. It then prunes only when the
     /// largest required window is populated and the current finalized height
     /// matches the selected phase of the configured maintenance interval.
-    fn observe_finalized(&mut self, height: Height, targets: T) -> DeferredPrune<T> {
+    fn observe(&mut self, height: Height, targets: T) -> DeferredPrune<T> {
         self.retained_targets.push_back((height, targets));
         if self.retained_targets.len() > self.marshal_retention_window {
             self.retained_targets.pop_front();
@@ -614,8 +611,8 @@ where
 {
     app: A,
     execution: Execution<E, A>,
-    replays: ReplayFlights<PendingDigest<A, E>>,
-    pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
+    replays: ReplayFlights<BlockDigest<A, E>>,
+    pruning: Option<Pruning<SyncTargets<A, E>>>,
 }
 
 impl<E, A> Processor<E, A>
@@ -628,9 +625,9 @@ where
     pub(super) fn new(
         app: A,
         databases: A::Databases,
-        last_processed: Anchor<PendingDigest<A, E>>,
+        last_processed: Anchor<BlockDigest<A, E>>,
         metrics: StatefulMetrics,
-        pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
+        pruning: Option<Pruning<SyncTargets<A, E>>>,
     ) -> Self {
         Self {
             app,
@@ -666,10 +663,7 @@ where
 
     /// Snapshot the pending bases that remain branch-valid after `block` is
     /// finalized.
-    pub(super) fn finalization_boundary(
-        &self,
-        block: &A::Block,
-    ) -> FinalizationBoundary<PendingDigest<A, E>> {
+    pub(super) fn boundary(&self, block: &A::Block) -> FinalizationBoundary<BlockDigest<A, E>> {
         let digest = block.digest();
         let round = block.context().round();
         let state = self.execution.state.lock();
@@ -687,12 +681,12 @@ where
         &self.execution.databases
     }
 
-    pub(super) fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
+    pub(super) fn last_processed(&self) -> Anchor<BlockDigest<A, E>> {
         self.execution.last_processed()
     }
 
     #[cfg(test)]
-    fn pending_contains(&self, digest: &PendingDigest<A, E>) -> bool {
+    fn pending_contains(&self, digest: &BlockDigest<A, E>) -> bool {
         self.execution.pending_contains(digest)
     }
 
@@ -857,8 +851,8 @@ where
         &mut self,
         context: &E,
         block: &A::Block,
-        start_sync: bool,
-    ) -> Option<Applied<PendingSyncTargets<A, E>>> {
+        start_barrier: bool,
+    ) -> Option<Applied<SyncTargets<A, E>>> {
         let finalized = Anchor::from(block);
         let (height, digest) = (finalized.height, finalized.digest);
         let last_processed = self.execution.last_processed();
@@ -946,7 +940,7 @@ where
             )
             .await;
         self.execution.databases.apply(batch).await;
-        let barrier = if start_sync {
+        let barrier = if start_barrier {
             Some(self.execution.databases.finalize().await)
         } else {
             None
@@ -962,7 +956,7 @@ where
         let prune = self
             .pruning
             .as_mut()
-            .and_then(|pruning| pruning.observe_finalized(height, sync_targets));
+            .and_then(|pruning| pruning.observe(height, sync_targets));
         self.execution.finish_finalization(finalized);
         timer.observe(context);
 
@@ -972,8 +966,8 @@ where
     /// Cache merkleized pending state for a block digest.
     fn cache_pending(
         &self,
-        digest: PendingDigest<A, E>,
-        parent: PendingDigest<A, E>,
+        digest: BlockDigest<A, E>,
+        parent: BlockDigest<A, E>,
         round: Round,
         merkleized: PendingBatches<A, E>,
         verified: bool,
@@ -988,12 +982,12 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
+    fn last_processed(&self) -> Anchor<BlockDigest<A, E>> {
         self.state.lock().last_processed
     }
 
     /// Records the compatible pending state for a serialized finalization.
-    fn begin_finalization(&self, anchor: Anchor<PendingDigest<A, E>>) {
+    fn begin_finalization(&self, anchor: Anchor<BlockDigest<A, E>>) {
         let mut state = self.state.lock();
         let compatible = compatible_pending(&state, anchor.digest, anchor.round);
         assert!(
@@ -1008,7 +1002,7 @@ where
     /// Retain the winner as a branch parent and discard incompatible state.
     fn secure_finalization_batch(
         &self,
-        digest: PendingDigest<A, E>,
+        digest: BlockDigest<A, E>,
         reconstructed: Option<PendingBatches<A, E>>,
     ) -> PendingBatches<A, E> {
         let mut state = self.state.lock();
@@ -1041,7 +1035,7 @@ where
     }
 
     /// Publish the finalized anchor after its application hook completes.
-    fn finish_finalization(&self, finalized: Anchor<PendingDigest<A, E>>) {
+    fn finish_finalization(&self, finalized: Anchor<BlockDigest<A, E>>) {
         let mut state = self.state.lock();
         assert_eq!(state.finalizing.take(), Some(finalized));
         assert!(state.finalizing_batch.take().is_some());
@@ -1049,17 +1043,17 @@ where
         state.last_processed = finalized;
     }
 
-    fn summary(&self) -> (Anchor<PendingDigest<A, E>>, usize) {
+    fn summary(&self) -> (Anchor<BlockDigest<A, E>>, usize) {
         let state = self.state.lock();
         (state.last_processed, state.pending.len())
     }
 
     #[cfg(test)]
-    fn pending_contains(&self, digest: &PendingDigest<A, E>) -> bool {
+    fn pending_contains(&self, digest: &BlockDigest<A, E>) -> bool {
         self.state.lock().pending.contains_key(digest)
     }
 
-    fn pending_verified(&self, digest: &PendingDigest<A, E>) -> bool {
+    fn pending_verified(&self, digest: &BlockDigest<A, E>) -> bool {
         self.state
             .lock()
             .pending
@@ -1077,8 +1071,8 @@ where
 
     fn cache_pending(
         &self,
-        digest: PendingDigest<A, E>,
-        parent: PendingDigest<A, E>,
+        digest: BlockDigest<A, E>,
+        parent: BlockDigest<A, E>,
         round: Round,
         merkleized: PendingBatches<A, E>,
         verified: bool,
@@ -1147,9 +1141,9 @@ where
     /// always locked before the replay registry when both are inspected.
     fn claim_finalization_batch(
         &self,
-        replays: &ReplayFlights<PendingDigest<A, E>>,
-        digest: PendingDigest<A, E>,
-    ) -> FinalizationClaim<PendingDigest<A, E>> {
+        replays: &ReplayFlights<BlockDigest<A, E>>,
+        digest: BlockDigest<A, E>,
+    ) -> FinalizationClaim<BlockDigest<A, E>> {
         let state = self.state.lock();
         let mut entries = replays.entries.lock();
         if let Some(flight) = entries.get_mut(&digest) {
@@ -1168,9 +1162,9 @@ where
     /// racing insertion of the same digest.
     fn claim_replay(
         &self,
-        replays: &ReplayFlights<PendingDigest<A, E>>,
-        digest: PendingDigest<A, E>,
-    ) -> ReplayClaim<PendingDigest<A, E>> {
+        replays: &ReplayFlights<BlockDigest<A, E>>,
+        digest: BlockDigest<A, E>,
+    ) -> ReplayClaim<BlockDigest<A, E>> {
         let state = self.state.lock();
         if state.last_processed.digest == digest
             || state.pending.contains_key(&digest)
@@ -1191,7 +1185,7 @@ where
     }
 
     /// Whether finalization supersedes a winner replay's terminal failure.
-    fn finalization_recovers_replay(&self, digest: PendingDigest<A, E>) -> bool {
+    fn finalization_recovers_replay(&self, digest: BlockDigest<A, E>) -> bool {
         let state = self.state.lock();
         state.last_processed.digest == digest
             || state
@@ -1202,7 +1196,7 @@ where
     /// Forks batches from a known parent.
     async fn fork_batches(
         &self,
-        parent: &PendingDigest<A, E>,
+        parent: &BlockDigest<A, E>,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError> {
         {
             let state = self.state.lock();
@@ -1236,7 +1230,7 @@ where
         &self,
         app: &mut A,
         context: &E,
-        target_digest: PendingDigest<A, E>,
+        target_digest: BlockDigest<A, E>,
         block: Arc<A::Block>,
         cancellation: &mut C,
     ) -> ReplayResult
@@ -1293,10 +1287,10 @@ where
         &self,
         app: &mut A,
         context: &E,
-        target_digest: PendingDigest<A, E>,
+        target_digest: BlockDigest<A, E>,
         block: Arc<A::Block>,
         cancellation: &mut C,
-        replay: ReplayTracking<'_, PendingDigest<A, E>>,
+        replay: ReplayTracking<'_, BlockDigest<A, E>>,
     ) -> ReplayResult
     where
         C: Cancellation,
@@ -1355,7 +1349,7 @@ where
         marshal: MarshalMailbox<S, V>,
         parent: Arc<A::Block>,
         cancellation: &mut C,
-        replay: Option<ReplayTracking<'_, PendingDigest<A, E>>>,
+        replay: Option<ReplayTracking<'_, BlockDigest<A, E>>>,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
     where
         S: Scheme,
@@ -1391,7 +1385,7 @@ where
         provider: P,
         target: Arc<A::Block>,
         cancellation: &mut C,
-        replay: Option<ReplayTracking<'_, PendingDigest<A, E>>>,
+        replay: Option<ReplayTracking<'_, BlockDigest<A, E>>>,
     ) -> Result<(), PrepareBatchesError>
     where
         P: BlockProvider<Block = A::Block> + Clone,
@@ -1601,7 +1595,7 @@ mod tests {
                 .expect("finalization must start durability")
                 .durable()
                 .await,
-            "database sync must complete",
+            "database barrier must complete",
         );
     }
 
@@ -2194,7 +2188,7 @@ mod tests {
             block
         }
 
-        /// Finalize `block` and wait for its database sync.
+        /// Finalize `block` and wait for its database barrier.
         /// Returns whether the block was newly applied (`false` for a
         /// duplicate report).
         #[boxed]
@@ -2309,13 +2303,13 @@ mod tests {
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::build(config, 2, 0);
+        let mut pruning = Pruning::new(config, 2, 0);
 
-        assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
-        assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
-        assert_eq!(pruning.observe_finalized(Height::new(3), 30_u64), None,);
+        assert_eq!(pruning.observe(Height::new(1), 10_u64), None,);
+        assert_eq!(pruning.observe(Height::new(2), 20_u64), None,);
+        assert_eq!(pruning.observe(Height::new(3), 30_u64), None,);
         assert_eq!(
-            pruning.observe_finalized(Height::new(4), 40_u64),
+            pruning.observe(Height::new(4), 40_u64),
             Some(Prune {
                 marshal_height: Height::new(1),
                 barrier_height: Height::new(1),
@@ -2331,12 +2325,12 @@ mod tests {
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::build(config, 1, 0);
+        let mut pruning = Pruning::new(config, 1, 0);
 
-        assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
-        assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
+        assert_eq!(pruning.observe(Height::new(1), 10_u64), None,);
+        assert_eq!(pruning.observe(Height::new(2), 20_u64), None,);
         assert_eq!(
-            pruning.observe_finalized(Height::new(3), 30_u64),
+            pruning.observe(Height::new(3), 30_u64),
             Some(Prune {
                 marshal_height: Height::new(1),
                 barrier_height: Height::new(1),
@@ -2344,7 +2338,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            pruning.observe_finalized(Height::new(4), 40_u64),
+            pruning.observe(Height::new(4), 40_u64),
             Some(Prune {
                 marshal_height: Height::new(2),
                 barrier_height: Height::new(2),
@@ -2360,15 +2354,15 @@ mod tests {
             retained_marshal_blocks: 3,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::build(config, 1, 0);
+        let mut pruning = Pruning::new(config, 1, 0);
 
-        assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None);
-        assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None);
-        assert_eq!(pruning.observe_finalized(Height::new(3), 30_u64), None);
-        assert_eq!(pruning.observe_finalized(Height::new(4), 40_u64), None);
-        assert_eq!(pruning.observe_finalized(Height::new(5), 50_u64), None);
+        assert_eq!(pruning.observe(Height::new(1), 10_u64), None);
+        assert_eq!(pruning.observe(Height::new(2), 20_u64), None);
+        assert_eq!(pruning.observe(Height::new(3), 30_u64), None);
+        assert_eq!(pruning.observe(Height::new(4), 40_u64), None);
+        assert_eq!(pruning.observe(Height::new(5), 50_u64), None);
         assert_eq!(
-            pruning.observe_finalized(Height::new(6), 60_u64),
+            pruning.observe(Height::new(6), 60_u64),
             Some(Prune {
                 marshal_height: Height::new(2),
                 barrier_height: Height::new(4),
@@ -2384,16 +2378,13 @@ mod tests {
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 0,
         };
-        let mut pruning = Pruning::build(config, 1, 2);
+        let mut pruning = Pruning::new(config, 1, 2);
 
         for height in 1..=6 {
-            assert_eq!(
-                pruning.observe_finalized(Height::new(height), height * 10),
-                None,
-            );
+            assert_eq!(pruning.observe(Height::new(height), height * 10), None);
         }
         assert_eq!(
-            pruning.observe_finalized(Height::new(7), 70),
+            pruning.observe(Height::new(7), 70),
             Some(Prune {
                 marshal_height: Height::new(5),
                 barrier_height: Height::new(6),
@@ -2401,13 +2392,10 @@ mod tests {
             }),
         );
         for height in 8..=11 {
-            assert_eq!(
-                pruning.observe_finalized(Height::new(height), height * 10),
-                None,
-            );
+            assert_eq!(pruning.observe(Height::new(height), height * 10), None);
         }
         assert_eq!(
-            pruning.observe_finalized(Height::new(12), 120),
+            pruning.observe(Height::new(12), 120),
             Some(Prune {
                 marshal_height: Height::new(10),
                 barrier_height: Height::new(11),
@@ -2453,7 +2441,7 @@ mod tests {
                     digest: Block::genesis().digest(),
                 },
                 StatefulMetrics::new(harness.context_cell.as_present()),
-                Some(Pruning::build(
+                Some(Pruning::new(
                     PruneConfig {
                         maintenance_interval: NZUsize!(1),
                         retained_marshal_blocks: 1,
@@ -2712,7 +2700,7 @@ mod tests {
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
-            let boundary = harness.processor.finalization_boundary(&parent);
+            let boundary = harness.processor.boundary(&parent);
             assert_eq!(boundary.disposition(&owner_progress), Disposition::Retain,);
             assert_eq!(boundary.disposition(&waiter_progress), Disposition::Retain,);
 

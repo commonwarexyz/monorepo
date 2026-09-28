@@ -7,10 +7,11 @@
 use crate::stateful::{
     Application,
     actor::{
+        BlockDigest, SyncTargets,
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
-        processor::{PendingSyncTargets, Processor, Pruning},
-        syncer::{self, SyncPlan, SyncResult},
+        processor::{Processor, Pruning},
+        syncer::{self, Artifact, SyncPlan},
     },
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
@@ -22,7 +23,7 @@ use commonware_consensus::{
     },
     simplex::types::Finalization,
 };
-use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::channel::oneshot;
@@ -37,8 +38,6 @@ pub(super) use mailbox::Verification;
 mod processing;
 mod syncing;
 mod verifications;
-
-type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,7 +99,7 @@ where
     pub mailbox_size: NonZeroUsize,
 
     /// Startup plan loaded via [`SyncPlan::init`], optionally given a persisted
-    /// floor via [`SyncPlan::with_floor`]. Carries the durable metadata handle
+    /// floor via [`SyncPlan::set_floor`]. Carries the durable metadata handle
     /// and the startup decision shared with marshal.
     pub plan: SyncPlan<E, S, V>,
 
@@ -156,7 +155,7 @@ where
     sync_config: SyncEngineConfig,
 
     /// Periodic pruning state.
-    pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
+    pruning: Option<Pruning<SyncTargets<A, E>>>,
 }
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
@@ -173,7 +172,7 @@ where
     ///
     /// This only wires dependencies and allocates the mailbox. The actor does
     /// not process messages until [`Stateful::start`] is called.
-    pub fn init(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
+    pub fn new(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
@@ -205,20 +204,20 @@ where
     }
 
     async fn run(self) {
-        if let Some(floor) = self.plan.floor().cloned() {
-            self.start_state_sync(floor).await;
+        if let Some(finalization) = self.plan.floor().cloned() {
+            self.sync(finalization).await;
         } else {
-            self.start_from_marshal().await;
+            self.recover().await;
         }
     }
 
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
-    async fn start_state_sync(self, finalization: Finalization<S, V::Commitment>) {
+    async fn sync(self, finalization: Finalization<S, V::Commitment>) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
-        let sync_metadata = self.plan.into_sync_metadata();
-        let (sync_complete, sync_completed) = oneshot::channel();
+        let metadata = self.plan.into_metadata();
+        let (sender, receiver) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
             db_config: self.db_config,
@@ -226,7 +225,7 @@ where
             resolvers: self.resolvers.clone(),
             finalization,
             marshal: (marshal.clone(), floor),
-            sync_complete,
+            completion: sender,
         });
         let syncing = Syncing {
             context: self.context,
@@ -234,30 +233,36 @@ where
             application: self.application,
             provider: self.provider,
             marshal,
-            sync_metadata,
+            metadata,
             syncer: syncer_mailbox,
             deferred_verifications: Vec::new(),
             database_subscribers: Vec::new(),
-            artifact: None,
             resolvers: self.resolvers,
-            sync_completed,
+            completion: receiver,
             pending_finalizations: Default::default(),
             pruning: self.pruning,
             metrics,
         };
-        let _ = join!(syncer.start(), syncing.start());
+        let _ = join!(syncer.start(), syncing.run());
     }
 
-    /// Starts the application by initializing the database set at marshal's current floor.
-    async fn start_from_marshal(self) {
+    /// Starts the application in [`Processing`] mode after opening the database set at
+    /// the later of the completed state sync height and marshal's processed height.
+    async fn recover(self) {
         let (marshal, _) = self.marshal;
-        let SyncResult { databases, anchor } = syncer::init_databases_from_marshal::<E, A, S, V>(
+        let metadata = self.plan.into_metadata();
+        let Artifact { databases, anchor } = syncer::open::<E, A, S, V>(
             self.context.child("databases"),
             &marshal,
             self.db_config,
-            self.plan.into_sync_metadata(),
+            metadata.completed(),
         )
         .await;
+
+        // Once startup has aligned databases with marshal, future boots should skip peer
+        // state sync and recover from the later of this anchor and marshal's durable
+        // processed height.
+        metadata.set_completed(anchor.height).await;
 
         // Attach the resolvers to the initialized databases before starting the processor,
         // so that this instance can serve peers database operations and proofs. The
@@ -276,7 +281,7 @@ where
             processor,
             deferred_verifications: Vec::new(),
         }
-        .start()
+        .run()
         .await
     }
 }
@@ -391,7 +396,7 @@ mod tests {
 
             let plan =
                 SyncPlan::init(context.child("plan"), "pending-floor-stateful".to_string()).await;
-            let (stateful, mut mailbox) = Stateful::init(
+            let (stateful, mut mailbox) = Stateful::new(
                 context.child("stateful"),
                 Config {
                     application: TestApp::default(),
@@ -399,7 +404,7 @@ mod tests {
                     provider: (),
                     marshal: (marshal.mailbox, marshal.floor),
                     mailbox_size: NZUsize!(8),
-                    plan: plan.with_floor(finalization).await,
+                    plan: plan.set_floor(finalization).await,
                     resolvers: NoopResolver::default(),
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
@@ -450,7 +455,7 @@ mod tests {
 
             let (resolver, startup_started, startup_release) = NoopResolver::gated();
             let plan = SyncPlan::init(context.child("plan"), format!("{prefix}-stateful")).await;
-            let (stateful, mut mailbox) = Stateful::init(
+            let (stateful, mut mailbox) = Stateful::new(
                 context.child("stateful"),
                 Config {
                     application: TestApp::default(),
