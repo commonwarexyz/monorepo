@@ -5,6 +5,10 @@
 //! Its [`Mailbox`] implements the consensus [`Application`](commonware_consensus::Application)
 //! and receives finalized blocks from marshal as a [`Reporter`](commonware_consensus::Reporter).
 //!
+//! Applications whose inputs consensus only orders, and which execute each finalized input
+//! afterward, use the [`ordered`] mode instead. It runs on any engine through the
+//! [`executor`](crate::executor), and keeps one line of pending state rather than a tree.
+//!
 //! # Overview
 //!
 //! Upon `propose` or `verify` of a block with parent `p`:
@@ -117,6 +121,7 @@ mod actor;
 pub use actor::{Config, Mailbox, PruneConfig, Stateful, SyncPlan};
 
 pub mod db;
+pub mod ordered;
 pub mod probe;
 
 #[cfg(test)]

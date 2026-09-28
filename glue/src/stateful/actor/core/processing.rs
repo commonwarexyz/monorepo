@@ -5,9 +5,10 @@ use crate::stateful::{
             mailbox::Message,
             verifications::{Handler as Verifications, Request as VerificationRequest},
         },
+        durability::Durability,
         processor::{Applied, Processor},
     },
-    db::{Barrier, DatabaseSet},
+    db::DatabaseSet,
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -18,16 +19,14 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{
-    Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt,
-};
+use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_utils::channel::fallible::OneshotExt;
 use futures::{
     FutureExt as _,
-    future::{Either, pending, ready},
+    future::{Either, ready},
 };
 use rand_core::Rng;
-use std::{collections::VecDeque, sync::mpsc::TryRecvError};
+use std::sync::mpsc::TryRecvError;
 use tracing::{Instrument as _, debug, info_span};
 
 /// Work selected for one iteration of the processing loop.
@@ -38,118 +37,6 @@ enum Step<M, P> {
     Prune(P),
     /// Completion of the active barrier (see [`Durability::completion`]).
     Barrier(Option<Height>),
-}
-
-/// Tracks the durable database prefix and marshal acknowledgements awaiting it.
-///
-/// At most one barrier covers a captured prefix. Applied heights beyond that prefix remain queued
-/// for a successor barrier.
-struct Durability {
-    /// Highest applied height known to be durable.
-    durable: Height,
-    /// Applied heights whose marshal acknowledgements await durability, in nondecreasing order.
-    acknowledgements: VecDeque<(Height, Exact)>,
-    /// Active barrier, whose output is the height of its captured prefix once durable.
-    barrier: Option<Handle<Option<Height>>>,
-}
-
-impl Durability {
-    /// Initializes tracking at a height already known to be durable.
-    const fn new(height: Height) -> Self {
-        Self {
-            durable: height,
-            acknowledgements: VecDeque::new(),
-            barrier: None,
-        }
-    }
-
-    /// Returns the highest applied height (the durable height when no acknowledgement is pending).
-    fn applied(&self) -> Height {
-        self.acknowledgements
-            .back()
-            .map_or(self.durable, |(height, _)| *height)
-    }
-
-    /// Holds the acknowledgement for a newly applied `height` until it is durable.
-    ///
-    /// Panics unless `height` is above every applied height.
-    fn record(&mut self, height: Height, acknowledgement: Exact) {
-        assert!(height > self.applied(), "finalized heights must increase");
-        self.acknowledgements.push_back((height, acknowledgement));
-    }
-
-    /// Holds a duplicate receipt until its height is durable (acknowledging it at once if it
-    /// already is).
-    ///
-    /// Panics if `height` is neither durable nor applied.
-    fn record_duplicate(&mut self, height: Height, acknowledgement: Exact) {
-        if self.covers(height) {
-            acknowledgement.acknowledge();
-            return;
-        }
-        let index = self
-            .acknowledgements
-            .iter()
-            .rposition(|(applied, _)| *applied == height)
-            .expect("an undurable applied height must retain its acknowledgement");
-        self.acknowledgements
-            .insert(index + 1, (height, acknowledgement));
-    }
-
-    /// Returns whether applied state is not yet durable and no barrier is active.
-    fn needs_barrier(&self) -> bool {
-        self.barrier.is_none() && self.durable < self.applied()
-    }
-
-    /// Tracks `barrier` as covering applied state through `height`.
-    ///
-    /// Panics if a barrier is active or `height` is not above the durable height and at or below
-    /// the applied height.
-    fn set_barrier(&mut self, height: Height, barrier: Barrier) {
-        assert!(self.barrier.is_none(), "barrier already active");
-        assert!(height > self.durable && height <= self.applied());
-        self.barrier = Some(Handle::from_future(async move {
-            Ok(barrier.durable().await.then_some(height))
-        }));
-    }
-
-    /// Awaits the active barrier, staying pending when none is active so callers can select on it
-    /// unconditionally.
-    ///
-    /// Resolves to the covered height, or `None` if shutdown interrupted the barrier.
-    async fn completion(&mut self) -> Option<Height> {
-        let Some(barrier) = &mut self.barrier else {
-            return pending().await;
-        };
-        barrier.await.expect("internal barrier handle cannot fail")
-    }
-
-    /// Clears the active barrier and acknowledges every height it made durable.
-    ///
-    /// Returns `false` without advancing the durable height if `completion` is `None`. Panics if no
-    /// barrier is active.
-    fn complete(&mut self, completion: Option<Height>) -> bool {
-        assert!(self.barrier.take().is_some(), "barrier not active");
-        let Some(height) = completion else {
-            return false;
-        };
-        assert!(height > self.durable && height <= self.applied());
-        self.durable = height;
-        let covered = self
-            .acknowledgements
-            .iter()
-            .take_while(|(height, _)| *height <= self.durable)
-            .count();
-        for (_, acknowledgement) in self.acknowledgements.drain(..covered) {
-            acknowledgement.acknowledge();
-        }
-        true
-    }
-
-    /// Returns whether `height` lies within the known durable prefix.
-    fn covers(&self, height: Height) -> bool {
-        self.durable >= height
-    }
 }
 
 /// Starts a barrier covering all applied state.
