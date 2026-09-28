@@ -9,10 +9,8 @@ use commonware_actor::{
 };
 use commonware_consensus::{
     Heightable as _, Reporter,
-    simplex::marshal::{
-        Update,
-        ancestry::{Ancestry, BoxedAncestry},
-    },
+    ancestry::{Ancestry, BoxedAncestry},
+    simplex::marshal::Update,
     types::Height,
 };
 use commonware_cryptography::{

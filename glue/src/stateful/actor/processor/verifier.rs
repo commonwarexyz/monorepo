@@ -8,9 +8,9 @@
 use super::{Application, Execution, ExecutionStep, PrepareBatchesError, ReplayPath};
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
+    ancestry::{self as marshal_ancestry, Ancestry, BlockProvider, BoxedAncestry},
     simplex::marshal::{
         Identifier,
-        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider, BoxedAncestry},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
 };
