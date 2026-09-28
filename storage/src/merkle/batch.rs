@@ -866,8 +866,10 @@ mod tests {
     use super::*;
     use crate::merkle::{Bagging::ForwardFold, hasher::Standard, mem::Mem};
     use commonware_cryptography::{Sha256, sha256};
+    #[cfg(feature = "std")]
     use commonware_parallel::{Manual, Rayon};
     use commonware_runtime::{Runner as _, deterministic};
+    #[cfg(feature = "std")]
     use commonware_utils::NZUsize;
 
     type D = sha256::Digest;
@@ -1406,6 +1408,7 @@ mod tests {
     }
 
     /// A strategy that splits work into up to `parallelism` batches, run on one thread.
+    #[cfg(feature = "std")]
     fn split_strategy(parallelism: usize) -> Manual<Rayon> {
         Rayon::new(NZUsize!(1))
             .unwrap()
@@ -1414,6 +1417,7 @@ mod tests {
     }
 
     /// `add_many` near the maximum leaf count, where some subtree roots can never exist.
+    #[cfg(feature = "std")]
     fn add_many_at_limit<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -1451,6 +1455,7 @@ mod tests {
 
     /// Repeated `add_many` calls on real worker threads, interleaved with `add` and `update_leaf`
     /// on a pruned base, match the same operations one leaf at a time on a parent batch.
+    #[cfg(feature = "std")]
     fn add_many_mixed_operations<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -1504,6 +1509,7 @@ mod tests {
 
     /// `add_many` split across workers matches adding the same items one at a time, on top of
     /// committed leaves and an unapplied parent batch.
+    #[cfg(feature = "std")]
     fn add_many_matches_add<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -1563,6 +1569,7 @@ mod tests {
     }
 
     /// Updates and appends after `add_many` replace the nodes it built.
+    #[cfg(feature = "std")]
     fn add_many_then_mutate<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -1599,21 +1606,25 @@ mod tests {
 
     // --- MMR tests ---
 
+    #[cfg(feature = "std")]
     #[test]
     fn mmr_add_many_matches_add() {
         add_many_matches_add::<crate::mmr::Family>();
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn mmr_add_many_then_mutate() {
         add_many_then_mutate::<crate::mmr::Family>();
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn mmr_add_many_at_limit() {
         add_many_at_limit::<crate::mmr::Family>();
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn mmr_add_many_mixed_operations() {
         add_many_mixed_operations::<crate::mmr::Family>();
@@ -1698,21 +1709,25 @@ mod tests {
 
     // --- MMB tests ---
 
+    #[cfg(feature = "std")]
     #[test]
     fn mmb_add_many_matches_add() {
         add_many_matches_add::<crate::mmb::Family>();
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn mmb_add_many_then_mutate() {
         add_many_then_mutate::<crate::mmb::Family>();
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn mmb_add_many_at_limit() {
         add_many_at_limit::<crate::mmb::Family>();
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn mmb_add_many_mixed_operations() {
         add_many_mixed_operations::<crate::mmb::Family>();
