@@ -88,6 +88,11 @@ impl<T> TracedAsyncRwLock<T> {
     pub async fn write(&self) -> AsyncRwLockWriteGuard<'_, T> {
         self.inner.write().await
     }
+
+    /// Acquire an exclusive write guard if no other guard is held, without waiting.
+    pub fn try_write(&self) -> Option<AsyncRwLockWriteGuard<'_, T>> {
+        self.inner.try_write().ok()
+    }
 }
 
 /// A Tokio-based async rwlock with an upgradable read mode.

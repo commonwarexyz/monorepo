@@ -6,8 +6,12 @@
 //! blocks new read guards but cannot be starved, and guards already granted
 //! finish first. A guard proves the database is present for one call, not
 //! that the caller's batch is still current (see
-//! [`commonware_storage::qmdb::Error::StaleRead`]). The lock is not
-//! reentrant: never hold two read guards at once.
+//! [`commonware_storage::qmdb::Error::StaleRead`]).
+//!
+//! Never hold two read guards at once, even on different cells. The lock is
+//! not reentrant, and because a waiting mutation blocks new guards, two tasks
+//! each holding one cell's guard while waiting on the other's deadlock once
+//! both cells have a mutation waiting.
 
 use commonware_utils::sync::{AsyncRwLockReadGuard, TracedAsyncRwLock};
 use futures::future;
@@ -24,6 +28,8 @@ enum State<T> {
     Live(T),
     /// A mutation was interrupted before restoring the database. Fatal.
     Poisoned,
+    /// The writer dropped and reclaimed the database.
+    Closed,
 }
 
 struct Cell<T> {
@@ -40,19 +46,19 @@ impl<T> Cell<T> {
         if self.closed.load(Ordering::Relaxed) {
             // The writer is gone. Park rather than serve frozen state.
             drop(guard);
-            tracing::error!(cell = self.label, "database cell closed, parking reader");
+            tracing::debug!(cell = self.label, "database cell closed, parking reader");
             return future::pending().await;
         }
         match AsyncRwLockReadGuard::try_map(guard, |state| match state {
             State::Live(db) => Some(db),
-            State::Poisoned => None,
+            State::Poisoned | State::Closed => None,
         }) {
             Ok(guard) => ReadGuard(guard),
             Err(guard) => {
                 // Poisoning only happens during actor teardown. Park until
                 // this task is dropped with it.
                 drop(guard);
-                tracing::error!(cell = self.label, "database cell poisoned, parking reader");
+                tracing::debug!(cell = self.label, "database cell poisoned, parking reader");
                 future::pending().await
             }
         }
@@ -69,12 +75,17 @@ pub fn split<T>(db: T) -> (Writer<T>, Reader<T>) {
 /// The unique handle that mutates the database behind a cell.
 ///
 /// Not [`Clone`], so at most one exists. Dropping it closes the cell, and
-/// later reads park rather than serve frozen state.
+/// later reads park rather than serve frozen state. The drop also drops the
+/// database unless a read guard is held at that moment, in which case the
+/// remaining [`Reader`]s keep it alive.
 pub struct Writer<T>(Arc<Cell<T>>);
 
 impl<T> Drop for Writer<T> {
     fn drop(&mut self) {
         self.0.closed.store(true, Ordering::Relaxed);
+        if let Some(mut guard) = self.0.state.try_write() {
+            *guard = State::Closed;
+        }
     }
 }
 
@@ -96,9 +107,9 @@ impl<T> Writer<T> {
 
     /// Run one consuming mutation to completion, returning the writer.
     ///
-    /// Waits at most one storage call to start, since new read guards queue
-    /// behind it. Dropping the future mid-flight poisons the cell, and later
-    /// reads park.
+    /// Starts once every granted read guard drops, each covering at most one
+    /// storage call, since new read guards queue behind it. Dropping the future
+    /// mid-flight poisons the cell, and later reads park.
     pub async fn mutate<F, Fut, R>(self, mutation: F) -> (Self, R)
     where
         F: FnOnce(T) -> Fut,
@@ -126,6 +137,8 @@ impl<T> Clone for Reader<T> {
 
 impl<T> Reader<T> {
     /// Acquire a read guard.
+    ///
+    /// Parks forever once the writer is gone or a mutation was interrupted.
     pub async fn read(&self) -> ReadGuard<'_, T> {
         self.0.read().await
     }
@@ -149,28 +162,30 @@ mod tests {
     use commonware_runtime::{Clock, Runner as _, Spawner as _, Supervisor as _, deterministic};
     use commonware_utils::channel::oneshot;
     use futures::FutureExt as _;
-    use std::time::Duration;
+    use std::{sync::atomic::AtomicUsize, time::Duration};
 
-    /// A waiting mutation cannot be starved by a stream of short reads, and
-    /// no read ever observes taken-out state.
+    /// A waiting mutation cannot be starved by a stream of overlapping reads,
+    /// and no read ever observes taken-out state.
     #[test]
     fn mutation_is_not_starved_by_read_storm() {
         deterministic::Runner::default().start(|context| async move {
             let (writer, reader) = split(0u64);
 
             let mut workers = Vec::new();
-            for worker in ["r0", "r1", "r2", "r3"] {
+            for (worker, offset) in [("r0", 0), ("r1", 1), ("r2", 2), ("r3", 3)] {
                 let reader = reader.clone();
                 workers.push(context.child(worker).spawn(move |ctx| async move {
+                    ctx.sleep(Duration::from_micros(offset * 250)).await;
                     loop {
-                        {
-                            let guard = reader.read().await;
-                            assert!(*guard == 0 || *guard == 1);
-                            if *guard == 1 {
-                                return;
-                            }
+                        // Hold each guard across an await, so some guard is
+                        // always granted while the mutation waits.
+                        let guard = reader.read().await;
+                        assert!(*guard == 0 || *guard == 1);
+                        if *guard == 1 {
+                            return;
                         }
                         ctx.sleep(Duration::from_millis(1)).await;
+                        drop(guard);
                     }
                 }));
             }
@@ -240,10 +255,49 @@ mod tests {
         });
     }
 
-    /// Dropping a mutation mid-flight poisons the cell, and later reads park.
-    /// The type rules out a second mutation, so there is nothing to assert.
+    /// Counts drops of the value it wraps.
+    struct DropCounter(Arc<AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Dropping the writer drops the database even while readers remain.
     #[test]
-    fn interrupted_mutation_poisons() {
+    fn dropped_writer_reclaims_database() {
+        deterministic::Runner::default().start(|_context| async move {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (writer, reader) = split(DropCounter(drops.clone()));
+            drop(writer);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            drop(reader);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    /// A guard held when the writer drops leaves the database to the
+    /// remaining readers, which drop it last.
+    #[test]
+    fn guard_held_at_writer_drop_defers_reclaim_to_readers() {
+        deterministic::Runner::default().start(|_context| async move {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (writer, reader) = split(DropCounter(drops.clone()));
+            let second = reader.clone();
+            let guard = reader.read().await;
+            drop(writer);
+            drop(guard);
+            drop(reader);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            drop(second);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    /// Dropping a mutation mid-flight poisons the cell, and later reads park.
+    #[test]
+    fn interrupted_mutation_parks_readers() {
         deterministic::Runner::default().start(|_context| async move {
             let (writer, reader) = split(0u64);
             let (started_tx, started) = oneshot::channel::<()>();
