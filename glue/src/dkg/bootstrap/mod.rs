@@ -73,8 +73,7 @@ pub struct Config<M, X, SS, T, D = Unit> {
 
     /// Peer manager for the one-shot chain.
     ///
-    /// With the P2P adapters, the tracker must be empty or already contain
-    /// this chain's epoch-zero peer set.
+    /// Do not register peer sets before passing this manager to the engine.
     pub manager: M,
 
     /// Blocker used for invalid peer behavior.
