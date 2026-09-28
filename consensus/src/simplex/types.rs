@@ -172,7 +172,7 @@ impl<T: Attributable> AttributableMap<T> {
 
     /// Returns the allocated slot capacity.
     #[cfg(test)]
-    pub(crate) fn capacity(&self) -> usize {
+    pub(crate) const fn capacity(&self) -> usize {
         self.data.capacity()
     }
 }
