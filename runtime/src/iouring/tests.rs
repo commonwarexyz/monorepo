@@ -5,12 +5,14 @@ use super::{
         driver::tests::fail_after_completion,
         operation::Operation,
         request::{RecvRequest, Request},
+        task::tests::live,
     },
     *,
 };
 use crate::{
     Blob as _, IoBufMut, Listener as _, Metrics as _, Network as _, Resolver as _, Runner as _,
-    Storage as _, WriteOptions, utils::extract_panic_message,
+    Storage as _, WriteOptions,
+    utils::{extract_panic_message, reschedule},
 };
 use futures::{
     FutureExt,
@@ -240,6 +242,21 @@ fn forbid_park() -> ParkGuard {
 /// Fail at the idle boundary if this test root still requires runnable work.
 pub fn before_park() {
     assert!(!FORBID_PARK.get(), "callback work reached the idle path");
+}
+
+/// Count destruction before injecting a task-disposal panic.
+struct PanickingDrop(Arc<AtomicUsize>);
+
+impl Drop for PanickingDrop {
+    fn drop(&mut self) {
+        // Count only after checking the borrow. Otherwise contain could
+        // swallow a borrow panic and make the disposal test pass anyway.
+        if let Some(local) = Local::current() {
+            let _borrow = local.borrow_mut();
+        }
+        self.0.fetch_add(1, Ordering::Relaxed);
+        panic!("task disposal panic");
+    }
 }
 
 #[test]
@@ -1549,6 +1566,111 @@ fn test_service_error_preserves_completions_before_cleanup() {
 }
 
 #[test]
+fn test_cancelled_task_disposal_is_contained() {
+    for catch in [false, true] {
+        for execution in [
+            Execution::default(),
+            Execution::Dedicated,
+            Execution::Shared(true),
+        ] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let task_drops = drops.clone();
+
+            Runner::new(Config::default().with_catch_panics(catch)).start(|context| async move {
+                let child = context.child("cancelled");
+                let child = match execution {
+                    Execution::Dedicated => child.dedicated(),
+                    Execution::Shared(blocking) => child.shared(blocking),
+                };
+                let (started, ready) = oneshot::channel();
+                let handle = child.spawn(|context| async move {
+                    let _guard = PanickingDrop(task_drops);
+                    assert!(started.send(context.child("retained")).is_ok());
+                    pending::<()>().await;
+                });
+
+                // Abort after the task has installed its guard. The panic
+                // comes from cancellation, regardless of user-poll policy.
+                let retained = ready.await.unwrap();
+                handle.abort();
+                assert!(matches!(handle.await, Err(Error::Closed)));
+
+                // Disposal must close the supervision subtree before the
+                // parent handle resolves, even when destruction panics.
+                let invoked = Arc::new(AtomicBool::new(false));
+                let factory_invoked = invoked.clone();
+                let result = retained
+                    .spawn(move |_| {
+                        factory_invoked.store(true, Ordering::Relaxed);
+                        async {}
+                    })
+                    .await;
+                assert!(
+                    !invoked.load(Ordering::Relaxed),
+                    "cancelled descendant invoked its spawn factory"
+                );
+                assert!(matches!(result, Err(Error::Closed)));
+
+                context.child("survivor").spawn(|_| async {}).await.unwrap();
+            });
+
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+        }
+    }
+}
+
+#[test]
+fn test_unpolled_task_disposal_is_contained() {
+    for catch in [false, true] {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let guard = PanickingDrop(drops.clone());
+        let polled = Arc::new(AtomicBool::new(false));
+        let task_polled = polled.clone();
+
+        Runner::new(Config::default().with_catch_panics(catch)).start(|context| async move {
+            // The root returns without yielding, leaving the guard captured
+            // in an accepted task that shutdown must destroy without polling.
+            context.child("unpolled").spawn(|_| async move {
+                let _guard = guard;
+                task_polled.store(true, Ordering::Relaxed);
+                pending::<()>().await;
+            });
+        });
+
+        assert!(!polled.load(Ordering::Relaxed));
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[test]
+fn test_self_woken_task_requeues_behind_queued_work() {
+    // A task that wakes itself during its poll runs again only after the work
+    // already queued, and completed tasks leave the arena.
+    let order = Runner::new(config()).start(|context| async move {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let first = context.child("first").spawn({
+            let order = order.clone();
+            move |_| async move {
+                order.lock().push("first");
+                reschedule().await;
+                order.lock().push("first again");
+            }
+        });
+        let second = context.child("second").spawn({
+            let order = order.clone();
+            move |_| async move { order.lock().push("second") }
+        });
+        first.await.unwrap();
+        second.await.unwrap();
+
+        // Only the runner's service task is still registered.
+        assert_eq!(live(&Local::current().unwrap().borrow().tasks), 1);
+        order.lock().clone()
+    });
+    assert_eq!(order, ["first", "second", "first again"]);
+}
+
+#[test]
 fn test_shutdown_cancels_tasks_before_destruction() {
     /// Inspect supervision and metrics when the user future is destroyed.
     struct Cleanup {
@@ -1619,14 +1741,13 @@ fn test_shutdown_cancels_tasks_before_destruction() {
                         tree.clone(),
                     );
                     tree.register(handle.aborter().unwrap());
-                    let task = Task::boxed(future);
+                    let task = Task::new(future, context.origin.clone());
                     if matches!(placement, Placement::Foreign) {
-                        let origin = context.origin.clone();
-                        thread::spawn(move || assert!(Tasks::register(&origin, task).is_ok()))
+                        thread::spawn(move || assert!(Tasks::register(task).is_ok()))
                             .join()
                             .unwrap();
                     } else {
-                        assert!(Tasks::register(&context.origin, task).is_ok());
+                        assert!(Tasks::register(task).is_ok());
                     }
 
                     handles.push(handle);
@@ -1857,16 +1978,6 @@ fn test_worker_releases_storage_and_durable_io_before_tracking_ends() {
 // Retain the task handle to check its result after the runner closes its mailbox.
 #[allow(clippy::async_yields_async)]
 fn test_queued_foreign_task_disposal_is_contained_at_shutdown() {
-    /// Record disposal before raising a panic from an unpolled task's captures.
-    struct PanickingDrop(Arc<AtomicUsize>);
-
-    impl Drop for PanickingDrop {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            panic!("queued task destructor failed");
-        }
-    }
-
     for catch in [false, true] {
         let drops = Arc::new(AtomicUsize::new(0));
         let payload = PanickingDrop(drops.clone());
