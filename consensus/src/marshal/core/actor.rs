@@ -1253,9 +1253,9 @@ where
         self.cleared_acks.extend(self.pending_acks.clear());
 
         // The pending floor holds the waiter, which is released when the floor is
-        // replaced, applied, or superseded. A closed subscription leaves the waiter
-        // pending rather than reaching the error arm, which would cancel caller
-        // subscriptions on the anchor. The fetch below is issued either way.
+        // replaced, applied, or superseded. Reporting a closed subscription as an
+        // error would cancel every caller subscription on the anchor, so the waiter
+        // stays pending instead. The fetch below is issued either way.
         let aborter = buffer
             .subscribe_by_commitment(commitment)
             .map(|rx| waiters.push(rx.or_else(|_| future::pending())));
