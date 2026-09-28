@@ -319,33 +319,27 @@ commonware_macros::stability_scope!(BETA {
         fn finalize(self) -> (Self, Self::Digest);
     }
 
-    /// Seals and opens an ordered sequence of messages under a single key.
+    /// Authenticated encryption of an ordered sequence of messages.
     ///
-    /// Each call consumes the next position in the sequence, so a message opens only at the
-    /// position it was sealed at. [Cipher::seal] and [Cipher::open] take the cipher by value and
-    /// return it on success, so a cipher that fails can seal or open nothing further. A key must
-    /// seal messages for at most one instance.
-    ///
-    /// [Random::random] creates an instance with a key sampled from the provided RNG.
+    /// Every message is encrypted and authenticated with its associated data. The nth call to
+    /// [Cipher::open] accepts only the nth message sealed under the same key, so replayed,
+    /// reordered, or modified messages fail to open. A failed call consumes the cipher. At most
+    /// one instance may seal under a given key.
     pub trait Cipher: Random + Sized + Send + Sync + 'static {
-        /// Error returned when a message cannot be sealed or opened.
-        type Error: core::error::Error + Send + Sync + 'static;
+        /// Authentication tag produced for each message.
+        type Tag: Array;
 
-        /// Number of bytes a sealed message grows by.
-        const TAG_SIZE: usize;
-
-        /// Encrypts all but the last [Self::TAG_SIZE] bytes of `buf` in place, authenticates them
-        /// together with `aad`, and writes the tag to the last [Self::TAG_SIZE] bytes.
+        /// Encrypts the next message in place, authenticated together with `aad`, and returns
+        /// the cipher with the tag.
         ///
-        /// # Panics
-        ///
-        /// Panics if `buf` is shorter than [Self::TAG_SIZE] or longer than the cipher can seal.
-        fn seal(self, aad: &[u8], buf: &mut [u8]) -> Result<Self, Self::Error>;
+        /// Returns `None` if sealing fails, in which case the contents of `data` are unspecified.
+        fn seal(self, aad: &[u8], data: &mut [u8]) -> Option<(Self, Self::Tag)>;
 
-        /// Decrypts `buf`, a ciphertext followed by its tag, in place after authenticating it
-        /// together with `aad`, and returns the cipher with the length of the plaintext at the
-        /// start of `buf`.
-        fn open(self, aad: &[u8], buf: &mut [u8]) -> Result<(Self, usize), Self::Error>;
+        /// Decrypts the next message in place if `tag` authenticates it together with `aad`, and
+        /// returns the cipher.
+        ///
+        /// Returns `None` if opening fails, in which case the contents of `data` are unspecified.
+        fn open(self, aad: &[u8], data: &mut [u8], tag: &Self::Tag) -> Option<Self>;
     }
 });
 

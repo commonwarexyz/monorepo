@@ -431,11 +431,10 @@ mod test {
 
     /// Seals `msg` with `send` and checks that `recv` opens it.
     fn exchange<C: Cipher>(send: C, recv: C, msg: &[u8]) {
-        let mut buf = msg.to_vec();
-        buf.resize(msg.len() + C::TAG_SIZE, 0);
-        send.seal(&[], &mut buf).unwrap();
-        let (_, len) = recv.open(&[], &mut buf).unwrap();
-        assert_eq!(&buf[..len], msg);
+        let mut data = msg.to_vec();
+        let (_, tag) = send.seal(&[], &mut data).unwrap();
+        recv.open(&[], &mut data, &tag).unwrap();
+        assert_eq!(data, msg);
     }
 
     #[test]

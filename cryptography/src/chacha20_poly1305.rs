@@ -1,25 +1,14 @@
 //! ChaCha20-Poly1305 [Cipher] with an implicit counter nonce.
 //!
 //! [ChaCha20Poly1305] holds one key and a 96-bit counter nonce that starts at zero, is encoded
-//! little-endian, and advances once per message. It is never transmitted, so a successful open
-//! authenticates a message at its expected position. Messages are sealed with empty associated
-//! data and a 16-byte tag.
+//! little-endian, and advances once per message. The nonce is never transmitted, so a message
+//! opens only in the order it was sealed. Each message carries a 16-byte tag.
 
 use crate::{Cipher, Secret};
 use commonware_math::algebra::Random;
+use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
-
-/// Errors returned by [ChaCha20Poly1305].
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// The nonce counter is exhausted, so no further message can be sealed or opened.
-    #[error("nonce exhausted")]
-    Exhausted,
-    /// The message does not authenticate at its position with the given associated data.
-    #[error("decryption failed")]
-    DecryptionFailed,
-}
 
 /// Size of the ChaCha20-Poly1305 authentication tag.
 const TAG_SIZE: usize = 16;
@@ -43,10 +32,10 @@ impl CounterNonce {
     }
 
     /// Increments the counter and returns the current value as bytes.
-    /// Returns an error if the counter would overflow.
-    pub fn inc(&mut self) -> Result<[u8; NONCE_SIZE_BYTES], Error> {
+    /// Returns `None` if the counter would overflow.
+    pub fn inc(&mut self) -> Option<[u8; NONCE_SIZE_BYTES]> {
         if self.inner >= 1 << (8 * NONCE_SIZE_BYTES) {
-            return Err(Error::Exhausted);
+            return None;
         }
         let out = self.inner.to_le_bytes();
         self.inner += 1;
@@ -54,7 +43,7 @@ impl CounterNonce {
         // Extract only the lower 96 bits (12 bytes) for the nonce
         let mut nonce = [0u8; NONCE_SIZE_BYTES];
         nonce.copy_from_slice(&out[..NONCE_SIZE_BYTES]);
-        Ok(nonce)
+        Some(nonce)
     }
 }
 
@@ -76,26 +65,27 @@ cfg_if::cfg_if! {
                 nonce: &[u8; NONCE_SIZE_BYTES],
                 aad: &[u8],
                 data: &mut [u8],
-            ) -> [u8; TAG_SIZE] {
+            ) -> Option<[u8; TAG_SIZE]> {
                 let nonce = aead::Nonce::assume_unique_for_key(*nonce);
                 let tag = self
                     .0
                     .seal_in_place_separate_tag(nonce, aead::Aad::from(aad), data)
-                    .expect("message too long for ChaCha20-Poly1305");
-                tag.as_ref().try_into().expect("tag size mismatch")
+                    .ok()?;
+                tag.as_ref().try_into().ok()
             }
 
             fn decrypt(
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
                 aad: &[u8],
-                buf: &mut [u8],
-            ) -> Result<(), Error> {
+                data: &mut [u8],
+                tag: &[u8; TAG_SIZE],
+            ) -> Option<()> {
                 let nonce = aead::Nonce::assume_unique_for_key(*nonce);
                 self.0
-                    .open_in_place(nonce, aead::Aad::from(aad), buf)
+                    .open_in_place_separate_tag(nonce, aead::Aad::from(aad), tag, data)
+                    .ok()
                     .map(|_| ())
-                    .map_err(|_| Error::DecryptionFailed)
             }
         }
     } else {
@@ -113,25 +103,23 @@ cfg_if::cfg_if! {
                 nonce: &[u8; NONCE_SIZE_BYTES],
                 aad: &[u8],
                 data: &mut [u8],
-            ) -> [u8; TAG_SIZE] {
+            ) -> Option<[u8; TAG_SIZE]> {
                 self.0
                     .encrypt_inout_detached(nonce.into(), aad, data.into())
-                    .expect("message too long for ChaCha20-Poly1305")
-                    .into()
+                    .ok()
+                    .map(Into::into)
             }
 
             fn decrypt(
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
                 aad: &[u8],
-                buf: &mut [u8],
-            ) -> Result<(), Error> {
-                let (data, tag) = buf
-                    .split_last_chunk_mut::<TAG_SIZE>()
-                    .ok_or(Error::DecryptionFailed)?;
+                data: &mut [u8],
+                tag: &[u8; TAG_SIZE],
+            ) -> Option<()> {
                 self.0
-                    .decrypt_inout_detached(nonce.into(), aad, data.into(), (&*tag).into())
-                    .map_err(|_| Error::DecryptionFailed)
+                    .decrypt_inout_detached(nonce.into(), aad, data.into(), tag.into())
+                    .ok()
             }
         }
     }
@@ -155,28 +143,21 @@ impl Random for ChaCha20Poly1305 {
 }
 
 impl Cipher for ChaCha20Poly1305 {
-    type Error = Error;
-
-    const TAG_SIZE: usize = TAG_SIZE;
+    type Tag = FixedBytes<TAG_SIZE>;
 
     #[inline]
-    fn seal(mut self, aad: &[u8], buf: &mut [u8]) -> Result<Self, Error> {
-        let (data, tag) = buf
-            .split_last_chunk_mut::<TAG_SIZE>()
-            .expect("buffer must have room for the tag");
+    fn seal(mut self, aad: &[u8], data: &mut [u8]) -> Option<(Self, Self::Tag)> {
         let nonce = self.nonce.inc()?;
-        *tag = self.key.expose(|key| key.encrypt(&nonce, aad, data));
-        Ok(self)
+        let tag = self.key.expose(|key| key.encrypt(&nonce, aad, data))?;
+        Some((self, FixedBytes::new(tag)))
     }
 
     #[inline]
-    fn open(mut self, aad: &[u8], buf: &mut [u8]) -> Result<(Self, usize), Error> {
+    fn open(mut self, aad: &[u8], data: &mut [u8], tag: &Self::Tag) -> Option<Self> {
         let nonce = self.nonce.inc()?;
-        let Some(len) = buf.len().checked_sub(TAG_SIZE) else {
-            return Err(Error::DecryptionFailed);
-        };
-        self.key.expose(|key| key.decrypt(&nonce, aad, buf))?;
-        Ok((self, len))
+        let tag: &[u8; TAG_SIZE] = tag.as_ref().try_into().expect("tag size is fixed");
+        self.key.expose(|key| key.decrypt(&nonce, aad, data, tag))?;
+        Some(self)
     }
 }
 
@@ -185,10 +166,14 @@ mod tests {
     use super::*;
     use commonware_utils::{TestRng, test_rng};
 
-    fn seal(cipher: ChaCha20Poly1305, aad: &[u8], msg: &[u8]) -> (ChaCha20Poly1305, Vec<u8>) {
-        let mut buf = msg.to_vec();
-        buf.resize(msg.len() + TAG_SIZE, 0);
-        (cipher.seal(aad, &mut buf).unwrap(), buf)
+    fn seal(
+        cipher: ChaCha20Poly1305,
+        aad: &[u8],
+        msg: &[u8],
+    ) -> (ChaCha20Poly1305, Vec<u8>, FixedBytes<TAG_SIZE>) {
+        let mut data = msg.to_vec();
+        let (cipher, tag) = cipher.seal(aad, &mut data).unwrap();
+        (cipher, data, tag)
     }
 
     #[test]
@@ -196,91 +181,65 @@ mod tests {
         let mut send = ChaCha20Poly1305::random(test_rng());
         let mut recv = ChaCha20Poly1305::random(test_rng());
         for msg in [&b""[..], b"hello", b"world"] {
-            let (next, mut buf) = seal(send, b"aad", msg);
+            let (next, mut data, tag) = seal(send, b"aad", msg);
             send = next;
-            assert_eq!(buf.len(), msg.len() + TAG_SIZE);
             if !msg.is_empty() {
-                assert_ne!(&buf[..msg.len()], msg);
+                assert_ne!(data, msg);
             }
-
-            let (next, len) = recv.open(b"aad", &mut buf).unwrap();
-            recv = next;
-            assert_eq!(&buf[..len], msg);
+            recv = recv.open(b"aad", &mut data, &tag).unwrap();
+            assert_eq!(data, msg);
         }
     }
 
     #[test]
     fn test_open_wrong_key_fails() {
-        let (_, mut buf) = seal(ChaCha20Poly1305::random(test_rng()), b"", b"hello");
+        let (_, mut data, tag) = seal(ChaCha20Poly1305::random(test_rng()), b"", b"hello");
         let recv = ChaCha20Poly1305::random(TestRng::new(1));
-        assert!(matches!(
-            recv.open(b"", &mut buf),
-            Err(Error::DecryptionFailed)
-        ));
+        assert!(recv.open(b"", &mut data, &tag).is_none());
     }
 
     #[test]
     fn test_open_wrong_aad_fails() {
-        let (_, mut buf) = seal(ChaCha20Poly1305::random(test_rng()), b"aad", b"hello");
+        let (_, mut data, tag) = seal(ChaCha20Poly1305::random(test_rng()), b"aad", b"hello");
         let recv = ChaCha20Poly1305::random(test_rng());
-        assert!(matches!(
-            recv.open(b"other", &mut buf),
-            Err(Error::DecryptionFailed)
-        ));
+        assert!(recv.open(b"other", &mut data, &tag).is_none());
     }
 
     #[test]
-    fn test_open_wrong_position_fails() {
-        let (send, _) = seal(ChaCha20Poly1305::random(test_rng()), b"", b"first");
-        let (_, mut second) = seal(send, b"", b"second");
+    fn test_open_out_of_order_fails() {
+        let (send, _, _) = seal(ChaCha20Poly1305::random(test_rng()), b"", b"first");
+        let (_, mut second, tag) = seal(send, b"", b"second");
         let recv = ChaCha20Poly1305::random(test_rng());
-        assert!(matches!(
-            recv.open(b"", &mut second),
-            Err(Error::DecryptionFailed)
-        ));
+        assert!(recv.open(b"", &mut second, &tag).is_none());
     }
 
     #[test]
     fn test_open_corrupted_fails() {
-        let (_, mut buf) = seal(ChaCha20Poly1305::random(test_rng()), b"", b"hello");
-        buf[0] ^= 0xFF;
+        let (_, mut data, tag) = seal(ChaCha20Poly1305::random(test_rng()), b"", b"hello");
+        data[0] ^= 0xFF;
         let recv = ChaCha20Poly1305::random(test_rng());
-        assert!(matches!(
-            recv.open(b"", &mut buf),
-            Err(Error::DecryptionFailed)
-        ));
+        assert!(recv.open(b"", &mut data, &tag).is_none());
     }
 
     #[test]
-    fn test_open_short_buffer_fails() {
-        for len in [0, TAG_SIZE - 1, TAG_SIZE] {
-            let recv = ChaCha20Poly1305::random(test_rng());
-            let mut buf = vec![0u8; len];
-            assert!(matches!(
-                recv.open(b"", &mut buf),
-                Err(Error::DecryptionFailed)
-            ));
-        }
+    fn test_open_corrupted_tag_fails() {
+        let (_, mut data, tag) = seal(ChaCha20Poly1305::random(test_rng()), b"", b"hello");
+        let mut tag: [u8; TAG_SIZE] = tag.as_ref().try_into().unwrap();
+        tag[0] ^= 0xFF;
+        let recv = ChaCha20Poly1305::random(test_rng());
+        assert!(recv.open(b"", &mut data, &FixedBytes::new(tag)).is_none());
     }
 
     #[test]
-    fn test_exhausted_positions_fail() {
+    fn test_exhausted_counter_fails() {
         let exhausted = |mut cipher: ChaCha20Poly1305| {
             cipher.nonce.inner = 1 << (8 * NONCE_SIZE_BYTES);
             cipher
         };
-        let mut buf = vec![0u8; TAG_SIZE];
         let send = exhausted(ChaCha20Poly1305::random(test_rng()));
-        assert!(matches!(send.seal(b"", &mut buf), Err(Error::Exhausted)));
+        assert!(send.seal(b"", &mut []).is_none());
         let recv = exhausted(ChaCha20Poly1305::random(test_rng()));
-        assert!(matches!(recv.open(b"", &mut buf), Err(Error::Exhausted)));
-    }
-
-    #[test]
-    #[should_panic(expected = "buffer must have room for the tag")]
-    fn test_seal_short_buffer_panics() {
-        let send = ChaCha20Poly1305::random(test_rng());
-        let mut buf = vec![0u8; TAG_SIZE - 1];
-        let _ = send.seal(b"", &mut buf);
+        let tag = FixedBytes::new([0u8; TAG_SIZE]);
+        assert!(recv.open(b"", &mut [], &tag).is_none());
     }
 }

@@ -1,10 +1,10 @@
 use super::Config;
 use crate::utils::codec::{Error as FrameError, recv_frame, send_frame, validate_frame_len};
 use commonware_codec::{
-    DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Write, varint::UInt,
+    Copying, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Write, varint::UInt,
 };
 use commonware_cryptography::{
-    ChaCha20Poly1305, Cipher, Signer, chacha20_poly1305,
+    ChaCha20Poly1305, Cipher, Signer,
     handshake::sake::{
         self, Ack, Context, Error as HandshakeError, Syn, SynAck, dial_end, dial_start, listen_end,
         listen_start,
@@ -26,31 +26,39 @@ const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
 /// Cipher that seals records in every [Version].
 type RecordCipher = ChaCha20Poly1305;
 
-/// Tag size of [RecordCipher] as a record length.
+/// Tag appended to every sealed piece of a record.
+type Tag = <RecordCipher as Cipher>::Tag;
+
+/// Size of a [Tag] as a record length.
 const TAG_SIZE: u32 = {
-    assert!(RecordCipher::TAG_SIZE <= u32::MAX as usize);
-    RecordCipher::TAG_SIZE as u32
+    assert!(Tag::SIZE <= u32::MAX as usize);
+    Tag::SIZE as u32
 };
 
 /// Size of a version 1 header.
-const V1_HEADER_SIZE: usize = V1_HEADER_PLAINTEXT_SIZE + RecordCipher::TAG_SIZE;
+const V1_HEADER_SIZE: usize = V1_HEADER_PLAINTEXT_SIZE + Tag::SIZE;
 
 /// Largest payload whose record length fits in a u32.
 const MAX_SIZE: u32 = u32::MAX - TAG_SIZE;
 
-/// Seals `buf` with `cipher`, leaving it empty if sealing fails.
-fn seal(cipher: &mut Option<RecordCipher>, buf: &mut [u8]) -> Result<(), Error> {
+/// Seals `data` with `cipher` and returns its tag, leaving the cipher empty if sealing fails.
+fn seal(cipher: &mut Option<RecordCipher>, data: &mut [u8]) -> Result<Tag, Error> {
     let sealer = cipher.take().ok_or(Error::StreamClosed)?;
-    *cipher = Some(sealer.seal(&[], buf)?);
-    Ok(())
+    let (sealer, tag) = sealer.seal(&[], data).ok_or(Error::SealFailed)?;
+    *cipher = Some(sealer);
+    Ok(tag)
 }
 
-/// Opens `buf` with `cipher`, leaving it empty if opening fails.
-fn open(cipher: &mut Option<RecordCipher>, buf: &mut [u8]) -> Result<usize, Error> {
+/// Opens `buf`, a ciphertext followed by its tag, with `cipher` and returns its plaintext, leaving
+/// the cipher empty if opening fails.
+fn open(cipher: &mut Option<RecordCipher>, mut buf: IoBufMut) -> Result<IoBufMut, Error> {
     let opener = cipher.take().ok_or(Error::StreamClosed)?;
-    let (opener, len) = opener.open(&[], buf)?;
-    *cipher = Some(opener);
-    Ok(len)
+    let len = buf.len().checked_sub(Tag::SIZE).ok_or(Error::OpenFailed)?;
+    let (data, tag) = buf.as_mut().split_at_mut(len);
+    let tag = Tag::decode(Copying(&*tag)).expect("tag has a fixed size");
+    *cipher = Some(opener.open(&[], data, &tag).ok_or(Error::OpenFailed)?);
+    buf.truncate(len);
+    Ok(buf)
 }
 
 /// Errors that can occur when interacting with a stream.
@@ -58,8 +66,10 @@ fn open(cipher: &mut Option<RecordCipher>, buf: &mut [u8]) -> Result<usize, Erro
 pub enum Error {
     #[error("handshake error: {0}")]
     HandshakeError(HandshakeError),
-    #[error("cipher error: {0}")]
-    CipherError(chacha20_poly1305::Error),
+    #[error("seal failed")]
+    SealFailed,
+    #[error("open failed")]
+    OpenFailed,
     #[error("unable to decode: {0}")]
     UnableToDecode(CodecError),
     #[error("peer rejected: {}", hex(_0))]
@@ -89,12 +99,6 @@ impl From<CodecError> for Error {
 impl From<HandshakeError> for Error {
     fn from(value: HandshakeError) -> Self {
         Self::HandshakeError(value)
-    }
-}
-
-impl From<chacha20_poly1305::Error> for Error {
-    fn from(value: chacha20_poly1305::Error) -> Self {
-        Self::CipherError(value)
     }
 }
 
@@ -169,7 +173,7 @@ impl Version {
     pub fn record_len(self, len: usize) -> usize {
         self.header_len(len)
             .checked_add(len)
-            .and_then(|size| size.checked_add(RecordCipher::TAG_SIZE))
+            .and_then(|size| size.checked_add(Tag::SIZE))
             .expect("record size exceeds usize")
     }
 
@@ -186,8 +190,8 @@ impl Version {
             Self::V1 => {
                 let offset = chunk.len();
                 len.write(chunk);
-                chunk.put_bytes(0, RecordCipher::TAG_SIZE);
-                seal(cipher, &mut chunk.as_mut()[offset..])?;
+                let tag = seal(cipher, &mut chunk.as_mut()[offset..])?;
+                chunk.put_slice(&tag);
             }
         }
         Ok(())
@@ -206,9 +210,7 @@ impl Version {
                 .await
                 .map_err(|err| match err {
                     // The prefix counts the tag, which is excluded from the reported payload.
-                    FrameError::RecvTooLarge(len) => {
-                        Error::RecvTooLarge(len - RecordCipher::TAG_SIZE)
-                    }
+                    FrameError::RecvTooLarge(len) => Error::RecvTooLarge(len - Tag::SIZE),
                     err => err.into(),
                 }),
             Self::V1 => {
@@ -218,19 +220,16 @@ impl Version {
                     .recv(V1_HEADER_SIZE)
                     .await
                     .map_err(Error::RecvFailed)?;
-                let mut header = mutable_frame(pool, header);
-
                 // Authenticate the header before decoding its length or requesting the payload.
-                let plaintext_len = open(cipher, header.as_mut())?;
-                assert_eq!(plaintext_len, V1_HEADER_PLAINTEXT_SIZE);
-                header.truncate(plaintext_len);
+                let header = open(cipher, mutable_frame(pool, header))?;
+                assert_eq!(header.len(), V1_HEADER_PLAINTEXT_SIZE);
                 let len = u32::decode(header)?;
                 if len > max_message_size {
                     return Err(Error::RecvTooLarge(Widen::<usize>::widen(len)));
                 }
 
                 // Receive the payload and tag only after authenticating and checking the length.
-                let body_len = Widen::<usize>::widen(len) + RecordCipher::TAG_SIZE;
+                let body_len = Widen::<usize>::widen(len) + Tag::SIZE;
                 stream.recv(body_len).await.map_err(Error::RecvFailed)
             }
         }
@@ -465,15 +464,15 @@ impl<O: Sink> Sender<O> {
         self.version.append_header(chunk, &mut self.cipher, len)?;
 
         let plaintext_offset = chunk.len();
-        // Copy the plaintext directly into the frame and reserve room for its tag.
+        // Copy the plaintext directly into the frame.
         chunk.put(&mut bufs);
-        chunk.put_bytes(0, RecordCipher::TAG_SIZE);
 
-        // Encrypt in-place and write the tag into the reserved room.
-        seal(&mut self.cipher, &mut chunk.as_mut()[plaintext_offset..])?;
+        // Encrypt in-place and append the tag to the frame.
+        let tag = seal(&mut self.cipher, &mut chunk.as_mut()[plaintext_offset..])?;
+        chunk.put_slice(&tag);
         assert_eq!(
             chunk.len() - plaintext_offset,
-            Widen::<usize>::widen(len) + RecordCipher::TAG_SIZE
+            Widen::<usize>::widen(len) + Tag::SIZE
         );
         Ok(())
     }
@@ -657,15 +656,9 @@ impl<I: Stream> Receiver<I> {
                 self.max_message_size,
             )
             .await?;
-        let mut decryption_buf = mutable_frame(&self.pool, encrypted);
-
-        // Decrypt in-place, get plaintext length back.
-        let plaintext_len = open(&mut self.cipher, decryption_buf.as_mut())?;
-
-        // Truncate to remove tag bytes, keeping only plaintext.
-        decryption_buf.truncate(plaintext_len);
-
-        Ok(decryption_buf.freeze().into())
+        // Decrypt in place, keeping only the plaintext.
+        let plaintext = open(&mut self.cipher, mutable_frame(&self.pool, encrypted))?;
+        Ok(plaintext.freeze().into())
     }
 }
 
@@ -676,9 +669,7 @@ mod test {
         Handshake as _,
         utils::{Timeout, TimeoutError},
     };
-    use commonware_cryptography::{
-        ChaCha20Poly1305, Signer, chacha20_poly1305, ed25519::PrivateKey,
-    };
+    use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
     use commonware_math::algebra::Random;
     use commonware_runtime::{
         BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
@@ -701,8 +692,8 @@ mod test {
     /// Seals `msg` with `cipher` into a new buffer.
     fn sealed(cipher: &mut Option<ChaCha20Poly1305>, msg: &[u8]) -> Vec<u8> {
         let mut buf = msg.to_vec();
-        buf.resize(msg.len() + ChaCha20Poly1305::TAG_SIZE, 0);
-        seal(cipher, &mut buf).unwrap();
+        let tag = seal(cipher, &mut buf).unwrap();
+        buf.extend_from_slice(&tag);
         buf
     }
 
@@ -828,6 +819,25 @@ mod test {
         });
     }
 
+    /// Checks that a version 0 record shorter than a tag fails to open.
+    #[test]
+    fn test_v0_record_shorter_than_tag_rejected() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut sink, stream) = mocks::Channel::init();
+            let mut receiver = Receiver {
+                cipher: Some(ChaCha20Poly1305::random(TestRng::new(0))),
+                stream,
+                max_message_size: MAX_MESSAGE_SIZE,
+                pool: context.network_buffer_pool().clone(),
+                version: Version::V0,
+            };
+            let mut record = UInt(TAG_SIZE - 1).encode().to_vec();
+            record.resize(record.len() + Tag::SIZE - 1, 0);
+            sink.send(record).await.unwrap();
+            assert!(matches!(receiver.recv().await, Err(Error::OpenFailed)));
+        });
+    }
+
     /// Checks that a receiver that fails to open a record refuses every later record.
     #[test]
     fn test_recv_after_failure_closed() {
@@ -846,12 +856,7 @@ mod test {
             let mut header = sealed(&mut cipher, &0u32.to_be_bytes());
             header[0] ^= 1;
             sink.send(header).await.unwrap();
-            assert!(matches!(
-                receiver.recv().await,
-                Err(Error::CipherError(
-                    chacha20_poly1305::Error::DecryptionFailed
-                ))
-            ));
+            assert!(matches!(receiver.recv().await, Err(Error::OpenFailed)));
 
             // A valid record at the next positions is refused.
             sink.send(sealed(&mut cipher, &0u32.to_be_bytes()))
@@ -893,12 +898,7 @@ mod test {
                     .now_or_never()
                     .expect("header rejection must be immediate");
                 if corrupt.is_some() {
-                    assert!(matches!(
-                        result,
-                        Err(Error::CipherError(
-                            chacha20_poly1305::Error::DecryptionFailed
-                        ))
-                    ));
+                    assert!(matches!(result, Err(Error::OpenFailed)));
                 } else {
                     assert!(matches!(
                         result,

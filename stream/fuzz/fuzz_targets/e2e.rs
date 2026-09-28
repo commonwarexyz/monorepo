@@ -1,5 +1,6 @@
 #![no_main]
 
+use commonware_codec::FixedSize;
 use commonware_cryptography::{ChaCha20Poly1305, Cipher, Signer, ed25519::PrivateKey};
 use commonware_runtime::{
     Handle, Runner as _, Sink as _, Spawner, Stream as _, Supervisor as _, deterministic, mocks,
@@ -18,7 +19,8 @@ use std::time::Duration;
 
 const NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 2048;
-const MAX_CIPHERTEXT_SIZE: u32 = MAX_MESSAGE_SIZE + ChaCha20Poly1305::TAG_SIZE as u32;
+const MAX_CIPHERTEXT_SIZE: u32 =
+    MAX_MESSAGE_SIZE + <<ChaCha20Poly1305 as Cipher>::Tag as FixedSize>::SIZE as u32;
 
 #[derive(Debug)]
 enum Direction {

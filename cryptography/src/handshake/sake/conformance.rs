@@ -18,19 +18,18 @@ fn relay(
     recv: ChaCha20Poly1305,
     msg: &[u8],
 ) -> (ChaCha20Poly1305, ChaCha20Poly1305) {
-    // Seal the message in place, leaving room at the end for its tag.
-    let mut ciphertext = msg.to_vec();
-    ciphertext.resize(msg.len() + ChaCha20Poly1305::TAG_SIZE, 0);
-    let send = send.seal(&[], &mut ciphertext).unwrap();
-    assert_ne!(ciphertext, msg);
-    log.extend(ciphertext.encode());
+    // Seal the message in place and log the ciphertext followed by its tag.
+    let mut data = msg.to_vec();
+    let (send, tag) = send.seal(&[], &mut data).unwrap();
+    let mut sealed = data.clone();
+    sealed.extend_from_slice(&tag);
+    assert_ne!(sealed, msg);
+    log.extend(sealed.encode());
 
-    // Open the ciphertext in place and keep only the recovered plaintext.
-    let mut received = ciphertext;
-    let (recv, len) = recv.open(&[], &mut received).unwrap();
-    received.truncate(len);
-    assert_eq!(received, msg);
-    log.extend(received.encode());
+    // Open the ciphertext in place and log the recovered plaintext.
+    let recv = recv.open(&[], &mut data, &tag).unwrap();
+    assert_eq!(data, msg);
+    log.extend(data.encode());
     (send, recv)
 }
 
