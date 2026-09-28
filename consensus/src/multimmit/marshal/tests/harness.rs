@@ -6,7 +6,7 @@ use crate::{
         algebra::FinalTips,
         config::Parameters,
         marshal::{
-            Bridge, Config, Floor, Key, Limits, LqcVerifier, Mailbox, MarshalProgress, OutputIndex,
+            Bridge, Config, Floor, Key, Limits, LqcVerifier, Mailbox, MarshalProgress,
             ServiceHandle, Update, open,
         },
         mocks::{
@@ -21,7 +21,7 @@ use crate::{
             TransactionBlock, TransactionBlockHeader, VoteBody, genesis_history,
         },
     },
-    types::{Height, Participant, Round, View},
+    types::{Height, OutputIndex, Participant, Round, View},
 };
 use bytes::Bytes;
 use commonware_actor::Feedback;
@@ -160,7 +160,15 @@ impl Reporter for Application {
         } = update;
         let auto = *self.auto.lock();
         let mut state = self.state.lock();
-        state.delivered.push(Delivered { index, block });
+        assert_eq!(
+            block.digest(),
+            block.inner().reference().digest(),
+            "delivered blocks carry their own digest"
+        );
+        state.delivered.push(Delivered {
+            index,
+            block: block.into(),
+        });
         if auto {
             drop(state);
             acknowledgement.acknowledge();

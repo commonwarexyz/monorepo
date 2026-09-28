@@ -1,7 +1,7 @@
 //! End-to-end scenarios.
 
 use super::harness::*;
-use crate::multimmit::marshal::{Error, OutputIndex};
+use crate::{multimmit::marshal::Error, types::OutputIndex};
 use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _};
 use std::time::Duration;
 
@@ -1083,5 +1083,42 @@ fn a_floor_after_a_payment_pass_installs_only_where_payments_are_ordered_first()
             coordinates(&delivered),
             vec![(0, 2), (0, 3), (1, 4), (0, 4)]
         );
+    });
+}
+
+#[test]
+fn engine_neutral_floors_install_at_the_floor_index() {
+    use crate::marshal::{Floors, Ledger};
+
+    runner(14).start(|context| async move {
+        let mut harness = Harness::new(context, 14, 2).await;
+        harness.start(0).await;
+        harness.script.certify([2, 1]);
+        harness.script.certify([1, 2]);
+        let holder = harness.mailbox(0);
+        for view in 0..2 {
+            harness.script.stage(&holder, view).await;
+            harness.script.prove(&holder, view);
+        }
+        let total = harness.script.ordered().len() as u64;
+        harness
+            .wait_progress(0, |progress| progress.acknowledged.get() == total)
+            .await;
+
+        let first = harness.script.views[0].ordered().len() as u64;
+        let (index, floor) = loop {
+            if let Some(found) = Floors::floor_at(&holder, OutputIndex::new(first)).await {
+                break found;
+            }
+            harness.settle(Duration::from_millis(10)).await;
+        };
+        assert_eq!(index.get(), first);
+
+        harness.start(1).await;
+        let follower = harness.mailbox(1);
+        assert_eq!(Floors::install(&follower, floor.clone()).await, Some(index));
+        // A floor the follower is no longer behind is rejected.
+        assert_eq!(Floors::install(&follower, floor).await, None);
+        assert_eq!(Ledger::ack_window(&follower), follower.max_pending_acks());
     });
 }

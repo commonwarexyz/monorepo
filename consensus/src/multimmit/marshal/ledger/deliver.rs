@@ -11,16 +11,16 @@ use crate::{
         marshal::{
             input::Delivered,
             store::{blocks::Stream, meta::State},
-            types::{Cause, LqcVerifier, OutputIndex, Update},
+            types::{Cause, LqcVerifier, Update},
             wire::{Key, MAX_BLOCKS},
         },
         scheme::Scheme,
         types::{BlockRef, Body, CertificateId, TransactionBlock},
     },
-    types::Height,
+    types::{Height, OutputIndex},
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::{Hasher, PublicKey};
+use commonware_cryptography::{Digested, Hasher, PublicKey};
 use commonware_resolver::{Outcome, Resolution, Resolver};
 use commonware_runtime::Spawner;
 use commonware_storage::Context;
@@ -160,7 +160,7 @@ where
         self.write_cut_entries(index);
         let update = Update {
             index: OutputIndex::new(index),
-            block: body,
+            block: Digested::precomputed(body, block.digest()),
             acknowledgement,
         };
         if self.application.report(update) == Feedback::Closed {

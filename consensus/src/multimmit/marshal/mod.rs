@@ -10,8 +10,9 @@
 //! 2. The caller attaches the bridge to its network resolver, as consumer and producer.
 //! 3. [`Service::start`] returns the [`Mailbox`] and the [`ServiceHandle`].
 //! 4. Consensus reports its activity to the [`Mailbox`] (it is a [`Reporter`](crate::Reporter));
-//!    producers stage their blocks with [`Mailbox::stage_block`], and [`Service::relay`] gives the
-//!    engine a [`Relay`] that broadcasts them.
+//!    producers stage their blocks with [`Mailbox::stage_block`], or run a consensus
+//!    [`Application`](crate::Application) as the engine's automaton through [`Inline`]; and
+//!    [`Service::relay`] gives the engine a [`Relay`] that broadcasts staged blocks.
 //! 5. The application receives one [`Update`] per block in [`OutputIndex`] order and acknowledges
 //!    each once it has durably applied it. An output's index is the sum of the producer-chain
 //!    heights once it is emitted, so it is the same on every node.
@@ -44,8 +45,11 @@
 //!   that floor servable and every block the engine may still verify.
 //!
 //! A storage failure stops marshal; no store is used after a failed mutation.
+//!
+//! [`OutputIndex`]: crate::types::OutputIndex
 
 mod config;
+mod inline;
 mod input;
 mod ledger;
 mod mailbox;
@@ -55,19 +59,19 @@ mod service;
 mod store;
 #[cfg(test)]
 mod tests;
+mod traits;
 mod types;
 mod verifier;
 mod wire;
 
 pub use crate::multimmit::actors::util::Completion;
 pub use config::{Config, ConfigError, Limits};
+pub use inline::Inline;
 pub use input::Bridge;
 pub use mailbox::Mailbox;
 pub use relay::Relay;
 pub use service::{OpenError, Service, ServiceHandle, open};
-pub use types::{
-    Custody, Error, Failure, Floor, LqcVerifier, MarshalProgress, OutputIndex, Update,
-};
+pub use types::{Custody, Error, Failure, Floor, LqcVerifier, MarshalProgress, Update};
 pub use verifier::{InvalidLqc, SchemeVerifier};
 pub use wire::Key;
 
