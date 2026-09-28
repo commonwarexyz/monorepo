@@ -60,6 +60,7 @@ pub trait Storage: Send + Sync {
     ///
     /// - Returns [Error::LocationOverflow] if `loc` is not a valid location.
     /// - Returns [Error::ElementPruned] if a node the boundary requires has been pruned.
+    /// - Returns any error [`Storage::get_node`] returns for a required node.
     fn pinned_nodes_at(
         &self,
         loc: Location<Self::Family>,

@@ -2354,7 +2354,7 @@ where
             };
 
             // A key resolved via the ancestor diff must only match at its ancestor-diff
-            // location. A stale snapshot collision (the pre-parent DB snapshot still
+            // location. A stale index collision (the pre-parent DB index still
             // containing the key's old location) must contribute nothing: consuming its
             // mutation would misclassify a parent-deleted key's re-creation as an update
             // (or its redundant delete as a live delete), and feeding its next_key or
@@ -2435,7 +2435,7 @@ where
                 _ => unreachable!("expected update operation"),
             };
 
-            // Same stale-location guard as the mutation classifier above: the snapshot scan
+            // Same stale-location guard as the mutation classifier above: the index scan
             // sees only applied state, so a key the ancestor diff supersedes at another
             // location (or deletes) is stale here and must not steer the predecessor search.
             // The ancestor-diff walk below contributes the live version of such keys.
@@ -6241,7 +6241,7 @@ mod tests {
             let k6 = colliding_digest(0xAA, 6);
             let k29 = colliding_digest(0xAA, 29);
 
-            // Seed both keys so the snapshot bucket contains two entries.
+            // Seed both keys so the index bucket contains two entries.
             let initial = db
                 .new_batch()
                 .write(k0, Some(colliding_digest(0xBB, 0)))
@@ -6454,7 +6454,7 @@ mod tests {
     /// Pins the stale-ancestor guard's position above the classifier's candidate pushes.
     ///
     /// The classifier resolves each mutated key's prior state by scanning its translated
-    /// bucket in the committed snapshot, and the same loop pushes each entry it examines
+    /// bucket in the committed index, and the same loop pushes each entry it examines
     /// into the next/prev candidate sets that stitch the ordered links. In this scenario the
     /// child updates a sibling that collides with a parent-deleted key, so the scan pulls
     /// the deleted key's stale committed location into the loop. Excluding that operation
@@ -6546,7 +6546,7 @@ mod tests {
     }
 
     /// While the parent's delete is pending, the deleted key's op remains in the
-    /// pre-parent snapshot, so a child write to the same bucket reads it during the
+    /// pre-parent index, so a child write to the same bucket reads it during the
     /// bucket scan. That stale op must contribute no candidates: they reorder the
     /// predecessor rewrites, so the root differs from the applied-parent path.
     #[test]

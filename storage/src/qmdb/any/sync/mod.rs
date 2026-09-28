@@ -1,6 +1,6 @@
 //! Shared synchronization logic for [crate::qmdb::any] databases.
 //! Contains the implementation of [crate::qmdb::sync::Database] for [Db], covering every
-//! variant (ordered/unordered, fixed/variable, any snapshot index).
+//! variant (ordered/unordered, fixed/variable, any key index).
 //!
 //! Callers verifying `any` sync proofs directly should use [`crate::qmdb::verify_proof`].
 
@@ -75,7 +75,7 @@ where
         apply_batch_size,
     )
     .await?;
-    let index_context = context.child("index");
+    let index_context = context.child("index_build");
     let metrics = Metrics::new(context);
     let db = Db::init_from_log(
         index_context,

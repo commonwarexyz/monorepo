@@ -1610,9 +1610,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
-    /// creation, and the snapshot stays readable across concurrent appends and prunes. It keeps
-    /// the journal's blobs open, so reopening a partition that still holds one of them fails
-    /// while the snapshot is alive.
+    /// creation, and the snapshot stays readable across concurrent appends and prunes.
+    ///
+    /// The snapshot keeps the journal's blobs open. While it is alive, an initialization that
+    /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
+    /// capture (for example by a prune) can be recreated. On filesystem-backed storage the
+    /// snapshot also holds the storage directory, so a second storage instance on that directory
+    /// waits for it to drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the journal.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, A>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))

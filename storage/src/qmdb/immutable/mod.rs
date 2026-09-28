@@ -792,6 +792,20 @@ where
 {
     /// Capture an owned immutable snapshot of the database's operations log, with bounds
     /// frozen at capture. The snapshot includes applied-but-uncommitted operations.
+    ///
+    /// The snapshot keeps the log's blobs open. While it is alive, an initialization that
+    /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
+    /// capture (for example by a prune) can be recreated. On filesystem-backed storage the
+    /// snapshot also holds the storage directory, so a second storage instance on that directory
+    /// waits for it to drop.
+    ///
+    /// Serving from the snapshot returns [`crate::merkle::Error::ElementPruned`] for a boundary
+    /// below the Merkle structure's pruning boundary, which a sync can leave above the log's
+    /// first retained operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the database.
     pub async fn snapshot(
         mut self,
     ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {

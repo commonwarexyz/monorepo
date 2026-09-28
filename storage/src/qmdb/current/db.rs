@@ -716,6 +716,20 @@ where
     /// frozen at capture. The snapshot includes applied-but-uncommitted operations. It serves the
     /// ops-tree proofs state sync needs. Grafted proofs require the live bitmap, which
     /// keeps no history, so those remain live-only.
+    ///
+    /// The snapshot keeps the log's blobs open. While it is alive, an initialization that
+    /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
+    /// capture (for example by a prune) can be recreated. On filesystem-backed storage the
+    /// snapshot also holds the storage directory, so a second storage instance on that directory
+    /// waits for it to drop.
+    ///
+    /// Serving from the snapshot returns [`crate::merkle::Error::ElementPruned`] for a boundary
+    /// below the Merkle structure's pruning boundary, which a sync can leave above the log's
+    /// first retained operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the database.
     pub async fn snapshot(
         mut self,
     ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {
@@ -1601,7 +1615,7 @@ mod tests {
     /// while the live database updates keys (flipping activity bits and raising the floor),
     /// commits, and prunes past it.
     #[test_traced]
-    fn test_snapshot_stable_across_bitmap_churn() {
+    fn test_snapshot_ops_proofs_stable_across_live_updates() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             let db = MmrDb::init(

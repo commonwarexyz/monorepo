@@ -604,9 +604,8 @@ where
         skip_all
     )]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        let op = Operation::Commit(self.last_commit_metadata.clone(), self.inactivity_floor_loc);
         let handle;
-        (self.witness, handle) = self.witness.start_sync::<H, S>(&self.merkle, op).await?;
+        (self.witness, handle) = self.witness.start_sync(&self.merkle).await?;
         Ok((self, handle))
     }
 
@@ -614,8 +613,7 @@ where
     /// reopen may need to replay the witness journal's tail to recover.
     #[tracing::instrument(name = "qmdb.immutable.compact.db.commit", level = "info", skip_all)]
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
-        let op = Operation::Commit(self.last_commit_metadata.clone(), self.inactivity_floor_loc);
-        self.witness = self.witness.commit::<H, S>(&self.merkle, op).await?;
+        self.witness = self.witness.commit(&self.merkle).await?;
         Ok(self)
     }
 
@@ -623,8 +621,7 @@ where
     /// minimize recovery work on reopen.
     #[tracing::instrument(name = "qmdb.immutable.compact.db.sync", level = "info", skip_all)]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
-        let op = Operation::Commit(self.last_commit_metadata.clone(), self.inactivity_floor_loc);
-        self.witness = self.witness.sync::<H, S>(&self.merkle, op).await?;
+        self.witness = self.witness.sync(&self.merkle).await?;
         Ok(self)
     }
 
@@ -651,7 +648,8 @@ where
     }
 
     /// Capture an owned immutable [Snapshot] of the database's latest applied state, which may
-    /// not be durable yet.
+    /// not be durable yet. The snapshot holds only in-memory state, so unlike the standard
+    /// databases' snapshots it keeps no blobs open.
     pub fn snapshot(&self) -> Snapshot<F, Operation<F, K, V>, H::Digest> {
         Arc::clone(self.witness.tip())
     }

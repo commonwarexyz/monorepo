@@ -867,12 +867,25 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Capture an owned immutable [Snapshot] of the journal.
+    /// Capture an owned immutable [Snapshot] of the journal and its Merkle structure.
+    ///
+    /// The snapshot keeps the journal's and Merkle structure's blobs open. While it is alive, an initialization that
+    /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
+    /// capture (for example by a prune) can be recreated. On filesystem-backed storage the
+    /// snapshot also holds the storage directory, so a second storage instance on that directory
+    /// waits for it to drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either capture fails, which consumes the journal.
     #[commonware_macros::stability(ALPHA)]
     pub async fn snapshot(mut self) -> Result<(Self, Snapshot<F, E, C::Reader, H>), Error<F>> {
-        let (journal, frozen) = self.journal.snapshot().await.map_err(Error::Journal)?;
+        let (journal, merkle) = (self.journal, self.merkle);
+        let ((journal, frozen), (merkle, nodes)) = futures::try_join!(
+            async { journal.snapshot().await.map_err(Error::Journal) },
+            async { merkle.snapshot().await.map_err(Error::from) },
+        )?;
         self.journal = journal;
-        let (merkle, nodes) = self.merkle.snapshot().await?;
         self.merkle = merkle;
         let hasher = self.hasher.clone();
         Ok((
