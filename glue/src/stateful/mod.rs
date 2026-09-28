@@ -97,6 +97,11 @@
 //!   state through it is durable, so marshal's processed height does not pass durable database
 //!   state. After a crash, recovery opens every database at the recovery height (rewinding any
 //!   that are ahead), and the blocks above it are delivered and applied again.
+//! * Once the databases are ready, the _applied tip_ is the latest block they reflect. [`Stateful`]
+//!   requires marshal to deliver every finalized block above its applied tip in height order. It
+//!   acknowledges a redelivered block at or below the tip without repeating its effects and panics
+//!   on a block that skips heights. The startup floor is the only permitted jump, so a live marshal
+//!   floor must not leave an unapplied height below it.
 //! * During state sync, retained blocks are acknowledged before the databases reach them (see
 //!   [State Sync](#state-sync)). A crash then resumes state sync, from the block backing marshal's
 //!   processed height if marshal has passed the floor.
@@ -124,10 +129,11 @@
 //! # Failures
 //!
 //! [`Stateful`] panics if a proposal does not match its sync targets, if [`Application::apply`]
-//! cannot execute or reproduce a finalized block, if state sync fails, if a database operation
-//! fails (see [Failures](db#failures)), if a state sync metadata write fails, or if marshal cannot
-//! return a block needed at startup. If shutdown interrupts a database barrier, [`Stateful`] stops
-//! without acknowledging the blocks that barrier covers.
+//! cannot execute or reproduce a finalized block, if marshal delivers a finalized block that skips
+//! heights above the applied tip (see [Persistence](#persistence)), if state sync fails, if a
+//! database operation fails (see [Failures](db#failures)), if a state sync metadata write fails, or
+//! if marshal cannot return a block needed at startup. If shutdown interrupts a database barrier,
+//! [`Stateful`] stops without acknowledging the blocks that barrier covers.
 //!
 //! # Compatibility
 //!

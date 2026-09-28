@@ -49,8 +49,8 @@ where
     /// [`EpochInfo`](crate::dkg::types::EpochInfo) before returning `Continue`.
     /// Returns `Break` on shutdown or when the mailbox closes.
     ///
-    /// Panics if the final block carries no
-    /// [`EpochInfo`](crate::dkg::types::EpochInfo).
+    /// Panics as described on [`Self::covered`], or if the final block carries
+    /// no [`EpochInfo`](crate::dkg::types::EpochInfo).
     pub(super) async fn follow(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,

@@ -632,8 +632,8 @@ where
     /// the mailbox closes, or when the runtime closes a verification task.
     ///
     /// Panics if an unapplied finalized block lies outside the inclusion window
-    /// of `epoch`. Also panics as described on [`Self::artifact`] and
-    /// [`Self::handle_finalized_epoch_info`].
+    /// of `epoch`. Also panics as described on [`Self::covered`],
+    /// [`Self::artifact`], and [`Self::handle_finalized_epoch_info`].
     pub(super) async fn inclusion(
         &mut self,
         epoch: Epoch,
@@ -1980,6 +1980,58 @@ mod tests {
 
             // Inclusion receives the sibling at the covered tip's height.
             let _receipt = deliver(&mut mailbox, &sibling);
+            let _ = actor
+                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .await;
+        });
+    }
+
+    /// Marshal delivers every finalized block above the applied tip in height order, so a block
+    /// that skips an unapplied height inside the inclusion window is a contract violation. The
+    /// skipped block may carry a dealer log, so the actor panics instead of deriving the next
+    /// epoch without it.
+    #[test]
+    #[should_panic(expected = "finalized block skips unapplied heights")]
+    fn skipped_inclusion_height_panics() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "skipped-inclusion", NZU64!(6)).await;
+
+            // Epoch zero spans heights 0..=5 with its midpoint at 3.
+            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            while blocks.len() < 6 {
+                blocks.push(Arc::new(child(blocks.last().unwrap())));
+            }
+
+            // Dealing applies every block below the midpoint.
+            let receipts = [0, 1, 2].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::zero(),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt.await.expect("early receipt must be acknowledged");
+            }
+
+            // Inclusion applies the midpoint, then receives the final block without the
+            // block at height four between them.
+            let _receipts = [3, 5].map(|height| deliver(&mut mailbox, &blocks[height]));
             let _ = actor
                 .inclusion(Epoch::zero(), &info, &mut store, None)
                 .await;

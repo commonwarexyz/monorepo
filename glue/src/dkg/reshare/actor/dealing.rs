@@ -61,8 +61,9 @@ where
     ///
     /// Returns `Continue` after the last block before the midpoint is
     /// acknowledged, and `Break` on shutdown or when the mailbox or the epoch's
-    /// P2P channel closes. Panics if an unapplied finalized block lies outside
-    /// the [`EpochPhase::Early`] part of `epoch`.
+    /// P2P channel closes. Panics as described on [`Self::covered`], or if an
+    /// unapplied finalized block lies outside the [`EpochPhase::Early`] part of
+    /// `epoch`.
     pub(super) async fn dealing<SE, RE>(
         &mut self,
         epoch: Epoch,

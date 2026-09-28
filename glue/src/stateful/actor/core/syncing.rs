@@ -330,7 +330,7 @@ where
 /// once. Every copy is classified as [`FinalizedHandoff::Apply`].
 ///
 /// Panics if the block at the anchor height has a different digest, a duplicate differs from its
-/// original, or blocks above the anchor do not ascend consecutively.
+/// original, or a block above the anchor skips a height.
 fn classify<B>(
     anchor: Anchor<<B as Digestible>::Digest>,
     mut finalized: VecDeque<PendingFinalization<Arc<B>>>,
@@ -374,7 +374,7 @@ where
             assert_eq!(
                 block.height(),
                 previous.height.next(),
-                "finalized blocks must ascend consecutively from the sync anchor",
+                "finalized block skips unapplied heights",
             );
             previous = Anchor::from(block.as_ref());
         }
@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "ascend consecutively from the sync anchor")]
+    #[should_panic(expected = "finalized block skips unapplied heights")]
     fn non_anchor_non_next_block_panics() {
         let _ = classify(
             anchor(7, 9),

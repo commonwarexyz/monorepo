@@ -863,7 +863,8 @@ where
     /// advances to `block` after the application's `finalized` hook returns.
     ///
     /// Panics if `block` is below the processed height, if it conflicts with the processed anchor
-    /// at the same height, or if an uncached `block` fails to execute or to match its commitments.
+    /// at the same height, if it skips a height above the processed anchor, or if an uncached
+    /// `block` fails to execute or to match its commitments.
     pub(super) async fn finalize(
         &mut self,
         context: &E,
@@ -887,6 +888,11 @@ where
             );
             return None;
         }
+        assert_eq!(
+            height,
+            processed.height.next(),
+            "finalized block skips unapplied heights",
+        );
 
         let timer = self.execution.metrics.finalize_duration.timer(context);
         let block_context = block.context();
@@ -2500,6 +2506,7 @@ mod tests {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
             let winner = harness.stage_pending_child(&block1, View::new(3)).await;
             let loser = harness.stage_pending_child(&block1, View::new(2)).await;
 
@@ -2525,6 +2532,7 @@ mod tests {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
             let loser = harness.stage_pending_child(&block1, View::new(2)).await;
             let winner = harness.stage_pending_child(&block1, View::new(3)).await;
             let loser_child = harness.stage_pending_child(&loser, View::new(4)).await;
@@ -2554,6 +2562,7 @@ mod tests {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
             let loser = harness.stage_pending_child(&block1, View::new(2)).await;
             let winner = harness.stage_pending_child(&block1, View::new(3)).await;
             let winner_child = harness.stage_pending_child(&winner, View::new(4)).await;
@@ -3181,6 +3190,7 @@ mod tests {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
             let loser = harness.stage_pending_child(&block1, View::new(2)).await;
             let winner = harness.stage_pending_child(&block1, View::new(3)).await;
             let late_view = View::new(4);

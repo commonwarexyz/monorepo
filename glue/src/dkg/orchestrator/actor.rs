@@ -597,11 +597,13 @@ where
 
     /// Handles a finalized block and returns whether the actor keeps running.
     ///
-    /// Acknowledges any block other than the active epoch's final block
+    /// Acknowledges any block below the active epoch's final block
     /// immediately. For the final block, enters the next epoch and acknowledges
     /// the block once the new engine has started. Returns `false` if marshal
     /// cannot supply the block or the next epoch cannot be entered. Panics if
-    /// the final block does not carry the next epoch's [`EpochInfo`].
+    /// the block is above the active epoch's final block (marshal skipped the
+    /// final block) or if the final block does not carry the next epoch's
+    /// [`EpochInfo`].
     async fn handle_finalized<S, R>(
         &mut self,
         epocher: &FixedEpocher,
@@ -616,7 +618,14 @@ where
     {
         let height = block.height();
         let current = active.epoch;
-        if epocher.last(current) != Some(height) {
+        let last = epocher
+            .last(current)
+            .expect("active epoch should be covered by epoch strategy");
+        assert!(
+            height <= last,
+            "finalized block skips the final block of epoch {current}"
+        );
+        if height != last {
             acknowledgement.acknowledge();
             return true;
         }

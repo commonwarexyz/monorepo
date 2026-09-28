@@ -23,7 +23,8 @@
 //!
 //! Upon a finalized block reported by marshal through [`Mailbox`]:
 //!
-//! - If it is not the active epoch's final block, acknowledge it.
+//! - If it is below the active epoch's final block, acknowledge it.
+//! - If it is above the active epoch's final block, panic.
 //! - Otherwise, read the next epoch's [`EpochInfo`] from it, enter the next epoch
 //!   from the block's commitment, stop the previous engine, and only then
 //!   acknowledge the block.
@@ -47,6 +48,14 @@
 //! start epoch N + 1, stop epoch N, acknowledge the block
 //! ```
 //!
+//! Once started, the orchestrator requires marshal to deliver every finalized
+//! block above the latest one it acknowledged in height order. It acknowledges a
+//! redelivered block without repeating its effects. A block above the active
+//! epoch's final block means marshal skipped that final block, and the
+//! orchestrator panics. The startup state-sync floor is the only permitted jump,
+//! so a live marshal floor must not leave a height below it that the
+//! orchestrator has not acknowledged.
+//!
 //! # Marshal Boundary
 //!
 //! Epoch zero is anchored by marshal's height-zero block, and each later epoch by
@@ -69,9 +78,10 @@
 //! cannot supply a boundary block, its mailbox or a consensus muxer closes, the
 //! active Simplex engine stops without error, or the runtime stops. It panics if
 //! a boundary block does not carry the [`EpochInfo`] of the epoch it introduces,
-//! if the [`Provider`] has no scheme for an entered epoch, if the
-//! [`SimplexConfig`] is invalid, if an epoch's Simplex engine fails, or if the
-//! [`state_sync::Plan`] cannot access storage.
+//! if a finalized block is above the active epoch's final block, if the
+//! [`Provider`] has no scheme for an entered epoch, if the [`SimplexConfig`] is
+//! invalid, if an epoch's Simplex engine fails, or if the [`state_sync::Plan`]
+//! cannot access storage.
 //!
 //! # Configuration
 //!
@@ -857,6 +867,34 @@ mod tests {
                     panic!("orchestrator stayed alive after boundary block lookup failed");
                 },
             };
+        });
+    }
+
+    /// Marshal delivers finalized blocks in height order, so a block above the active epoch's
+    /// final block means marshal skipped that final block. The orchestrator panics instead of
+    /// acknowledging the block and remaining in the previous epoch.
+    #[test]
+    #[should_panic(expected = "finalized block skips the final block of epoch 0")]
+    fn skipped_final_block_panics() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            // Without the boundary block, a lone node stays in epoch zero, whose final block is
+            // at height one.
+            let mut cluster = Cluster::start_with_seeded_first(&mut context, 1, false).await;
+            let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
+            assert_eq!(proposal.round.epoch(), Epoch::zero());
+
+            // Marshal reports the first block of epoch one without the final block of epoch
+            // zero.
+            let skipped = Arc::new(mocks::child(&cluster.boundary));
+            let node = &mut cluster.nodes[0];
+            let (acknowledgement, waiter) = Exact::handle();
+            assert_eq!(
+                node.orchestrator
+                    .report(marshal::Update::Block(skipped, acknowledgement)),
+                Feedback::Ok
+            );
+            let _ = waiter.await;
         });
     }
 

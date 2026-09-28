@@ -3253,6 +3253,76 @@ mod tests {
         });
     }
 
+    /// A live floor above the successor of the applied tip makes marshal deliver a block that
+    /// skips an unapplied height. Processing panics instead of applying it.
+    #[test]
+    #[should_panic(expected = "finalized block skips unapplied heights")]
+    fn live_floor_skip_panics() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let mut signing = context.child("signing");
+            let fixture =
+                scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_PROCESSING_SKIP", 1);
+
+            // Build the chain through the floor block, two heights above genesis.
+            let genesis = TestBlock::new(0, 0);
+            let floor = TestBlock::child(&TestBlock::child(&genesis, 1), 2);
+
+            // Marshal delivers finalized blocks to processing anchored at genesis.
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mailbox = Mailbox::<_, GatedApp>::new(sender);
+            let marshal = fixtures::marshal_fixture_with_reporter(
+                context.child("marshal"),
+                "live-floor-skip",
+                fixture.schemes[0].clone(),
+                NZUsize!(1),
+                mailbox.clone(),
+            )
+            .await;
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox.clone(),
+                processor: Processor::new(
+                    GatedApp {
+                        verify_gates: Arc::default(),
+                        proposal_gate: Arc::default(),
+                        verify_valid: true,
+                        observed_contexts: Arc::default(),
+                    },
+                    test_databases(),
+                    anchor(0, 0),
+                    StatefulMetrics::new(&context),
+                    None,
+                ),
+                deferred_verifications: Vec::new(),
+            };
+            let _actor = context.child("loop").spawn(move |_| processing.run());
+
+            // Genesis is the applied tip, so its startup delivery is acknowledged.
+            while marshal.mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {}
+
+            // Installing the floor records the never-stored height 1 as processed, then delivers
+            // the floor block.
+            assert!(
+                marshal
+                    .mailbox
+                    .verified(floor.context().round, Arc::new(floor.clone()))
+                    .await
+            );
+            marshal
+                .mailbox
+                .set_floor(fixtures::finalization(&fixture, 2, floor.digest()));
+            assert_eq!(
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(1)))
+            );
+
+            // Processing handles the floor block before this request and panics.
+            drop(mailbox.subscribe_databases().await);
+        });
+    }
+
     #[test]
     fn stable_leader_finalizations_coalesce_while_barrier_pending() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {

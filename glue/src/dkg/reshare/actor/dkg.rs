@@ -207,8 +207,11 @@ where
         }
     }
 
-    /// Serves requests and acknowledges finalized blocks after the ceremony ends,
-    /// until shutdown or the mailbox closes.
+    /// Serves requests and acknowledges finalized blocks once the ceremony's
+    /// outcome is reported, until shutdown or the mailbox closes.
+    ///
+    /// A finalized block has no effects here, so it is acknowledged without
+    /// checking it against the tip.
     async fn terminal(&mut self) {
         select_loop! {
             self.context,

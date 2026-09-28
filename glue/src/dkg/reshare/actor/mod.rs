@@ -428,13 +428,24 @@ where
     /// Returns whether the actor has already applied `block`, either at startup
     /// or by completing its effects.
     ///
+    /// A block at or below the tip is a redelivery. A block above the tip must
+    /// be at the height after it. Without a tip, returns `false` and checks
+    /// nothing.
+    ///
     /// # Panics
     ///
-    /// Panics if `block` conflicts with the tip at the same height.
+    /// Panics if `block` conflicts with the tip at the same height or skips
+    /// heights above the tip.
     fn covered(&self, block: &B) -> bool {
         self.tip.is_some_and(|tip| {
             if block.height() == tip.height {
                 assert_eq!(block.digest(), tip.digest, "conflicting finalized block");
+            } else if block.height() > tip.height {
+                assert_eq!(
+                    block.height(),
+                    tip.height.next(),
+                    "finalized block skips unapplied heights"
+                );
             }
             block.height() <= tip.height
         })

@@ -20,7 +20,8 @@ where
     /// A block finalized by marshal.
     ///
     /// The orchestrator acknowledges the final block of the active epoch only after
-    /// entering the next epoch, and every other block immediately.
+    /// entering the next epoch, and every earlier block immediately. It panics on
+    /// a later block, which means marshal skipped the final block.
     Finalized { block: Arc<B>, acknowledgement: A },
 }
 

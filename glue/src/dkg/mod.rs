@@ -103,6 +103,17 @@
 //! - Upon its gate reaching an epoch, the [`orchestrator`] activates that epoch from its
 //!   [`types::EpochInfo`] before starting the epoch's Simplex engine and channels.
 //!
+//! # Marshal Delivery
+//!
+//! Once started, the [`reshare::Actor`] and the [`orchestrator::Actor`] require marshal to
+//! deliver every finalized block above the latest one they acknowledged in height order. Each
+//! acknowledges a redelivered block without repeating its effects. The reshare actor panics
+//! on a block that skips heights, and the orchestrator panics on a block above the active
+//! epoch's final block. The startup floor from the [`state_sync::Plan`] is the only
+//! permitted jump, so a live marshal floor must not leave a height below it that they have
+//! not acknowledged. A skipped block may carry a dealer log or be an epoch's final block,
+//! which the actors need to derive the same [`types::EpochInfo`] and to enter each epoch.
+//!
 //! # Marshal Retention
 //!
 //! Except when entering through state sync, a restarting node derives its active epoch
