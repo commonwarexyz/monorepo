@@ -530,6 +530,8 @@ where
             marshal_mailbox.hint_finalized(last, targets);
         }
 
+        // Run the ceremony in a DKG-mode reshare actor. The one-shot chain never
+        // enters another epoch, so nothing waits on the fence.
         let (fence, _gate) = Fence::new(Epoch::zero());
         let (reshare_actor, reshare_mailbox) = reshare::Actor::new_dkg(
             context.child("reshare"),
