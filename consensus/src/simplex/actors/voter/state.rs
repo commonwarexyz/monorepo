@@ -1255,10 +1255,17 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// `min_active`.
     pub fn prune(&mut self) -> Vec<View> {
         let min = self.min_active();
-        let kept = self.views.split_off(&min);
-        let removed = replace(&mut self.views, kept).into_keys().collect();
-        self.nullification_views = self.nullification_views.split_off(&min);
-        self.nullify_views = self.nullify_views.split_off(&min);
+        let removed = self
+            .views
+            .extract_if(..min, |_, _| true)
+            .map(|(view, _)| view)
+            .collect();
+        self.nullification_views
+            .extract_if(..min, |_| true)
+            .for_each(drop);
+        self.nullify_views
+            .extract_if(..min, |_| true)
+            .for_each(drop);
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
@@ -7873,6 +7880,7 @@ mod tests {
 
             let removed = state.prune();
             assert!(removed.contains(&View::new(1)));
+            assert!(!state.nullify_views.contains(&View::new(1)));
 
             let certify_view = |state: &mut TestState| {
                 let view = View::new(11);
