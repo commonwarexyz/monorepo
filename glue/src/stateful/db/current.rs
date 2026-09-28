@@ -47,7 +47,8 @@ use std::{
     sync::Arc,
 };
 
-/// A speculative batch of updates and deletes over a shared `current` database.
+/// A speculative batch of updates and deletes that reads a `current` database through a
+/// [`Reader`].
 pub struct CurrentUnmerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
@@ -66,9 +67,8 @@ where
 
 /// A staged batch returned by [`CurrentUnmerkleized::stage`].
 ///
-/// A branch-scoped view of the database. It stays valid only while every batch finalized on
-/// the database is an ancestor of this batch (see [`MerkleizedBatch`]'s branch-validity
-/// contract).
+/// A branch-scoped view of the database. Once a batch that is not an ancestor of this one is
+/// finalized on the database, its reads return [`Error::StaleRead`].
 pub struct CurrentStaged<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,

@@ -28,8 +28,8 @@
 //! block immediately, and verification jobs keep running through the apply.
 //!
 //! Jobs share an [`Execution`], which holds readers over the databases and,
-//! under one lock, the pending map of verified blocks, the applied anchor,
-//! and the finalizing flag.
+//! under one lock, the pending map of executed blocks (proposed, verified, or
+//! replayed), the applied anchor, and the finalizing flag.
 //!
 //! A job on the losing side of an apply is refused at its next database read
 //! ([`ExecutionError::Stale`]). It waits out the anchor move

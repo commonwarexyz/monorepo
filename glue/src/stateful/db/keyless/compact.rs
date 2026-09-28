@@ -29,7 +29,8 @@ use commonware_storage::{
 use commonware_utils::channel::mpsc;
 use std::{ops::Deref, sync::Arc};
 
-/// A speculative batch of appended values over a shared compact keyless database.
+/// A speculative batch of appended values that reads a compact keyless database through a
+/// [`Reader`].
 pub struct KeylessUnjournaledUnmerkleized<F, E, V, H, S, C = ()>
 where
     F: Family,
@@ -84,6 +85,9 @@ where
 
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
     /// (inherited from the parent batch or database when unset).
+    ///
+    /// The floor must not fall below the inherited floor or pass this batch's commit location.
+    /// Otherwise merkleize fails with [`Error::FloorRegressed`] or [`Error::FloorBeyondSize`].
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self

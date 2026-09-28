@@ -39,7 +39,8 @@ use std::{ops::Deref, sync::Arc};
 /// Reader over the immutable database a wrapper batch reads through.
 type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Reader<Immutable<F, E, K, V, C, H, T, S>>;
 
-/// A speculative batch of new keyed values over a shared immutable database.
+/// A speculative batch of new keyed values that reads an immutable database through a
+/// [`Reader`].
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -97,6 +98,9 @@ where
 
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
     /// (inherited from the parent batch or database when unset).
+    ///
+    /// The floor must not fall below the inherited floor or pass this batch's commit location.
+    /// Otherwise merkleize fails with [`Error::FloorRegressed`] or [`Error::FloorBeyondSize`].
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self

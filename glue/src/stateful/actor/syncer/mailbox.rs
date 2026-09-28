@@ -105,9 +105,8 @@ where
             assert!(feedback.accepted(), "syncer must outlive retarget callers",);
 
             let Ok(outcome) = receiver.await else {
-                // A newer queued update displaced this one before the syncer saw
-                // it (the queue keeps only the newest update), or the syncer died
-                // with the message queued.
+                // The syncer dropped the message unanswered. With one sequential caller no newer
+                // update can displace it, so the syncer stopped, and the retry's enqueue panics.
                 continue;
             };
             if outcome == UpdateOutcome::SyncCompleted {

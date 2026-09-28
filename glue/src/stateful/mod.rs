@@ -283,9 +283,10 @@ where
     /// finalized block is applied waits for that apply and then continues. Actor shutdown drops
     /// it with everything else.
     ///
-    /// Once a block from a competing branch is finalized, every batch operation refuses with
-    /// [`ExecutionError::Stale`]. [`Stateful`] then re-checks the block against the new canonical
-    /// state and retries or answers from it.
+    /// Once a block that is not an ancestor of `batches` is finalized, every batch operation
+    /// refuses with [`ExecutionError::Stale`]. That block may be a competitor or the candidate
+    /// itself, finalized from a separate replay. [`Stateful`] then re-checks the block against the
+    /// new canonical state and retries or answers from it.
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -303,9 +304,10 @@ where
     /// [`verify`](Self::verify). [`Stateful`] checks only [`sync_targets`](Self::sync_targets),
     /// so implementations must check any other block commitments.
     ///
-    /// A replayed ancestor may be invalid. Return `Ok(None)` if it cannot be executed, rejecting
-    /// ancestry that depends on it. For a finalized block, `Ok(None)` or mismatched sync targets
-    /// cause [`Stateful`] to panic.
+    /// A replayed ancestor may be invalid. Return `Ok(None)` or [`ExecutionError::Invalid`] if it
+    /// cannot be executed, rejecting ancestry that depends on it. For a finalized block,
+    /// `Ok(None)`, mismatched sync targets, or any [`ExecutionError`] cause [`Stateful`] to panic
+    /// (see the table on [`ExecutionError`]).
     ///
     /// This future may be cancelled if its originating request is dropped or
     /// the actor shuts down; the wrapper never cancels it while the actor runs.
@@ -336,6 +338,9 @@ where
     /// pending (verifications already running continue). Keep this capture cheap, and spawn
     /// expensive follow-on work from [`finalized`](Self::finalized) instead of awaiting it.
     ///
+    /// A graceful stop may drop this future. The block is then unacknowledged, and marshal
+    /// redelivers it after a restart.
+    ///
     /// # Panics
     ///
     /// Implementations should panic if capturing pre-apply state fails.
@@ -358,11 +363,13 @@ where
     /// so consecutive calls may skip heights after state sync.
     ///
     /// `readers` are readers over the database set. They may be used concurrently with descendant
-    /// verification. Mutations that affect execution results must go through normal block
-    /// execution.
+    /// verification. Hold no [`ReadGuard`](db::ReadGuard) across an await, and never hold two at
+    /// once, since a waiting apply blocks new guards. Mutations that affect execution results must
+    /// go through normal block execution.
     ///
-    /// Capture, application, and this hook may repeat after a crash until both the block's state
-    /// and marshal's processed position are durable.
+    /// Capture, application, and this hook may repeat after a crash or a graceful stop, which may
+    /// drop this future, until both the block's state and marshal's processed position are
+    /// durable.
     ///
     /// # Panics
     ///

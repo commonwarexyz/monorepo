@@ -569,8 +569,9 @@ where
                             assert!(durability.covers(prune.barrier_height));
                         }
                         // Prune mutates storage and can take a while. Race it against
-                        // shutdown so a stop signal is not blocked past its deadline; the
-                        // prune is safe to drop mid-flight and re-runs on restart.
+                        // shutdown so a stop signal is not blocked past its deadline. A
+                        // dropped prune leaves storage recoverable, and after a restart the
+                        // next due prune covers its target.
                         select! {
                             _ = &mut shutdown => {
                                 debug!("shutdown signal received, stopping processing");
