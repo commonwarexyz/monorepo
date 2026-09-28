@@ -54,8 +54,8 @@ explain why in the Rationale.
 - Use IDs starting at `{{NEXT_ID}}` and increasing by one with no gaps.
 - Follow the template below exactly: the same front matter keys and section headings,
   in the same order. Delete optional sections you do not use.
-- Set `source_kind: {{KIND}}` and `author: {{AUTHOR}}`. Make `source_ref` as precise as
-  you can: URL, `path:line`, document section, or paper page.
+- Set `source_kind: {{KIND}}`. Make `source_ref` as precise as you can: URL,
+  `path:line`, document section, or paper page.
 - Plain ASCII only. Wrap lines at 100 characters.
 - Do not modify or delete existing files, create other files, or write code.
 
@@ -79,7 +79,6 @@ title: No finalize and nullify in the same view
 source_kind: human
 source_ref: consensus/src/simplex/actors/voter/round.rs
 scope: [replica, voter]
-author: <name>
 ---
 
 ## Statement

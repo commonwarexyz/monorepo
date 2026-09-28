@@ -4,7 +4,6 @@ title: <one line, at most 80 characters>
 source_kind: <human | issue | design | comment | spec | paper>
 source_ref: <URL, path, path:line, document section, or paper page>
 scope: [<one or more of the registry's scope values, listed in the prompt context>]
-author: <person, or agent/model; optional>
 ---
 
 ## Statement

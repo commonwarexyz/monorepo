@@ -4,7 +4,6 @@ title: Deliberately false, never accept a nullification
 source_kind: human
 source_ref: consensus/fuzz/statelens/docs/SPEC.md (acceptance procedure AC-6)
 scope: [replica, voter]
-author: statelens
 ---
 
 ## Statement

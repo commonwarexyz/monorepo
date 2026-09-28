@@ -176,7 +176,6 @@ YAML front matter between two `---` lines. Keys, in this order:
 | `source_kind` | yes | `human`, `issue`, `design`, `comment`, `spec` or `paper`. |
 | `source_ref` | yes | URL, path, `path:line`, document section, or paper page. |
 | `scope` | yes | Inline list, one or more of the registry's scope values (below). |
-| `author` | no | A person, or `claude`, `codex`, `claude/<model>`, `codex/<model>`. |
 
 | Registry | Allowed `scope` values |
 |---|---|
@@ -220,7 +219,6 @@ title: <one line, at most 80 characters>
 source_kind: <human | issue | design | comment | spec | paper>
 source_ref: <URL, path, path:line, document section, or paper page>
 scope: [<one or more of the registry's scope values, listed in the prompt context>]
-author: <person, or agent/model; optional>
 ---
 
 ## Statement
@@ -407,10 +405,9 @@ the repository root, which is the agent's working directory.
    each other. Convert with `pdftotext -layout`, falling back to `pypdf`. When
    neither is available, pass the PDF as is. List the text next to the source.
 5. Render the prompt: `prompts/analyst.md`, a blank line, then `prompts/analyst-<KIND>.md`.
-   Placeholders: `KIND`, `NEXT_ID`, `AUTHOR` (`claude` or `claude/<model>`, and likewise
-   for codex), `TEMPLATE` (the content of `templates/invariant.md`), `SOURCES` (one
-   `- <source>` line per source, with `(text: <path>)` appended for converted papers),
-   `REGISTRY` (the registry name), `CONTEXT` (the content of
+   Placeholders: `KIND`, `NEXT_ID`, `TEMPLATE` (the content of `templates/invariant.md`),
+   `SOURCES` (one `- <source>` line per source, with `(text: <path>)` appended for
+   converted papers), `REGISTRY` (the registry name), `CONTEXT` (the content of
    `prompts/subsystems/<registry>-analyst.md`) and `SOURCE_ROOT`
    (`consensus/src/<registry>`).
 6. Run the agent with the Phase 1 invocation (section 12), working directory = the
@@ -1053,8 +1050,8 @@ explain why in the Rationale.
 - Use IDs starting at `{{NEXT_ID}}` and increasing by one with no gaps.
 - Follow the template below exactly: the same front matter keys and section headings,
   in the same order. Delete optional sections you do not use.
-- Set `source_kind: {{KIND}}` and `author: {{AUTHOR}}`. Make `source_ref` as precise as
-  you can: URL, `path:line`, document section, or paper page.
+- Set `source_kind: {{KIND}}`. Make `source_ref` as precise as you can: URL,
+  `path:line`, document section, or paper page.
 - Plain ASCII only. Wrap lines at 100 characters.
 - Do not modify or delete existing files, create other files, or write code.
 
@@ -1078,7 +1075,6 @@ title: No finalize and nullify in the same view
 source_kind: human
 source_ref: consensus/src/simplex/actors/voter/round.rs
 scope: [replica, voter]
-author: <name>
 ---
 
 ## Statement
@@ -2246,7 +2242,6 @@ title: Deliberately false, never accept a nullification
 source_kind: human
 source_ref: consensus/fuzz/statelens/docs/SPEC.md (acceptance procedure AC-6)
 scope: [replica, voter]
-author: statelens
 ---
 
 ## Statement
@@ -2298,7 +2293,6 @@ title: Deliberately false, never deliver a block above height 1
 source_kind: human
 source_ref: consensus/fuzz/statelens/docs/SPEC.md (acceptance procedure AC-10)
 scope: [replica, core]
-author: statelens
 ---
 
 ## Statement

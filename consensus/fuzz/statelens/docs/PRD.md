@@ -243,7 +243,6 @@ R-REG-2. Front-matter fields:
 | `source_kind` | yes | `human`, `issue`, `design`, `comment`, `spec`, `paper`. |
 | `source_ref` | yes | Issue URL, document path, or `file:line` / module path. |
 | `scope` | yes | One or more of the registry's values. `simplex`: `protocol`, `replica`, `voter`, `batcher`, `resolver`, `cross-actor`. `marshal`: `protocol`, `replica`, `core`, `resolver`, `standard`, `coding`, `application`, `cross-component`, where `resolver` means marshal's backfill resolver. |
-| `author` | no | A person, or `claude`, `codex`, `claude/<model>`, `codex/<model>`. |
 
 R-REG-3. Required body sections:
 - **Statement**: the invariant in English, implementation-agnostic, stated for an honest replica unless the scope is `protocol`.
@@ -267,7 +266,6 @@ title: No finalize and nullify in the same view
 source_kind: human
 source_ref: consensus/src/simplex/actors/voter/round.rs
 scope: [replica, voter]
-author: <name>
 ---
 
 ## Statement
@@ -303,7 +301,7 @@ It is parameterized by the agent (`claude|codex`), the registry (`simplex` or `m
 R-P1-2. Each source kind has one prompt file, `prompts/analyst-<kind>.md`, appended to the shared `prompts/analyst.md`, which includes the registry's part, `prompts/subsystems/<subsystem>-analyst.md`. Every prompt:
 - casts the agent as an analyst for that source kind;
 - tells it to read the source (and any code it needs for context);
-- tells it to write zero or more invariant files that strictly follow `templates/invariant.md`, with EARS statements, the right `source_kind` / `source_ref` / `author`, and IDs starting at the next free ID, which the script computes.
+- tells it to write zero or more invariant files that strictly follow `templates/invariant.md`, with EARS statements, the right `source_kind` and `source_ref`, and IDs starting at the next free ID, which the script computes.
 
 R-P1-3. Supported sources:
 - GitHub issues and PRs (read via `gh`, or the GitHub REST API or web fetch when `gh` is not installed).

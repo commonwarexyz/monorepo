@@ -45,7 +45,6 @@ SCOPES = {
 }
 ALL_SCOPES = tuple(dict.fromkeys(scope for name in SUBSYSTEMS for scope in SCOPES[name]))
 REQUIRED_KEYS = ("id", "title", "source_kind", "source_ref", "scope")
-OPTIONAL_KEYS = ("author",)
 REQUIRED_SECTIONS = ("Statement", "Rationale", "Evidence")
 FILE_NAMES = {
     "invariants": re.compile(r"^INV-\d{4,}\.md$"),
@@ -537,7 +536,7 @@ def lint_file(path):
         if not front.get(key):
             problems.append(f"missing or empty front matter key: {key}")
     for key in front:
-        if key not in REQUIRED_KEYS + OPTIONAL_KEYS:
+        if key not in REQUIRED_KEYS:
             problems.append(f"unknown front matter key: {key}")
     if front.get("id") and front["id"] != path.stem:
         problems.append(f"id {front['id']} does not match the file name")
@@ -642,18 +641,16 @@ def paper_text(repo, sl_dir, source):
     return output
 
 
-def extract_values(repo, sl_dir, config, agent, kind, registry, sources):
+def extract_values(repo, sl_dir, kind, registry, sources):
     """Placeholder values of the Phase 1 prompt (SPEC section 6.2, step 5)."""
     lines = []
     for source in sources:
         text = paper_text(repo, sl_dir, source) if kind == "paper" else None
         suffix = f" (text: {text.relative_to(repo)})" if text else ""
         lines.append(f"- {source}{suffix}")
-    model = agent_model(config, agent)
     return {
         "KIND": kind,
         "NEXT_ID": next_invariant_id(sl_dir),
-        "AUTHOR": f"{agent}/{model}" if model else agent,
         "TEMPLATE": (sl_dir / "templates" / "invariant.md").read_text().rstrip("\n"),
         "SOURCES": "\n".join(lines),
         "REGISTRY": registry,
@@ -676,7 +673,7 @@ def cmd_extract(args):
     registry = invariants / args.registry
     registry.mkdir(parents=True, exist_ok=True)
     before = files_under(invariants)
-    values = extract_values(repo, sl_dir, config, agent, args.kind, args.registry, args.sources)
+    values = extract_values(repo, sl_dir, args.kind, args.registry, args.sources)
     prompt = compose(sl_dir, "analyst.md", f"analyst-{args.kind}.md", values)
 
     stamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
