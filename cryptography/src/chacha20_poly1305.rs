@@ -5,10 +5,31 @@
 //! authenticates a message at its expected position. Messages are sealed with empty associated
 //! data and a 16-byte tag.
 
-use crate::{Cipher, CipherError, Secret};
+use crate::{Cipher, Secret};
 use commonware_math::algebra::Random;
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
+
+/// Errors returned by [ChaCha20Poly1305].
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// An error indicating that no more messages can (safely) be sealed or opened.
+    ///
+    /// In practice, you should never see this error, because the limit takes
+    /// an ultra-astronomical amount of messages to reach.
+    #[error("message limit reached")]
+    MessageLimitReached,
+    /// Encryption failed for some reason.
+    ///
+    /// In practice, this error shouldn't happen.
+    #[error("encryption failed")]
+    EncryptionFailed,
+    /// Decryption failed.
+    ///
+    /// This can happen if the message was corrupted, truncated, or opened out of order.
+    #[error("decryption failed")]
+    DecryptionFailed,
+}
 
 /// Size of the ChaCha20-Poly1305 authentication tag.
 const TAG_SIZE: usize = 16;
@@ -33,9 +54,9 @@ impl CounterNonce {
 
     /// Increments the counter and returns the current value as bytes.
     /// Returns an error if the counter would overflow.
-    pub fn inc(&mut self) -> Result<[u8; NONCE_SIZE_BYTES], CipherError> {
+    pub fn inc(&mut self) -> Result<[u8; NONCE_SIZE_BYTES], Error> {
         if self.inner >= 1 << (8 * NONCE_SIZE_BYTES) {
-            return Err(CipherError::MessageLimitReached);
+            return Err(Error::MessageLimitReached);
         }
         let out = self.inner.to_le_bytes();
         self.inner += 1;
@@ -64,12 +85,12 @@ cfg_if::cfg_if! {
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
                 data: &mut [u8],
-            ) -> Result<[u8; TAG_SIZE], CipherError> {
+            ) -> Result<[u8; TAG_SIZE], Error> {
                 let nonce = aead::Nonce::assume_unique_for_key(*nonce);
                 let tag = self
                     .0
                     .seal_in_place_separate_tag(nonce, aead::Aad::empty(), data)
-                    .map_err(|_| CipherError::EncryptionFailed)?;
+                    .map_err(|_| Error::EncryptionFailed)?;
                 Ok(tag.as_ref().try_into().expect("tag size mismatch"))
             }
 
@@ -77,11 +98,11 @@ cfg_if::cfg_if! {
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
                 data: &mut [u8],
-            ) -> Result<usize, CipherError> {
+            ) -> Result<usize, Error> {
                 let nonce = aead::Nonce::assume_unique_for_key(*nonce);
                 self.0
                     .open_in_place(nonce, aead::Aad::empty(), data)
-                    .map_err(|_| CipherError::DecryptionFailed)?;
+                    .map_err(|_| Error::DecryptionFailed)?;
                 Ok(data.len() - TAG_SIZE)
             }
         }
@@ -99,11 +120,11 @@ cfg_if::cfg_if! {
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
                 data: &mut [u8],
-            ) -> Result<[u8; TAG_SIZE], CipherError> {
+            ) -> Result<[u8; TAG_SIZE], Error> {
                 let tag = self
                     .0
                     .encrypt_inout_detached(nonce.into(), &[], data.into())
-                    .map_err(|_| CipherError::EncryptionFailed)?;
+                    .map_err(|_| Error::EncryptionFailed)?;
                 Ok(tag.into())
             }
 
@@ -111,11 +132,11 @@ cfg_if::cfg_if! {
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
                 data: &mut [u8],
-            ) -> Result<usize, CipherError> {
+            ) -> Result<usize, Error> {
                 let plaintext_len = data.len() - TAG_SIZE;
                 let tag: [u8; TAG_SIZE] = data[plaintext_len..]
                     .try_into()
-                    .map_err(|_| CipherError::DecryptionFailed)?;
+                    .map_err(|_| Error::DecryptionFailed)?;
                 self.0
                     .decrypt_inout_detached(
                         nonce.into(),
@@ -123,7 +144,7 @@ cfg_if::cfg_if! {
                         (&mut data[..plaintext_len]).into(),
                         &tag.into(),
                     )
-                    .map_err(|_| CipherError::DecryptionFailed)?;
+                    .map_err(|_| Error::DecryptionFailed)?;
                 Ok(plaintext_len)
             }
         }
@@ -148,10 +169,12 @@ impl Random for ChaCha20Poly1305 {
 }
 
 impl Cipher for ChaCha20Poly1305 {
+    type Error = Error;
+
     const TAG_SIZE: usize = TAG_SIZE;
 
     #[inline]
-    fn seal_in_place(&mut self, buf: &mut [u8]) -> Result<(), CipherError> {
+    fn seal_in_place(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         let (data, tag) = buf
             .split_last_chunk_mut::<TAG_SIZE>()
             .expect("buffer must have room for the tag");
@@ -161,10 +184,10 @@ impl Cipher for ChaCha20Poly1305 {
     }
 
     #[inline]
-    fn open_in_place(&mut self, buf: &mut [u8]) -> Result<usize, CipherError> {
+    fn open_in_place(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
         let nonce = self.nonce.inc()?;
         if buf.len() < TAG_SIZE {
-            return Err(CipherError::DecryptionFailed);
+            return Err(Error::DecryptionFailed);
         }
         self.key.expose(|key| key.decrypt_in_place(&nonce, buf))
     }
@@ -196,7 +219,7 @@ mod tests {
         let ciphertext = send.seal(b"hello").unwrap();
         assert!(matches!(
             recv.open(&ciphertext),
-            Err(CipherError::DecryptionFailed)
+            Err(Error::DecryptionFailed)
         ));
     }
 
@@ -206,7 +229,7 @@ mod tests {
         let short_data = vec![0u8; TAG_SIZE - 1];
         assert!(matches!(
             recv.open(&short_data),
-            Err(CipherError::DecryptionFailed)
+            Err(Error::DecryptionFailed)
         ));
     }
 
@@ -214,10 +237,7 @@ mod tests {
     fn test_open_ciphertext_exactly_overhead() {
         let mut recv = ChaCha20Poly1305::random(test_rng());
         let tag_only = vec![0u8; TAG_SIZE];
-        assert!(matches!(
-            recv.open(&tag_only),
-            Err(CipherError::DecryptionFailed)
-        ));
+        assert!(matches!(recv.open(&tag_only), Err(Error::DecryptionFailed)));
     }
 
     #[test]
@@ -253,7 +273,7 @@ mod tests {
         let mut buf = vec![0u8; TAG_SIZE - 1];
         assert!(matches!(
             recv.open_in_place(&mut buf),
-            Err(CipherError::DecryptionFailed)
+            Err(Error::DecryptionFailed)
         ));
     }
 

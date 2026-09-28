@@ -1,10 +1,10 @@
 #![no_main]
 
-use commonware_cryptography::{Signer, ed25519::PrivateKey};
+use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
     Handshake as _,
-    cups::{Handshake, Version},
+    cups::{Config, Handshake, Version},
     utils::Timeout,
 };
 use libfuzzer_sys::fuzz_target;
@@ -28,14 +28,20 @@ fn fuzz(data: &[u8]) {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let mut dialer_handshake = Handshake::new(dialer_signer.clone(), version);
-        dialer_handshake.synchrony_bound = Duration::from_secs(1);
-        dialer_handshake.max_handshake_age = Duration::from_secs(1);
+        let dialer_handshake = Handshake::<_, ChaCha20Poly1305>::new(Config {
+            signer: dialer_signer.clone(),
+            version,
+            synchrony_bound: Duration::from_secs(1),
+            max_handshake_age: Duration::from_secs(1),
+        });
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
-        let mut listener_handshake = Handshake::new(listener_signer.clone(), version);
-        listener_handshake.synchrony_bound = Duration::from_secs(1);
-        listener_handshake.max_handshake_age = Duration::from_secs(1);
+        let listener_handshake = Handshake::<_, ChaCha20Poly1305>::new(Config {
+            signer: listener_signer.clone(),
+            version,
+            synchrony_bound: Duration::from_secs(1),
+            max_handshake_age: Duration::from_secs(1),
+        });
         let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(1));
 
         let listener_handle = context.child("listener").spawn(move |context| async move {

@@ -29,20 +29,20 @@
 //! # Records
 //!
 //! Each message becomes one record, and batching writes preserves record boundaries. Records are
-//! sealed with the [Handshake]'s [Cipher](commonware_cryptography::Cipher),
-//! [ChaCha20Poly1305](commonware_cryptography::ChaCha20Poly1305) by default.
+//! sealed with the [Cipher](commonware_cryptography::Cipher) that the [Handshake] is instantiated
+//! with. Both peers must use the same cipher.
 //!
 //! - Version 0: a visible u32 varint holding the length of the encrypted payload and its tag,
 //!   then the encrypted payload and its tag.
 //! - Version 1: a header holding the payload length as an encrypted 4-byte big-endian integer
-//!   and its tag (20 bytes with the default cipher), then the encrypted payload and its tag.
+//!   and its tag (20 bytes with [ChaCha20Poly1305](commonware_cryptography::ChaCha20Poly1305)),
+//!   then the encrypted payload and its tag.
 //!
-//! Each direction uses a fixed session key and an implicit counter nonce. The counter advances
-//! once per record in version 0 and twice per record in version 1, first for the header and then
-//! for the payload. It is never transmitted. Counter exhaustion requires a new connection.
-//! Counters bind records to their expected positions: replayed, reordered, or corrupted records
-//! fail authentication rather than being reordered for delivery. Callers must discard the
-//! connection after an authentication failure.
+//! Each direction uses a fixed session key. A record consumes one position of its cipher in
+//! version 0 and two in version 1, first for the header and then for the payload. Positions are
+//! never transmitted, so replayed, reordered, or corrupted records fail authentication rather than
+//! being reordered for delivery. A cipher that can seal no more messages requires a new
+//! connection. Callers must discard the connection after an authentication failure.
 //!
 //! # Security
 //!

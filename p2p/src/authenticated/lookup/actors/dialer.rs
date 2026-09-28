@@ -11,6 +11,7 @@ use crate::{
             },
             metrics,
         },
+        stream::Config as StreamConfig,
     },
 };
 use commonware_cryptography::PublicKey;
@@ -20,7 +21,7 @@ use commonware_runtime::{
     StreamOf, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
-use commonware_stream::{Handshake, cups::Config as StreamConfig};
+use commonware_stream::Handshake;
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand_core::CryptoRng;
 use std::{sync::Arc, time::Duration};
@@ -229,13 +230,13 @@ mod tests {
     };
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_stream::{
-        cups::{Handshake as StreamHandshake, Version},
+        cups::{self, Handshake as StreamHandshake, Version},
         utils::Timeout,
     };
     use commonware_utils::NZUsize;
@@ -264,7 +265,10 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            StreamHandshake::new(signer, Version::V1),
+                            StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config::new(
+                                signer,
+                                Version::V1,
+                            )),
                             Duration::from_secs(5),
                         ),
                         b"test",
@@ -320,7 +324,10 @@ mod tests {
             let dialer_cfg = Config {
                 stream: Arc::new(StreamConfig::new(
                     Timeout::new(
-                        StreamHandshake::new(signer, Version::V1),
+                        StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config::new(
+                            signer,
+                            Version::V1,
+                        )),
                         Duration::from_secs(5),
                     ),
                     b"test",
@@ -414,7 +421,10 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            StreamHandshake::new(signer, Version::V1),
+                            StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config::new(
+                                signer,
+                                Version::V1,
+                            )),
                             Duration::from_secs(5),
                         ),
                         b"test",
@@ -481,7 +491,10 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            StreamHandshake::new(signer, Version::V1),
+                            StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config::new(
+                                signer,
+                                Version::V1,
+                            )),
                             Duration::from_secs(5),
                         ),
                         b"test",
@@ -567,7 +580,10 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            StreamHandshake::new(signer, Version::V1),
+                            StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config::new(
+                                signer,
+                                Version::V1,
+                            )),
                             Duration::from_secs(5),
                         ),
                         b"test",

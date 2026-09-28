@@ -12,6 +12,7 @@ use crate::{
         channels::{self, Channels},
         discovery::types::{Info, InfoVerifier},
         max_size, router,
+        stream::Config as StreamConfig,
     },
     sizing::max_retained_peers,
 };
@@ -20,7 +21,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::{cups::Config as StreamConfig, utils::Timeout};
+use commonware_stream::utils::Timeout;
 use commonware_utils::{SystemTimeExt, ordered::Set, union};
 use rand_core::CryptoRng;
 use std::sync::Arc;
@@ -315,9 +316,9 @@ mod tests {
     use super::*;
     use crate::{Ingress, Manager, authenticated::discovery::actors::peer};
     use commonware_codec::Encode;
-    use commonware_cryptography::{Signer, ed25519::PrivateKey};
+    use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_stream::cups::{Handshake as StreamHandshake, Version};
+    use commonware_stream::cups::{self, Handshake as StreamHandshake, Version};
     use commonware_utils::NZUsize;
     use std::{net::SocketAddr, time::Duration};
 
@@ -331,7 +332,10 @@ mod tests {
             let peer = peer_signer.public_key();
             let address = SocketAddr::from(([127, 0, 0, 1], 7000));
             let cfg = Config::local(
-                StreamHandshake::new(signer.clone(), Version::V1),
+                StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config::new(
+                    signer.clone(),
+                    Version::V1,
+                )),
                 b"discovery-test",
                 address,
                 address,

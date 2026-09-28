@@ -165,7 +165,7 @@ mod tests {
     use crate::authenticated::discovery::types;
     use commonware_actor::{Feedback, Unreliable, mailbox};
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
@@ -173,7 +173,8 @@ mod tests {
     use commonware_stream::{
         Handshake as _,
         cups::{
-            Handshake as StreamHandshake, Receiver as CupsReceiver, Sender as CupsSender, Version,
+            self, Handshake as StreamHandshake, Receiver as CupsReceiver, Sender as CupsSender,
+            Version,
         },
         utils::Timeout,
     };
@@ -187,12 +188,18 @@ mod tests {
     const IP_NAMESPACE: &[u8] = b"test_discovery_spawner_actor_IP";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>);
+    type Connection = (
+        CupsSender<mocks::Sink, ChaCha20Poly1305>,
+        CupsReceiver<mocks::Stream, ChaCha20Poly1305>,
+    );
 
-    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
-        let mut handshake = StreamHandshake::new(signer, Version::V1);
-        handshake.synchrony_bound = Duration::from_secs(10);
-        handshake.max_handshake_age = Duration::from_secs(10);
+    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey, ChaCha20Poly1305>> {
+        let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+            signer,
+            version: Version::V1,
+            synchrony_bound: Duration::from_secs(10),
+            max_handshake_age: Duration::from_secs(10),
+        });
         Timeout::new(handshake, Duration::from_secs(10))
     }
 
@@ -267,7 +274,13 @@ mod tests {
         context: deterministic::Context,
         local: PublicKey,
     ) -> (
-        Mailbox<Message<CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>, PublicKey>>,
+        Mailbox<
+            Message<
+                CupsSender<mocks::Sink, ChaCha20Poly1305>,
+                CupsReceiver<mocks::Stream, ChaCha20Poly1305>,
+                PublicKey,
+            >,
+        >,
         mailbox::Receiver<tracker::Message<PublicKey>>,
         mailbox::UnreliableReceiver<router::Message<PublicKey>>,
         tracker::ingress::Releaser<PublicKey>,
@@ -289,8 +302,8 @@ mod tests {
         let (spawner, spawner_mailbox) =
             Actor::<
                 deterministic::Context,
-                CupsSender<mocks::Sink>,
-                CupsReceiver<mocks::Stream>,
+                CupsSender<mocks::Sink, ChaCha20Poly1305>,
+                CupsReceiver<mocks::Stream, ChaCha20Poly1305>,
                 PublicKey,
             >::new(context.child("spawner"), spawner_config(local));
         let handle = spawner.start(tracker_mailbox, router_mailbox);

@@ -14,7 +14,7 @@ use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{Viewable, simplex::types::Activity};
 use commonware_cryptography::{
-    Hasher,
+    ChaCha20Poly1305, Hasher,
     bls12381::primitives::variant::{MinSig, Variant},
 };
 use commonware_parallel::Sequential;
@@ -27,7 +27,7 @@ use tracing::{debug, info};
 /// Application actor.
 pub struct Application<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> {
     context: R,
-    indexer: (Sender<Si>, Receiver<St>),
+    indexer: (Sender<Si, ChaCha20Poly1305>, Receiver<St, ChaCha20Poly1305>),
     this_network: <MinSig as Variant>::Public,
     other_network: Scheme,
     mailbox: ActorReceiver<Message<H::Digest>>,

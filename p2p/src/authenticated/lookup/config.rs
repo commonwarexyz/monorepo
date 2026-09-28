@@ -1,9 +1,9 @@
 #[cfg(test)]
-use commonware_cryptography::Signer;
+use commonware_cryptography::{ChaCha20Poly1305, Signer};
 use commonware_runtime::Quota;
 use commonware_stream::Handshake;
 #[cfg(test)]
-use commonware_stream::cups::{Handshake as StreamHandshake, Version};
+use commonware_stream::cups::{self, Handshake as StreamHandshake, Version};
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -201,10 +201,10 @@ impl<H: Handshake> Config<H> {
 }
 
 #[cfg(test)]
-impl<C: Signer> Config<StreamHandshake<C>> {
+impl<C: Signer> Config<StreamHandshake<C, ChaCha20Poly1305>> {
     pub fn test(signer: C, listen: SocketAddr, max_message_size: u32) -> Self {
         let mut config = Self::local(
-            StreamHandshake::new(signer, Version::V1),
+            StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config::new(signer, Version::V1)),
             b"test_namespace",
             listen,
             NZUsize!(32),

@@ -154,11 +154,8 @@ commonware_macros::stability_scope!(BETA {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::{
-            cups::Config,
-            utils::{Timeout, TimeoutError},
-        };
-        use commonware_cryptography::ed25519::PrivateKey;
+        use crate::utils::{Timeout, TimeoutError};
+        use commonware_cryptography::{ChaCha20Poly1305, ed25519::PrivateKey};
         use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
         use commonware_utils::sync::Mutex;
         use futures::{FutureExt as _, future::Either};
@@ -260,7 +257,8 @@ commonware_macros::stability_scope!(BETA {
         }
 
         impl Handshake for OpaqueHandshake {
-            const MAX_SIZE: u32 = <cups::Handshake<PrivateKey> as Handshake>::MAX_SIZE;
+            const MAX_SIZE: u32 =
+                <cups::Handshake<PrivateKey, ChaCha20Poly1305> as Handshake>::MAX_SIZE;
 
             type PublicKey = OpaqueIdentity;
             type Error = Rejected;
@@ -329,7 +327,7 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[test]
-        fn configured_handshake_supports_opaque_identity_and_shared_session() {
+        fn handshake_supports_opaque_identity_and_shared_session() {
             fn assert_send<T: Send>(_: T) {}
 
             deterministic::Runner::default().start(|context| async move {
@@ -341,21 +339,24 @@ commonware_macros::stability_scope!(BETA {
                     let received = handshake.received.clone();
                     let handshake = Timeout::new(handshake, Duration::from_secs(1));
                     let _: OpaqueIdentity = handshake.public_key();
-                    let config = Config::new(handshake, namespace.clone(), max_message_size);
 
-                    // Reuse one configuration for multiple connections in each direction.
+                    // Reuse one handshake for multiple connections in each direction.
                     for _ in 0..2 {
                         let (sink, stream) = mocks::Channel::init();
-                        assert_send(config.dial(
+                        assert_send(handshake.clone().dial(
                             context.child("dialer"),
+                            &namespace,
+                            max_message_size,
                             OpaqueIdentity(PhantomData),
                             stream,
                             sink,
                         ));
                         let (sink, stream) = mocks::Channel::init();
                         let accepted = true;
-                        assert_send(config.listen(
+                        assert_send(handshake.clone().listen(
                             context.child("listener"),
+                            &namespace,
+                            max_message_size,
                             |_| async { accepted },
                             stream,
                             sink,
@@ -373,43 +374,29 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[test]
-        fn configured_handshake_message_size_bounds() {
-            for max_message_size in [0, OpaqueHandshake::MAX_SIZE] {
-                Config::new(OpaqueHandshake::new(Outcome::Success), b"", max_message_size);
-            }
-            assert!(std::panic::catch_unwind(|| {
-                Config::new(
-                    OpaqueHandshake::new(Outcome::Success),
-                    b"",
-                    OpaqueHandshake::MAX_SIZE + 1,
-                )
-            })
-            .is_err());
-        }
-
-        #[test]
-        fn configured_handshake_starts_timeout_when_called() {
+        fn handshake_starts_timeout_when_called() {
             for dialer in [false, true] {
                 deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
                     let (sink, mut peer_stream) = mocks::Channel::init();
                     let (mut peer_sink, stream) = mocks::Channel::init();
-                    let config = Config::new(
-                        Timeout::new(OpaqueHandshake::new(Outcome::Pending), Duration::from_millis(50)),
-                        b"timeout",
-                        1,
-                    );
+                    let handshake =
+                        Timeout::new(OpaqueHandshake::new(Outcome::Pending), Duration::from_millis(50));
                     let attempt = if dialer {
-                        Either::Left(config.dial(
+                        Either::Left(handshake.dial(
                             context.child("handshake"),
+                            b"timeout",
+                            1,
                             OpaqueIdentity(PhantomData),
                             stream,
                             sink,
                         ))
                     } else {
                         Either::Right(
-                            config
+                            handshake
                                 .listen(
                                     context.child("handshake"),
+                                    b"timeout",
+                                    1,
                                     |_| async { true },
                                     stream,
                                     sink,

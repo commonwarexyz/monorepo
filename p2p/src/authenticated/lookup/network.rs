@@ -10,6 +10,7 @@ use crate::{
         MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
         max_size, router,
+        stream::Config as StreamConfig,
     },
     sizing::max_retained_peers,
 };
@@ -19,7 +20,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::{Handshake, cups::Config as StreamConfig, utils::Timeout};
+use commonware_stream::{Handshake, utils::Timeout};
 use commonware_utils::union;
 use rand_core::CryptoRng;
 use std::sync::Arc;

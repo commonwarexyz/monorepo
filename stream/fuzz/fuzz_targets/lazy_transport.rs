@@ -1,10 +1,10 @@
 #![no_main]
 
-use commonware_cryptography::{Signer, ed25519::PrivateKey};
+use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
     Handshake as _,
-    cups::{Handshake, Receiver, Sender, Version},
+    cups::{Config, Handshake, Receiver, Sender, Version},
     utils::Timeout,
 };
 use futures::executor::block_on;
@@ -15,8 +15,8 @@ static NAMESPACE: &[u8] = b"lazy_fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 1023 * 1024; // ~1MB buffer
 
 struct TransportPair {
-    dialer_sender: Sender<mocks::Sink>,
-    listener_receiver: Receiver<mocks::Stream>,
+    dialer_sender: Sender<mocks::Sink, ChaCha20Poly1305>,
+    listener_receiver: Receiver<mocks::Stream, ChaCha20Poly1305>,
 }
 
 /// Establishes a connected transport pair for `version`.
@@ -29,14 +29,20 @@ fn connect(version: Version) -> TransportPair {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let mut dialer_handshake = Handshake::new(dialer_signer.clone(), version);
-        dialer_handshake.synchrony_bound = Duration::from_secs(3);
-        dialer_handshake.max_handshake_age = Duration::from_secs(5);
+        let dialer_handshake = Handshake::<_, ChaCha20Poly1305>::new(Config {
+            signer: dialer_signer.clone(),
+            version,
+            synchrony_bound: Duration::from_secs(3),
+            max_handshake_age: Duration::from_secs(5),
+        });
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(2));
 
-        let mut listener_handshake = Handshake::new(listener_signer.clone(), version);
-        listener_handshake.synchrony_bound = Duration::from_secs(3);
-        listener_handshake.max_handshake_age = Duration::from_secs(5);
+        let listener_handshake = Handshake::<_, ChaCha20Poly1305>::new(Config {
+            signer: listener_signer.clone(),
+            version,
+            synchrony_bound: Duration::from_secs(3),
+            max_handshake_age: Duration::from_secs(5),
+        });
         let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(2));
 
         let listener_handle = context.child("listener").spawn(move |context| async move {

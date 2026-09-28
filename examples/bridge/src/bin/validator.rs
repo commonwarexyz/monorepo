@@ -12,7 +12,7 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
-    Sha256, Signer as _,
+    ChaCha20Poly1305, Sha256, Signer as _,
     bls12381::primitives::{
         group,
         sharing::{ModeVersion, Sharing},
@@ -26,7 +26,8 @@ use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
 use commonware_stream::{
-    cups::{Config as StreamConfig, Handshake, Version},
+    Handshake as _,
+    cups::{self, Handshake, Version},
     utils::Timeout,
 };
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
@@ -164,18 +165,19 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
-    let mut indexer_handshake = Handshake::new(signer.clone(), Version::V1);
-    indexer_handshake.synchrony_bound = Duration::from_secs(1);
-    indexer_handshake.max_handshake_age = Duration::from_secs(60);
-    let indexer_handshake = StreamConfig::new(
-        Timeout::new(indexer_handshake, Duration::from_secs(5)),
-        INDEXER_NAMESPACE,
-        MAX_MESSAGE_SIZE,
+    let indexer_handshake = Timeout::new(
+        Handshake::<_, ChaCha20Poly1305>::new(cups::Config {
+            signer: signer.clone(),
+            version: Version::V1,
+            synchrony_bound: Duration::from_secs(1),
+            max_handshake_age: Duration::from_secs(60),
+        }),
+        Duration::from_secs(5),
     );
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        Handshake::new(signer, Version::V1),
+        Handshake::<_, ChaCha20Poly1305>::new(cups::Config::new(signer, Version::V1)),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -192,7 +194,14 @@ fn main() {
             .await
             .expect("Failed to dial indexer");
         let indexer = indexer_handshake
-            .dial(context.child("dialer"), indexer, stream, sink)
+            .dial(
+                context.child("dialer"),
+                INDEXER_NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                indexer,
+                stream,
+                sink,
+            )
             .await
             .expect("Failed to upgrade connection with indexer");
 

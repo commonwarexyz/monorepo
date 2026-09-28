@@ -288,7 +288,7 @@ mod tests {
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        Signer,
+        ChaCha20Poly1305, Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
@@ -297,7 +297,7 @@ mod tests {
     };
     use commonware_stream::{
         Handshake as _,
-        cups::{Handshake as StreamHandshake, Version},
+        cups::{self, Handshake as StreamHandshake, Version},
         utils::Timeout,
     };
     use commonware_utils::{NZU32, NZUsize, SystemTimeExt, bitmap::BitMap};
@@ -329,10 +329,13 @@ mod tests {
         }
     }
 
-    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
-        let mut handshake = StreamHandshake::new(signer, Version::V1);
-        handshake.synchrony_bound = Duration::from_secs(10);
-        handshake.max_handshake_age = Duration::from_secs(10);
+    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S, ChaCha20Poly1305>> {
+        let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+            signer,
+            version: Version::V1,
+            synchrony_bound: Duration::from_secs(10),
+            max_handshake_age: Duration::from_secs(10),
+        });
         Timeout::new(handshake, Duration::from_secs(10))
     }
 

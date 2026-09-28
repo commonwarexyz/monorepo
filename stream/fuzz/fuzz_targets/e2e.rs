@@ -6,10 +6,10 @@ use commonware_runtime::{
 };
 use commonware_stream::{
     Handshake as _,
-    cups::{Error, Handshake, Receiver, Sender, Version},
+    cups::{Config, Handshake, Receiver, Sender, Version},
     utils::{
         Timeout,
-        codec::{recv_frame, send_frame},
+        codec::{Error, recv_frame, send_frame},
     },
 };
 use futures::future::{Either, select};
@@ -115,14 +115,20 @@ fn fuzz(input: FuzzInput) {
         let (listener_sink, mut adversary_l_stream) = mocks::Channel::init();
         let (mut adversary_l_sink, dialer_stream) = mocks::Channel::init();
 
-        let mut dialer_handshake = Handshake::new(dialer_signer.clone(), version);
-        dialer_handshake.synchrony_bound = Duration::from_secs(1);
-        dialer_handshake.max_handshake_age = Duration::from_secs(1);
+        let dialer_handshake = Handshake::<_, ChaCha20Poly1305>::new(Config {
+            signer: dialer_signer.clone(),
+            version,
+            synchrony_bound: Duration::from_secs(1),
+            max_handshake_age: Duration::from_secs(1),
+        });
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
-        let mut listener_handshake = Handshake::new(listener_signer.clone(), version);
-        listener_handshake.synchrony_bound = Duration::from_secs(1);
-        listener_handshake.max_handshake_age = Duration::from_secs(1);
+        let listener_handshake = Handshake::<_, ChaCha20Poly1305>::new(Config {
+            signer: listener_signer.clone(),
+            version,
+            synchrony_bound: Duration::from_secs(1),
+            max_handshake_age: Duration::from_secs(1),
+        });
         let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(1));
 
         let dialer_handle = context.child("dialer").spawn(move |context| async move {
@@ -250,10 +256,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     let (sender, a_in, a_out, receiver): (
-                        &mut Sender<mocks::Sink>,
+                        &mut Sender<mocks::Sink, ChaCha20Poly1305>,
                         &mut mocks::Stream,
                         &mut mocks::Sink,
-                        &mut Receiver<mocks::Stream>,
+                        &mut Receiver<mocks::Stream, ChaCha20Poly1305>,
                     ) = match direction {
                         Direction::D2L => (
                             &mut d_sender,
@@ -290,10 +296,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     let (sender, a_in, a_out, receiver): (
-                        &mut Sender<mocks::Sink>,
+                        &mut Sender<mocks::Sink, ChaCha20Poly1305>,
                         &mut mocks::Stream,
                         &mut mocks::Sink,
-                        &mut Receiver<mocks::Stream>,
+                        &mut Receiver<mocks::Stream, ChaCha20Poly1305>,
                     ) = match direction {
                         Direction::D2L => (
                             &mut d_sender,
@@ -350,10 +356,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     let (sender, a_in, a_out, receiver): (
-                        &mut Sender<mocks::Sink>,
+                        &mut Sender<mocks::Sink, ChaCha20Poly1305>,
                         &mut mocks::Stream,
                         &mut mocks::Sink,
-                        &mut Receiver<mocks::Stream>,
+                        &mut Receiver<mocks::Stream, ChaCha20Poly1305>,
                     ) = match direction {
                         Direction::D2L => (
                             &mut d_sender,

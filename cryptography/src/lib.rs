@@ -319,36 +319,18 @@ commonware_macros::stability_scope!(BETA {
         fn finalize(self) -> (Self, Self::Digest);
     }
 
-    /// Errors returned by a [Cipher].
-    #[derive(Debug, thiserror::Error)]
-    pub enum CipherError {
-        /// An error indicating that no more messages can (safely) be sealed or opened.
-        ///
-        /// In practice, you should never see this error, because the limit takes
-        /// an ultra-astronomical amount of messages to reach.
-        #[error("message encryption limited reached")]
-        MessageLimitReached,
-        /// Encryption failed for some reason.
-        ///
-        /// In practice, this error shouldn't happen.
-        #[error("encryption failed")]
-        EncryptionFailed,
-        /// Decryption failed.
-        ///
-        /// This can happen if the message was corrupted, truncated, or opened out of order.
-        #[error("decryption failed")]
-        DecryptionFailed,
-    }
-
     /// Seals and opens an ordered sequence of messages under a single key.
     ///
     /// Each message is bound to its position in the sequence, so a message opens only at the
-    /// position it was sealed at. Every call consumes a position, even when it fails, so an
-    /// instance that fails to open a message cannot open any later message. A key must seal
-    /// messages for at most one instance.
+    /// position it was sealed at. Every call consumes a position, even when it fails, so a message
+    /// that fails to open cannot be opened again. A key must seal messages for at most one
+    /// instance.
     ///
     /// [Random::random] creates an instance with a key sampled from the provided RNG.
     pub trait Cipher: Random + Send + Sync + 'static {
+        /// Error returned when a message cannot be sealed or opened.
+        type Error: core::error::Error + Send + Sync + 'static;
+
         /// Number of bytes a sealed message grows by.
         const TAG_SIZE: usize;
 
@@ -358,17 +340,16 @@ commonware_macros::stability_scope!(BETA {
         /// # Panics
         ///
         /// Panics if `buf` is shorter than [Self::TAG_SIZE].
-        fn seal_in_place(&mut self, buf: &mut [u8]) -> Result<(), CipherError>;
+        fn seal_in_place(&mut self, buf: &mut [u8]) -> Result<(), Self::Error>;
 
         /// Decrypts `buf`, a ciphertext followed by its authentication tag, in place and returns
         /// the length of the plaintext at the start of `buf`.
         ///
-        /// Returns [CipherError::DecryptionFailed] if `buf` is shorter than [Self::TAG_SIZE] or
-        /// does not authenticate.
-        fn open_in_place(&mut self, buf: &mut [u8]) -> Result<usize, CipherError>;
+        /// Returns an error if `buf` is shorter than [Self::TAG_SIZE] or does not authenticate.
+        fn open_in_place(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
 
         /// Encrypts `data` and returns the ciphertext followed by its authentication tag.
-        fn seal(&mut self, data: &[u8]) -> Result<Vec<u8>, CipherError> {
+        fn seal(&mut self, data: &[u8]) -> Result<Vec<u8>, Self::Error> {
             let mut buf = Vec::with_capacity(data.len() + Self::TAG_SIZE);
             buf.extend_from_slice(data);
             buf.resize(data.len() + Self::TAG_SIZE, 0);
@@ -378,7 +359,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Decrypts `data`, a ciphertext followed by its authentication tag, and returns the
         /// plaintext.
-        fn open(&mut self, data: &[u8]) -> Result<Vec<u8>, CipherError> {
+        fn open(&mut self, data: &[u8]) -> Result<Vec<u8>, Self::Error> {
             let mut buf = data.to_vec();
             let len = self.open_in_place(&mut buf)?;
             buf.truncate(len);

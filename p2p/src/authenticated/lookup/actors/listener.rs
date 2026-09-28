@@ -3,6 +3,7 @@
 use crate::authenticated::{
     Mailbox as SpawnerMailbox,
     lookup::actors::{spawner, tracker},
+    stream::Config as StreamConfig,
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
@@ -12,7 +13,7 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_stream::{Handshake, cups::Config as StreamConfig};
+use commonware_stream::Handshake;
 use commonware_utils::{IpAddrExt, NZUsize, channel::ring, concurrency::Limiter, net::SubnetMask};
 use futures::{Sink, StreamExt};
 use rand_core::CryptoRng;
@@ -321,7 +322,7 @@ mod tests {
     use super::*;
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::test_traced;
@@ -329,7 +330,7 @@ mod tests {
         Error as RuntimeError, Runner as _, Stream, Supervisor as _, deterministic,
     };
     use commonware_stream::{
-        cups::{Handshake as StreamHandshake, Version},
+        cups::{self, Handshake as StreamHandshake, Version},
         utils::Timeout,
     };
     use commonware_utils::{NZU32, NZUsize};
@@ -365,9 +366,12 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let mut handshake = StreamHandshake::new(PrivateKey::from_seed(1), Version::V1);
-            handshake.synchrony_bound = Duration::from_secs(1);
-            handshake.max_handshake_age = Duration::from_secs(1);
+            let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+                signer: PrivateKey::from_seed(1),
+                version: Version::V1,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+            });
 
             let (mut updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
@@ -532,9 +536,12 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let mut handshake = StreamHandshake::new(PrivateKey::from_seed(1), Version::V1);
-            handshake.synchrony_bound = Duration::from_secs(1);
-            handshake.max_handshake_age = Duration::from_secs(1);
+            let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+                signer: PrivateKey::from_seed(1),
+                version: Version::V1,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+            });
 
             let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
@@ -616,9 +623,12 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let mut handshake = StreamHandshake::new(PrivateKey::from_seed(1), Version::V1);
-            handshake.synchrony_bound = Duration::from_secs(1);
-            handshake.max_handshake_age = Duration::from_secs(1);
+            let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+                signer: PrivateKey::from_seed(1),
+                version: Version::V1,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+            });
 
             let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
@@ -700,9 +710,12 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let mut handshake = StreamHandshake::new(PrivateKey::from_seed(1), Version::V1);
-            handshake.synchrony_bound = Duration::from_secs(1);
-            handshake.max_handshake_age = Duration::from_secs(1);
+            let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+                signer: PrivateKey::from_seed(1),
+                version: Version::V1,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+            });
 
             let (mut updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(

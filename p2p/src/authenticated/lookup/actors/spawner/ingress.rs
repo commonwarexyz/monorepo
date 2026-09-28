@@ -52,14 +52,15 @@ mod tests {
     use crate::authenticated::lookup::actors::tracker::{self, Metadata};
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
         Handshake as _,
         cups::{
-            Handshake as StreamHandshake, Receiver as CupsReceiver, Sender as CupsSender, Version,
+            self, Handshake as StreamHandshake, Receiver as CupsReceiver, Sender as CupsSender,
+            Version,
         },
         utils::Timeout,
     };
@@ -70,12 +71,18 @@ mod tests {
     const STREAM_NAMESPACE: &[u8] = b"test_lookup_spawner_ingress";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>);
+    type Connection = (
+        CupsSender<mocks::Sink, ChaCha20Poly1305>,
+        CupsReceiver<mocks::Stream, ChaCha20Poly1305>,
+    );
 
-    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
-        let mut handshake = StreamHandshake::new(signer, Version::V1);
-        handshake.synchrony_bound = Duration::from_secs(10);
-        handshake.max_handshake_age = Duration::from_secs(10);
+    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey, ChaCha20Poly1305>> {
+        let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+            signer,
+            version: Version::V1,
+            synchrony_bound: Duration::from_secs(10),
+            max_handshake_age: Duration::from_secs(10),
+        });
         Timeout::new(handshake, Duration::from_secs(10))
     }
 
@@ -138,7 +145,7 @@ mod tests {
             let peer_2 = PrivateKey::from_seed(2).public_key();
 
             let (mut spawner, mut receiver) =
-                Mailbox::<Message<CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>, PublicKey>>::new(
+                Mailbox::<Message<CupsSender<mocks::Sink, ChaCha20Poly1305>, CupsReceiver<mocks::Stream, ChaCha20Poly1305>, PublicKey>>::new(
                     context.child("spawner_mailbox"),
                     NZUsize!(1),
                 );

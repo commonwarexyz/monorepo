@@ -1,10 +1,25 @@
-use crate::cups::Error;
 use commonware_codec::{
     Encode,
     varint::{Decoder, MAX_U32_VARINT_SIZE, UInt},
 };
-use commonware_runtime::{Buf, IoBuf, IoBufs, Sink, Stream};
+use commonware_runtime::{Buf, Error as RuntimeError, IoBuf, IoBufs, Sink, Stream};
 use commonware_utils::Widen;
+use thiserror::Error;
+
+/// Errors that can occur when sending or receiving a length-prefixed frame.
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("recv failed")]
+    RecvFailed(RuntimeError),
+    #[error("recv too large: {0} bytes")]
+    RecvTooLarge(usize),
+    #[error("invalid varint length prefix")]
+    InvalidVarint,
+    #[error("send failed")]
+    SendFailed(RuntimeError),
+    #[error("send too large: {0} bytes")]
+    SendTooLarge(usize),
+}
 
 /// Returns `len` as a u32 if it does not exceed `max_message_size`.
 pub(crate) fn validate_frame_len(len: usize, max_message_size: u32) -> Result<u32, Error> {

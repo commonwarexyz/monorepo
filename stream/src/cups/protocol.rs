@@ -1,9 +1,10 @@
-use crate::utils::codec::{recv_frame, send_frame, validate_frame_len};
+use super::Config;
+use crate::utils::codec::{Error as FrameError, recv_frame, send_frame, validate_frame_len};
 use commonware_codec::{
     DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Write, varint::UInt,
 };
 use commonware_cryptography::{
-    ChaCha20Poly1305, Cipher, CipherError, Signer,
+    Cipher, Signer,
     handshake::sake::{
         self, Ack, Context, Error as HandshakeError, Syn, SynAck, dial_end, dial_start, listen_end,
         listen_start,
@@ -16,7 +17,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{DurationExt, SystemTimeExt, Widen};
 use rand_core::CryptoRng;
-use std::{future::Future, marker::PhantomData, ops::Range, time::Duration};
+use std::{future::Future, marker::PhantomData, ops::Range};
 use thiserror::Error;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_CUPS";
@@ -31,18 +32,23 @@ const fn tag_size<C: Cipher>() -> u32 {
     C::TAG_SIZE as u32
 }
 
+/// Returns the size of a version 1 header sealed with `C`.
+const fn v1_header_size<C: Cipher>() -> usize {
+    V1_HEADER_PLAINTEXT_SIZE + C::TAG_SIZE
+}
+
 /// Returns the largest payload whose record length fits in a u32 with a tag of `C`.
 const fn max_size<C: Cipher>() -> u32 {
     u32::MAX - tag_size::<C>()
 }
 
-/// Errors that can occur when interacting with a stream.
+/// Errors that can occur when interacting with a stream, where `E` is the error of its [Cipher].
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum Error<E> {
     #[error("handshake error: {0}")]
     HandshakeError(HandshakeError),
     #[error("cipher error: {0}")]
-    CipherError(CipherError),
+    CipherError(E),
     #[error("unable to decode: {0}")]
     UnableToDecode(CodecError),
     #[error("peer rejected: {}", hex(_0))]
@@ -63,21 +69,27 @@ pub enum Error {
     StreamClosed,
 }
 
-impl From<CodecError> for Error {
+impl<E> From<CodecError> for Error<E> {
     fn from(value: CodecError) -> Self {
         Self::UnableToDecode(value)
     }
 }
 
-impl From<HandshakeError> for Error {
+impl<E> From<HandshakeError> for Error<E> {
     fn from(value: HandshakeError) -> Self {
         Self::HandshakeError(value)
     }
 }
 
-impl From<CipherError> for Error {
-    fn from(value: CipherError) -> Self {
-        Self::CipherError(value)
+impl<E> From<FrameError> for Error<E> {
+    fn from(value: FrameError) -> Self {
+        match value {
+            FrameError::RecvFailed(err) => Self::RecvFailed(err),
+            FrameError::RecvTooLarge(len) => Self::RecvTooLarge(len),
+            FrameError::InvalidVarint => Self::InvalidVarint,
+            FrameError::SendFailed(err) => Self::SendFailed(err),
+            FrameError::SendTooLarge(len) => Self::SendTooLarge(len),
+        }
     }
 }
 
@@ -128,7 +140,7 @@ impl Version {
             .expect("payload exceeds stream limit");
         match self {
             Self::V0 => UInt(len + tag_size::<C>()).encode_size(),
-            Self::V1 => V1_HEADER_PLAINTEXT_SIZE + C::TAG_SIZE,
+            Self::V1 => v1_header_size::<C>(),
         }
     }
 
@@ -137,26 +149,31 @@ impl Version {
     /// # Panics
     ///
     /// Panics if `len` exceeds the [MAX_SIZE](crate::Handshake::MAX_SIZE) of a [Handshake] using
-    /// `C`.
+    /// `C`, or if the record size does not fit in a `usize`.
     pub fn record_len<C: Cipher>(self, len: usize) -> usize {
-        self.header_len::<C>(len) + len + C::TAG_SIZE
+        self.header_len::<C>(len)
+            .checked_add(len)
+            .and_then(|size| size.checked_add(C::TAG_SIZE))
+            .expect("record size exceeds usize")
     }
 
-    /// Appends the header for an encrypted payload of `len` bytes, consuming a nonce when the
-    /// header is encrypted.
+    /// Appends the header for an encrypted payload of `len` bytes, consuming a cipher position when
+    /// the header is encrypted.
     fn append_header<C: Cipher>(
         self,
         chunk: &mut IoBufMut,
         cipher: &mut C,
         len: u32,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<C::Error>> {
         match self {
             Self::V0 => UInt(len + tag_size::<C>()).write(chunk),
             Self::V1 => {
                 let offset = chunk.len();
                 len.write(chunk);
                 chunk.put_bytes(0, C::TAG_SIZE);
-                cipher.seal_in_place(&mut chunk.as_mut()[offset..])?;
+                cipher
+                    .seal_in_place(&mut chunk.as_mut()[offset..])
+                    .map_err(Error::CipherError)?;
             }
         }
         Ok(())
@@ -169,20 +186,28 @@ impl Version {
         cipher: &mut C,
         pool: &BufferPool,
         max_message_size: u32,
-    ) -> Result<IoBufs, Error> {
+    ) -> Result<IoBufs, Error<C::Error>> {
         match self {
-            Self::V0 => recv_frame(stream, max_message_size.saturating_add(tag_size::<C>())).await,
+            Self::V0 => recv_frame(stream, max_message_size.saturating_add(tag_size::<C>()))
+                .await
+                .map_err(|err| match err {
+                    // The prefix counts the tag, which is excluded from the reported payload.
+                    FrameError::RecvTooLarge(len) => Error::RecvTooLarge(len - C::TAG_SIZE),
+                    err => err.into(),
+                }),
             Self::V1 => {
                 // Request the fixed-size header before trusting the payload length, reusing
                 // its allocation for in-place decryption when possible.
                 let header = stream
-                    .recv(V1_HEADER_PLAINTEXT_SIZE + C::TAG_SIZE)
+                    .recv(v1_header_size::<C>())
                     .await
                     .map_err(Error::RecvFailed)?;
                 let mut header = mutable_frame(pool, header);
 
                 // Authenticate the header before decoding its length or requesting the payload.
-                let plaintext_len = cipher.open_in_place(header.as_mut())?;
+                let plaintext_len = cipher
+                    .open_in_place(header.as_mut())
+                    .map_err(Error::CipherError)?;
                 assert_eq!(plaintext_len, V1_HEADER_PLAINTEXT_SIZE);
                 header.truncate(plaintext_len);
                 let len = u32::decode(header)?;
@@ -202,66 +227,46 @@ impl Version {
 ///
 /// Implements [crate::Handshake] using [commonware_cryptography::handshake::sake] and seals records
 /// with `C`.
-pub struct Handshake<S, C = ChaCha20Poly1305> {
-    /// Signer used to authenticate the local peer.
-    pub signer: S,
-
-    /// Protocol version, selecting the SAKE version, the transcript scope, and the record format.
-    pub version: Version,
-
-    /// Maximum time drift allowed for future timestamps.
-    pub synchrony_bound: Duration,
-
-    /// Maximum age of handshake messages before rejection.
-    pub max_handshake_age: Duration,
-
+pub struct Handshake<S, C> {
+    config: Config<S>,
     cipher: PhantomData<C>,
 }
 
 impl<S: Clone, C> Clone for Handshake<S, C> {
     fn clone(&self) -> Self {
         Self {
-            signer: self.signer.clone(),
-            version: self.version,
-            synchrony_bound: self.synchrony_bound,
-            max_handshake_age: self.max_handshake_age,
+            config: self.config.clone(),
             cipher: PhantomData,
         }
-    }
-}
-
-impl<S> Handshake<S> {
-    /// Creates a SAKE handshake that seals records with [ChaCha20Poly1305], accepting timestamps up
-    /// to five seconds ahead or ten seconds old.
-    pub const fn new(signer: S, version: Version) -> Self {
-        Self::with_cipher(signer, version)
     }
 }
 
 impl<S, C> Handshake<S, C> {
-    /// Creates a SAKE handshake that seals records with `C`, accepting timestamps up to five
-    /// seconds ahead or ten seconds old.
-    pub const fn with_cipher(signer: S, version: Version) -> Self {
+    /// Creates a handshake that seals records with `C`.
+    pub const fn new(config: Config<S>) -> Self {
         Self {
-            signer,
-            version,
-            synchrony_bound: Duration::from_secs(5),
-            max_handshake_age: Duration::from_secs(10),
+            config,
             cipher: PhantomData,
         }
+    }
+
+    /// Returns the configuration of this handshake.
+    pub const fn config(&self) -> &Config<S> {
+        &self.config
     }
 
     /// Computes the current time and acceptable timestamp range.
     pub fn time_information(&self, ctx: &impl Clock) -> (u64, Range<u64>) {
         let current_time_ms = ctx.current().epoch().as_millis_u64();
-        let ok_timestamps = (current_time_ms.saturating_sub(self.max_handshake_age.as_millis_u64()))
-            ..(current_time_ms.saturating_add(self.synchrony_bound.as_millis_u64()));
+        let ok_timestamps = (current_time_ms
+            .saturating_sub(self.config.max_handshake_age.as_millis_u64()))
+            ..(current_time_ms.saturating_add(self.config.synchrony_bound.as_millis_u64()));
         (current_time_ms, ok_timestamps)
     }
 }
 
 /// Sends a handshake message bounded by its fixed encoded size.
-async fn send_handshake_frame<M, T>(sink: &mut T, message: M) -> Result<(), Error>
+async fn send_handshake_frame<M, T>(sink: &mut T, message: M) -> Result<(), FrameError>
 where
     M: Encode + FixedSize,
     T: Sink,
@@ -271,7 +276,7 @@ where
 }
 
 /// Receives and decodes a handshake message bounded by its fixed encoded size.
-async fn recv_handshake_frame<M, T>(stream: &mut T) -> Result<M, Error>
+async fn recv_handshake_frame<M, T, E>(stream: &mut T) -> Result<M, Error<E>>
 where
     M: DecodeExt<()> + FixedSize,
     T: Stream,
@@ -288,12 +293,12 @@ impl<S: Signer, C: Cipher> crate::Handshake for Handshake<S, C> {
     const MAX_SIZE: u32 = max_size::<C>();
 
     type PublicKey = S::PublicKey;
-    type Error = Error;
+    type Error = Error<C::Error>;
     type Sender<I: Stream, O: Sink> = Sender<O, C>;
     type Receiver<I: Stream, O: Sink> = Receiver<I, C>;
 
     fn public_key(&self) -> Self::PublicKey {
-        self.signer.public_key()
+        self.config.signer.public_key()
     }
 
     async fn dial<E, I, O>(
@@ -315,23 +320,23 @@ impl<S: Signer, C: Cipher> crate::Handshake for Handshake<S, C> {
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
-        send_handshake_frame(&mut sink, self.signer.public_key()).await?;
+        send_handshake_frame(&mut sink, self.config.signer.public_key()).await?;
 
         let (current_time, ok_timestamps) = self.time_information(&context);
         let (state, syn) = dial_start(
             context,
-            self.version.scope(Context::new(
+            self.config.version.scope(Context::new(
                 namespace,
-                self.version.sake(),
+                self.config.version.sake(),
                 current_time,
                 ok_timestamps,
-                self.signer,
+                self.config.signer,
                 peer,
             )),
         );
         send_handshake_frame(&mut sink, syn).await?;
 
-        let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _>(&mut stream).await?;
+        let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _, _>(&mut stream).await?;
 
         let (ack, send, recv) = dial_end(state, syn_ack)?;
         send_handshake_frame(&mut sink, ack).await?;
@@ -342,14 +347,14 @@ impl<S: Signer, C: Cipher> crate::Handshake for Handshake<S, C> {
                 sink,
                 max_message_size,
                 pool: pool.clone(),
-                version: self.version,
+                version: self.config.version,
             },
             Receiver {
                 cipher: recv,
                 stream,
                 max_message_size,
                 pool,
-                version: self.version,
+                version: self.config.version,
             },
         ))
     }
@@ -375,29 +380,29 @@ impl<S: Signer, C: Cipher> crate::Handshake for Handshake<S, C> {
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
-        let peer = recv_handshake_frame::<S::PublicKey, _>(&mut stream).await?;
+        let peer = recv_handshake_frame::<S::PublicKey, _, _>(&mut stream).await?;
         if !bouncer(peer.clone()).await {
             return Err(Error::PeerRejected(peer.encode().to_vec()));
         }
 
-        let msg1 = recv_handshake_frame::<Syn<S::Signature>, _>(&mut stream).await?;
+        let msg1 = recv_handshake_frame::<Syn<S::Signature>, _, _>(&mut stream).await?;
 
         let (current_time, ok_timestamps) = self.time_information(&context);
         let (state, syn_ack) = listen_start(
             context,
-            self.version.scope(Context::new(
+            self.config.version.scope(Context::new(
                 namespace,
-                self.version.sake(),
+                self.config.version.sake(),
                 current_time,
                 ok_timestamps,
-                self.signer,
+                self.config.signer,
                 peer.clone(),
             )),
             msg1,
         )?;
         send_handshake_frame(&mut sink, syn_ack).await?;
 
-        let ack = recv_handshake_frame::<Ack, _>(&mut stream).await?;
+        let ack = recv_handshake_frame::<Ack, _, _>(&mut stream).await?;
 
         let (send, recv) = listen_end(state, ack)?;
 
@@ -408,21 +413,21 @@ impl<S: Signer, C: Cipher> crate::Handshake for Handshake<S, C> {
                 sink,
                 max_message_size,
                 pool: pool.clone(),
-                version: self.version,
+                version: self.config.version,
             },
             Receiver {
                 cipher: recv,
                 stream,
                 max_message_size,
                 pool,
-                version: self.version,
+                version: self.config.version,
             },
         ))
     }
 }
 
 /// Sends CUPS records to a peer.
-pub struct Sender<O, C = ChaCha20Poly1305> {
+pub struct Sender<O, C> {
     cipher: C,
     sink: O,
     max_message_size: u32,
@@ -440,7 +445,7 @@ impl<O: Sink, C: Cipher> Sender<O, C> {
     /// Returns the total encoded size of one encrypted frame.
     ///
     /// The returned size includes the header, ciphertext, and AEAD tags.
-    fn encrypted_frame_len(&self, len: usize) -> Result<usize, Error> {
+    fn encrypted_frame_len(&self, len: usize) -> Result<usize, Error<C::Error>> {
         validate_frame_len(len, self.max_message_size)?;
         Ok(self.version.record_len::<C>(len))
     }
@@ -454,7 +459,7 @@ impl<O: Sink, C: Cipher> Sender<O, C> {
         &mut self,
         chunk: &mut IoBufMut,
         mut bufs: IoBufs,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<C::Error>> {
         let len = validate_frame_len(bufs.len(), self.max_message_size)?;
         self.version.append_header(chunk, &mut self.cipher, len)?;
 
@@ -465,7 +470,8 @@ impl<O: Sink, C: Cipher> Sender<O, C> {
 
         // Encrypt in-place and write the tag into the reserved room.
         self.cipher
-            .seal_in_place(&mut chunk.as_mut()[plaintext_offset..])?;
+            .seal_in_place(&mut chunk.as_mut()[plaintext_offset..])
+            .map_err(Error::CipherError)?;
         assert_eq!(
             chunk.len() - plaintext_offset,
             Widen::<usize>::widen(len) + C::TAG_SIZE
@@ -477,7 +483,7 @@ impl<O: Sink, C: Cipher> Sender<O, C> {
     ///
     /// Callers compute `total_len` up front so this helper can allocate once,
     /// append each framed ciphertext in order, and freeze the result.
-    fn build_chunk<I>(&mut self, messages: I, total_len: usize) -> Result<IoBuf, Error>
+    fn build_chunk<I>(&mut self, messages: I, total_len: usize) -> Result<IoBuf, Error<C::Error>>
     where
         I: IntoIterator<Item = IoBufs>,
     {
@@ -492,8 +498,8 @@ impl<O: Sink, C: Cipher> Sender<O, C> {
     /// Plans `send_many` chunk boundaries without consuming cipher state.
     ///
     /// This validation pass ensures any oversize error is reported before
-    /// encryption advances nonces, so the sender remains usable after failure.
-    fn plan_chunks<B, I>(&self, bufs: I) -> Result<Vec<ChunkPlan>, Error>
+    /// sealing consumes cipher positions, so the sender remains usable after failure.
+    fn plan_chunks<B, I>(&self, bufs: I) -> Result<Vec<ChunkPlan>, Error<C::Error>>
     where
         B: Into<IoBufs>,
         I: IntoIterator<Item = B>,
@@ -554,7 +560,7 @@ impl<O: Sink, C: Cipher> Sender<O, C> {
     ///
     /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
     /// and sends the ciphertext.
-    pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
+    pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error<C::Error>> {
         let bufs = bufs.into();
         let frame_len = self.encrypted_frame_len(bufs.len())?;
         let chunk = self.build_chunk(std::iter::once(bufs), frame_len)?;
@@ -568,7 +574,7 @@ impl<O: Sink, C: Cipher> Sender<O, C> {
     /// chunks capped to one network buffer-pool item, then submitted together as
     /// a chunked `IoBufs`. An individual message larger than that cap is still
     /// sent as its own chunk.
-    pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
+    pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error<C::Error>>
     where
         B: Into<IoBufs>,
         I: IntoIterator<Item = B>,
@@ -581,14 +587,14 @@ impl<O: Sink, C: Cipher> Sender<O, C> {
         let chunks = plans
             .into_iter()
             .map(|plan| self.build_chunk(plan.messages, plan.total_len))
-            .collect::<Result<IoBufs, Error>>()?;
+            .collect::<Result<IoBufs, _>>()?;
 
         self.sink.send(chunks).await.map_err(Error::SendFailed)
     }
 }
 
 /// Receives CUPS records from a peer.
-pub struct Receiver<I, C = ChaCha20Poly1305> {
+pub struct Receiver<I, C> {
     cipher: C,
     stream: I,
     max_message_size: u32,
@@ -597,13 +603,13 @@ pub struct Receiver<I, C = ChaCha20Poly1305> {
 }
 
 impl<O: Sink, C: Cipher> crate::Sender for Sender<O, C> {
-    type Error = Error;
+    type Error = Error<C::Error>;
 
-    async fn send(&mut self, message: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    async fn send(&mut self, message: impl Into<IoBufs> + Send) -> Result<(), Self::Error> {
         Self::send(self, message).await
     }
 
-    async fn send_many<I>(&mut self, messages: I) -> Result<(), Error>
+    async fn send_many<I>(&mut self, messages: I) -> Result<(), Self::Error>
     where
         I: IntoIterator + Send,
         I::Item: Into<IoBufs> + Send,
@@ -614,9 +620,9 @@ impl<O: Sink, C: Cipher> crate::Sender for Sender<O, C> {
 }
 
 impl<I: Stream, C: Cipher> crate::Receiver for Receiver<I, C> {
-    type Error = Error;
+    type Error = Error<C::Error>;
 
-    async fn recv(&mut self) -> Result<IoBufs, Error> {
+    async fn recv(&mut self) -> Result<IoBufs, Self::Error> {
         Self::recv(self).await
     }
 }
@@ -642,7 +648,7 @@ impl<I: Stream, C: Cipher> Receiver<I, C> {
     /// Receives ciphertext and decrypts it in-place when the received frame is
     /// a single, uniquely-owned buffer. Otherwise, allocates a buffer from the
     /// pool, copies the ciphertext, and decrypts the copy in-place.
-    pub async fn recv(&mut self) -> Result<IoBufs, Error> {
+    pub async fn recv(&mut self) -> Result<IoBufs, Error<C::Error>> {
         let encrypted = self
             .version
             .recv_frame(
@@ -655,7 +661,10 @@ impl<I: Stream, C: Cipher> Receiver<I, C> {
         let mut decryption_buf = mutable_frame(&self.pool, encrypted);
 
         // Decrypt in-place, get plaintext length back.
-        let plaintext_len = self.cipher.open_in_place(decryption_buf.as_mut())?;
+        let plaintext_len = self
+            .cipher
+            .open_in_place(decryption_buf.as_mut())
+            .map_err(Error::CipherError)?;
 
         // Truncate to remove tag bytes, keeping only plaintext.
         decryption_buf.truncate(plaintext_len);
@@ -671,7 +680,9 @@ mod test {
         Handshake as _,
         utils::{Timeout, TimeoutError},
     };
-    use commonware_cryptography::{Signer, ed25519::PrivateKey};
+    use commonware_cryptography::{
+        ChaCha20Poly1305, Signer, chacha20_poly1305, ed25519::PrivateKey,
+    };
     use commonware_math::algebra::Random;
     use commonware_runtime::{
         BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
@@ -734,6 +745,88 @@ mod test {
         assert_eq!(Version::V1.sake(), sake::Version::V1);
     }
 
+    /// Checks that sizing a payload beyond the stream limit panics.
+    #[test]
+    #[should_panic(expected = "payload exceeds stream limit")]
+    fn test_header_len_rejects_oversized_payload() {
+        Version::V1.header_len::<ChaCha20Poly1305>(Widen::<usize>::widen(u32::MAX));
+    }
+
+    /// Checks that a version 0 receiver reports the payload length of an oversized record, which
+    /// excludes the tag that its length prefix counts.
+    #[test]
+    fn test_v0_recv_too_large_reports_payload_len() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut sink, stream) = mocks::Channel::init();
+            let mut receiver = Receiver {
+                cipher: ChaCha20Poly1305::random(TestRng::new(0)),
+                stream,
+                max_message_size: MAX_MESSAGE_SIZE,
+                pool: context.network_buffer_pool().clone(),
+                version: Version::V0,
+            };
+            let len = MAX_MESSAGE_SIZE + 1;
+            let prefix = UInt(len + tag_size::<ChaCha20Poly1305>()).encode().to_vec();
+            sink.send(prefix).await.unwrap();
+
+            // Keep the sink open without sending a payload: rejection must not wait for it.
+            let result = receiver
+                .recv()
+                .now_or_never()
+                .expect("prefix rejection must be immediate");
+            assert!(matches!(
+                result,
+                Err(Error::RecvTooLarge(n)) if n == Widen::<usize>::widen(len)
+            ));
+        });
+    }
+
+    /// Checks that frame failures surface as the matching stream errors.
+    #[test]
+    fn test_frame_errors_surface_as_stream_errors() {
+        deterministic::Runner::default().start(|context| async move {
+            // A length prefix that never terminates is an invalid varint.
+            let (mut sink, stream) = mocks::Channel::init();
+            let mut receiver = Receiver {
+                cipher: ChaCha20Poly1305::random(TestRng::new(0)),
+                stream,
+                max_message_size: MAX_MESSAGE_SIZE,
+                pool: context.network_buffer_pool().clone(),
+                version: Version::V0,
+            };
+            sink.send(vec![0xFF; 5]).await.unwrap();
+            assert!(matches!(receiver.recv().await, Err(Error::InvalidVarint)));
+
+            // A closed peer fails the read of the length prefix.
+            let (sink, stream) = mocks::Channel::init();
+            let mut receiver = Receiver {
+                cipher: ChaCha20Poly1305::random(TestRng::new(0)),
+                stream,
+                max_message_size: MAX_MESSAGE_SIZE,
+                pool: context.network_buffer_pool().clone(),
+                version: Version::V0,
+            };
+            drop(sink);
+            assert!(matches!(receiver.recv().await, Err(Error::RecvFailed(_))));
+
+            // A closed peer fails the first handshake frame.
+            let (sink, peer_stream) = mocks::Channel::init();
+            let (_peer_sink, stream) = mocks::Channel::init();
+            drop(peer_stream);
+            let result = transport_handshake(PrivateKey::from_seed(0), Version::V1)
+                .dial(
+                    context.child("dialer"),
+                    NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    PrivateKey::from_seed(1).public_key(),
+                    stream,
+                    sink,
+                )
+                .await;
+            assert!(matches!(result, Err(Error::SendFailed(_))));
+        });
+    }
+
     /// Checks that a version 1 receiver rejects an invalid header before any payload arrives.
     #[test]
     fn test_invalid_header_rejected_before_body() {
@@ -767,7 +860,9 @@ mod test {
                 if corrupt.is_some() {
                     assert!(matches!(
                         result,
-                        Err(Error::CipherError(CipherError::DecryptionFailed))
+                        Err(Error::CipherError(
+                            chacha20_poly1305::Error::DecryptionFailed
+                        ))
                     ));
                 } else {
                     assert!(matches!(
@@ -781,14 +876,18 @@ mod test {
 
     #[test]
     fn test_max_message_size_bounds() {
-        const MAX_SIZE: u32 = <Handshake<PrivateKey> as crate::Handshake>::MAX_SIZE;
+        const MAX_SIZE: u32 =
+            <Handshake<PrivateKey, ChaCha20Poly1305> as crate::Handshake>::MAX_SIZE;
         assert_eq!(MAX_SIZE + tag_size::<ChaCha20Poly1305>(), u32::MAX);
         deterministic::Runner::default().start(|context| async move {
             for max_message_size in [0, MAX_SIZE, MAX_SIZE + 1] {
                 for dialer in [true, false] {
                     let (sink, _) = mocks::Channel::init();
                     let (_, stream) = mocks::Channel::init();
-                    let handshake = Handshake::new(PrivateKey::from_seed(0), Version::V1);
+                    let handshake = Handshake::<_, ChaCha20Poly1305>::new(Config::new(
+                        PrivateKey::from_seed(0),
+                        Version::V1,
+                    ));
                     let attempt = async {
                         if dialer {
                             handshake
@@ -830,11 +929,16 @@ mod test {
         });
     }
 
-    fn transport_handshake(signer: PrivateKey, version: Version) -> Handshake<PrivateKey> {
-        let mut handshake = Handshake::new(signer, version);
-        handshake.synchrony_bound = Duration::from_secs(1);
-        handshake.max_handshake_age = Duration::from_secs(1);
-        handshake
+    fn transport_handshake(
+        signer: PrivateKey,
+        version: Version,
+    ) -> Handshake<PrivateKey, ChaCha20Poly1305> {
+        Handshake::new(Config {
+            signer,
+            version,
+            synchrony_bound: Duration::from_secs(1),
+            max_handshake_age: Duration::from_secs(1),
+        })
     }
 
     fn oversized_handshake_prefix(message: &impl commonware_codec::Encode) -> IoBuf {
@@ -973,7 +1077,7 @@ mod test {
     fn handshake_with_versions(
         dialer_version: Version,
         listener_version: Version,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<chacha20_poly1305::Error>> {
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(move |context| async move {
             let dialer_signer = PrivateKey::from_seed(42);
@@ -1467,15 +1571,15 @@ mod test {
             // oversized prefix we inject below.
             let (current_time, ok_timestamps) = dialer_handshake.time_information(&context);
             let listener_public_key = listener_signer.public_key();
-            let dialer_public_key = dialer_handshake.signer.public_key();
+            let dialer_public_key = dialer_handshake.config().signer.public_key();
             let (_, syn) = dial_start(
                 context.child("dialer"),
                 Context::new(
                     NAMESPACE,
-                    dialer_handshake.version.sake(),
+                    dialer_handshake.config().version.sake(),
                     current_time,
                     ok_timestamps.clone(),
-                    dialer_handshake.signer.clone(),
+                    dialer_handshake.config().signer.clone(),
                     listener_public_key.clone(),
                 ),
             );
@@ -1483,7 +1587,7 @@ mod test {
                 context.child("listener"),
                 Context::new(
                     NAMESPACE,
-                    dialer_handshake.version.sake(),
+                    dialer_handshake.config().version.sake(),
                     current_time,
                     ok_timestamps,
                     listener_signer,
