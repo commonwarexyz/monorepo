@@ -108,7 +108,7 @@ use super::{
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
-    task::{Outcome, Target, Task, Tasks, root_waker},
+    task::{Outcome, RootWaker, Target, Task, Tasks},
     timeout::TimeoutWheel,
     waker::SUBMISSION_SEQ_MASK,
 };
@@ -1329,7 +1329,7 @@ impl Worker {
         {
             worker.panics.run(|| service.clear());
         }
-        let root_waker = root_waker(Arc::downgrade(&mailbox));
+        let root_waker = RootWaker::new(Arc::downgrade(&mailbox)).into();
 
         // The catch owns the root, including when interrupted. Worker and TLS stay
         // outside it so root destruction can orphan operations or spawn more work.

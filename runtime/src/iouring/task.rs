@@ -737,15 +737,17 @@ pub enum Target {
     Task(Task),
 }
 
-/// Build the waker for the root future of the worker behind `mailbox`.
-pub fn root_waker(mailbox: Weak<Mailbox>) -> Waker {
-    Arc::new(RootWaker { mailbox }).into()
-}
-
 /// Waker for the root future, which the worker pins on its stack.
-struct RootWaker {
+pub struct RootWaker {
     /// Worker polling the root, without extending its lifetime.
     mailbox: Weak<Mailbox>,
+}
+
+impl RootWaker {
+    /// Allocate a waker that notifies the root of the worker behind `mailbox`.
+    pub fn new(mailbox: Weak<Mailbox>) -> Arc<Self> {
+        Arc::new(Self { mailbox })
+    }
 }
 
 impl Wake for RootWaker {
