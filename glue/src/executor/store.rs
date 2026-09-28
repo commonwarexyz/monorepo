@@ -1,8 +1,10 @@
-//! The executed chain's archive and its applied cursor.
+//! The executed chain's archive and its applied cursor. Until a state sync gives the chain a
+//! base, the archive holds only the blocks offered as its targets.
 //!
 //! A storage failure is fatal: the executor stops instead of continuing with a store whose state
 //! it no longer knows.
 
+use super::Start;
 use commonware_codec::Codec;
 use commonware_consensus::{Block, Heightable as _, types::Height};
 use commonware_cryptography::{Digested, Digestible as _};
@@ -42,6 +44,14 @@ pub struct StoreConfig<T: Translator, C> {
     pub codec_config: C,
 }
 
+/// What an opened [`Store`] holds.
+pub(super) enum Opened<B> {
+    /// The newest block the consumer applied, which execution resumes from.
+    Applied(B),
+    /// No base yet: the chain waits for a state sync, toward the recorded target if any.
+    Syncing(Option<B>),
+}
+
 /// The executed chain, keyed by height and digest, and the highest height its consumer applied.
 pub(super) struct Store<E, T, B>
 where
@@ -60,14 +70,16 @@ where
     T: Translator,
     B: Block + Codec,
 {
-    /// Opens the store, archiving `genesis` as the applied block of an empty chain, and returns it
-    /// with the applied block, whose digest is computed on `strategy`.
+    /// Opens the store. An empty chain archives `genesis` as its applied block when starting from
+    /// [`Start::Genesis`], and waits for a state sync otherwise. The digests of the blocks it
+    /// returns are computed on `strategy`.
     pub(super) async fn init<G>(
         context: E,
         config: StoreConfig<T, B::Cfg>,
+        start: Start,
         strategy: &impl Strategy,
         genesis: impl FnOnce() -> G,
-    ) -> (Self, Digested<B>)
+    ) -> (Self, Opened<Digested<B>>)
     where
         G: Future<Output = B>,
     {
@@ -105,40 +117,64 @@ where
             cursor: Some(cursor),
             applied: applied.unwrap_or_default(),
         };
-        if applied.is_none() {
-            let genesis = Digested::compute(genesis().await, strategy).await;
-            assert!(
-                genesis.height().is_zero(),
-                "genesis block must be at height zero"
+        if applied.is_some() {
+            let tip = store
+                .get(store.applied)
+                .await
+                .expect("applied block is missing from the executed chain");
+            return (
+                store,
+                Opened::Applied(Digested::compute(tip, strategy).await),
             );
-            // A crash between archiving genesis and recording the cursor leaves genesis alone.
-            match store.archive().last_index() {
-                None => store.put(&genesis).await,
-                Some(0) => {
-                    let archived = store
-                        .get(Height::zero())
-                        .await
-                        .expect("genesis is archived");
-                    assert_eq!(
-                        Digested::compute(archived, strategy).await.digest(),
-                        genesis.digest(),
-                        "archived genesis is not the application's"
-                    );
-                }
-                Some(_) => panic!("executed chain exists without an applied cursor"),
-            }
-            store.apply(Height::zero()).await;
-            return (store, genesis);
         }
-        let tip = store
-            .get(store.applied)
-            .await
-            .expect("applied block is missing from the executed chain");
-        (store, Digested::compute(tip, strategy).await)
+        // Without an applied cursor, the archive holds the genesis block a crash left before
+        // recording it, or the blocks offered as sync targets, the newest of which resumes the
+        // sync.
+        let archived = match store.archive().last_index() {
+            Some(height) => {
+                let block = store
+                    .get(Height::new(height))
+                    .await
+                    .expect("archived block is retained");
+                Some(Digested::compute(block, strategy).await)
+            }
+            None => None,
+        };
+        match (start, archived) {
+            (Start::Genesis, archived)
+                if archived
+                    .as_ref()
+                    .is_none_or(|block| block.height().is_zero()) =>
+            {
+                let genesis = Digested::compute(genesis().await, strategy).await;
+                assert!(
+                    genesis.height().is_zero(),
+                    "genesis block must be at height zero"
+                );
+                match archived {
+                    None => store.put(&genesis).await,
+                    Some(archived) => assert_eq!(
+                        archived.digest(),
+                        genesis.digest(),
+                        "executed chain holds a block other than genesis without an applied cursor"
+                    ),
+                }
+                store.apply(Height::zero()).await;
+                (store, Opened::Applied(genesis))
+            }
+            (_, target) => (store, Opened::Syncing(target)),
+        }
     }
 
     const fn archive(&self) -> &prunable::Archive<T, E, B::Digest, B> {
         self.archive.as_ref().expect("executed chain is open")
+    }
+
+    /// Makes every archived block durable.
+    async fn sync_archive(&mut self) {
+        let archive = self.archive.take().expect("executed chain is open");
+        let archive = archive.sync().await.expect("failed to sync executed chain");
+        self.archive = Some(archive);
     }
 
     /// Returns the highest height the consumer applied.
@@ -167,9 +203,7 @@ where
     /// Makes every archived block durable, then durably records that the consumer applied
     /// through `height`.
     pub(super) async fn apply(&mut self, height: Height) {
-        let archive = self.archive.take().expect("executed chain is open");
-        let archive = archive.sync().await.expect("failed to sync executed chain");
-        self.archive = Some(archive);
+        self.sync_archive().await;
         let cursor = self.cursor.take().expect("applied cursor is open");
         let cursor = cursor
             .put_sync(APPLIED, height)
@@ -177,6 +211,12 @@ where
             .expect("failed to record applied height");
         self.cursor = Some(cursor);
         self.applied = height;
+    }
+
+    /// Durably records `target` as the block a state sync targets.
+    pub(super) async fn record_target(&mut self, target: &Digested<B>) {
+        self.put(target).await;
+        self.sync_archive().await;
     }
 
     /// Prunes blocks below `below`. The applied block is always retained.
