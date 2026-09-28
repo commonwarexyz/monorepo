@@ -243,6 +243,21 @@ pub fn before_park() {
     assert!(!FORBID_PARK.get(), "callback work reached the idle path");
 }
 
+/// Count destruction before injecting a task-disposal panic.
+struct PanickingDrop(Arc<AtomicUsize>);
+
+impl Drop for PanickingDrop {
+    fn drop(&mut self) {
+        // Count only after checking the borrow. Otherwise contain could
+        // swallow a borrow panic and make the disposal test pass anyway.
+        if let Some(local) = Local::current() {
+            let _borrow = local.borrow_mut();
+        }
+        self.0.fetch_add(1, Ordering::Relaxed);
+        panic!("task disposal panic");
+    }
+}
+
 #[test]
 fn test_config_validation_before_startup() {
     let mut rounded = config().with_ring_config(RingConfig {
@@ -1549,21 +1564,6 @@ fn test_service_error_preserves_completions_before_cleanup() {
     drop(retained);
 }
 
-/// Count destruction before injecting a task-disposal panic.
-struct PanickingDrop(Arc<AtomicUsize>);
-
-impl Drop for PanickingDrop {
-    fn drop(&mut self) {
-        // Count only after checking the borrow. Otherwise contain could
-        // swallow a borrow panic and make the disposal test pass anyway.
-        if let Some(local) = Local::current() {
-            let _borrow = local.borrow_mut();
-        }
-        self.0.fetch_add(1, Ordering::Relaxed);
-        panic!("task disposal panic");
-    }
-}
-
 #[test]
 fn test_cancelled_task_disposal_is_contained() {
     for catch in [false, true] {
@@ -1641,10 +1641,10 @@ fn test_unpolled_task_disposal_is_contained() {
     }
 }
 
-/// A task that wakes itself during its poll runs again only after the work
-/// already queued, and completed tasks leave the arena.
 #[test]
 fn test_self_woken_task_requeues_behind_queued_work() {
+    /// A task that wakes itself during its poll runs again only after the work
+    /// already queued, and completed tasks leave the arena.
     let order = Runner::new(config()).start(|context| async move {
         let order = Arc::new(Mutex::new(Vec::new()));
         let first = context.child("first").spawn({
