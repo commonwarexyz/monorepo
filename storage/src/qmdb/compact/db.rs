@@ -52,7 +52,6 @@ use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RError, Handle};
-use core::cmp::Ordering;
 use futures::FutureExt as _;
 use std::sync::{Arc, Weak};
 
@@ -365,7 +364,6 @@ where
         Arc::new(MerkleizedBatch {
             merkle_batch: self.merkle.to_batch(),
             operations: Arc::new(Vec::new()),
-            commit: self.tip.witness.commit.clone(),
             parent: None,
             bounds: Bounds::from_db(self.commitment(), self.inactivity_floor_loc()),
         })
@@ -412,15 +410,18 @@ where
         debug_assert_eq!(self.tip.size(), self.merkle.leaves());
         let start_loc = self.size();
         self.merkle.apply_batch(&batch.merkle_batch)?;
-        let tip = match self.tip.size().cmp(&self.merkle.leaves()) {
-            Ordering::Equal => None,
-            Ordering::Greater => {
-                return Err(Error::DataCorrupted("witness ahead of in-memory state"));
-            }
+        // Only a [`Self::to_batch`] snapshot has no operations, and it leaves the Merkle
+        // unchanged. Any other batch ends with its commit.
+        debug_assert_eq!(
+            batch.operations.is_empty(),
+            self.tip.size() == self.merkle.leaves()
+        );
+        let tip = match batch.operations.last() {
+            None => None,
             // Build before pruning because the commit proof needs the unpruned Merkle.
-            Ordering::Less => Some(witness::build_witness::<F, O, H, S>(
+            Some(commit) => Some(witness::build_witness::<F, O, H, S>(
                 &self.merkle,
-                batch.commit.clone(),
+                commit.clone(),
                 batch.bounds.inactivity_floor,
             )?),
         };
@@ -675,11 +676,10 @@ where
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
 
-        let commit = O::commit(metadata, inactivity_floor);
         let mutations = self.mutations.into_iter().map(O::mutation);
         let mut ops = Vec::with_capacity(mutations.len() + 1);
         ops.extend(mutations);
-        ops.push(commit.clone());
+        ops.push(O::commit(metadata, inactivity_floor));
 
         let operations = Arc::new(ops);
         let total_size = self.base.size + operations.len() as u64;
@@ -702,7 +702,6 @@ where
         Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
             operations,
-            commit,
             parent: self.parent.as_ref().map(Arc::downgrade),
             bounds: Bounds {
                 base: self.base,
@@ -720,7 +719,6 @@ where
 pub struct MerkleizedBatch<F: Family, D: Digest, O: Operation<F>, S: Strategy> {
     merkle_batch: Arc<batch::MerkleizedBatch<F, D, S>>,
     operations: Arc<Vec<O>>,
-    commit: O,
     parent: Option<Weak<Self>>,
     bounds: Bounds<F, D>,
 }
@@ -948,6 +946,15 @@ pub(crate) mod tests {
             Some(cap),
         )
         .await
+    }
+
+    /// The number of witnesses `db`'s journal holds.
+    fn witness_entries<O: TestOperation>(db: &TestDb<O>) -> u64 {
+        let Storage::Open(open) = &db.storage else {
+            panic!("a pending import has no journal");
+        };
+        let bounds = open.journal.bounds();
+        bounds.end - bounds.start
     }
 
     /// Open the witness journal for `partition`; `open_db` and the tip-corrupting tests share it.
@@ -1535,6 +1542,57 @@ pub(crate) mod tests {
                 "to_batch().root() must match the live db.root() even before sync"
             );
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Applying a snapshot journals nothing, however often it is applied, while a batch with no
+    /// mutations still appends its commit and a witness.
+    pub(crate) fn test_compact_apply_snapshot_appends_no_witness<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<O>(context.child("db"), "compact-apply-snapshot").await;
+            let (db, _) = apply_seed::<O>(db, 1).await;
+            let mut db = db.sync().await.unwrap();
+            let target = db.target();
+            let entries = witness_entries(&db);
+
+            for _ in 0..2 {
+                let snapshot = db.to_batch();
+                let (applied, range) = db.apply_batch(snapshot).await.unwrap();
+                db = applied;
+                assert_eq!(range, target.size..target.size);
+                assert_eq!(db.target(), target);
+                assert_eq!(witness_entries(&db), entries);
+            }
+
+            let floor = db.inactivity_floor_loc();
+            let batch = db.new_batch().merkleize(&db, None, floor).await;
+            let (db, range) = db.apply_batch(batch).await.unwrap();
+            assert_eq!(range, target.size..target.size + 1);
+            assert_eq!(db.size(), target.size + 1);
+            assert_eq!(db.get_metadata(), None);
+            assert_eq!(witness_entries(&db), entries + 1);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Applying a snapshot of a pending import journals only the import.
+    pub(crate) fn test_compact_apply_snapshot_journals_import<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let dst = "compact-apply-snapshot-import-dst";
+            let import =
+                Import::<O>::build(context.child("src"), "compact-apply-snapshot-import-src", 2)
+                    .await;
+            commit_seed::<O>(context.child("seed"), dst, 1).await;
+            let imported = import.clone().into_db(context.child("import"), dst);
+            let snapshot = imported.to_batch();
+            let (db, range) = imported.apply_batch(snapshot).await.unwrap();
+            assert_eq!(range, import.target.size..import.target.size);
+            assert_eq!(witness_entries(&db), 1);
+            drop(db.sync().await.unwrap());
+
+            let db = open_db::<O>(context.child("reopen"), dst).await;
+            assert_eq!(db.target(), import.target);
             db.destroy().await.unwrap();
         });
     }
@@ -3138,6 +3196,8 @@ pub(crate) mod tests {
                 test_compact_stale_batch_rejected,
                 test_compact_delayed_merkleize_after_ancestor_apply,
                 test_compact_to_batch_reflects_live_state,
+                test_compact_apply_snapshot_appends_no_witness,
+                test_compact_apply_snapshot_journals_import,
                 test_compact_stale_batch_chained,
                 test_compact_stale_parent_after_child_applied,
                 test_compact_sequential_commit_parent_then_child,
