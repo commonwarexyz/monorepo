@@ -759,8 +759,7 @@ pub enum InitError<E: Debug, T: Debug> {
     },
 }
 
-/// Validate the complete target before returning a managed database.
-/// Bounds alone do not identify a checkpoint: its commitment and retained range must also match.
+/// Validate the complete sync target before returning a managed database.
 fn validate_initialization<E, T>(
     db: T,
     expected: Option<T::SyncTarget>,
@@ -2165,7 +2164,7 @@ pub(crate) mod tests {
 
     mod managed_db_lifecycle {
         use super::{InitError, ManagedDb, Shared, configs};
-        use crate::stateful::db::{Merkleized as _, Unmerkleized as _, qmdb::Qmdb};
+        use crate::stateful::db::{Merkleized as _, Unmerkleized, qmdb::Qmdb};
         use commonware_cryptography::{Sha256, sha256::Digest};
         use commonware_parallel::Sequential;
         use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
@@ -2179,7 +2178,7 @@ pub(crate) mod tests {
         };
         use commonware_utils::{non_empty_range, sequence::U64};
         use rstest::rstest;
-        use std::{marker::PhantomData, sync::Arc};
+        use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
         type Context = deterministic::Context;
 
@@ -2407,6 +2406,90 @@ pub(crate) mod tests {
             .err()
             .expect("discarded suffix must not recover");
             assert!(matches!(err, InitError::TargetMismatch { .. }));
+        }
+
+        #[rstest]
+        #[case::any_fixed(PhantomData::<AnyFixed>, configs::any::fixed_config)]
+        #[case::any_variable(PhantomData::<AnyVariable>, configs::any::variable_config)]
+        #[case::current_unordered_fixed(
+            PhantomData::<CurrentUnorderedFixed>,
+            configs::current::fixed_config
+        )]
+        #[case::current_ordered_fixed(
+            PhantomData::<CurrentOrderedFixed>,
+            configs::current::fixed_config
+        )]
+        #[case::current_unordered_variable(
+            PhantomData::<CurrentUnorderedVariable>,
+            configs::current::variable_config
+        )]
+        #[case::current_ordered_variable(
+            PhantomData::<CurrentOrderedVariable>,
+            configs::current::variable_config
+        )]
+        #[case::immutable_fixed(PhantomData::<ImmutableFixed>, configs::immutable::fixed_config)]
+        #[case::immutable_variable(
+            PhantomData::<ImmutableVariable>,
+            configs::immutable::variable_config
+        )]
+        #[case::immutable_compact_fixed(
+            PhantomData::<ImmutableCompactFixed>,
+            configs::immutable::compact::fixed_config
+        )]
+        #[case::immutable_compact_variable(
+            PhantomData::<ImmutableCompactVariable>,
+            configs::immutable::compact::variable_config
+        )]
+        #[case::keyless_fixed(PhantomData::<KeylessFixed>, configs::keyless::fixed_config)]
+        #[case::keyless_variable(PhantomData::<KeylessVariable>, configs::keyless::variable_config)]
+        #[case::keyless_compact_fixed(
+            PhantomData::<KeylessCompactFixed>,
+            configs::keyless::compact::fixed_config
+        )]
+        #[case::keyless_compact_variable(
+            PhantomData::<KeylessCompactVariable>,
+            configs::keyless::compact::variable_config
+        )]
+        fn merkleize_stale_batch_returns_error<T>(
+            #[case] _db: PhantomData<T>,
+            #[case] config: fn(&Context, &str) -> T::Config,
+        ) where
+            T: ManagedDb<Context> + 'static,
+            T::Unmerkleized: Unmerkleized<
+                    Merkleized = T::Merkleized,
+                    Error = commonware_storage::qmdb::Error<mmr::Family>,
+                >,
+            T::SyncTarget: Debug,
+        {
+            deterministic::Runner::default().start(|context| async move {
+                let config = config(&context, "db");
+                let database = T::init(context.child("db"), config, None).await.unwrap();
+                let db = Shared::new("test", database);
+                let stale = db.new_batch_for_test::<Context>().await;
+                let winner = db
+                    .new_batch_for_test::<Context>()
+                    .await
+                    .merkleize()
+                    .await
+                    .unwrap();
+
+                // Batch creation releases the read lock, permitting a sibling to be applied.
+                let (slot, database) = db.write().await;
+                let database = T::apply(database, winner).await.unwrap();
+                slot.put(database);
+
+                assert!(matches!(
+                    stale.merkleize().await,
+                    Err(commonware_storage::qmdb::Error::StaleBatch)
+                ));
+                assert!(
+                    db.new_batch_for_test::<Context>()
+                        .await
+                        .merkleize()
+                        .await
+                        .is_ok()
+                );
+            });
         }
 
         #[rstest]

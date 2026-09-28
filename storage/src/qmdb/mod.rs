@@ -40,8 +40,7 @@
 //! Initialization fails if pruning removed history needed by the selected commit.
 //!
 //! Initialization durably removes later history before returning successfully. The bound does not
-//! limit future appends. Close all existing users of the storage before reopening.
-//! To require an exact checkpoint, also check the recovered root and range.
+//! limit future appends. To require an exact checkpoint, also check the recovered root and range.
 //!
 //! # Ownership
 //!

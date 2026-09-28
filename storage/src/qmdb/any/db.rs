@@ -381,8 +381,9 @@ where
         }
     }
 
-    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
-    /// retained operations respectively.
+    /// Return the retained operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.log.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
@@ -451,6 +452,8 @@ where
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
+    ///
+    /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.

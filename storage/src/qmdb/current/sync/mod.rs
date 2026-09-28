@@ -113,7 +113,7 @@ where
         merkle,
         log,
         qmdb::hasher::<H>(),
-        apply_batch_size.get(),
+        apply_batch_size,
     )
     .await?;
 

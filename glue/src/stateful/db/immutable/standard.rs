@@ -116,7 +116,7 @@ where
         floor: Option<Location<F>>,
     ) -> Result<Arc<Self::MerkleizedBatch>, Error<F>> {
         let floor = floor.unwrap_or_default();
-        Ok(batch.merkleize(self, metadata, floor).await)
+        batch.merkleize(self, metadata, floor).await
     }
 
     async fn apply_batch(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
