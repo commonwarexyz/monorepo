@@ -32,7 +32,7 @@ use commonware_cryptography::Digest;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};
 pub use position::Position;
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 pub(crate) use proof::build_range_proof;
 pub use proof::{MAX_PROOF_DIGESTS_PER_ELEMENT, Proof};
 pub use read::Readable;

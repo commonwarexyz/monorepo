@@ -10,6 +10,9 @@
 //! - Producers complete requested signaling with [`Waker::wake`] after unlocking.
 //! - Wake CQEs are acknowledged with [`Waker::acknowledge`].
 //!
+//! Driver-owned permit waits use [`Waker::wake`] directly. Their readiness stays
+//! in the driver's acquisition queue and remains available after mailbox closure.
+//!
 //! The packed atomic state combines:
 //! - bit 0: waiting on futex
 //! - bit 1: waiting on eventfd
@@ -174,6 +177,16 @@ pub struct Waker {
     inner: Arc<WakerInner>,
 }
 
+impl std::task::Wake for Waker {
+    fn wake(self: std::sync::Arc<Self>) {
+        Self::wake(&self);
+    }
+
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        Self::wake(self);
+    }
+}
+
 impl Waker {
     /// Create a hybrid futex/eventfd wake source backed by a non-blocking
     /// `eventfd`.
@@ -214,9 +227,8 @@ impl Waker {
         })
     }
 
-    /// Complete signaling requested by [`Self::publish`] after releasing the inbox.
+    /// Signal the current wait target, or latch a wake until the loop next arms.
     ///
-    /// The batch may already be consumed and the wait target may have changed.
     /// The first caller to set `WAKE_SIGNALLED_BIT` in the current epoch performs
     /// the wake. Later callers do nothing until the loop disarms and clears it.
     /// This coalesces delayed signals from previously consumed batches.

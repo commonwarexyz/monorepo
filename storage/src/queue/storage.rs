@@ -28,6 +28,9 @@ pub struct Config<C> {
     ///
     /// If set, items will be compressed before storage. Higher values provide
     /// better compression but use more CPU.
+    ///
+    /// Keep the choice between `None` and `Some(_)` fixed while stored items are retained.
+    /// Only the compression level may change between initializations when compression is enabled.
     pub compression: Option<u8>,
 
     /// Codec configuration for encoding/decoding items.
