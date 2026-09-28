@@ -193,6 +193,7 @@ fn main() {
             binary: BINARY_NAME.to_string(),
             config: peer_config_file,
             profiling: instrument,
+            mptcp: false,
         };
         instance_configs.push(instance);
     }

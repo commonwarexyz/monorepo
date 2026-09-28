@@ -108,6 +108,16 @@
 //!
 //! Separate for monitoring (tag) and binary instances (`{tag}-binary`), dynamically configured for deployer and inter-instance traffic.
 //!
+//! ### Multipath TCP
+//!
+//! Binary instances with `mptcp: true` let MPTCP sockets open one extra subflow to each peer. EC2
+//! limits bandwidth per 5-tuple, but each instance has a single private IPv4 address behind the
+//! internet gateway's 1:1 NAT, and the Linux path manager never opens a subflow from the address a
+//! connection started on. Setup therefore registers a dummy address (`198.18.0.1` on `mptcp0`) as
+//! a `subflow` endpoint and masquerades it to the primary private address, so no addresses, ports,
+//! or security group rules are added. The binary must still create MPTCP sockets (e.g. with
+//! `commonware_runtime::tokio::Config::with_mptcp`).
+//!
 //! # Workflow
 //!
 //! ## Lifecycle
@@ -283,6 +293,7 @@
 //!     binary: /path/to/binary-arm64
 //!     config: /path/to/config.conf
 //!     profiling: true
+//!     # mptcp: true  # Optional, defaults to false.
 //!   - name: node2
 //!     region: us-west-2
 //!     instance_type: t3.small  # x86_64 (Intel/AMD)
@@ -695,6 +706,12 @@ pub struct InstanceConfig {
 
     /// Whether to enable profiling
     pub profiling: bool,
+
+    /// Whether to let MPTCP sockets open an extra subflow to each peer
+    ///
+    /// The binary must also create MPTCP sockets for this to take effect.
+    #[serde(default)]
+    pub mptcp: bool,
 }
 
 /// Monitoring configuration
