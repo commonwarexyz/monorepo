@@ -385,7 +385,7 @@ mod tests {
         Automaton as _, Epochable as _, Relay as _, Reporter as _,
         multimmit::{
             Artifact,
-            marshal::{self, ArchiveConfig, LqcVerifier, OutputIndex, Start, Update},
+            marshal::{self, ArchiveConfig, LqcVerifier, Start, Update},
             mocks::{
                 Committee,
                 cluster::{QUOTA, link_all, start_network},
@@ -393,9 +393,11 @@ mod tests {
             },
             types::{Activity, BlockRef, Lqc, PathLimits},
         },
-        types::{Epoch, Height, Participant, Round, View},
+        types::{Epoch, Height, OutputIndex, Participant, Round, View},
     };
-    use commonware_cryptography::{Hasher as _, bls12381::primitives::variant::MinPk, ed25519};
+    use commonware_cryptography::{
+        Digested, Hasher as _, bls12381::primitives::variant::MinPk, ed25519,
+    };
     use commonware_parallel::Sequential;
     use commonware_resolver::p2p as resolver;
     use commonware_runtime::{
@@ -764,17 +766,14 @@ mod tests {
             let mut harness = Harness::new(&context, saturated()).await;
             let block_context = harness.context(0);
             let body = harness.mailbox.propose(block_context).await.await.unwrap();
-            let block = harness
-                .marshal
-                .get_block(reference(block_context, body))
-                .await
-                .unwrap()
-                .unwrap();
+            let local = reference(block_context, body);
+            let block = harness.marshal.get_block(local).await.unwrap().unwrap();
+            let block = Digested::precomputed(block, local.digest());
             let remote_context = harness.context(1);
-            let remote = Arc::new(Block::from_context(
-                remote_context,
-                Body::junk(11, remote_context, BODY_SIZE),
-            ));
+            let remote =
+                Block::from_context(remote_context, Body::junk(11, remote_context, BODY_SIZE));
+            let remote_digest = remote.reference().digest();
+            let remote = Digested::precomputed(remote, remote_digest);
 
             let mut reporter = OutputReporter::new(harness.mailbox.clone(), None);
             for (index, block) in [remote, block].into_iter().enumerate() {

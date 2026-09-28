@@ -10,11 +10,11 @@ use super::{
 };
 use crate::{
     multimmit::{
-        marshal::{OutputIndex, storage::catalog::StoredRef},
+        marshal::storage::catalog::StoredRef,
         testing::TestBody,
         types::{ChainId, TransactionBlock, TransactionBlockHeader},
     },
-    types::{Epoch, Height},
+    types::{Epoch, Height, OutputIndex},
 };
 use commonware_actor::Feedback;
 use commonware_codec::EncodeSize as _;

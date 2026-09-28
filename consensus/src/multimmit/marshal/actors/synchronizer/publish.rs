@@ -6,20 +6,22 @@ use super::{
     mailbox::Error,
     ports::{CatalogPort, Fetcher},
 };
-use crate::multimmit::{
-    marshal::{
-        OutputIndex,
-        actors::delivery,
-        protocol::order::{Reconciliation, Slot},
-        storage::{
-            catalog::StoredRef,
-            catalog_state::{Checkpoint, CheckpointParts},
-            commit::{Commit, CustodyRef, HistoryOpening, OutputRow, SelectedLqc},
-            scratch::{BlockStack, HistoryStack},
+use crate::{
+    multimmit::{
+        marshal::{
+            actors::delivery,
+            protocol::order::{Reconciliation, Slot},
+            storage::{
+                catalog::StoredRef,
+                catalog_state::{Checkpoint, CheckpointParts},
+                commit::{Commit, CustodyRef, HistoryOpening, OutputRow, SelectedLqc},
+                scratch::{BlockStack, HistoryStack},
+            },
+            types::LqcVerifier,
         },
-        types::LqcVerifier,
+        types::{Body, TransactionBlock},
     },
-    types::{Body, TransactionBlock},
+    types::OutputIndex,
 };
 use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
 use commonware_macros::select;
