@@ -512,7 +512,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// `Some(false)` if this is the first timeout for this round, and `None` if we
     /// should not timeout (e.g. because we have already finalized).
     pub const fn construct_nullify(&mut self) -> Option<bool> {
-        // Ensure we haven't already broadcast a finalize vote.
         if matches!(self.decision, Decision::VotedFinalize) {
             return None;
         }
