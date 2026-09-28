@@ -26,8 +26,9 @@
 //!
 //! ## Anchors
 //!
-//! Each set of sync targets is paired with an [`Anchor`], the finalized block that carries them. A
-//! running sync handles each tip update as follows:
+//! Each set of sync targets is paired with an anchor identifying the block that carries them, such
+//! as an [`Anchor`]. Anchors are compared only by height. A running sync handles each tip update as
+//! follows:
 //!
 //! - Upon a tip at or below the height of the most recently adopted anchor (initially the one
 //!   passed to [`StateSyncSet::sync`]): ignore it.
@@ -638,6 +639,12 @@ pub struct Anchor<D: Digest> {
     pub digest: D,
 }
 
+impl<D: Digest> Heightable for Anchor<D> {
+    fn height(&self) -> Height {
+        self.height
+    }
+}
+
 impl<D: Digest> Anchor<D> {
     /// Builds the anchor of `block`.
     pub fn from_block<B>(block: &Digested<B>) -> Self
@@ -656,15 +663,15 @@ impl<D: Digest> Anchor<D> {
 /// A finalized tip delivered to a running [`StateSyncSet::sync`].
 ///
 /// See [Anchors](crate::stateful::db#anchors) for how a sync handles each update.
-pub struct TipUpdate<D: Digest, T> {
-    anchor: Anchor<D>,
+pub struct TipUpdate<P, T> {
+    anchor: P,
     targets: T,
     observed: Option<oneshot::Sender<()>>,
 }
 
-impl<D: Digest, T> TipUpdate<D, T> {
+impl<P, T> TipUpdate<P, T> {
     /// Creates an update for the block identified by `anchor`, which carries `targets`.
-    pub const fn new(anchor: Anchor<D>, targets: T) -> Self {
+    pub const fn new(anchor: P, targets: T) -> Self {
         Self {
             anchor,
             targets,
@@ -676,20 +683,22 @@ impl<D: Digest, T> TipUpdate<D, T> {
     /// the sync adopted it.
     ///
     /// The receiver errors if the update is dropped unhandled.
-    pub(crate) fn with_observation(anchor: Anchor<D>, targets: T) -> (Self, oneshot::Receiver<()>) {
+    pub(crate) fn with_observation(anchor: P, targets: T) -> (Self, oneshot::Receiver<()>) {
         let (observed, receiver) = oneshot::channel();
-        (
-            Self {
-                anchor,
-                targets,
-                observed: Some(observed),
-            },
-            receiver,
-        )
+        (Self::observed_by(anchor, targets, observed), receiver)
+    }
+
+    /// Creates an update that resolves `observed` once a sync has handled it.
+    pub(crate) const fn observed_by(anchor: P, targets: T, observed: oneshot::Sender<()>) -> Self {
+        Self {
+            anchor,
+            targets,
+            observed: Some(observed),
+        }
     }
 
     /// Passes the update to `record`, then resolves its observer.
-    pub(crate) fn record<R>(self, record: impl FnOnce(Anchor<D>, T) -> R) -> R {
+    pub(crate) fn record<R>(self, record: impl FnOnce(P, T) -> R) -> R {
         let result = record(self.anchor, self.targets);
         if let Some(observed) = self.observed {
             let _ = observed.send(());
@@ -709,16 +718,17 @@ pub trait StateSyncSet<E, R>: DatabaseSet<E> {
     /// Updates on `tip_updates` follow the [module rules](crate::stateful::db#anchors). The
     /// returned anchor, not the latest tip delivered, identifies the synced state.
     ///
-    /// `D` is the block digest type of each [`Anchor`].
-    fn sync<D: Digest>(
+    /// `P` is the anchor paired with each set of sync targets, such as an [`Anchor`]. Targets
+    /// only move to anchors at greater heights.
+    fn sync<P: Heightable + Clone + Send + Sync + 'static>(
         context: E,
         config: Self::Config,
         sources: R,
-        anchor: Anchor<D>,
+        anchor: P,
         targets: Self::SyncTargets,
-        tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
+        tip_updates: ring::Receiver<TipUpdate<P, Self::SyncTargets>>,
         sync_config: SyncEngineConfig,
-    ) -> impl Future<Output = Result<(Self, Anchor<D>), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<(Self, P), Self::Error>> + Send;
 }
 
 /// An error opening a [`ManagedDb`].
@@ -822,15 +832,15 @@ where
 {
     type Error = T::SyncError;
 
-    async fn sync<D: Digest>(
+    async fn sync<P: Heightable + Clone + Send + Sync + 'static>(
         context: E,
         config: Self::Config,
         source: R,
-        anchor: Anchor<D>,
+        anchor: P,
         target: Self::SyncTargets,
-        tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
+        tip_updates: ring::Receiver<TipUpdate<P, Self::SyncTargets>>,
         sync_config: SyncEngineConfig,
-    ) -> Result<(Self, Anchor<D>), Self::Error> {
+    ) -> Result<(Self, P), Self::Error> {
         let (target_tx, target_rx) = ring::channel(NZUsize!(1));
         let (finish_tx, finish_rx) = mpsc::channel(1);
         let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(1));
@@ -886,7 +896,7 @@ where
                             continue;
                         };
                         let target = update.record(|new_anchor, new_target| {
-                            if new_anchor.height <= current_anchor.height {
+                            if new_anchor.height() <= current_anchor.height() {
                                 return None;
                             }
                             current_anchor = new_anchor;
@@ -920,14 +930,14 @@ where
 /// Records every queued tip, then sends the newest adopted target to the database if it changed.
 ///
 /// Returns `false` if the database has dropped its target receiver.
-fn dispatch_queued_tips<D, T>(
-    tip_updates: &mut Option<ring::Receiver<TipUpdate<D, T>>>,
+fn dispatch_queued_tips<P, T>(
+    tip_updates: &mut Option<ring::Receiver<TipUpdate<P, T>>>,
     target_tx: &ring::Sender<T>,
-    current_anchor: &mut Anchor<D>,
+    current_anchor: &mut P,
     current_target: &mut T,
 ) -> bool
 where
-    D: Digest,
+    P: Heightable,
     T: Clone + PartialEq,
 {
     let mut latest = None;
@@ -945,10 +955,10 @@ where
         update.record(|new_anchor, new_target| {
             let latest_height = latest
                 .as_ref()
-                .map_or(current_anchor.height, |(anchor, _): &(Anchor<D>, T)| {
-                    anchor.height
+                .map_or(current_anchor.height(), |(anchor, _): &(P, T)| {
+                    anchor.height()
                 });
-            if new_anchor.height > latest_height {
+            if new_anchor.height() > latest_height {
                 latest = Some((new_anchor, new_target));
             }
         });
@@ -1145,15 +1155,15 @@ macro_rules! impl_state_sync_set {
         {
             type Error = String;
 
-            async fn sync<D: Digest>(
+            async fn sync<P: Heightable + Clone + Send + Sync + 'static>(
                 context: E,
                 config: Self::Config,
                 sources: ($($R,)+),
-                anchor: Anchor<D>,
+                anchor: P,
                 targets: Self::SyncTargets,
-                tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
+                tip_updates: ring::Receiver<TipUpdate<P, Self::SyncTargets>>,
                 sync_config: SyncEngineConfig,
-            ) -> Result<(Self, Anchor<D>), Self::Error> {
+            ) -> Result<(Self, P), Self::Error> {
                 let db_channels = ($(
                     DbSyncChannels::<<$T as ManagedDb<E>>::SyncTarget>::new(),
                 )+);
@@ -1540,13 +1550,13 @@ impl DbSyncState {
 }
 
 /// What the coordinator should do after processing events.
-enum CoordinatorAction<D: Digest, T> {
+enum CoordinatorAction<P, T> {
     /// Nothing to do until the next event.
     Wait,
     /// Dispatch `targets` as `generation` to the databases still seeking.
     Dispatch { generation: usize, targets: T },
     /// Every database reached the targets of one generation, carried by `anchor`.
-    Converged { anchor: Anchor<D>, targets: T },
+    Converged { anchor: P, targets: T },
 }
 
 /// State machine for tuple-set sync convergence (see the
@@ -1554,19 +1564,19 @@ enum CoordinatorAction<D: Digest, T> {
 ///
 /// Tracks each database's assigned generation and whether it has reached it, and decides when to
 /// dispatch, regroup, or finish.
-struct CoordinatorState<D: Digest, T> {
+struct CoordinatorState<P, T> {
     dbs: Vec<DbSyncState>,
-    generation_state: BTreeMap<usize, (Anchor<D>, T)>,
+    generation_state: BTreeMap<usize, (P, T)>,
     current_generation: usize,
-    latest_tip: Option<(Anchor<D>, T)>,
-    last_dispatched_anchor: Anchor<D>,
+    latest_tip: Option<(P, T)>,
+    last_dispatched_anchor: P,
 }
 
-impl<D: Digest, T: Clone> CoordinatorState<D, T> {
-    fn new(db_count: usize, anchor: Anchor<D>, targets: T) -> Self {
+impl<P: Heightable + Clone, T: Clone> CoordinatorState<P, T> {
+    fn new(db_count: usize, anchor: P, targets: T) -> Self {
         let dbs = vec![DbSyncState::Seeking { generation: 0 }; db_count];
         let mut generation_state = BTreeMap::new();
-        generation_state.insert(0, (anchor, targets));
+        generation_state.insert(0, (anchor.clone(), targets));
         Self {
             dbs,
             generation_state,
@@ -1594,14 +1604,12 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     ///
     /// A tip at or below the height of the pending or last dispatched anchor is ignored. Targets
     /// are not compared.
-    fn record_tip_update(&mut self, anchor: Anchor<D>, targets: T) {
-        let current_height = self
-            .latest_tip
-            .as_ref()
-            .map_or(self.last_dispatched_anchor.height, |(latest_anchor, _)| {
-                latest_anchor.height
-            });
-        if anchor.height <= current_height {
+    fn record_tip_update(&mut self, anchor: P, targets: T) {
+        let current_height = self.latest_tip.as_ref().map_or(
+            self.last_dispatched_anchor.height(),
+            |(latest_anchor, _)| latest_anchor.height(),
+        );
+        if anchor.height() <= current_height {
             return;
         }
         self.latest_tip = Some((anchor, targets));
@@ -1613,7 +1621,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     /// Returns `Dispatch` for a pending tip (a new generation) or a regroup (every database
     /// reached, at different generations), and `Wait` otherwise. After a `Dispatch`,
     /// [`Self::should_dispatch`] identifies the databases that receive the targets.
-    fn next_action(&mut self) -> CoordinatorAction<D, T> {
+    fn next_action(&mut self) -> CoordinatorAction<P, T> {
         let all_reached = self.dbs.iter().all(|db| db.is_reached());
 
         if all_reached {
@@ -1626,7 +1634,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
                     self.current_generation = generation;
                     self.dbs.fill(DbSyncState::Seeking { generation });
                     self.generation_state
-                        .insert(generation, (anchor, targets.clone()));
+                        .insert(generation, (anchor.clone(), targets.clone()));
                     self.last_dispatched_anchor = anchor;
                     self.prune_generations();
                     return CoordinatorAction::Dispatch {
@@ -1677,7 +1685,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
             }
         }
         self.generation_state
-            .insert(generation, (anchor, targets.clone()));
+            .insert(generation, (anchor.clone(), targets.clone()));
         self.last_dispatched_anchor = anchor;
 
         self.prune_generations();
@@ -5047,7 +5055,7 @@ mod tests {
     /// the coordinator is parked before the test sends anything.
     async fn start_lagging_sync(
         context: deterministic::Context,
-        tip_rx: ring::Receiver<TipUpdate<sha256::Digest, u64>>,
+        tip_rx: ring::Receiver<TipUpdate<TestAnchor, u64>>,
         report: mpsc::Receiver<()>,
     ) -> Handle<(Shared<LaggingReportSyncDb>, Anchor<sha256::Digest>)> {
         let (started_tx, started_rx) = oneshot::channel();
@@ -5078,7 +5086,7 @@ mod tests {
     /// Sends a burst of tips without yielding, then waits until the coordinator has recorded the
     /// last one, which it dispatches in the same step.
     async fn send_tip_burst(
-        tip_tx: &ring::Sender<TipUpdate<sha256::Digest, u64>>,
+        tip_tx: &ring::Sender<TipUpdate<TestAnchor, u64>>,
         heights: RangeInclusive<u64>,
     ) {
         let mut observed = None;
