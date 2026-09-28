@@ -13,6 +13,7 @@ use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
+    sync::Arc,
 };
 use tracing::{debug, warn};
 
@@ -128,16 +129,34 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
             }
         };
 
-        // Open all blobs and check for partial records
+        // Remove uncovered blobs and open the rest, checking for partial records
         for name in stored_blobs {
-            let (blob, mut len) = context.open(&config.partition, &name).await?;
             let index = match name.try_into() {
                 Ok(index) => u64::from_be_bytes(index),
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
             };
 
+            // Remove sections the bits omit or mark no record in without opening them, so a
+            // discarded section is never repaired
+            let keep = match bits.as_ref().and_then(|bits| bits.get(&index)) {
+                Some(Some(bits)) => bits.count_ones() != 0,
+                Some(None) => true,
+                None => false,
+            };
+            if !keep {
+                context
+                    .remove(&config.partition, Some(&index.to_be_bytes()))
+                    .await?;
+                continue;
+            }
+
+            // Open a section the bits keep
+            let (blob, mut len) = context
+                .open(&config.partition, &index.to_be_bytes())
+                .await?;
+
             // Check if blob size is aligned to record size
-            if bits.is_some() && len % record_size != 0 {
+            if len % record_size != 0 {
                 warn!(
                     blob = index,
                     invalid_size = len,
@@ -150,7 +169,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
             }
 
             debug!(blob = index, len, "found index blob");
-            blobs.insert(index, (blob, len));
+            blobs.insert(index, (Arc::new(blob), len));
         }
 
         // Initialize intervals by scanning committed records
@@ -162,22 +181,6 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let mut items = 0;
         let mut intervals = RMap::new();
         if let Some(bits) = &bits {
-            // Drop sections the committed bits do not cover
-            let sections = blobs.keys().copied().collect::<Vec<_>>();
-            for section in sections {
-                let keep = match bits.get(&section) {
-                    Some(Some(bits)) => bits.count_ones() != 0,
-                    Some(None) => true,
-                    None => false,
-                };
-                if !keep {
-                    context
-                        .remove(&config.partition, Some(&section.to_be_bytes()))
-                        .await?;
-                    blobs.remove(&section);
-                }
-            }
-
             // Replay ignores records outside the committed bits, but recovery clears them so
             // stored blobs match the checkpointed view
             let empty = vec![0u8; Record::<V>::SIZE];
@@ -224,7 +227,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 // re-read and damage surfaces at get. Membership of an unmarked section
                 // comes from record validity, so its records must be read.
                 let mut replay_blob = bits.is_none().then(|| {
-                    ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer)
+                    ReadBuffer::from_pooler(&context, Arc::clone(blob), *size, config.replay_buffer)
                 });
                 while let Some(bit_index) = set_indices
                     .as_mut()
@@ -262,6 +265,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let blobs = blobs
             .into_iter()
             .map(|(index, (blob, len))| {
+                let blob = Arc::into_inner(blob).expect("replay readers must be closed");
                 (
                     index,
                     Write::from_pooler(&context, blob, len, config.write_buffer),

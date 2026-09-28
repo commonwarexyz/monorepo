@@ -1,8 +1,8 @@
-//! Compact [`ManagedDb`] implementation for QMDB
+//! Compact [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
-//! These compact databases retain only the current Merkle peaks, so the glue
-//! adapters expose set and merkleization operations but no historical reads.
+//! Compact databases retain only the current Merkle peaks. Batches support `set` and
+//! merkleization but no historical reads.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -29,7 +29,7 @@ use commonware_storage::{
 use commonware_utils::{Array, channel::mpsc};
 use std::{ops::Deref, sync::Arc};
 
-/// Wraps an unjournaled immutable batch before merkleization.
+/// A speculative batch of new keyed values over a shared compact immutable database.
 pub struct ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C = ()>
 where
     F: Family,
@@ -79,26 +79,27 @@ where
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
-    /// Set commit metadata included in the next merkleization.
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
     pub fn with_metadata(mut self, metadata: V::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Set the inactivity floor included in the next merkleization.
+    /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
+    /// (location 0 when unset).
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = Some(floor);
         self
     }
 
-    /// Set `key` to `value` in the speculative batch.
+    /// Sets `key` to `value` in the batch.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.batch = self.batch.set(key, value);
         self
     }
 }
 
-/// Wraps an unjournaled immutable batch after merkleization.
+/// A sealed compact immutable batch with a computed root.
 pub struct ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C = ()>
 where
     F: Family,
@@ -179,7 +180,7 @@ where
                 self.metadata,
                 self.inactivity_floor.unwrap_or_default(),
             )
-            .await;
+            .await?;
         Ok(ImmutableUnjournaledMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -710,7 +711,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .merkleize(&source, Some(metadata), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
 
@@ -747,7 +749,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .merkleize(&source, Some(Sha256::hash(&[&[3]])), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let target = sync::CompactTarget {
@@ -839,7 +842,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .merkleize(&source, Some(Sha256::hash(&[&[9]])), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let stale_target = sync::CompactTarget {
@@ -852,7 +856,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
                 .merkleize(&source, Some(Sha256::hash(&[&[10]])), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let latest_target = sync::CompactTarget {
@@ -915,7 +920,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .merkleize(&db, Some(Sha256::hash(&[&[11]])), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let mut db = db.sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
@@ -927,7 +933,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
             }
@@ -967,7 +974,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));

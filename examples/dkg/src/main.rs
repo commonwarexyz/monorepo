@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use tracing::Level;
 
 mod application;
+mod bootstrap;
 mod config;
-mod dkg;
 mod setup;
 mod types;
 mod validator;
@@ -32,7 +32,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    Dkg(dkg::Dkg),
+    Bootstrap(bootstrap::Bootstrap),
     Setup(setup::Setup),
     Validator(validator::Validator),
 }
@@ -40,7 +40,7 @@ enum Command {
 impl Command {
     fn runtime_dir(&self) -> PathBuf {
         match self {
-            Self::Dkg(args) => args.node_dir.join("runtime"),
+            Self::Bootstrap(args) => args.node_dir.join("runtime"),
             Self::Setup(args) => args.node_dir.join("runtime"),
             Self::Validator(args) => args.node_dir.join("runtime"),
         }
@@ -77,7 +77,7 @@ fn main() {
         );
 
         match cli.command {
-            Command::Dkg(args) => dkg::run(context, args).await,
+            Command::Bootstrap(args) => bootstrap::run(context, args).await,
             Command::Validator(args) => validator::run(context, args).await,
             Command::Setup(_) => unreachable!("setup runs without a runtime"),
         }

@@ -124,20 +124,19 @@ mod tests {
     /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
     /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
     fn open_delayed_db(
-        context: &deterministic::Context,
-        label: &'static str,
+        context: deterministic::Context,
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let mut cfg = config(suffix, context);
-        let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        let mut cfg = config(suffix, &context);
+        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
         cfg.log.items_per_blob = NZU64!(1000);
         cfg.log.page_cache = page_cache.clone();
         cfg.merkle_config.items_per_blob = NZU64!(1000);
         cfg.merkle_config.page_cache = page_cache;
         DelayedDb::init(
             DelayedSyncContext {
-                inner: context.child(label),
+                inner: context,
                 pending: pending.clone(),
             },
             cfg,
@@ -156,7 +155,8 @@ mod tests {
             .new_batch()
             .set(key, value)
             .merkleize(&db, None, floor)
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(batch).await.unwrap();
         db
     }
@@ -166,7 +166,7 @@ mod tests {
     fn test_fixed_start_sync_overlaps_work() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "start-sync-overlap", &pending);
+            let open = open_delayed_db(ctx.child("delayed"), "start-sync-overlap", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::fill(1u8);
             let value0 = Sha256::fill(2u8);
@@ -211,7 +211,7 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", "start-sync-overlap", &pending)
+            let db = open_delayed_db(ctx.child("reopen"), "start-sync-overlap", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -228,7 +228,7 @@ mod tests {
             // Pass syncs through so opening the database doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "start-sync-fail", &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), "start-sync-fail", &pending)
                 .await
                 .unwrap();
             let floor = db.inactivity_floor_loc();
@@ -263,7 +263,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "start-sync-recovery", &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), "start-sync-recovery", &pending)
                 .await
                 .unwrap();
             let key = Sha256::fill(1u8);
@@ -277,7 +277,7 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", "start-sync-recovery", &pending)
+            let db = open_delayed_db(ctx.child("reopen"), "start-sync-recovery", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -291,7 +291,7 @@ mod tests {
     fn test_fixed_start_sync_prune_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "start-sync-prune", &pending);
+            let open = open_delayed_db(ctx.child("delayed"), "start-sync-prune", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             // Two batches: the second declares floor 2 so the prune below is non-trivial.
             db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Location::new(0)).await;
@@ -329,7 +329,8 @@ mod tests {
                 .new_batch()
                 .set(key, value)
                 .merkleize(&db, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
@@ -480,6 +481,9 @@ mod tests {
     }
 
     immutable_tests! {
+        test_fixed_merkleize_foreign_db => run_merkleize_foreign_db, pair;
+        test_fixed_merkleize_stale_sibling => run_merkleize_stale_sibling, open;
+        test_fixed_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, open;
         test_fixed_empty => run_empty, open;
         test_fixed_build_basic => run_build_basic, open;
         test_fixed_proof_verify => run_proof_verify, open;
@@ -559,13 +563,15 @@ mod tests {
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&db, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
         let compact_batch = compact
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&compact, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(retained.root(), compact_batch.root());
 
@@ -651,7 +657,10 @@ mod tests {
                 for i in 1..=100 {
                     batch = batch.set(key(i), value(1, i));
                 }
-                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 102);
@@ -662,7 +671,10 @@ mod tests {
                 for i in 101..=200 {
                     batch = batch.set(key(i), value(2, i));
                 }
-                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
@@ -686,7 +698,10 @@ mod tests {
                 for i in 201..=250 {
                     batch = batch.set(key(i), value(3, i));
                 }
-                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
                 let root_n = batch.root();
                 let (db, range) = db.apply_batch(batch).await.unwrap();
                 assert_eq!((*range.start, *range.end), (102, 153));
@@ -733,7 +748,8 @@ mod tests {
                     .new_batch()
                     .set(key(255), value(5, 255))
                     .merkleize(&db, None, db.inactivity_floor_loc())
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 let size = *db.bounds().end;
