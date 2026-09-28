@@ -347,7 +347,7 @@ where
                 error!(%height, "executed block diverges from the one honest validators signed");
                 return Err(Halt::Diverged(height));
             }
-            Message::Target { response, .. } => {
+            Message::Target { response, .. } | Message::AwaitsFloor { response } => {
                 response.send_lossy(false);
             }
         }
@@ -411,6 +411,9 @@ where
             Message::Target { block, response } => {
                 self.offer(block).await;
                 response.send_lossy(true);
+            }
+            Message::AwaitsFloor { response } => {
+                response.send_lossy(self.syncing.is_none());
             }
         }
         Ok(())
