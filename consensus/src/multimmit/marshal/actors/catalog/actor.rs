@@ -12,19 +12,22 @@ use super::{
     reads::{BodyReads, read_header_segments, read_history_segment, read_output_refs},
     validate,
 };
-use crate::multimmit::{
-    actors::util::gated,
-    marshal::{
-        MarshalProgress, OutputIndex,
-        actors::{delivery, metrics::saturating_u64, promoter},
-        storage::{
-            Error as StorageError,
-            catalog::{CatalogStore, InstallRequest},
-            pending::BODY_READ_CONCURRENCY,
+use crate::{
+    multimmit::{
+        actors::util::gated,
+        marshal::{
+            MarshalProgress,
+            actors::{delivery, metrics::saturating_u64, promoter},
+            storage::{
+                Error as StorageError,
+                catalog::{CatalogStore, InstallRequest},
+                pending::BODY_READ_CONCURRENCY,
+            },
+            types::Reply,
         },
-        types::Reply,
+        types::{BlockRef, Body},
     },
-    types::{BlockRef, Body},
+    types::OutputIndex,
 };
 use commonware_actor::{Feedback, mailbox};
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};

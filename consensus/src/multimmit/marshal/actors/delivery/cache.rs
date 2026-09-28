@@ -1,12 +1,12 @@
 //! A byte-bounded prefix of committed outputs waiting to be reported.
 
-use super::batch::{DeliveryOutput, DurableBatch};
-use crate::multimmit::{
-    marshal::{OutputIndex, storage::catalog::StoredRef},
-    types::{Body, TransactionBlock},
+use super::batch::{DeliveryOutput, DurableBatch, HotOutput};
+use crate::{
+    multimmit::{marshal::storage::catalog::StoredRef, types::Body},
+    types::OutputIndex,
 };
 use commonware_cryptography::Hasher;
-use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
+use std::{collections::VecDeque, num::NonZeroUsize};
 
 /// Committed outputs from published batches, kept in output order within a byte bound.
 pub(super) struct DeliveryCache<H, B>
@@ -71,8 +71,8 @@ where
         }
     }
 
-    /// Takes the body of output `index` if the cache holds it.
-    pub(super) fn take_hot(&mut self, index: OutputIndex) -> Option<Arc<TransactionBlock<H, B>>> {
+    /// Takes output `index` with its body if the cache holds it.
+    pub(super) fn take_hot(&mut self, index: OutputIndex) -> Option<HotOutput<H, B>> {
         self.discard_before(index);
         match self.outputs.front()? {
             DeliveryOutput::Hot(output) if output.stored.index == index => {}
@@ -86,7 +86,7 @@ where
         let DeliveryOutput::Hot(output) = output else {
             unreachable!("the requested delivery output is hot");
         };
-        Some(output.block)
+        Some(output)
     }
 
     /// Takes consecutive descriptors from `index`, up to `max_items` whose bodies encode within
