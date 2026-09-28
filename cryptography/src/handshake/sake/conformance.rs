@@ -11,6 +11,29 @@ use commonware_math::algebra::Random;
 use rand::{RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
+/// Seals `msg` with `send`, opens it with `recv`, and logs the ciphertext and the plaintext.
+fn relay(
+    log: &mut Vec<u8>,
+    send: ChaCha20Poly1305,
+    recv: ChaCha20Poly1305,
+    msg: &[u8],
+) -> (ChaCha20Poly1305, ChaCha20Poly1305) {
+    // Seal the message in place, leaving room at the end for its tag.
+    let mut ciphertext = msg.to_vec();
+    ciphertext.resize(msg.len() + ChaCha20Poly1305::TAG_SIZE, 0);
+    let send = send.seal(&[], &mut ciphertext).unwrap();
+    assert_ne!(ciphertext, msg);
+    log.extend(ciphertext.encode());
+
+    // Open the ciphertext in place and keep only the recovered plaintext.
+    let mut received = ciphertext;
+    let (recv, len) = recv.open(&[], &mut received).unwrap();
+    received.truncate(len);
+    assert_eq!(received, msg);
+    log.extend(received.encode());
+    (send, recv)
+}
+
 /// Runs a full handshake and message exchange for `version`, logging every encoded artifact.
 fn exchange(seed: u64, version: Version) -> Vec<u8> {
     let mut log = Vec::new();
@@ -69,26 +92,14 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
         rng.fill(&mut random_msg[..]);
         log.extend(random_msg.encode());
 
-        let dialer_ciphertext = dialer_tx.seal(random_msg.as_slice()).unwrap();
-        assert_ne!(dialer_ciphertext, random_msg);
-        log.extend(dialer_ciphertext.encode());
-
-        let received_msg = listener_rx.open(&dialer_ciphertext).unwrap();
-        assert_eq!(received_msg, random_msg);
-        log.extend(received_msg.encode());
+        (dialer_tx, listener_rx) = relay(&mut log, dialer_tx, listener_rx, &random_msg);
 
         // Send a random message from the listener to the dialer.
         let mut random_msg = vec![0u8; rng.random_range(0..256)];
         rng.fill(&mut random_msg[..]);
         log.extend(random_msg.encode());
 
-        let listener_ciphertext = listener_tx.seal(random_msg.as_slice()).unwrap();
-        assert_ne!(listener_ciphertext, random_msg);
-        log.extend(listener_ciphertext.encode());
-
-        let received_msg = dialer_rx.open(&listener_ciphertext).unwrap();
-        assert_eq!(received_msg, random_msg);
-        log.extend(received_msg.encode());
+        (listener_tx, dialer_rx) = relay(&mut log, listener_tx, dialer_rx, &random_msg);
     }
 
     log

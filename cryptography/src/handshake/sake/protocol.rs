@@ -429,6 +429,15 @@ mod test {
         assert!(value == &<T as DecodeExt<_>>::decode(value.encode()).unwrap());
     }
 
+    /// Seals `msg` with `send` and checks that `recv` opens it.
+    fn exchange<C: Cipher>(send: C, recv: C, msg: &[u8]) {
+        let mut buf = msg.to_vec();
+        buf.resize(msg.len() + C::TAG_SIZE, 0);
+        send.seal(&[], &mut buf).unwrap();
+        let (_, len) = recv.open(&[], &mut buf).unwrap();
+        assert_eq!(&buf[..len], msg);
+    }
+
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
         for version in VERSIONS {
@@ -461,20 +470,12 @@ mod test {
                 msg1,
             )?;
             test_encode_roundtrip(&msg2);
-            let (msg3, mut d_send, mut d_recv) = dial_end::<ChaCha20Poly1305, _>(d_state, msg2)?;
+            let (msg3, d_send, d_recv) = dial_end::<ChaCha20Poly1305, _>(d_state, msg2)?;
             test_encode_roundtrip(&msg3);
-            let (mut l_send, mut l_recv) = listen_end::<ChaCha20Poly1305>(l_state, msg3)?;
+            let (l_send, l_recv) = listen_end::<ChaCha20Poly1305>(l_state, msg3)?;
 
-            let m1: &'static [u8] = b"message 1";
-
-            let c1 = d_send.seal(m1).unwrap();
-            let m1_prime = l_recv.open(&c1).unwrap();
-            assert_eq!(m1, &m1_prime);
-
-            let m2: &'static [u8] = b"message 2";
-            let c2 = l_send.seal(m2).unwrap();
-            let m2_prime = d_recv.open(&c2).unwrap();
-            assert_eq!(m2, &m2_prime);
+            exchange(d_send, l_recv, b"message 1");
+            exchange(l_send, d_recv, b"message 2");
         }
 
         Ok(())
@@ -750,9 +751,9 @@ mod test {
                 transcript: claimed,
                 ..state
             };
-            let (ack, mut send, _) = dial_end::<ChaCha20Poly1305, _>(state, syn_ack).unwrap();
-            let (_, mut recv) = listen_end::<ChaCha20Poly1305>(listen_state, ack).unwrap();
-            assert_eq!(recv.open(&send.seal(b"hello").unwrap()).unwrap(), b"hello");
+            let (ack, send, _) = dial_end::<ChaCha20Poly1305, _>(state, syn_ack).unwrap();
+            let (_, recv) = listen_end::<ChaCha20Poly1305>(listen_state, ack).unwrap();
+            exchange(send, recv, b"hello");
         }
     }
 }

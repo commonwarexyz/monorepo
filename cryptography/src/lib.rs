@@ -321,50 +321,31 @@ commonware_macros::stability_scope!(BETA {
 
     /// Seals and opens an ordered sequence of messages under a single key.
     ///
-    /// Each message is bound to its position in the sequence, so a message opens only at the
-    /// position it was sealed at. Every call consumes a position, even when it fails, so a message
-    /// that fails to open cannot be opened again. A key must seal messages for at most one
-    /// instance.
+    /// Each call consumes the next position in the sequence, so a message opens only at the
+    /// position it was sealed at. [Cipher::seal] and [Cipher::open] take the cipher by value and
+    /// return it on success, so a cipher that fails can seal or open nothing further. A key must
+    /// seal messages for at most one instance.
     ///
     /// [Random::random] creates an instance with a key sampled from the provided RNG.
-    pub trait Cipher: Random + Send + Sync + 'static {
+    pub trait Cipher: Random + Sized + Send + Sync + 'static {
         /// Error returned when a message cannot be sealed or opened.
         type Error: core::error::Error + Send + Sync + 'static;
 
         /// Number of bytes a sealed message grows by.
         const TAG_SIZE: usize;
 
-        /// Encrypts all but the last [Self::TAG_SIZE] bytes of `buf` in place and writes their
-        /// authentication tag to the last [Self::TAG_SIZE] bytes.
+        /// Encrypts all but the last [Self::TAG_SIZE] bytes of `buf` in place, authenticates them
+        /// together with `aad`, and writes the tag to the last [Self::TAG_SIZE] bytes.
         ///
         /// # Panics
         ///
-        /// Panics if `buf` is shorter than [Self::TAG_SIZE].
-        fn seal_in_place(&mut self, buf: &mut [u8]) -> Result<(), Self::Error>;
+        /// Panics if `buf` is shorter than [Self::TAG_SIZE] or longer than the cipher can seal.
+        fn seal(self, aad: &[u8], buf: &mut [u8]) -> Result<Self, Self::Error>;
 
-        /// Decrypts `buf`, a ciphertext followed by its authentication tag, in place and returns
-        /// the length of the plaintext at the start of `buf`.
-        ///
-        /// Returns an error if `buf` is shorter than [Self::TAG_SIZE] or does not authenticate.
-        fn open_in_place(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
-
-        /// Encrypts `data` and returns the ciphertext followed by its authentication tag.
-        fn seal(&mut self, data: &[u8]) -> Result<Vec<u8>, Self::Error> {
-            let mut buf = Vec::with_capacity(data.len() + Self::TAG_SIZE);
-            buf.extend_from_slice(data);
-            buf.resize(data.len() + Self::TAG_SIZE, 0);
-            self.seal_in_place(&mut buf)?;
-            Ok(buf)
-        }
-
-        /// Decrypts `data`, a ciphertext followed by its authentication tag, and returns the
-        /// plaintext.
-        fn open(&mut self, data: &[u8]) -> Result<Vec<u8>, Self::Error> {
-            let mut buf = data.to_vec();
-            let len = self.open_in_place(&mut buf)?;
-            buf.truncate(len);
-            Ok(buf)
-        }
+        /// Decrypts `buf`, a ciphertext followed by its tag, in place after authenticating it
+        /// together with `aad`, and returns the cipher with the length of the plaintext at the
+        /// start of `buf`.
+        fn open(self, aad: &[u8], buf: &mut [u8]) -> Result<(Self, usize), Self::Error>;
     }
 });
 

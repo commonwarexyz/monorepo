@@ -42,7 +42,7 @@
 //! version 0 and two in version 1, first for the header and then for the payload. Positions are
 //! never transmitted, so replayed, reordered, or corrupted records fail authentication rather than
 //! being reordered for delivery. A cipher that can seal no more messages requires a new
-//! connection. Callers must discard the connection after an authentication failure.
+//! connection. After a record fails to seal or open, that half refuses every later record.
 //!
 //! # Security
 //!
