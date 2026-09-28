@@ -39,7 +39,7 @@ use crate::{
     Context, SyncCompletion,
     journal::{
         authenticated::{Backing as _, BackingRecovery as _},
-        contiguous::Contiguous,
+        contiguous::{Contiguous, variable},
     },
     merkle::{self, Family, Location, Proof, batch, compact as compact_merkle},
     qmdb::{
@@ -58,16 +58,131 @@ use std::sync::{Arc, Weak};
 
 type MerkleizedParent<F, H, O, S> = Arc<MerkleizedBatch<F, DigestOf<H>, O, S>>;
 
-/// The tip witness's relationship to the journal.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// The journaled tip's durability.
+#[derive(PartialEq, Eq)]
 enum TipState {
-    /// Journaled and covered by a durability operation that has at least started.
+    /// Covered by a durability operation that has at least started.
     Committed,
     /// Journaled after the latest durability operation started.
     Uncommitted,
-    /// From compact sync. The journal still holds the partition's previous contents until the
-    /// first apply or durability operation replaces them with the tip.
-    Imported,
+}
+
+/// An open witness journal whose last entry is the tip.
+struct OpenJournal<E, F, D, O>
+where
+    E: Context,
+    F: Family,
+    D: Digest,
+    O: Operation<F>,
+{
+    /// The journal of witnesses, one per applied state.
+    journal: witness::Journal<E, F, D, O>,
+
+    /// Whether the tip is durable.
+    tip_state: TipState,
+
+    /// The sync pipelined by the last [`Db::start_sync`], cleared by the next full journal sync.
+    pending_sync: Option<SyncCompletion>,
+}
+
+impl<E, F, D, O> OpenJournal<E, F, D, O>
+where
+    E: Context,
+    F: Family,
+    D: Digest,
+    O: Operation<F>,
+{
+    /// Append `witness` as the new tip, leaving it outside the durable prefix.
+    async fn append(mut self, witness: &Witness<F, D, O>) -> Result<Self, Error<F>> {
+        (self.journal, _) = self.journal.append(witness).await?;
+        self.tip_state = TipState::Uncommitted;
+        Ok(self)
+    }
+
+    /// Sync the journal and all of its metadata, which covers the tip and settles any sync
+    /// pipelined by [`Db::start_sync`].
+    async fn sync(mut self) -> Result<Self, Error<F>> {
+        self.journal = self.journal.sync().await?;
+        self.pending_sync = None;
+        self.tip_state = TipState::Committed;
+        Ok(self)
+    }
+
+    /// Wait for any sync pipelined by [`Db::start_sync`], surfacing its failure.
+    ///
+    /// A successful completion stays recorded until the next full journal sync.
+    async fn wait_for_sync(&self) -> Result<(), RError> {
+        let Some(pending) = self.pending_sync.clone() else {
+            return Ok(());
+        };
+        pending.await
+    }
+
+    /// Binary search for the first retained position whose entry commits at least `size`
+    /// leaves, or the end of the journal if none does.
+    async fn first_at_or_above(&self, size: Location<F>) -> Result<u64, Error<F>> {
+        let bounds = self.journal.bounds();
+        let (mut lo, mut hi) = (bounds.start, bounds.end);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.journal.read(mid).await?.size < size {
+                // The entry at `mid` is below `size`, so the answer is after it.
+                lo = mid + 1;
+            } else {
+                // The entry at `mid` qualifies, so the answer is `mid` or before it.
+                hi = mid;
+            }
+        }
+        Ok(lo)
+    }
+}
+
+/// Where a compact db's witnesses live.
+enum Storage<E, F, D, O>
+where
+    E: Context,
+    F: Family,
+    D: Digest,
+    O: Operation<F>,
+{
+    /// The open witness journal.
+    Open(OpenJournal<E, F, D, O>),
+
+    /// A compact-sync import not yet journaled. The partition keeps its previous contents,
+    /// unopened, until the first apply or durability operation replaces them with the tip.
+    Replacing {
+        context: E,
+        cfg: variable::Config<O::Cfg>,
+    },
+}
+
+impl<E, F, D, O> Storage<E, F, D, O>
+where
+    E: Context,
+    F: Family,
+    D: Digest,
+    O: Operation<F>,
+{
+    /// Return the open journal, first replacing the partition's contents with `tip` if a
+    /// compact-sync import is pending.
+    ///
+    /// The replacement never decodes the previous contents. It resets the journal to position 1,
+    /// so a crash before `tip` is durable reopens as an interrupted import rather than a fresh
+    /// db.
+    async fn open(self, tip: &Witness<F, D, O>) -> Result<OpenJournal<E, F, D, O>, Error<F>> {
+        match self {
+            Self::Open(open) => Ok(open),
+            Self::Replacing { context, cfg } => {
+                let journal = witness::Journal::init_at_size(context, cfg, 1).await?;
+                let open = OpenJournal {
+                    journal,
+                    tip_state: TipState::Uncommitted,
+                    pending_sync: None,
+                };
+                open.append(tip).await
+            }
+        }
+    }
 }
 
 /// A compact authenticated db that discards historical operations, retaining only a witness
@@ -82,18 +197,11 @@ where
     /// The peak-only Merkle the witnesses describe.
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
 
-    /// The journal of witnesses, one per applied batch.
-    journal: witness::Journal<E, F, H::Digest, O>,
+    /// Where the witnesses live.
+    storage: Storage<E, F, H::Digest, O>,
 
     /// The verified tip witness.
     tip: VerifiedWitness<F, H::Digest, O>,
-
-    /// Whether the tip is journaled and durable.
-    tip_state: TipState,
-
-    /// The sync pipelined by the last [`Self::start_sync`], cleared by the next full
-    /// journal sync.
-    pending_sync: Option<SyncCompletion>,
 }
 
 impl<F, E, O, H, S: Strategy> std::fmt::Debug for Db<F, E, O, H, S>
@@ -176,23 +284,27 @@ where
         }
         Ok(Self {
             merkle,
-            journal,
+            storage: Storage::Open(OpenJournal {
+                journal,
+                tip_state: TipState::Committed,
+                pending_sync: None,
+            }),
             tip,
-            tip_state: TipState::Committed,
-            pending_sync: None,
         })
     }
 
     /// Build a compact db from state fetched by the sync engine: `last_commit_op` must be a
     /// commit whose floor is at or below `last_commit_loc`.
     ///
-    /// The imported witness lives only in memory until the first [`Self::apply_batch`],
-    /// [`Self::commit`], [`Self::sync`], or [`Self::start_sync`], which replaces the journal's
-    /// contents with it. Until one of those succeeds, prune is rejected. A crash
-    /// during the replacement leaves a journal that fails to reopen, and re-syncing recovers it.
+    /// The imported witness lives only in memory, and the partition `cfg` names is not opened,
+    /// until the first [`Self::apply_batch`], [`Self::commit`], [`Self::sync`], or
+    /// [`Self::start_sync`] replaces the partition's contents with it. Until one of those
+    /// succeeds, prune is rejected. A crash during the replacement leaves a journal that fails
+    /// to reopen, and re-syncing recovers it.
     pub(crate) fn init_from_sync(
         strategy: S,
-        journal: witness::Journal<E, F, H::Digest, O>,
+        context: E,
+        cfg: variable::Config<O::Cfg>,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: O,
@@ -205,10 +317,8 @@ where
         let Rebuilt { merkle, tip } = witness::restore::<F, O, H, S>(strategy, imported)?;
         Ok(Self {
             merkle,
-            journal,
+            storage: Storage::Replacing { context, cfg },
             tip,
-            tip_state: TipState::Imported,
-            pending_sync: None,
         })
     }
 
@@ -315,35 +425,15 @@ where
             )?),
         };
         // Journal the import before the new witness so every applied state has its own entry.
-        self = self.flush_import().await?;
+        let mut open = self.storage.open(&self.tip.witness).await?;
         if let Some(tip) = tip {
             self.tip = tip;
             self.merkle.prune_to_frontier();
-            self = self.journal_tip().await?;
+            open = open.append(&self.tip.witness).await?;
         }
+        self.storage = Storage::Open(open);
         debug_assert_eq!(self.commitment(), batch.bounds.tip);
         Ok((self, start_loc..batch.bounds.tip.size))
-    }
-
-    /// Journal a pending compact-sync import, if any, in place of the partition's previous
-    /// contents.
-    ///
-    /// Clears to at least size 1 so a crash mid-import reopens as a corrupt journal rather than a
-    /// fresh db.
-    async fn flush_import(mut self) -> Result<Self, Error<F>> {
-        if self.tip_state != TipState::Imported {
-            return Ok(self);
-        }
-        let size = self.journal.size();
-        self.journal = self.journal.clear_to_size(size.max(1)).await?;
-        self.journal_tip().await
-    }
-
-    /// Append the tip's witness to the journal, leaving the tip outside the durable prefix.
-    async fn journal_tip(mut self) -> Result<Self, Error<F>> {
-        (self.journal, _) = self.journal.append(&self.tip.witness).await?;
-        self.tip_state = TipState::Uncommitted;
-        Ok(self)
     }
 
     /// Begin durably persisting the current db state to disk.
@@ -361,25 +451,27 @@ where
         fields(kind = O::NAME)
     )]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        // Match the deferred-failure convention used by the journal: return a prior completion's
-        // error through a ready handle before a later completion can replace it. Errors while
-        // journaling an import or initiating this sync continue to use the outer result.
-        if let Err(err) = self.wait_for_sync().await {
-            return Ok((self, Handle::ready(Err(err))));
-        }
-
         // Journal a pending import before starting the sync so the returned handle covers the
         // current tip. A later apply remains uncommitted and requires a successor durability
         // operation.
-        self = self.flush_import().await?;
+        let mut open = self.storage.open(&self.tip.witness).await?;
+
+        // Match the deferred-failure convention used by the journal: return a prior completion's
+        // error through a ready handle before a later completion can replace it. Errors while
+        // journaling an import or initiating this sync continue to use the outer result.
+        if let Err(err) = open.wait_for_sync().await {
+            self.storage = Storage::Open(open);
+            return Ok((self, Handle::ready(Err(err))));
+        }
 
         // Share one completion between the caller and the db. Retaining a clone keeps a
         // dropped handle's failure observable by the next durability operation.
         let handle;
-        (self.journal, handle) = self.journal.start_sync().await?;
+        (open.journal, handle) = open.journal.start_sync().await?;
         let completion: SyncCompletion = handle.boxed().shared();
-        self.tip_state = TipState::Committed;
-        self.pending_sync = Some(completion.clone());
+        open.tip_state = TipState::Committed;
+        open.pending_sync = Some(completion.clone());
+        self.storage = Storage::Open(open);
         Ok((self, Handle::from_future(completion)))
     }
 
@@ -394,12 +486,13 @@ where
         fields(kind = O::NAME)
     )]
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
-        self.wait_for_sync().await?;
-        self = self.flush_import().await?;
-        if self.tip_state == TipState::Uncommitted {
-            self.journal = self.journal.commit().await?;
-            self.tip_state = TipState::Committed;
+        let mut open = self.storage.open(&self.tip.witness).await?;
+        open.wait_for_sync().await?;
+        if open.tip_state == TipState::Uncommitted {
+            open.journal = open.journal.commit().await?;
+            open.tip_state = TipState::Committed;
         }
+        self.storage = Storage::Open(open);
         Ok(self)
     }
 
@@ -413,28 +506,9 @@ where
         fields(kind = O::NAME)
     )]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
-        self = self.flush_import().await?;
-        self.sync_journal().await
-    }
-
-    /// Sync the journal and all of its metadata, which covers the tip and settles any sync
-    /// pipelined by [`Self::start_sync`].
-    async fn sync_journal(mut self) -> Result<Self, Error<F>> {
-        self.journal = self.journal.sync().await?;
-        self.pending_sync = None;
-        self.tip_state = TipState::Committed;
+        let open = self.storage.open(&self.tip.witness).await?;
+        self.storage = Storage::Open(open.sync().await?);
         Ok(self)
-    }
-
-    /// Wait for any sync pipelined by [`Self::start_sync`], surfacing its failure.
-    ///
-    /// A successful completion remains recorded until the next full journal sync, which must
-    /// still guarantee that all metadata is current.
-    async fn wait_for_sync(&self) -> Result<(), RError> {
-        let Some(pending) = self.pending_sync.clone() else {
-            return Ok(());
-        };
-        pending.await
     }
 
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
@@ -453,52 +527,36 @@ where
         fields(kind = O::NAME)
     )]
     pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
-        self.check_import_applied()?;
+        let Storage::Open(mut open) = self.storage else {
+            return Err(Error::DataCorrupted("compact-sync import not applied"));
+        };
 
-        let bounds = self.journal.bounds();
+        let bounds = open.journal.bounds();
         if bounds.is_empty() {
+            self.storage = Storage::Open(open);
             return Ok(self);
         }
         // Clamp below the tip so the journal never empties: the tip is the current state.
-        let pos = self
+        let pos = open
             .first_at_or_above(pruning_boundary)
             .await?
             .min(bounds.end - 1);
-        (self.journal, _) = self.journal.prune(pos).await?;
-        self.sync_journal().await
-    }
-
-    /// Reject operations on a journal whose contents an unapplied compact-sync import is
-    /// about to replace.
-    const fn check_import_applied(&self) -> Result<(), Error<F>> {
-        if matches!(self.tip_state, TipState::Imported) {
-            return Err(Error::DataCorrupted("compact-sync import not applied"));
-        }
-        Ok(())
-    }
-
-    /// Binary search for the first retained position whose entry commits at least `size`
-    /// leaves, or the end of the journal if none does.
-    async fn first_at_or_above(&self, size: Location<F>) -> Result<u64, Error<F>> {
-        let bounds = self.journal.bounds();
-        let (mut lo, mut hi) = (bounds.start, bounds.end);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if self.journal.read(mid).await?.size < size {
-                // The entry at `mid` is below `size`, so the answer is after it.
-                lo = mid + 1;
-            } else {
-                // The entry at `mid` qualifies, so the answer is `mid` or before it.
-                hi = mid;
-            }
-        }
-        Ok(lo)
+        (open.journal, _) = open.journal.prune(pos).await?;
+        self.storage = Storage::Open(open.sync().await?);
+        Ok(self)
     }
 
     /// Destroy all persisted state associated with this database.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.journal.destroy().await?;
+        let journal = match self.storage {
+            Storage::Open(open) => open.journal,
+            // Reset rather than open, so the previous contents are never decoded.
+            Storage::Replacing { context, cfg } => {
+                witness::Journal::init_at_size(context, cfg, 0).await?
+            }
+        };
+        journal.destroy().await?;
         Ok(())
     }
 
@@ -816,7 +874,7 @@ pub(crate) mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::VecU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Probability, probability, sequence::VecU64};
     use core::future::Future;
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -1394,71 +1452,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// The first persist after a compact-sync import can be pipelined: awaiting the handle
-    /// makes the imported witness durable.
-    pub(crate) fn test_compact_start_sync_persists_import<O: TestOperation>() {
-        deterministic::Runner::default().start(|context| async move {
-            let dst = "compact-import-start-sync-dst";
-            let src = "compact-import-start-sync-src";
-            let meta_a = O::value(11);
-            let meta_b = O::value(22);
-
-            // Build state B in a separate source partition and capture its validated state.
-            let target_b = {
-                let source = open_db::<O>(context.child("src"), src).await;
-                let batch = source
-                    .new_batch()
-                    .mutate(2)
-                    .merkleize(&source, Some(meta_b.clone()), Location::new(0))
-                    .await;
-                let (source, _) = source.apply_batch(batch).await.unwrap();
-                let source = source.sync().await.unwrap();
-                source.target()
-            };
-            let (_, size_b, pinned_b) = {
-                let journal = open_witness_journal::<O>(context.child("src_tip"), src).await;
-                witness::tests::tip(&journal).await
-            };
-            assert_eq!(size_b, target_b.size);
-
-            // Seed the destination partition with a different committed state A.
-            {
-                let seeded = open_db::<O>(context.child("seed"), dst).await;
-                let batch = seeded
-                    .new_batch()
-                    .mutate(1)
-                    .merkleize(&seeded, Some(meta_a), Location::new(0))
-                    .await;
-                let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
-                let seeded = seeded.sync().await.unwrap();
-                assert_ne!(seeded.target(), target_b);
-            }
-
-            // Import state B over the destination and make it durable through a pipelined sync.
-            {
-                let journal = open_witness_journal::<O>(context.child("import"), dst).await;
-                let imported = TestDb::<O>::init_from_sync(
-                    Sequential,
-                    journal,
-                    size_b - 1,
-                    pinned_b,
-                    O::commit(Some(meta_b.clone()), Location::new(0)),
-                )
-                .unwrap();
-                assert_eq!(imported.target(), target_b);
-                let (_imported, handle) = imported.start_sync().await.unwrap();
-                handle.await.unwrap();
-            }
-
-            // Reopen recovers the imported state, replacing state A.
-            let db = open_db::<O>(context.child("reopen"), dst).await;
-            assert_eq!(db.target(), target_b);
-            assert_eq!(db.root(), target_b.root);
-            assert_eq!(db.get_metadata(), Some(meta_b));
-            db.destroy().await.unwrap();
-        });
-    }
-
     pub(crate) fn test_compact_stale_batch_rejected<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-stale").await;
@@ -1932,74 +1925,134 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_import_persists_with_commit<O: TestOperation>() {
-        deterministic::Runner::default().start(|context| async move {
-            let dst = "compact-import-commit-dst";
-            let src = "compact-import-commit-src";
-            let meta_a = O::value(11);
-            let meta_b = O::value(22);
+    /// A compact-sync import: a committed state and the pieces [`Db::init_from_sync`] takes.
+    #[derive(Clone)]
+    struct Import<O: TestOperation> {
+        target: CompactTarget<O::Family, Digest>,
+        pinned_nodes: Vec<Digest>,
+        commit: O,
+    }
 
-            // Build state B in a separate source partition and fetch its state the way a sync
-            // client would.
-            let (target_b, pinned_b) = {
-                let source = open_db::<O>(context.child("src"), src).await;
-                let batch = source
-                    .new_batch()
-                    .mutate(2)
-                    .merkleize(&source, Some(meta_b.clone()), Location::new(0))
-                    .await;
-                let (source, _) = source.apply_batch(batch).await.unwrap();
-                let source = source.sync().await.unwrap();
-                let target = source.target();
-                let (response, _) = source
-                    .serve(Request::Boundary {
-                        size: target.size,
-                        start: target.size - 1,
-                    })
-                    .await
-                    .unwrap();
-                let Response::Boundary { pinned_nodes, .. } = response else {
-                    panic!("boundary request should get a boundary response");
-                };
-                (target, pinned_nodes)
-            };
-
-            // Seed the destination partition with a different committed state A.
-            {
-                let seeded = open_db::<O>(context.child("seed"), dst).await;
-                let batch = seeded
-                    .new_batch()
-                    .mutate(1)
-                    .merkleize(&seeded, Some(meta_a), Location::new(0))
-                    .await;
-                let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
-                let seeded = seeded.sync().await.unwrap();
-                assert_ne!(seeded.target(), target_b);
-            }
-
-            // Import state B over the destination and make it durable with commit (not sync).
-            {
-                let journal = open_witness_journal::<O>(context.child("import"), dst).await;
-                let imported = TestDb::<O>::init_from_sync(
-                    Sequential,
-                    journal,
-                    target_b.size - 1,
-                    pinned_b,
-                    O::commit(Some(meta_b.clone()), Location::new(0)),
-                )
+    impl<O: TestOperation> Import<O> {
+        /// Build the state holding `seed`'s mutation in partition `src` and fetch it the way a
+        /// sync client would.
+        async fn build(context: deterministic::Context, src: &str, seed: u64) -> Self {
+            let target = commit_seed::<O>(context.child("build"), src, seed).await;
+            let source = open_db::<O>(context.child("serve"), src).await;
+            let (response, _) = source
+                .serve(Request::Boundary {
+                    size: target.size,
+                    start: target.size - 1,
+                })
+                .await
                 .unwrap();
-                assert_eq!(imported.target(), target_b);
-                let _imported = imported.commit().await.unwrap();
+            let Response::Boundary {
+                op, pinned_nodes, ..
+            } = response
+            else {
+                panic!("boundary request should get a boundary response");
+            };
+            Self {
+                target,
+                pinned_nodes,
+                commit: op,
             }
+        }
 
-            // Reopen recovers the committed import, replacing state A even though the journal was
-            // never synced.
-            let db = open_db::<O>(context.child("reopen"), dst).await;
-            assert_eq!(db.target(), target_b);
-            assert_eq!(db.root(), target_b.root);
-            assert_eq!(db.get_metadata(), Some(meta_b));
-            db.destroy().await.unwrap();
-        });
+        /// Import this state over partition `dst` without journaling it.
+        fn into_db(self, context: deterministic::Context, dst: &str) -> TestDb<O> {
+            let cfg = witness_config(dst, &context);
+            let db = TestDb::<O>::init_from_sync(
+                Sequential,
+                context,
+                cfg,
+                self.target.size - 1,
+                self.pinned_nodes,
+                self.commit,
+            )
+            .unwrap();
+            assert_eq!(db.target(), self.target);
+            db
+        }
+    }
+
+    /// Durably commit `seed`'s mutation, with `seed`'s value as metadata, on top of the state in
+    /// `partition`, returning the new target.
+    async fn commit_seed<O: TestOperation>(
+        context: deterministic::Context,
+        partition: &str,
+        seed: u64,
+    ) -> CompactTarget<O::Family, Digest> {
+        let db = open_db::<O>(context, partition).await;
+        let floor = db.inactivity_floor_loc();
+        let batch = db
+            .new_batch()
+            .mutate(seed)
+            .merkleize(&db, Some(O::value(seed)), floor)
+            .await;
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        db.sync().await.unwrap().target()
+    }
+
+    /// Apply `seed`'s mutation without making it durable, returning the db and its commitment.
+    async fn apply_seed<O: TestOperation>(
+        db: TestDb<O>,
+        seed: u64,
+    ) -> (TestDb<O>, Commitment<O::Family, Digest>) {
+        let floor = db.inactivity_floor_loc();
+        let batch = db
+            .new_batch()
+            .mutate(seed)
+            .merkleize(&db, Some(O::value(seed)), floor)
+            .await;
+        let tip = batch.bounds().tip;
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        (db, tip)
+    }
+
+    /// A durability operation that journals a pending import.
+    #[derive(Clone, Copy)]
+    enum Persist {
+        Sync,
+        Commit,
+        StartSync,
+    }
+
+    /// Make `db` durable with `persist`, waiting for a pipelined sync to complete.
+    async fn persist<O: TestOperation>(db: TestDb<O>, persist: Persist) -> TestDb<O> {
+        match persist {
+            Persist::Sync => db.sync().await.unwrap(),
+            Persist::Commit => db.commit().await.unwrap(),
+            Persist::StartSync => {
+                let (db, handle) = db.start_sync().await.unwrap();
+                handle.await.unwrap();
+                db
+            }
+        }
+    }
+
+    /// Each durability operation replaces the partition's previous contents with a pending
+    /// import, and the import survives a crash once the operation completes.
+    pub(crate) fn test_compact_import_persists<O: TestOperation>() {
+        for persist_with in [Persist::Sync, Persist::Commit, Persist::StartSync] {
+            let (import, checkpoint) =
+                deterministic::Runner::default().start_and_recover(|context| async move {
+                    let import =
+                        Import::<O>::build(context.child("src"), "compact-import-src", 2).await;
+                    let dst = "compact-import-dst";
+                    let seeded = commit_seed::<O>(context.child("seed"), dst, 1).await;
+                    assert_ne!(seeded, import.target);
+                    let db = import.clone().into_db(context.child("import"), dst);
+                    drop(persist(db, persist_with).await);
+                    import
+                });
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let db = open_db::<O>(context.child("reopen"), "compact-import-dst").await;
+                assert_eq!(db.target(), import.target);
+                assert_eq!(db.get_metadata(), Some(O::value(2)));
+                db.destroy().await.unwrap();
+            });
+        }
     }
 
     /// Applying a batch to an import-pending db journals the imported witness in place of the
@@ -2007,93 +2060,203 @@ pub(crate) mod tests {
     pub(crate) fn test_compact_import_then_apply_persists<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let dst = "compact-import-apply-dst";
-            let src = "compact-import-apply-src";
-            let meta_a = O::value(11);
-            let meta_b = O::value(22);
-            let meta_c = O::value(33);
+            let import =
+                Import::<O>::build(context.child("src"), "compact-import-apply-src", 2).await;
 
-            // Build state B in a separate source partition and fetch its state the way a sync
-            // client would.
-            let (target_b, pinned_b) = {
-                let source = open_db::<O>(context.child("src"), src).await;
-                let batch = source
-                    .new_batch()
-                    .mutate(2)
-                    .merkleize(&source, Some(meta_b.clone()), Location::new(0))
-                    .await;
-                let (source, _) = source.apply_batch(batch).await.unwrap();
-                let source = source.sync().await.unwrap();
-                let target = source.target();
-                let (response, _) = source
-                    .serve(Request::Boundary {
-                        size: target.size,
-                        start: target.size - 1,
-                    })
-                    .await
-                    .unwrap();
-                let Response::Boundary { pinned_nodes, .. } = response else {
-                    panic!("boundary request should get a boundary response");
-                };
-                (target, pinned_nodes)
-            };
+            // Seed the destination partition with a different committed state of the same size.
+            let seeded = commit_seed::<O>(context.child("seed"), dst, 1).await;
+            assert_eq!(seeded.size, import.target.size);
+            assert_ne!(seeded, import.target);
 
-            // Seed the destination partition with a different committed state A of the same size.
-            {
-                let seeded = open_db::<O>(context.child("seed"), dst).await;
-                let batch = seeded
-                    .new_batch()
-                    .mutate(1)
-                    .merkleize(&seeded, Some(meta_a), Location::new(0))
-                    .await;
-                let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
-                let seeded = seeded.sync().await.unwrap();
-                assert_eq!(seeded.target().size, target_b.size);
-                assert_ne!(seeded.target(), target_b);
-            }
+            // Import over the destination and apply a batch on top of it with no durability
+            // operation in between.
+            let imported = import.clone().into_db(context.child("import"), dst);
+            let floor = imported.inactivity_floor_loc();
+            let batch = imported
+                .new_batch()
+                .mutate(3)
+                .merkleize(&imported, Some(O::value(3)), floor)
+                .await;
+            let root = batch.root();
+            let (applied, _) = imported.apply_batch(batch).await.unwrap();
+            assert_eq!(applied.root(), root);
+            let target = applied.target();
+            drop(applied.sync().await.unwrap());
 
-            // Import state B over the destination and apply a batch on top of it with no
-            // durability operation in between.
-            let target_c = {
-                let journal = open_witness_journal::<O>(context.child("import"), dst).await;
-                let imported = TestDb::<O>::init_from_sync(
-                    Sequential,
-                    journal,
-                    target_b.size - 1,
-                    pinned_b,
-                    O::commit(Some(meta_b.clone()), Location::new(0)),
-                )
-                .unwrap();
-                assert_eq!(imported.target(), target_b);
-                let floor = imported.inactivity_floor_loc();
-                let batch = imported
-                    .new_batch()
-                    .mutate(3)
-                    .merkleize(&imported, Some(meta_c.clone()), floor)
-                    .await;
-                let root_c = batch.root();
-                let (applied, _) = imported.apply_batch(batch).await.unwrap();
-                assert_eq!(applied.root(), root_c);
-                let target_c = applied.target();
-                let _applied = applied.sync().await.unwrap();
-                target_c
-            };
-
-            // Reopen lands on the applied state, and the retained history below it is B, not A.
+            // Reopen lands on the applied state, and the retained history below it is the
+            // import, not the seeded state.
             let db = open_db::<O>(context.child("reopen"), dst).await;
-            assert_eq!(db.target(), target_c);
-            assert_eq!(db.get_metadata(), Some(meta_c));
+            assert_eq!(db.target(), target);
+            assert_eq!(db.get_metadata(), Some(O::value(3)));
             drop(db);
             let db = open_bounded::<O>(
                 context.child("imported"),
                 witness_config(dst, &context),
-                target_b.size,
+                import.target.size,
             )
             .await
             .unwrap();
-            assert_eq!(db.target(), target_b);
-            assert_eq!(db.get_metadata(), Some(meta_b));
+            assert_eq!(db.target(), import.target);
+            assert_eq!(db.get_metadata(), Some(O::value(2)));
             db.destroy().await.unwrap();
         });
+    }
+
+    /// Destroying a pending import removes the partition without decoding its contents.
+    pub(crate) fn test_compact_import_destroy<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let dst = "compact-import-destroy-dst";
+            let import =
+                Import::<O>::build(context.child("src"), "compact-import-destroy-src", 2).await;
+            commit_seed::<O>(context.child("seed"), dst, 1).await;
+            let imported = import.into_db(context.child("import"), dst);
+            imported.destroy().await.unwrap();
+
+            let db = open_db::<O>(context.child("reopen"), dst).await;
+            assert_eq!(db.size(), Location::new(1));
+            assert_eq!(db.root(), initial_root::<O::Family, O, Sha256>());
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Where a crash interrupts replacing a partition with a compact-sync import.
+    #[derive(Clone, Copy)]
+    enum ImportCrash {
+        /// The import is built but nothing is written.
+        BeforeReplacement,
+        /// The reset is durable but the imported witness is not written.
+        AfterReset,
+        /// The imported and applied witnesses are written but their sync fails. The device
+        /// keeps each written byte with the given percent probability.
+        DuringAppend(u64),
+        /// The durability operation completed.
+        AfterDurability,
+    }
+
+    /// What reopening after an [`ImportCrash`] finds.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Reopened {
+        /// The seeded state.
+        Seeded,
+        /// The import's state.
+        Imported,
+        /// The state applied on top of the import.
+        Applied,
+        /// An empty journal past genesis: an interrupted import.
+        NoTip,
+    }
+
+    /// Crash while replacing a seeded partition with an import, reopen, then re-sync.
+    ///
+    /// Returns what the reopen found. Every crash point reopens as a retained state or an
+    /// interrupted import, never as a fresh db, and a re-sync then completes.
+    fn crash_import<O: TestOperation>(crash: ImportCrash, seed: u64) -> Reopened {
+        let dst = "compact-import-crash-dst";
+        let cfg = deterministic::Config::new().with_seed(seed);
+        let ((import, seeded, applied), checkpoint) = deterministic::Runner::new(cfg)
+            .start_and_recover(|context| async move {
+                let import =
+                    Import::<O>::build(context.child("src"), "compact-import-crash-src", 2).await;
+                let seeded = commit_seed::<O>(context.child("seed"), dst, 1).await;
+                let db = import.clone().into_db(context.child("import"), dst);
+                let mut applied = None;
+                match crash {
+                    ImportCrash::BeforeReplacement => drop(db),
+                    ImportCrash::AfterReset => {
+                        let (db, _) = apply_seed::<O>(db, 3).await;
+                        drop(db);
+                    }
+                    ImportCrash::DuringAppend(percent) => {
+                        // Retain unsynced writes from the start: the journal may write full
+                        // pages before it is asked to sync them.
+                        let write_rate = Some(deterministic::WriteConfig {
+                            failure_rate: probability!(0.0),
+                            retention_rate: Probability::new(percent, 100).unwrap(),
+                            mode: deterministic::PartialWriteMode::Prefix,
+                        });
+                        *context.storage_fault_config().write() = deterministic::FaultConfig {
+                            write_rate,
+                            ..Default::default()
+                        };
+                        let (db, tip) = apply_seed::<O>(db, 3).await;
+                        applied = Some(tip);
+                        *context.storage_fault_config().write() = deterministic::FaultConfig {
+                            sync_rate: Some(probability!(1.0)),
+                            write_rate,
+                            ..Default::default()
+                        };
+                        assert!(db.commit().await.is_err());
+                    }
+                    ImportCrash::AfterDurability => drop(db.commit().await.unwrap()),
+                }
+                (import, seeded, applied)
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let reopened = match TestDb::<O>::init(
+                context.child("reopen"),
+                Config {
+                    strategy: Sequential,
+                    witness: witness_config(dst, &context),
+                },
+                None,
+            )
+            .await
+            {
+                Err(Error::DataCorrupted("witness journal has no tip")) => Reopened::NoTip,
+                Err(err) => panic!("unexpected reopen error: {err:?}"),
+                Ok(db) => {
+                    let target = db.commitment();
+                    drop(db);
+                    if target == Commitment::new(seeded.size, seeded.root) {
+                        Reopened::Seeded
+                    } else if target == Commitment::new(import.target.size, import.target.root) {
+                        Reopened::Imported
+                    } else if Some(target) == applied {
+                        Reopened::Applied
+                    } else {
+                        panic!("reopened an unexpected state at size {}", target.size);
+                    }
+                }
+            };
+
+            // A re-sync over whatever the crash left completes.
+            let db = import.clone().into_db(context.child("resync"), dst);
+            drop(db.sync().await.unwrap());
+            let db = open_db::<O>(context.child("resynced"), dst).await;
+            assert_eq!(db.target(), import.target);
+            db.destroy().await.unwrap();
+            reopened
+        })
+    }
+
+    /// Recovery from a crash at each point of replacing a partition with an import.
+    pub(crate) fn test_compact_import_crash_points<O: TestOperation>() {
+        assert_eq!(
+            crash_import::<O>(ImportCrash::BeforeReplacement, 0),
+            Reopened::Seeded
+        );
+        assert_eq!(
+            crash_import::<O>(ImportCrash::AfterReset, 0),
+            Reopened::NoTip
+        );
+        assert_eq!(
+            crash_import::<O>(ImportCrash::DuringAppend(0), 0),
+            Reopened::NoTip
+        );
+        assert_eq!(
+            crash_import::<O>(ImportCrash::DuringAppend(100), 0),
+            Reopened::Applied
+        );
+        for seed in 0..8 {
+            let reopened = crash_import::<O>(ImportCrash::DuringAppend(50), seed);
+            assert_ne!(reopened, Reopened::Seeded);
+        }
+        assert_eq!(
+            crash_import::<O>(ImportCrash::AfterDurability, 0),
+            Reopened::Imported
+        );
     }
 
     pub(crate) fn test_compact_reopen_rejects_tampered_witness<O: TestOperation>() {
@@ -2190,39 +2353,6 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(reopened.target(), tip_target);
             reopened.destroy().await.unwrap();
-        });
-    }
-
-    pub(crate) fn test_compact_reopen_rejects_interrupted_import<O: TestOperation>() {
-        deterministic::Runner::default().start(|context| async move {
-            let partition = "compact-interrupted-import";
-            let db = open_db::<O>(context.child("db"), partition).await;
-            let batch = db
-                .new_batch()
-                .mutate(7)
-                .merkleize(&db, Some(O::value(11)), Location::new(1))
-                .await;
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
-            drop(db);
-
-            // Simulate a crash between an import's journal clear and its entry append: the
-            // journal is empty but its size is nonzero.
-            let journal = open_witness_journal::<O>(context.child("clear"), partition).await;
-            let size = journal.size();
-            let journal = journal.clear_to_size(size.max(1)).await.unwrap();
-            drop(journal);
-
-            // Reopen must fail rather than bootstrap a fresh db.
-            let cfg = Config {
-                strategy: Sequential,
-                witness: witness_config(partition, &context),
-            };
-            let reopened = TestDb::<O>::init(context.child("reopen_witness"), cfg, None).await;
-            assert!(matches!(
-                reopened,
-                Err(Error::DataCorrupted("witness journal has no tip"))
-            ));
         });
     }
 
@@ -3005,7 +3135,6 @@ pub(crate) mod tests {
                 test_compact_start_sync_metadata_failure_resurfaces_on_commit,
                 test_compact_start_sync_retains_dropped_metadata_failure,
                 test_compact_start_sync_proven_skips_journal,
-                test_compact_start_sync_persists_import,
                 test_compact_stale_batch_rejected,
                 test_compact_delayed_merkleize_after_ancestor_apply,
                 test_compact_to_batch_reflects_live_state,
@@ -3019,11 +3148,12 @@ pub(crate) mod tests {
                 test_compact_commit_persists_across_reopen,
                 test_compact_bounded_initialization_to_committed_entry_after_reopen,
                 test_compact_sync_after_commit,
-                test_compact_import_persists_with_commit,
+                test_compact_import_persists,
                 test_compact_import_then_apply_persists,
+                test_compact_import_destroy,
+                test_compact_import_crash_points,
                 test_compact_reopen_rejects_tampered_witness,
                 test_compact_bounded_initialization_rejects_corrupt_target_entry,
-                test_compact_reopen_rejects_interrupted_import,
                 test_compact_reopen_rejects_commit_floor_beyond_tip,
                 test_compact_reopen_rejects_non_commit_tip,
                 test_compact_reopen_rejects_tampered_pinned_nodes,

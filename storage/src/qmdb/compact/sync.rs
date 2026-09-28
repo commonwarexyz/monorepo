@@ -3,7 +3,6 @@
 use super::{Config, Db, Operation};
 use crate::{
     Context,
-    journal::contiguous::variable,
     merkle::{Family, Location},
     qmdb::{
         Error,
@@ -51,10 +50,12 @@ where
             return Err(Error::UnexpectedData(last_commit_loc));
         }
 
-        let journal = variable::Journal::init(context.child("witness"), config.witness).await?;
+        // The destination partition is opened only when the import is journaled, after the
+        // engine has verified the root, so its previous contents are never decoded.
         Self::init_from_sync(
             config.strategy,
-            journal,
+            context.child("witness"),
+            config.witness,
             last_commit_loc,
             // None only happens at genesis, where nothing is pinned.
             pinned_nodes.unwrap_or_default(),

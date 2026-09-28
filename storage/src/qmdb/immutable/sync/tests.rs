@@ -1929,15 +1929,10 @@ mod compact_variable_mmr {
             else {
                 unreachable!("boundary fetch returns a boundary response");
             };
-            let journal = crate::journal::contiguous::variable::Journal::init(
-                context.child("import"),
-                client_cfg.witness.clone(),
-            )
-            .await
-            .unwrap();
             let imported = ClientDb::init_from_sync(
                 client_cfg.strategy.clone(),
-                journal,
+                context.child("import"),
+                client_cfg.witness.clone(),
                 target_b.size - 1,
                 pinned_nodes,
                 op,
@@ -1958,15 +1953,10 @@ mod compact_variable_mmr {
             else {
                 unreachable!("boundary fetch returns a boundary response");
             };
-            let journal = crate::journal::contiguous::variable::Journal::init(
-                context.child("import").with_attribute("index", 2),
-                client_cfg.witness.clone(),
-            )
-            .await
-            .unwrap();
             let imported = ClientDb::init_from_sync(
                 client_cfg.strategy.clone(),
-                journal,
+                context.child("import").with_attribute("index", 2),
+                client_cfg.witness.clone(),
                 target_b.size - 1,
                 pinned_nodes,
                 op,
