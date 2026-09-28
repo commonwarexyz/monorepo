@@ -730,6 +730,13 @@ pub(crate) mod tests {
         assert_eq!(c.get_many(&locs, &db).await.unwrap(), expected);
         assert_eq!(child.get_many(&locs, &db).await.unwrap(), expected);
 
+        // Merkleizing the child is refused: its dropped ancestors are unapplied, so the chain no
+        // longer reaches the database.
+        assert!(matches!(
+            child.merkleize(&db, None, floor).await,
+            Err(Error::StaleBatch)
+        ));
+
         // Applying the chain lands the same values the reads reported.
         let (db, _) = db.apply_batch(c).await.unwrap();
         for (loc, expected) in locs.iter().zip(&expected) {
@@ -738,8 +745,79 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    /// Batch reads below the chain's inactivity floor are refused on every node alike, and a
+    /// merkleized batch answers `None` at or past its tip, like an unmerkleized one.
+    #[boxed]
+    pub(crate) async fn run_reads_below_floor_refused<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        Operation<F, V>: EncodeShared + std::fmt::Debug,
+    {
+        // Locations 1 and 2 hold appends, and the commit at 3 raises the floor to 2.
+        let seed = db
+            .new_batch()
+            .append(V::Value::make(1))
+            .append(V::Value::make(2))
+            .merkleize(&db, None, Location::new(2))
+            .await
+            .unwrap();
+        (db, _) = db.apply_batch(seed).await.unwrap();
+        db = db.commit().await.unwrap();
+
+        // A batch built on the database uses its floor.
+        let batch = db.new_batch();
+        assert!(matches!(
+            batch.get(Location::new(1), &db).await,
+            Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(1)
+        ));
+        assert_eq!(
+            batch.get(Location::new(2), &db).await.unwrap(),
+            Some(V::Value::make(2))
+        );
+        assert!(matches!(
+            batch
+                .get_many(&[Location::new(1), Location::new(2)], &db)
+                .await,
+            Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(1)
+        ));
+
+        // A merkleized batch appending at 4 and raising the floor to 4 refuses location 2.
+        let parent = db
+            .new_batch()
+            .append(V::Value::make(3))
+            .merkleize(&db, None, Location::new(4))
+            .await
+            .unwrap();
+        assert!(matches!(
+            parent.get(Location::new(2), &db).await,
+            Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(2)
+        ));
+        let tip = parent.bounds().tip.size;
+        let locs = [Location::new(4), tip, tip + 1];
+        let mut individual = Vec::new();
+        for loc in locs {
+            individual.push(parent.get(loc, &db).await.unwrap());
+        }
+        assert_eq!(individual, vec![Some(V::Value::make(3)), None, None]);
+        assert_eq!(parent.get_many(&locs, &db).await.unwrap(), individual);
+
+        // Its unmerkleized child builds on the parent's floor.
+        let child = parent.new_batch::<Sha256>();
+        assert!(matches!(
+            child.get(Location::new(3), &db).await,
+            Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(3)
+        ));
+        assert_eq!(
+            child.get(Location::new(4), &db).await.unwrap(),
+            Some(V::Value::make(3))
+        );
+        db.destroy().await.unwrap();
+    }
+
     /// A surviving child chain merkleizes across a prune whose floor passed the chain
-    /// base without losing the nodes its graft needs.
+    /// base without losing the nodes it needs.
     #[boxed]
     pub(crate) async fn run_merkleize_across_prune<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
@@ -3139,15 +3217,14 @@ pub(crate) mod tests {
         let root_before = db.root();
         let last_commit_before = db.bounds().end - 1;
 
-        // Try to commit with a lower floor; apply_batch rejects.
-        let merkleized = db
+        // Try to commit with a lower floor; merkleize rejects.
+        let Err(err) = db
             .new_batch()
             .append(V::Value::make(3))
             .merkleize(&db, None, Location::new(1))
             .await
-            .unwrap();
-        let Err(err) = db.apply_batch(merkleized).await else {
-            panic!("expected apply_batch to fail");
+        else {
+            panic!("expected merkleize to fail");
         };
         assert!(
             matches!(err, Error::FloorRegressed(new, current) if *new == 1 && *current == 3),
@@ -3155,6 +3232,7 @@ pub(crate) mod tests {
         );
 
         // Reopen the partition and verify the rejected batch persisted nothing.
+        drop(db);
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
         assert_eq!(db.bounds().end - 1, last_commit_before);
@@ -3180,15 +3258,14 @@ pub(crate) mod tests {
         let floor = db.inactivity_floor_loc();
         let last_commit_loc = db.bounds().end - 1;
         let root = db.root();
-        let merkleized = db
+        let Err(err) = db
             .new_batch()
             .append(V::Value::make(1))
             .append(V::Value::make(2))
             .merkleize(&db, None, Location::new(999))
             .await
-            .unwrap();
-        let Err(err) = db.apply_batch(merkleized).await else {
-            panic!("expected apply_batch to fail");
+        else {
+            panic!("expected merkleize to fail");
         };
         assert!(
             matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 999 && *commit == 3),
@@ -3196,21 +3273,21 @@ pub(crate) mod tests {
         );
 
         // Reopen and confirm nothing persisted.
+        drop(db);
         let db = reopen(context.child("reopen_boundary")).await;
         assert_eq!(db.inactivity_floor_loc(), floor);
         assert_eq!(db.bounds().end - 1, last_commit_loc);
         assert_eq!(db.root(), root);
 
         // Boundary: floor == total_size (= commit_loc + 1) is also rejected.
-        let merkleized = db
+        let Err(err) = db
             .new_batch()
             .append(V::Value::make(3))
             .append(V::Value::make(4))
             .merkleize(&db, None, Location::new(4))
             .await
-            .unwrap();
-        let Err(err) = db.apply_batch(merkleized).await else {
-            panic!("expected apply_batch to fail");
+        else {
+            panic!("expected merkleize to fail");
         };
         assert!(
             matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 4 && *commit == 3),
@@ -3428,20 +3505,18 @@ pub(crate) mod tests {
             .merkleize(&db, None, Location::new(2))
             .await
             .unwrap();
-        // child: 1 append + commit at loc 4 with floor=1 (regressed from parent's floor=2).
-        let child = parent
-            .new_batch::<H>()
-            .append(V::Value::make(2))
-            .merkleize(&db, None, Location::new(1))
-            .await
-            .unwrap();
-
         let root_before = db.root();
         let last_commit_before = db.bounds().end - 1;
         let floor_before = db.inactivity_floor_loc();
 
-        let Err(err) = db.apply_batch(child).await else {
-            panic!("expected apply_batch to fail");
+        // child: 1 append + commit at loc 4 with floor=1 (regressed from parent's floor=2).
+        let Err(err) = parent
+            .new_batch::<H>()
+            .append(V::Value::make(2))
+            .merkleize(&db, None, Location::new(1))
+            .await
+        else {
+            panic!("expected merkleize to fail");
         };
         assert!(
             matches!(err, Error::FloorRegressed(new, prev) if *new == 1 && *prev == 2),
@@ -3449,6 +3524,7 @@ pub(crate) mod tests {
         );
 
         // Reopen the partition and verify the rejected chain persisted nothing.
+        drop(db);
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end - 1, last_commit_before);
@@ -3469,25 +3545,17 @@ pub(crate) mod tests {
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
-        // parent: 1 append + commit at loc 2. Declare floor = 3 (one past the commit).
-        let parent = db
+        // parent: 1 append + commit at loc 2. Declare floor = 3 (one past the commit). The parent
+        // is refused at merkleize, so no descendant can build on it.
+        let Err(err) = db
             .new_batch()
             .append(V::Value::make(1))
             .merkleize(&db, None, Location::new(3))
             .await
-            .unwrap();
-        // child: valid on its own (floor = 0 ≤ child's commit_loc), but parent's floor is bad.
-        let child = parent
-            .new_batch::<H>()
-            .append(V::Value::make(2))
-            .merkleize(&db, None, Location::new(0))
-            .await
-            .unwrap();
-
-        let Err(err) = db.apply_batch(child).await else {
-            panic!("expected apply_batch to fail");
+        else {
+            panic!("expected merkleize to fail");
         };
-        // Error should identify the ancestor's commit_loc (2), not the tip's.
+        // Error should identify the ancestor's commit_loc (2).
         assert!(
             matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 3 && *commit == 2),
             "unexpected error: {err:?}"

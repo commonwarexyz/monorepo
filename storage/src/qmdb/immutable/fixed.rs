@@ -547,6 +547,8 @@ mod tests {
         test_fixed_merkleize_across_prune => run_merkleize_across_prune, open;
         test_fixed_stale_fork_refuses => run_stale_fork_refuses, open;
         test_fixed_snapshot => run_snapshot, open;
+        test_fixed_reads_ignore_inactive_operations => run_reads_ignore_inactive_operations, open;
+        test_fixed_proof_refused_after_sibling_apply => run_proof_refused_after_sibling_apply, open;
     }
 
     #[boxed]
