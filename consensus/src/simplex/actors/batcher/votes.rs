@@ -365,9 +365,8 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"test";
 
-    // Helper function to create a sample digest
     fn sample_digest(v: u8) -> Sha256 {
-        Sha256::from([v; 32]) // Simple fixed digest for testing
+        Sha256::from([v; 32])
     }
 
     #[test]
