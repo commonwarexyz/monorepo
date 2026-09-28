@@ -5,7 +5,7 @@ use crate::stateful::{
             mailbox::Message,
             verifications::{Handler as Verifications, Request as VerificationRequest},
         },
-        processor::{Applied, Processor},
+        processor::{Applied, Processor, Publication},
     },
     db::{Barrier, DatabaseSet, Publisher, SnapshotsOf},
 };
@@ -444,11 +444,7 @@ where
                             .await;
                         drop(boundary);
                         async {
-                            let Applied {
-                                snapshots,
-                                barrier,
-                                prune,
-                            } = verifications
+                            let Applied { publication, prune } = verifications
                                 .drive(self.processor.finalize(
                                     &self.context,
                                     block.as_ref(),
@@ -460,19 +456,22 @@ where
                                 "applied finalized database batch"
                             );
 
-                            // Snapshots are captured when a barrier starts; they
-                            // serve immediately, ahead of that barrier completing.
-                            let height = block.height();
-                            if let Some(snapshots) = snapshots {
-                                self.snapshot_publisher.publish(height, snapshots);
-                            }
-
                             // Acknowledge only once a barrier covers this height, so marshal's
                             // processed height never passes durable state and an unsynced suffix
                             // is replayed after restart.
+                            let height = block.height();
                             durability.record(height, acknowledgement);
-                            if let Some(barrier) = barrier {
-                                durability.set_barrier(height, barrier);
+
+                            // Snapshots serve immediately, ahead of the barrier that covers them.
+                            match publication {
+                                Publication::None => {}
+                                Publication::Snapshot(snapshots) => {
+                                    self.snapshot_publisher.publish(height, snapshots);
+                                }
+                                Publication::WithBarrier(snapshots, barrier) => {
+                                    self.snapshot_publisher.publish(height, snapshots);
+                                    durability.set_barrier(height, barrier);
+                                }
                             }
 
                             if let Some(prune) = prune {

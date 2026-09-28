@@ -111,7 +111,12 @@ where
     /// Resolvers that fetch state sync data from peers.
     pub resolvers: R,
 
-    /// Publishes the latest snapshots.
+    /// Publishes the latest snapshots for serving peers.
+    ///
+    /// Create it with [`Publisher::new`] and hand the returned
+    /// [`Subscriber`](crate::stateful::db::Subscriber), or a
+    /// [view](crate::stateful::db::Subscriber::view) of one database's snapshot, to each
+    /// [`p2p::Actor`](crate::stateful::db::p2p::Actor) that serves that database.
     pub snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Sync engine tuning knobs.

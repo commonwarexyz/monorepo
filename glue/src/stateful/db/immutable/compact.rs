@@ -231,6 +231,8 @@ where
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
     type Snapshot = compact::Snapshot<F, Operation<F, K, FixedEncoding<V>>, H::Digest>;
 
+    const CHEAP_SNAPSHOT: bool = true;
+
     async fn init(
         context: E,
         config: Self::Config,
@@ -305,6 +307,8 @@ where
     type Config = variable::CompactConfig<C, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
     type Snapshot = compact::Snapshot<F, Operation<F, K, VariableEncoding<V>>, H::Digest>;
+
+    const CHEAP_SNAPSHOT: bool = true;
 
     async fn init(
         context: E,

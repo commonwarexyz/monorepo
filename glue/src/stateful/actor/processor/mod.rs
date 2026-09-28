@@ -482,14 +482,22 @@ impl Cancellation for Verification {
     }
 }
 
+/// What serving receives from one finalization.
+pub(super) enum Publication<S> {
+    /// Nothing new: no barrier was requested, and the set's snapshots are not cheap.
+    None,
+    /// A snapshot of the applied state, captured without a barrier because the set's snapshots
+    /// are cheap (see [`DatabaseSet::CHEAP_SNAPSHOT`]).
+    Snapshot(S),
+    /// A snapshot of the applied state and the barrier started with it, which covers the block
+    /// and every earlier applied block.
+    WithBarrier(S, Barrier),
+}
+
 /// Result of applying a newly finalized block.
 pub(super) struct Applied<T, S> {
-    /// A snapshot of the database set, captured when the barrier started. `None` without a
-    /// barrier.
-    pub(super) snapshots: Option<S>,
-
-    /// Barrier covering the block, present only when the caller requested one.
-    pub(super) barrier: Option<Barrier>,
+    /// Snapshots to serve, with the barrier covering the block when the caller requested one.
+    pub(super) publication: Publication<S>,
 
     /// Prune that became due with this finalization.
     pub(super) prune: Option<Prune<T>>,
@@ -895,8 +903,8 @@ where
 
     /// Applies the next finalized `block` and discards cached state that does not descend from it.
     ///
-    /// Returns the prune that became due, if any, and, if `start_barrier` is set, a barrier covering
-    /// `block` and every earlier applied block. The processed anchor advances to `block` after the
+    /// Returns the prune that became due, if any, and the [`Publication`] for serving: with a
+    /// barrier covering `block` and every earlier applied block if `start_barrier` is set. The processed anchor advances to `block` after the
     /// application's `finalized` hook returns.
     ///
     /// Panics if `block` does not have the next height and the processed anchor as its parent,
@@ -981,11 +989,13 @@ where
             )
             .await;
         self.execution.databases.apply(batch).await;
-        let (snapshots, barrier) = if start_barrier {
+        let publication = if start_barrier {
             let (snapshots, barrier) = self.execution.databases.finalize().await;
-            (Some(snapshots), Some(barrier))
+            Publication::WithBarrier(snapshots, barrier)
+        } else if A::Databases::CHEAP_SNAPSHOT {
+            Publication::Snapshot(self.execution.databases.snapshot().await)
         } else {
-            (None, None)
+            Publication::None
         };
         self.app
             .finalized(
@@ -1002,11 +1012,7 @@ where
         self.execution.set_processed(finalized);
         timer.observe(context);
 
-        Applied {
-            snapshots,
-            barrier,
-            prune,
-        }
+        Applied { publication, prune }
     }
 
     fn cache_pending(&self, digest: BlockDigest<A, E>, entry: PendingEntry<A, E>) -> bool {
@@ -1611,8 +1617,8 @@ where
 mod tests {
     use super::{
         Applied, Disposition, FinalizationBoundary, PendingEntry, PrepareBatchesError, Processor,
-        Prune, Pruning, ReplayClaim, ReplayFlights, ReplayTracking, VerificationProgress,
-        fetch_ancestor,
+        Prune, Pruning, Publication, ReplayClaim, ReplayFlights, ReplayTracking,
+        VerificationProgress, fetch_ancestor,
     };
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
@@ -1655,6 +1661,16 @@ mod tests {
         },
         time::Duration,
     };
+
+    impl<S> Publication<S> {
+        /// The barrier this publication started, if any.
+        fn into_barrier(self) -> Option<Barrier> {
+            match self {
+                Self::WithBarrier(_, barrier) => Some(barrier),
+                Self::None | Self::Snapshot(_) => None,
+            }
+        }
+    }
 
     async fn assert_durable(barrier: Option<Barrier>) {
         assert!(
@@ -2265,10 +2281,12 @@ mod tests {
             if self.processor.redelivered(&block) {
                 return false;
             }
-            let Applied { barrier, .. } = self
+            let barrier = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block, true)
-                .await;
+                .await
+                .publication
+                .into_barrier();
             assert_durable(barrier).await;
             true
         }
@@ -2282,14 +2300,11 @@ mod tests {
                 <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::SyncTargets,
             >,
         > {
-            let Applied {
-                snapshots: _,
-                barrier,
-                prune,
-            } = self
+            let Applied { publication, prune } = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block, true)
                 .await;
+            let barrier = publication.into_barrier();
             assert_durable(barrier).await;
             prune
         }
@@ -2621,7 +2636,7 @@ mod tests {
             release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.publication.into_barrier();
             assert_durable(barrier).await;
         });
     }
@@ -2654,7 +2669,7 @@ mod tests {
             assert!(forked.is_ok(), "finalizing winner should remain forkable");
 
             drop(read);
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.publication.into_barrier();
             assert_durable(barrier).await;
         });
     }
@@ -2705,7 +2720,7 @@ mod tests {
             release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.publication.into_barrier();
             assert_durable(barrier).await;
 
             assert!(execution.cache_pending(
@@ -2809,7 +2824,7 @@ mod tests {
             finalized_release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.publication.into_barrier();
             assert_durable(barrier).await;
         });
     }
@@ -2894,7 +2909,7 @@ mod tests {
             finalized_release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.publication.into_barrier();
             assert_durable(barrier).await;
             assert!(matches!(
                 observations.lock().as_slice(),
@@ -2954,7 +2969,7 @@ mod tests {
             assert_eq!(owner.await, Err(PrepareBatchesError::Cancelled));
             owner_release.closed().await;
 
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.publication.into_barrier();
             assert_durable(barrier).await;
             assert_eq!(
                 probe.calls(),
@@ -3019,7 +3034,7 @@ mod tests {
                 Ok(()),
                 "retained waiter should join recovery of the finalizing winner",
             );
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.publication.into_barrier();
             assert_durable(barrier).await;
             assert_eq!(probe.calls(), 1, "winner should be reconstructed once");
             assert_eq!(harness.processor.processed().digest, winner.digest());
@@ -3084,7 +3099,7 @@ mod tests {
             release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.publication.into_barrier();
             assert_durable(barrier).await;
         });
     }
@@ -3170,7 +3185,7 @@ mod tests {
             finalized_release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.publication.into_barrier();
             assert_durable(barrier).await;
         });
     }

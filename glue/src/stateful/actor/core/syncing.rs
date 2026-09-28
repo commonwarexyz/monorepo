@@ -282,7 +282,12 @@ where
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(block.as_ref()) {
-                        let Applied { prune, .. } = processor
+                        // A cheap snapshot is not published here: the handoff publishes once
+                        // when its barrier starts.
+                        let Applied {
+                            publication: _,
+                            prune,
+                        } = processor
                             .finalize(self.context.as_present(), block.as_ref(), false)
                             .await;
                         pending_prune = prune.or(pending_prune);

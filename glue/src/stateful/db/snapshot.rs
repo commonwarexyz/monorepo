@@ -1,12 +1,14 @@
 //! Serving the latest published database snapshots.
 //!
 //! [`Publisher::new`] creates a [`Publisher`] and a [`Subscriber`] over a shared
-//! cell containing the latest published snapshots. Each finalization publishes
-//! its snapshots as soon as the block applies, so served state may run ahead of
-//! disk. That is safe because peers verify everything they fetch against a
-//! finalized root, and finalized state survives any local crash by replay.
-//! Publication is monotone by construction, since finalizations arrive in
-//! order.
+//! cell containing the latest published snapshots. Snapshots are captured and
+//! published when a barrier starts over applied state, or after every finalized
+//! block when the set's snapshots are cheap (see
+//! [`DatabaseSet::CHEAP_SNAPSHOT`](super::DatabaseSet::CHEAP_SNAPSHOT)). Served
+//! state may therefore run ahead of disk. That is safe because peers verify
+//! everything they fetch against a finalized root, and finalized state survives
+//! any local crash by replay. Every publish site labels at the latest applied
+//! height, so publication stays monotone (asserted in [`Publisher::publish`]).
 //!
 //! A prune leaves the served snapshots pinning the pruned storage, so the prune
 //! path captures and publishes fresh snapshots right after pruning.
@@ -18,7 +20,7 @@ use commonware_runtime::{
 };
 use commonware_utils::sync::Mutex;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::sync::Arc;
+use std::{mem::replace, sync::Arc};
 
 enum State<S> {
     Empty,
@@ -93,9 +95,16 @@ impl<S> Publisher<S> {
             "published height must not regress"
         );
         self.last_published = Some(height);
-        *self.cell.state.lock() = State::Published(Arc::new(snapshots));
+        let replaced = replace(
+            &mut *self.cell.state.lock(),
+            State::Published(Arc::new(snapshots)),
+        );
         let _ = self.cell.metrics.height.try_set(height.get());
         self.cell.metrics.published.inc();
+
+        // Releasing the last reference to a snapshot can close storage handles, so do it
+        // after the lock that readers take.
+        drop(replaced);
     }
 }
 
@@ -103,8 +112,9 @@ impl<S> Drop for Publisher<S> {
     fn drop(&mut self) {
         // Without a publisher the served snapshots would only grow staler. Close
         // the cell so reads decline instead.
-        *self.cell.state.lock() = State::Closed;
+        let replaced = replace(&mut *self.cell.state.lock(), State::Closed);
         self.cell.metrics.height.set(-1);
+        drop(replaced);
     }
 }
 
