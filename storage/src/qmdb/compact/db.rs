@@ -108,6 +108,12 @@ where
     }
 }
 
+/// The partition a pending compact-sync import will replace.
+struct Destination<E, C> {
+    context: E,
+    cfg: variable::Config<C>,
+}
+
 /// Where a compact db's witnesses live.
 enum Storage<E, F, D, O>
 where
@@ -121,10 +127,9 @@ where
 
     /// A compact-sync import not yet journaled. The partition keeps its previous contents,
     /// unopened, until the first apply or durability operation replaces them with the tip.
-    Replacing {
-        context: E,
-        cfg: variable::Config<O::Cfg>,
-    },
+    ///
+    /// Boxed so the variant does not enlarge every db, and every future that moves one.
+    Replacing(Box<Destination<E, O::Cfg>>),
 }
 
 impl<E, F, D, O> Storage<E, F, D, O>
@@ -143,7 +148,8 @@ where
     async fn open(self, tip: &Witness<F, D, O>) -> Result<OpenJournal<E, F, D, O>, Error<F>> {
         match self {
             Self::Open(open) => Ok(open),
-            Self::Replacing { context, cfg } => {
+            Self::Replacing(destination) => {
+                let Destination { context, cfg } = *destination;
                 let journal = witness::Journal::init_at_size(context, cfg, 1).await?;
                 let open = OpenJournal {
                     journal,
@@ -286,7 +292,7 @@ where
         let Rebuilt { merkle, tip } = witness::restore::<F, O, H, S>(strategy, imported)?;
         Ok(Self {
             merkle,
-            storage: Storage::Replacing { context, cfg },
+            storage: Storage::Replacing(Box::new(Destination { context, cfg })),
             tip,
         })
     }
@@ -523,7 +529,8 @@ where
         let journal = match self.storage {
             Storage::Open(open) => open.journal,
             // Reset rather than open, so the previous contents are never decoded.
-            Storage::Replacing { context, cfg } => {
+            Storage::Replacing(destination) => {
+                let Destination { context, cfg } = *destination;
                 witness::Journal::init_at_size(context, cfg, 0).await?
             }
         };
