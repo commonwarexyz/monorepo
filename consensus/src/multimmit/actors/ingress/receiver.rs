@@ -103,13 +103,19 @@ impl<E: Clock, R: Receiver, H: Hasher, V: Variant, S: Strategy> IngressReceiver<
                         continue;
                     };
                     let received_at = self.context.current();
+                    let received_elapsed_ns = crate::multimmit::diagnostics::elapsed_ns();
+                    crate::multimmit::diagnostics::record("wire_received", &[("peer", &peer), ("plane", &self.plane), ("bytes", &bytes.len())]);
                     let config = self.config.clone();
                     let plane = self.plane;
                     let strategy = self.strategy.clone();
                     let weight = bytes.len();
                     self.jobs.push(async move {
                         let (_, outcome) = offload(strategy, weight, Span::none(), move |_| {
-                            prepare::<H, V, _>(plane, peer, bytes, &config, received_at)
+                            let outcome = prepare::<H, V, _>(plane, peer, bytes, &config, received_at);
+                            if let Some(stamp) = received_elapsed_ns && let IngressOutcome::Ready { group, .. } = &outcome {
+                                group.diagnostic_received::<H>(stamp);
+                            }
+                            outcome
                         })
                         .await;
                         outcome.unwrap_or(IngressOutcome::Panicked)

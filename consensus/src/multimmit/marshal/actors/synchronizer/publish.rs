@@ -111,6 +111,11 @@ where
             Some(index) => index.next().ok_or(Error::OutputExhausted)?,
             None => OutputIndex::ZERO,
         };
+        crate::multimmit::diagnostics::block(
+            "order_planned",
+            reference,
+            &[("index", &index.get()), ("slot", &slot)],
+        );
         self.committed = Some(index);
         batch.output_bytes = batch.output_bytes.saturating_add(encoded_len);
         batch.outputs.push(PlannedOutput {

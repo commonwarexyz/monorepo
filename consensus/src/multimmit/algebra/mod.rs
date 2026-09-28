@@ -15,6 +15,7 @@ pub(crate) mod fuzz;
 mod reference;
 
 use crate::multimmit::types::ChainId;
+pub(crate) use path::{ProposalPaths, VotePaths};
 pub(crate) use tips::{FinalTips, PoolExtractor, Tips, VqcExtraction};
 pub(crate) use validate::{
     CertificateDerivations, DerivedVqc, ValidatedLqc, ValidatedVqc, ValidatedVqcParts,

@@ -107,6 +107,7 @@
 //! - [`scheme`]: the aggregate and threshold signatures behind votes and certificates.
 
 pub mod config;
+pub mod diagnostics;
 #[cfg(any(test, feature = "mocks"))]
 pub(crate) mod fuzz;
 pub mod scheme;

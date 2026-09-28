@@ -404,6 +404,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         {
             return Ok(WorkStatus::Requeue);
         }
+        if self.vote_hold == Some(self.durable.state.view) {
+            return Ok(WorkStatus::Complete);
+        }
         // Vote with the DA frontier the background pass has already advanced instead of reserving
         // a fresh DA vote on the critical path, so the ordinary vote never waits on the
         // data-availability plane. The background reservation (reserve_ready_da_votes) advances

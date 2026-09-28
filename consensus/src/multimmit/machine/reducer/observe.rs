@@ -59,6 +59,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 id,
                 artifact,
                 provisions,
+                received_at: _,
             } = identified;
             let observation = Observation::new(cohort, index as u32);
             if let Some(rejection) = self.precheck_unidentified(&artifact) {

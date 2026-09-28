@@ -160,6 +160,26 @@ enum Mode {
 pub async fn run(context: tokio::Context, config: RunConfig) {
     let index = config.index();
     let key = config.identity.key;
+    let _diagnostic_guard = config.diagnostic.as_ref().map(|capture| {
+        crate::diagnostics::install(
+            &capture.path,
+            key,
+            capture.warmup,
+            capture.cohort,
+            capture.drain,
+        )
+        .expect("diagnostic capture opens")
+    });
+    commonware_consensus::multimmit::diagnostics::record(
+        "node_config",
+        &[
+            ("participant", &index),
+            ("participants", &config.network.participants),
+            ("producers", &config.network.producers),
+            ("proposal_policy", &config.tuning.proposal_policy),
+            ("tuning", &config.tuning),
+        ],
+    );
     let port = config.identity.port;
     let committee = committee::derive(&config);
     let producer_chain = committee
@@ -326,6 +346,16 @@ pub async fn run(context: tokio::Context, config: RunConfig) {
     )
     .await
     .expect("engine opens");
+    let engine = match config
+        .tuning
+        .vote_pacing(participants)
+        .expect("validated pacing")
+    {
+        Some(pacing) => engine
+            .with_vote_pacing(pacing)
+            .expect("validated committee dimensions"),
+        None => engine,
+    };
     let mut running = engine.start(Planes {
         data,
         consensus,

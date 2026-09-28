@@ -276,6 +276,37 @@ impl<E: Clock + Spawner + Metrics> Actor<E> {
                     context,
                     Body::junk(seed, context, body_size),
                 ));
+                if commonware_consensus::multimmit::diagnostics::enabled() {
+                    commonware_consensus::multimmit::diagnostics::block(
+                        "block_constructed",
+                        block.reference(),
+                        &[
+                            (
+                                "parent",
+                                &commonware_consensus::multimmit::diagnostics::Hex(
+                                    block.header().parent().as_ref(),
+                                ),
+                            ),
+                            ("body_digest", &block.header().body_digest()),
+                            (
+                                "submission_unix_ns",
+                                &input_ready_at.map(|at| {
+                                    at.duration_since(SystemTime::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_nanos()
+                                }),
+                            ),
+                            (
+                                "construction_unix_ns",
+                                &construction_at
+                                    .duration_since(SystemTime::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_nanos(),
+                            ),
+                            ("synthetic_saturated", &input_ready_at.is_none()),
+                        ],
+                    );
+                }
                 Completion::Built {
                     block,
                     construction_at,
@@ -349,6 +380,7 @@ impl<E: Clock + Spawner + Metrics> Actor<E> {
                     warn!(?reference, %error, "cannot stage proposed block");
                     return;
                 }
+                commonware_consensus::multimmit::diagnostics::block("block_staged", reference, &[]);
                 let body_digest = block.header().body_digest();
                 debug!(
                     chain = reference.chain().get(),

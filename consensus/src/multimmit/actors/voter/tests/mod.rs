@@ -4,6 +4,7 @@ mod admission;
 mod discharge;
 mod durability;
 mod harness;
+mod pacing;
 mod production;
 mod recovery;
 mod relay;

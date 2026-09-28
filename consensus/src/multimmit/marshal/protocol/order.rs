@@ -435,6 +435,36 @@ impl<D: Digest> FinalSweep<D> {
         let total = passes.total()?;
         passes.halt(proposed, &settled);
         let planned = passes.total()?;
+        if crate::multimmit::diagnostics::enabled() {
+            let sweep = crate::multimmit::diagnostics::elapsed_ns();
+            for (chain, tip) in target.iter().enumerate() {
+                crate::multimmit::diagnostics::block(
+                    "sweep_chain",
+                    *tip,
+                    &[
+                        ("sweep", &sweep),
+                        ("base_height", &base[chain].height().get()),
+                        ("proposed_height", &proposed[chain].get()),
+                        ("settled", &settled[chain]),
+                        ("positional_kept", &passes.positional.maxima[chain]),
+                        ("extension_kept", &passes.extension.maxima[chain]),
+                    ],
+                );
+            }
+        }
+        crate::multimmit::diagnostics::record(
+            "final_sweep",
+            &[
+                ("base", &base),
+                ("target", &target),
+                ("proposed", &proposed),
+                ("settled", &settled),
+                ("positional_kept", &passes.positional.maxima),
+                ("extension_kept", &passes.extension.maxima),
+                ("planned", &planned),
+                ("unhalted", &total),
+            ],
+        );
         Ok(Self {
             stream: SlotStream { target, passes },
             halted: planned < total,

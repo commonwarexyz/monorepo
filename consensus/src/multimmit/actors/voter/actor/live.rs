@@ -79,6 +79,7 @@ pub(crate) struct Live<T: VoterTypes, S> {
     pub(crate) leaders: LeaderSchedule,
     pub(crate) participant: Option<Participant>,
     pub(crate) limits: VoterLimits,
+    pub(crate) pacing: Option<super::pacing::Pacing<DigestOf<T>>>,
 
     pub(crate) inbox: Inbox<T::PublicKey, T::Variant, DigestOf<T>>,
     /// A queued cohort that did not fit the last merged step; it leads the next one.
@@ -204,7 +205,12 @@ where
                 let root = self.round_span();
                 root.in_scope(|| self.chain_update(update)).at(&root)?;
             }
+            RuntimeEvent::VoteRelease => self.release_vote_pacing(),
             RuntimeEvent::ViewTimer => {
+                if let Some(pacing) = &mut self.pacing {
+                    // The cutoff input owns the held vote even while queued behind other work.
+                    pacing.deadline = None;
+                }
                 let armed = self.timers.take_view().expect("armed timer fired");
                 self.submit_view_timeout(armed.timer, armed.reason.as_str())
                     .at(self.telemetry.round_span())?;
@@ -243,6 +249,7 @@ where
         let started = self.context.current();
         let mut yielded = false;
         loop {
+            self.refresh_vote_pacing();
             if !self.persistence.has_capacity() {
                 break;
             }
@@ -281,6 +288,14 @@ where
                 }
                 CoreTurn::Input(serviced) => {
                     self.hooks.serviced(&serviced);
+                    crate::multimmit::diagnostics::record(
+                        "input_serviced",
+                        &[
+                            ("ticket", &serviced.ticket),
+                            ("status", serviced.transition.status()),
+                            ("final_chunk", &serviced.final_chunk),
+                        ],
+                    );
                     if serviced.observed_items > 0 {
                         self.correlation
                             .admit_observations(
@@ -383,6 +398,17 @@ where
 
     fn report_activities(&mut self, activities: Vec<Activity<T::Variant, DigestOf<T>>>) {
         for activity in activities {
+            match &activity {
+                Activity::ProtocolAccepted {
+                    artifact_id,
+                    artifact,
+                } => crate::multimmit::diagnostics::artifact::<T::Hasher, T::Variant>(
+                    "artifact_accepted",
+                    *artifact_id,
+                    artifact,
+                ),
+                _ => crate::multimmit::diagnostics::record("activity", &[("activity", &activity)]),
+            }
             if let Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } =
                 &activity
             {
@@ -656,6 +682,23 @@ where
                 generation,
                 artifact,
             } => {
+                if let Some(pacing) = &mut self.pacing
+                    && let Artifact::LeaderBlock(block) = artifact.as_ref()
+                {
+                    pacing.observe(
+                        artifact.id::<T::Hasher>(),
+                        block.block().round().view(),
+                        self.context.current(),
+                        self.machine.machine().view(),
+                    );
+                }
+                if crate::multimmit::diagnostics::enabled() {
+                    crate::multimmit::diagnostics::artifact::<T::Hasher, T::Variant>(
+                        "artifact_signed",
+                        artifact.id::<T::Hasher>(),
+                        &artifact,
+                    );
+                }
                 self.track_transition(
                     |core| {
                         core.enqueue(Input::EffectCompleted(EffectCompletion::signed(
@@ -672,6 +715,15 @@ where
                 generation,
                 artifacts,
             } => {
+                if crate::multimmit::diagnostics::enabled() {
+                    for artifact in &artifacts {
+                        crate::multimmit::diagnostics::artifact::<T::Hasher, T::Variant>(
+                            "artifact_signed",
+                            artifact.id::<T::Hasher>(),
+                            artifact,
+                        );
+                    }
+                }
                 self.track_transition(
                     |core| {
                         core.enqueue(Input::EffectCompleted(EffectCompletion::signed(
@@ -775,6 +827,25 @@ where
     ) -> Result<(), Fatal> {
         let arrived_at = self.context.current();
         for identified in &artifacts {
+            if let Some(pacing) = &mut self.pacing
+                && let Artifact::LeaderBlock(block) = &identified.artifact
+                && let Some(received) = identified.received_at
+            {
+                pacing.observe(
+                    identified.id,
+                    block.block().round().view(),
+                    received,
+                    self.machine.machine().view(),
+                );
+            }
+            crate::multimmit::diagnostics::record(
+                "voter_observed",
+                &[
+                    ("artifact", &identified.id),
+                    ("kind", &identified.artifact.kind()),
+                    ("view", &identified.artifact.view()),
+                ],
+            );
             if let Artifact::TransactionBlock(block) = &identified.artifact {
                 self.telemetry
                     .record_arrival(block.header().block_ref::<T::Hasher>(), arrived_at);

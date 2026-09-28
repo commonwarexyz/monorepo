@@ -5,6 +5,7 @@ mod bench;
 mod committee;
 mod config;
 mod deploy;
+mod diagnostics;
 mod gui;
 mod marshal;
 mod node;

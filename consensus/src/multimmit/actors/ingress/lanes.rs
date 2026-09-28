@@ -65,7 +65,8 @@ pub(super) struct Group<V: Variant, D: Digest> {
 }
 
 impl<V: Variant, D: Digest> Group<V, D> {
-    pub(super) fn one(artifact: IdentifiedArtifact<V, D>, received_at: SystemTime) -> Self {
+    pub(super) fn one(mut artifact: IdentifiedArtifact<V, D>, received_at: SystemTime) -> Self {
+        artifact.received_at = Some(received_at);
         Self {
             first: Entry::new(artifact),
             second: None,
@@ -74,13 +75,49 @@ impl<V: Variant, D: Digest> Group<V, D> {
     }
 
     pub(super) fn pair(
-        [first, second]: [IdentifiedArtifact<V, D>; 2],
+        [mut first, mut second]: [IdentifiedArtifact<V, D>; 2],
         received_at: SystemTime,
     ) -> Self {
+        first.received_at = Some(received_at);
+        second.received_at = Some(received_at);
         Self {
             first: Entry::new(first),
             second: Some(Box::new(Entry::new(second))),
             received_at,
+        }
+    }
+
+    pub(super) fn diagnostic_received<H: commonware_cryptography::Hasher<Digest = D>>(
+        &self,
+        received_elapsed_ns: u128,
+    ) {
+        for entry in std::iter::once(&self.first).chain(self.second.as_deref()) {
+            let artifact = &entry.artifact.artifact;
+            let id = entry.artifact.id;
+            crate::multimmit::diagnostics::record(
+                "artifact_received",
+                &[
+                    ("artifact", &id),
+                    ("kind", &artifact.kind()),
+                    ("view", &artifact.view().map(|view| view.get())),
+                    ("received_elapsed_ns", &received_elapsed_ns),
+                ],
+            );
+            if let Artifact::TransactionBlock(block) = artifact {
+                crate::multimmit::diagnostics::block(
+                    "block_received",
+                    block.header().block_ref::<H>(),
+                    &[
+                        ("artifact", &id),
+                        (
+                            "parent",
+                            &crate::multimmit::diagnostics::Hex(block.header().parent().as_ref()),
+                        ),
+                        ("body_digest", &block.header().body_digest()),
+                        ("received_elapsed_ns", &received_elapsed_ns),
+                    ],
+                );
+            }
         }
     }
 

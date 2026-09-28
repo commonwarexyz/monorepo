@@ -416,6 +416,13 @@ where
             outputs,
             ..
         } = pending;
+        crate::multimmit::diagnostics::record(
+            "order_durable",
+            &[(
+                "through",
+                &publication.checkpoint.committed().map(|index| index.get()),
+            )],
+        );
         self.commits.durable = publication.checkpoint.clone();
         match &mut self.commits.cleanup {
             Some(cleanup) => cleanup.coalesce(publication.cleanup),

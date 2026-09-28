@@ -134,6 +134,10 @@ where
             {
                 continue;
             }
+            crate::multimmit::diagnostics::record(
+                "direct_sweep",
+                &[("fact", &fact), ("emitted", &self.state.emitted())],
+            );
             let Ok(sweep) = FinalSweep::new(
                 self.state.ordered(),
                 fact.blocks().to_vec(),
@@ -261,6 +265,14 @@ where
             self.state.ordered().to_vec(),
             self.state.ordered().to_vec(),
         )?;
+        crate::multimmit::diagnostics::record(
+            "lqc_sweep",
+            &[
+                ("view", &selected.view),
+                ("proof", &selected.id),
+                ("emitted", &self.state.emitted()),
+            ],
+        );
         let sweep =
             preview.final_sweep::<H, V>(&selected.proof, self.codec, self.state.ordered())?;
         self.sweep(sweep.into_stream(), batch).await?;
@@ -340,6 +352,15 @@ where
         batch: &mut PublicationBatch<H, V, B>,
     ) -> Result<(), Error> {
         let emitted = self.state.emitted().to_vec();
+        crate::multimmit::diagnostics::record(
+            "history_open",
+            &[
+                ("commitment", &link.commitment),
+                ("record", &link.record),
+                ("ordered", &self.state.ordered()),
+                ("emitted", &self.state.emitted()),
+            ],
+        );
         let mut stream = SlotStream::new(
             self.state.ordered(),
             link.record.tips(),
@@ -350,6 +371,7 @@ where
             .await?;
         self.state
             .validate_opening::<H>(link.commitment, &link.record, &plan.common)?;
+        crate::multimmit::diagnostics::history(link.commitment, &link.record, self.floor_view);
         self.drive(&mut stream, &emitted, &plan.forward, batch)
             .await?;
         self.record_opening(link, batch).await
@@ -377,6 +399,19 @@ where
             }
             return Ok(());
         };
+        if crate::multimmit::diagnostics::enabled() {
+            for link in &links {
+                crate::multimmit::diagnostics::record(
+                    "history_open",
+                    &[
+                        ("commitment", &link.commitment),
+                        ("record", &link.record),
+                        ("ordered", &self.state.ordered()),
+                        ("emitted", &self.state.emitted()),
+                    ],
+                );
+            }
+        }
         let mut stream = history_order(self.state.ordered(), &links)?.into_iter();
 
         // Validate every opening before the first output mutates ordering state. The single
@@ -389,6 +424,7 @@ where
         for link in &links {
             preview.validate_opening::<H>(link.commitment, &link.record, link.record.tips())?;
             preview.finish_opening::<H>(link.commitment, &link.record)?;
+            crate::multimmit::diagnostics::history(link.commitment, &link.record, self.floor_view);
         }
 
         self.drive(&mut stream, &emitted, &staged.forward, batch)

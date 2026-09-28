@@ -480,6 +480,10 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
         !self.queues[Lane::PersistenceCompletion.index()].is_empty()
     }
 
+    pub(crate) fn hold_vote(&mut self, view: Option<crate::types::View>) {
+        self.machine.hold_vote(view);
+    }
+
     /// Returns the machine this core schedules.
     pub(crate) const fn machine(&self) -> &Machine<H, V> {
         &self.machine

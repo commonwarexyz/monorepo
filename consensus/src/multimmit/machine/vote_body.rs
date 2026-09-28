@@ -200,6 +200,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 self.config,
             )
             .map_err(|_| ChainError::Context)?;
+            crate::multimmit::diagnostics::vote_paths::<H, V>(&pass.leader, &body);
             let stats = self.vote_build_stats(pass);
             return Ok(VoteBodyProgress::Complete { body, stats });
         }
@@ -326,12 +327,14 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             extensions.push(extension);
         }
 
-        VoteBody::for_leader(
+        let body = VoteBody::for_leader(
             DigestedLeader::new::<H>(leader),
             positions,
             extensions,
             config,
         )
-        .map_err(|_| ChainError::Context)
+        .map_err(|_| ChainError::Context)?;
+        crate::multimmit::diagnostics::vote_paths::<H, V>(leader, &body);
+        Ok(body)
     }
 }

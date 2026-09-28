@@ -10,6 +10,7 @@ mod crypto;
 mod dispatch;
 mod hooks;
 mod live;
+mod pacing;
 mod persist;
 mod publish;
 mod sources;
@@ -266,6 +267,7 @@ pub(crate) struct Actor<T: VoterTypes> {
     hooks: T::Hooks,
     /// Overrides the persistence actor's command capacity.
     journal_capacity: Option<NonZeroUsize>,
+    pacing: Option<pacing::Pacing<DigestOf<T>>>,
     /// The persistence actor's flush channel, opened before the actor starts.
     flushes: persistence::Flushes,
 }
@@ -341,6 +343,7 @@ impl<T: VoterTypes> Actor<T> {
                 metrics,
                 hooks,
                 journal_capacity: None,
+                pacing: None,
                 flushes: persistence::Flushes::default(),
             },
             mailbox,
@@ -357,6 +360,15 @@ impl<T: VoterTypes> Actor<T> {
     #[cfg(test)]
     pub(crate) const fn skip_timeout(&self) -> Option<Duration> {
         self.config.limits.skip_timeout
+    }
+
+    pub(crate) fn with_vote_pacing(
+        mut self,
+        config: crate::multimmit::config::VotePacing,
+    ) -> Result<Self, crate::multimmit::config::PacingError> {
+        config.validate_participants(self.config.scheme.codec_config().participants())?;
+        self.pacing = Some(pacing::Pacing::new(config));
+        Ok(self)
     }
 
     /// Bounds the persistence actor's command queue.
@@ -390,6 +402,7 @@ impl<T: VoterTypes> Actor<T> {
                 metrics,
                 hooks,
                 journal_capacity,
+                pacing,
                 flushes,
                 ..
             } = self;
@@ -405,6 +418,7 @@ impl<T: VoterTypes> Actor<T> {
                 metrics,
                 hooks,
                 journal_capacity,
+                pacing,
                 flushes,
             });
             let live = match starting.run().await {

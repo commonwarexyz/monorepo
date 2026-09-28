@@ -131,6 +131,14 @@ impl<D: Digest> Telemetry<D> {
         if let Some(started_at) = self.view_started_at.get(&self.round_view) {
             self.metrics.round_latency.observe_between(*started_at, now);
         }
+        crate::multimmit::diagnostics::record(
+            "view_entered",
+            &[
+                ("epoch", &self.epoch),
+                ("previous", &self.round_view),
+                ("view", &view),
+            ],
+        );
         self.round_view = view;
         self.view_started_at.insert(view, now);
         self.round_span = round_span(self.epoch, view);

@@ -291,7 +291,7 @@ struct FinalityProof<V: Variant, D: Digest> {
 }
 
 /// The verification verdict of one finality claim.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 enum ClaimVerdict {
     Pending,
     Rejected,
@@ -982,8 +982,29 @@ impl<V: Variant, D: Digest> DirectPool<V, D> {
             .insert::<H, V>(&self.leader, signer, &vote.body)
             .is_err()
         {
+            crate::multimmit::diagnostics::record(
+                "pool_vote_rejected",
+                &[
+                    ("round", &self.leader.round()),
+                    ("leader", &vote.body.leader()),
+                    ("artifact", &vote.id),
+                    ("signer", &signer),
+                ],
+            );
             return Inserted::Rejected;
         }
+        crate::multimmit::diagnostics::record(
+            "pool_vote_inserted",
+            &[
+                ("round", &self.leader.round()),
+                ("leader", &vote.body.leader()),
+                ("artifact", &vote.id),
+                ("evidence", &vote.evidence),
+                ("observation", &vote.observation),
+                ("signer", &signer),
+                ("votes", &self.extractor.len()),
+            ],
+        );
         self.votes[usize::from(signer)] = Some(vote);
         if matches!(self.phase, PoolPhase::Collecting { .. }) {
             let position = self.signers.partition_point(|held| *held < signer);
@@ -1042,6 +1063,29 @@ impl<V: Variant, D: Digest> DirectPool<V, D> {
         let PoolPhase::Finalized { tips, .. } = &self.phase else {
             unreachable!("the pool finalized above");
         };
+        if crate::multimmit::diagnostics::enabled() {
+            for (chain, reference) in fact.blocks().iter().enumerate() {
+                crate::multimmit::diagnostics::block(
+                    "finalized_tip",
+                    *reference,
+                    &[
+                        ("epoch", &fact.round().epoch().get()),
+                        ("view", &fact.round().view().get()),
+                        ("leader", &fact.leader()),
+                        ("proof", &fact.id()),
+                        ("first", &first),
+                        ("votes", &fact.votes()),
+                        ("proposed_height", &fact.proposed()[chain].get()),
+                        ("position", &fact.positions()[chain].get()),
+                        ("settled", &fact.settled()[chain]),
+                    ],
+                );
+            }
+        }
+        crate::multimmit::diagnostics::record(
+            "local_finality",
+            &[("first", &first), ("fact", &fact)],
+        );
         let commitments = self.extractor.selected(self.leader.round().epoch(), tips);
         Ok(Some(if first {
             FinalityUpdate::Finalized(fact, commitments)
@@ -1325,6 +1369,10 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         let reservations =
             PoolReservations(keys.try_map(|key| self.reserve_pool(profile, key, observation))?);
 
+        crate::multimmit::diagnostics::record(
+            "pool_claim",
+            &[("artifact", &id), ("observation", &observation)],
+        );
         let claim = FinalityClaim::new(observation, Arc::clone(&artifact), reservations);
         let owner = claim.owner();
         debug_assert!(
@@ -1448,6 +1496,14 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
             .claims
             .get_mut(&id)
             .expect("the reconciled finality claim remains retained");
+        crate::multimmit::diagnostics::record(
+            "pool_claim_resolved",
+            &[
+                ("artifact", &id),
+                ("observation", &observation),
+                ("verdict", &verdict),
+            ],
+        );
         claim.verdict = verdict;
         if derivations.is_some() {
             claim.derivations = derivations;
@@ -2347,9 +2403,21 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                 .first()
                 .is_some_and(|claim| *claim < next)
             {
+                crate::multimmit::diagnostics::record(
+                    "pool_blocked",
+                    &[
+                        ("pool", &key),
+                        ("candidate", &next),
+                        ("earlier_claim", &pending.claim_order.first()),
+                    ],
+                );
                 break;
             }
             let (_, signer, id) = next;
+            crate::multimmit::diagnostics::record(
+                "pool_candidate",
+                &[("pool", &key), ("candidate", &next)],
+            );
             let mut candidate = pending
                 .pop_candidate(signer, id)
                 .expect("the candidate was checked above");

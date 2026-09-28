@@ -114,6 +114,18 @@ impl<D: Digest> PoolExtractor<D> {
                 .ok_or(Error::Vote)? += 1;
             let path = paths.extension(chain)?;
             let proposal = self.proposals.chain(chain)?;
+            crate::multimmit::diagnostics::record(
+                "pool_vote_path",
+                &[
+                    ("round", &body.round()),
+                    ("leader", &body.leader()),
+                    ("signer", &signer),
+                    ("chain", &chain),
+                    ("position", &position),
+                    ("proposal_prefix", &&proposal[..=position]),
+                    ("extension_path", &path),
+                ],
+            );
             let proposal_tip = *proposal.last().expect("proposal includes its anchor");
             // An extension may fork below the proposal tip or reproduce its exact suffix.
             let extends_proposal = path.get(proposal.len() - 1 - position) == Some(&proposal_tip);

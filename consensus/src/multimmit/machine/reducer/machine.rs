@@ -316,6 +316,8 @@ pub(crate) enum Lifecycle {
 
 /// The single owner of all Multimmit protocol state for one epoch.
 pub(crate) struct Machine<H: Hasher, V: Variant> {
+    /// Runtime advisory hold; timeout rescue bypasses it and recovery starts without it.
+    pub(super) vote_hold: Option<View>,
     pub(in crate::multimmit::machine) profile: Profile<H::Digest>,
     pub(in crate::multimmit::machine) lifecycle: Lifecycle,
     /// Applied durable state and its reference ledgers.
@@ -385,6 +387,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             view_certificates: ViewCertificates::CurrentOnly,
             chain,
             views,
+            vote_hold: None,
             finality,
             resolution,
             scheduler: Scheduler::new(resources.max_outbox_effects()),
@@ -793,6 +796,22 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         self.scheduler.has_work()
     }
 
+    /// Returns whether a valid proposal can begin this node's ordinary vote.
+    pub(crate) fn vote_proposal_id(&self) -> Option<ArtifactId<H::Digest>> {
+        if self.views.timeout_cutoff(self.view()).is_some() {
+            return None;
+        }
+        self.views.vote_proposal_id(self.view())
+    }
+
+    pub(crate) fn hold_vote(&mut self, view: Option<View>) {
+        if self.vote_hold != view {
+            self.vote_hold = view;
+            self.scheduler
+                .enqueue(WorkKey::Drive(ProtocolComponent::View));
+        }
+    }
+
     /// Returns whether the next poll begins this node's vote pass for the current view.
     ///
     /// A poll drives the view component when it is the first ready key, and that drive begins the
@@ -803,7 +822,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// hold.
     pub(crate) fn vote_build_due(&self) -> bool {
         let view = self.durable.state.view;
-        self.scheduler.peek() == Some(WorkKey::Drive(ProtocolComponent::View))
+        self.vote_hold != Some(view)
+            && self.scheduler.peek() == Some(WorkKey::Drive(ProtocolComponent::View))
             && self.views.timeout_cutoff(view).is_none()
             && self.views.vote_pass_begins(view).unwrap_or(false)
     }

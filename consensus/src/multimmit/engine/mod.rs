@@ -497,6 +497,19 @@ where
         Ok(Self { context, actors })
     }
 
+    /// Enables local B-lambda pacing for ordinary votes before starting the engine.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a matrix whose dimensions differ from the epoch's committee.
+    pub fn with_vote_pacing(
+        mut self,
+        pacing: crate::multimmit::config::VotePacing,
+    ) -> Result<Self, crate::multimmit::config::PacingError> {
+        self.actors.voter = self.actors.voter.with_vote_pacing(pacing)?;
+        Ok(self)
+    }
+
     /// Returns the handle tests use to read the view proofs this engine serves to peers.
     #[cfg(any(test, feature = "mocks"))]
     pub(crate) fn proofs(&self) -> resolver::Server<V, H::Digest> {

@@ -226,6 +226,7 @@ pub(crate) enum RuntimeEvent<P: PublicKey, V: Variant, D: Digest> {
     Crypto(Finished<CryptoResult<V, D>>),
     ChainTask(ChainUpdate<V, D>),
     ViewTimer,
+    VoteRelease,
     ProductionTimer,
     Publication,
     Heartbeat,
@@ -249,6 +250,7 @@ impl<P: PublicKey, V: Variant, D: Digest> RuntimeEvent<P, V, D> {
             Self::Observation(_) => Some(Lane::PeerObservation),
             Self::Persistence(_)
             | Self::PersistenceCapacity(_)
+            | Self::VoteRelease
             | Self::Publication
             | Self::Heartbeat
             | Self::Inspection(_)
@@ -472,6 +474,12 @@ where
         }
         let gates = self.gates();
         let now = self.context.current();
+        if self
+            .vote_release_deadline()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            return Some(RuntimeEvent::VoteRelease);
+        }
         for source in cursor.sources() {
             if !gates.allows(source, excluded) {
                 continue;
@@ -553,6 +561,7 @@ where
                 .then(|| self.timers.deadline(TimerKind::Production))
                 .flatten()
         ));
+        let mut vote_release = pin!(sleep(self.vote_release_deadline()));
         let mut publication = pin!(sleep(self.egress.next_attempt()));
         let mut heartbeat = pin!(sleep(Some(self.timers.heartbeat_at())));
         let (source, event) = poll_fn(|cx| {
@@ -577,6 +586,9 @@ where
             }
             if poll_optional(production.as_mut(), cx).is_ready() {
                 return Poll::Ready((Some(Source::Timer), RuntimeEvent::ProductionTimer));
+            }
+            if poll_optional(vote_release.as_mut(), cx).is_ready() {
+                return Poll::Ready((None, RuntimeEvent::VoteRelease));
             }
             if poll_optional(publication.as_mut(), cx).is_ready() {
                 return Poll::Ready((Some(Source::Publication), RuntimeEvent::Publication));

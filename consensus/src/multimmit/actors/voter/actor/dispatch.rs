@@ -24,6 +24,7 @@ use crate::{
     },
     types::{Participant, Round},
 };
+use commonware_cryptography::Hasher as _;
 use commonware_p2p::{Blocker as _, Sender};
 use commonware_runtime::{
     Clock as _,
@@ -145,6 +146,14 @@ where
         let (issued, effect) = job.into_parts();
         let (id, generation) = (issued.id(), issued.generation());
         self.hooks.issued(id, generation, &effect);
+        crate::multimmit::diagnostics::record(
+            "durable_effect_released",
+            &[
+                ("id", &id),
+                ("generation", &generation),
+                ("effect", &effect),
+            ],
+        );
         match effect {
             DurableEffect::Sign(effect) if effect.requests().len() == 1 => {
                 let requests = Arc::clone(effect.shared());
@@ -209,6 +218,22 @@ where
             }
             DurableEffect::Publish(Publication::Propose(publication)) => {
                 let transmission = self.egress.frame_proposal(&publication);
+                if crate::multimmit::diagnostics::enabled() {
+                    let artifact = Artifact::<T::Variant, DigestOf<T>>::id_of::<T::Hasher, _>(
+                        crate::multimmit::types::ArtifactKind::LeaderBlock,
+                        publication.block().as_ref(),
+                    );
+                    crate::multimmit::diagnostics::record(
+                        "artifact_framed",
+                        &[
+                            ("artifact", &artifact),
+                            (
+                                "frame_digest",
+                                &T::Hasher::hash(&[transmission.bytes.as_ref()]),
+                            ),
+                        ],
+                    );
+                }
                 self.install(id, generation, vec![transmission])?;
             }
             DurableEffect::Publish(Publication::Send(requests)) => {
@@ -515,6 +540,14 @@ where
             return Err(Fatal::Closed);
         }
         for proof in proofs {
+            if crate::multimmit::diagnostics::enabled() {
+                let artifact = proof.clone().into_artifact();
+                crate::multimmit::diagnostics::artifact::<T::Hasher, T::Variant>(
+                    "artifact_recovered",
+                    artifact.id::<T::Hasher>(),
+                    &artifact,
+                );
+            }
             self.retain(proof, RetentionBoundary::Recovered)?;
         }
         Ok(())
@@ -538,8 +571,22 @@ where
         artifact: &Arc<Artifact<T::Variant, DigestOf<T>>>,
         recipient: Option<T::PublicKey>,
     ) -> Result<Transmission<T::PublicKey, DigestOf<T>>, Fatal> {
-        self.egress
+        let transmission = self
+            .egress
             .frame::<T::Hasher, T::Variant>(artifact, recipient)
-            .ok_or(Fatal::Step(StepError::UnauthorizedEffect))
+            .ok_or(Fatal::Step(StepError::UnauthorizedEffect))?;
+        if crate::multimmit::diagnostics::enabled() {
+            crate::multimmit::diagnostics::record(
+                "artifact_framed",
+                &[
+                    ("artifact", &artifact.id::<T::Hasher>()),
+                    (
+                        "frame_digest",
+                        &T::Hasher::hash(&[transmission.bytes.as_ref()]),
+                    ),
+                ],
+            );
+        }
+        Ok(transmission)
     }
 }

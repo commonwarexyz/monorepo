@@ -557,6 +557,7 @@ fn ready_runtime_source_between_actions(scenario: RuntimeSourceScenario) {
         )
         .unwrap();
         let mut driver: Live<TestTypes, _> = Live {
+            pacing: None,
             context: context.child("driver"),
             tasks,
             epoch,

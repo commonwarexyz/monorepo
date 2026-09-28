@@ -5,7 +5,10 @@ use crate::{
     deploy::NodeConfig,
 };
 use clap::Args;
-use commonware_consensus::multimmit::types::{CodecConfigError, PathLimits};
+use commonware_consensus::multimmit::{
+    config::{PacingError, VotePacing},
+    types::{CodecConfigError, PathLimits},
+};
 use commonware_deployer::aws::{Hosts, METRICS_PORT, TRACES_PORT};
 use commonware_utils::{NZUsize, Probability, probability};
 use serde::{Deserialize, Serialize};
@@ -76,6 +79,9 @@ const fn default_extension_bound() -> u32 {
 /// A configuration that cannot run.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    /// Invalid local vote timing settings.
+    #[error(transparent)]
+    VotePacing(#[from] PacingError),
     /// No participant was listed.
     #[error("at least one participant is required")]
     NoParticipants,
@@ -189,6 +195,23 @@ impl FromStr for Bootstrapper {
     }
 }
 
+/// One-way delays in milliseconds, indexed by committee position.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LatencyMatrix(Vec<Vec<f64>>);
+
+impl FromStr for LatencyMatrix {
+    type Err = serde_yaml::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        serde_yaml::from_str(value)
+    }
+}
+
+const fn default_vote_pacing_lambda() -> f64 {
+    1.0
+}
+
 /// Consensus, marshal, and production settings shared by local runs, deployment bundles, and
 /// deployed nodes.
 #[derive(Args, Clone, Debug, Serialize, Deserialize)]
@@ -197,6 +220,27 @@ pub struct NodeTuning {
     #[arg(long, value_enum, default_value = "endorsed")]
     #[serde(default)]
     pub proposal_policy: ProposalPolicy,
+
+    /// Enable B-lambda vote pacing; disabled runs retain the same diagnostic instrumentation.
+    #[arg(long, requires = "vote_pacing_matrix_ms")]
+    #[serde(default)]
+    pub vote_pacing_enabled: bool,
+
+    /// Square matrix of one-way delays in milliseconds for B-lambda vote pacing.
+    /// Rows and columns follow --participants; accepts JSON or YAML nested arrays.
+    #[arg(long)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vote_pacing_matrix_ms: Option<LatencyMatrix>,
+
+    /// Fraction of the estimated quorum slack to wait, between zero and one.
+    #[arg(long, default_value_t = 1.0, requires = "vote_pacing_matrix_ms")]
+    #[serde(default = "default_vote_pacing_lambda")]
+    pub vote_pacing_lambda: f64,
+
+    /// Maximum vote wait in milliseconds; defaults to twice the median off-diagonal delay.
+    #[arg(long, requires = "vote_pacing_matrix_ms")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vote_pacing_cap_ms: Option<u64>,
 
     /// Parallel verification threads.
     #[arg(long, default_value_t = COMPUTE_THREADS)]
@@ -258,6 +302,26 @@ pub struct NodeTuning {
 }
 
 impl NodeTuning {
+    /// Validates and resolves optional pacing against the committee.
+    pub fn vote_pacing(&self, participants: usize) -> Result<Option<VotePacing>, PacingError> {
+        let Some(matrix) = &self.vote_pacing_matrix_ms else {
+            if self.vote_pacing_enabled
+                || self.vote_pacing_cap_ms.is_some()
+                || self.vote_pacing_lambda != 1.0
+            {
+                return Err(PacingError::Dimensions);
+            }
+            return Ok(None);
+        };
+        let pacing = VotePacing::new(
+            matrix.0.clone(),
+            self.vote_pacing_lambda,
+            self.vote_pacing_cap_ms.map(Duration::from_millis),
+        )?;
+        pacing.validate_participants(participants)?;
+        Ok(self.vote_pacing_enabled.then_some(pacing))
+    }
+
     /// Returns the configured pipeline limits.
     pub const fn limits(&self) -> Result<PathLimits, CodecConfigError> {
         PathLimits::new(self.pipeline_depth, self.extension_bound)
@@ -379,6 +443,22 @@ pub struct RunArgs {
     #[arg(long, conflicts_with_all = ["headless", "config"])]
     trace_file: Option<PathBuf>,
 
+    /// Unsampled bounded diagnostic capture, independent of OTLP tracing.
+    #[arg(long)]
+    diagnostic_file: Option<PathBuf>,
+
+    /// Seconds of startup context before the diagnostic block cohort.
+    #[arg(long, default_value_t = 30)]
+    diagnostic_warmup_secs: u64,
+
+    /// Contiguous diagnostic cohort duration, between 10 and 20 seconds.
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(10..=20))]
+    diagnostic_cohort_secs: u64,
+
+    /// Seconds of outcome capture after the cohort; unresolved outcomes remain censored.
+    #[arg(long, default_value_t = 30)]
+    diagnostic_drain_secs: u64,
+
     /// Include debug diagnostics in headless logs.
     #[arg(long, requires = "headless")]
     debug: bool,
@@ -434,8 +514,22 @@ pub enum Output {
     Terminal { trace_file: Option<PathBuf> },
 }
 
+/// One contiguous diagnostic cohort and its context windows.
+pub struct DiagnosticConfig {
+    /// Destination for the capture envelope and event rows.
+    pub path: PathBuf,
+    /// Startup context before the cohort.
+    pub warmup: Duration,
+    /// Contiguous production interval selected for analysis.
+    pub cohort: Duration,
+    /// Follow-up observations after the cohort.
+    pub drain: Duration,
+}
+
 /// Everything a node needs to run.
 pub struct RunConfig {
+    /// Independent, unsampled diagnostic capture when requested.
+    pub diagnostic: Option<DiagnosticConfig>,
     /// This node's key, port, and storage.
     pub identity: Identity,
     /// Committee membership and peer addresses.
@@ -454,10 +548,18 @@ impl RunConfig {
     /// Loads a deployed node's configuration when `--config` is set, or the command line
     /// otherwise.
     pub fn load(args: RunArgs) -> Self {
-        match (&args.config, &args.hosts) {
+        let diagnostic = args.diagnostic_file.clone().map(|path| DiagnosticConfig {
+            path,
+            warmup: Duration::from_secs(args.diagnostic_warmup_secs),
+            cohort: Duration::from_secs(args.diagnostic_cohort_secs),
+            drain: Duration::from_secs(args.diagnostic_drain_secs),
+        });
+        let mut config = match (&args.config, &args.hosts) {
             (Some(config), Some(hosts)) => Self::load_remote(config, hosts),
             _ => Self::load_local(args),
-        }
+        };
+        config.diagnostic = diagnostic;
+        config
     }
 
     fn load_local(args: RunArgs) -> Self {
@@ -475,6 +577,7 @@ impl RunConfig {
             }),
         };
         Self {
+            diagnostic: None,
             identity: Identity {
                 key: me.key,
                 port: me.port,
@@ -538,6 +641,7 @@ impl RunConfig {
             rate,
         });
         Self {
+            diagnostic: None,
             identity: Identity {
                 key: config.key,
                 port: config.port,
@@ -569,6 +673,7 @@ impl RunConfig {
         self.tuning.validate()?;
         let participants = &self.network.participants;
         validate_committee(participants, &self.network.producers)?;
+        self.tuning.vote_pacing(participants.len())?;
         if !participants.contains(&self.identity.key) {
             return Err(ConfigError::UnknownIdentity(self.identity.key));
         }
@@ -637,6 +742,60 @@ mod tests {
             Output::Headless(telemetry) => telemetry,
             Output::Terminal { .. } => panic!("expected headless output"),
         }
+    }
+
+    #[test]
+    fn vote_pacing_is_optional_and_validated() {
+        assert!(parse([]).unwrap().tuning.vote_pacing(3).unwrap().is_none());
+        let matrix = "[[0,10,20],[10,0,30],[20,30,0]]";
+        let config = parse([
+            "--vote-pacing-enabled",
+            "--vote-pacing-matrix-ms",
+            matrix,
+            "--vote-pacing-lambda",
+            "0.7",
+            "--vote-pacing-cap-ms",
+            "40",
+        ])
+        .unwrap();
+        assert!(config.validate().is_ok());
+        assert!(config.tuning.vote_pacing(3).unwrap().is_some());
+        assert!(
+            parse(["--vote-pacing-matrix-ms", matrix])
+                .unwrap()
+                .tuning
+                .vote_pacing(3)
+                .unwrap()
+                .is_none()
+        );
+        assert!(parse(["--vote-pacing-enabled"]).is_err());
+        assert!(config.tuning.vote_pacing(6).is_err());
+        for lambda in ["NaN", "inf", "1.1"] {
+            assert!(
+                parse([
+                    "--vote-pacing-matrix-ms",
+                    matrix,
+                    "--vote-pacing-lambda",
+                    lambda
+                ])
+                .unwrap()
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            parse(["--vote-pacing-matrix-ms", "[[0,1],[1,0]]"])
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        assert!(
+            parse(["--vote-pacing-matrix-ms", "[[0,-1,0],[0,0,0],[0,0,0]]"])
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        assert!(parse(["--vote-pacing-cap-ms", "40"]).is_err());
     }
 
     #[test]

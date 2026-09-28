@@ -9,14 +9,15 @@
 //! scheme's key material, and derives every internal resource bound from the tuning, so the pieces
 //! cannot disagree.
 
+mod pacing;
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) mod profile;
 mod protocol;
-
 use crate::{
     multimmit::types::CodecConfigError,
     types::{Epoch, Participant},
 };
+pub use pacing::{PacingError, VotePacing};
 #[cfg(test)]
 pub(crate) use profile::HEIGHT_WINDOW_PIPELINES;
 #[cfg(not(target_arch = "wasm32"))]

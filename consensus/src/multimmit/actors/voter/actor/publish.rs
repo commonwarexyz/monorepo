@@ -13,6 +13,7 @@ use crate::{
     },
 };
 use commonware_actor::Feedback;
+use commonware_cryptography::Hasher as _;
 use commonware_p2p::{Recipients, Sender};
 use commonware_runtime::{
     Clock as _,
@@ -217,6 +218,24 @@ where
                 .retransmitted_bytes
                 .get_or_create(metric)
                 .inc_by(recipients * transmission.bytes.len() as u64);
+        }
+        if crate::multimmit::diagnostics::enabled() {
+            crate::multimmit::diagnostics::record(
+                "frame_sent",
+                &[
+                    (
+                        "frame_digest",
+                        &T::Hasher::hash(&[transmission.bytes.as_ref()]),
+                    ),
+                    ("accepted", &accepted),
+                    ("complete", &complete),
+                    ("retry", &retry),
+                    ("plane", &transmission.plane),
+                    ("recipient", &transmission.recipient),
+                    ("accepted_peers", &sent),
+                    ("bytes", &transmission.bytes.len()),
+                ],
+            );
         }
         Submission { accepted, complete }
     }

@@ -35,6 +35,8 @@ pub(crate) struct IdentifiedArtifact<V: Variant, D: Digest> {
     pub(crate) id: ArtifactId<D>,
     pub(crate) artifact: Artifact<V, D>,
     pub(crate) provisions: Vec<Dependency<D>>,
+    /// Local ingress receipt time for advisory pacing; never enters protocol state.
+    pub(crate) received_at: Option<std::time::SystemTime>,
 }
 
 impl<V: Variant, D: Digest> Artifact<V, D> {
@@ -58,6 +60,7 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
             id,
             artifact: self,
             provisions,
+            received_at: None,
         }
     }
 

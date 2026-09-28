@@ -169,6 +169,7 @@ pub(super) struct NodeBuilder {
     attachments: Attachments,
     network: Option<Network>,
     production_resolver: bool,
+    pacing: Option<crate::multimmit::config::VotePacing>,
     limits: Vec<LimitsOverride>,
 }
 
@@ -183,8 +184,14 @@ impl NodeBuilder {
             attachments: Attachments::default(),
             network: None,
             production_resolver: false,
+            pacing: None,
             limits: Vec::new(),
         }
+    }
+
+    pub(super) fn pacing(mut self, pacing: crate::multimmit::config::VotePacing) -> Self {
+        self.pacing = Some(pacing);
+        self
     }
 
     /// Runs the node with `attachments`.
@@ -244,6 +251,7 @@ impl NodeBuilder {
             attachments,
             network,
             production_resolver,
+            pacing,
             limits: overrides,
         } = self;
         let Network {
@@ -398,7 +406,11 @@ impl NodeBuilder {
             )
         };
         let (ready_sender, ready_receiver) = oneshot::channel();
-        let voter_task = actors.voter.start(
+        let voter = match pacing {
+            Some(pacing) => actors.voter.with_vote_pacing(pacing).unwrap(),
+            None => actors.voter,
+        };
+        let voter_task = voter.start(
             ready_sender,
             Planes {
                 data: data.0,

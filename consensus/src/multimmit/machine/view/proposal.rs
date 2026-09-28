@@ -153,6 +153,16 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             && self.valid_proposal(view)?.is_some())
     }
 
+    pub(crate) fn vote_proposal_id(
+        &self,
+        view: View,
+    ) -> Option<crate::multimmit::types::ArtifactId<D>> {
+        if !self.vote_pass_begins(view).unwrap_or(false) {
+            return None;
+        }
+        self.entry(view)?.proposals.first().map(|(id, _)| id)
+    }
+
     /// Discards the in-flight pass, reporting a vote pass that never produced its body.
     fn discard_regular_sign_pass(&mut self) {
         if let Some(RegularSignPass::Vote { ready: None, .. }) = self.regular_sign_pass.take() {

@@ -35,6 +35,13 @@ impl<C: Clock> Reporter for OutputReporter<C> {
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let Update { block, .. } = &activity;
+        if commonware_consensus::multimmit::diagnostics::enabled() {
+            commonware_consensus::multimmit::diagnostics::block(
+                "marshal_delivered",
+                block.reference(),
+                &[("index", &activity.index.get())],
+            );
+        }
         self.application.ordered(block.reference());
         match &mut self.sink {
             Some(sink) => sink.report(activity),

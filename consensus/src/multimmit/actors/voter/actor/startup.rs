@@ -56,6 +56,7 @@ pub(crate) struct Parts<T: VoterTypes, S> {
     pub(crate) metrics: Metrics,
     pub(crate) hooks: T::Hooks,
     pub(crate) journal_capacity: Option<NonZeroUsize>,
+    pub(crate) pacing: Option<super::pacing::Pacing<DigestOf<T>>>,
     pub(crate) flushes: persistence::Flushes,
 }
 
@@ -77,6 +78,7 @@ where
             metrics,
             hooks,
             journal_capacity,
+            pacing,
             flushes,
         } = parts;
         let Recovered {
@@ -157,6 +159,7 @@ where
             carried_observation: None,
             observation_batch,
             pending_inspection: None,
+            pacing,
             persistence: Persistence::new(
                 persistence_mailbox,
                 persisted,

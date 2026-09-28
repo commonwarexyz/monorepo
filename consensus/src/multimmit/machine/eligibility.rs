@@ -355,6 +355,11 @@ impl<V: Variant, D: Digest> ChainEligibility<V, D> {
                 ValidationOutcome::Deferred
             }
             BlockValidity::Valid => {
+                crate::multimmit::diagnostics::block(
+                    "block_validated",
+                    record.block_ref,
+                    &[("generation", &self.generation)],
+                );
                 record.state = ValidationState::Valid;
                 ValidationOutcome::Retained
             }
@@ -461,6 +466,11 @@ impl<V: Variant, D: Digest> ChainEligibility<V, D> {
             let Some(record) = Self::valid_child(records, parent) else {
                 continue;
             };
+            crate::multimmit::diagnostics::block(
+                "block_eligible",
+                record.block_ref,
+                &[("anchor", &self.anchor)],
+            );
             let mut run = vec![Arc::clone(&record.block)];
             let mut parent = record.block_ref;
             while run.len() < cap {
@@ -477,6 +487,11 @@ impl<V: Variant, D: Digest> ChainEligibility<V, D> {
                 else {
                     break;
                 };
+                crate::multimmit::diagnostics::block(
+                    "block_eligible",
+                    record.block_ref,
+                    &[("anchor", &self.anchor)],
+                );
                 run.push(Arc::clone(&record.block));
                 parent = record.block_ref;
             }
