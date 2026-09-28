@@ -9,7 +9,7 @@ use crate::{
     Epochable as _, Reporter, Viewable as _,
     multimmit::{
         marshal::{
-            MarshalProgress,
+            MarshalProgress, OutputIndex,
             actors::delivery::{self, DeliveryOutput, DurableBatch, HotOutput},
             bodies::Bodies,
             config::{ArchiveConfig, ArchiveMode, Config, Retention, Start},
@@ -22,7 +22,7 @@ use crate::{
                 pending::BODY_READ_CONCURRENCY,
                 record::blob_size,
             },
-            types::{OutputIndex, Update},
+            types::Update,
         },
         mocks::Committee,
         testing::{TestBody, metric_total},
@@ -448,9 +448,8 @@ fn output_commit<'a>(
         .into_iter()
         .map(|block| {
             emitted[block.reference().chain().get() as usize] = block.reference();
-            let index = committed.map_or(OutputIndex::ZERO, |index| index.next().unwrap());
-            committed = Some(index);
-            output_row(index, block)
+            committed = committed.next();
+            output_row(committed, block)
         })
         .collect();
     let checkpoint = Checkpoint::try_from(CheckpointParts {
@@ -462,7 +461,7 @@ fn output_commit<'a>(
         history_index: current.history_index(),
         ordered: current.ordered().to_vec(),
         emitted,
-        committed,
+        floor_index: current.floor_index(),
     })
     .unwrap();
     Commit {
@@ -499,7 +498,7 @@ pub(super) fn checkpoint(
     history: Sha256Digest,
     history_index: u64,
     emitted: Vec<BlockRef<Sha256Digest>>,
-    committed: Option<OutputIndex>,
+    floor_index: OutputIndex,
 ) -> Checkpoint<Sha256Digest> {
     Checkpoint::try_from(CheckpointParts {
         epoch: committee.config.epoch(),
@@ -514,7 +513,7 @@ pub(super) fn checkpoint(
         history_index: Some(history_index),
         ordered: committee.config.genesis().tips().to_vec(),
         emitted,
-        committed,
+        floor_index,
     })
     .unwrap()
 }
@@ -639,7 +638,7 @@ impl Lifecycle {
                 commitment: self.history,
                 record: self.record.clone(),
             }],
-            outputs: vec![output_row(OutputIndex::ZERO, &self.block)],
+            outputs: vec![output_row(OutputIndex::new(1), &self.block)],
             checkpoint: checkpoint(
                 &self.committee,
                 0,
@@ -647,7 +646,7 @@ impl Lifecycle {
                 self.history,
                 0,
                 self.emitted(),
-                Some(OutputIndex::ZERO),
+                OutputIndex::zero(),
             ),
         }
     }
@@ -663,12 +662,12 @@ impl Lifecycle {
                 self.history,
                 0,
                 self.emitted(),
-                Some(OutputIndex::ZERO),
+                OutputIndex::zero(),
             ),
         )
     }
 
-    /// Commits both batches, durably acknowledges output zero, and stops the catalog.
+    /// Commits both batches, durably acknowledges the first output, and stops the catalog.
     async fn acknowledged(&self, context: &DeterministicContext, label: &'static str) {
         let child = context.child(label);
         let (delivery_client, _delivery) = delivery::channel(child.child("delivery_mailbox"));
@@ -690,16 +689,13 @@ impl Lifecycle {
         client.commit(self.intermediate()).await.unwrap();
         client.commit(self.finalizing()).await.unwrap();
         delivery_store
-            .start_acknowledgement(0, OutputIndex::ZERO)
+            .start_acknowledgement(0, OutputIndex::new(1))
             .await
             .unwrap()
             .await
             .unwrap();
-        assert_eq!(
-            client.delivery_cursor(0, Some(OutputIndex::ZERO)),
-            Feedback::Ok
-        );
-        while client.progress().await.unwrap().acknowledged != Some(OutputIndex::ZERO) {
+        assert_eq!(client.delivery_cursor(0, OutputIndex::new(1)), Feedback::Ok);
+        while client.progress().await.unwrap().acknowledged != OutputIndex::new(1) {
             context.sleep(std::time::Duration::from_millis(1)).await;
         }
         drop(delivery_store);

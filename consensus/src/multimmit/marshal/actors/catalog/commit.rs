@@ -120,6 +120,8 @@ where
     accepted: Checkpoint<H::Digest>,
     /// Newest published checkpoint.
     durable: Checkpoint<H::Digest>,
+    /// Finalized ordinal of the newest L-QC the published checkpoint covers.
+    durable_lqc: Option<u64>,
     /// Hot-body bytes charged to commits not yet handed to delivery.
     pending_delivery_bytes: u64,
     /// Pending-archive cleanup owed by published commits.
@@ -132,11 +134,12 @@ where
     H: Hasher,
     B: Body<H>,
 {
-    pub(super) fn new(checkpoint: Checkpoint<H::Digest>) -> Self {
+    pub(super) fn new(checkpoint: Checkpoint<H::Digest>, lqc_index: Option<u64>) -> Self {
         Self {
             state: CommitState::Idle,
             accepted: checkpoint.clone(),
             durable: checkpoint,
+            durable_lqc: lqc_index,
             pending_delivery_bytes: 0,
             cleanup: None,
             commits_since_cleanup: 0,
@@ -153,10 +156,19 @@ where
         &self.durable
     }
 
+    /// Returns the finalized ordinal of the newest L-QC the published checkpoint covers.
+    ///
+    /// Finalized archives may hold records past it that a crash left before their checkpoint
+    /// was published, or that a buffered commit wrote; neither is served.
+    pub(super) const fn durable_lqc(&self) -> Option<u64> {
+        self.durable_lqc
+    }
+
     /// Replaces both checkpoints after a floor installation.
-    pub(super) fn installed(&mut self, checkpoint: Checkpoint<H::Digest>) {
+    pub(super) fn installed(&mut self, checkpoint: Checkpoint<H::Digest>, lqc_index: Option<u64>) {
         self.accepted = checkpoint.clone();
         self.durable = checkpoint;
+        self.durable_lqc = lqc_index;
     }
 }
 
@@ -417,6 +429,7 @@ where
             ..
         } = pending;
         self.commits.durable = publication.checkpoint.clone();
+        self.commits.durable_lqc = publication.lqc_index;
         match &mut self.commits.cleanup {
             Some(cleanup) => cleanup.coalesce(publication.cleanup),
             None => self.commits.cleanup = Some(publication.cleanup),
@@ -425,9 +438,6 @@ where
         self.metrics.committed(outputs);
         self.update_progress_metrics();
         let promoter_closed = self.promoter.as_ref().is_some_and(|promoter| {
-            let Some(committed) = publication.checkpoint.committed() else {
-                return false;
-            };
             let hot = delivery
                 .as_ref()
                 .into_iter()
@@ -437,7 +447,7 @@ where
                     DeliveryOutput::Descriptor(_) => None,
                 })
                 .collect();
-            promoter.published(committed, hot) == Feedback::Closed
+            promoter.published(publication.checkpoint.committed(), hot) == Feedback::Closed
         });
         let delivery_closed =
             delivery.is_some_and(|batch| self.delivery.committed(batch) == Feedback::Closed);

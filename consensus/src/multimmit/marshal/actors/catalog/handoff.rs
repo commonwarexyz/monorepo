@@ -249,7 +249,7 @@ mod tests {
     use super::*;
     use crate::{
         multimmit::{
-            marshal::{storage::commit::CustodyRef, types::OutputIndex},
+            marshal::{OutputIndex, storage::commit::CustodyRef},
             testing::TestBody,
             types::{ChainId, TransactionBlock, TransactionBlockHeader},
         },

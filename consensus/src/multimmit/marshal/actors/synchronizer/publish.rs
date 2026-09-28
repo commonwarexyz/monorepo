@@ -8,6 +8,7 @@ use super::{
 };
 use crate::multimmit::{
     marshal::{
+        OutputIndex,
         actors::delivery,
         protocol::order::{Reconciliation, Slot},
         storage::{
@@ -16,7 +17,7 @@ use crate::multimmit::{
             commit::{Commit, CustodyRef, HistoryOpening, OutputRow, SelectedLqc},
             scratch::{BlockStack, HistoryStack},
         },
-        types::{LqcVerifier, OutputIndex},
+        types::LqcVerifier,
     },
     types::{Body, TransactionBlock},
 };
@@ -107,11 +108,8 @@ where
                 "staged ordering slot reconciled as a duplicate",
             ));
         }
-        let index = match self.committed {
-            Some(index) => index.next().ok_or(Error::OutputExhausted)?,
-            None => OutputIndex::ZERO,
-        };
-        self.committed = Some(index);
+        let index = self.committed.next();
+        self.committed = index;
         batch.output_bytes = batch.output_bytes.saturating_add(encoded_len);
         batch.outputs.push(PlannedOutput {
             index,
@@ -248,7 +246,7 @@ where
             history_index: self.history_index,
             ordered: self.state.ordered().to_vec(),
             emitted: self.state.emitted().to_vec(),
-            committed: self.committed,
+            floor_index: self.floor_index,
         })
         .map_err(|_| Error::Invalid("synchronizer produced a non-canonical checkpoint"))
     }

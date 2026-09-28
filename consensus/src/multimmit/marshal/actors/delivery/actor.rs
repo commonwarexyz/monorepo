@@ -12,11 +12,11 @@ use crate::{
     multimmit::{
         actors::util::gated,
         marshal::{
-            MarshalProgress,
+            MarshalProgress, OutputIndex,
             actors::catalog,
             bodies::{self, Bodies},
             storage::{Error as StorageError, catalog::StoredRef},
-            types::{OutputIndex, Update},
+            types::Update,
         },
         types::{Body, TransactionBlock},
     },
@@ -47,9 +47,6 @@ pub(crate) enum Error {
     /// A committed output was not retained for delivery.
     #[error("committed output {0} is missing")]
     Missing(OutputIndex),
-    /// The dense output coordinate cannot advance.
-    #[error("output index exhausted")]
-    IndexExhausted,
     /// Catalog access failed.
     #[error(transparent)]
     Catalog(#[from] catalog::Error),
@@ -238,24 +235,15 @@ where
     /// Reports hot outputs from the delivery cursor, starting a cold read at the first output
     /// without a hot body.
     fn fill(&mut self, progress: &MarshalProgress<H::Digest>) -> Result<(), Error> {
-        let Some(mut next) = self.pending.next(progress.acknowledged)? else {
-            return Ok(());
-        };
-        while self.pending.has_capacity()
-            && progress
-                .committed
-                .is_some_and(|committed| next <= committed)
-        {
+        let mut next = self.pending.next(progress.acknowledged);
+        while self.pending.has_capacity() && next <= progress.committed {
             let Some(block) = self.cache.take_hot(next) else {
                 self.start_fetch(progress.floor_generation, next);
                 return Ok(());
             };
             self.metrics.hot_output();
             self.report(next, block)?;
-            let Some(following) = next.next() else {
-                return Ok(());
-            };
-            next = following;
+            next = next.next();
         }
         Ok(())
     }
@@ -306,10 +294,7 @@ where
                 return Err(Error::Missing(next));
             }
             self.report(next, block)?;
-            let Some(following) = next.next() else {
-                break;
-            };
-            next = following;
+            next = next.next();
         }
         Ok(())
     }
@@ -390,7 +375,7 @@ where
                 let syncing = self.pending.complete_sync(result)?;
                 syncing.durability_timer.observe(&*self.context);
                 syncing.completion_timer.observe(&*self.context);
-                progress.acknowledged = Some(syncing.through);
+                progress.acknowledged = syncing.through;
                 self.metrics.acknowledged(syncing.outputs);
                 self.metrics.progress(progress.acknowledged);
                 if self
@@ -423,10 +408,9 @@ where
         match message {
             Message::Committed(batch) => {
                 if batch.floor_generation == progress.floor_generation {
-                    progress.committed = progress.committed.max(Some(batch.committed));
-                    if let Some(next) = self.pending.next(progress.acknowledged)? {
-                        self.cache.insert(batch, next);
-                    }
+                    progress.committed = progress.committed.max(batch.committed);
+                    self.cache
+                        .insert(batch, self.pending.next(progress.acknowledged));
                     return Ok(());
                 }
                 drop(batch);
