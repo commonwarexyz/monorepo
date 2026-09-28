@@ -15,14 +15,14 @@ use super::{
 use crate::multimmit::{
     actors::util::gated,
     marshal::{
-        MarshalProgress,
+        MarshalProgress, OutputIndex,
         actors::{delivery, metrics::saturating_u64, promoter},
         storage::{
             Error as StorageError,
             catalog::{CatalogStore, InstallRequest},
             pending::BODY_READ_CONCURRENCY,
         },
-        types::{OutputIndex, Reply},
+        types::Reply,
     },
     types::{BlockRef, Body},
 };
@@ -93,7 +93,7 @@ where
     /// The promoter, when finalized bodies move to an immutable archive.
     pub(crate) promoter: Option<promoter::Mailbox<H, B>>,
     /// Delivery's durable acknowledgement, already checked against the recovered checkpoint.
-    pub(crate) acknowledged: Option<OutputIndex>,
+    pub(crate) acknowledged: OutputIndex,
 }
 
 /// The catalog stopped because continuing could break storage or delivery invariants.
@@ -239,6 +239,7 @@ where
         } = config;
         let metrics = Metrics::new(&context);
         let checkpoint = stores.checkpoint().clone();
+        let lqc_index = stores.state().lqc_index();
         metrics.progress(checkpoint.committed());
         let (commands, command_receiver) = mailbox::new(context.child("mailbox"), mailbox_size);
         let (cursors, cursor_receiver) =
@@ -273,7 +274,7 @@ where
                 admission_cut_capacity.get(),
                 custody_waiter_capacity.get(),
             ),
-            commits: CommitPipeline::new(checkpoint),
+            commits: CommitPipeline::new(checkpoint, lqc_index),
             reads: BodyReads::new(
                 materializer,
                 body_waiter_capacity.get(),
@@ -336,7 +337,7 @@ where
                     }
                     if let Some(message) = self.intake.cursors.try_recv() {
                         let timer =
-                            self.metrics.time(Source::Completion, Operation::DeliveryCursor, &*self.context);
+                            self.metrics.time(Source::Completion, message.kind(), &*self.context);
                         self.apply_cursor(message)?;
                         self.metrics.finish(timer, &*self.context);
                         continue;
@@ -400,7 +401,7 @@ where
                 self.finish_wait(wait);
                 if let Some(message) = message {
                     let timer =
-                        self.metrics.time(Source::Completion, Operation::DeliveryCursor, &*self.context);
+                        self.metrics.time(Source::Completion, message.kind(), &*self.context);
                     self.apply_cursor(message)?;
                     self.metrics.finish(timer, &*self.context);
                 }
@@ -595,6 +596,12 @@ where
             Command::History { commitment, reply } => {
                 reply.send_lossy(outcome(self.stores.history(commitment).await)?);
             }
+            Command::FloorAt { at, reply } => {
+                // A buffered commit's floor is not served until its checkpoint is durable.
+                let at = at.min(self.commits.durable().committed());
+                let floor = self.stores.floor_at(at, self.commits.durable_lqc()).await;
+                reply.send_lossy(outcome(floor)?);
+            }
             Command::HistorySegment {
                 commitment,
                 max_items,
@@ -616,10 +623,7 @@ where
                 reply,
             } => self.accept_commit(batch, handoff, reply).await?,
             Command::Install { request, reply } => self.install(request, reply).await?,
-            Command::Prune {
-                floor_generation,
-                reply,
-            } => self.prune(floor_generation, reply).await?,
+            Command::Prune { below, reply } => self.prune(below, reply).await?,
             Command::Promoted { frontiers, reply } => self.promoted(frontiers, reply).await?,
             Command::Checkpoint { reply } => {
                 reply.send_lossy(Ok(self.commits.durable().clone()));
@@ -672,25 +676,20 @@ where
                 max_bytes,
                 reply,
             } => {
-                let Some(committed) = self
-                    .commits
-                    .durable()
-                    .committed()
-                    .filter(|committed| start <= *committed)
-                else {
+                let durable = self.commits.durable();
+                if start.is_zero() || start > durable.committed() {
                     reply.send_lossy(Err(Error::Invalid(
                         "output range does not begin at a committed row",
                     )));
                     return Ok(());
-                };
-                read_output_refs(&self.stores, committed, start, max_items, max_bytes, reply)
-                    .await?;
+                }
+                read_output_refs(&self.stores, durable, start, max_items, max_bytes, reply).await?;
             }
         }
         Ok(())
     }
 
-    /// Mirrors a delivery-cursor change.
+    /// Mirrors a delivery-cursor change or an engine release.
     fn apply_cursor(&mut self, message: CursorMessage) -> Result<(), Fatal> {
         match message {
             CursorMessage::Update {
@@ -716,6 +715,7 @@ where
                 }
                 reply.send_lossy(result);
             }
+            CursorMessage::Release { chain, released } => self.stores.release(chain, released),
         }
         Ok(())
     }
@@ -757,8 +757,8 @@ where
             return Ok(());
         }
         self.reads.clear_caches(&self.metrics);
-        self.commits.installed(installed.clone());
-        self.cursor.reset();
+        self.commits
+            .installed(installed.clone(), self.stores.state().lqc_index());
         self.metrics.floor_installed();
         self.update_progress_metrics();
         if self.promoter.as_ref().is_some_and(|promoter| {
@@ -778,15 +778,14 @@ where
         Ok(())
     }
 
-    /// Prunes finalized storage up to delivery's cursor for `floor_generation`.
-    async fn prune(&mut self, floor_generation: u64, reply: Reply<(), Error>) -> Result<(), Fatal> {
+    /// Prunes what the newest floor at or below both `below` and delivery's cursor makes
+    /// obsolete.
+    async fn prune(&mut self, below: OutputIndex, reply: Reply<(), Error>) -> Result<(), Fatal> {
         let pinned = self.reads.pinned_segments();
-        let acknowledged = self
-            .cursor
-            .acknowledged_in(self.commits.durable(), floor_generation);
+        let below = below.min(self.cursor.acknowledged());
         let result = self
             .stores
-            .prune_finalized(floor_generation, acknowledged, &pinned)
+            .prune_finalized(below, self.commits.durable_lqc(), &pinned)
             .await;
         match outcome(result)? {
             Ok(reclaimed) => {

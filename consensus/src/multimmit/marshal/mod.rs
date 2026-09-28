@@ -15,7 +15,8 @@
 //!    through [`Reporters::from((marshal, application))`](crate::Reporters), and
 //!    [`Service::relay`] gives it a [`Relay`] that broadcasts staged blocks.
 //! 5. The application receives one [`Update`] per block in [`OutputIndex`] order and
-//!    acknowledges each once it has durably applied it.
+//!    acknowledges each once it has durably applied it. Indices are canonical: an output's index
+//!    is the sum of the producer-chain heights once it commits, so it is the same on every node.
 //! 6. [`ServiceHandle::abort`] stops marshal; [`ServiceHandle::join`] returns its first
 //!    failure.
 //!
@@ -57,8 +58,10 @@
 //! - [`Start::Floor`] seeds a fresh namespace from a caller-authenticated [`Floor`].
 //! - [`Mailbox::install_floor`] verifies and installs a newer floor while marshal runs, and
 //!   resets delivery to it.
-//! - [`Mailbox::prune`] then drops data that floor made obsolete, naming its generation in a
-//!   [`Prune`].
+//! - [`Mailbox::floor_at`] serves the newest retained floor at or below an output index, which
+//!   another node can install to resume at the same indices.
+//! - [`Mailbox::prune`] drops what the newest floor at or below an output index makes obsolete,
+//!   keeping that floor servable.
 
 mod actors;
 mod bodies;
@@ -87,8 +90,7 @@ pub(crate) use protocol::fuzz;
 pub use relay::Relay;
 pub use service::{Service, ServiceHandle, open};
 pub use types::{
-    Custody, Error, Failure, Families, Floor, LqcVerifier, MarshalProgress, OutputIndex, Prune,
-    Update,
+    Custody, Error, Failure, Families, Floor, LqcVerifier, MarshalProgress, OutputIndex, Update,
 };
 pub use verifier::{InvalidLqc, SchemeVerifier};
 pub use wire::BackfillKey;

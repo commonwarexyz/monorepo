@@ -1,7 +1,7 @@
 //! Body, header, and output reads, the caches that serve them, and materialization.
 
 use super::*;
-use crate::multimmit::testing::expect_within;
+use crate::multimmit::{marshal::OutputIndex, testing::expect_within};
 
 #[test]
 fn pending_metadata_bypasses_finalized_archive_reads() {
@@ -166,7 +166,7 @@ fn finalized_header_branches_follow_parents() {
                 outputs: blocks
                     .iter()
                     .enumerate()
-                    .map(|(index, block)| output_row(OutputIndex::new(index as u64), block))
+                    .map(|(index, block)| output_row(OutputIndex::new(index as u64 + 1), block))
                     .collect(),
                 checkpoint: Checkpoint::try_from(CheckpointParts {
                     epoch: current.epoch(),
@@ -177,7 +177,7 @@ fn finalized_header_branches_follow_parents() {
                     history_index: current.history_index(),
                     ordered: current.ordered().to_vec(),
                     emitted: emitted.clone(),
-                    committed: Some(OutputIndex::new(3)),
+                    floor_index: current.floor_index(),
                 })
                 .unwrap(),
             })
@@ -341,7 +341,7 @@ fn independent_read_completes_during_segment_open(
             .await
             .unwrap();
         let refs = client
-            .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024))
+            .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024))
             .await
             .unwrap();
         drop(client);
@@ -398,7 +398,7 @@ fn independent_read_completes_during_segment_open(
                 }
                 IndependentReadCase::Outputs => {
                     let outputs = client
-                        .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024))
+                        .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024))
                         .await
                         .unwrap();
                     assert_eq!(outputs[0].reference, first.reference());
@@ -1170,12 +1170,12 @@ fn committed_output_descriptors_preserve_order_and_bounds(#[case] archive: Archi
             (NZUsize!(3), NonZeroUsize::MIN, 1),
         ] {
             let outputs = client
-                .output_refs(OutputIndex::ZERO, max_items, max_bytes)
+                .output_refs(OutputIndex::new(1), max_items, max_bytes)
                 .await
                 .unwrap();
             assert_eq!(outputs.len(), expected);
             for (index, (output, block)) in outputs.iter().zip(&blocks).enumerate() {
-                assert_eq!(output.index, OutputIndex::new(index as u64));
+                assert_eq!(output.index, OutputIndex::new(index as u64 + 1));
                 assert_eq!(output.reference, block.reference());
                 assert_eq!(output.encoded_len, block.encode_size() as u64);
             }
@@ -1223,7 +1223,7 @@ fn application_prune_preserves_queued_cold_materialization() {
             .commit(Commit {
                 selected: Vec::new(),
                 history: Vec::new(),
-                outputs: vec![output_row(OutputIndex::ZERO, finalized)],
+                outputs: vec![output_row(OutputIndex::new(1), finalized)],
                 checkpoint: Checkpoint::try_from(CheckpointParts {
                     epoch: checkpoint.epoch(),
                     floor_generation: checkpoint.floor_generation(),
@@ -1233,7 +1233,7 @@ fn application_prune_preserves_queued_cold_materialization() {
                     history_index: checkpoint.history_index(),
                     ordered: checkpoint.ordered().to_vec(),
                     emitted,
-                    committed: Some(OutputIndex::ZERO),
+                    floor_index: checkpoint.floor_index(),
                 })
                 .unwrap(),
             })
@@ -1250,10 +1250,10 @@ fn application_prune_preserves_queued_cold_materialization() {
         let (client, handle, _delivery) =
             spawn_catalog(configure(&context), delayed.child("reopened")).await;
         assert_eq!(
-            client.delivery_cursor(0, Some(OutputIndex::ZERO)),
+            client.delivery_cursor(0, OutputIndex::new(1)),
             Feedback::Ok
         );
-        while client.progress().await.unwrap().acknowledged != Some(OutputIndex::ZERO) {
+        while client.progress().await.unwrap().acknowledged != OutputIndex::new(1) {
             context.sleep(std::time::Duration::from_millis(1)).await;
         }
         let (releases, blocked): (Vec<_>, Vec<_>) = (0..BODY_READ_CONCURRENCY.get())
@@ -1276,7 +1276,7 @@ fn application_prune_preserves_queued_cold_materialization() {
             },
         }
 
-        client.prune(0).await.unwrap();
+        client.prune(OutputIndex::zero()).await.unwrap();
         for release in releases {
             release.send(()).expect("blocked read was dropped");
         }
@@ -1288,7 +1288,7 @@ fn application_prune_preserves_queued_cold_materialization() {
                 .collect::<Vec<_>>(),
             expected
         );
-        client.prune(0).await.unwrap();
+        client.prune(OutputIndex::zero()).await.unwrap();
 
         drop(client);
         assert!(handle.await.is_ok());
@@ -1383,6 +1383,46 @@ fn body_materialization_balances_request_across_read_jobs() {
                 .map(|block| block.as_ref().unwrap().reference())
                 .collect::<Vec<_>>(),
             references
+        );
+        drop(client);
+        assert!(handle.await.is_ok());
+    });
+}
+
+#[test]
+fn floors_are_served_by_output_index() {
+    deterministic::Runner::default().start(|context| async move {
+        let lifecycle = Lifecycle::new();
+        let (client, handle, _delivery) = open(&context, "floors", &lifecycle.committee).await;
+        lifecycle.admit_all(&client).await;
+
+        // An output-only commit selects no L-QC, so it establishes no floor.
+        client.commit(lifecycle.intermediate()).await.unwrap();
+        assert!(
+            client
+                .floor_at(OutputIndex::new(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Selecting the L-QC makes the commit's checkpoint its floor.
+        client.commit(lifecycle.finalizing()).await.unwrap();
+        let (index, floor) = client.floor_at(OutputIndex::new(1)).await.unwrap().unwrap();
+        assert_eq!(index, OutputIndex::new(1));
+        assert_eq!(floor.anchor(), lifecycle.proof.as_ref());
+        assert_eq!(floor.history(), lifecycle.record.as_ref());
+        assert_eq!(floor.emitted(), lifecycle.emitted().as_slice());
+
+        // A later index resolves to the newest floor at or below it, and an earlier one to none.
+        let later = client.floor_at(OutputIndex::new(9)).await.unwrap();
+        assert_eq!(later.map(|(index, _)| index), Some(OutputIndex::new(1)));
+        assert!(
+            client
+                .floor_at(OutputIndex::zero())
+                .await
+                .unwrap()
+                .is_none()
         );
         drop(client);
         assert!(handle.await.is_ok());
