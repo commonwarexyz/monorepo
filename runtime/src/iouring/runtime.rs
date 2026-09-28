@@ -698,11 +698,15 @@ impl crate::Spawner for Context {
         self.tree = child;
         let shared = self.shared.clone();
         let origin = self.origin.clone();
-        let active = if matches!(execution, Execution::Dedicated | Execution::Shared(true)) {
-            let Some(active) = shared.workers.reserve() else {
+
+        // Dedicated and blocking spawns reserve a one-off worker before the
+        // factory runs, so shutdown waits for them. Ordinary spawns only check
+        // that their worker still accepts tasks.
+        let reservation = if matches!(execution, Execution::Dedicated | Execution::Shared(true)) {
+            let Some(reservation) = shared.workers.reserve() else {
                 return Handle::closed(metric);
             };
-            Some(active)
+            Some(reservation)
         } else {
             if !Tasks::is_open(&origin) {
                 return Handle::closed(metric);
@@ -729,8 +733,10 @@ impl crate::Spawner for Context {
             parent.register(aborter);
         }
 
-        if let Some(active) = active {
-            shared.launch(Box::pin(future), active);
+        // A one-off worker polls the future as its root. An ordinary spawn
+        // becomes a task on its origin worker.
+        if let Some(reservation) = reservation {
+            shared.launch(Box::pin(future), reservation);
         } else if let Err(task) = Tasks::register(Task::new(future, origin)) {
             // Rejection after closure follows the caller's panic boundary.
             // Cancel descendants and finish metrics before destroying captures.
