@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| Implements | [PRD.md](../statelens/docs/PRD.md) |
+| Implements | [PRD.md](PRD.md) |
 | Audience | The coding agent that implements `consensus/fuzz/statelens/`, and fuzz operators |
-| Verified against | commits `7cb6a3d583` and `2e56fa856e` (see section 1.2) |
+| Verified against | commits `7cb6a3d583` and `2e56fa856e` (see section 1.2); marshal at commit `2649e4a668` (see section 8.1) |
 
 ---
 
@@ -48,19 +48,21 @@ The following were built and exercised in a scratch checkout of the commit above
 End-to-end campaigns at commit `2e56fa856e`, with Claude as the agent, in scratch clones:
 
 - AC-1: Claude and Codex each wrote lint-clean invariants from issue #2070.
-- AC-5: with INV-0001 and FALSE-0001, the test gate stopped the campaign with
+- AC-6: with INV-0001 and FALSE-0001, the test gate stopped the campaign with
   `[statelens][FALSE-0001]`; every one of the 175 failing tests failed on that invariant
   only. The agent added 143 probe sites, and none of them panicked.
-- AC-3: with the nine registry invariants (5 bound, 4 partial, 21 assertion sites, 147
+- AC-4: with the nine registry invariants (5 bound, 4 partial, 21 assertion sites, 147
   probe sites), the first run exposed ghost state leaking between the seeds of one test:
   26 tests raised a false INV-0001 alarm, and the `nuller` tests pass with one seed and
   fail with two. With the fresh-run hook (D16), all 242 tests pass and a 3-minute fuzz
   run finds no violation.
-- AC-4: after 3 minutes on empty corpora, `ft:` is 48,371 with StateLens feedback and
+- AC-5: after 3 minutes on empty corpora, `ft:` is 48,371 with StateLens feedback and
   47,131 without.
-- AC-6: with real instrumentation, `STATELENS_BYZANTINE=panic` panics on the first input.
+- AC-7: with real instrumentation, `STATELENS_BYZANTINE=panic` panics on the first input.
 - R-NF-3: 13 executions per second both for the instrumented target and for the stock
   `simplex_cert_mock_twins_mutator` target (2,502 and 2,529 inputs in 3 minutes).
+
+Section 8.1 lists what was checked for marshal, at commit `2649e4a668`.
 
 ---
 
@@ -71,14 +73,14 @@ them; the last column names the PRD requirement.
 
 | ID | Decision | PRD requirement |
 |---|---|---|
-| D1 | Every file in `SL/invariants/` is active. Phase 1 writes there; humans review, edit and delete. There is no `status` field. | R-REG-1, R-P1-5 |
-| D2 | The test gate runs the engine-level tests `simplex::tests::*` including the `slow` group, minus the Twins tests, plus the `simplex::statelens` self-tests. Only 7 of the 247 engine-level tests are outside the `slow` group, so a non-slow gate would check almost nothing. Twins tests run two live engines with one identity, which breaks per-replica ghost state. | R-P2-2 step 6 |
+| D1 | Every file in a registry (`SL/invariants/<subsystem>/`) is active. Phase 1 writes there; humans review, edit and delete. There is no `status` field. | R-REG-1, R-P1-5 |
+| D2 | The test gate runs the engine-level tests `simplex::tests::*` including the `slow` group, minus the Twins tests, plus the `simplex::statelens` self-tests. Only 7 of the 247 engine-level tests are outside the `slow` group, so a non-slow gate would check almost nothing. Twins tests run two live engines with one identity, which breaks per-replica ghost state. | R-S-P2-1 step 6 |
 | D3 | Probes record presence: a counter is set to 1, never incremented. | R-FB-2 |
 | D4 | Phase 2 agents run with full permissions in the checkout. Phase 1 agents run restricted. Campaigns MUST run on a dedicated machine or container. | R-AG-3 |
-| D5 | The fuzz target `simplex_statelens` is added during a campaign to the existing `consensus/fuzz/simplex` package; no new package is created. `just run simplex_statelens` works unchanged. | G4, R-P2-2 step 1 |
+| D5 | The fuzz target `simplex_statelens` is added during a campaign to the existing `consensus/fuzz/simplex` package; no new package is created. `just run simplex_statelens` works unchanged. | G4, R-S-P2-1 step 1 |
 | D6 | The macros are `macro_rules!` items re-exported with `pub(crate) use` and invoked by path: `crate::simplex::statelens::sl_implies!(...)`. `#[macro_export]` cannot work: `simplex` is declared inside `stability_scope!`, and macro-expanded `macro_export` macros cannot be called by absolute path from their own crate. | R-INS-4 |
 | D7 | The Byzantine guard is built into the macros and into the ghost accessors, so no call site can forget it. The fuzz target calls `clear_compromised()` after `fuzz()` returns, not inside the runner, so compromised replicas stay guarded while the runtime shuts down. | R-INS-2, PRD section 8.4 |
-| D8 | The runner hook also asserts that every scheme's own index equals its position in the participant list. | PRD section 8.4, AC-6 |
+| D8 | The runner hook also asserts that every scheme's own index equals its position in the participant list. | PRD section 8.4, AC-7 |
 | D9 | `protocol`-scope invariants use a guarded ghost store shared by all honest replicas (`Global`, `with_global`). | R-INS-5 |
 | D10 | A campaign runs in place in the operator's checkout, a fresh clone of the repository; StateLens never makes another clone. The campaign refuses a checkout with tracked changes outside `SL/` or with instrumentation from an earlier campaign, never commits, and records its changes in `SL/campaign/instrumentation.diff`. Uncommitted registry edits are used. | R-P2-1 |
 | D11 | Tests use the `stable` toolchain; fuzz builds use the nightly pinned in `.github/workflows/slow.yml`. | R-P2-2 step 5 |
@@ -87,6 +89,15 @@ them; the last column names the PRD requirement.
 | D14 | Prompt files are named `analyst-<kind>.md`, one per source kind (`issue`, `design`, `comment`, `spec`, `paper`), plus a shared `analyst.md`. | R-LAYOUT-1, R-P1-2 |
 | D15 | StateLens fuzz targets use only the `cert_mock` certificate scheme (`consensus/src/simplex/mocks/scheme.rs`, imported as `cert_mock` in `consensus/fuzz/core`). Every `fuzz::<P, ...>` call in a target template names a `P` whose `impl Simplex` in `consensus/fuzz/core/src/simplex.rs` sets `type Scheme = cert_mock::Scheme<...>`. At the reference commit these are `SimplexCertificateMock`, `SimplexCertificateMockAttributable`, `SimplexCertificateMockCustomRoundRobin` and `SimplexCertificateMockByzantineFirstLeader`; the committed target uses `SimplexCertificateMock`. No ed25519, BLS12-381 or secp256r1 scheme is used. The materialize step enforces this (section 7.2). The test gate is not affected. | R-P2-4 |
 | D16 | Ghost state lives for one run. The campaign patches the deterministic runtime so that `Runner::new` calls a hook that clears it; independent runs in one test thread (for example the seeds of one test) no longer share history, while a crash-restart from a checkpoint keeps it (Appendix B.4). | R-INS-5, PRD section 8.4 |
+| D17 | Registries are directories per subsystem: `invariants/simplex/` and `invariants/marshal/`, and likewise for false invariants. No invariant file lies directly under `invariants/` or `false-invariants/`. | R-REG-1, R-REG-8 |
+| D18 | Each ID prefix has one global counter across all registries, so the marshal false invariant is FALSE-0002. The lint rejects an ID that two files use. | R-REG-1, R-REG-8, R-M-REG-2 |
+| D19 | Scope vocabularies are per registry (section 4.2). | R-REG-2 |
+| D20 | Profiles are data in `statelens.py` (section 5.5). `--profile` defaults to `simplex`. | R-P2-1 |
+| D21 | Both subsystems use the runtime module at `consensus/src/simplex/statelens.rs` (Appendix A), and marshal code calls it as `crate::simplex::statelens::...`. | G8 |
+| D22 | The per-subsystem parts of the prompts live in `prompts/subsystems/` (sections 13.11 to 13.14), and the shared prompts take them through placeholders. | R-P1-2 |
+| D23 | A campaign does not run the fuzzer, in either profile. It ends after the test gate with the result `READY`, and prints, for each StateLens target, the command that runs it and the command that replays a crash. The operator runs the targets with the existing `just run` recipe, and chooses which ones, for how long, and with which libFuzzer arguments. The campaign passes no arguments to libFuzzer. Exit codes 5 and 6 are retired. | R-P2-2 step 7, R-P2-3, R-P3-1 |
+
+D24 to D30 concern marshal only; they are in section 8.2.
 
 ---
 
@@ -94,28 +105,37 @@ them; the last column names the PRD requirement.
 
 ```
 consensus/fuzz/statelens/
-  PRD.md
-  SPEC.md
+  docs/
+    PRD.md
+    SPEC.md
   README.md                      operator guide (Appendix D)
   config.env                     defaults (section 5.1)
   justfile                       recipes (section 5.3)
   .gitignore                     two lines: `campaign/` and `extract/` (generated outputs)
-  invariants/                    the registry; every INV-*.md is active
+  invariants/                    the registries; every INV-*.md is active (section 4.1)
+    simplex/
+    marshal/                     holds `.gitkeep` until its first invariant
   false-invariants/
-    FALSE-0001.md                deliberately false invariant for AC-5 (Appendix C)
+    simplex/FALSE-0001.md        deliberately false invariant for AC-6 (Appendix C)
+    marshal/FALSE-0002.md        deliberately false invariant for AC-10 (Appendix E)
   templates/
     invariant.md                 reference format (section 4.5)
   prompts/
-    analyst.md                   Phase 1, shared part (section 12.1)
-    analyst-issue.md             Phase 1, per kind (sections 12.2 to 12.6)
+    analyst.md                   Phase 1, shared part (section 13.1)
+    analyst-issue.md             Phase 1, per kind (sections 13.2 to 13.6)
     analyst-design.md
     analyst-comment.md
     analyst-spec.md
     analyst-paper.md
-    instrument.md                Phase 2, shared rules and API (section 12.7)
-    instrument-invariants.md     Phase 2, bind invariants (section 12.8)
-    instrument-beacons.md        Phase 2, beacon probes (section 12.9)
-    repair.md                    Phase 2, compile repair (section 12.10)
+    instrument.md                Phase 2, shared rules and API (section 13.7)
+    instrument-invariants.md     Phase 2, bind invariants (section 13.8)
+    instrument-beacons.md        Phase 2, beacon probes (section 13.9)
+    repair.md                    Phase 2, compile repair (section 13.10)
+    subsystems/
+      simplex-analyst.md         Phase 1, Simplex part (section 13.11)
+      marshal-analyst.md         Phase 1, marshal part (section 13.12)
+      simplex-instrument.md      Phase 2, Simplex rules (section 13.13)
+      marshal-instrument.md      Phase 2, marshal rules (section 13.14)
   runtime/
     statelens.rs                 runtime support module (Appendix A)
     target.rs                    fuzz target, cert_mock scheme only (Appendix B.1, D15)
@@ -137,12 +157,13 @@ Constraints on committed files:
 
 ### 4.1 Files and IDs
 
-- One invariant per file: `SL/invariants/INV-NNNN.md`, where `NNNN` is a zero-padded
-  decimal of at least 4 digits.
-- False invariants live in `SL/false-invariants/FALSE-NNNN.md` and are used only when
-  `STATELENS_FALSE_INVARIANTS=1` (section 7.1).
-- The next ID is `1 + max(N)` over the existing `INV-N` files. Deleting the file with
-  the highest ID lets its ID be reused; this is accepted.
+- One invariant per file: `SL/invariants/<subsystem>/INV-NNNN.md`, where `<subsystem>` is
+  `simplex` or `marshal`, and `NNNN` is a zero-padded decimal of at least 4 digits.
+- False invariants live in `SL/false-invariants/<subsystem>/FALSE-NNNN.md` and are used
+  only when `STATELENS_FALSE_INVARIANTS=1` (section 7.1).
+- IDs are global. The next ID is `1 + max(N)` over the `INV-N` files of all registries,
+  and likewise over the `FALSE-N` files. Deleting the file with the highest ID lets its ID
+  be reused; this is accepted.
 
 ### 4.2 Front matter
 
@@ -154,8 +175,13 @@ YAML front matter between two `---` lines. Keys, in this order:
 | `title` | yes | One line, at most 80 characters. |
 | `source_kind` | yes | `human`, `issue`, `design`, `comment`, `spec` or `paper`. |
 | `source_ref` | yes | URL, path, `path:line`, document section, or paper page. |
-| `scope` | yes | Inline list, one or more of `protocol`, `replica`, `voter`, `batcher`, `resolver`, `cross-actor`. |
+| `scope` | yes | Inline list, one or more of the registry's scope values (below). |
 | `author` | no | A person, or `claude`, `codex`, `claude/<model>`, `codex/<model>`. |
+
+| Registry | Allowed `scope` values |
+|---|---|
+| `simplex` | `protocol`, `replica`, `voter`, `batcher`, `resolver`, `cross-actor` |
+| `marshal` | `protocol`, `replica`, `core`, `resolver`, `standard`, `coding`, `application`, `cross-component`; here `resolver` is marshal's backfill resolver |
 
 ### 4.3 Body
 
@@ -183,7 +209,7 @@ protocol".
 | Complex | `While <state>, when <trigger>, the replica shall <response>.` | `sl_implies!(state && trigger, response)` |
 
 Prohibitions use `shall not`. History ("after", "once", "never again") is kept in
-ghost state (section 8.4) and checked at the later action.
+ghost state (section 9.4) and checked at the later action.
 
 ### 4.5 `templates/invariant.md` (verbatim)
 
@@ -217,28 +243,36 @@ if unused.>
 
 ### 4.6 Lint rules
 
-`statelens.py lint [PATH...]` checks each file (default: all of `SL/invariants/*.md`
-and `SL/false-invariants/*.md`) and prints `path: problem` for every violation:
+`statelens.py lint [PATH...]` checks each file (default: every `*.md` in
+`SL/invariants/*/` and `SL/false-invariants/*/`; `.gitkeep` files are ignored) and prints
+`path: problem` for every violation:
 
-1. File name matches `INV-\d{4,}\.md` in `invariants/` or `FALSE-\d{4,}\.md` in
-   `false-invariants/`.
+1. The file is in `invariants/<subsystem>/` and named `INV-\d{4,}\.md`, or in
+   `false-invariants/<subsystem>/` and named `FALSE-\d{4,}\.md`, where `<subsystem>` is a
+   known registry. A Markdown file directly in `invariants/` or `false-invariants/` is a
+   problem.
 2. The file starts with `---`, and a second `---` line closes the front matter.
 3. Every front-matter line is `key: value`. Required keys are present and non-empty;
    unknown keys are reported.
 4. `id` equals the file stem.
 5. `source_kind` is one of the allowed values.
-6. `scope` is `[a, b, ...]` with allowed values only.
+6. `scope` is `[a, b, ...]` with the allowed values of the file's registry only
+   (section 4.2).
 7. `## Statement`, `## Rationale` and `## Evidence` are present, in this order, and
    non-empty.
 8. Only ASCII characters.
+9. No two files, in any registries, have the same `id`; a repeated ID is a problem for
+   each file that has it.
 
 Exit code 0 when clean, 3 otherwise. EARS conformance is not linted; humans review it.
 
 ### 4.7 False invariants
 
-`SL/false-invariants/FALSE-0001.md` (Appendix C) is a deliberately false invariant: a
-working campaign must panic on it (AC-5). It follows the registry format with an ID
-prefix of `FALSE`, and a campaign binds it only when `STATELENS_FALSE_INVARIANTS=1`.
+Each registry has a deliberately false invariant, on which a working campaign must panic:
+`SL/false-invariants/simplex/FALSE-0001.md` (Appendix C, AC-6) and
+`SL/false-invariants/marshal/FALSE-0002.md` (Appendix E, AC-10). They follow the registry
+format with an ID prefix of `FALSE`. A campaign binds those of its profile's subsystems,
+and only when `STATELENS_FALSE_INVARIANTS=1`.
 
 ---
 
@@ -275,9 +309,9 @@ Environment-only switches:
 
 | Variable | Effect |
 |---|---|
-| `STATELENS_FALSE_INVARIANTS=1` | Campaign also binds `SL/false-invariants/*.md`, next to the registry (AC-5). |
+| `STATELENS_FALSE_INVARIANTS=1` | Campaign also binds the false invariants of its profile's subsystems, `SL/false-invariants/<subsystem>/*.md`, next to their registries (AC-6, AC-10). |
 | `CARGO_TARGET_DIR` | Passed through. By default builds use the checkout's `target/`. |
-| `STATELENS_BYZANTINE`, `STATELENS_FEEDBACK` | Read by the runtime module (section 8.5). |
+| `STATELENS_BYZANTINE`, `STATELENS_FEEDBACK` | Read by the runtime module (section 9.5). |
 
 ### 5.2 Prerequisites
 
@@ -299,7 +333,7 @@ set positional-arguments := true
 extract *args:
     python3 scripts/statelens.py extract "$@"
 
-# Run a campaign (instrument this checkout, test, fuzz): just fuzz [--agent A] [-- <libFuzzer args>]
+# Run a campaign (instrument, build the StateLens targets, test): just fuzz [--agent A] [--profile P]
 fuzz *args:
     python3 scripts/statelens.py campaign "$@"
 
@@ -317,10 +351,10 @@ prefixed with `statelens:`.
 | Subcommand | Usage | Exit codes |
 |---|---|---|
 | `lint` | `lint [PATH...]` | 0 clean, 3 problems |
-| `extract` | `extract [--agent A] KIND SOURCE...` | 0 done (including zero files), 1 usage, 2 agent failed, 3 lint problems |
-| `campaign` | `campaign [--agent A] [--stop-after STEP] [-- LIBFUZZER_ARGS...]` | 0 no panic, 1 usage (including `-artifact_prefix`, `-exact_artifact_path` or a `-handle_*` flag among `LIBFUZZER_ARGS`), 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed, 5 fuzzer crash, 6 fuzz command failed without a crash |
+| `extract` | `extract [--agent A] [--registry R] KIND SOURCE...`, where `R` is `simplex` (default) or `marshal` | 0 done (including zero files), 1 usage, 2 agent failed, 3 lint problems |
+| `campaign` | `campaign [--agent A] [--profile P] [--stop-after STEP]`, where `P` is `simplex` (default) or `marshal` | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
 
-`--stop-after` accepts `materialize`, `instrument`, `build` or `test`. It exists for
+`--stop-after` accepts `materialize`, `instrument` or `build`. It exists for
 development and acceptance testing and is not a campaign parameter in the PRD sense. A
 campaign that stops this way exits with code 0 and reports the result
 `STOPPED after <step>`.
@@ -328,9 +362,26 @@ campaign that stops this way exits with code 0 and reports the result
 Placeholders in prompt files have the form `{{NAME}}` (upper case). Rendering MUST fail
 on a placeholder without a value. Every rendered prompt is saved next to its log.
 
+### 5.5 Profiles
+
+A campaign's profile selects what it binds, instruments, tests and builds (D20). Profiles
+are data in `statelens.py`:
+
+| Item | `simplex` | `marshal` |
+|---|---|---|
+| Registries, in binding order | `simplex` | `simplex`, `marshal` |
+| Editable roots (scope check) | `consensus/src/simplex/` | `consensus/src/simplex/`, `consensus/src/marshal/` |
+| Warn-only paths | `consensus/src/simplex/mocks/`, `consensus/src/simplex/scheme/` | the same, and `consensus/src/marshal/mocks/` |
+| Beacon components, as `ACTOR`: `ACTOR_DIR` | `voter`, `batcher`, `resolver`: `consensus/src/simplex/actors/<actor>` | the three of `simplex`; `marshal.core`: `consensus/src/marshal/core`; `marshal.standard`: `consensus/src/marshal/standard`; `marshal.coding`: `consensus/src/marshal/coding` |
+| Materialize edits | Section 7.2, edits 1 to 8 | Section 7.2, edits 1 to 3 and 6 to 8, and edits M1 to M3 (section 8.3) |
+| Cryptography check | D15 (section 7.2) | Section 8.4 |
+| Fuzz package | `consensus/fuzz/simplex` | `consensus/fuzz/marshal` |
+| Fuzz targets it builds | `simplex_statelens` | One StateLens variant per target in `consensus/fuzz/marshal/fuzz_targets/` |
+| Test filter | Section 7.7 | Section 8.3, step 6 |
+
 ---
 
-## 6. Phase 1: extract
+## 6. Phase 1: discover invariants (`extract`)
 
 ### 6.1 Sources
 
@@ -338,7 +389,7 @@ on a placeholder without a value. Every rendered prompt is saved next to its log
 |---|---|
 | `issue` | GitHub URL of an issue or pull request, or `owner/repo#N` |
 | `design` | Local path or URL, with an optional `#section` suffix |
-| `comment` | File or directory under `consensus/src/simplex`, optionally `path:line` or `path:start-end` |
+| `comment` | File or directory under `consensus/src/<registry>`, optionally `path:line` or `path:start-end` |
 | `spec` | Quint, TLA+ or Lean file, optionally `path:line` |
 | `paper` | Local PDF or text file, or URL, with an optional `#page=N` suffix |
 
@@ -347,9 +398,9 @@ the repository root, which is the agent's working directory.
 
 ### 6.2 Procedure
 
-1. Validate `KIND` and that at least one source is given.
-2. Record the content hash of every file in `SL/invariants/`.
-3. Compute `NEXT_ID` (section 4.1).
+1. Validate `KIND`, the registry, and that at least one source is given.
+2. Record the content hash of every file under `SL/invariants/`, in all registries.
+3. Compute `NEXT_ID`, which is global (section 4.1).
 4. For `paper`, convert each local `.pdf` source (ignoring a `#...` suffix) to text in
    `SL/extract/papers/<stem>-<digest>.txt`, where `<digest>` is the first 10 hex digits of
    the SHA-256 of the resolved path, so papers with the same file name do not overwrite
@@ -358,19 +409,28 @@ the repository root, which is the agent's working directory.
 5. Render the prompt: `prompts/analyst.md`, a blank line, then `prompts/analyst-<KIND>.md`.
    Placeholders: `KIND`, `NEXT_ID`, `AUTHOR` (`claude` or `claude/<model>`, and likewise
    for codex), `TEMPLATE` (the content of `templates/invariant.md`), `SOURCES` (one
-   `- <source>` line per source, with `(text: <path>)` appended for converted papers).
-6. Run the agent with the Phase 1 invocation (section 11), working directory = the
+   `- <source>` line per source, with `(text: <path>)` appended for converted papers),
+   `REGISTRY` (the registry name), `CONTEXT` (the content of
+   `prompts/subsystems/<registry>-analyst.md`) and `SOURCE_ROOT`
+   (`consensus/src/<registry>`).
+6. Run the agent with the Phase 1 invocation (section 12), working directory = the
    repository root, prompt on standard input. Log to
    `SL/extract/<UTC timestamp>-<kind>.log`.
 7. New files = files that did not exist in step 2. Report any pre-existing file whose
-   hash changed as a problem ("agent modified an existing invariant").
+   hash changed as a problem ("agent modified an existing invariant"), and any new file
+   outside `SL/invariants/<registry>/` ("agent wrote outside the registry").
 8. Lint the new files (section 4.6).
-9. Print each new file with its title and the reminder: "Every file in invariants/ is
-   used by the next campaign. Review, edit or delete these files first."
+9. Print each new file with its title and the reminder: "Every file in a registry is
+   used by the next campaign that binds it. Review, edit or delete these files first."
 
 ---
 
-## 7. Phase 2: campaign
+## 7. StateLens for Simplex
+
+This chapter specifies StateLens for the Simplex subsystem: the campaign of the `simplex`
+profile, which instruments the code and generates the fuzz target (Phase 2, sections 7.1
+to 7.9), and how the operator runs the target (Phase 3, sections 7.10 to 7.12). Where a
+rule depends on the profile, it says so; chapter 8 gives what differs for marshal.
 
 ### 7.1 Preconditions and setup
 
@@ -381,16 +441,20 @@ A campaign runs in place in the checkout (D10); `repo` is its root
    ask for a fresh clone:
    - `cargo`, `cargo-nextest`, `cargo-fuzz` and `just` are on `PATH` (the agent CLI is
      checked before), so a missing tool fails before any agent time is spent;
-   - neither `consensus/src/simplex/statelens.rs` nor
-     `consensus/fuzz/simplex/fuzz_targets/simplex_statelens.rs` exists (an earlier
-     campaign already instrumented this checkout);
+   - none of `consensus/src/simplex/statelens.rs`,
+     `consensus/fuzz/simplex/fuzz_targets/simplex_statelens.rs` and
+     `consensus/fuzz/marshal/fuzz_targets/*_statelens.rs` exists (an earlier campaign
+     already instrumented this checkout);
    - `git status --porcelain --untracked-files=no` lists no path outside `SL/`.
 2. `base = git rev-parse HEAD`.
 3. Recreate `SL/campaign/` with `logs/`, `prompts/` and `meta.json`: `base`, `agent`,
-   `model`, test and fuzz toolchains, start time, invariant IDs.
-4. The invariants to bind are `SL/invariants/*.md`, plus `SL/false-invariants/*.md` when
-   `STATELENS_FALSE_INVARIANTS=1`, sorted by ID. Uncommitted files are included. Lint
-   them (section 4.6) and print any problem as a warning.
+   `model`, `profile`, test and fuzz toolchains, start time, invariant IDs, and `targets`
+   (the StateLens targets the campaign builds).
+4. The invariants to bind are those of the profile's registries, in the order of section
+   5.5. For each registry they are `SL/invariants/<subsystem>/*.md`, plus
+   `SL/false-invariants/<subsystem>/*.md` when `STATELENS_FALSE_INVARIANTS=1`, sorted by
+   ID. Uncommitted files are included. Lint them (section 4.6) and print any problem as a
+   warning.
 5. Create `SL/campaign/plan.md` with this content, then fill in the values:
 
 ~~~markdown
@@ -398,7 +462,8 @@ A campaign runs in place in the checkout (D10); `repo` is its root
 
 - Base commit: <base>
 - Agent: <agent>
-- Invariants: <count> (<ID, ID, ...>)
+- Profile: <profile>
+- Invariants: <count> (<ID, ID, ...>), per registry
 
 ## Invariants
 
@@ -410,10 +475,14 @@ A campaign runs in place in the checkout (D10); `repo` is its root
 
 All steps run with working directory `repo` unless stated otherwise. The campaign never
 commits, stages, stashes or resets anything, apart from `git add --intent-to-add` on the
-files the campaign creates (section 7.2) and on the files its agents create under
-`consensus/src/simplex/` (section 7.5).
+files the campaign creates (section 7.2) and on the files its agents create under the
+profile's editable roots (section 7.5).
 
 ### 7.2 Step 1: materialize
+
+This section gives the edits of the `simplex` profile. The `marshal` profile makes edits 1
+to 3 and 6 to 8, and edits M1 to M3 with its own cryptography check (sections 8.3 and
+8.4).
 
 Before any edit, the script checks the cryptography rule (D15). For every target template
 in `SL/runtime/` (every `*.rs` file except `statelens.rs`) and every `fuzz::<P` or
@@ -452,23 +521,25 @@ allows `unexpected_cfgs` itself.
 
 1. Take the invariants of section 7.1 step 4. When there are none, skip to step 3 with a
    warning.
-2. Split them into batches of 8.
+2. Split them into batches of 8 within one registry, in the order of section 5.5.
 3. For each batch, render `prompts/instrument.md`, a blank line, then
    `prompts/instrument-invariants.md`. Placeholders: `BASE`, `PLAN`
    (`consensus/fuzz/statelens/campaign/plan.md`), `CHECK` (section 7.6),
    `INVARIANT_IDS` (comma separated), `INVARIANTS` (for each file, a line
-   `===== <path from repo root> =====` followed by its content).
-4. Run the agent with the Phase 2 invocation (section 11). Save the prompt to
-   `SL/campaign/prompts/invariants-<n>.md` and the output to
-   `SL/campaign/logs/invariants-<n>.log`.
+   `===== <path from repo root> =====` followed by its content), `REGISTRY` (the batch's
+   registry) and `SUBSYSTEM_RULES` (the content of
+   `prompts/subsystems/<registry>-instrument.md`).
+4. Run the agent with the Phase 2 invocation (section 12). Save the prompt to
+   `SL/campaign/prompts/invariants-<registry>-<n>.md` and the output to
+   `SL/campaign/logs/invariants-<registry>-<n>.log`.
 5. A non-zero agent exit aborts the campaign with exit code 2.
 
 ### 7.4 Step 3: beacon probes
 
-For each actor in `voter`, `batcher` and `resolver`, render `prompts/instrument.md`, a
+For each beacon component of the profile (section 5.5), render `prompts/instrument.md`, a
 blank line, then `prompts/instrument-beacons.md`. Placeholders: `BASE`, `PLAN`, `CHECK`,
-`ACTOR`, `ACTOR_DIR` (`consensus/src/simplex/actors/<actor>`). Run and log as in section
-7.3, with `beacons-<actor>` as the file stem.
+`ACTOR` and `ACTOR_DIR` from the profile table, and `SUBSYSTEM_RULES` of the component's
+subsystem. Run and log as in section 7.3, with `beacons-<ACTOR>` as the file stem.
 
 ### 7.5 Step 4: finalize the plan and check scope
 
@@ -477,16 +548,15 @@ blank line, then `prompts/instrument-beacons.md`. Placeholders: `BASE`, `PLAN`, 
    `Notes: not processed by the agent`.
 3. Take a new snapshot (section 7.2) and compare it with the baseline. Every path that is
    new, changed or gone since the baseline:
-   - outside `consensus/src/simplex/` aborts the campaign with exit code 2
-     ("instrumentation edited <path>"), except `Cargo.lock`, which the first build
+   - outside the profile's editable roots (section 5.5) aborts the campaign with exit
+     code 2 ("instrumentation edited <path>"), except `Cargo.lock`, which the first build
      updates for the new `sancov` dependency;
-   - under `consensus/src/simplex/mocks/` or `consensus/src/simplex/scheme/` produces a
-     warning.
-4. Run `git add --intent-to-add` on every untracked file under `consensus/src/simplex/`
-   (files the agents created; no content is staged), so that `git diff` and the counts
-   include them. Then count the deleted lines under `consensus/src/simplex/`
-   (`git diff --numstat`), the added `sl_assert!`, `sl_implies!` and `sl_probe!` call
-   sites, and the beacon table rows.
+   - under a warn-only path of the profile produces a warning.
+4. Run `git add --intent-to-add` on every untracked file under the editable roots (files
+   the agents created; no content is staged), so that `git diff` and the counts include
+   them. Then count the deleted lines under the editable roots (`git diff --numstat`),
+   the added `sl_assert!`, `sl_implies!` and `sl_probe!` call sites, and the beacon table
+   rows.
 5. Append a `## Summary` section to the plan with the status counts, call-site counts,
    beacon count and deleted-line count. Deleted lines are expected to be 0; any other
    value must match the "Edited lines" entries of the plan.
@@ -497,14 +567,16 @@ blank line, then `prompts/instrument-beacons.md`. Placeholders: `BASE`, `PLAN`, 
 Commands, run in order:
 
 1. `CHECK`: `cargo +<test toolchain> check -p commonware-consensus --lib --tests`
-2. `FUZZBUILD`: `cargo +<fuzz toolchain> fuzz build --fuzz-dir consensus/fuzz/simplex simplex_statelens`
+2. `FUZZBUILD`: `cargo +<fuzz toolchain> fuzz build --fuzz-dir consensus/fuzz/simplex simplex_statelens`;
+   for the `marshal` profile, the build of each StateLens variant (section 8.3).
 
 The fuzz toolchain is `STATELENS_FUZZ_TOOLCHAIN`, or the value of `NIGHTLY_VERSION:` in
 `.github/workflows/slow.yml`, or `nightly`.
 
 On a failure, run a repair attempt: render `prompts/instrument.md`, a blank line, then
 `prompts/repair.md`. Placeholders: `BASE`, `PLAN`, `CHECK`, `ATTEMPT`, `COMMAND` (the
-failing command), `ERRORS` (its last 150 output lines). Run the agent, repeat the
+failing command), `ERRORS` (its last 150 output lines), `SUBSYSTEM_RULES` (the parts of
+all the profile's subsystems, in the order of section 5.5). Run the agent, repeat the
 section 7.5 scope check, then run both commands again. After 3 failed attempts, exit with
 code 3. After a successful repair, write `SL/campaign/instrumentation.diff` again.
 
@@ -518,42 +590,14 @@ cargo +<test toolchain> nextest run -p commonware-consensus --lib --no-fail-fast
 
 Log to `SL/campaign/logs/test.log`. On failure, print the `FAIL` lines and every
 `[statelens][` line, write the summary (section 7.9), and exit with code 4. The whole
-gate is 240 tests and took 125 s on 16 cores at the verified commit.
+gate is 240 tests and took 125 s on 16 cores at the verified commit. The `marshal`
+profile adds the marshal tests (section 8.3, step 6).
 
-### 7.8 Step 7: fuzz
+### 7.8 Step 7: hand-over
 
-In `consensus/fuzz`:
-
-~~~
-NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- \
-  -rss_limit_mb=4000 -print_final_stats=1 <LIBFUZZER_ARGS>
-~~~
-
-- Tee the output to `SL/campaign/logs/fuzz.log`.
-- While the fuzzer runs, the script ignores `SIGINT`. The fuzzer receives Ctrl-C itself
-  and exits, and then the script writes the summary.
-- If the fuzz command cannot be started, the result is `FUZZER FAILED`, exit code 6.
-- Otherwise the result combines the exit code with the evidence. The target's output
-  starts at cargo fuzz's ``Running `...` `` line or libFuzzer's first `INFO: Running with`
-  or `INFO: Seed:` line; crash evidence only counts from there on, so build output (such
-  as a panicking build script) is never taken for a crash. In this order:
-  1. A crash, result `PANIC (fuzz)` and exit code 5: a new or rewritten file (by
-     modification time) in `consensus/fuzz/simplex/artifacts/simplex_statelens/`, or, in
-     the target's output, a `Test unit written to` line, a libFuzzer `ERROR:` or
-     `SUMMARY:` line, a `[statelens][` line, or a Rust `panicked at` line. The artifact is
-     the path the log names, else the changed file.
-  2. Otherwise, exit code 0 of the fuzz command: result `NO PANIC`, exit code 0.
-  3. Otherwise, a `libFuzzer: run interrupted` line, or an exit caused by SIGINT (the
-     operator pressed Ctrl-C): result `NO PANIC`, exit code 0, reason "stopped by the
-     operator".
-  4. Otherwise: result `FUZZER FAILED`, exit code 6. The fuzz command failed without a
-     crash, for example a failed build.
-- `-artifact_prefix`, `-exact_artifact_path` and every `-handle_*` flag are rejected with
-  a usage error (exit code 1). The first two would move crash artifacts out of the
-  directory the result is read from; the `-handle_*` switches stop libFuzzer from reporting
-  a crash and saving the input that caused it.
-- The operator MAY pass `-fork=<N>` among `LIBFUZZER_ARGS` to use N cores. libFuzzer's
-  fork mode also stops at the first crash.
+The campaign does not run the fuzzer (D23). After the test gate passes, it writes the
+summary of section 7.9 with the result `READY`, and exits with code 0. The `run` and
+`replay` lines of the summary are where Phase 3 starts (section 7.10).
 
 ### 7.9 Result reporting
 
@@ -566,16 +610,54 @@ campaign that instrumented the checkout:
 statelens: checkout   <repo>
 statelens: base       <base>
 statelens: agent      <agent>
+statelens: profile    <profile>
 statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)
 statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
-statelens: result     NO PANIC | PANIC (tests) | PANIC (fuzz) | FUZZER FAILED | BUILD FAILED | SETUP FAILED
-statelens: reason     <why the campaign stopped, for any result other than NO PANIC>
+statelens: result     READY | PANIC (tests) | BUILD FAILED | SETUP FAILED
+statelens: reason     <why the campaign stopped, for any result other than READY>
 statelens: panic      <first [statelens][...] line, or the first panic message>
-statelens: artifact   consensus/fuzz/simplex/artifacts/simplex_statelens/<file>
-statelens: replay     cd <repo>/consensus/fuzz && CONSENSUS_FUZZ_LOG=1 just run simplex_statelens simplex/artifacts/simplex_statelens/<file>
+statelens: run        cd <repo>/consensus/fuzz && NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- -rss_limit_mb=4000 -print_final_stats=1
+statelens: replay     cd <repo>/consensus/fuzz && CONSENSUS_FUZZ_LOG=1 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens simplex/artifacts/simplex_statelens/<crash file>
 ~~~
 
-### 7.10 Investigation
+The `run` and `replay` lines appear only with `READY`, one pair per target: the `marshal`
+profile prints one pair per StateLens variant (section 8.3). The `replay` line is a
+template: the operator puts in the crash file that libFuzzer wrote.
+
+### 7.10 Phase 3: running a target
+
+Phase 3 is manual (D23). The operator runs the StateLens fuzz targets that a `READY`
+campaign built, in the instrumented checkout. StateLens has no command for this phase.
+
+The `run` lines of the summary (section 7.9) give one command per target. For the
+`simplex` profile, in `consensus/fuzz`:
+
+~~~
+NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- \
+  -rss_limit_mb=4000 -print_final_stats=1
+~~~
+
+- The operator chooses which targets to run and adds libFuzzer arguments as needed, for
+  example `-fork=<N>` to use N cores, or `-max_total_time=<s>` to bound the run.
+- A run ends when the target panics or the operator stops it. libFuzzer, including its
+  fork mode, stops at the first crash.
+- The operator should not pass `-artifact_prefix` or `-exact_artifact_path`, which move the
+  crash file elsewhere, or any `-handle_*` switch, which can stop libFuzzer from reporting
+  a crash and saving its input.
+- PRD section 9.4 lists the marshal variants whose adversary runs Simplex or marshal
+  code; only they exercise the Byzantine guard.
+
+### 7.11 Phase 3: crashes and replay
+
+- libFuzzer writes a crashing input to the artifact directory of the target's package:
+  `consensus/fuzz/simplex/artifacts/simplex_statelens/`, or
+  `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant (R-ART-1).
+- The `replay` line of the summary, with the crash file put in, replays the input in the
+  same checkout, and replay reproduces the panic (R-NF-2). For the Simplex target,
+  `CONSENSUS_FUZZ_LOG=1` also prints the decoded input; the marshal harnesses do not
+  read it.
+
+### 7.12 Phase 3: investigation
 
 The instrumented checkout stays as it is until the operator discards it. The operator
 uses:
@@ -583,21 +665,194 @@ uses:
 - `SL/campaign/plan.md`: how each invariant was bound;
 - `SL/campaign/instrumentation.diff` (or `git diff`): every change the campaign made;
 - `SL/campaign/logs/` and `SL/campaign/prompts/`;
-- the replay line from the summary. Replay reproduces the panic in the same checkout
-  (R-NF-2).
+- the crash file, replayed as in section 7.11.
 
 To locate the code for an invariant: `rg '\[statelens\] INV-0007' consensus/src`.
 
-An instrumented checkout must not be committed or reused; the next campaign starts from a
-fresh clone.
+An instrumented checkout must not be committed or reused for another campaign; the next
+campaign starts from a fresh clone.
 
 ---
 
-## 8. Runtime support: `statelens.rs`
+## 8. StateLens for Marshal
+
+This chapter specifies StateLens for the marshal subsystem: the `marshal` profile of PRD
+chapter 9. A `marshal` campaign binds the simplex and marshal registries, instruments both
+subsystems, and builds a StateLens variant of every marshal fuzz target. It follows chapter
+7 with the differences of section 8.3, and the other chapters apply to it unchanged.
+
+### 8.1 What was verified
+
+At commit `2649e4a668`, in a checkout instrumented by a `simplex` campaign (18
+invariants, 49 assertion sites, 146 probe sites), on 16 cores:
+
+- Each of the 12 files in `consensus/fuzz/marshal/fuzz_targets/` has exactly one line
+  for each anchor of edit M1 (section 8.3). The anchor of edit M3 occurs exactly once in
+  `consensus/fuzz/marshal/src/marshal/end_to_end/scenario.rs`, with `schemes` and `Role`
+  in scope.
+- All four `impl Simplex` blocks in `consensus/fuzz/core/src/simplex.rs` use the
+  `cert_mock` scheme. No other Simplex type is named under `consensus/fuzz/marshal/`.
+- The marshal part of the test gate passed in 70.6 s: the 421 tests matching
+  `test(/^marshal::/)`, including the `slow` group. Eight `slow` finalize tests of 24 to
+  66 s make up its tail. No StateLens assertion fired.
+- The stock target `marshal_e2e_standard_app_cert_mock_twins`, whose harness reaches the
+  patched Twins runner, ran for 120 s. It executed 1,862 inputs (15 per second) with a
+  peak RSS of 628 MB. There was no crash, no StateLens violation and no participant index
+  mismatch, and the case report after 1,024 cases showed none skipped. This is a smoke
+  test, not evidence that the simplex invariants hold in marshal targets:
+  - the stock target does not call `statelens::reset()`, so state feedback was off;
+  - inputs stayed at 4 bytes or less.
+- With `STATELENS_BYZANTINE=panic`, the same target panicked on its first input with
+  `[statelens][BYZANTINE] replica=2`. So the existing Twins runner hook (section 7.2,
+  edit 6) already guards the compromised identity of marshal Twins targets at the
+  Simplex sites.
+
+Not verified: the script changes, the generated variants, the wedge hook, marshal
+instrumentation, and AC-9 to AC-13.
+
+### 8.2 Decisions
+
+| ID | Decision | PRD requirement |
+|---|---|---|
+| D24 | StateLens variants are generated from the existing marshal targets, with two anchored insertions each, rather than kept as templates. The variant set therefore always equals the target set. | R-M-P2-1 step 1 |
+| D25 | The `marshal` profile does not create `simplex_statelens` (section 7.2, edits 4 and 5), and does not check `SL/runtime/target.rs`. | R-M-P2-1 step 1 |
+| D26 | The wedge scenario gets its own guard hook (Appendix F). The Twins targets use edit 6, and the other targets need no hook. | G5 |
+| D27 | The core actor derives `me` when it is created and copies it into its mailbox. The standard adapters read it there, and coding reads its scheme provider. `None` never stands for an unknown identity. | R-M-INS-1 |
+| D28 | The marshal beacon components are `marshal.core`, `marshal.standard` and `marshal.coding`. The backfill resolver, application gates, ancestry and store modules have no identity of their own, so they are instrumented at their call sites in these components. | R-FB-4, R-M-FB-1 |
+| D29 | The test gate of the `marshal` profile adds `test(/^marshal::/)` to the filter of section 7.7. | R-M-P2-1 step 6 |
+| D30 | The campaign builds every StateLens variant and runs none of them (D23). The operator chooses which variants to fuzz. | R-M-P2-1 step 7, R-M-P3-1 |
+
+### 8.3 The `marshal` campaign
+
+A `marshal` campaign follows section 7, with these differences.
+
+Step 1, materialize. First the cryptography check of section 8.4. Then edits 1 to 3 and
+6 to 8 of section 7.2, and:
+
+| # | File | Edit |
+|---|---|---|
+| M1 | `consensus/fuzz/marshal/fuzz_targets/<target>_statelens.rs`, for every `<target>.rs` in that directory | Create it as a copy of `<target>.rs` with two insertions. After the only line that matches `^    fuzz_target!\(\|input: [A-Za-z0-9_]+\| \{$`, insert `        commonware_consensus::simplex::statelens::reset();`. Before the only line equal to `    });`, insert `        commonware_consensus::simplex::statelens::clear_compromised();`. |
+| M2 | `consensus/fuzz/marshal/Cargo.toml` | For every variant, append a `[[bin]]` block with `name = "<target>_statelens"` and `path = "fuzz_targets/<target>_statelens.rs"`, followed by whichever of the `test`, `doc`, `bench` and `required-features` keys the original target's block has. |
+| M3 | `consensus/fuzz/marshal/src/marshal/end_to_end/scenario.rs` | After the line `        let router = Router::new([participants[Role::Byzantine.index()].clone()]);` (eight leading spaces), insert the hook of Appendix F. |
+
+As in section 7.2, a missing or repeated anchor aborts the campaign with exit code 2
+before any edit is made. `git add --intent-to-add` also covers the variants.
+
+Step 2, bind invariants (section 7.3): the batches of the simplex registry come first,
+with the Simplex subsystem rules, then those of the marshal registry, with the marshal
+subsystem rules.
+
+Step 3, beacon probes (section 7.4): one run for each of the six components of the profile
+(section 5.5).
+
+Step 4, plan and scope check (section 7.5): both editable roots of the profile are
+allowed.
+
+Step 5, build (section 7.6): `FUZZBUILD` is
+`cargo +<fuzz toolchain> fuzz build --fuzz-dir consensus/fuzz/marshal <variant>`, run for
+each variant in turn. The first failure is the one the repair step sees.
+
+Step 6, test gate (section 7.7):
+
+~~~
+cargo +<test toolchain> nextest run -p commonware-consensus --lib --no-fail-fast \
+  --ignore-default-filter \
+  -E '(test(/^simplex::tests::/) & not test(/::test_twins/)) | test(/^simplex::statelens::/) | test(/^marshal::/)'
+~~~
+
+At the reference commit, the marshal part is 421 tests and took 70.6 s on 16 cores. A
+marshal test that runs two live marshal actors under one identity would share ghost state
+and must be excluded, as the Twins tests are. None is known at the reference commit.
+
+Step 7, hand-over (section 7.8): the summary gives a `run` and a `replay` line for every
+variant, in the order of `consensus/fuzz/marshal/fuzz_targets/`:
+
+~~~
+statelens: profile    marshal
+statelens: run        cd <repo>/consensus/fuzz && NIGHTLY_VERSION=<fuzz toolchain> just run <variant> -- -rss_limit_mb=4000 -print_final_stats=1
+statelens: replay     cd <repo>/consensus/fuzz && NIGHTLY_VERSION=<fuzz toolchain> just run <variant> marshal/artifacts/<variant>/<crash file>
+~~~
+
+Phase 3 (sections 7.10 to 7.12) applies to the variants. PRD section 9.4 says which variants have an
+adversary that runs Simplex or marshal code.
+
+### 8.4 Cryptography check
+
+The `marshal` profile checks D15 as follows. Before edit M1, the script checks every `<target>.rs` in
+`consensus/fuzz/marshal/fuzz_targets/`:
+1. Every `::<P>` type argument in the file names a `P` that passes the D15 check: the
+   `impl Simplex for P {` block in `consensus/fuzz/core/src/simplex.rs` contains
+   `type Scheme = cert_mock::Scheme<`.
+2. No type whose `impl Simplex` in `consensus/fuzz/core/src/simplex.rs` lacks the
+   `cert_mock` scheme is named in the file, or in any `*.rs` file under
+   `consensus/fuzz/marshal/src/`.
+
+A failure aborts the campaign with exit code 2 and names the target and the type. At the
+reference commit, all four `impl Simplex` blocks use `cert_mock`. Eight targets name
+`SimplexCertificateMock` or `SimplexCertificateMockByzantineFirstLeader` explicitly. The
+other four call entry points that fix the type themselves, through
+`fuzz_marshal_twins_with::<SimplexCertificateMock, ...>` or
+`SimplexCertificateMock::setup`.
+
+### 8.5 Instrumentation conventions
+
+These rules add to section 10 for marshal code, and the marshal subsystem rules (section
+13.14) give them to the agent.
+
+| Topic | Rule |
+|---|---|
+| Editable code | An invariant: the root of its subsystem (section 5.5). A beacon run: the component directory, and the marshal code it calls outside `mocks/`. |
+| Runtime | Marshal code calls `crate::simplex::statelens::...`, as simplex code does. |
+| Replica index | Core actor: derived once when the actor is created, from the scheme its provider returns for the epoch it starts in. It is kept in a `// [statelens] me` field and copied into a `// [statelens] me` field of `core::Mailbox` when the actor creates the mailbox. Standard adapters: read from the mailbox they hold. Coding adapter and shards engine: from their scheme provider at the epoch of the round in hand. |
+| Modules without identity | The backfill resolver, the application gates and validation, ancestry and store are instrumented at their call sites in the components, never inside. |
+| Unknown identity | Never pass `None` for an index that could not be obtained. Leave the site without instrumentation, and say why in the plan. |
+| Discretization | Heights relative to the processed floor, the last delivered height or the finalized tip. Never raw heights, digests, commitments or shard indices. |
+
+The rule for the core actor assumes that a replica's provider returns its own signing
+scheme at every epoch. This holds for every harness at the reference commit. The Twins
+stacks, the scenarios, the store target and the marshal test harness give each validator
+a `ConstantProvider` over its own scheme. Some marshal tests use other providers:
+`VerifierProvider`, `RetiringProvider`, `MultiEpochProvider` and `ChurningProvider`.
+When the scheme a provider returns has no signer, `me` is `None`: that replica is not a
+participant, and it is checked without ghost state.
+
+### 8.6 Acceptance procedures
+
+| AC | Procedure | Pass condition |
+|---|---|---|
+| AC-9 | With at least one marshal invariant: `just fuzz --profile marshal`, then each printed `run` command. | Materialize (12 variants), instrument, plan, build and the test gate complete, the result is `READY` with one `run` line per variant, and each `run` command starts its variant. |
+| AC-10 | `STATELENS_FALSE_INVARIANTS=1 just fuzz --profile marshal`. | Result `PANIC (tests)`. `SL/campaign/logs/test.log` contains both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. |
+| AC-11 | In an instrumented checkout, for each variant: `STATELENS_BYZANTINE=panic just run <variant> -- -max_total_time=120`, then the same without the variable. | With the variable, the four Twins variants and the wedge-scenario variant panic with `[statelens][BYZANTINE]`, and no other variant does. Without it, none does. `[statelens] participant index mismatch` never appears. Verified for the Simplex sites of the stock standard Twins target (section 8.1). |
+| AC-12 | `just run <variant> <artifact>` in the checkout of a crashing Phase 3 run. | The same `[statelens][...]` line as in that run. |
+| AC-13 | Two 10-minute runs of `marshal_e2e_standard_app_cert_mock_twins_statelens` on empty corpora, one with `STATELENS_FEEDBACK=0` and one without. | `ft:` on the `DONE` line is higher with feedback. |
+| R-NF-3 | With the same duration and flags: each variant in an instrumented checkout, and its original target in an uninstrumented checkout at the same commit. | The exec/s values are reported side by side. A slowdown above 2x is recorded as an instrumentation problem. |
+
+### 8.7 Known limitations
+
+- Throughput was measured for one stock target only: 15 exec/s for the standard Twins
+  target. The other target families are unmeasured.
+- A fuzz process of a Twins variant needs about 0.6 GB (measured for one target). The
+  other variants are unmeasured, so the operator sizes the runs.
+- The Byzantine role of the wedge scenario is guarded, so its state feeds neither the
+  assertions nor the counters.
+- The store variant has no peers and reaches only the core actor's store paths.
+- The scenario-prefix targets seed notarizations into voter journals, and inject backfill
+  deliveries. No Simplex test creates these states, and history kept in ghost state may
+  not account for them.
+- When marshal moves under `consensus/src/simplex/` (draft PR #4994), several paths
+  change: the marshal root, the component directories, and the test filter (which
+  becomes `simplex::marshal::`). The `simplex` profile's editable root must then exclude
+  `consensus/src/simplex/marshal/`.
+- Issue #4701 removes marshal's backward ancestry API. Bindings are made again in every
+  campaign, but Observation hints that name that API will go stale.
+
+---
+
+## 9. Runtime support: `statelens.rs`
 
 The full source is in Appendix A. This section specifies its behavior.
 
-### 8.1 Byzantine guard
+### 9.1 Byzantine guard
 
 | Item | Behavior |
 |---|---|
@@ -610,7 +865,7 @@ The set is thread-local. This is sound because the deterministic runtime runs ev
 on the thread that calls `Runner::start`, and because nextest runs each test in its own
 process.
 
-### 8.2 Macros
+### 9.2 Macros
 
 All three evaluate `me` first and do nothing else when `should_check(me)` is `false`.
 
@@ -623,7 +878,7 @@ All three evaluate `me` first and do nothing else when `should_check(me)` is `fa
 The panic message is `[statelens][<ID>] replica=<index|none> <message>`. The reported
 location is the macro call site (`#[track_caller]`).
 
-### 8.3 Counter table
+### 9.3 Counter table
 
 - `sancov::Counters<65536>` in a static.
 - `record` sets `cell(site, a, b)` to 1 with an atomic store (presence, D3).
@@ -633,10 +888,10 @@ location is the macro call site (`#[track_caller]`).
 - Once the table is registered, libFuzzer stops printing `cov:` because the table has no
   PC table. Compare runs by `ft:`.
 
-### 8.4 Ghost state
+### 9.4 Ghost state
 
-- `Ghost`: one per replica, keyed by participant index. The voter, batcher and resolver of
-  a replica share it.
+- `Ghost`: one per replica, keyed by participant index. All actors and components of a
+  replica share it, in both subsystems.
 - `Global`: one per run, shared by all honest replicas.
 - Lifetime: one run. `reset()` clears ghost state before every fuzz input, and the
   fresh-run hook (Appendix B.4) clears it whenever a fresh deterministic runtime is
@@ -649,7 +904,7 @@ location is the macro call site (`#[track_caller]`).
 - Instrumentation adds `pub` fields with `Default` types to `Ghost` and `Global`, each
   marked `// [statelens] ghost:<ID>`.
 
-### 8.5 Discretization helpers and switches
+### 9.5 Discretization helpers and switches
 
 | Helper | Result |
 |---|---|
@@ -661,32 +916,32 @@ location is the macro call site (`#[track_caller]`).
 
 | Switch | Default | Effect |
 |---|---|---|
-| `STATELENS_BYZANTINE` | `skip` | What instrumentation does for a compromised replica: `skip` ignores it (the guard), `check` checks it like an honest replica, `panic` panics at the first instrumented site it reaches (AC-6). |
+| `STATELENS_BYZANTINE` | `skip` | What instrumentation does for a compromised replica: `skip` ignores it (the guard), `check` checks it like an honest replica, `panic` panics at the first instrumented site it reaches (AC-7). |
 | `STATELENS_FEEDBACK` | on | `0` leaves the table unregistered. |
 
 ---
 
-## 9. Instrumentation conventions
+## 10. Instrumentation conventions
 
-The prompts in section 12.7 are normative for the agent. In summary:
+The prompts in section 13.7 are normative for the agent. In summary:
 
 | Topic | Rule |
 |---|---|
-| Editable code | Non-test code in `consensus/src/simplex/`, except `mocks/` and `scheme/`. New-field initializers may be added to struct literals anywhere, including tests. In `statelens.rs`, only `Ghost` and `Global` fields and private helpers. |
+| Editable code | Non-test code of the profile's subsystems (section 5.5): `consensus/src/simplex/`, except `mocks/` and `scheme/`, and for the `marshal` profile `consensus/src/marshal/`, except `mocks/`. Each invariant only in the code of its own subsystem. New-field initializers may be added to struct literals anywhere, including tests. In `statelens.rs`, only `Ghost` and `Global` fields and private helpers. |
 | Additions only | No deleted or changed logic. The only allowed edit of an existing line is wrapping an expression in a block, keeping its tokens; each such edit is listed in the plan. |
 | Markers | `// [statelens] <tag>` above every added statement, block, field or item. Tags: `INV-NNNN`, `ghost:INV-NNNN`, `beacon:<label>`, `me`. |
-| Replica index | `self.scheme.me()`; otherwise a `// [statelens] me` field of type `Option<Participant>`. |
+| Replica index | Simplex: `self.scheme.me()`; otherwise a `// [statelens] me` field of type `Option<Participant>`. Marshal: section 8.5. Never `None` for an index that could not be obtained. |
 | Side effects | None: no `await`, spawn, lock, runtime context, RNG, clock, network, storage, metrics or logging; no reordering or consuming of values. |
 | Panics | Only through violations: saturating or checked arithmetic, no `unwrap` or `expect`, no out-of-bounds indexing. |
 | Cost | O(1) per site, or bounded by the number of tracked views. |
 | Warnings | Denied workspace-wide. Use full paths rather than new imports. |
-| Discretization | No raw views, digests, keys, payloads or timestamps. Views relative to another known view. At most about 64 `(a, b)` pairs per probe. No replica index in probe values. |
+| Discretization | No raw views, heights, digests, commitments, keys, payloads or timestamps. Views and heights relative to another known view or height. At most about 64 `(a, b)` pairs per probe. No replica index in probe values. |
 | Adversarial input | Assert what the honest replica does or keeps, not what peers send. |
-| Asynchrony | Cross-actor checks hold for every delivery delay the implementation allows. |
+| Asynchrony | Checks across actors or components hold for every delivery delay the implementation allows. |
 
 ---
 
-## 10. Instrumentation plan format
+## 11. Instrumentation plan format
 
 Agents add sections under `## Invariants`:
 
@@ -711,7 +966,7 @@ The script adds the `## Summary` section (section 7.5).
 
 ---
 
-## 11. Agent invocation
+## 12. Agent invocation
 
 The prompt always goes to standard input.
 
@@ -732,30 +987,22 @@ Notes:
 
 ---
 
-## 12. Prompts (verbatim)
+## 13. Prompts (verbatim)
 
-### 12.1 `prompts/analyst.md`
+### 13.1 `prompts/analyst.md`
 
 ~~~markdown
 # StateLens analyst: extract invariants
 
 You are a senior security engineer who specializes in Byzantine fault tolerant
-consensus. Read the sources listed at the end and write invariants for the StateLens
-registry of the Simplex consensus implementation in this repository.
+consensus. Read the sources listed at the end and write invariants for the
+`{{REGISTRY}}` registry of StateLens in this repository.
 
 ## Context
 
-- `consensus/src/simplex` implements a modified Simplex consensus protocol. Leaders
-  propose blocks for views. Replicas vote to notarize a proposal, to nullify a view
-  (skip it), or to finalize a notarized proposal, and a quorum of votes of one kind
-  forms a certificate (notarization, nullification, finalization). Each replica runs
-  three actors: the voter (the view state machine), the batcher (vote collection and
-  verification) and the resolver (fetching missing certificates). Replicas persist
-  their votes in a journal and recover from it after a crash. The module docs in
-  `consensus/src/simplex/mod.rs` describe the protocol; read them when a source leaves
-  a concept unclear.
-- Every file in `consensus/fuzz/statelens/invariants/` is used by the next fuzzing
-  campaign. An agent turns each invariant into assertions inside honest replicas, and a
+{{CONTEXT}}
+- Every file in `consensus/fuzz/statelens/invariants/{{REGISTRY}}/` is used by the next
+  fuzzing campaign that binds this registry. An agent turns each invariant into assertions inside honest replicas, and a
   fuzzer runs honest replicas next to Byzantine ones (equivocating, mutating messages,
   splitting the network) until an assertion fails. A wrong invariant costs a human
   investigation. A vague one cannot be checked.
@@ -765,18 +1012,14 @@ registry of the Simplex consensus implementation in this repository.
 - It holds in every execution for an honest replica, or, with scope `protocol`, for all
   honest replicas together. That includes executions with Byzantine replicas up to the
   fault threshold, arbitrary message delay, reordering and loss, timeouts, and crashes
-  followed by journal recovery.
-- It constrains what an honest replica does or keeps: votes it signs, messages it sends,
-  certificates it accepts, state it persists, views it enters. It never requires a
-  Byzantine replica to behave.
-- It uses protocol terms (views, leaders, proposals, parents, votes, certificates,
-  timeouts, the finalized tip, the journal). It never names Rust types, functions,
-  fields or files; those go in "Observation hints".
+  followed by recovery from persistent state.
+- It constrains what an honest replica does or keeps: the honest actions in Context. It
+  never requires a Byzantine replica to behave.
+- It uses the protocol terms in Context. It never names Rust types, functions, fields or
+  files; those go in "Observation hints".
 - It is precise enough to decide, at a specific moment of an execution, whether it has
-  been violated. Progress properties are welcome when they name that moment, for example
-  "When the replica times out in a view without having signed a finalize vote for it,
-  the replica shall sign a nullify vote for that view". Do not write open-ended
-  "eventually" properties.
+  been violated. Progress properties are welcome when they name that moment, like the example
+  in Context. Do not write open-ended "eventually" properties.
 - When a property holds only under extra conditions (for example, the replica must first
   have data it may still be waiting for), put those conditions into the Statement's
   trigger or state, or into "Preconditions / assumptions", instead of dropping the
@@ -801,7 +1044,7 @@ explain why in the Rationale.
 
 ## Output
 
-- Write one file per invariant: `consensus/fuzz/statelens/invariants/<ID>.md`.
+- Write one file per invariant: `consensus/fuzz/statelens/invariants/{{REGISTRY}}/<ID>.md`.
 - Use IDs starting at `{{NEXT_ID}}` and increasing by one with no gaps.
 - Follow the template below exactly: the same front matter keys and section headings,
   in the same order. Delete optional sections you do not use.
@@ -820,6 +1063,8 @@ evidence), or with the reason you wrote none.
 ```
 
 ## Example
+
+The example shows the format; it comes from the simplex registry.
 
 ```markdown
 ---
@@ -858,7 +1103,7 @@ Kind: `{{KIND}}`
 {{SOURCES}}
 ~~~
 
-### 12.2 `prompts/analyst-issue.md`
+### 13.2 `prompts/analyst-issue.md`
 
 ~~~markdown
 ## How to read an issue or pull request
@@ -886,32 +1131,31 @@ Kind: `{{KIND}}`
   its finalized tip"). Do not write open-ended "eventually" properties.
 - In Evidence, describe the violating scenario in two to five sentences and cite the
   issue, the pull request and the fixing commit.
-- Write nothing for issues that are not about Simplex behavior (documentation, CI,
-  build, performance tuning, other crates).
+- Write nothing for issues that are not about the behavior in scope for this registry
+  (see Context), or that are about documentation, CI, builds, performance tuning or
+  other crates.
 ~~~
 
-### 12.3 `prompts/analyst-design.md`
+### 13.3 `prompts/analyst-design.md`
 
 ~~~markdown
 ## How to read a design document
 
 - Read the listed documents: local paths, or URLs through your web fetch tool or
   `curl`. A `#section` suffix names the part to focus on; read the rest for context.
-- Extract every rule the document states or implies an honest replica follows: voting
-  rules, conditions for entering a view, timeout and nullification rules, certificate
-  validity and use, parent and ancestry rules, persistence and recovery guarantees, and
-  bounds on tracked state.
+- Extract every rule the document states or implies an honest replica follows, of the
+  kinds listed in Context.
 - Also extract the properties the design relies on in its safety argument.
 - In source_ref give the document and the section heading. In Evidence quote or
   closely paraphrase the relevant sentence.
 ~~~
 
-### 12.4 `prompts/analyst-comment.md`
+### 13.4 `prompts/analyst-comment.md`
 
 ~~~markdown
 ## How to read code comments
 
-- The sources are files or directories under `consensus/src/simplex`, optionally with
+- The sources are files or directories under `{{SOURCE_ROOT}}`, optionally with
   `:line` or `:start-end`. Read the doc comments, the inline comments, and the
   conditions of `assert!`, `debug_assert!`, `unreachable!`, `expect("...")` and
   `panic!` in non-test code. Ignore test modules and `mocks/`.
@@ -923,7 +1167,7 @@ Kind: `{{KIND}}`
 - Skip comments that describe mechanics without stating a condition.
 ~~~
 
-### 12.5 `prompts/analyst-spec.md`
+### 13.5 `prompts/analyst-spec.md`
 
 ~~~markdown
 ## How to read a formal specification
@@ -940,7 +1184,7 @@ Kind: `{{KIND}}`
 - source_ref is `path:line` of the property or action.
 ~~~
 
-### 12.6 `prompts/analyst-paper.md`
+### 13.6 `prompts/analyst-paper.md`
 
 ~~~markdown
 ## How to read a paper
@@ -956,12 +1200,12 @@ Kind: `{{KIND}}`
 - source_ref is the paper title with page and section.
 ~~~
 
-### 12.7 `prompts/instrument.md`
+### 13.7 `prompts/instrument.md`
 
 ~~~markdown
 # StateLens instrumenter
 
-You are instrumenting the Simplex consensus implementation for a StateLens fuzzing
+You are instrumenting consensus code in this repository for a StateLens fuzzing
 campaign. Your changes turn English invariants into runtime assertions, and add state
 probes that tell the fuzzer when an execution reached a new internal state.
 
@@ -971,7 +1215,7 @@ probes that tell the fuzzer when an execution reached a new internal state.
   fuzzing campaign. Nobody will review, merge or reuse your changes. The repository conventions in AGENTS.md and CLAUDE.md about public API
   stability, documentation, benchmarks, dependencies, commits and pull requests do not
   apply here. The rules in this prompt take precedence.
-- Do not commit. Do not run the tests or the fuzzer; the campaign runs them after you.
+- Do not commit. Do not run the tests or the fuzzer; the campaign runs the tests after you.
   Do run the check command at the end of this prompt until it passes.
 - Read `consensus/src/simplex/statelens.rs` first. It is the runtime support module.
 - A fuzzer will run honest replicas next to Byzantine ones. Any panic you cause is
@@ -980,14 +1224,18 @@ probes that tell the fuzzer when an execution reached a new internal state.
 
 ## Scope
 
-- You may edit non-test code in `consensus/src/simplex/`, except `mocks/` and
-  `scheme/`. Non-test code is code outside `#[cfg(test)]` items and `tests` modules.
+- You may edit the non-test code that the subsystem rules below allow. Non-test code is
+  code outside `#[cfg(test)]` items and `tests` modules.
   You may add initializers for new fields to struct literals anywhere, including tests,
   when the compiler requires them.
 - In `statelens.rs` you may only add fields to `Ghost` and `Global`, and private helper
   functions.
 - Do not edit anything else: no `Cargo.toml`, nothing under `consensus/fuzz/`, no
   other crate.
+
+## Subsystem rules
+
+{{SUBSYSTEM_RULES}}
 
 ## Rules
 
@@ -1001,11 +1249,11 @@ probes that tell the fuzzer when an execution reached a new internal state.
    fields and their updates, `beacon:<label>` for beacon probes, and `me` for code added
    only to make the replica index available.
 3. Observe only honest replicas. The macros, `with_ghost` and `with_global` apply the
-   Byzantine guard themselves. Always pass the replica's own index as `me`:
-   `self.scheme.me()` wherever a scheme is in scope (the voter, batcher and resolver
-   all hold one). Where it is not, add a `// [statelens] me` field of type
-   `Option<crate::simplex::statelens::Participant>`, set where the struct is created.
-   Never hard-code or guess an index.
+   Byzantine guard themselves. Always pass the replica's own index as `me`, obtained as
+   the subsystem rules say. Never hard-code or guess an index, and never pass `None` for
+   an index you could not obtain: `None` means the replica is not a participant and
+   turns the guard off. Leave such a site without instrumentation and say so in the
+   plan.
 4. No side effects on the protocol. Instrumentation must not `await`, spawn tasks, take
    locks, or use the runtime context, RNG, clock, network, storage, metrics or logging.
    It must not send or reorder messages, and must not move or consume values the
@@ -1021,9 +1269,9 @@ probes that tell the fuzzer when an execution reached a new internal state.
 8. Byzantine peers are adversarial: a message an honest replica receives can contain
    anything. Assert what the honest replica itself does, keeps or accepts, not what
    peers send, unless the invariant is about how the replica handles bad input.
-9. Actors run concurrently and exchange messages through mailboxes. A check that
-   compares the voter, batcher and resolver of one replica must hold for every delivery
-   delay the implementation allows, not only when the actors are in step.
+9. Actors and components run concurrently and exchange messages through mailboxes. A
+   check that compares components of one replica must hold for every delivery delay the
+   implementation allows, not only when they are in step.
 
 ## Runtime API (`crate::simplex::statelens`)
 
@@ -1041,7 +1289,7 @@ probes that tell the fuzzer when an execution reached a new internal state.
   `pack(high: u32, low: u32) -> u32` (two values below 2^16), `disc(&value) -> u32`
   (enum variant code, payload ignored). Views convert with `view.get()`.
 - Ghost state: `with_ghost(me, |g: &mut Ghost| ...)` gives one `Ghost` per replica,
-  shared by its voter, batcher and resolver. `with_global(me, |g: &mut Global| ...)`
+  shared by all its actors and components. `with_global(me, |g: &mut Global| ...)`
   gives one `Global` shared by all honest replicas, for `protocol` invariants. Both
   return `None` without running the closure for a skipped replica. Never nest them. Add
   the fields you need to `Ghost` or `Global`, with `Default` types. Ghost state lives
@@ -1086,20 +1334,21 @@ Run this until it succeeds with no errors and no warnings:
 Then reply with a short summary of what you added.
 ~~~
 
-### 12.8 `prompts/instrument-invariants.md`
+### 13.8 `prompts/instrument-invariants.md`
 
 ~~~markdown
-## Task: bind invariants {{INVARIANT_IDS}}
+## Task: bind invariants {{INVARIANT_IDS}} of the {{REGISTRY}} registry
 
-For each invariant below:
+Bind each invariant only in the code that the subsystem rules allow. For each invariant
+below:
 
 1. Read the Statement (EARS). Identify the trigger or state (`pre`) and the required
    response (`post`), or the single condition of a ubiquitous statement. Treat
    "Preconditions / assumptions" as part of `pre`. Treat "Observation hints" as leads,
    not as facts.
 2. Find where the implementation establishes and uses the concepts. Trace with search,
-   references and call hierarchy across the voter, batcher and resolver, including the
-   mailbox messages between them and the journal replay path on restart.
+   references and call hierarchy across the components the subsystem rules name,
+   including the mailbox messages between them and the recovery path on restart.
 3. Choose assertion sites where a violation first becomes observable: just before the
    replica acts (signs, broadcasts, persists, accepts a certificate, enters a view) or
    just after it changes the relevant state. Cover every code path that performs the
@@ -1124,10 +1373,10 @@ Invariants:
 {{INVARIANTS}}
 ~~~
 
-### 12.9 `prompts/instrument-beacons.md`
+### 13.9 `prompts/instrument-beacons.md`
 
 ~~~markdown
-## Task: beacon probes for the {{ACTOR}} actor (`{{ACTOR_DIR}}`)
+## Task: beacon probes for the {{ACTOR}} component (`{{ACTOR_DIR}}`)
 
 Add state probes that let the fuzzer tell apart executions that run the same code in
 different internal states. Do not add assertions in this task.
@@ -1140,22 +1389,21 @@ different internal states. Do not add assertions in this task.
 2. For each beacon, find the transition sites (where the state is set or changed) and
    the decision sites (where it is read to choose what to do).
 3. Choose probes in this order of priority:
-   - transitions caused by side effects or asynchrony: the view advances while work is
-     outstanding, a timeout races a certificate, a verification or certification result
-     arrives after the state moved on, equivocation is detected after acceptance, state
-     is rebuilt from the journal;
-   - conditions set in one actor and used in another through mailbox messages;
+   - transitions caused by side effects or asynchrony, such as those the subsystem rules
+     list;
+   - conditions set in one actor or component and used in another through mailbox
+     messages;
    - state combinations that comments or assertions call out as fragile.
 4. Probe shape: `sl_probe!(me, "{{ACTOR}}.<beacon>.<event>", a, b)`, with `(a, b)` the
    state before and after a transition, or the state and its context at a decision
    point. Use `disc` for enums, `flag` for booleans and options, `delta` and `bucket`
    for views and counts, and `pack` to put two small values on one side.
-5. Budget: 20 to 60 probes for this actor. Avoid per-message hot loops unless the state
+5. Budget: 20 to 60 probes for this component. Avoid per-message hot loops unless the state
    there is interesting.
 6. Add one row per probe to the "Beacon probes" table of the plan.
 ~~~
 
-### 12.10 `prompts/repair.md`
+### 13.10 `prompts/repair.md`
 
 ~~~markdown
 ## Task: repair the instrumentation (attempt {{ATTEMPT}} of 3)
@@ -1175,47 +1423,178 @@ Last lines of its output:
 {{ERRORS}}
 ~~~
 
+### 13.11 `prompts/subsystems/simplex-analyst.md`
+
+~~~markdown
+- `consensus/src/simplex` implements a modified Simplex consensus protocol. Leaders
+  propose blocks for views. Replicas vote to notarize a proposal, to nullify a view
+  (skip it), or to finalize a notarized proposal, and a quorum of votes of one kind
+  forms a certificate (notarization, nullification, finalization). Each replica runs
+  three actors: the voter (the view state machine), the batcher (vote collection and
+  verification) and the resolver (fetching missing certificates). Replicas persist
+  their votes in a journal and recover from it after a crash. The module docs in
+  `consensus/src/simplex/mod.rs` describe the protocol; read them when a source leaves
+  a concept unclear.
+- Honest actions: votes it signs, messages it sends, certificates it accepts, state it
+  persists, views it enters.
+- Protocol terms: views, leaders, proposals, parents, votes, certificates, timeouts, the
+  finalized tip, the journal.
+- Example of a progress property that names its moment: "When the replica times out in a
+  view without having signed a finalize vote for it, the replica shall sign a nullify
+  vote for that view".
+- Kinds of rules in design documents: voting rules, conditions for entering a view,
+  timeout and nullification rules, certificate validity and use, parent and ancestry
+  rules, persistence and recovery guarantees, and bounds on tracked state.
+- In scope: Simplex behavior.
+~~~
+
+### 13.12 `prompts/subsystems/marshal-analyst.md`
+
+~~~markdown
+- `consensus/src/marshal` turns the certificates of the Simplex consensus protocol
+  (`consensus/src/simplex`), and the blocks disseminated for its proposals, into an
+  ordered stream of finalized blocks for the application. Each replica runs a marshal
+  actor. It caches blocks and certificates, persists finalized blocks and their
+  finalizations, and keeps a processed floor; it may start from a finalized floor instead
+  of genesis. It delivers finalized blocks to the application in height order and at
+  least once, waits for the application to acknowledge them, prunes what it no longer
+  needs, and fetches missing blocks and certificates from peers (backfill). Between
+  Simplex and marshal, a consensus adapter proposes, verifies and certifies blocks:
+  `Inline` or `Deferred` in standard mode, or `Marshaled` in coding mode. In coding
+  mode, blocks are erasure coded into shards, which the shards engine disseminates,
+  checks and reconstructs. The module docs in `consensus/src/marshal/mod.rs` describe
+  the design; read them when a source leaves a concept unclear.
+- Honest actions: the blocks it delivers to the application and their order, the blocks
+  and certificates it persists, prunes or serves to peers, the processed floor it keeps,
+  the backfill requests it makes and the responses it accepts, the verification and
+  certification results it reports to consensus, and the shards it accepts, forwards or
+  uses for reconstruction.
+- Protocol terms: finalized blocks, heights, parents, notarizations, finalizations, the
+  processed floor, delivery and acknowledgement, backfill, durable storage, pruning,
+  epochs, and, in coding mode, commitments, shards and reconstruction.
+- Example of a progress property that names its moment: "When the replica learns a
+  finalization for a height above every finalized tip it has reported, the replica shall
+  report that height to the application as its new finalized tip".
+- Kinds of rules in design documents: delivery order and duplication, floor and anchor
+  rules, conditions for persisting, pruning and serving blocks and certificates, backfill
+  and repair rules, verification and certification rules of the consensus adapters,
+  shard validity and reconstruction rules, recovery after a restart, and bounds on
+  tracked state.
+- In scope: marshal behavior, including the consensus adapters and the coding mode.
+  Simplex voting, views and the forming of certificates belong to the simplex registry.
+~~~
+
+### 13.13 `prompts/subsystems/simplex-instrument.md`
+
+~~~markdown
+### Simplex (`consensus/src/simplex/`)
+
+- Editable code: non-test code in `consensus/src/simplex/`, except `mocks/` and
+  `scheme/`.
+- Components: the voter, batcher and resolver actors in `consensus/src/simplex/actors/`,
+  which exchange messages through mailboxes, and the journal replay path on restart.
+- Replica index: `self.scheme.me()` wherever a scheme is in scope (the voter, batcher and
+  resolver all hold one). Where it is not, add a `// [statelens] me` field of type
+  `Option<crate::simplex::statelens::Participant>`, set where the struct is created.
+- Asynchrony worth probing: the view advances while work is outstanding, a timeout races
+  a certificate, a verification or certification result arrives after the state moved
+  on, equivocation is detected after acceptance, state is rebuilt from the journal.
+~~~
+
+### 13.14 `prompts/subsystems/marshal-instrument.md`
+
+~~~markdown
+### Marshal (`consensus/src/marshal/`)
+
+- Editable code: non-test code in `consensus/src/marshal/`, except `mocks/`. Call the
+  runtime from here as `crate::simplex::statelens::...`, as simplex code does.
+- Components:
+  - the core actor (`core/`): ordering, the processed floor, caches, archives,
+    acknowledgements, subscriptions, and repair and backfill handling;
+  - the standard consensus adapters (`standard/`): `Inline` and `Deferred`;
+  - the coding mode (`coding/`): the `Marshaled` adapter and the shards engine.
+
+  They exchange messages through mailboxes. They use the backfill resolver (`resolver/`),
+  the application gates and validation (`application/`), `ancestry.rs` and `store.rs`.
+- Replica index: the participant index of the replica's own signing scheme, which marshal
+  gets from its scheme provider.
+  - Core actor: derive it once when the actor is created, from the scheme its provider
+    returns for the epoch it starts in. Keep it in a `// [statelens] me` field of type
+    `Option<crate::simplex::statelens::Participant>`. When the actor creates its mailbox,
+    copy it into a `// [statelens] me` field of the mailbox, so that every holder of a
+    mailbox clone can read it.
+  - Standard adapters: read it from the core mailbox they hold.
+  - Coding adapter and shards engine: take it from the scheme their scheme provider
+    returns for the epoch of the round in hand.
+  - The backfill resolver, the application gates and validation, `ancestry.rs` and
+    `store.rs` have no identity of their own. Instrument them at their call sites in the
+    components above, never inside them.
+  - When the scheme has no signer (it is a verifier), `me` is `None`: the replica is not a
+    participant.
+- Asynchrony worth probing:
+  - a finalization arrives before its block;
+  - the floor moves while backfill is in flight;
+  - a block arrives after its height was passed or pruned;
+  - dispatch runs ahead of acknowledgements;
+  - certification is requested before the block is available;
+  - shards arrive out of order or after reconstruction;
+  - state is rebuilt from the archives after a restart.
+- Heights: record them relative to the processed floor, the last delivered height or the
+  finalized tip, never raw. Never feed commitments or shard indices to a probe.
+~~~
+
 ---
 
-## 13. Acceptance procedures
+## 14. Acceptance procedures
 
 | AC | Procedure | Pass condition |
 |---|---|---|
-| AC-1 | For each agent: `just extract issue <URL of a real Simplex bug>`. | At least one new `invariants/INV-*.md`; `just check-invariants` reports no problem for it. |
-| AC-2 | On `main` with the subproject committed: `git ls-files consensus/fuzz/statelens` contains no `Cargo.toml`; `just check-fmt`; `just lint`; `just test -p commonware-consensus`; the CI fuzz target listing for `consensus/fuzz/simplex`. | All behave exactly as without the subproject. |
-| AC-3 | With at least one invariant: `just fuzz`. | Materialize, instrument, plan, build and test gate complete, and the fuzzer starts. |
-| AC-4 | In an instrumented checkout, two 10-minute runs on empty corpora: `STATELENS_FEEDBACK=0 just run simplex_statelens <empty dir A> -- -max_total_time=600` and the same without the variable on `<empty dir B>`. | The `ft:` value on the `DONE` line is higher with feedback. Compare `ft:`, not `cov:` (section 8.3). |
-| AC-5 | `STATELENS_FALSE_INVARIANTS=1 just fuzz`. | Result `PANIC (tests)` or `PANIC (fuzz)` with `[statelens][FALSE-0001]`. |
-| AC-6 | In an instrumented checkout: `STATELENS_BYZANTINE=panic just run simplex_statelens -- -max_total_time=120`, then the same without the variable. | The first run panics with `[statelens][BYZANTINE]`; the second does not; `[statelens] participant index mismatch` never appears. Verified at the reference commit (section 1.2). |
-| AC-7 | `just run simplex_statelens <artifact>` in the checkout of a crashing campaign. | The same `[statelens][...]` line as in the campaign. Verified for `BYZANTINE` (section 1.2). |
+| AC-1 | For each agent: `just extract issue <URL of a real Simplex bug>`. | At least one new `invariants/simplex/INV-*.md`; `just check-invariants` reports no problem for it. |
+| AC-2 | On `main` with the subproject committed: `git ls-files consensus/fuzz/statelens` contains no `Cargo.toml`; `just check-fmt`; `just lint`; `just test -p commonware-consensus`; the CI fuzz target listings for `consensus/fuzz/simplex` and `consensus/fuzz/marshal`. | All behave exactly as without the subproject. |
+| AC-3 | `just check-invariants`; `git ls-files consensus/fuzz/statelens/invariants consensus/fuzz/statelens/false-invariants`; then `just extract --registry marshal comment consensus/src/marshal/mod.rs`. | No lint problem. Every invariant file is in a subsystem directory. The new files are in `invariants/marshal/`, numbered from the next global ID. |
+| AC-4 | With at least one simplex invariant: `just fuzz`, then the printed `run` command. | Materialize, instrument, plan, build and test gate complete, the result is `READY`, and the `run` command starts the fuzzer. |
+| AC-5 | In an instrumented checkout, two 10-minute runs on empty corpora: `STATELENS_FEEDBACK=0 just run simplex_statelens <empty dir A> -- -max_total_time=600` and the same without the variable on `<empty dir B>`. | The `ft:` value on the `DONE` line is higher with feedback. Compare `ft:`, not `cov:` (section 9.3). |
+| AC-6 | `STATELENS_FALSE_INVARIANTS=1 just fuzz`; if the result is `READY`, a short run of the printed `run` command. | Result `PANIC (tests)` with `[statelens][FALSE-0001]`, or a panic with it in the short run. |
+| AC-7 | In an instrumented checkout: `STATELENS_BYZANTINE=panic just run simplex_statelens -- -max_total_time=120`, then the same without the variable. | The first run panics with `[statelens][BYZANTINE]`; the second does not; `[statelens] participant index mismatch` never appears. Verified at the reference commit (section 1.2). |
+| AC-8 | `just run simplex_statelens <artifact>` in the checkout of a crashing campaign. | The same `[statelens][...]` line as in the campaign. Verified for `BYZANTINE` (section 1.2). |
 | R-NF-3 | Same duration and flags: `simplex_statelens` in an instrumented checkout, and `simplex_cert_mock_twins_mutator` in an uninstrumented checkout at the same commit. | exec/s from `-print_final_stats=1` are reported side by side; a slowdown above 2x is recorded as an instrumentation problem. |
+
+Section 8.6 gives the procedures for AC-9 to AC-13, and for R-NF-3 on the marshal
+variants.
 
 ---
 
-## 14. Implementation order
+## 15. Implementation order
 
 1. Create the layout of section 3 with the verbatim files: `config.env`, `justfile`,
-   `templates/invariant.md`, all prompts (section 12), `false-invariants/FALSE-0001.md`
-   (Appendix C), `runtime/statelens.rs` (Appendix A) and `runtime/target.rs`
-   (Appendix B.1). Create `invariants/` with a `.gitkeep` file.
+   `templates/invariant.md`, all prompts with the subsystem parts (section 13),
+   `false-invariants/simplex/FALSE-0001.md` (Appendix C),
+   `false-invariants/marshal/FALSE-0002.md` (Appendix E), `runtime/statelens.rs`
+   (Appendix A) and `runtime/target.rs` (Appendix B.1). Create `invariants/simplex/` and
+   `invariants/marshal/`, each with a `.gitkeep` file while it is empty. Invariant files
+   that already exist go to their subsystem directory with `git mv`.
 2. Check the runtime templates:
    `rustfmt +<pinned nightly> --edition 2024 --config-path rustfmt.toml --check consensus/fuzz/statelens/runtime/*.rs`.
 3. Implement `scripts/statelens.py` in this order: config and argument parsing, `lint`,
-   prompt rendering, agent invocation, `extract`, then `campaign`, starting with the
-   materialize step and `--stop-after materialize`.
+   prompt rendering, agent invocation, `extract`, then `campaign`. Implement `campaign`
+   for the `simplex` profile first, starting with the materialize step and
+   `--stop-after materialize`, and then for the `marshal` profile (chapter 8).
 4. Write `README.md` (Appendix D).
-5. Validate: `just check-invariants false-invariants/FALSE-0001.md`;
-   `STATELENS_FALSE_INVARIANTS=1 just fuzz --stop-after build`; then AC-1 to AC-7.
+5. Validate:
+   - `just check-invariants`;
+   - `STATELENS_FALSE_INVARIANTS=1 just fuzz --stop-after build`, then AC-1 to AC-8;
+   - `STATELENS_FALSE_INVARIANTS=1 just fuzz --profile marshal --stop-after build`, then
+     AC-9 to AC-13.
 6. Change nothing outside `consensus/fuzz/statelens/`.
 
 ---
 
-## 15. Known limitations
+## 16. Known limitations
 
-- Throughput is about 13 executions per second per process, so a campaign needs many
-  core-hours. Use `-fork=<N>`.
-- The patch anchors in section 7.2 follow the code. When one moves, the campaign stops
-  with exit code 2 and the anchor in `statelens.py` must be updated.
+- Throughput is about 13 executions per second per process, so fuzzing needs many
+  core-hours. Run the targets with `-fork=<N>`.
+- The patch anchors in sections 7.2 and 8.3 follow the code. When one moves, the
+  campaign stops with exit code 2 and the anchor in `statelens.py` must be updated.
 - Agents are not deterministic: the same invariant can be bound differently in two
   campaigns. The plan and `instrumentation.diff` document each binding.
 - A campaign instruments the checkout in place, so every campaign needs a fresh clone.
@@ -1226,6 +1605,8 @@ Last lines of its output:
   Twins scenarios with the correct guard.
 - The runtime module relies on the deterministic runtime running tasks on the calling
   thread (`Runner::start` calls `start_and_recover` on the same thread).
+
+---
 
 ---
 
@@ -1848,14 +2229,14 @@ next.
 
 ---
 
-## Appendix C: `false-invariants/FALSE-0001.md` (verbatim)
+## Appendix C: `false-invariants/simplex/FALSE-0001.md` (verbatim)
 
 ~~~markdown
 ---
 id: FALSE-0001
 title: Deliberately false, never accept a nullification
 source_kind: human
-source_ref: consensus/fuzz/statelens/SPEC.md (acceptance procedure AC-5)
+source_ref: consensus/fuzz/statelens/docs/SPEC.md (acceptance procedure AC-6)
 scope: [replica, voter]
 author: statelens
 ---
@@ -1869,27 +2250,82 @@ leader is slow or offline. A campaign that includes this invariant must panic wi
 [statelens][FALSE-0001], which shows that invariants are bound, checked and reported.
 
 ## Evidence
-Workflow test, see SPEC.md section 13.
+Workflow test, see SPEC.md section 14.
 ~~~
 
 ---
 
 ## Appendix D: `README.md` outline
 
-1. What StateLens is, in three sentences, with links to PRD.md and SPEC.md.
+1. What StateLens is, in three sentences: the two subsystems it covers and its three
+   phases, with links to PRD.md and SPEC.md.
 2. How to run a campaign safely: campaigns give the agent full control of the machine
    (D4) and instrument the checkout in place (D10). Clone the repository fresh on a
-   dedicated machine or container, run the campaign in that clone, and discard the clone
-   afterwards. Never commit an instrumented checkout.
+   dedicated machine or container, run the campaign and the fuzzers in that clone, and
+   discard the clone afterwards. Never commit an instrumented checkout.
 3. Prerequisites (section 5.2) and `config.env`.
-4. Phase 1: `just extract <kind> <source>...` with one example per kind, then review:
-   every file in `invariants/` is used by the next campaign; edit or delete drafts;
-   `just check-invariants`.
-5. Phase 2: `just fuzz`, `just fuzz --agent codex`, passing libFuzzer arguments
-   (`just fuzz -- -fork=8`), `--stop-after`. Note that `just fuzz` in `consensus/fuzz/`
-   or at the repository root is the existing recipe that runs a package's fuzz targets.
-6. Results: the summary lines, exit codes, and `campaign/` (plan, diff, logs, prompts).
-7. Investigating a panic (section 7.10).
-8. Testing the workflow itself: `STATELENS_FALSE_INVARIANTS=1` (the campaign must panic on
+4. Phase 1: `just extract [--registry simplex|marshal] <kind> <source>...` with one example
+   per kind, then review: every file in a registry is used by the next campaign that binds
+   it; edit or delete drafts; `just check-invariants`.
+5. Phase 2: `just fuzz`, `just fuzz --profile marshal`, `just fuzz --agent codex`,
+   `--stop-after`. The campaign builds the StateLens targets and does not fuzz. Note that
+   `just fuzz` in `consensus/fuzz/` or at the repository root is the existing recipe that
+   runs a package's fuzz targets.
+6. Phase 3: run the printed `run` commands, adding libFuzzer arguments such as `-fork=8`
+   (section 7.10); which marshal variants have an adversary that runs Simplex or marshal code.
+7. Results: the summary lines, exit codes, and `campaign/` (plan, diff, logs, prompts).
+8. Investigating a panic (section 7.12).
+9. Testing the workflow itself: `STATELENS_FALSE_INVARIANTS=1` (the campaign must panic on
    the deliberately false invariants), `STATELENS_BYZANTINE=panic` (guard test) and
    `STATELENS_FEEDBACK=0` (feedback comparison).
+
+---
+
+## Appendix E: `false-invariants/marshal/FALSE-0002.md` (verbatim)
+
+~~~markdown
+---
+id: FALSE-0002
+title: Deliberately false, never deliver a block above height 1
+source_kind: human
+source_ref: consensus/fuzz/statelens/docs/SPEC.md (acceptance procedure AC-10)
+scope: [replica, core]
+author: statelens
+---
+
+## Statement
+The replica shall not deliver a finalized block above height 1 to the application.
+
+## Rationale
+Deliberately false. Marshal delivers every finalized block to the application in height
+order, so any run that finalizes two blocks violates it. A marshal campaign that includes
+this invariant must panic with [statelens][FALSE-0002], which shows that marshal
+invariants are bound, checked and reported.
+
+## Evidence
+Workflow test, see SPEC.md section 8.6.
+~~~
+
+---
+
+## Appendix F: wedge-scenario hook (verbatim)
+
+Inserted after the anchor line of edit M3 (section 8.3), with this indentation:
+
+~~~rust
+        // [statelens] The Byzantine role runs a real engine and marshal behind the wedge:
+        // publish it as compromised before any engine starts, and check that every
+        // scheme's own index matches its position in `participants`.
+        commonware_consensus::simplex::statelens::set_compromised([Role::Byzantine.index()]);
+        for (idx, scheme) in schemes.iter().enumerate() {
+            assert_eq!(
+                commonware_cryptography::certificate::Scheme::me(scheme),
+                Some(commonware_utils::Participant::from_usize(idx)),
+                "[statelens] participant index mismatch"
+            );
+        }
+~~~
+
+`run_scenario` creates `schemes` with `P::setup` before this line and uses it afterwards,
+so the loop only borrows it. The StateLens variant clears the compromised set after the
+harness returns, as the Simplex target does (D7).
