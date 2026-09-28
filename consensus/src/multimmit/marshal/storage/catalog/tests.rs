@@ -5,7 +5,6 @@ use crate::{
     Epochable as _, Viewable as _,
     multimmit::{
         marshal::{
-            OutputIndex,
             actors::delivery,
             open::{Opened, storage as open_storage},
             storage::{
@@ -18,7 +17,7 @@ use crate::{
         testing::TestBody,
         types::{BlockRef, ChainId, Frontier, PathLimits},
     },
-    types::{Height, Participant},
+    types::{Height, OutputIndex, Participant},
 };
 use commonware_cryptography::{
     Digestible as _, Hasher as _, Sha256, bls12381::primitives::variant::MinPk,

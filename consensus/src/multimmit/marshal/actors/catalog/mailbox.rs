@@ -10,7 +10,7 @@ use crate::{
     multimmit::{
         actors::util::{Completion, ask, reliable_policy},
         marshal::{
-            MarshalProgress, OutputIndex,
+            MarshalProgress,
             actors::delivery,
             storage::{
                 catalog::{Admission, InstallRequest, StoredRef},
@@ -24,7 +24,7 @@ use crate::{
             TransactionBlockHeader,
         },
     },
-    types::{Height, View},
+    types::{Height, OutputIndex, View},
 };
 use commonware_actor::{
     Feedback,

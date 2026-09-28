@@ -3,7 +3,7 @@
 //! Delivery owns the cursor. The catalog mirrors it only to report progress and to bound
 //! finalized pruning.
 
-use crate::multimmit::marshal::{OutputIndex, storage::catalog_state::Checkpoint};
+use crate::{multimmit::marshal::storage::catalog_state::Checkpoint, types::OutputIndex};
 use commonware_cryptography::Digest;
 
 /// The highest output delivery durably acknowledged.
