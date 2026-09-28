@@ -1,4 +1,4 @@
-//! Internal handler types for resolver actor coordination.
+//! Resolver engine callbacks forwarded to the resolver [`Actor`](super::Actor).
 
 use super::mailbox::Reply;
 use bytes::Bytes;
@@ -43,10 +43,7 @@ impl<R> Ord for Subscriber<R> {
     }
 }
 
-/// Messages sent from [`Handler`] to the resolver [`Actor`](super::Actor).
-///
-/// Each variant corresponds to one of the `resolver::Consumer` or `p2p::Producer`
-/// callbacks, re-routed so the actor processes them on its own task.
+/// An engine callback forwarded by [`Handler`] to the resolver [`Actor`](super::Actor).
 pub(super) enum EngineMessage<F: Family, R> {
     /// A peer response for the subscribers in `delivery`. Send its validity through `response`,
     /// or drop `response` to leave the delivery unjudged.
@@ -108,8 +105,8 @@ impl<F: Family, R> Policy for EngineMessage<F, R> {
     type Overflow = EnginePending<F, R>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        // Drop produce requests when the ready queue is full. We prefer handling our own
-        // responses over serving peers, who can ask a less loaded peer instead.
+        // When the queue is full, peer requests are dropped so deliveries to local callers keep
+        // priority. The requesting peer can ask a less loaded peer instead.
         if matches!(message, Self::Produce { .. }) {
             return;
         }
@@ -122,13 +119,8 @@ impl<F: Family, R> Policy for EngineMessage<F, R> {
     }
 }
 
-/// Bridges `resolver::Consumer` and `p2p::Producer` into the actor's
-/// message channel.
-///
-/// Every callback from the resolver engine is converted into an
-/// [`EngineMessage`] and sent to the actor. This keeps all mutable
-/// state (database handle and outstanding work) on the actor task,
-/// while the engine runs independently.
+/// Forwards `resolver::Consumer` and `p2p::Producer` callbacks to the actor as
+/// [`EngineMessage`]s, so all mutable state stays on the actor task.
 pub(super) struct Handler<F: Family, R> {
     sender: Sender<EngineMessage<F, R>>,
 }
