@@ -7,7 +7,7 @@ use commonware_consensus::{
     aggregation::types::{Activity, Certificate},
     types::{Epoch, Height},
 };
-use commonware_cryptography::{Digestible as _, certificate::Scheme};
+use commonware_cryptography::{Digested, Digestible as _, certificate::Scheme};
 use commonware_utils::{
     channel::{fallible::OneshotExt as _, mpsc, oneshot},
     sync::Mutex,
@@ -19,6 +19,16 @@ type Latest<S, D> = Arc<Mutex<Option<Certificate<S, D>>>>;
 
 /// Senders of every epoch subscription, kept open because the epoch never changes.
 type Subscriptions = Arc<Mutex<Vec<mpsc::Sender<Epoch>>>>;
+
+/// Returns the height of the block checkpoint `checkpoint` certifies when checkpoints are taken
+/// every `interval` blocks, or `None` if it exceeds the height space.
+pub(super) fn height(checkpoint: Height, interval: NonZeroU64) -> Option<Height> {
+    checkpoint
+        .get()
+        .checked_add(1)?
+        .checked_mul(interval.get())
+        .map(|end| Height::new(end - 1))
+}
 
 /// Feeds the executed chain's checkpoints to [`aggregation`] and applies its outcomes.
 ///
@@ -65,16 +75,23 @@ impl<S: Scheme, B: Block> Checkpoints<S, B> {
     /// Returns the height of the block checkpoint `checkpoint` certifies, or `None` if it exceeds
     /// the height space.
     pub fn height(&self, checkpoint: Height) -> Option<Height> {
-        checkpoint
-            .get()
-            .checked_add(1)?
-            .checked_mul(self.interval.get())
-            .map(|end| Height::new(end - 1))
+        height(checkpoint, self.interval)
     }
 
     /// Returns the newest certified checkpoint, if any.
     pub fn latest(&self) -> Option<Certificate<S, B::Digest>> {
         self.latest.lock().clone()
+    }
+
+    /// Returns the newest certified checkpoint and the executed block it certifies, if that
+    /// block is retained and is the one the checkpoint certifies.
+    pub async fn newest(&self) -> Option<(Certificate<S, B::Digest>, Digested<B>)> {
+        let certificate = self.latest()?;
+        let block = self
+            .chain
+            .block_at(self.height(certificate.item.height)?)
+            .await?;
+        (block.digest() == certificate.item.digest).then_some((certificate, block))
     }
 }
 
