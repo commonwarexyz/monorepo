@@ -41,6 +41,28 @@
 //! be faulty sign one. It prunes nothing before a checkpoint is certified, so a node must run
 //! aggregation over its executed chain to bound its storage and to serve peers that state-sync.
 //!
+//! # State Sync
+//!
+//! An executor configured with [`Start::Checkpoint`] and an empty chain executes nothing until it
+//! has a base. It waits for a block a checkpoint certifies, offered through [`Mailbox::sync_to`],
+//! durably records it as its target, and has the application sync its state to it through
+//! [`Execute::sync`]. Newer offers move the target forward while the sync runs. The block the sync
+//! reaches becomes the base: the executor archives it as applied, acknowledges every input at or
+//! below it without executing them, and executes the inputs after it.
+//!
+//! Marshal must resume the stream at or below the first target so that no input after the base is
+//! missing: install marshal's floor before offering the first target, and not again, even after a
+//! restart that resumes the sync. Marshal's jump to the installed floor may reach the executor
+//! after the first target; the inputs held from the earlier floor are then acknowledged and
+//! dropped.
+//!
+//! Inputs keep arriving while the sync runs. Those at or below the first target, or at or below an
+//! update the application [recorded](Update::recorded), are acknowledged at once, because the base
+//! is at or above them. The rest are held unacknowledged until the base is known, which stops
+//! marshal once its acknowledgement window fills. An application that records updates as they
+//! arrive therefore lets marshal follow the newest checkpoint for as long as the sync runs. A
+//! crash during the sync resumes it toward the newest recorded target.
+//!
 //! [`aggregation`]: commonware_consensus::aggregation
 //! [`Finalized`]: commonware_consensus::marshal::Finalized
 //! [`Ledger`]: commonware_consensus::marshal::Ledger
@@ -49,11 +71,12 @@
 use commonware_consensus::{Block, ancestry::Ancestry, types::Height};
 use commonware_cryptography::{Digest, Digestible};
 use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_utils::channel::{oneshot, ring};
 use rand_core::Rng;
 use std::{future::Future, sync::Arc};
 
 mod actor;
-pub use actor::{Config, Executor, Halt};
+pub use actor::{Config, Executor, Halt, Start};
 mod checkpoints;
 pub use checkpoints::Checkpoints;
 mod mailbox;
@@ -71,6 +94,15 @@ pub struct Context<D: Digest> {
     pub height: Height,
     /// The input's digest.
     pub input: D,
+}
+
+/// A newer target for a running [state sync](Execute::sync).
+pub struct Update<B> {
+    /// A block a checkpoint certifies, above every earlier target.
+    pub block: Arc<B>,
+    /// Signaled once the sync is certain to reach `block` or a later update. The executor then
+    /// acknowledges the inputs up to `block`.
+    pub recorded: oneshot::Sender<()>,
 }
 
 /// A block produced by executing an input.
@@ -100,10 +132,38 @@ where
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
     /// Called once, before the first execution, with the block execution resumes from: the
-    /// newest block the consumer applied, or the genesis block of an empty chain.
+    /// newest block the consumer applied, the genesis block of an empty chain, or the block a
+    /// [`sync`](Self::sync) reached.
     ///
     /// Every later execution builds on this block or one of its descendants.
     fn resume(&mut self, _tip: Arc<Self::Block>) {}
+
+    /// Called when a checkpoint certifies `block`, an executed block, so the application can keep
+    /// what a peer needs to sync to it.
+    ///
+    /// Calls follow increasing heights. The block a [`sync`](Self::sync) reached counts as
+    /// certified.
+    fn certified(&mut self, _block: Arc<Self::Block>) {}
+
+    /// Brings the application's state to the state `target` commits to, or to that of a later
+    /// block from `updates`, and returns the block it reached.
+    ///
+    /// `target` and every update are blocks a checkpoint certifies, offered in increasing height
+    /// order. Execution resumes after the returned block, which must be `target` or one of the
+    /// updates, and at or above every update whose [`recorded`](Update::recorded) the application
+    /// signaled. Until an update is recorded, the inputs above the newest recorded target are held
+    /// unacknowledged, which stops marshal once its acknowledgement window fills. The executor may
+    /// ask again after a crash, starting from the newest target it recorded.
+    ///
+    /// An application without state of its own can resume from any certified block, which the
+    /// default implementation does by returning `target`.
+    fn sync(
+        &mut self,
+        target: Arc<Self::Block>,
+        _updates: ring::Receiver<Update<Self::Block>>,
+    ) -> impl Future<Output = Arc<Self::Block>> + Send {
+        async move { target }
+    }
 
     /// Executes `input` on top of `ancestry`, the executed chain newest first starting at the
     /// block at `context.height - 1`, and returns the block at `context.height`.

@@ -53,6 +53,12 @@ pub(super) enum Message<B: Digestible> {
     /// More validators than can be faulty signed a block other than the executed one at
     /// `height`.
     Diverged { height: Height },
+    /// Offers `block`, which a checkpoint certifies, as a state sync target, and answers whether
+    /// the chain still has no base.
+    Target {
+        block: Arc<B>,
+        response: oneshot::Sender<bool>,
+    },
 }
 
 /// Keeps every request in order, and drops reads whose caller left.
@@ -165,6 +171,17 @@ impl<B: Block> Mailbox<B> {
     /// Reports that more validators than can be faulty signed another block at `height`.
     pub(super) fn diverged(&self, height: Height) -> Feedback {
         self.sender.enqueue(Message::Diverged { height })
+    }
+
+    /// Offers `block`, which a checkpoint certifies, as the target of the state sync that gives a
+    /// chain without a base its base.
+    ///
+    /// Only offers above the current target move it, and the executor trusts that the certificate
+    /// was verified. Returns whether the chain still has no base, which is when offers matter.
+    pub async fn sync_to(&self, block: Arc<B>) -> bool {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::Target { block, response });
+        receiver.await.unwrap_or(false)
     }
 }
 

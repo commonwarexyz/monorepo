@@ -17,7 +17,7 @@ where
     A: Application<E>,
 {
     Retarget {
-        update: TipUpdate<BlockDigest<A, E>, SyncTargets<A, E>>,
+        update: TipUpdate<Anchor<BlockDigest<A, E>>, SyncTargets<A, E>>,
         response: oneshot::Sender<Option<Artifact<E, A>>>,
     },
 }

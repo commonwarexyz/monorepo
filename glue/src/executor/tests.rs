@@ -26,12 +26,12 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{
     Acknowledgement as _, NZU16, NZU64, NZUsize,
     acknowledgement::{Exact, ExactWaiter},
-    channel::mpsc::error::TryRecvError,
+    channel::{mpsc::error::TryRecvError, ring},
     non_empty,
     sync::Mutex,
 };
 use futures::{FutureExt as _, StreamExt as _};
-use std::{convert::Infallible, num::NonZeroUsize, time::Duration};
+use std::{convert::Infallible, future, num::NonZeroUsize, time::Duration};
 
 /// A finalized input: an amount to add.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,6 +163,26 @@ struct Adder {
     ancestries: Arc<Mutex<Vec<Vec<u64>>>>,
     /// The height of each block execution resumed from.
     resumed: Arc<Mutex<Vec<u64>>>,
+    /// The height of each target a state sync started from.
+    synced: Arc<Mutex<Vec<u64>>>,
+    /// The height of each block reported as certified.
+    certified: Arc<Mutex<Vec<u64>>>,
+    /// Which block a state sync reaches.
+    reach: Reach,
+}
+
+/// Which block [`Adder`]'s state sync reaches.
+#[derive(Clone, Copy, Default)]
+enum Reach {
+    /// The target it started from, at once.
+    #[default]
+    Target,
+    /// The first newer target.
+    Update,
+    /// The target it started from, once a newer one arrives.
+    Stale,
+    /// The first update at or above this height, recording every update as it arrives.
+    Record(u64),
 }
 
 impl Execute<deterministic::Context> for Adder {
@@ -180,6 +200,36 @@ impl Execute<deterministic::Context> for Adder {
 
     fn resume(&mut self, tip: Arc<Total>) {
         self.resumed.lock().push(tip.height.get());
+    }
+
+    fn certified(&mut self, block: Arc<Total>) {
+        self.certified.lock().push(block.height.get());
+    }
+
+    async fn sync(
+        &mut self,
+        target: Arc<Total>,
+        mut updates: ring::Receiver<Update<Total>>,
+    ) -> Arc<Total> {
+        self.synced.lock().push(target.height.get());
+        if matches!(self.reach, Reach::Target) {
+            return target;
+        }
+        loop {
+            let Some(Update { block, recorded }) = updates.recv().await else {
+                return future::pending().await;
+            };
+            match self.reach {
+                Reach::Update => return block,
+                Reach::Target | Reach::Stale => return target,
+                Reach::Record(height) => {
+                    let _ = recorded.send(());
+                    if block.height.get() >= height {
+                        return block;
+                    }
+                }
+            }
+        }
     }
 
     async fn execute(
@@ -311,6 +361,8 @@ struct Parts {
     adder: Adder,
     marshal: Marshal,
     consumer: Consumer,
+    /// Starts an empty chain from a checkpoint instead of genesis.
+    checkpoint: bool,
 }
 
 impl Parts {
@@ -323,6 +375,11 @@ impl Parts {
             consumer: self.consumer.clone(),
             ack_window: NZUsize!(16),
             epoch: Epoch::zero(),
+            start: if self.checkpoint {
+                Start::Checkpoint
+            } else {
+                Start::Genesis
+            },
             store: StoreConfig {
                 partition_prefix: "executor".into(),
                 translator: TwoCap,
@@ -352,6 +409,55 @@ fn input(index: u64, amount: u64) -> (Finalized<Input>, ExactWaiter) {
         acknowledgement,
     };
     (finalized, waiter)
+}
+
+/// Returns a block at `height` that executed the input `(height, amount)`, as a checkpoint might
+/// certify.
+fn certified(height: u64, amount: u64, total: u64) -> Arc<Total> {
+    Arc::new(Total {
+        height: Height::new(height),
+        parent: Sha256::hash(&[b"parent", &height.to_be_bytes()]),
+        input: Some(input(height, amount).0.block.digest()),
+        total,
+    })
+}
+
+/// Returns the block [`Adder`] executes on top of `parent` for an input of `amount`.
+fn child(parent: &Total, amount: u64) -> Arc<Total> {
+    let height = parent.height.next();
+    Arc::new(Total {
+        height,
+        parent: parent.digest(),
+        input: Some(input(height.get(), amount).0.block.digest()),
+        total: parent.total + amount,
+    })
+}
+
+/// Returns the chain an unbiased [`Adder`] executes from `inputs`, starting at genesis.
+fn expected_chain(inputs: &[(u64, u64)]) -> Vec<Total> {
+    let mut chain = vec![Total {
+        height: Height::zero(),
+        parent: Digest::EMPTY,
+        input: None,
+        total: 0,
+    }];
+    for &(index, amount) in inputs {
+        let parent = chain.last().unwrap();
+        let block = Total {
+            height: Height::new(index),
+            parent: parent.digest(),
+            input: Some(
+                Input {
+                    height: Height::new(index),
+                    amount,
+                }
+                .digest(),
+            ),
+            total: parent.total + amount,
+        };
+        chain.push(block);
+    }
+    chain
 }
 
 /// Waits until `condition` holds.
@@ -803,5 +909,298 @@ fn divergence_halts_the_executor() {
         };
         assert_eq!(checkpoints.report(Activity::Diverged(item)), Feedback::Ok);
         assert_eq!(executor.await.unwrap(), Err(Halt::Diverged(Height::new(1))));
+    });
+}
+
+#[test]
+fn checkpoint_start_executes_after_the_synced_block() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+        let mut checkpoints = TestCheckpoints::new(mailbox.clone(), NZU64!(2));
+        let below = checkpoints.propose(Height::zero()).await;
+        let at = checkpoints.propose(Height::new(1)).await;
+
+        // Inputs from marshal's floor are held until the chain has a base.
+        let mut waiters = report(&mut inbox, &[(2, 1), (3, 2), (4, 3), (5, 4)]);
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(!acknowledged(&mut waiters[0]));
+        assert!(parts.consumer.heights().is_empty());
+        assert!(mailbox.block_at(Height::zero()).await.is_none());
+
+        // Inputs at or below the synced block are acknowledged without executing them.
+        let base = certified(3, 2, 100);
+        mailbox.sync_to(Arc::clone(&base)).await;
+        until_acknowledged(&context, &mut waiters[1]).await;
+        assert!(acknowledged(&mut waiters[0]));
+        assert_eq!(*parts.adder.synced.lock(), vec![3]);
+        assert_eq!(*parts.adder.resumed.lock(), vec![3]);
+        assert_eq!(*parts.adder.certified.lock(), vec![3]);
+        assert_eq!(
+            mailbox.block_at(Height::new(3)).await,
+            Some(Arc::clone(&base))
+        );
+        until(&context, || parts.consumer.heights() == vec![4, 5]).await;
+        assert_eq!(parts.consumer.totals(), vec![103, 107]);
+
+        // A checkpoint below the base can no longer be answered, and the base answers its own.
+        assert!(below.await.is_err());
+        assert_eq!(at.await.unwrap(), base.digest());
+    });
+}
+
+#[test]
+fn sync_follows_newer_targets_and_resumes_after_a_crash() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            adder: Adder {
+                reach: Reach::Update,
+                ..Adder::default()
+            },
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (executor, _, mailbox) = parts.start(&context).await;
+        mailbox.sync_to(certified(3, 2, 100)).await;
+        until(&context, || parts.adder.synced.lock().len() == 1).await;
+        executor.abort();
+        let _ = executor.await;
+
+        // The recorded target restarts the sync, and only newer targets reach it.
+        let restarted_context = context.child("restarted");
+        let (_executor, mut inbox, mailbox) = parts.start(&restarted_context).await;
+        until(&context, || *parts.adder.synced.lock() == vec![3, 3]).await;
+        assert!(mailbox.sync_to(certified(2, 1, 50)).await);
+        assert!(mailbox.sync_to(certified(3, 2, 100)).await);
+        let base = certified(6, 3, 200);
+        assert!(mailbox.sync_to(Arc::clone(&base)).await);
+        until(&context, || *parts.adder.resumed.lock() == vec![6]).await;
+        assert_eq!(mailbox.block_at(Height::new(6)).await, Some(base));
+
+        // Offers no longer matter once the chain has a base.
+        assert!(!mailbox.sync_to(certified(9, 4, 300)).await);
+
+        let mut waiters = report(&mut inbox, &[(6, 3), (7, 1)]);
+        until_acknowledged(&context, &mut waiters[0]).await;
+        until(&context, || parts.consumer.heights() == vec![7]).await;
+        assert_eq!(parts.consumer.totals(), vec![201]);
+    });
+}
+
+#[test]
+#[should_panic(expected = "marshal's input differs from the one a state sync target executed")]
+fn a_base_that_executed_another_input_halts() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (executor, mut inbox, mailbox) = parts.start(&context).await;
+        report(&mut inbox, &[(3, 5)]);
+        mailbox.sync_to(certified(3, 2, 100)).await;
+        let _ = executor.await;
+    });
+}
+
+#[test]
+fn sync_acknowledges_the_inputs_it_is_certain_to_reach() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            adder: Adder {
+                reach: Reach::Record(8),
+                ..Adder::default()
+            },
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+
+        // Without a target, every input is held.
+        let mut waiters = report(&mut inbox, &[(2, 1), (3, 2), (4, 1), (5, 1)]);
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(!acknowledged(&mut waiters[0]));
+
+        // The first target covers the inputs at or below it.
+        let base = certified(3, 2, 100);
+        mailbox.sync_to(Arc::clone(&base)).await;
+        until_acknowledged(&context, &mut waiters[1]).await;
+        assert!(acknowledged(&mut waiters[0]));
+        assert!(!acknowledged(&mut waiters[2]));
+
+        // A recorded update covers the inputs up to it, and later inputs are held again.
+        let recorded = child(&child(&base, 1), 1);
+        mailbox.sync_to(Arc::clone(&recorded)).await;
+        until_acknowledged(&context, &mut waiters[3]).await;
+        assert!(acknowledged(&mut waiters[2]));
+        let mut later = report(&mut inbox, &[(6, 1), (7, 1)]);
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(!acknowledged(&mut later[0]));
+        assert!(parts.adder.resumed.lock().is_empty());
+
+        // The sync reaches the newest update, which covers the rest.
+        let reached = child(&child(&child(&recorded, 1), 1), 1);
+        mailbox.sync_to(Arc::clone(&reached)).await;
+        until(&context, || *parts.adder.resumed.lock() == vec![8]).await;
+        until_acknowledged(&context, &mut later[1]).await;
+        assert!(acknowledged(&mut later[0]));
+        report(&mut inbox, &[(8, 1), (9, 4)]);
+        until(&context, || parts.consumer.heights() == vec![9]).await;
+        assert_eq!(parts.consumer.totals(), vec![reached.total + 4]);
+    });
+}
+
+#[test]
+fn a_floor_jump_before_the_first_target_drops_the_held_inputs() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+
+        // Marshal delivers from its old floor, then jumps to the installed one.
+        let mut stale = report(&mut inbox, &[(1, 1), (2, 1)]);
+        let mut waiters = report(&mut inbox, &[(10, 1), (11, 2)]);
+        until_acknowledged(&context, &mut stale[1]).await;
+        assert!(acknowledged(&mut stale[0]));
+        assert!(!acknowledged(&mut waiters[0]));
+
+        let base = certified(10, 1, 100);
+        mailbox.sync_to(Arc::clone(&base)).await;
+        until(&context, || parts.consumer.heights() == vec![11]).await;
+        assert!(acknowledged(&mut waiters[0]));
+        assert_eq!(parts.consumer.totals(), vec![102]);
+    });
+}
+
+#[test]
+fn a_floor_jump_that_arrives_after_the_first_target_drops_the_held_inputs() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            adder: Adder {
+                reach: Reach::Record(12),
+                ..Adder::default()
+            },
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+
+        // The first target reaches the executor before marshal's first input from the floor
+        // installed for it, and covers the inputs held from the old floor.
+        let mut stale = report(&mut inbox, &[(1, 1), (2, 1)]);
+        let base = certified(10, 1, 100);
+        mailbox.sync_to(Arc::clone(&base)).await;
+        until_acknowledged(&context, &mut stale[1]).await;
+        let mut waiters = report(&mut inbox, &[(10, 1), (11, 2), (12, 3)]);
+        until_acknowledged(&context, &mut waiters[0]).await;
+        assert!(!acknowledged(&mut waiters[1]));
+
+        // The sync reaches a newer target, and execution resumes after it.
+        let reached = child(&child(&base, 2), 3);
+        mailbox.sync_to(Arc::clone(&reached)).await;
+        until(&context, || *parts.adder.resumed.lock() == vec![12]).await;
+        until_acknowledged(&context, &mut waiters[2]).await;
+        report(&mut inbox, &[(13, 4)]);
+        until(&context, || parts.consumer.heights() == vec![13]).await;
+        assert_eq!(parts.consumer.totals(), vec![reached.total + 4]);
+    });
+}
+
+#[test]
+#[should_panic(expected = "marshal skipped inputs after a state sync target")]
+fn a_floor_jump_past_the_recorded_target_halts() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            adder: Adder {
+                reach: Reach::Record(100),
+                ..Adder::default()
+            },
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (executor, mut inbox, mailbox) = parts.start(&context).await;
+        mailbox.sync_to(certified(3, 2, 100)).await;
+        report(&mut inbox, &[(4, 1), (6, 1)]);
+        let _ = executor.await;
+    });
+}
+
+#[test]
+#[should_panic(expected = "marshal's input differs from the one a state sync target executed")]
+fn a_target_that_executed_another_input_halts_once_the_input_arrives() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            adder: Adder {
+                reach: Reach::Record(100),
+                ..Adder::default()
+            },
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (executor, mut inbox, mailbox) = parts.start(&context).await;
+        let base = certified(3, 2, 100);
+        mailbox.sync_to(Arc::clone(&base)).await;
+        mailbox.sync_to(child(&child(&base, 1), 1)).await;
+        report(&mut inbox, &[(3, 2), (4, 1), (5, 7)]);
+        let _ = executor.await;
+    });
+}
+
+#[test]
+fn a_target_above_the_synced_block_is_checked_once_executed() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            adder: Adder {
+                reach: Reach::Stale,
+                ..Adder::default()
+            },
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+
+        // The sync reaches block 3 although block 6 was offered, and recorded, meanwhile.
+        let base = certified(3, 2, 100);
+        let later = child(&child(&child(&base, 1), 1), 1);
+        mailbox.sync_to(Arc::clone(&base)).await;
+        mailbox.sync_to(Arc::clone(&later)).await;
+        until(&context, || *parts.adder.resumed.lock() == vec![3]).await;
+
+        // Execution passes the heights below the recorded block and reproduces it.
+        report(&mut inbox, &[(4, 1), (5, 1), (6, 1), (7, 1)]);
+        until(&context, || parts.consumer.heights() == vec![4, 5, 6, 7]).await;
+        assert_eq!(parts.consumer.block(6), later);
+    });
+}
+
+#[test]
+fn certified_blocks_reach_the_application_once_executed() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let parts = Parts::default();
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+        let mut checkpoints = TestCheckpoints::new(mailbox, NZU64!(2));
+        let inputs = [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)];
+        let chain = expected_chain(&inputs);
+
+        // Checkpoint one certifies height three before it is executed.
+        let digest = chain[3].digest();
+        checkpoints.report(Activity::Certified(certificate(&mut context, 1, digest)));
+        report(&mut inbox, &inputs[..2]);
+        until(&context, || parts.consumer.heights().len() == 2).await;
+        assert!(parts.adder.certified.lock().is_empty());
+        report(&mut inbox, &inputs[2..]);
+        until(&context, || *parts.adder.certified.lock() == vec![3]).await;
+
+        // An older checkpoint is ignored, and a newer one of an executed block is reported at once.
+        let digest = chain[1].digest();
+        checkpoints.report(Activity::Certified(certificate(&mut context, 0, digest)));
+        until(&context, || parts.consumer.heights().len() == 5).await;
+        let digest = chain[5].digest();
+        checkpoints.report(Activity::Certified(certificate(&mut context, 2, digest)));
+        until(&context, || *parts.adder.certified.lock() == vec![3, 5]).await;
     });
 }

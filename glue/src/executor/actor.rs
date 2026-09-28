@@ -1,9 +1,9 @@
 //! The executor actor.
 
 use super::{
-    Context, Execute, Executed as _,
+    Context, Execute, Executed as _, Update,
     mailbox::{Inbox, Input, Mailbox, Message, Subscriber},
-    store::{Store, StoreConfig},
+    store::{Opened, Store, StoreConfig},
 };
 use commonware_actor::{
     Feedback,
@@ -17,7 +17,7 @@ use commonware_consensus::{
     types::{Epoch, Height, OutputIndex},
 };
 use commonware_cryptography::Digestible;
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{
@@ -27,19 +27,29 @@ use commonware_runtime::{
 };
 use commonware_storage::{Context as StorageContext, translator::Translator};
 use commonware_utils::{
-    Acknowledgement,
+    Acknowledgement, NZUsize,
     acknowledgement::{Canceled, Exact, ExactWaiter},
-    channel::fallible::OneshotExt as _,
+    channel::{fallible::OneshotExt as _, oneshot, ring},
 };
 use futures::{FutureExt as _, future::BoxFuture};
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, VecDeque},
-    future,
+    future, mem,
     num::NonZeroUsize,
     sync::Arc,
 };
 use tracing::{debug, error, warn};
+
+/// Where an executor with an empty chain starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// From the application's genesis block.
+    Genesis,
+    /// From a block a checkpoint certifies, once one is offered through [`Mailbox::sync_to`] and
+    /// the application syncs its state to it.
+    Checkpoint,
+}
 
 /// Configuration of an [`Executor`].
 pub struct Config<X, R, T: Translator, C> {
@@ -53,6 +63,8 @@ pub struct Config<X, R, T: Translator, C> {
     /// The epoch [`Checkpoints`](super::Checkpoints) reports to aggregation, whose validator set
     /// certifies every checkpoint.
     pub epoch: Epoch,
+    /// Where an empty chain starts. Ignored once the chain has a base or a sync target.
+    pub start: Start,
     /// Storage of the executed chain.
     pub store: StoreConfig<T, C>,
     /// Capacity of the executor's mailbox.
@@ -83,6 +95,23 @@ struct Execution<B, D, A> {
     acknowledgement: A,
     block: BoxFuture<'static, B>,
     timer: histogram::Timer,
+}
+
+/// A state sync toward the newest offered target.
+struct Syncing<B: Send + Sync> {
+    /// The newest target.
+    target: Arc<B>,
+    /// Height of the newest target the sync is certain to reach: the first target, or an update
+    /// the application recorded. The base is at or above it.
+    recorded: Height,
+    /// Offers targets above the first to the application.
+    updates: ring::Sender<Update<B>>,
+    /// Updates not yet recorded, by increasing height, each with the signal of its recording.
+    unrecorded: VecDeque<(Height, oneshot::Receiver<()>)>,
+    /// Targets at or above the next input, by height, to check against the input at their height.
+    offered: BTreeMap<Height, Arc<B>>,
+    /// Resolves to the block the application synced its state to.
+    base: BoxFuture<'static, Arc<B>>,
 }
 
 /// A block delivered to the consumer and awaiting its acknowledgement.
@@ -121,11 +150,15 @@ where
     /// The executed chain, which backs each execution's ancestry.
     chain: Mailbox<X::Block>,
 
-    /// Blocks from the applied block through the newest executed one, oldest first.
+    /// Blocks from the applied block through the newest executed one, oldest first, or empty
+    /// while the chain has no base.
     line: VecDeque<Arc<X::Block>>,
+    /// The state sync that gives a chain without a base its base, once a target is known.
+    syncing: Option<Syncing<X::Block>>,
     /// Index of the next input marshal will deliver.
     expected: Height,
-    /// Inputs awaiting execution, in index order.
+    /// Inputs awaiting execution, in index order, or, while the chain has no base, the inputs the
+    /// sync may not reach, held unacknowledged.
     inputs: VecDeque<Finalized<X::Input, A>>,
     /// The execution in flight, if any.
     execution: Option<Execution<X::Block, <X::Input as Digestible>::Digest, A>>,
@@ -162,9 +195,10 @@ where
     /// The engine's marshal is supplied to [`start`](Self::start), so it can be built with the
     /// inbox as its application.
     ///
-    /// An empty chain starts from the application's genesis block. Otherwise the executor resumes
-    /// after the highest block its consumer applied, which is where marshal redelivers from. Either
-    /// way, the application learns that block through [`Execute::resume`].
+    /// An empty chain starts from the application's genesis block, or with [`Start::Checkpoint`]
+    /// waits for a state sync. Otherwise the executor resumes after the highest block its consumer
+    /// applied, which is where marshal redelivers from, or continues an interrupted state sync. The
+    /// application learns the block execution resumes from through [`Execute::resume`].
     pub async fn init<U>(
         context: E,
         config: Config<X, R, T, <X::Block as Read>::Cfg>,
@@ -177,12 +211,20 @@ where
             consumer,
             ack_window,
             epoch,
+            start,
             store,
             mailbox_size,
         } = config;
-        let (store, tip) = Store::init(context.child("store"), store, || execute.genesis()).await;
-        let tip = Arc::new(tip);
-        execute.resume(Arc::clone(&tip));
+        let (store, opened) =
+            Store::init(context.child("store"), store, start, || execute.genesis()).await;
+        let (line, target) = match opened {
+            Opened::Applied(tip) => {
+                let tip = Arc::new(tip);
+                execute.resume(Arc::clone(&tip));
+                (VecDeque::from([tip]), None)
+            }
+            Opened::Syncing(target) => (VecDeque::new(), target.map(Arc::new)),
+        };
         let applied = store.applied();
         let (inputs, inbox) = actor_mailbox::new(context.child("inbox"), mailbox_size);
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), mailbox_size);
@@ -205,7 +247,7 @@ where
         ));
         let _ = executed_height.try_set(applied.get());
         let _ = applied_height.try_set(applied.get());
-        let executor = Self {
+        let mut executor = Self {
             context: ContextCell::new(context),
             execute,
             marshal: None,
@@ -214,7 +256,8 @@ where
             inbox: Some(inbox),
             mailbox,
             chain: chain.clone(),
-            line: VecDeque::from([tip]),
+            line,
+            syncing: None,
             expected: applied.next(),
             inputs: VecDeque::new(),
             execution: None,
@@ -228,6 +271,7 @@ where
             execution_duration,
             ancestor_fetch_duration,
         };
+        executor.syncing = target.map(|target| executor.start_sync(target));
         (executor, Inbox::new(inputs), chain)
     }
 
@@ -249,6 +293,9 @@ where
     }
 
     async fn run(mut self) -> Result<(), Halt> {
+        if self.line.is_empty() && !self.sync().await? {
+            return Ok(());
+        }
         select_loop! {
             self.context,
             on_start => {
@@ -290,8 +337,248 @@ where
                 error!(%height, "executed block diverges from the one honest validators signed");
                 return Err(Halt::Diverged(height));
             }
+            Message::Target { response, .. } => {
+                response.send_lossy(false);
+            }
         }
         Ok(())
+    }
+
+    /// Runs the state sync of a chain without a base, holding the inputs it may not reach
+    /// unacknowledged, then installs the block it reaches. Returns `false` if the executor stopped
+    /// first.
+    async fn sync(&mut self) -> Result<bool, Halt> {
+        // Index of the input after the newest one marshal delivered, once it delivered one.
+        let mut next = None;
+        let base = loop {
+            select! {
+                _ = self.context.stopped() => {
+                    debug!("executor stopped");
+                    return Ok(false);
+                },
+                input = next_input(&mut self.inbox) => match input {
+                    Some(input) => self.hold(input, &mut next),
+                    None => self.inbox = None,
+                },
+                message = self.mailbox.recv() => {
+                    let Some(message) = message else {
+                        return Ok(false);
+                    };
+                    self.handle_syncing(message).await?;
+                },
+                progress = next_progress(&mut self.syncing) => match progress {
+                    Progress::Recorded(height) => self.recorded(height),
+                    Progress::Reached(base) => break base,
+                },
+            }
+        };
+        self.install(base).await?;
+        Ok(true)
+    }
+
+    /// Handles a request while the chain has no base.
+    async fn handle_syncing(&mut self, message: Message<X::Block>) -> Result<(), Halt> {
+        match message {
+            Message::Block { response, .. } => {
+                response.send_lossy(None);
+            }
+            Message::Subscribe { height, subscriber } => {
+                self.subscribers.entry(height).or_default().push(subscriber);
+            }
+            Message::Prune { .. } => {}
+            Message::Certified { height, digest } => {
+                if self
+                    .certified
+                    .is_none_or(|(certified, _)| certified < height)
+                {
+                    self.certified = Some((height, digest));
+                }
+            }
+            Message::Diverged { height } => {
+                error!(%height, "honest validators certified a block other than the one synced to");
+                return Err(Halt::Diverged(height));
+            }
+            Message::Target { block, response } => {
+                self.offer(block).await;
+                response.send_lossy(true);
+            }
+        }
+        Ok(())
+    }
+
+    /// Makes `block` the sync target if it is above the current one, starting the sync if none
+    /// runs yet.
+    async fn offer(&mut self, block: Arc<X::Block>) {
+        if let Some(syncing) = &self.syncing {
+            if block.height() == syncing.target.height() {
+                assert_eq!(
+                    block.digest(),
+                    syncing.target.digest(),
+                    "checkpoints certify two blocks at one height"
+                );
+            }
+            if block.height() <= syncing.target.height() {
+                return;
+            }
+        }
+        if let Some(input) = self
+            .inputs
+            .iter()
+            .find(|input| input.index.get() == block.height().get())
+        {
+            check_input(block.as_ref(), input);
+        }
+        self.store.record_target(&block).await;
+        match &mut self.syncing {
+            Some(syncing) => {
+                syncing.offered.insert(block.height(), Arc::clone(&block));
+                let (recorded, record) = oneshot::channel();
+                syncing.unrecorded.push_back((block.height(), record));
+                syncing.updates.send_lossy(Update {
+                    block: Arc::clone(&block),
+                    recorded,
+                });
+                syncing.target = block;
+            }
+            None => {
+                let syncing = self.start_sync(block);
+                let recorded = syncing.recorded;
+                self.syncing = Some(syncing);
+                self.recorded(recorded);
+            }
+        }
+    }
+
+    /// Holds an input that arrived while the chain has no base, or acknowledges it if the sync is
+    /// certain to reach a block at or above it. `next` is the index of the input after the
+    /// previous one.
+    ///
+    /// Marshal may jump to a newly installed floor, which supersedes the inputs held from the old
+    /// one. The jump may reach the executor after the first target, but never resumes the stream
+    /// above the newest target the sync is certain to reach, which the base is at or above.
+    fn hold(&mut self, input: Finalized<X::Input, A>, next: &mut Option<Height>) {
+        let index = Height::new(input.index.get());
+        if next.is_some_and(|next| next != index) {
+            assert!(
+                self.syncing
+                    .as_ref()
+                    .is_none_or(|syncing| index.get() <= syncing.recorded.get().saturating_add(1)),
+                "marshal skipped inputs after a state sync target"
+            );
+            debug!(%index, "marshal moved its floor");
+            for held in self.inputs.drain(..) {
+                held.acknowledgement.acknowledge();
+            }
+        }
+        *next = Some(index.next());
+        let Some(syncing) = &mut self.syncing else {
+            self.inputs.push_back(input);
+            return;
+        };
+        while syncing
+            .offered
+            .first_key_value()
+            .is_some_and(|(height, _)| *height < index)
+        {
+            syncing.offered.pop_first();
+        }
+        if let Some(target) = syncing.offered.remove(&index) {
+            check_input(target.as_ref(), &input);
+        }
+        if index <= syncing.recorded {
+            input.acknowledgement.acknowledge();
+            return;
+        }
+        self.inputs.push_back(input);
+    }
+
+    /// Records that the sync is certain to reach a block at or above `height`, and acknowledges
+    /// the held inputs up to it.
+    fn recorded(&mut self, height: Height) {
+        let syncing = self.syncing.as_mut().expect("a sync runs");
+        syncing.recorded = syncing.recorded.max(height);
+        let recorded = syncing.recorded;
+        while self
+            .inputs
+            .front()
+            .is_some_and(|input| input.index.get() <= recorded.get())
+        {
+            let input = self.inputs.pop_front().expect("an input is held");
+            input.acknowledgement.acknowledge();
+        }
+    }
+
+    /// Starts the application's state sync toward `target`.
+    fn start_sync(&self, target: Arc<X::Block>) -> Syncing<X::Block> {
+        let (updates, receiver) = ring::channel(NZUsize!(1));
+        let mut execute = self.execute.clone();
+        let first = Arc::clone(&target);
+        Syncing {
+            recorded: target.height(),
+            offered: BTreeMap::from([(target.height(), Arc::clone(&target))]),
+            target,
+            updates,
+            unrecorded: VecDeque::new(),
+            base: async move { execute.sync(first, receiver).await }.boxed(),
+        }
+    }
+
+    /// Makes `base`, the block the state sync reached, the applied block, and admits the inputs
+    /// held while syncing.
+    async fn install(&mut self, base: Arc<X::Block>) -> Result<(), Halt> {
+        let syncing = self.syncing.take().expect("a sync reached the base");
+        let height = base.height();
+        assert!(
+            height <= syncing.target.height(),
+            "state sync reached a block above its newest target"
+        );
+        assert!(
+            height >= syncing.recorded,
+            "state sync reached a block below a target it recorded"
+        );
+        let offered = self
+            .store
+            .get(height)
+            .await
+            .expect("state sync reached a block it was never offered");
+        assert_eq!(
+            offered.digest(),
+            base.digest(),
+            "state sync reached a block other than the one offered at its height"
+        );
+        // The base was archived when it was offered, so it only needs to become the applied block.
+        self.store.apply(height).await;
+        let _ = self.executed_height.try_set(height.get());
+        let _ = self.applied_height.try_set(height.get());
+        self.line.push_back(Arc::clone(&base));
+        self.expected = height.next();
+        self.execute.resume(Arc::clone(&base));
+
+        // Blocks below the base were never executed here, so their subscribers are dropped.
+        let later = self.subscribers.split_off(&height.next());
+        for (subscribed, subscribers) in mem::replace(&mut self.subscribers, later) {
+            if subscribed == height {
+                for subscriber in subscribers {
+                    subscriber(&base);
+                }
+            }
+        }
+        for input in mem::take(&mut self.inputs) {
+            self.admit(input).await;
+        }
+
+        // The base is a certified block, and a checkpoint reported while syncing is checked
+        // against it or against the block that executes at its height.
+        match self.certified.take() {
+            Some((certified, digest)) if certified == height => {
+                self.matches_certified(&base, digest)
+            }
+            pending => {
+                self.certified = pending.filter(|(certified, _)| *certified > height);
+                self.checkpointed(&base);
+                Ok(())
+            }
+        }
     }
 
     /// Records that a checkpoint certified `digest` as the block at `height`, checking it against
@@ -320,23 +607,31 @@ where
             debug!(%height, "certified block is no longer retained");
             return Ok(());
         };
-        self.matches_certified(height, &block, digest)
+        self.matches_certified(&block, digest)
     }
 
-    /// Checks `block`, executed at `height`, against the digest a checkpoint certified there,
-    /// making it the newest checkpoint if they match.
+    /// Checks an executed `block` against the digest a checkpoint certified at its height, making
+    /// it the newest checkpoint if they match.
     fn matches_certified(
         &mut self,
-        height: Height,
-        block: &X::Block,
+        block: &Arc<X::Block>,
         digest: <X::Block as Digestible>::Digest,
     ) -> Result<(), Halt> {
         if block.digest() != digest {
-            error!(%height, "executed block diverges from the one honest validators certified");
-            return Err(Halt::Diverged(height));
+            error!(
+                height = %block.height(),
+                "executed block diverges from the one honest validators certified"
+            );
+            return Err(Halt::Diverged(block.height()));
         }
-        self.checkpoint = Some(height);
+        self.checkpointed(block);
         Ok(())
+    }
+
+    /// Makes `block` the newest checkpoint, and tells the application.
+    fn checkpointed(&mut self, block: &Arc<X::Block>) {
+        self.checkpoint = Some(block.height());
+        self.execute.certified(Arc::clone(block));
     }
 
     /// Calls `subscriber` with the block at `height` once it is executed, or drops it if that
@@ -360,13 +655,14 @@ where
     async fn admit(&mut self, input: Finalized<X::Input, A>) {
         let index = Height::new(input.index.get());
         if index <= self.store.applied() {
-            // An applied block is durable, so a retained one must have executed this input.
-            if !index.is_zero()
-                && let Some(block) = self.store.get(index).await
+            // An applied block is durable, so a retained one must have executed this input. The
+            // genesis block executed none, and marshal's block at its index is the engine's.
+            if let Some(block) = self.store.get(index).await
+                && let Some(executed) = block.input()
             {
                 assert_eq!(
-                    block.input(),
-                    Some(input.block.digest()),
+                    executed,
+                    input.block.digest(),
                     "marshal redelivered an input other than the one executed"
                 );
             }
@@ -440,26 +736,26 @@ where
             "executed block has the wrong input"
         );
 
-        // A block archived before a crash must be the one execution produces again. A crash may
-        // lose any unsynced block, not only a suffix, so each height is checked on its own.
+        // A block archived before a crash, or recorded as a state sync target, must be the one
+        // execution produces. A crash may lose any unsynced block, not only a suffix, so each
+        // height is checked on its own.
         match self.store.get(height).await {
             Some(archived) => assert_eq!(
                 archived.digest(),
                 block.digest(),
-                "execution is not deterministic"
+                "execution is not deterministic, or diverges from a certified target"
             ),
             None => self.store.put(&block).await,
         }
         let _ = self.executed_height.try_set(height.get());
 
+        let block = Arc::new(block);
         if let Some((_, digest)) = self
             .certified
             .take_if(|(certified, _)| *certified == height)
         {
-            self.matches_certified(height, &block, digest)?;
+            self.matches_certified(&block, digest)?;
         }
-
-        let block = Arc::new(block);
         for subscriber in self.subscribers.remove(&height).into_iter().flatten() {
             subscriber(&block);
         }
@@ -583,6 +879,52 @@ where
         Some(inbox) => inbox.recv().await.map(|Input(input)| input),
         None => future::pending().await,
     }
+}
+
+/// Checks that `input` is the one `target`, a block a checkpoint certifies at its index, executed.
+fn check_input<B, I, A>(target: &B, input: &Finalized<I, A>)
+where
+    B: super::Executed<I::Digest>,
+    I: Digestible,
+{
+    assert_eq!(
+        target.input(),
+        Some(input.block.digest()),
+        "marshal's input differs from the one a state sync target executed"
+    );
+}
+
+/// Progress of a state sync.
+enum Progress<B> {
+    /// The application recorded an update at this height.
+    Recorded(Height),
+    /// The application synced its state to this block.
+    Reached(Arc<B>),
+}
+
+/// Waits for the state sync to progress, if one runs.
+async fn next_progress<B: Send + Sync>(syncing: &mut Option<Syncing<B>>) -> Progress<B> {
+    let Some(syncing) = syncing else {
+        return future::pending().await;
+    };
+    select! {
+        base = &mut syncing.base => Progress::Reached(base),
+        height = next_record(&mut syncing.unrecorded) => Progress::Recorded(height),
+    }
+}
+
+/// Waits for the application to record the oldest unrecorded update, skipping updates it dropped
+/// unrecorded, and returns its height.
+async fn next_record(unrecorded: &mut VecDeque<(Height, oneshot::Receiver<()>)>) -> Height {
+    while let Some((height, record)) = unrecorded.front_mut() {
+        let height = *height;
+        let recorded = record.await.is_ok();
+        unrecorded.pop_front();
+        if recorded {
+            return height;
+        }
+    }
+    future::pending().await
 }
 
 /// Waits for the consumer to acknowledge the oldest delivered block, if any.
