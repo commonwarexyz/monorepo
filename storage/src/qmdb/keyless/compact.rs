@@ -1,4 +1,4 @@
-//! Keyless [`compact::Db`] db.
+//! The keyless [`compact::Db`].
 //!
 //! See [`crate::qmdb::compact`] for the shared implementation.
 

@@ -1,4 +1,4 @@
-//! Immutable [`compact::Db`] db.
+//! The immutable [`compact::Db`].
 //!
 //! See [`crate::qmdb::compact`] for the shared implementation.
 

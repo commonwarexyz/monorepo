@@ -50,8 +50,9 @@ where
             return Err(Error::UnexpectedData(last_commit_loc));
         }
 
-        // The destination partition is opened only when the import is journaled, after the
-        // engine has verified the root, so its previous contents are never decoded.
+        // Nothing touches the destination partition until the import is journaled, after the
+        // engine has verified the root. Journaling resets the partition, so its previous contents
+        // are never decoded.
         Self::init_from_sync(
             config.strategy,
             context.child("witness"),

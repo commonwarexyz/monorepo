@@ -290,6 +290,8 @@ mod tests {
     type TestDb<F, O> = Db<F, deterministic::Context, O, Sha256, Sequential>;
     type TestBatch<F, O> = UnmerkleizedBatch<F, Sha256, O, Sequential>;
 
+    /// Bounded initialization through [`ManagedDb::init`] reports target mismatches, restores an
+    /// exact target that then serves and verifies, and fails once that target is pruned.
     fn bounded_initialization<F, O>(
         codec_config: O::Cfg,
         mutate: impl Fn(TestBatch<F, O>, u64) -> TestBatch<F, O>,
@@ -311,14 +313,21 @@ mod tests {
                     replay_buffer: NZUsize!(1024),
                 },
             };
-            let db = <TestDb<F, O> as ManagedDb<_>>::init(context.child("seed"), cfg.clone(), None).await.unwrap();
+            let db = <TestDb<F, O> as ManagedDb<_>>::init(context.child("seed"), cfg.clone(), None)
+                .await
+                .unwrap();
             let batch = mutate(mutate(mutate(db.new_batch(), 1), 2), 3)
-                .merkleize(&db, Some(metadata(11)), Location::new(0)).await.unwrap();
+                .merkleize(&db, Some(metadata(11)), Location::new(0))
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let first = db.target();
             assert_eq!(first.size, Location::new(5));
-            let batch = mutate(db.new_batch(), 4).merkleize(&db, Some(metadata(22)), Location::new(1)).await.unwrap();
+            let batch = mutate(db.new_batch(), 4)
+                .merkleize(&db, Some(metadata(22)), Location::new(1))
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let latest = db.target();
@@ -326,38 +335,98 @@ mod tests {
 
             let mut wrong_root = latest.clone();
             wrong_root.root = Sha256::fill(0xff);
-            assert!(matches!(
-                <TestDb<F, O> as ManagedDb<_>>::init(context.child("wrong_root"), cfg.clone(), Some(wrong_root.clone())).await,
-                Err(InitError::TargetMismatch { expected, recovered }) if expected == wrong_root && recovered == latest
-            ));
+            let result = <TestDb<F, O> as ManagedDb<_>>::init(
+                context.child("wrong_root"),
+                cfg.clone(),
+                Some(wrong_root.clone()),
+            )
+            .await;
+            let Err(InitError::TargetMismatch {
+                expected,
+                recovered,
+            }) = result
+            else {
+                panic!("a wrong root must be a target mismatch");
+            };
+            assert_eq!(expected, wrong_root);
+            assert_eq!(recovered, latest);
+
             // A cap inside a batch selects the preceding commit, but is not an exact sync target.
             let mut between = first.clone();
             between.size += 1;
-            assert!(matches!(
-                <TestDb<F, O> as ManagedDb<_>>::init(context.child("between"), cfg.clone(), Some(between.clone())).await,
-                Err(InitError::TargetMismatch { expected, recovered }) if expected == between && recovered == first
-            ));
-            let db = <TestDb<F, O> as ManagedDb<_>>::init(context.child("exact"), cfg.clone(), Some(first.clone())).await.unwrap();
+            let result = <TestDb<F, O> as ManagedDb<_>>::init(
+                context.child("between"),
+                cfg.clone(),
+                Some(between.clone()),
+            )
+            .await;
+            let Err(InitError::TargetMismatch {
+                expected,
+                recovered,
+            }) = result
+            else {
+                panic!("a size between commits must be a target mismatch");
+            };
+            assert_eq!(expected, between);
+            assert_eq!(recovered, first);
+
+            let db = <TestDb<F, O> as ManagedDb<_>>::init(
+                context.child("exact"),
+                cfg.clone(),
+                Some(first.clone()),
+            )
+            .await
+            .unwrap();
             assert_eq!(db.get_metadata(), Some(metadata(11)));
             assert_eq!(db.inactivity_floor_loc(), Location::new(0));
-            let (response, _) = sync::Source::serve(&db, sync::Request::Boundary { size: first.size, start: first.size - 1 }).await.unwrap();
-            let sync::Response::Boundary { proof, op, pinned_nodes } = response else { panic!("expected boundary response") };
-            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(&proof, first.size - 1, &[op], &pinned_nodes, &first.root));
+            let request = sync::Request::Boundary {
+                size: first.size,
+                start: first.size - 1,
+            };
+            let (response, _) = sync::Source::serve(&db, request).await.unwrap();
+            let sync::Response::Boundary {
+                proof,
+                op,
+                pinned_nodes,
+            } = response
+            else {
+                panic!("expected boundary response");
+            };
+            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                &proof,
+                first.size - 1,
+                &[op],
+                &pinned_nodes,
+                &first.root
+            ));
             drop(db);
-            let db = TestDb::<F, O>::init(context.child("reopen"), cfg.clone(), None).await.unwrap();
+            let db = TestDb::<F, O>::init(context.child("reopen"), cfg.clone(), None)
+                .await
+                .unwrap();
             assert_eq!(db.target(), first);
 
-            let batch = mutate(db.new_batch(), 5).merkleize(&db, Some(metadata(33)), first.size - 1).await.unwrap();
+            let batch = mutate(db.new_batch(), 5)
+                .merkleize(&db, Some(metadata(33)), first.size - 1)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let latest = db.target();
             let db = db.prune(latest.size).await.unwrap();
             drop(db);
             assert!(matches!(
-                <TestDb<F, O> as ManagedDb<_>>::init(context.child("pruned"), cfg.clone(), Some(first)).await,
+                <TestDb<F, O> as ManagedDb<_>>::init(
+                    context.child("pruned"),
+                    cfg.clone(),
+                    Some(first)
+                )
+                .await,
                 Err(InitError::Database(Error::HistoricalFloorPruned(_)))
             ));
-            let db = <TestDb<F, O> as ManagedDb<_>>::init(context.child("latest"), cfg, Some(latest)).await.unwrap();
+            let db =
+                <TestDb<F, O> as ManagedDb<_>>::init(context.child("latest"), cfg, Some(latest))
+                    .await
+                    .unwrap();
             assert_eq!(db.get_metadata(), Some(metadata(33)));
             db.destroy().await.unwrap();
         });

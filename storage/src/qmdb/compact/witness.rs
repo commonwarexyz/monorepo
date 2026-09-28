@@ -180,9 +180,9 @@ pub(super) fn split_config<C>(cfg: variable::Config<C>) -> (variable::Config<()>
 ///
 /// Witness position `p` has size at least `p + 1` in an append-only journal, so positions below
 /// the cap hold every witness no larger than the cap. A compact-sync import resets the journal to
-/// position 1, so an imported state of size 1 leaves position `p` with size `p`. A retained start
-/// at or above the cap therefore opens unbounded, and a bounded view that ends at the cap with a
-/// tip size below the cap widens.
+/// position 1, so an imported state of size 1 leaves position `p` with size at least `p`. A
+/// retained start at or above the cap therefore opens unbounded, and a bounded view that ends at
+/// the cap with a tip size below the cap widens.
 pub(super) async fn recover<E, F, D>(
     context: E,
     config: variable::Config<()>,

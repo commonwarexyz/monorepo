@@ -1,8 +1,9 @@
 //! Database batch lifecycle and state sync for [`Stateful`](super::Stateful).
 //!
 //! `db` defines the traits a storage backend implements to be driven by
-//! [`Stateful`](super::Stateful) and implements them for QMDB databases ([`any`], [`current`],
-//! [`immutable`], [`keyless`]). [`p2p`] fetches and serves state sync data over the network.
+//! [`Stateful`](super::Stateful) and implements them for QMDB databases ([`any`], [`compact`],
+//! [`current`], [`immutable`], [`keyless`]). [`p2p`] fetches and serves state sync data over the
+//! network.
 //!
 //! # Batch Lifecycle
 //!

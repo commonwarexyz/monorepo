@@ -1,7 +1,7 @@
 //! A compact authenticated db that discards historical operations, retaining only a witness
 //! for each applied state.
 //!
-//! One [`Db`] serves the keyless and immutable variants through the sealed [`Operation`] trait.
+//! One [`Db`] serves the keyless and immutable dbs through the sealed [`Operation`] trait.
 //! [`crate::qmdb::keyless`] and [`crate::qmdb::immutable`] pin the operation type through
 //! aliases and add `append` and `set`, respectively.
 //!
@@ -30,8 +30,9 @@
 //! Entries are strictly increasing in committed size, so a size uniquely identifies an
 //! initialization or prune target. An appended entry becomes durable when [`Db::commit`] or
 //! [`Db::sync`] completes, or, for [`Db::start_sync`], when the returned handle completes.
-//! Before that point recovery may fall back to the previous entry. The tip entry is never
-//! pruned.
+//! Before that point recovery may fall back to the previous entry. The first entry of a
+//! compact-sync import has none: a crash that loses it leaves an interrupted import, which fails
+//! to open until a re-sync replaces it. The tip entry is never pruned.
 //!
 //! # Inactivity floor
 //!
