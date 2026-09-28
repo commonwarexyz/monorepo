@@ -1,79 +1,87 @@
-//! Traits for database batch lifecycle and state sync in [`Stateful`](super::Stateful).
+//! Database batch lifecycle and state sync for [`Stateful`](super::Stateful).
 //!
-//! This module defines the boundary between stateful application logic and
-//! storage backends (QMDB variants).
+//! `db` defines the traits a storage backend implements to be driven by
+//! [`Stateful`](super::Stateful) and implements them for QMDB databases ([`any`], [`current`],
+//! [`immutable`], [`keyless`]). [`p2p`] fetches and serves state sync data over the network.
 //!
 //! # Batch Lifecycle
 //!
-//! Normal execution has three stages:
-//! 1. [`Unmerkleized`]: mutable, in-progress batch (concrete types expose reads and writes).
-//! 2. [`Merkleized`]: a sealed batch with a computed root.
-//! 3. Finalization applies the sealed batch via [`ManagedDb::apply`]. It then requests durability
-//!    via [`ManagedDb::finalize`] and observes completion through [`Barrier`]. A barrier covers the
-//!    state applied before it was requested. Later batches may be applied while it is pending.
+//! A block's state changes pass through three stages:
+//! 1. [`Unmerkleized`]: a mutable batch (concrete types expose reads and writes).
+//! 2. [`Merkleized`]: a sealed batch with a computed state root.
+//! 3. Applied: [`ManagedDb::apply`] exposes the batch as a recoverable checkpoint.
+//!    [`ManagedDb::finalize`] then starts persisting it, and a [`Barrier`] observes completion.
+//!    A barrier covers the state applied before it was requested. Later batches may be applied
+//!    while it is pending.
 //!
-//! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
-//! unit for execution and commit.
+//! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one unit for execution and
+//! commit. [`Shared`] implements it for one database, and tuples of up to eight [`Shared`]
+//! databases implement it for several.
 //!
 //! # State Sync
 //!
-//! State sync orchestration is expressed by two traits:
-//! - [`StateSyncDb`]: per-database sync entrypoint.
-//! - [`StateSyncSet`]: set-level orchestration.
+//! [`StateSyncDb`] builds one database by syncing it from peers. [`StateSyncSet`] syncs every
+//! database in a set to the targets carried by a finalized block, following newer tips until the
+//! databases converge.
 //!
 //! ## Anchors
 //!
-//! Each set of sync targets is paired with an anchor `(Height, Round, D)` where
-//! `D` is the block digest. The db layer never interprets the anchor; it
-//! only tracks which anchor each database converged on.
+//! Each set of sync targets is paired with an [`Anchor`], the finalized block that carries them. A
+//! running sync handles each tip update as follows:
 //!
-//! On completion, [`StateSyncSet::sync`] returns the anchor that all databases
-//! agreed on. The caller uses this to set the marshal floor and the
-//! last-processed digest, ensuring they match the actual convergence point
-//! rather than whatever marshal's head happens to be (which may have advanced
-//! during sync).
+//! - Upon a tip at or below the height of the most recently adopted anchor (initially the one
+//!   passed to [`StateSyncSet::sync`]): ignore it.
+//! - Upon a tip at a greater height: adopt its anchor. If its targets differ from the current
+//!   targets, send them to the databases (tuple sets follow the
+//!   [convergence rules](#convergence-tuple-sets)).
 //!
-//! ## Convergence Algorithm (tuple sets)
+//! Queued tips are coalesced: a tip superseded by a newer one before the sync dispatches it may
+//! never reach the databases. [`StateSyncSet::sync`] returns an anchor whose targets every database
+//! reached. Tips delivered after convergence are not observed, so the returned anchor can trail
+//! the latest tip sent.
 //!
-//! Tuple [`StateSyncSet`] implementations assign each `(anchor, targets)`
-//! pair a *generation* number and use this algorithm:
+//! ## Convergence (tuple sets)
 //!
-//! 1. Forward tip updates only to databases that have not yet reported
-//!    "reached target". Reached databases are frozen to prevent them from
-//!    running ahead to a newer anchor.
-//! 2. When all databases report reached, compare the generation each was
-//!    assigned when it reported.
-//! 3. If all generations match, every database synced to targets from the
-//!    same anchor. Return that anchor.
-//! 4. If generations differ, *regroup*: re-send the highest-reached
-//!    generation's targets to the behind databases, clear their reached
-//!    state, and repeat from step 1.
+//! A tuple set assigns a _generation_ each time it dispatches a tip to its databases, and tracks
+//! the generation each database is assigned and whether it has reached that generation's target.
+//!
+//! - Upon a tip while some database is still seeking its target: start a new generation and send
+//!   its targets only to the seeking databases. Databases that already reached their target stay
+//!   frozen at their generation, so they cannot run ahead to a newer anchor. A reached database
+//!   whose target is unchanged in the new generation counts as reached for it.
+//! - Upon every database reaching the same generation with a tip pending: start a new generation
+//!   for all databases.
+//! - Upon every database reaching the same generation with no tip pending: finish at that
+//!   generation's anchor.
+//! - Upon every database reaching its target, at different generations: _regroup_. Send the
+//!   highest generation's targets to the databases behind it and mark them seeking again.
+//!
+//! The coordinator retains state only for generations assigned to some database, so its memory
+//! is bounded by the number of databases however long sync runs.
 //!
 //! ### Chasing a moving tip
 //!
 //! ```text
-//! time -------------------------------------------------------------->
+//! time ------------------------------------------------------------------------------->
 //!
-//! marshal finalized tip:   A0 ------ A1 ------ A2 ------ A3
-//! generation:              g0        g1        g2        g3
+//! tips:          A0      A1                A2 A3
+//! generation:    g0      g1                g2 = A3 (A2 is superseded before dispatch)
 //!
-//! db0 (slow):              g0 ------------------> g1 -----------------> g3 reached
-//! db1 (fast):              g0 ----> g1 reached -- frozen -- regroup --> g3 reached
-//! db2 (fast):              g0 ----> g1 reached -- frozen -- regroup --> g3 reached
+//! db0 (slow):    g0 ---- g1 -------------- g2 ------- reached g2
+//! db1 (fast):    g0 ---- g1 -- reached g1 -- frozen ------------ regroup -- reached g2
+//! db2 (fast):    g0 ---- g1 -- reached g1 -- frozen ------------ regroup -- reached g2
 //!
-//! coordinator queue while db0 is still catching up:
-//!                          [A2] [A3] -- drain --> keep only A3
-//!
-//! finish only when:
+//! finish at A3 only when:
 //! - every database has reported the same generation
-//! - no newer tip update is still queued behind it
+//! - no newer tip update is pending
 //! ```
 //!
-//! The coordinator continuously drains tip updates and keeps only the latest
-//! value before forwarding, which avoids target-channel backpressure buildup.
-//! The `generation_state` map is pruned after every dispatch to only retain
-//! generations currently assigned to at least one database, so memory usage
-//! is bounded by the number of databases regardless of how long sync runs.
+//! # Failures
+//!
+//! Database failures are fatal. [`DatabaseSet`] implementations panic when a database fails to
+//! open, apply, finalize, or prune, and [`Barrier::durable`] panics when a deferred sync fails. A
+//! mutation that is cancelled also loses its database until restart (see [`Shared`]). A database
+//! that fails state sync is reported through the error returned by [`StateSyncSet::sync`].
 
 use commonware_codec::Encode;
 use commonware_consensus::{
@@ -118,17 +126,14 @@ pub use snapshot::{Publisher, Subscriber};
 
 /// A database shared across tasks.
 ///
-/// Owned mutations (apply, finalize, prune) take the database out of
-/// the cell under the write lock ([Self::write]) and put it back on success
-/// ([WriteSlot::put]). A failure, panic, or cancellation mid-operation leaves
-/// the cell empty permanently, and every later [Self::read] or [Self::write]
-/// panics. A lost database is fatal here by design and requires a restart.
-/// Serve calls instead report the source as missing, so remote sync degrades
-/// without crashing.
+/// By-value mutations take the database out with [`Self::write`] and restore it with
+/// [`WriteSlot::put`]. A mutation that fails, panics, or is cancelled before the put leaves the
+/// database _lost_: every later [`Self::read`] or [`Self::write`] panics, and only a restart
+/// recovers it.
+/// [`Source::serve`] on a lost database returns an error instead of panicking.
 pub struct Shared<DB>(Inner<DB>);
 
-/// The lock wrapped by [`Shared`]. Storage implements its sync source traits on
-/// this shape, so [`Shared`]'s source impls delegate to it.
+/// The lock behind [`Shared`], for which storage implements [`Source`].
 type Inner<DB> = Arc<TracedAsyncRwLock<Option<DB>>>;
 
 impl<DB> Clone for Shared<DB> {
@@ -137,17 +142,16 @@ impl<DB> Clone for Shared<DB> {
     }
 }
 
-/// Message used when a [`Shared`] cell is empty.
 const DB_LOST_MSG: &str =
     "database was lost by an earlier failed or interrupted operation; restart to recover";
 
 impl<DB> Shared<DB> {
-    /// Create a cell holding `db`, identified by `label` in lock traces.
+    /// Creates a shared database identified by `label` in lock traces.
     pub fn new(label: &'static str, db: DB) -> Self {
         Self(Arc::new(TracedAsyncRwLock::new(label, Some(db))))
     }
 
-    /// Acquire shared read access to the database.
+    /// Acquires shared read access to the database.
     ///
     /// The lock is write-preferring: once a writer is queued, new readers wait
     /// behind it. Holding a guard across an await that acquires this cell
@@ -162,7 +166,7 @@ impl<DB> Shared<DB> {
         }))
     }
 
-    /// Take the database out for a by-value mutation.
+    /// Takes the database out for a by-value mutation.
     ///
     /// The returned [`WriteSlot`] holds the cell locked and empty until
     /// [`WriteSlot::put`] restores the database. Dropping the slot without a put
@@ -212,10 +216,14 @@ impl<DB> Shared<DB> {
 pub struct Reader<DB>(Shared<DB>);
 
 impl<DB> Reader<DB> {
-    /// Acquire shared read access to the database.
+    /// Acquires shared read access to the database.
     ///
     /// The guard follows the same write-preferring lock discipline as
     /// [`Shared::read`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the database was lost by an earlier failed or interrupted mutation.
     pub async fn read(&self) -> ReadGuard<'_, DB> {
         self.0.read().await
     }
@@ -236,7 +244,7 @@ impl<DB> Deref for ReadGuard<'_, DB> {
 pub struct WriteSlot<'a, DB>(AsyncRwLockWriteGuard<'a, Option<DB>>);
 
 impl<DB> WriteSlot<'_, DB> {
-    /// Restore the database, making it visible to other tasks again.
+    /// Restores the database and releases the write lock.
     pub fn put(mut self, db: DB) {
         *self.0 = Some(db);
     }
@@ -259,16 +267,15 @@ impl<DB> ReadLocked<'_, DB> {
 
 /// Origin-bound database access for synchronous batch construction.
 ///
-/// Only [`DatabaseSet`] can create this capability. Its borrow prevents a
-/// [`ManagedDb`] implementation from retaining the set's read lock in the
-/// returned batch.
+/// Only the [`DatabaseSet`] implementations in this module construct it. Its borrow prevents a
+/// [`ManagedDb`] implementation from retaining the set's read lock in the returned batch.
 pub struct BatchContext<'a, DB> {
     database: &'a DB,
     shared: Shared<DB>,
 }
 
 impl<'a, DB> BatchContext<'a, DB> {
-    /// Split the capability into applied state and its matching shared handle.
+    /// Splits the capability into the read-locked database and its [`Shared`] handle.
     pub fn into_parts(self) -> (&'a DB, Shared<DB>) {
         (self.database, self.shared)
     }
@@ -292,80 +299,64 @@ where
     }
 }
 
-/// Mutable batch state before merkleization.
+/// A batch of speculative mutations that has not been merkleized.
 ///
-/// Concrete types provide key-value operations (`get`, `write`, `set`,
-/// `append`, etc.) as inherent methods; the generic wrapper only needs
-/// [`merkleize`](Self::merkleize).
+/// Concrete types expose reads and writes (`get`, `write`, `set`, `append`, and so on) as
+/// inherent methods.
 pub trait Unmerkleized: Sized + Send {
-    /// The merkleized batch produced by [`merkleize`](Self::merkleize).
+    /// The sealed batch returned by [`Self::merkleize`].
     type Merkleized: Merkleized;
 
-    /// The error type returned by fallible operations.
+    /// Error returned by [`Self::merkleize`].
     type Error: Send;
 
-    /// Resolve all mutations, compute the new state root, and produce a
-    /// merkleized batch.
+    /// Computes the state root over every mutation and seals the batch.
     fn merkleize(self) -> impl Future<Output = Result<Self::Merkleized, Self::Error>> + Send;
 }
 
-/// Sealed batch state with a computed root.
-///
-/// The application uses [`root`](Self::root) in block headers, and the wrapper
-/// later applies this batch.
+/// A sealed batch with a computed state root.
 pub trait Merkleized: Sized + Send + Sync {
-    /// The digest type used for the state root.
+    /// Digest type of the state root returned by [`Self::root`].
     type Digest: Digest;
 
-    /// The unmerkleized batch type produced by [`new_batch`](Self::new_batch).
+    /// The child batch returned by [`Self::new_batch`].
     type Unmerkleized: Unmerkleized;
 
-    /// The canonical state root committed in block headers.
+    /// Returns the state root of the database with this batch applied.
     fn root(&self) -> Self::Digest;
 
-    /// Create a child unmerkleized batch that reads through this batch's
-    /// pending changes before falling back to the applied database state.
-    ///
-    /// In QMDB, this maps to `merkleized_batch.new_batch()`.
+    /// Creates a child batch whose reads see this batch's pending changes before the applied
+    /// database state.
     fn new_batch(&self) -> Self::Unmerkleized;
 }
 
-/// One database managed by the [`Stateful`](super::Stateful) wrapper.
+/// A database whose batches [`Stateful`](super::Stateful) builds, applies, persists, and prunes.
 ///
-/// Implementations create new batches from applied state, apply finalized
-/// batches back to storage, and start durability work separately.
-///
-/// [`new_batch`](Self::new_batch) consumes origin-bound read access so batch
-/// types can snapshot applied state and retain the matching [`Shared`] handle.
-///
-/// `E` is a trait generic (not an associated type), so one database type can
-/// work across runtimes that satisfy the bounds.
+/// Applying a batch and persisting it are separate steps: [`Self::apply`] exposes a batch as a
+/// recoverable checkpoint, and [`Self::finalize`] starts making applied checkpoints durable.
 ///
 /// # Ownership
 ///
-/// Mutating methods take the database by value and return it on success. If a mutating
-/// method returns an error, or its future is dropped before it finishes, the database is
-/// gone: state that was not yet durable is discarded, but everything already on disk stays
-/// recoverable.
+/// Mutating methods take the database by value and return it on success. If a mutating method
+/// returns an error or its future is dropped, the instance is lost. Durable state remains
+/// recoverable on restart. State that was not yet durable may or may not be recovered.
 pub trait ManagedDb<E>: Send + Sync + Sized {
-    /// An in-progress batch of mutations that has not yet been merkleized.
+    /// A batch of mutations that has not been merkleized.
     type Unmerkleized: Unmerkleized;
 
-    /// A batch whose root has been computed but has not yet been applied to
-    /// the underlying database.
+    /// A merkleized batch that has not been applied.
     ///
-    /// Constrained so that [`Merkleized::new_batch`] produces the same
-    /// [`Unmerkleized`] type as [`ManagedDb::new_batch`](Self::new_batch).
     /// Cloning must preserve the same sealed branch state and should be cheap.
     type Merkleized: Clone + Merkleized<Unmerkleized = Self::Unmerkleized>;
 
-    /// The error type returned by fallible operations.
+    /// Error returned by [`Self::apply`], [`Self::finalize`], and [`Self::prune`], and carried by
+    /// [`InitError::Database`] from [`Self::init`].
     type Error: Debug + Send;
 
-    /// Configuration needed to construct a new database instance.
+    /// Configuration passed to [`Self::init`].
     type Config: Send;
 
-    /// Sync target type for state sync of this database.
+    /// Recovery and state sync target for this database.
     ///
     /// Typically a database-specific state commitment plus the operation range needed to reach it.
     type SyncTarget: Clone + Debug + PartialEq + Send + Sync;
@@ -373,66 +364,62 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Owned immutable snapshot of applied state.
     type Snapshot: Clone + Send + Sync + 'static;
 
-    /// Open a database at `expected`, or its latest checkpoint when no target is supplied.
+    /// Opens the database at `expected`, or at its latest checkpoint when `expected` is `None`.
     ///
-    /// Implementations durably discard state beyond the selected checkpoint before returning.
+    /// State beyond the selected checkpoint must be durably discarded before this returns.
+    /// Returns [`InitError::TargetMismatch`] if the recovered target is not `expected`.
     fn init(
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
     ) -> impl Future<Output = Result<Self, InitError<Self::Error, Self::SyncTarget>>> + Send;
 
-    /// Return the sync target produced by a newly initialized database.
+    /// Returns the sync target of a new, empty database.
     ///
-    /// This must match [`sync_target`](Self::sync_target) after opening an empty partition.
+    /// It must equal [`Self::sync_target`] after [`Self::init`] opens an empty partition.
     fn initial_sync_target() -> Self::SyncTarget;
 
-    /// Create a new unmerkleized batch rooted at the read-locked database's
-    /// applied state.
+    /// Creates a batch over the applied state of `database`.
     ///
-    /// This method must return without retaining `database`, releasing its read
-    /// lock before the batch performs any lazy read-through work. Batch types
-    /// can retain the matching handle returned by [`BatchContext::into_parts`].
+    /// The batch may keep the [`Shared`] handle from [`BatchContext::into_parts`] for later reads.
+    /// It cannot keep the borrowed database, so the batch never holds the set's read lock.
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized;
 
-    /// Return true if a merkleized batch matches a sync target.
+    /// Returns whether applying `batch` yields a database whose [`Self::sync_target`] is
+    /// `target`.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
 
-    /// Apply a merkleized batch's changeset to the underlying database.
+    /// Applies `batch` to the database.
     ///
-    /// In QMDB, this encapsulates calling `merkleized.finalize()` to produce
-    /// a `Changeset`, then `db.apply_batch(changeset)`. The returned database
-    /// must expose the batch as an independently recoverable checkpoint.
-    /// The checkpoint need not be durable until the handle returned by
-    /// [`Self::finalize`] resolves.
+    /// The returned database must expose `batch` as an independently recoverable checkpoint. The
+    /// checkpoint need not be durable until the handle returned by [`Self::finalize`] resolves.
     fn apply(
         self,
         batch: Self::Merkleized,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
-    /// Capture a snapshot of every checkpoint applied before this call and begin
-    /// persisting them.
+    /// Captures a snapshot of every checkpoint applied before this call and starts persisting
+    /// them.
     ///
-    /// The snapshot reflects the applied state immediately, ahead of durability.
-    /// Awaiting the returned handle proves the state applied before this call
-    /// durable. Later batches may be applied while the handle is pending, but
-    /// that dirty suffix needs a subsequent finalization. The caller must
-    /// observe the handle before finalizing again.
+    /// The snapshot reflects the applied state immediately, ahead of durability. The returned
+    /// handle resolves once that state is durable. Batches applied while it is pending are not
+    /// covered and need a later finalization. Callers must await the handle before finalizing
+    /// again.
     fn finalize(
         self,
     ) -> impl Future<Output = Result<(Self, Self::Snapshot, Handle<()>), Self::Error>> + Send;
 
-    /// Capture a snapshot of the current applied state.
+    /// Captures a snapshot of the current applied state.
     ///
-    /// The snapshot reflects every batch applied before this call and nothing
-    /// applied after it, including state that may not yet be durably persisted.
+    /// The snapshot reflects every batch applied before this call and nothing applied after it,
+    /// including state that may not yet be durable.
     fn snapshot(self) -> impl Future<Output = Result<(Self, Self::Snapshot), Self::Error>> + Send;
 
-    /// Prune the database to a previously finalized sync target.
+    /// Prunes the database to a previously finalized sync target.
     ///
-    /// The caller resolves every handle returned by [`Self::finalize`] before pruning. Databases
-    /// that do not retain pruneable operation history can rely on the default no-op. Any pruning
-    /// effects must be durable before returning.
+    /// Callers must await every handle returned by [`Self::finalize`] before pruning. Pruning
+    /// effects must be durable before this returns. The default implementation does nothing, for
+    /// databases without prunable history.
     fn prune(
         self,
         _target: &Self::SyncTarget,
@@ -440,18 +427,14 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         async { Ok(self) }
     }
 
-    /// Return the latest applied recovery target.
-    ///
-    /// Returning a target does not by itself prove that target durable.
+    /// Returns the target of the latest applied checkpoint (which need not be durable yet).
     fn sync_target(&self) -> Self::SyncTarget;
 }
 
-/// Durability barrier returned by [`DatabaseSet::finalize`].
+/// A durability barrier returned by [`DatabaseSet::finalize`].
 ///
-/// Holds one [`ManagedDb::finalize`] handle per database in the set. Deferred
-/// sync failures surface only here, so every barrier must be awaited via
-/// [`durable`](Self::durable), typically on a futures pool. Before
-/// [`DatabaseSet::prune`] runs, the active barrier must resolve.
+/// Deferred sync failures surface only through [`Self::durable`], so every barrier must be
+/// awaited. A barrier must resolve before [`DatabaseSet::prune`] runs.
 ///
 /// # Examples
 ///
@@ -474,7 +457,7 @@ pub struct Barrier {
 }
 
 impl Barrier {
-    /// Construct a barrier from deferred sync handles owned by `T`.
+    /// Builds a barrier from deferred sync handles owned by `T`.
     ///
     /// Failures identify `T` and the handle's zero-based position in the
     /// provided iteration. An empty barrier is immediately durable.
@@ -489,11 +472,13 @@ impl Barrier {
         }
     }
 
-    /// Resolves `true` once every deferred sync is durable.
-    ///
-    /// A sync failure panics because the database has already advanced past
-    /// non-durable state. Returns `false` only when runtime shutdown aborts
+    /// Resolves `true` once every deferred sync completes, or `false` if runtime shutdown aborts
     /// or closes a sync handle.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a sync fails, because the database has already advanced past the state that
+    /// failed to persist.
     pub async fn durable(self) -> bool {
         let syncs = self
             .syncs
@@ -519,27 +504,22 @@ impl Barrier {
     }
 }
 
-/// A collection of individually locked [`ManagedDb`] instances.
+/// A group of [`ManagedDb`] instances executed and committed as one unit.
 ///
-/// Each database is wrapped in [`Shared`], so the set is cheap to
-/// clone and each database can be shared without a global lock.
-/// Multi-database mutations must not hold one member's writer while waiting
-/// to acquire another. Readers may span members in the opposite order.
-///
-/// `E` is a trait generic (not an associated type), so one set type can work
-/// across runtimes that satisfy the bounds.
+/// Read access may span several members at once, so a mutation must not hold one member's write
+/// access while waiting for another's.
 ///
 /// # Mutation Safety
 ///
 /// Calls to [`Self::apply`], [`Self::finalize`], and [`Self::prune`] must not overlap.
-/// Implementations panic if an underlying database mutation returns an error. If a mutation
-/// panics or is cancelled after taking a database from [`Shared`], the affected cell remains
-/// empty and subsequent access panics.
+/// Implementations panic if a database mutation fails (see
+/// [Failures](crate::stateful::db#failures)).
 pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
-    /// Tuple of [`ManagedDb::Unmerkleized`] for every database in the set.
+    /// One [`ManagedDb::Unmerkleized`] per database in the set.
     type Unmerkleized: Send;
 
-    /// Tuple of [`ManagedDb::Merkleized`] for every database in the set.
+    /// One [`ManagedDb::Merkleized`] per database in the set.
+    ///
     /// Cloning must preserve the same sealed branch state and should be cheap.
     type Merkleized: Clone + Send + Sync;
 
@@ -560,64 +540,66 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     ///   `(Db1::Config, Db2::Config, ...)`.
     type Config: Send;
 
-    /// Per-database sync targets extracted from a finalized block.
+    /// Per-database sync targets carried by a finalized block.
     ///
     /// For a single-database set this is one target. For multi-database sets it is a tuple of
     /// targets, one per database.
     type SyncTargets: Clone + PartialEq + Send + Sync;
 
-    /// Construct the database set from its configuration.
-    /// Every returned database must match its expected target when one is supplied.
+    /// Opens every database in the set, each at its target in `expected` when supplied.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a database fails to open, including when it does not match its expected target.
     fn init(
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTargets>,
     ) -> impl Future<Output = Self> + Send;
 
-    /// Return the sync targets produced by a newly initialized database set.
+    /// Returns the sync targets of a new, empty set.
     fn initial_sync_targets() -> Self::SyncTargets;
 
-    /// Create unmerkleized batches from each database's applied state.
+    /// Creates a batch over each database's applied state.
     ///
-    /// Implementations must release every read lock before the returned
-    /// batches perform lazy reads.
+    /// Implementations must release every read lock before returning.
     fn new_batches(&self) -> impl Future<Output = Self::Unmerkleized> + Send;
 
-    /// Create child unmerkleized batches from a pending merkleized parent.
+    /// Creates child batches of a pending merkleized parent.
     ///
-    /// No lock is needed; reads come from the in-memory merkleized state.
+    /// Construction takes no lock. Reads see `parent`'s pending changes before falling back to the
+    /// applied state.
     fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized;
 
-    /// Return true if merkleized batches match the sync targets.
+    /// Returns whether applying `batches` yields `targets` (see
+    /// [`ManagedDb::matches_sync_target`]).
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool;
 
-    /// Return read-only handles for every database in the set.
+    /// Returns read-only handles for every database in the set.
     fn readers(&self) -> Self::Readers;
 
-    /// Apply each merkleized batch's changeset.
+    /// Applies each batch to its database.
     ///
-    /// Returns once every database exposes its batch as an independently
-    /// recoverable checkpoint. Durability is started separately with
-    /// [`DatabaseSet::finalize`].
+    /// Returns once every database exposes its batch as an independently recoverable checkpoint.
+    /// Durability starts separately with [`Self::finalize`].
     ///
     /// Cancelling the future mid-flight loses the databases whose mutations
     /// were in progress (see [Shared]); every later access panics.
     fn apply(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
 
-    /// Capture a snapshot of every checkpoint applied before this call and begin
-    /// persisting them.
+    /// Captures a snapshot of every checkpoint applied before this call and starts persisting
+    /// them.
     ///
-    /// The snapshots reflect the applied state immediately, ahead of durability.
-    /// The returned [`Barrier`] resolves once the captured state is durable in
-    /// every database. Later batches may be applied while the barrier is
-    /// pending, but that dirty suffix needs a subsequent finalization. The
-    /// barrier must be observed before finalizing again.
+    /// The snapshots reflect the applied state immediately, ahead of durability. The returned
+    /// [`Barrier`] resolves once that state is durable in every database. Batches applied while
+    /// it is pending are not covered and need a later finalization. The barrier must be awaited
+    /// before finalizing again.
     ///
     /// Cancelling the future mid-flight loses the databases whose mutations
     /// were in progress (see [Shared]); every later access panics.
     fn finalize(&self) -> impl Future<Output = (Self::Snapshots, Barrier)> + Send;
 
-    /// Capture a snapshot of every database's current applied state.
+    /// Captures a snapshot of every database's current applied state.
     ///
     /// A snapshot can include state that is not yet durably persisted.
     ///
@@ -625,15 +607,13 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// were in progress (see [Shared]); every later access panics.
     fn snapshot(&self) -> impl Future<Output = Self::Snapshots> + Send;
 
-    /// Prune each database to the provided per-database targets.
+    /// Prunes each database to its target in `targets`.
     ///
-    /// The finalized state represented by `targets` must already be durable, and no database sync
-    /// may remain active. Pruning effects must be durable before this call returns.
+    /// The state represented by `targets` must already be durable, and no barrier may be pending.
+    /// Pruning effects must be durable before this returns.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
-    /// Return the latest applied recovery targets.
-    ///
-    /// A target does not by itself prove durability.
+    /// Returns the targets of the latest applied checkpoints (which need not be durable yet).
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
 }
 
@@ -659,17 +639,24 @@ pub struct SyncEngineConfig {
     /// Capacity of per-database target-update channels.
     pub update_channel_size: NonZeroUsize,
 
-    /// Number of historical roots to retain for proof verification across
-    /// target updates.
+    /// Number of previous targets whose outstanding requests stay eligible after a target update
+    /// (0 cancels them on every update).
     pub max_retained_roots: usize,
 }
 
-/// A [`ManagedDb`] with a state-sync entrypoint.
+/// A [`ManagedDb`] that can be built by syncing it from peers.
 pub trait StateSyncDb<E, R>: ManagedDb<E> {
-    /// Error returned by the state-sync engine for this database.
+    /// Error returned by [`Self::sync_db`].
     type SyncError: Debug + Send;
 
-    /// Run state-sync for this database and return a fully-initialized instance.
+    /// Syncs a new database from `source` to `target` and returns it.
+    ///
+    /// Implementations must follow these rules:
+    /// - Adopt a target from `tip_updates` only if it advances the current target.
+    /// - When `finish` is `Some`, complete only once it has signaled and the current target is
+    ///   reached. When `finish` is `None`, complete as soon as the current target is reached.
+    /// - When `reached_target` is `Some`, report each reached target on it at most once. A report
+    ///   may wait for channel capacity, so callers must drain the receiver.
     #[allow(clippy::too_many_arguments)]
     fn sync_db(
         context: E,
@@ -683,15 +670,14 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
     ) -> impl Future<Output = Result<Self, Self::SyncError>> + Send;
 }
 
-/// Block metadata identifying the block that produced a set
-/// of sync targets.
+/// The finalized block that carries a set of sync targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Anchor<D: Digest> {
-    /// Height of the anchoring block.
+    /// Height of the block.
     pub height: Height,
-    /// Consensus round of the anchoring block.
+    /// Consensus round of the block.
     pub round: Round,
-    /// Digest of the anchoring block.
+    /// Digest of the block.
     pub digest: D,
 }
 
@@ -710,11 +696,9 @@ where
     }
 }
 
-/// Tip update delivered to a live state-sync session.
+/// A finalized tip delivered to a running [`StateSyncSet::sync`].
 ///
-/// The optional observation barrier is used by the stateful actor to delay
-/// marshal acknowledgement until the sync coordinator has recorded the new
-/// anchor and targets.
+/// See [Anchors](crate::stateful::db#anchors) for how a sync handles each update.
 pub struct TipUpdate<D: Digest, T> {
     anchor: Anchor<D>,
     targets: T,
@@ -722,6 +706,7 @@ pub struct TipUpdate<D: Digest, T> {
 }
 
 impl<D: Digest, T> TipUpdate<D, T> {
+    /// Creates an update for the block identified by `anchor`, which carries `targets`.
     pub const fn new(anchor: Anchor<D>, targets: T) -> Self {
         Self {
             anchor,
@@ -730,6 +715,10 @@ impl<D: Digest, T> TipUpdate<D, T> {
         }
     }
 
+    /// Creates an update and a receiver that resolves once a sync has handled it, whether or not
+    /// the sync adopted it.
+    ///
+    /// The receiver errors if the update is dropped unhandled.
     pub(crate) fn with_observation(anchor: Anchor<D>, targets: T) -> (Self, oneshot::Receiver<()>) {
         let (observed, receiver) = oneshot::channel();
         (
@@ -742,7 +731,7 @@ impl<D: Digest, T> TipUpdate<D, T> {
         )
     }
 
-    /// Record the update before releasing its observation barrier.
+    /// Passes the update to `record`, then resolves its observer.
     pub(crate) fn record<R>(self, record: impl FnOnce(Anchor<D>, T) -> R) -> R {
         let result = record(self.anchor, self.targets);
         if let Some(observed) = self.observed {
@@ -752,11 +741,9 @@ impl<D: Digest, T> TipUpdate<D, T> {
     }
 }
 
-/// A [`DatabaseSet`] that can run one-time state sync.
+/// A [`DatabaseSet`] that can be built by one-time state sync.
 ///
-/// `D` is the block digest type. Each set of sync targets is paired
-/// with an [`Anchor`] identifying the block that produced those targets.
-/// On convergence, `sync` returns the anchor that all databases agreed on.
+/// `D` is the block digest type of each [`Anchor`].
 pub trait StateSyncSet<E, R, D>: DatabaseSet<E>
 where
     D: Digest,
@@ -764,8 +751,11 @@ where
     /// Error returned if any database in the set fails state sync.
     type Error: Debug + Send;
 
-    /// Run one-time state sync and return the initialized set
-    /// together with the anchor all databases converged on.
+    /// Syncs every database from `sources` to `targets`, carried by `anchor`, and returns the
+    /// synced set with an anchor whose targets every database reached.
+    ///
+    /// Updates on `tip_updates` follow the [module rules](crate::stateful::db#anchors). The
+    /// returned anchor, not the latest tip delivered, identifies the synced state.
     #[allow(clippy::too_many_arguments)]
     fn sync(
         context: E,
@@ -778,13 +768,13 @@ where
     ) -> impl Future<Output = Result<(Self, Anchor<D>), Self::Error>> + Send;
 }
 
-/// Why a managed database failed to open.
+/// An error opening a [`ManagedDb`].
 #[derive(Debug, thiserror::Error)]
 pub enum InitError<E: Debug, T: Debug> {
     /// The database failed to open or recover.
     #[error("database initialization failed: {0:?}")]
     Database(E),
-    /// The recovered database does not match the expected sync target.
+    /// The opened database's [`ManagedDb::sync_target`] is not the expected target.
     #[error("database target mismatch: expected {expected:?}, recovered {recovered:?}")]
     TargetMismatch {
         /// The target requested by the caller.
@@ -794,7 +784,7 @@ pub enum InitError<E: Debug, T: Debug> {
     },
 }
 
-/// Validate the complete sync target before returning a managed database.
+/// Validates the requested sync target before returning the database.
 fn validate_initialization<E, T>(
     db: T,
     expected: Option<T::SyncTarget>,
@@ -815,7 +805,6 @@ where
     Ok(db)
 }
 
-/// Implement [`DatabaseSet`] for a single [`ManagedDb`] behind a lock.
 impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     type Unmerkleized = T::Unmerkleized;
     type Merkleized = T::Merkleized;
@@ -991,6 +980,9 @@ where
     }
 }
 
+/// Handles every queued tip update, then forwards the newest adopted targets if they changed.
+///
+/// Returns `false` if the database stopped accepting targets.
 async fn drain_single_tip_updates<D, T>(
     tip_updates: &mut Option<ring::Receiver<TipUpdate<D, T>>>,
     target_tx: &mpsc::Sender<T>,
@@ -1041,8 +1033,6 @@ where
     target_tx.send_lossy(new_target).await
 }
 
-/// Implement [`DatabaseSet`] for a tuple of individually-locked
-/// [`ManagedDb`] instances.
 macro_rules! impl_database_set {
     ($($T:ident : $idx:tt),+) => {
         impl<E: Send + Sync + Metrics, $($T: ManagedDb<E> + 'static),+> DatabaseSet<E>
@@ -1252,6 +1242,8 @@ macro_rules! impl_state_sync_set {
                 let initial_targets = targets.clone();
                 let first_db_error: Arc<commonware_utils::sync::Mutex<Option<String>>> =
                     Arc::new(commonware_utils::sync::Mutex::new(None));
+
+                // The coordinator applies the convergence rules and dispatches each generation.
                 let coordinator_handle = context.child("coordinator").spawn({
                     move |_context| async move {
                         let coordinator_owned_senders = coordinator_owned_senders;
@@ -1351,6 +1343,9 @@ macro_rules! impl_state_sync_set {
                         }
                     }
                 });
+
+                // Each database task runs its sync and reports every generation whose target it
+                // has reached.
                 let db_handles = (
                     $(
                         context.child(concat!("db_", stringify!($idx))).spawn({
@@ -1540,6 +1535,8 @@ impl_state_sync_set!(
     DB8: R8: 7
 );
 
+/// Applies the queued generation assignments for database `idx`, reporting each one whose target
+/// the database has already reached.
 async fn drain_generation_updates<T>(
     generation_rx: &mut Option<mpsc::Receiver<(usize, T)>>,
     current_generation: &mut usize,
@@ -1608,19 +1605,19 @@ impl DbSyncState {
 
 /// What the coordinator should do after processing events.
 enum CoordinatorAction<D: Digest, T> {
-    /// Nothing to do; wait for the next event.
+    /// Nothing to do until the next event.
     Wait,
-    /// Dispatch targets to non-reached databases for `generation`.
+    /// Dispatch `targets` as `generation` to the databases still seeking.
     Dispatch { generation: usize, targets: T },
-    /// All databases converged on the same generation.
+    /// Every database reached the targets of one generation, carried by `anchor`.
     Converged { anchor: Anchor<D>, targets: T },
 }
 
-/// Pure state machine for multi-database sync convergence.
+/// State machine for tuple-set sync convergence (see the
+/// [module docs](crate::stateful::db#convergence-tuple-sets)).
 ///
-/// Tracks which generation each database is assigned to, which have
-/// reported "reached", and decides when to regroup or declare
-/// convergence.
+/// Tracks each database's assigned generation and whether it has reached it, and decides when to
+/// dispatch, regroup, or finish.
 struct CoordinatorState<D: Digest, T> {
     dbs: Vec<DbSyncState>,
     generation_state: BTreeMap<usize, (Anchor<D>, T)>,
@@ -1643,10 +1640,10 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
         }
     }
 
-    /// Record that database `idx` reached `generation`.
+    /// Records that database `idx` reached `generation`.
     ///
-    /// Reached events can arrive late. If the database has already been
-    /// re-assigned to a newer generation, stale events are ignored.
+    /// Reached events can arrive late. An event for a generation the database is no longer
+    /// assigned is ignored.
     fn record_reached(&mut self, idx: usize, generation: usize) {
         if self.dbs[idx].generation() != generation {
             return;
@@ -1657,10 +1654,10 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
         self.dbs[idx] = DbSyncState::Reached { generation };
     }
 
-    /// Record a new tip update.
+    /// Records a tip as the pending dispatch, replacing any earlier pending tip.
     ///
-    /// Sync targets must move strictly forward. Ignore stale and duplicate
-    /// anchors to avoid dispatching backward targets.
+    /// A tip at or below the height of the pending or last dispatched anchor is ignored. Targets
+    /// are not compared.
     fn record_tip_update(&mut self, anchor: Anchor<D>, targets: T) {
         let current_height = self
             .latest_tip
@@ -1674,10 +1671,12 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
         self.latest_tip = Some((anchor, targets));
     }
 
-    /// Determine the next action. Mutates internal state for regroup/dispatch.
+    /// Returns the next coordinator action, updating assignments for a `Dispatch`.
     ///
-    /// Returns which database indices should receive targets via
-    /// `dbs[idx].is_reached() == false` after a `Dispatch` action.
+    /// Returns `Converged` when every database reached the same generation and no tip is pending.
+    /// Returns `Dispatch` for a pending tip (a new generation) or a regroup (every database
+    /// reached, at different generations), and `Wait` otherwise. After a `Dispatch`,
+    /// [`Self::should_dispatch`] identifies the databases that receive the targets.
     fn next_action(&mut self) -> CoordinatorAction<D, T> {
         let all_reached = self.dbs.iter().all(|db| db.is_reached());
 
@@ -1728,7 +1727,8 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
             };
         }
 
-        // Not all reached. If there's a pending tip, dispatch it.
+        // With some database still seeking, a pending tip starts a new generation for the
+        // seeking databases only.
         let Some((anchor, targets)) = self.latest_tip.take() else {
             return CoordinatorAction::Wait;
         };
@@ -1751,18 +1751,21 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
         }
     }
 
-    /// Retain only generations referenced by at least one database.
+    /// Drops the state of generations no database is assigned.
     fn prune_generations(&mut self) {
         self.generation_state
             .retain(|r#gen, _| self.dbs.iter().any(|db| db.generation() == *r#gen));
     }
 
-    /// Whether database `idx` is a non-reached recipient for dispatch.
+    /// Returns whether database `idx` receives a dispatch's targets (it has not reached its
+    /// generation).
     fn should_dispatch(&self, idx: usize) -> bool {
         !self.dbs[idx].is_reached()
     }
 
-    /// Advance a reached database to `generation` when its target is unchanged.
+    /// Marks a reached database as reached for `generation` (no effect on a seeking database).
+    ///
+    /// Callers must only use this when the database's target is unchanged in `generation`.
     fn mark_reached_same_target(&mut self, idx: usize, generation: usize) {
         if !self.dbs[idx].is_reached() {
             return;
@@ -1771,7 +1774,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     }
 }
 
-/// Sync a database that durably persists an operation log.
+/// Syncs a database that durably persists its operation log.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_standard_db<E, DB, S>(
     context: E,
@@ -1813,7 +1816,10 @@ impl Drop for Forwarder {
     }
 }
 
-/// Sync a database that does not durably persist an operation log.
+/// Syncs a compact database, which does not persist its operation log.
+///
+/// A compact target that does not convert to an engine target fails the sync when passed as
+/// `target` and is ignored when it arrives on `tip_updates`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_compact_db<E, DB, S>(
     context: E,
@@ -1843,10 +1849,8 @@ where
     }
 
     let (update_tx, update_rx) = mpsc::channel(sync_config.update_channel_size.get());
-    // Retain the handle until the engine exits so the adapter is aborted on completion or cancel.
     let update_forwarder = Forwarder(context.child("compact_updates").spawn(move |_| async move {
         while let Some(update) = tip_updates.recv().await {
-            // Ignore malformed updates.
             let Ok(update) = sync::Target::try_from(&update) else {
                 continue;
             };
@@ -1906,7 +1910,7 @@ async fn apply<E, T: ManagedDb<E>>(database: T, batch: T::Merkleized, index: Opt
     }
 }
 
-/// Run one database's apply lifecycle under only its own shared writer.
+/// Applies `batch` to one database while holding only that database's write lock.
 async fn apply_shared<E, T: ManagedDb<E>>(
     shared: &Shared<T>,
     batch: T::Merkleized,
@@ -1933,7 +1937,7 @@ async fn finalize<E, T: ManagedDb<E>>(
     }
 }
 
-/// Restore the shared database after starting durability, then return its completion handle.
+/// Starts persisting one database and returns the handle that resolves once it is durable.
 async fn finalize_shared<E, T: ManagedDb<E>>(
     shared: &Shared<T>,
     index: Option<usize>,

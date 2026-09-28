@@ -110,7 +110,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
             // Every boot recovers from marshal. No state sync floor is configured.
             let plan = SyncPlan::init(context.child("plan"), "floor-stateful").await;
             if boot > 0 {
-                assert!(!plan.should_state_sync(true));
+                assert!(!plan.should_sync(true));
             }
             assert!(plan.floor().is_none());
             let (marshal_actor, mut marshal, floor) =
@@ -138,7 +138,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                 )
                 .await;
             let publication_context = context.child("publication");
-            let (stateful, mut application) = Stateful::init(
+            let (stateful, mut application) = Stateful::new(
                 context.child("stateful"),
                 Config {
                     application: App::new(genesis.clone()),

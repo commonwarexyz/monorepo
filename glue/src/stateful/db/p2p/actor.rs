@@ -59,17 +59,19 @@ where
     /// Retry cadence for pending fetches.
     pub fetch_retry_timeout: Duration,
 
-    /// Maximum number of operations to serve in a single response.
+    /// Largest `max_ops` served in a peer's operations request. Larger requests go unanswered.
     pub max_serve_ops: NonZeroU64,
 
-    /// Send fetch requests with network priority.
+    /// Whether fetch requests are sent with network priority.
     pub priority_requests: bool,
 
-    /// Send responses with network priority.
+    /// Whether responses are sent with network priority.
     pub priority_responses: bool,
 }
 
-/// Runs a QMDB sync resolver service over `commonware_resolver::p2p::Engine`.
+/// A QMDB state sync resolver that fetches from peers and serves them from published snapshots.
+///
+/// See the [module docs](super) for the fetch and serve contract.
 pub struct Actor<E, P, D, B, F, S, M>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
@@ -104,7 +106,7 @@ where
     M: Source<Family = F> + Clone + Send + Sync + 'static,
     Op<M>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
-    /// Create a new resolver actor and mailbox.
+    /// Creates the actor and its mailbox.
     pub fn new(
         context: E,
         cfg: Config<P, D, B>,
@@ -127,7 +129,7 @@ where
         (actor, mailbox)
     }
 
-    /// Start the resolver service.
+    /// Starts the actor, fetching and serving over `net`.
     pub fn start(
         mut self,
         net: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -135,7 +137,7 @@ where
         spawn_cell!(self.context, self.run(net))
     }
 
-    /// Main event loop: multiplexes mailbox messages and engine callbacks.
+    /// Multiplexes mailbox messages and resolver engine callbacks.
     async fn run(
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -178,8 +180,6 @@ where
             },
             // Drive verdicts and subscription retirement independently of database reads.
             _ = self.work.next_completed() => {},
-            // Drive reads and release their slots on completion.
-            // Each future sends its response and records the outcome.
             _ = self.serves.next_completed() => {},
             Some(message) = mailbox_message else continue => {
                 self.handle_mailbox_message(&mut resolver_mailbox, message);
@@ -201,7 +201,7 @@ where
         }
     }
 
-    /// Process fetch requests.
+    /// Processes fetch requests.
     fn handle_mailbox_message<R>(&mut self, resolver: &mut R, message: SyncMessage<F, M>)
     where
         R: Resolver<Key = Request<F>, Subscriber = Subscriber<F, M>>,
@@ -239,7 +239,8 @@ where
         }
     }
 
-    /// Decode a candidate and route its validity feedback to waiting callers.
+    /// Decodes a peer response and reports a verdict on it to the resolver (see the
+    /// [module docs](super)).
     fn handle_deliver(
         &mut self,
         delivery: Delivery<Request<F>, Subscriber<F, M>>,
@@ -274,7 +275,7 @@ where
             }
         };
 
-        // The resolver waits asynchronously for this verdict.
+        // A single recipient judges the candidate directly.
         if let [(subscriber, _)] = subscribers.as_slice() {
             let status = if subscriber.reply.try_send((response, feedback_tx)).is_ok() {
                 status::Status::Success
@@ -301,7 +302,8 @@ where
         }
         self.metrics.deliveries.inc(status::Status::Success);
         self.work.push(async move {
-            // All callers verify the same QMDB history. Closed receipts abstain.
+            // All callers verify against the same history, so the first verdict in subscriber
+            // order applies to all. A caller that drops its verdict sender abstains.
             let mut verdict = None;
             for receiver in verdicts {
                 verdict = verdict.or(receiver.await.ok());
@@ -312,7 +314,7 @@ where
         });
     }
 
-    /// Serve a peer's request from the latest published snapshot.
+    /// Serves a peer's request from the latest published snapshot.
     fn handle_produce(&mut self, key: Request<F>, response_tx: oneshot::Sender<bytes::Bytes>) {
         let Some(source) = self.subscriber.latest() else {
             self.metrics.serve_requests.inc(status::Status::Dropped);

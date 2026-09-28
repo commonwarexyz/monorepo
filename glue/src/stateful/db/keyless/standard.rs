@@ -1,10 +1,9 @@
-//! Journaled [`ManagedDb`] implementation for QMDB
+//! Journaled [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`keyless`](commonware_storage::qmdb::keyless) databases.
 //!
-//! Keyless databases are append-only. Operations are addressed by
-//! [`Location`] rather than by key.
-//! The wrapper types here capture a [`Shared`] database handle so the batch API
-//! can read through to applied state.
+//! Keyless databases are append-only. Operations are addressed by [`Location`] rather than by
+//! key. Batch reads fall back to the database's applied state at the time of the read, not to a
+//! snapshot taken when the batch was created.
 
 use crate::stateful::db::{
     BatchContext, InitError, LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Shared,
@@ -35,8 +34,7 @@ use commonware_storage::{
 use commonware_utils::{channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
-/// Wraps a keyless [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
+/// A speculative batch of appended values over a shared keyless database.
 pub struct KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -80,29 +78,32 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    /// Set commit metadata included in the next
-    /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
     pub fn with_metadata(mut self, metadata: V::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Set the inactivity floor to include within the next [`merkleize`](UnmerkleizedTrait::merkleize) call.
+    /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
+    /// (inherited from the parent batch or database when unset).
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self
     }
 
-    /// Read a value by location, falling back to applied state.
+    /// Reads a value by location, falling back to applied state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(location, &db).await
     }
 
-    /// Read multiple values by location, falling back to applied state.
+    /// Reads multiple values by location, falling back to applied state.
     ///
-    /// Locations must be sorted in ascending order. Returns results in the same
-    /// order as the input locations.
+    /// Returns results in the same order as `locations`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `locations` is not strictly increasing.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -111,15 +112,14 @@ where
         self.batch.get_many(locations, &db).await
     }
 
-    /// Append a value to the speculative batch.
+    /// Appends `value` to the batch.
     pub fn append(mut self, value: V::Value) -> Self {
         self.batch = self.batch.append(value);
         self
     }
 }
 
-/// Wraps a keyless [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](crate::stateful::db::Merkleized) trait.
+/// A sealed keyless batch with a computed root.
 pub struct KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -179,16 +179,19 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    /// Read a value by location, falling back to applied state.
+    /// Reads a value by location, falling back to applied state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(location, &db).await
     }
 
-    /// Read multiple values by location, falling back to applied state.
+    /// Reads multiple values by location, falling back to applied state.
     ///
-    /// Locations must be sorted in ascending order. Returns results in the same
-    /// order as the input locations.
+    /// Returns results in the same order as `locations`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `locations` is not strictly increasing.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
