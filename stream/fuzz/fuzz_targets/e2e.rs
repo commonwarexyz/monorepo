@@ -1,7 +1,6 @@
 #![no_main]
 
-use commonware_codec::{EncodeSize as _, varint::UInt};
-use commonware_cryptography::{Signer, ed25519::PrivateKey, handshake::sake::TAG_SIZE};
+use commonware_cryptography::{ChaCha20Poly1305, Cipher, Signer, ed25519::PrivateKey};
 use commonware_runtime::{
     Handle, Runner as _, Sink as _, Spawner, Stream as _, Supervisor as _, deterministic, mocks,
 };
@@ -19,21 +18,7 @@ use std::time::Duration;
 
 const NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 2048;
-const MAX_CIPHERTEXT_SIZE: u32 = MAX_MESSAGE_SIZE + TAG_SIZE as u32;
-const V1_HEADER_SIZE: usize = 4 + TAG_SIZE;
-
-/// Returns the size of the header that precedes an encrypted payload of `len` bytes.
-fn header_len(version: Version, len: usize) -> usize {
-    match version {
-        Version::V0 => UInt((len + TAG_SIZE) as u32).encode_size(),
-        Version::V1 => V1_HEADER_SIZE,
-    }
-}
-
-/// Returns the encoded size of a record carrying `len` payload bytes.
-fn record_len(version: Version, len: usize) -> usize {
-    header_len(version, len) + len + TAG_SIZE
-}
+const MAX_CIPHERTEXT_SIZE: u32 = MAX_MESSAGE_SIZE + ChaCha20Poly1305::TAG_SIZE as u32;
 
 #[derive(Debug)]
 enum Direction {
@@ -130,25 +115,15 @@ fn fuzz(input: FuzzInput) {
         let (listener_sink, mut adversary_l_stream) = mocks::Channel::init();
         let (mut adversary_l_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Timeout::new(
-            Handshake {
-                signer: dialer_signer.clone(),
-                version,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            },
-            Duration::from_secs(1),
-        );
+        let mut dialer_handshake = Handshake::new(dialer_signer.clone(), version);
+        dialer_handshake.synchrony_bound = Duration::from_secs(1);
+        dialer_handshake.max_handshake_age = Duration::from_secs(1);
+        let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
-        let listener_handshake = Timeout::new(
-            Handshake {
-                signer: listener_signer.clone(),
-                version,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            },
-            Duration::from_secs(1),
-        );
+        let mut listener_handshake = Handshake::new(listener_signer.clone(), version);
+        listener_handshake.synchrony_bound = Duration::from_secs(1);
+        listener_handshake.max_handshake_age = Duration::from_secs(1);
+        let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(1));
 
         let dialer_handle = context.child("dialer").spawn(move |context| async move {
             dialer_handshake
@@ -297,7 +272,10 @@ fn fuzz(input: FuzzInput) {
                     // Send a legitimate plaintext message through the encrypted channel.
                     sender.send(data.clone()).await.unwrap();
                     // Intercept the resulting record from the wire.
-                    let record = a_in.recv(record_len(version, data.len())).await.unwrap();
+                    let record = a_in
+                        .recv(version.record_len::<ChaCha20Poly1305>(data.len()))
+                        .await
+                        .unwrap();
                     // Forward the exact record unchanged.
                     a_out.send(record).await.unwrap();
                     // Receiver should decrypt and deliver the original plaintext.
@@ -334,14 +312,22 @@ fn fuzz(input: FuzzInput) {
                     // Trigger one legitimate record so nonce/state advance as normal.
                     sender.send(vec![0u8]).await.unwrap();
                     // Adversary intercepts and drops that record.
-                    let _ = a_in.recv(record_len(version, 1)).await.unwrap();
+                    let _ = a_in
+                        .recv(version.record_len::<ChaCha20Poly1305>(1))
+                        .await
+                        .unwrap();
                     // Adversary injects forged unauthenticated bytes instead. A forged version 1
                     // header is padded to full size so the receiver has a header to reject.
                     match version {
                         Version::V0 => send_frame(a_out, data, MAX_CIPHERTEXT_SIZE).await.unwrap(),
                         Version::V1 => {
                             let mut forged = data;
-                            forged.resize(forged.len().max(V1_HEADER_SIZE), 0);
+                            forged.resize(
+                                forged
+                                    .len()
+                                    .max(Version::V1.header_len::<ChaCha20Poly1305>(0)),
+                                0,
+                            );
                             a_out.send(forged).await.unwrap();
                         }
                     }
@@ -386,7 +372,7 @@ fn fuzz(input: FuzzInput) {
                     // Send a legitimate record and intercept it.
                     sender.send(data.clone()).await.unwrap();
                     let mut record: Vec<u8> = a_in
-                        .recv(record_len(version, data.len()))
+                        .recv(version.record_len::<ChaCha20Poly1305>(data.len()))
                         .await
                         .unwrap()
                         .coalesce()
@@ -396,7 +382,7 @@ fn fuzz(input: FuzzInput) {
                     // same span, and any version 1 byte may change because its header is
                     // authenticated before the payload is requested.
                     let start = match version {
-                        Version::V0 => header_len(version, data.len()),
+                        Version::V0 => version.header_len::<ChaCha20Poly1305>(data.len()),
                         Version::V1 => 0,
                     };
                     let target = start + index % (record.len() - start);

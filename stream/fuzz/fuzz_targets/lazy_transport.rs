@@ -29,25 +29,15 @@ fn connect(version: Version) -> TransportPair {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Timeout::new(
-            Handshake {
-                signer: dialer_signer.clone(),
-                version,
-                synchrony_bound: Duration::from_secs(3),
-                max_handshake_age: Duration::from_secs(5),
-            },
-            Duration::from_secs(2),
-        );
+        let mut dialer_handshake = Handshake::new(dialer_signer.clone(), version);
+        dialer_handshake.synchrony_bound = Duration::from_secs(3);
+        dialer_handshake.max_handshake_age = Duration::from_secs(5);
+        let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(2));
 
-        let listener_handshake = Timeout::new(
-            Handshake {
-                signer: listener_signer.clone(),
-                version,
-                synchrony_bound: Duration::from_secs(3),
-                max_handshake_age: Duration::from_secs(5),
-            },
-            Duration::from_secs(2),
-        );
+        let mut listener_handshake = Handshake::new(listener_signer.clone(), version);
+        listener_handshake.synchrony_bound = Duration::from_secs(3);
+        listener_handshake.max_handshake_age = Duration::from_secs(5);
+        let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(2));
 
         let listener_handle = context.child("listener").spawn(move |context| async move {
             listener_handshake

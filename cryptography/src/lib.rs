@@ -94,6 +94,11 @@ commonware_macros::stability_scope!(BETA {
     pub use crate::crc32::Crc32;
 
     #[cfg(feature = "std")]
+    pub mod chacha20_poly1305;
+    #[cfg(feature = "std")]
+    pub use crate::chacha20_poly1305::ChaCha20Poly1305;
+
+    #[cfg(feature = "std")]
     pub mod handshake;
 
     /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
@@ -312,6 +317,73 @@ commonware_macros::stability_scope!(BETA {
         /// Consume the hasher, returning a freshly-reset hasher alongside the
         /// digest of everything written so far.
         fn finalize(self) -> (Self, Self::Digest);
+    }
+
+    /// Errors returned by a [Cipher].
+    #[derive(Debug, thiserror::Error)]
+    pub enum CipherError {
+        /// An error indicating that no more messages can (safely) be sealed or opened.
+        ///
+        /// In practice, you should never see this error, because the limit takes
+        /// an ultra-astronomical amount of messages to reach.
+        #[error("message encryption limited reached")]
+        MessageLimitReached,
+        /// Encryption failed for some reason.
+        ///
+        /// In practice, this error shouldn't happen.
+        #[error("encryption failed")]
+        EncryptionFailed,
+        /// Decryption failed.
+        ///
+        /// This can happen if the message was corrupted, truncated, or opened out of order.
+        #[error("decryption failed")]
+        DecryptionFailed,
+    }
+
+    /// Seals and opens an ordered sequence of messages under a single key.
+    ///
+    /// Each message is bound to its position in the sequence, so a message opens only at the
+    /// position it was sealed at. Every call consumes a position, even when it fails, so an
+    /// instance that fails to open a message cannot open any later message. A key must seal
+    /// messages for at most one instance.
+    ///
+    /// [Random::random] creates an instance with a key sampled from the provided RNG.
+    pub trait Cipher: Random + Send + Sync + 'static {
+        /// Number of bytes a sealed message grows by.
+        const TAG_SIZE: usize;
+
+        /// Encrypts all but the last [Self::TAG_SIZE] bytes of `buf` in place and writes their
+        /// authentication tag to the last [Self::TAG_SIZE] bytes.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `buf` is shorter than [Self::TAG_SIZE].
+        fn seal_in_place(&mut self, buf: &mut [u8]) -> Result<(), CipherError>;
+
+        /// Decrypts `buf`, a ciphertext followed by its authentication tag, in place and returns
+        /// the length of the plaintext at the start of `buf`.
+        ///
+        /// Returns [CipherError::DecryptionFailed] if `buf` is shorter than [Self::TAG_SIZE] or
+        /// does not authenticate.
+        fn open_in_place(&mut self, buf: &mut [u8]) -> Result<usize, CipherError>;
+
+        /// Encrypts `data` and returns the ciphertext followed by its authentication tag.
+        fn seal(&mut self, data: &[u8]) -> Result<Vec<u8>, CipherError> {
+            let mut buf = Vec::with_capacity(data.len() + Self::TAG_SIZE);
+            buf.extend_from_slice(data);
+            buf.resize(data.len() + Self::TAG_SIZE, 0);
+            self.seal_in_place(&mut buf)?;
+            Ok(buf)
+        }
+
+        /// Decrypts `data`, a ciphertext followed by its authentication tag, and returns the
+        /// plaintext.
+        fn open(&mut self, data: &[u8]) -> Result<Vec<u8>, CipherError> {
+            let mut buf = data.to_vec();
+            let len = self.open_in_place(&mut buf)?;
+            buf.truncate(len);
+            Ok(buf)
+        }
     }
 });
 

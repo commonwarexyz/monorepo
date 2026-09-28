@@ -1,79 +1,14 @@
-//! Simple Authenticated Key Exchange (SAKE).
-//!
-//! This construction is unrelated to [EAP-SAKE] or the [symmetric-key SAKE] protocol.
-//!
-//! # Construction
-//!
-//! SAKE is a fixed three-message handshake between a **dialer** and **listener**:
-//!
-//! 1. [Syn]: The dialer sends a timestamp, an ephemeral X25519 public key, and a signature bound
-//!    to the transcript and intended listener.
-//! 2. [SynAck]: The listener sends its timestamp, ephemeral X25519 public key, transcript
-//!    signature, and key-confirmation tag.
-//! 3. [Ack]: The dialer verifies the response and sends the opposite-direction confirmation.
-//!
-//! The current suite uses X25519 for ephemeral key agreement, BLAKE3 for the transcript and key
-//! derivation, a generic [Signer] implementation for identity signatures, and ChaCha20-Poly1305
-//! for the resulting directional traffic ciphers.
-//!
-//! Both public identities are inputs to the core exchange and are incorporated into the transcript
-//! with the timestamps, ephemeral keys, and shared secret in a fixed order. Identities are visible,
-//! not hidden by the construction. SAKE has no 0-RTT mode or resumption mechanism. Application
-//! data can be sent only after the three messages complete.
-//!
-//! The BLAKE3 transcript first commits the caller-provided application namespace as one packet. A
-//! protocol built on SAKE may then fork it with its own label ([Context::fork]). SAKE then forks it
-//! with the protocol namespace of the [Version]: `_COMMONWARE_CRYPTOGRAPHY_SAKE` for [Version::V1]
-//! and the original `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` for [Version::V0]. Distinct
-//! labels derive the listener-to-dialer and dialer-to-listener traffic keys and confirmations.
-//! These namespace bytes, transcript order, and labels are protocol constants.
-//!
-//! # Versions
-//!
-//! [Version] selects the transcript schema. Both peers must use the same version. A mismatch fails
-//! signature verification. The message encodings are identical across versions.
-//!
-//! - [Version::V0] signs [Syn] over the timestamp, listener identity, and ephemeral key, and
-//!   commits the dialer identity only afterwards. If the signature scheme lacks conservative
-//!   exclusive ownership (it admits key substitution), a dialer can complete a handshake under a
-//!   public key other than its own under which its [Syn] signature also verifies. Whether such a
-//!   key can match one a listener admits depends on the signature scheme. V0 uses
-//!   [transcript::Version::V0], which is sound here because SAKE commits a fixed sequence of
-//!   canonical encodings at fixed positions.
-//! - [Version::V1] commits both identities before every signature, so each signature covers the
-//!   signer's own identity, and uses [transcript::Version::V1].
-//!
-//! [SendCipher] and [RecvCipher] use independent ChaCha20-Poly1305 keys and 96-bit counter nonces.
-//! A successful receive therefore authenticates a message at its expected position in that
-//! direction.
-//!
-//! # Timing
-//!
-//! Callers provide the accepted timestamp range to limit replay and clock skew. Because this core
-//! performs no I/O, callers must separately enforce deadlines around the handshake to bound stalled
-//! attempts.
-//!
-//! [EAP-SAKE]: https://www.rfc-editor.org/rfc/rfc4763
-//! [symmetric-key SAKE]: https://eprint.iacr.org/2019/444
+use super::{
+    Error,
+    key_exchange::{EphemeralPublicKey, SecretKey},
+};
 use crate::{
-    PublicKey, Signature, Signer, Verifier,
+    Cipher, PublicKey, Signature, Signer, Verifier,
     transcript::{self, Summary, Transcript},
 };
 use commonware_codec::{Buf, Encode, FixedSize, Read, ReadExt, Write};
 use core::ops::Range;
 use rand_core::CryptoRng;
-
-mod error;
-pub use error::Error;
-
-mod key_exchange;
-use key_exchange::{EphemeralPublicKey, SecretKey};
-
-mod cipher;
-pub use cipher::{RecvCipher, SendCipher, TAG_SIZE};
-
-#[cfg(all(test, feature = "arbitrary"))]
-mod conformance;
 
 const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
 const LABEL_CIPHER_D2L: &[u8] = b"cipher_d2l";
@@ -264,11 +199,10 @@ pub struct DialState<P> {
 }
 
 /// State maintained by the listener during handshake.
-/// Tracks expected confirmation and derived ciphers.
+/// Tracks expected confirmation and the transcript that derives the ciphers.
 pub struct ListenState {
     confirmation: Summary,
-    send: SendCipher,
-    recv: RecvCipher,
+    transcript: Transcript,
 }
 
 /// Handshake context containing timing and identity information.
@@ -357,11 +291,11 @@ pub fn dial_start<S: Signer, P: PublicKey>(
 }
 
 /// Completes a handshake as the dialer.
-/// Verifies the listener's response and returns final message and ciphers.
-pub fn dial_end<P: PublicKey>(
+/// Verifies the listener's response and returns final message and the send and receive ciphers.
+pub fn dial_end<C: Cipher, P: PublicKey>(
     state: DialState<P>,
     msg: SynAck<<P as Verifier>::Signature>,
-) -> Result<(Ack, SendCipher, RecvCipher), Error> {
+) -> Result<(Ack, C, C), Error> {
     let DialState {
         esk,
         peer_identity,
@@ -384,8 +318,8 @@ pub fn dial_end<P: PublicKey>(
     shared
         .secret
         .expose(|secret| transcript.commit(secret.as_ref()));
-    let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_L2D));
-    let send = SendCipher::new(transcript.noise(LABEL_CIPHER_D2L));
+    let recv = C::random(transcript.noise(LABEL_CIPHER_L2D));
+    let send = C::random(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
     let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
     if msg.confirmation != confirmation_l2d {
@@ -448,16 +382,13 @@ pub fn listen_start<S: Signer, P: PublicKey>(
     shared
         .secret
         .expose(|secret| transcript.commit(secret.as_ref()));
-    let send = SendCipher::new(transcript.noise(LABEL_CIPHER_L2D));
-    let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
     let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
 
     Ok((
         ListenState {
             confirmation: confirmation_d2l,
-            send,
-            recv,
+            transcript,
         },
         SynAck {
             time_ms: current_time,
@@ -469,18 +400,20 @@ pub fn listen_start<S: Signer, P: PublicKey>(
 }
 
 /// Completes the handshake as the listener.
-/// Verifies the dialer's confirmation and returns established ciphers.
-pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCipher), Error> {
+/// Verifies the dialer's confirmation and returns the send and receive ciphers.
+pub fn listen_end<C: Cipher>(state: ListenState, msg: Ack) -> Result<(C, C), Error> {
     if msg.confirmation != state.confirmation {
         return Err(Error::HandshakeFailed);
     }
-    Ok((state.send, state.recv))
+    let send = C::random(state.transcript.noise(LABEL_CIPHER_L2D));
+    let recv = C::random(state.transcript.noise(LABEL_CIPHER_D2L));
+    Ok((send, recv))
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{Signer, ed25519::PrivateKey, secp256r1::standard};
+    use crate::{ChaCha20Poly1305, Signer, ed25519::PrivateKey, secp256r1::standard};
     use commonware_codec::{Codec, Copying, DecodeExt};
     use commonware_math::algebra::Random;
     use commonware_utils::{test_rng, union_unique};
@@ -528,19 +461,19 @@ mod test {
                 msg1,
             )?;
             test_encode_roundtrip(&msg2);
-            let (msg3, mut d_send, mut d_recv) = dial_end(d_state, msg2)?;
+            let (msg3, mut d_send, mut d_recv) = dial_end::<ChaCha20Poly1305, _>(d_state, msg2)?;
             test_encode_roundtrip(&msg3);
-            let (mut l_send, mut l_recv) = listen_end(l_state, msg3)?;
+            let (mut l_send, mut l_recv) = listen_end::<ChaCha20Poly1305>(l_state, msg3)?;
 
             let m1: &'static [u8] = b"message 1";
 
-            let c1 = d_send.send(m1)?;
-            let m1_prime = l_recv.recv(&c1)?;
+            let c1 = d_send.seal(m1).unwrap();
+            let m1_prime = l_recv.open(&c1).unwrap();
             assert_eq!(m1, &m1_prime);
 
             let m2: &'static [u8] = b"message 2";
-            let c2 = l_send.send(m2)?;
-            let m2_prime = d_recv.recv(&c2)?;
+            let c2 = l_send.seal(m2).unwrap();
+            let m2_prime = d_recv.open(&c2).unwrap();
             assert_eq!(m2, &m2_prime);
         }
 
@@ -817,21 +750,9 @@ mod test {
                 transcript: claimed,
                 ..state
             };
-            let (ack, mut send, _) = dial_end(state, syn_ack).unwrap();
-            let (_, mut recv) = listen_end(listen_state, ack).unwrap();
-            assert_eq!(recv.recv(&send.send(b"hello").unwrap()).unwrap(), b"hello");
-        }
-    }
-
-    #[cfg(feature = "arbitrary")]
-    mod conformance {
-        use super::*;
-        use commonware_codec::conformance::CodecConformance;
-
-        commonware_conformance::conformance_tests! {
-            CodecConformance<Syn<crate::ed25519::Signature>>,
-            CodecConformance<SynAck<crate::ed25519::Signature>>,
-            CodecConformance<Ack>,
+            let (ack, mut send, _) = dial_end::<ChaCha20Poly1305, _>(state, syn_ack).unwrap();
+            let (_, mut recv) = listen_end::<ChaCha20Poly1305>(listen_state, ack).unwrap();
+            assert_eq!(recv.open(&send.seal(b"hello").unwrap()).unwrap(), b"hello");
         }
     }
 }

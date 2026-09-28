@@ -240,16 +240,11 @@ fn main() {
 
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
+        let mut handshake = Handshake::new(signer, Version::V1);
+        handshake.synchrony_bound = Duration::from_secs(1);
+        handshake.max_handshake_age = Duration::from_secs(60);
         let handshake = StreamConfig::new(
-            Timeout::new(
-                Handshake {
-                    signer,
-                    version: Version::V1,
-                    synchrony_bound: Duration::from_secs(1),
-                    max_handshake_age: Duration::from_secs(60),
-                },
-                Duration::from_secs(5),
-            ),
+            Timeout::new(handshake, Duration::from_secs(5)),
             INDEXER_NAMESPACE,
             MAX_MESSAGE_SIZE,
         );

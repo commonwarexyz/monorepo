@@ -1,69 +1,12 @@
-//! Counter Unidirectional Packet Stream (CUPS).
-//!
-//! CUPS protects ordered message records using a separate key and implicit counter for each
-//! direction. "Packet" refers to a framed message on an ordered byte stream, not a datagram.
-//! The current construction uses ChaCha20-Poly1305. The construction name is independent of
-//! this algorithm choice.
-//!
-//! # Handshake
-//!
-//! [Handshake] implements [crate::Handshake] using
-//! [Simple Authenticated Key Exchange (SAKE)](commonware_cryptography::handshake::sake) and returns CUPS
-//! [Sender] and [Receiver] halves. SAKE uses a fixed three-message exchange with ephemeral X25519
-//! keys, identity signatures, and BLAKE3 transcript derivation to establish directional ciphers.
-//!
-//! The core SAKE protocol receives both peer identities as inputs. This adapter first sends the
-//! dialer's public key in a framed, cleartext prelude, separate from SAKE's three messages. The
-//! listener's bouncer may reject that claim before authentication. Accepting it only permits the
-//! handshake to continue. A successful handshake authenticates the returned identity.
-//!
-//! Version 1 forks the SAKE transcript with `_COMMONWARE_STREAM_CUPS` after the application
-//! namespace and before SAKE's own protocol namespace ([sake::Context::fork]), so its handshakes
-//! differ from SAKE handshakes that another protocol runs with the same application namespace.
-//! Version 0 does not fork it.
-//!
-//! Peers must agree on a unique, application-specific namespace, a [Version], and have clocks
-//! within the configured timestamp acceptance windows. The version is not negotiated: a mismatch
-//! fails the handshake. Callers must enforce a handshake deadline, for example with
-//! [crate::utils::Timeout]. Identities are exposed during the handshake, and there is no 0-RTT
-//! resumption.
-//!
-//! # Records
-//!
-//! Each message becomes one record, and batching writes preserves record boundaries. Every seal
-//! uses ChaCha20-Poly1305 with a 16-byte tag and empty associated data.
-//!
-//! - Version 0: a visible u32 varint holding the length of the encrypted payload and its tag,
-//!   then the encrypted payload and its tag.
-//! - Version 1: a 20-byte header holding the payload length as an encrypted 4-byte big-endian
-//!   integer and its tag, then the encrypted payload and its tag.
-//!
-//! Each direction uses a fixed session key and an implicit 96-bit counter nonce, starting at zero
-//! and encoded little-endian. The counter advances once per record in version 0 and twice
-//! per record in version 1, first for the header and then for the payload. It is never
-//! transmitted. Counter exhaustion requires a new connection. Counters bind records to their
-//! expected positions: replayed, reordered, or corrupted records fail authentication rather than
-//! being reordered for delivery. Callers must discard the connection after an authentication
-//! failure.
-//!
-//! # Security
-//!
-//! SAKE provides mutual authentication and ephemeral session keys. CUPS protects record contents
-//! and integrity. Version 0 exposes record lengths and boundaries in the byte stream. Version 1
-//! removes them from the byte stream, but message sizes and timing remain observable through
-//! transport segments. There is no padding, in-session key ratchet, or rekeying. Callers must
-//! discard the connection after an I/O error or cancellation, as required by [crate::Sender] and
-//! [crate::Receiver].
-
-use crate::utils::codec::{build_frame, recv_frame, send_frame, validate_frame_len};
+use crate::utils::codec::{recv_frame, send_frame, validate_frame_len};
 use commonware_codec::{
     DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Write, varint::UInt,
 };
 use commonware_cryptography::{
-    Signer,
+    ChaCha20Poly1305, Cipher, CipherError, Signer,
     handshake::sake::{
-        self, Ack, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, dial_end,
-        dial_start, listen_end, listen_start,
+        self, Ack, Context, Error as HandshakeError, Syn, SynAck, dial_end, dial_start, listen_end,
+        listen_start,
     },
 };
 use commonware_formatting::hex;
@@ -73,31 +16,33 @@ use commonware_runtime::{
 };
 use commonware_utils::{DurationExt, SystemTimeExt, Widen};
 use rand_core::CryptoRng;
-use std::{future::Future, ops::Range, time::Duration};
+use std::{future::Future, marker::PhantomData, ops::Range, time::Duration};
 use thiserror::Error;
 
-mod config;
-pub use config::Config;
-
-#[cfg(all(test, feature = "arbitrary"))]
-mod conformance;
-
 const NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_CUPS";
-const TAG_SIZE: u32 = {
-    assert!(sake::TAG_SIZE <= u32::MAX as usize);
-    sake::TAG_SIZE as u32
-};
 const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
-const V1_HEADER_SIZE: usize = V1_HEADER_PLAINTEXT_SIZE + TAG_SIZE as usize;
 
-/// Maximum supported plaintext message size.
-pub const MAX_SIZE: u32 = u32::MAX - TAG_SIZE;
+/// Returns the tag size of `C` as a record length.
+const fn tag_size<C: Cipher>() -> u32 {
+    assert!(
+        C::TAG_SIZE <= u32::MAX as usize,
+        "tag exceeds record length"
+    );
+    C::TAG_SIZE as u32
+}
+
+/// Returns the largest payload whose record length fits in a u32 with a tag of `C`.
+const fn max_size<C: Cipher>() -> u32 {
+    u32::MAX - tag_size::<C>()
+}
 
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("handshake error: {0}")]
     HandshakeError(HandshakeError),
+    #[error("cipher error: {0}")]
+    CipherError(CipherError),
     #[error("unable to decode: {0}")]
     UnableToDecode(CodecError),
     #[error("peer rejected: {}", hex(_0))]
@@ -130,6 +75,12 @@ impl From<HandshakeError> for Error {
     }
 }
 
+impl From<CipherError> for Error {
+    fn from(value: CipherError) -> Self {
+        Self::CipherError(value)
+    }
+}
+
 /// Protocol version used by [Handshake], selecting the SAKE version, the transcript scope, and the
 /// record format.
 ///
@@ -153,10 +104,10 @@ impl Version {
         }
     }
 
-    /// Scopes a SAKE context to CUPS.
+    /// Scopes the handshake transcript to CUPS.
     ///
-    /// Each version must give SAKE a version and transcript scope that no other version gives it, so
-    /// a mismatch fails the handshake.
+    /// Each version must produce transcripts that no other version produces, so peers on different
+    /// versions fail the handshake.
     fn scope<S, P>(self, context: Context<S, P>) -> Context<S, P> {
         match self {
             Self::V0 => context,
@@ -164,65 +115,83 @@ impl Version {
         }
     }
 
-    /// Returns the encoded header size for an encrypted body of the given length.
-    fn header_len(self, body_len: u32) -> usize {
+    /// Returns the size of the header that precedes a payload of `len` bytes sealed with `C`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `len` exceeds the [MAX_SIZE](crate::Handshake::MAX_SIZE) of a [Handshake] using
+    /// `C`.
+    pub fn header_len<C: Cipher>(self, len: usize) -> usize {
+        let len = u32::try_from(len)
+            .ok()
+            .filter(|len| *len <= max_size::<C>())
+            .expect("payload exceeds stream limit");
         match self {
-            Self::V0 => UInt(body_len).encode_size(),
-            Self::V1 => V1_HEADER_SIZE,
+            Self::V0 => UInt(len + tag_size::<C>()).encode_size(),
+            Self::V1 => V1_HEADER_PLAINTEXT_SIZE + C::TAG_SIZE,
         }
     }
 
-    /// Appends a record header, consuming a nonce when the header is encrypted.
-    fn append_header(
+    /// Returns the encoded size of a record carrying `len` payload bytes sealed with `C`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `len` exceeds the [MAX_SIZE](crate::Handshake::MAX_SIZE) of a [Handshake] using
+    /// `C`.
+    pub fn record_len<C: Cipher>(self, len: usize) -> usize {
+        self.header_len::<C>(len) + len + C::TAG_SIZE
+    }
+
+    /// Appends the header for an encrypted payload of `len` bytes, consuming a nonce when the
+    /// header is encrypted.
+    fn append_header<C: Cipher>(
         self,
         chunk: &mut IoBufMut,
-        cipher: &mut SendCipher,
-        body_len: u32,
+        cipher: &mut C,
+        len: u32,
     ) -> Result<(), Error> {
         match self {
-            Self::V0 => UInt(body_len).write(chunk),
+            Self::V0 => UInt(len + tag_size::<C>()).write(chunk),
             Self::V1 => {
                 let offset = chunk.len();
-                (body_len - TAG_SIZE).write(chunk);
-                let tag = cipher.send_in_place(&mut chunk.as_mut()[offset..])?;
-                chunk.put_slice(&tag);
+                len.write(chunk);
+                chunk.put_bytes(0, C::TAG_SIZE);
+                cipher.seal_in_place(&mut chunk.as_mut()[offset..])?;
             }
         }
         Ok(())
     }
 
     /// Receives an encrypted payload and its tag, validating any header before requesting them.
-    async fn recv_frame(
+    async fn recv_frame<C: Cipher>(
         self,
         stream: &mut impl Stream,
-        cipher: &mut RecvCipher,
+        cipher: &mut C,
         pool: &BufferPool,
         max_message_size: u32,
     ) -> Result<IoBufs, Error> {
         match self {
-            Self::V0 => recv_frame(stream, max_message_size.saturating_add(TAG_SIZE)).await,
+            Self::V0 => recv_frame(stream, max_message_size.saturating_add(tag_size::<C>())).await,
             Self::V1 => {
                 // Request the fixed-size header before trusting the payload length, reusing
                 // its allocation for in-place decryption when possible.
                 let header = stream
-                    .recv(V1_HEADER_SIZE)
+                    .recv(V1_HEADER_PLAINTEXT_SIZE + C::TAG_SIZE)
                     .await
                     .map_err(Error::RecvFailed)?;
                 let mut header = mutable_frame(pool, header);
 
                 // Authenticate the header before decoding its length or requesting the payload.
-                let plaintext_len = cipher.recv_in_place(header.as_mut())?;
+                let plaintext_len = cipher.open_in_place(header.as_mut())?;
                 assert_eq!(plaintext_len, V1_HEADER_PLAINTEXT_SIZE);
                 header.truncate(plaintext_len);
                 let len = u32::decode(header)?;
                 if len > max_message_size {
-                    return Err(Error::RecvTooLarge(
-                        Widen::<usize>::widen(len).saturating_add(sake::TAG_SIZE),
-                    ));
+                    return Err(Error::RecvTooLarge(Widen::<usize>::widen(len)));
                 }
 
                 // Receive the payload and tag only after authenticating and checking the length.
-                let body_len = Widen::<usize>::widen(len) + sake::TAG_SIZE;
+                let body_len = Widen::<usize>::widen(len) + C::TAG_SIZE;
                 stream.recv(body_len).await.map_err(Error::RecvFailed)
             }
         }
@@ -231,9 +200,9 @@ impl Version {
 
 /// Establishes CUPS streams with Simple Authenticated Key Exchange (SAKE).
 ///
-/// Implements [crate::Handshake] using [commonware_cryptography::handshake::sake].
-#[derive(Clone)]
-pub struct Handshake<S> {
+/// Implements [crate::Handshake] using [commonware_cryptography::handshake::sake] and seals records
+/// with `C`.
+pub struct Handshake<S, C = ChaCha20Poly1305> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
 
@@ -245,16 +214,40 @@ pub struct Handshake<S> {
 
     /// Maximum age of handshake messages before rejection.
     pub max_handshake_age: Duration,
+
+    cipher: PhantomData<C>,
+}
+
+impl<S: Clone, C> Clone for Handshake<S, C> {
+    fn clone(&self) -> Self {
+        Self {
+            signer: self.signer.clone(),
+            version: self.version,
+            synchrony_bound: self.synchrony_bound,
+            max_handshake_age: self.max_handshake_age,
+            cipher: PhantomData,
+        }
+    }
 }
 
 impl<S> Handshake<S> {
-    /// Creates a SAKE handshake accepting timestamps up to five seconds ahead or ten seconds old.
+    /// Creates a SAKE handshake that seals records with [ChaCha20Poly1305], accepting timestamps up
+    /// to five seconds ahead or ten seconds old.
     pub const fn new(signer: S, version: Version) -> Self {
+        Self::with_cipher(signer, version)
+    }
+}
+
+impl<S, C> Handshake<S, C> {
+    /// Creates a SAKE handshake that seals records with `C`, accepting timestamps up to five
+    /// seconds ahead or ten seconds old.
+    pub const fn with_cipher(signer: S, version: Version) -> Self {
         Self {
             signer,
             version,
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
+            cipher: PhantomData,
         }
     }
 
@@ -291,21 +284,21 @@ where
     Ok(M::decode(frame)?)
 }
 
-impl<S: Signer> crate::Handshake for Handshake<S> {
-    const MAX_SIZE: u32 = MAX_SIZE;
+impl<S: Signer, C: Cipher> crate::Handshake for Handshake<S, C> {
+    const MAX_SIZE: u32 = max_size::<C>();
 
     type PublicKey = S::PublicKey;
     type Error = Error;
-    type Sender<I: Stream, O: Sink> = Sender<O>;
-    type Receiver<I: Stream, O: Sink> = Receiver<I>;
+    type Sender<I: Stream, O: Sink> = Sender<O, C>;
+    type Receiver<I: Stream, O: Sink> = Receiver<I, C>;
 
     fn public_key(&self) -> Self::PublicKey {
         self.signer.public_key()
     }
 
-    async fn dial<C, I, O>(
+    async fn dial<E, I, O>(
         self,
-        context: C,
+        context: E,
         namespace: &[u8],
         max_message_size: u32,
         peer: S::PublicKey,
@@ -313,12 +306,12 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         mut sink: O,
     ) -> Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
     where
-        C: BufferPooler + Clock + CryptoRng,
+        E: BufferPooler + Clock + CryptoRng,
         I: Stream,
         O: Sink,
     {
         assert!(
-            max_message_size <= MAX_SIZE,
+            max_message_size <= Self::MAX_SIZE,
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
@@ -361,9 +354,9 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         ))
     }
 
-    async fn listen<C, I, O, B, F>(
+    async fn listen<E, I, O, B, F>(
         self,
-        context: C,
+        context: E,
         namespace: &[u8],
         max_message_size: u32,
         bouncer: B,
@@ -371,14 +364,14 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         mut sink: O,
     ) -> Result<(S::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
     where
-        C: BufferPooler + Clock + CryptoRng,
+        E: BufferPooler + Clock + CryptoRng,
         I: Stream,
         O: Sink,
         B: FnOnce(S::PublicKey) -> F + Send,
         F: Future<Output = bool> + Send,
     {
         assert!(
-            max_message_size <= MAX_SIZE,
+            max_message_size <= Self::MAX_SIZE,
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
@@ -429,8 +422,8 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
 }
 
 /// Sends CUPS records to a peer.
-pub struct Sender<O> {
-    cipher: SendCipher,
+pub struct Sender<O, C = ChaCha20Poly1305> {
+    cipher: C,
     sink: O,
     max_message_size: u32,
     pool: BufferPool,
@@ -443,16 +436,13 @@ struct ChunkPlan {
     total_len: usize,
 }
 
-impl<O: Sink> Sender<O> {
+impl<O: Sink, C: Cipher> Sender<O, C> {
     /// Returns the total encoded size of one encrypted frame.
     ///
     /// The returned size includes the header, ciphertext, and AEAD tags.
-    fn encrypted_frame_len(&self, plaintext_len: usize) -> Result<usize, Error> {
-        let body_len = validate_frame_len(
-            plaintext_len + TAG_SIZE as usize,
-            self.max_message_size.saturating_add(TAG_SIZE),
-        )?;
-        Ok(self.version.header_len(body_len) + Widen::<usize>::widen(body_len))
+    fn encrypted_frame_len(&self, len: usize) -> Result<usize, Error> {
+        validate_frame_len(len, self.max_message_size)?;
+        Ok(self.version.record_len::<C>(len))
     }
 
     /// Appends one encrypted frame directly into caller-provided storage.
@@ -465,23 +455,21 @@ impl<O: Sink> Sender<O> {
         chunk: &mut IoBufMut,
         mut bufs: IoBufs,
     ) -> Result<(), Error> {
-        let body_len = bufs.len() + TAG_SIZE as usize;
-        build_frame(
-            body_len,
-            self.max_message_size.saturating_add(TAG_SIZE),
-            |len| self.version.append_header(chunk, &mut self.cipher, len),
-        )?;
+        let len = validate_frame_len(bufs.len(), self.max_message_size)?;
+        self.version.append_header(chunk, &mut self.cipher, len)?;
 
         let plaintext_offset = chunk.len();
-        // Copy the plaintext directly into the frame.
+        // Copy the plaintext directly into the frame and reserve room for its tag.
         chunk.put(&mut bufs);
+        chunk.put_bytes(0, C::TAG_SIZE);
 
-        // Encrypt in-place and append the tag to the frame.
-        let tag = self
-            .cipher
-            .send_in_place(&mut chunk.as_mut()[plaintext_offset..])?;
-        chunk.put_slice(&tag);
-        assert_eq!(chunk.len() - plaintext_offset, body_len);
+        // Encrypt in-place and write the tag into the reserved room.
+        self.cipher
+            .seal_in_place(&mut chunk.as_mut()[plaintext_offset..])?;
+        assert_eq!(
+            chunk.len() - plaintext_offset,
+            Widen::<usize>::widen(len) + C::TAG_SIZE
+        );
         Ok(())
     }
 
@@ -600,15 +588,15 @@ impl<O: Sink> Sender<O> {
 }
 
 /// Receives CUPS records from a peer.
-pub struct Receiver<I> {
-    cipher: RecvCipher,
+pub struct Receiver<I, C = ChaCha20Poly1305> {
+    cipher: C,
     stream: I,
     max_message_size: u32,
     pool: BufferPool,
     version: Version,
 }
 
-impl<O: Sink> crate::Sender for Sender<O> {
+impl<O: Sink, C: Cipher> crate::Sender for Sender<O, C> {
     type Error = Error;
 
     async fn send(&mut self, message: impl Into<IoBufs> + Send) -> Result<(), Error> {
@@ -625,7 +613,7 @@ impl<O: Sink> crate::Sender for Sender<O> {
     }
 }
 
-impl<I: Stream> crate::Receiver for Receiver<I> {
+impl<I: Stream, C: Cipher> crate::Receiver for Receiver<I, C> {
     type Error = Error;
 
     async fn recv(&mut self) -> Result<IoBufs, Error> {
@@ -648,7 +636,7 @@ fn mutable_frame(pool: &BufferPool, encrypted: IoBufs) -> IoBufMut {
     }
 }
 
-impl<I: Stream> Receiver<I> {
+impl<I: Stream, C: Cipher> Receiver<I, C> {
     /// Receives and decrypts a message from the peer.
     ///
     /// Receives ciphertext and decrypts it in-place when the received frame is
@@ -667,7 +655,7 @@ impl<I: Stream> Receiver<I> {
         let mut decryption_buf = mutable_frame(&self.pool, encrypted);
 
         // Decrypt in-place, get plaintext length back.
-        let plaintext_len = self.cipher.recv_in_place(decryption_buf.as_mut())?;
+        let plaintext_len = self.cipher.open_in_place(decryption_buf.as_mut())?;
 
         // Truncate to remove tag bytes, keeping only plaintext.
         decryption_buf.truncate(plaintext_len);
@@ -684,6 +672,7 @@ mod test {
         utils::{Timeout, TimeoutError},
     };
     use commonware_cryptography::{Signer, ed25519::PrivateKey};
+    use commonware_math::algebra::Random;
     use commonware_runtime::{
         BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
         Supervisor as _, deterministic, mocks,
@@ -708,7 +697,7 @@ mod test {
             deterministic::Runner::default().start(|context| async move {
                 let (sink, mut stream) = mocks::Channel::init();
                 let mut sender = Sender {
-                    cipher: SendCipher::new(TestRng::new(0)),
+                    cipher: ChaCha20Poly1305::random(TestRng::new(0)),
                     sink,
                     max_message_size: 64,
                     pool: context.network_buffer_pool().clone(),
@@ -717,14 +706,18 @@ mod test {
                 let messages = [&b""[..], &b"hello"[..], &[7; 64][..]];
                 sender.send_many(messages).await.unwrap();
 
-                let mut cipher = SendCipher::new(TestRng::new(0));
+                let mut cipher = ChaCha20Poly1305::random(TestRng::new(0));
                 for message in messages {
                     let len = message.len() as u32;
                     let mut expected = match version {
-                        Version::V0 => UInt(len + TAG_SIZE).encode().to_vec(),
-                        Version::V1 => cipher.send(&len.to_be_bytes()).unwrap(),
+                        Version::V0 => UInt(len + tag_size::<ChaCha20Poly1305>()).encode().to_vec(),
+                        Version::V1 => cipher.seal(&len.to_be_bytes()).unwrap(),
                     };
-                    expected.extend(cipher.send(message).unwrap());
+                    expected.extend(cipher.seal(message).unwrap());
+                    assert_eq!(
+                        version.record_len::<ChaCha20Poly1305>(message.len()),
+                        expected.len()
+                    );
                     assert_eq!(
                         stream.recv(expected.len()).await.unwrap().coalesce(),
                         expected.as_slice()
@@ -753,14 +746,14 @@ mod test {
             deterministic::Runner::default().start(|context| async move {
                 let (mut sink, stream) = mocks::Channel::init();
                 let mut receiver = Receiver {
-                    cipher: RecvCipher::new(TestRng::new(0)),
+                    cipher: ChaCha20Poly1305::random(TestRng::new(0)),
                     stream,
                     max_message_size: MAX_MESSAGE_SIZE,
                     pool: context.network_buffer_pool().clone(),
                     version: Version::V1,
                 };
-                let mut cipher = SendCipher::new(TestRng::new(0));
-                let mut header = cipher.send(&length.to_be_bytes()).unwrap();
+                let mut cipher = ChaCha20Poly1305::random(TestRng::new(0));
+                let mut header = cipher.seal(&length.to_be_bytes()).unwrap();
                 if let Some(offset) = corrupt {
                     header[offset] ^= 1;
                 }
@@ -774,13 +767,12 @@ mod test {
                 if corrupt.is_some() {
                     assert!(matches!(
                         result,
-                        Err(Error::HandshakeError(HandshakeError::DecryptionFailed))
+                        Err(Error::CipherError(CipherError::DecryptionFailed))
                     ));
                 } else {
                     assert!(matches!(
                         result,
-                        Err(Error::RecvTooLarge(n))
-                            if n == Widen::<usize>::widen(length) + sake::TAG_SIZE
+                        Err(Error::RecvTooLarge(n)) if n == Widen::<usize>::widen(length)
                     ));
                 }
             });
@@ -789,7 +781,8 @@ mod test {
 
     #[test]
     fn test_max_message_size_bounds() {
-        assert_eq!(MAX_SIZE + TAG_SIZE, u32::MAX);
+        const MAX_SIZE: u32 = <Handshake<PrivateKey> as crate::Handshake>::MAX_SIZE;
+        assert_eq!(MAX_SIZE + tag_size::<ChaCha20Poly1305>(), u32::MAX);
         deterministic::Runner::default().start(|context| async move {
             for max_message_size in [0, MAX_SIZE, MAX_SIZE + 1] {
                 for dialer in [true, false] {
@@ -838,12 +831,10 @@ mod test {
     }
 
     fn transport_handshake(signer: PrivateKey, version: Version) -> Handshake<PrivateKey> {
-        Handshake {
-            signer,
-            version,
-            synchrony_bound: Duration::from_secs(1),
-            max_handshake_age: Duration::from_secs(1),
-        }
+        let mut handshake = Handshake::new(signer, version);
+        handshake.synchrony_bound = Duration::from_secs(1);
+        handshake.max_handshake_age = Duration::from_secs(1);
+        handshake
     }
 
     fn oversized_handshake_prefix(message: &impl commonware_codec::Encode) -> IoBuf {

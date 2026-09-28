@@ -73,15 +73,10 @@ mod tests {
     type Connection = (CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>);
 
     fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
-        Timeout::new(
-            StreamHandshake {
-                signer,
-                version: Version::V1,
-                synchrony_bound: Duration::from_secs(10),
-                max_handshake_age: Duration::from_secs(10),
-            },
-            Duration::from_secs(10),
-        )
+        let mut handshake = StreamHandshake::new(signer, Version::V1);
+        handshake.synchrony_bound = Duration::from_secs(10);
+        handshake.max_handshake_age = Duration::from_secs(10);
+        Timeout::new(handshake, Duration::from_secs(10))
     }
 
     async fn connections(

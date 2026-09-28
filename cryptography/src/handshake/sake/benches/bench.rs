@@ -1,10 +1,7 @@
 use commonware_cryptography::{
-    Signer,
+    ChaCha20Poly1305, Signer,
     ed25519::PrivateKey,
-    handshake::sake::{
-        Context, Error, RecvCipher, SendCipher, Version, dial_end, dial_start, listen_end,
-        listen_start,
-    },
+    handshake::sake::{Context, Error, Version, dial_end, dial_start, listen_end, listen_start},
 };
 use commonware_math::algebra::Random;
 use criterion::criterion_main;
@@ -14,7 +11,7 @@ use rand_chacha::ChaCha8Rng;
 mod sake;
 mod transport;
 
-fn connect() -> Result<(SendCipher, RecvCipher), Error> {
+fn connect() -> Result<(ChaCha20Poly1305, ChaCha20Poly1305), Error> {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let dialer_crypto = PrivateKey::random(&mut rng);
     let listener_crypto = PrivateKey::random(&mut rng);

@@ -365,12 +365,9 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake {
-                signer: PrivateKey::from_seed(1),
-                version: Version::V1,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            };
+            let mut handshake = StreamHandshake::new(PrivateKey::from_seed(1), Version::V1);
+            handshake.synchrony_bound = Duration::from_secs(1);
+            handshake.max_handshake_age = Duration::from_secs(1);
 
             let (mut updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
@@ -535,12 +532,9 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake {
-                signer: PrivateKey::from_seed(1),
-                version: Version::V1,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            };
+            let mut handshake = StreamHandshake::new(PrivateKey::from_seed(1), Version::V1);
+            handshake.synchrony_bound = Duration::from_secs(1);
+            handshake.max_handshake_age = Duration::from_secs(1);
 
             let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
@@ -622,12 +616,9 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake {
-                signer: PrivateKey::from_seed(1),
-                version: Version::V1,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            };
+            let mut handshake = StreamHandshake::new(PrivateKey::from_seed(1), Version::V1);
+            handshake.synchrony_bound = Duration::from_secs(1);
+            handshake.max_handshake_age = Duration::from_secs(1);
 
             let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
@@ -709,12 +700,9 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake {
-                signer: PrivateKey::from_seed(1),
-                version: Version::V1,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            };
+            let mut handshake = StreamHandshake::new(PrivateKey::from_seed(1), Version::V1);
+            handshake.synchrony_bound = Duration::from_secs(1);
+            handshake.max_handshake_age = Duration::from_secs(1);
 
             let (mut updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(

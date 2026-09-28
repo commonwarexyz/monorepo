@@ -2502,6 +2502,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-formatting",
  "commonware-macros",
+ "commonware-math",
  "commonware-runtime",
  "commonware-utils",
  "criterion",

@@ -33,6 +33,7 @@ features = ["getrandom"]
 
 [dev-dependencies]
 commonware-conformance.workspace = true
+commonware-math.workspace = true
 criterion.workspace = true
 rand.workspace = true
 

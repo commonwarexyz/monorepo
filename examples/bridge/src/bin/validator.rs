@@ -164,16 +164,11 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
+    let mut indexer_handshake = Handshake::new(signer.clone(), Version::V1);
+    indexer_handshake.synchrony_bound = Duration::from_secs(1);
+    indexer_handshake.max_handshake_age = Duration::from_secs(60);
     let indexer_handshake = StreamConfig::new(
-        Timeout::new(
-            Handshake {
-                signer: signer.clone(),
-                version: Version::V1,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(60),
-            },
-            Duration::from_secs(5),
-        ),
+        Timeout::new(indexer_handshake, Duration::from_secs(5)),
         INDEXER_NAMESPACE,
         MAX_MESSAGE_SIZE,
     );

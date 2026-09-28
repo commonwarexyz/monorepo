@@ -158,6 +158,7 @@ commonware_macros::stability_scope!(BETA {
             cups::Config,
             utils::{Timeout, TimeoutError},
         };
+        use commonware_cryptography::ed25519::PrivateKey;
         use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
         use commonware_utils::sync::Mutex;
         use futures::{FutureExt as _, future::Either};
@@ -259,7 +260,7 @@ commonware_macros::stability_scope!(BETA {
         }
 
         impl Handshake for OpaqueHandshake {
-            const MAX_SIZE: u32 = cups::MAX_SIZE;
+            const MAX_SIZE: u32 = <cups::Handshake<PrivateKey> as Handshake>::MAX_SIZE;
 
             type PublicKey = OpaqueIdentity;
             type Error = Rejected;

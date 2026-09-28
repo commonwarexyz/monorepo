@@ -330,15 +330,10 @@ mod tests {
     }
 
     fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
-        Timeout::new(
-            StreamHandshake {
-                signer,
-                version: Version::V1,
-                synchrony_bound: Duration::from_secs(10),
-                max_handshake_age: Duration::from_secs(10),
-            },
-            Duration::from_secs(10),
-        )
+        let mut handshake = StreamHandshake::new(signer, Version::V1);
+        handshake.synchrony_bound = Duration::from_secs(10);
+        handshake.max_handshake_age = Duration::from_secs(10);
+        Timeout::new(handshake, Duration::from_secs(10))
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {

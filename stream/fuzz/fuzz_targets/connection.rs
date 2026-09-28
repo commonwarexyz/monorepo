@@ -108,25 +108,15 @@ fn fuzz(input: FuzzInput) {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Timeout::new(
-            Handshake {
-                signer: dialer_signer.clone(),
-                version: input.version,
-                synchrony_bound,
-                max_handshake_age,
-            },
-            handshake_timeout,
-        );
+        let mut dialer_handshake = Handshake::new(dialer_signer.clone(), input.version);
+        dialer_handshake.synchrony_bound = synchrony_bound;
+        dialer_handshake.max_handshake_age = max_handshake_age;
+        let dialer_handshake = Timeout::new(dialer_handshake, handshake_timeout);
 
-        let listener_handshake = Timeout::new(
-            Handshake {
-                signer: listener_signer.clone(),
-                version: input.version,
-                synchrony_bound,
-                max_handshake_age,
-            },
-            handshake_timeout,
-        );
+        let mut listener_handshake = Handshake::new(listener_signer.clone(), input.version);
+        listener_handshake.synchrony_bound = synchrony_bound;
+        listener_handshake.max_handshake_age = max_handshake_age;
+        let listener_handshake = Timeout::new(listener_handshake, handshake_timeout);
 
         let listener_namespace = input.namespace.clone();
         let listener_handle = context.child("listener").spawn({

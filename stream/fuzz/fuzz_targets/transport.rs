@@ -28,25 +28,15 @@ fn fuzz(data: &[u8]) {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Timeout::new(
-            Handshake {
-                signer: dialer_signer.clone(),
-                version,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            },
-            Duration::from_secs(1),
-        );
+        let mut dialer_handshake = Handshake::new(dialer_signer.clone(), version);
+        dialer_handshake.synchrony_bound = Duration::from_secs(1);
+        dialer_handshake.max_handshake_age = Duration::from_secs(1);
+        let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
-        let listener_handshake = Timeout::new(
-            Handshake {
-                signer: listener_signer.clone(),
-                version,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            },
-            Duration::from_secs(1),
-        );
+        let mut listener_handshake = Handshake::new(listener_signer.clone(), version);
+        listener_handshake.synchrony_bound = Duration::from_secs(1);
+        listener_handshake.max_handshake_age = Duration::from_secs(1);
+        let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(1));
 
         let listener_handle = context.child("listener").spawn(move |context| async move {
             listener_handshake
