@@ -112,16 +112,15 @@ impl arbitrary::Arbitrary<'_> for Data {
 mod tests {
     use super::*;
     use commonware_codec::{Decode as _, Encode as _, Error};
-    use commonware_cryptography::{ChaCha20Poly1305, ed25519};
+    use commonware_cryptography::ed25519;
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
     use commonware_stream::cups::Handshake as StreamHandshake;
 
     #[test]
     fn test_max_size_bounds() {
         assert_eq!(
-            max_size::<StreamHandshake<ed25519::PrivateKey, ChaCha20Poly1305>>()
-                + MAX_PAYLOAD_OVERHEAD,
-            StreamHandshake::<ed25519::PrivateKey, ChaCha20Poly1305>::MAX_SIZE
+            max_size::<StreamHandshake<ed25519::PrivateKey>>() + MAX_PAYLOAD_OVERHEAD,
+            StreamHandshake::<ed25519::PrivateKey>::MAX_SIZE
         );
     }
 

@@ -25,7 +25,7 @@ use commonware_consensus::{
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
-use commonware_cryptography::{ChaCha20Poly1305, ed25519, sha256::Sha256};
+use commonware_cryptography::{ed25519, sha256::Sha256};
 use commonware_glue::{
     dkg::{
         SecretStore as _,
@@ -75,7 +75,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        Handshake::<_, ChaCha20Poly1305>::new(cups::Config::new(node.signer.clone(), Version::V1)),
+        Handshake::new(cups::Config::new(node.signer.clone(), Version::V1)),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,

@@ -28,15 +28,14 @@
 //!
 //! # Records
 //!
-//! Each message becomes one record, and batching writes preserves record boundaries. Records are
-//! sealed with the [Cipher](commonware_cryptography::Cipher) that the [Handshake] is instantiated
-//! with. Both peers must use the same cipher.
+//! Each message becomes one record, and batching writes preserves record boundaries. Both versions
+//! seal records with [ChaCha20Poly1305](commonware_cryptography::ChaCha20Poly1305), which adds a
+//! 16-byte tag.
 //!
 //! - Version 0: a visible u32 varint holding the length of the encrypted payload and its tag,
 //!   then the encrypted payload and its tag.
-//! - Version 1: a header holding the payload length as an encrypted 4-byte big-endian integer
-//!   and its tag (20 bytes with [ChaCha20Poly1305](commonware_cryptography::ChaCha20Poly1305)),
-//!   then the encrypted payload and its tag.
+//! - Version 1: a 20-byte header holding the payload length as an encrypted 4-byte big-endian
+//!   integer and its tag, then the encrypted payload and its tag.
 //!
 //! Each direction uses a fixed session key. A record consumes one position of its cipher in
 //! version 0 and two in version 1, first for the header and then for the payload. Positions are

@@ -89,11 +89,11 @@ impl<H: Handshake> Config<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::cups::{self, Version};
 
-    type CupsHandshake = cups::Handshake<PrivateKey, ChaCha20Poly1305>;
+    type CupsHandshake = cups::Handshake<PrivateKey>;
 
     const NAMESPACE: &[u8] = b"test_namespace";
     const LIMIT: u32 = 1024;

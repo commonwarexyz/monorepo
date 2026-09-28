@@ -5,7 +5,7 @@ use crate::{
     cups::{Config, Handshake, Version},
 };
 use commonware_conformance::{Conformance, conformance_tests};
-use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
+use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 use commonware_runtime::{
     Clock as _, Error, IoBufs, Runner as _, Sink, Spawner as _, Supervisor as _, deterministic,
     mocks,
@@ -72,8 +72,7 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
         };
 
         // Complete the handshake.
-        let listener_handshake =
-            Handshake::<_, ChaCha20Poly1305>::new(Config::new(listener.clone(), version));
+        let listener_handshake = Handshake::new(Config::new(listener.clone(), version));
         let handle = context.child("listener").spawn(move |context| async move {
             listener_handshake
                 .listen(
@@ -86,18 +85,17 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
                 )
                 .await
         });
-        let (mut dialer_tx, mut dialer_rx) =
-            Handshake::<_, ChaCha20Poly1305>::new(Config::new(dialer, version))
-                .dial(
-                    context.child("dialer"),
-                    NAMESPACE,
-                    MAX_MESSAGE_SIZE,
-                    listener.public_key(),
-                    dialer_stream,
-                    dialer_sink,
-                )
-                .await
-                .unwrap();
+        let (mut dialer_tx, mut dialer_rx) = Handshake::new(Config::new(dialer, version))
+            .dial(
+                context.child("dialer"),
+                NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                listener.public_key(),
+                dialer_stream,
+                dialer_sink,
+            )
+            .await
+            .unwrap();
         let (_, mut listener_tx, mut listener_rx) = handle.await.unwrap().unwrap();
 
         // Send one record of each length class in each direction.

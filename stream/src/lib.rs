@@ -155,7 +155,7 @@ commonware_macros::stability_scope!(BETA {
     mod tests {
         use super::*;
         use crate::utils::{Timeout, TimeoutError};
-        use commonware_cryptography::{ChaCha20Poly1305, ed25519::PrivateKey};
+        use commonware_cryptography::{ed25519::PrivateKey};
         use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
         use commonware_utils::sync::Mutex;
         use futures::{FutureExt as _, future::Either};
@@ -258,7 +258,7 @@ commonware_macros::stability_scope!(BETA {
 
         impl Handshake for OpaqueHandshake {
             const MAX_SIZE: u32 =
-                <cups::Handshake<PrivateKey, ChaCha20Poly1305> as Handshake>::MAX_SIZE;
+                <cups::Handshake<PrivateKey> as Handshake>::MAX_SIZE;
 
             type PublicKey = OpaqueIdentity;
             type Error = Rejected;

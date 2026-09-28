@@ -322,7 +322,7 @@ mod tests {
     use super::*;
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        ChaCha20Poly1305, Signer as _,
+        Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::test_traced;
@@ -366,7 +366,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+            let handshake = StreamHandshake::new(cups::Config {
                 signer: PrivateKey::from_seed(1),
                 version: Version::V1,
                 synchrony_bound: Duration::from_secs(1),
@@ -536,7 +536,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+            let handshake = StreamHandshake::new(cups::Config {
                 signer: PrivateKey::from_seed(1),
                 version: Version::V1,
                 synchrony_bound: Duration::from_secs(1),
@@ -623,7 +623,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+            let handshake = StreamHandshake::new(cups::Config {
                 signer: PrivateKey::from_seed(1),
                 version: Version::V1,
                 synchrony_bound: Duration::from_secs(1),
@@ -710,7 +710,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+            let handshake = StreamHandshake::new(cups::Config {
                 signer: PrivateKey::from_seed(1),
                 version: Version::V1,
                 synchrony_bound: Duration::from_secs(1),

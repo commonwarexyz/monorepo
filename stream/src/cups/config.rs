@@ -6,18 +6,18 @@ use std::time::Duration;
 /// # Examples
 ///
 /// ```
-/// use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
+/// use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 /// use commonware_stream::cups::{Config, Handshake, Version};
 ///
-/// let handshake =
-///     Handshake::<_, ChaCha20Poly1305>::new(Config::new(PrivateKey::from_seed(0), Version::V1));
+/// let handshake = Handshake::new(Config::new(PrivateKey::from_seed(0), Version::V1));
 /// ```
 #[derive(Clone)]
 pub struct Config<S> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
 
-    /// Protocol version, selecting the SAKE version, the transcript scope, and the record format.
+    /// Protocol version, selecting the SAKE version, the transcript scope, the record cipher, and
+    /// the record format.
     pub version: Version,
 
     /// Maximum time drift allowed for future timestamps.

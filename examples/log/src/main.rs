@@ -52,7 +52,7 @@ use commonware_consensus::{
     simplex::{self, ForwardPolicy, SkipPolicy, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{ChaCha20Poly1305, Sha256, Signer as _, ed25519};
+use commonware_cryptography::{Sha256, Signer as _, ed25519};
 use commonware_p2p::{
     Manager as _,
     authenticated::{self, discovery},
@@ -156,7 +156,7 @@ fn main() {
 
     // Configure network
     let p2p_cfg = discovery::Config::local(
-        Handshake::<_, ChaCha20Poly1305>::new(cups::Config::new(signer.clone(), Version::V1)),
+        Handshake::new(cups::Config::new(signer.clone(), Version::V1)),
         &union(APPLICATION_NAMESPACE, b"_P2P"),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

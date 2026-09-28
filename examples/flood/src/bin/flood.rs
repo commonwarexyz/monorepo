@@ -1,7 +1,7 @@
 use clap::{Arg, Command};
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{
-    ChaCha20Poly1305, Signer as _,
+    Signer as _,
     ed25519::{PrivateKey, PublicKey},
 };
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
@@ -131,7 +131,7 @@ fn main() {
         // Configure network
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
         let mut p2p_cfg = discovery::Config::local(
-            Handshake::<_, ChaCha20Poly1305>::new(cups::Config::new(signer.clone(), Version::V1)),
+            Handshake::new(cups::Config::new(signer.clone(), Version::V1)),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),

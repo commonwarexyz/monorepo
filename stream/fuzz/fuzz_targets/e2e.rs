@@ -115,7 +115,7 @@ fn fuzz(input: FuzzInput) {
         let (listener_sink, mut adversary_l_stream) = mocks::Channel::init();
         let (mut adversary_l_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Handshake::<_, ChaCha20Poly1305>::new(Config {
+        let dialer_handshake = Handshake::new(Config {
             signer: dialer_signer.clone(),
             version,
             synchrony_bound: Duration::from_secs(1),
@@ -123,7 +123,7 @@ fn fuzz(input: FuzzInput) {
         });
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
-        let listener_handshake = Handshake::<_, ChaCha20Poly1305>::new(Config {
+        let listener_handshake = Handshake::new(Config {
             signer: listener_signer.clone(),
             version,
             synchrony_bound: Duration::from_secs(1),
@@ -256,10 +256,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     let (sender, a_in, a_out, receiver): (
-                        &mut Sender<mocks::Sink, ChaCha20Poly1305>,
+                        &mut Sender<mocks::Sink>,
                         &mut mocks::Stream,
                         &mut mocks::Sink,
-                        &mut Receiver<mocks::Stream, ChaCha20Poly1305>,
+                        &mut Receiver<mocks::Stream>,
                     ) = match direction {
                         Direction::D2L => (
                             &mut d_sender,
@@ -278,10 +278,7 @@ fn fuzz(input: FuzzInput) {
                     // Send a legitimate plaintext message through the encrypted channel.
                     sender.send(data.clone()).await.unwrap();
                     // Intercept the resulting record from the wire.
-                    let record = a_in
-                        .recv(version.record_len::<ChaCha20Poly1305>(data.len()))
-                        .await
-                        .unwrap();
+                    let record = a_in.recv(version.record_len(data.len())).await.unwrap();
                     // Forward the exact record unchanged.
                     a_out.send(record).await.unwrap();
                     // Receiver should decrypt and deliver the original plaintext.
@@ -296,10 +293,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     let (sender, a_in, a_out, receiver): (
-                        &mut Sender<mocks::Sink, ChaCha20Poly1305>,
+                        &mut Sender<mocks::Sink>,
                         &mut mocks::Stream,
                         &mut mocks::Sink,
-                        &mut Receiver<mocks::Stream, ChaCha20Poly1305>,
+                        &mut Receiver<mocks::Stream>,
                     ) = match direction {
                         Direction::D2L => (
                             &mut d_sender,
@@ -318,22 +315,14 @@ fn fuzz(input: FuzzInput) {
                     // Trigger one legitimate record so nonce/state advance as normal.
                     sender.send(vec![0u8]).await.unwrap();
                     // Adversary intercepts and drops that record.
-                    let _ = a_in
-                        .recv(version.record_len::<ChaCha20Poly1305>(1))
-                        .await
-                        .unwrap();
+                    let _ = a_in.recv(version.record_len(1)).await.unwrap();
                     // Adversary injects forged unauthenticated bytes instead. A forged version 1
                     // header is padded to full size so the receiver has a header to reject.
                     match version {
                         Version::V0 => send_frame(a_out, data, MAX_CIPHERTEXT_SIZE).await.unwrap(),
                         Version::V1 => {
                             let mut forged = data;
-                            forged.resize(
-                                forged
-                                    .len()
-                                    .max(Version::V1.header_len::<ChaCha20Poly1305>(0)),
-                                0,
-                            );
+                            forged.resize(forged.len().max(Version::V1.header_len(0)), 0);
                             a_out.send(forged).await.unwrap();
                         }
                     }
@@ -356,10 +345,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     let (sender, a_in, a_out, receiver): (
-                        &mut Sender<mocks::Sink, ChaCha20Poly1305>,
+                        &mut Sender<mocks::Sink>,
                         &mut mocks::Stream,
                         &mut mocks::Sink,
-                        &mut Receiver<mocks::Stream, ChaCha20Poly1305>,
+                        &mut Receiver<mocks::Stream>,
                     ) = match direction {
                         Direction::D2L => (
                             &mut d_sender,
@@ -378,7 +367,7 @@ fn fuzz(input: FuzzInput) {
                     // Send a legitimate record and intercept it.
                     sender.send(data.clone()).await.unwrap();
                     let mut record: Vec<u8> = a_in
-                        .recv(version.record_len::<ChaCha20Poly1305>(data.len()))
+                        .recv(version.record_len(data.len()))
                         .await
                         .unwrap()
                         .coalesce()
@@ -388,7 +377,7 @@ fn fuzz(input: FuzzInput) {
                     // same span, and any version 1 byte may change because its header is
                     // authenticated before the payload is requested.
                     let start = match version {
-                        Version::V0 => version.header_len::<ChaCha20Poly1305>(data.len()),
+                        Version::V0 => version.header_len(data.len()),
                         Version::V1 => 0,
                     };
                     let target = start + index % (record.len() - start);

@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
+use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
     Handshake as _,
@@ -28,7 +28,7 @@ fn fuzz(data: &[u8]) {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Handshake::<_, ChaCha20Poly1305>::new(Config {
+        let dialer_handshake = Handshake::new(Config {
             signer: dialer_signer.clone(),
             version,
             synchrony_bound: Duration::from_secs(1),
@@ -36,7 +36,7 @@ fn fuzz(data: &[u8]) {
         });
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
-        let listener_handshake = Handshake::<_, ChaCha20Poly1305>::new(Config {
+        let listener_handshake = Handshake::new(Config {
             signer: listener_signer.clone(),
             version,
             synchrony_bound: Duration::from_secs(1),

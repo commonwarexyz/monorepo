@@ -52,7 +52,7 @@ mod tests {
     use crate::authenticated::discovery::actors::tracker::{self, Metadata};
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        ChaCha20Poly1305, Signer as _,
+        Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
@@ -71,13 +71,10 @@ mod tests {
     const STREAM_NAMESPACE: &[u8] = b"test_discovery_spawner_ingress";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (
-        CupsSender<mocks::Sink, ChaCha20Poly1305>,
-        CupsReceiver<mocks::Stream, ChaCha20Poly1305>,
-    );
+    type Connection = (CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>);
 
-    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey, ChaCha20Poly1305>> {
-        let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
+        let handshake = StreamHandshake::new(cups::Config {
             signer,
             version: Version::V1,
             synchrony_bound: Duration::from_secs(10),
@@ -145,7 +142,7 @@ mod tests {
             let peer_2 = PrivateKey::from_seed(2).public_key();
 
             let (mut spawner, mut receiver) =
-                Mailbox::<Message<CupsSender<mocks::Sink, ChaCha20Poly1305>, CupsReceiver<mocks::Stream, ChaCha20Poly1305>, PublicKey>>::new(
+                Mailbox::<Message<CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>, PublicKey>>::new(
                     context.child("spawner_mailbox"),
                     NZUsize!(1),
                 );

@@ -3,7 +3,7 @@
 //! participants are active at a given view.
 
 use crate::Scheme;
-use commonware_cryptography::{ChaCha20Poly1305, Hasher};
+use commonware_cryptography::Hasher;
 use std::num::NonZeroUsize;
 
 mod actor;
@@ -23,7 +23,7 @@ pub fn genesis<H: Hasher>() -> H::Digest {
 
 /// Configuration for the application.
 pub struct Config<Si: Sink, St: Stream> {
-    pub indexer: (Sender<Si, ChaCha20Poly1305>, Receiver<St, ChaCha20Poly1305>),
+    pub indexer: (Sender<Si>, Receiver<St>),
 
     /// Signing scheme for this network.
     pub this_network: Scheme,

@@ -12,7 +12,7 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
-    ChaCha20Poly1305, Sha256, Signer as _,
+    Sha256, Signer as _,
     bls12381::primitives::{
         group,
         sharing::{ModeVersion, Sharing},
@@ -166,7 +166,7 @@ fn main() {
 
     // Configure indexer
     let indexer_handshake = Timeout::new(
-        Handshake::<_, ChaCha20Poly1305>::new(cups::Config {
+        Handshake::new(cups::Config {
             signer: signer.clone(),
             version: Version::V1,
             synchrony_bound: Duration::from_secs(1),
@@ -177,7 +177,7 @@ fn main() {
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        Handshake::<_, ChaCha20Poly1305>::new(cups::Config::new(signer, Version::V1)),
+        Handshake::new(cups::Config::new(signer, Version::V1)),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

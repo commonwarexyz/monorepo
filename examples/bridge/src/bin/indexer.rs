@@ -14,7 +14,7 @@ use commonware_consensus::{
     types::View,
 };
 use commonware_cryptography::{
-    ChaCha20Poly1305, Digest, Hasher, Sha256, Signer as _,
+    Digest, Hasher, Sha256, Signer as _,
     bls12381::primitives::{
         group::G2,
         variant::{MinSig, Variant},
@@ -242,7 +242,7 @@ fn main() {
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
         let handshake = Timeout::new(
-            Handshake::<_, ChaCha20Poly1305>::new(cups::Config {
+            Handshake::new(cups::Config {
                 signer,
                 version: Version::V1,
                 synchrony_bound: Duration::from_secs(1),

@@ -11,9 +11,7 @@ use crate::{
 };
 use clap::Args;
 use commonware_consensus::types::Epoch;
-use commonware_cryptography::{
-    ChaCha20Poly1305, bls12381::primitives::variant::MinSig, ed25519::PublicKey,
-};
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_glue::dkg::{
     bootstrap,
     types::{EpochInfo, EpochOutcome},
@@ -49,7 +47,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        Handshake::<_, ChaCha20Poly1305>::new(cups::Config::new(node.signer.clone(), Version::V1)),
+        Handshake::new(cups::Config::new(node.signer.clone(), Version::V1)),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,

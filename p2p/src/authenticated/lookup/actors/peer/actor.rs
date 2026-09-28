@@ -191,7 +191,7 @@ mod tests {
     use crate::authenticated::router;
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        ChaCha20Poly1305, Signer,
+        Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
@@ -245,8 +245,8 @@ mod tests {
         }
     }
 
-    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S, ChaCha20Poly1305>> {
-        let handshake = StreamHandshake::<_, ChaCha20Poly1305>::new(cups::Config {
+    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
+        let handshake = StreamHandshake::new(cups::Config {
             signer,
             version: Version::V1,
             synchrony_bound: Duration::from_secs(10),
