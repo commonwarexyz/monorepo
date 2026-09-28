@@ -68,7 +68,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::{Location, mmr},
+        merkle::{Location, mmb, mmr},
         qmdb::{
             any::value::FixedEncoding,
             compact::db::tests::{TestBatch, TestOperation, compact_db_tests, open_db},
@@ -78,9 +78,11 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
-    type TestOp = Operation<mmr::Family, Digest, FixedEncoding<Digest>>;
+    type TestOp<F = mmr::Family> = Operation<F, Digest, FixedEncoding<Digest>>;
 
-    impl TestOperation for TestOp {
+    impl<F: Family> TestOperation for TestOp<F> {
+        type Family = F;
+
         fn value(seed: u64) -> Digest {
             Sha256::hash(&[&seed.to_le_bytes()])
         }
@@ -91,6 +93,12 @@ mod tests {
     }
 
     compact_db_tests!(TestOp);
+
+    mod mmb_tests {
+        use super::*;
+
+        compact_db_tests!(TestOp<mmb::Family>);
+    }
 
     /// Setting a key twice in one batch keeps the later value and emits one operation.
     #[test_traced("INFO")]

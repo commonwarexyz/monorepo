@@ -3,7 +3,7 @@
 //! A [`Witness`] records one applied state: the commit operation, the committed size, and the
 //! pinned nodes one operation below it. The commit's inclusion proof is not stored. [`restore`]
 //! rebuilds the Merkle by appending the commit operation to the pinned nodes and derives the root
-//! and proof from it; a structurally invalid entry fails with [`Error::DataCorrupted`].
+//! and proof from it. [`rebuild`] maps invalid persisted entries to [`Error::DataCorrupted`].
 
 use super::operation::Operation;
 use crate::{
@@ -150,28 +150,14 @@ where
     })
 }
 
-/// Validate that a commit floor does not point past the commit it authenticates.
-///
-/// A higher floor would reference operations that do not exist yet, which indicates disk
-/// corruption in a persisted witness or a bad import.
-pub(super) fn validate_inactivity_floor<F: Family>(
-    inactivity_floor_loc: Location<F>,
-    last_commit_loc: Location<F>,
-) -> Result<(), Error<F>> {
-    if inactivity_floor_loc > last_commit_loc {
-        return Err(Error::DataCorrupted("invalid compact witness"));
-    }
-    Ok(())
-}
-
-/// Materialize the Merkle `witness` describes and derive its root and commit proof.
+/// Validate `witness`, materialize its Merkle, and derive its root and commit proof.
 ///
 /// The Merkle is built from the pinned nodes one operation below the commit plus the commit
-/// itself, then pruned back to its frontier. Merkle errors propagate unchanged.
+/// itself, then pruned back to its frontier. A non-commit operation returns
+/// [`Error::UnexpectedData`]. Merkle errors propagate unchanged.
 pub(super) fn restore<F, O, H, S>(
     strategy: S,
     witness: Witness<F, H::Digest, O>,
-    inactivity_floor_loc: Location<F>,
 ) -> Result<Rebuilt<F, H::Digest, O, S>, Error<F>>
 where
     F: Family,
@@ -187,6 +173,12 @@ where
     let Some(last_commit_loc) = size.checked_sub(1) else {
         return Err(Error::DataCorrupted("invalid compact witness"));
     };
+    let Some(inactivity_floor_loc) = commit.has_floor() else {
+        return Err(Error::UnexpectedData(last_commit_loc));
+    };
+    if inactivity_floor_loc > last_commit_loc {
+        return Err(Error::DataCorrupted("invalid compact witness"));
+    }
     let mut merkle = compact::Merkle::from_compact_state(strategy, last_commit_loc, pinned_nodes)?;
     merkle.append_leaf(&qmdb::hasher::<H>(), &commit.encode())?;
     let tip = build_witness::<F, O, H, S>(&merkle, commit, inactivity_floor_loc)?;
@@ -206,23 +198,70 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let Some(last_commit_loc) = witness.size.checked_sub(1) else {
-        return Err(Error::DataCorrupted("invalid compact witness"));
-    };
-    // The floor determines the inactive peak boundary used for root computation.
-    let Some(inactivity_floor_loc) = witness.commit.has_floor() else {
-        return Err(Error::DataCorrupted("last operation was not a commit"));
-    };
-    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
-
-    restore::<F, O, H, S>(strategy, witness, inactivity_floor_loc)
-        .map_err(|_| Error::DataCorrupted("invalid compact witness"))
+    restore::<F, O, H, S>(strategy, witness).map_err(|err| match err {
+        Error::UnexpectedData(_) => Error::DataCorrupted("last operation was not a commit"),
+        _ => Error::DataCorrupted("invalid compact witness"),
+    })
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::{Context, journal::contiguous::Contiguous};
+    use crate::{
+        Context,
+        journal::contiguous::Contiguous,
+        merkle::{mmb, mmr},
+        qmdb::keyless::fixed::Operation as TestOp,
+    };
+    use commonware_cryptography::Sha256;
+    use commonware_parallel::Sequential;
+    use commonware_utils::sequence::U64;
+
+    fn assert_restore_rejects_invalid_witness<F: Family>() {
+        let genesis = Witness {
+            commit: TestOp::<F, U64>::Commit(None, Location::new(0)),
+            size: Location::new(1),
+            pinned_nodes: Vec::new(),
+        };
+
+        let mut empty = genesis.clone();
+        empty.size = Location::new(0);
+        assert!(matches!(
+            restore::<F, _, Sha256, _>(Sequential, empty),
+            Err(Error::DataCorrupted("invalid compact witness"))
+        ));
+
+        let mut non_commit = genesis.clone();
+        non_commit.commit = TestOp::Append(U64::new(7));
+        assert!(matches!(
+            restore::<F, _, Sha256, _>(Sequential, non_commit),
+            Err(Error::UnexpectedData(loc)) if loc == 0
+        ));
+
+        let mut invalid_floor = genesis.clone();
+        invalid_floor.commit = TestOp::Commit(None, Location::new(1));
+        assert!(matches!(
+            restore::<F, _, Sha256, _>(Sequential, invalid_floor),
+            Err(Error::DataCorrupted("invalid compact witness"))
+        ));
+
+        let mut invalid_pins = genesis;
+        invalid_pins.pinned_nodes.push(Sha256::fill(0xff));
+        assert!(matches!(
+            restore::<F, _, Sha256, _>(Sequential, invalid_pins),
+            Err(Error::Merkle(crate::merkle::Error::InvalidPinnedNodes))
+        ));
+    }
+
+    #[test]
+    fn test_restore_rejects_invalid_witness_mmr() {
+        assert_restore_rejects_invalid_witness::<mmr::Family>();
+    }
+
+    #[test]
+    fn test_restore_rejects_invalid_witness_mmb() {
+        assert_restore_rejects_invalid_witness::<mmb::Family>();
+    }
 
     #[cfg(feature = "arbitrary")]
     mod conformance {

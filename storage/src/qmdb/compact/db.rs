@@ -197,17 +197,12 @@ where
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: O,
     ) -> Result<Self, Error<F>> {
-        let Some(inactivity_floor_loc) = last_commit_op.has_floor() else {
-            return Err(Error::UnexpectedData(last_commit_loc));
-        };
-        witness::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
         let imported = Witness {
             commit: last_commit_op,
             size: last_commit_loc + 1,
             pinned_nodes,
         };
-        let Rebuilt { merkle, tip } =
-            witness::restore::<F, O, H, S>(strategy, imported, inactivity_floor_loc)?;
+        let Rebuilt { merkle, tip } = witness::restore::<F, O, H, S>(strategy, imported)?;
         Ok(Self {
             merkle,
             journal,
@@ -420,10 +415,7 @@ where
     )]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self = self.flush_import().await?;
-        if self.tip_state == TipState::Uncommitted || self.pending_sync.is_some() {
-            return self.sync_journal().await;
-        }
-        Ok(self)
+        self.sync_journal().await
     }
 
     /// Sync the journal and all of its metadata, which covers the tip and settles any sync
@@ -813,7 +805,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         journal::contiguous::variable::Config as JournalConfig,
-        merkle::mmr,
+        metadata::{Config as MetadataConfig, Metadata},
         qmdb::{compact::witness, verify_proof, verify_proof_and_pinned_nodes},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -825,14 +817,17 @@ pub(crate) mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::VecU64};
     use core::future::Future;
     use std::num::{NonZeroU16, NonZeroUsize};
 
     /// An operation type under test: its values and mutations derive from a seed.
     pub(crate) trait TestOperation:
-        Operation<mmr::Family, Metadata: PartialEq + std::fmt::Debug, Cfg = ()>
+        Operation<Self::Family, Metadata: PartialEq + std::fmt::Debug, Cfg = ()>
     {
+        /// The Merkle family used by the operation.
+        type Family: Family;
+
         /// The value (and commit metadata) for `seed`.
         fn value(seed: u64) -> Self::Metadata;
 
@@ -840,8 +835,10 @@ pub(crate) mod tests {
         fn mutate(batch: TestBatch<Self>, seed: u64) -> TestBatch<Self>;
     }
 
-    pub(crate) type TestDb<O> = Db<mmr::Family, deterministic::Context, O, Sha256, Sequential>;
-    pub(crate) type TestBatch<O> = UnmerkleizedBatch<mmr::Family, Sha256, O, Sequential>;
+    pub(crate) type TestDb<O> =
+        Db<<O as TestOperation>::Family, deterministic::Context, O, Sha256, Sequential>;
+    pub(crate) type TestBatch<O> =
+        UnmerkleizedBatch<<O as TestOperation>::Family, Sha256, O, Sequential>;
 
     /// Lets tests write `batch.mutate(seed)` for any operation type.
     trait Mutate {
@@ -883,8 +880,8 @@ pub(crate) mod tests {
     async fn open_bounded<O: TestOperation>(
         context: deterministic::Context,
         witness: JournalConfig<()>,
-        cap: Location<mmr::Family>,
-    ) -> Result<TestDb<O>, Error<mmr::Family>> {
+        cap: Location<O::Family>,
+    ) -> Result<TestDb<O>, Error<O::Family>> {
         Db::init(
             context,
             Config {
@@ -900,7 +897,7 @@ pub(crate) mod tests {
     async fn open_witness_journal<O: TestOperation>(
         context: deterministic::Context,
         partition: &str,
-    ) -> witness::Journal<deterministic::Context, mmr::Family, Digest, O> {
+    ) -> witness::Journal<deterministic::Context, O::Family, Digest, O> {
         let cfg = witness_config(partition, &context);
         witness::Journal::init(context, cfg).await.unwrap()
     }
@@ -919,11 +916,11 @@ pub(crate) mod tests {
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let n = db.target().size;
-            let boundary = |size: Location<mmr::Family>, start: Location<mmr::Family>| {
+            let boundary = |size: Location<O::Family>, start: Location<O::Family>| {
                 Request::Boundary { size, start }
             };
             let operations =
-                |size: Location<mmr::Family>, start: Location<mmr::Family>| Request::Operations {
+                |size: Location<O::Family>, start: Location<O::Family>| Request::Operations {
                     size,
                     start,
                     max_ops: NZU64!(1),
@@ -973,8 +970,13 @@ pub(crate) mod tests {
     }
 
     /// A compact db over a delayed-sync storage backend.
-    type DelayedDb<O> =
-        Db<mmr::Family, DelayedSyncContext<deterministic::Context>, O, Sha256, Sequential>;
+    type DelayedDb<O> = Db<
+        <O as TestOperation>::Family,
+        DelayedSyncContext<deterministic::Context>,
+        O,
+        Sha256,
+        Sequential,
+    >;
 
     /// Open a [DelayedDb] whose blob syncs park on `pending`.
     ///
@@ -985,7 +987,7 @@ pub(crate) mod tests {
         label: &'static str,
         partition: &str,
         pending: &PendingSyncs,
-    ) -> impl Future<Output = Result<DelayedDb<O>, Error<mmr::Family>>> {
+    ) -> impl Future<Output = Result<DelayedDb<O>, Error<O::Family>>> {
         let witness_cfg = witness_config(partition, context);
         let context = DelayedSyncContext {
             inner: context.child(label),
@@ -1905,10 +1907,24 @@ pub(crate) mod tests {
                     .await;
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
-                // The commit already made the state durable, so this is a no-op.
+                // Sync must persist recovery metadata even when the data is already durable.
                 let db = db.sync().await.unwrap();
                 db.root()
             };
+
+            // Check the watermark before reopening can rebuild the offsets journal.
+            let metadata = Metadata::<_, u64, VecU64>::init(
+                context.child("checkpoint"),
+                MetadataConfig {
+                    partition: format!("{partition}-witness_offsets-metadata"),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
+            // Key 3 records the durable prefix: the genesis witness and the applied batch.
+            assert_eq!(metadata.get(&3).copied().map(u64::from), Some(2));
+            drop(metadata);
 
             let db = open_db::<O>(context.child("second"), partition).await;
             assert_eq!(db.root(), root);
@@ -2859,7 +2875,7 @@ pub(crate) mod tests {
             assert_eq!(child_proof.leaves, child_end);
             assert_eq!(
                 child_proof.inactive_peaks,
-                mmr::Family::inactive_peaks(child_end, floor),
+                O::Family::inactive_peaks(child_end, floor),
             );
             assert!(verify_proof::<Sha256, _, _>(
                 &child_proof,
@@ -2922,7 +2938,7 @@ pub(crate) mod tests {
             assert_eq!(commit_proof.leaves, commit_end);
             assert_eq!(
                 commit_proof.inactive_peaks,
-                mmr::Family::inactive_peaks(commit_end, commit_floor)
+                O::Family::inactive_peaks(commit_end, commit_floor)
             );
             assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
                 &commit_proof,
