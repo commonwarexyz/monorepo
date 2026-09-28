@@ -343,7 +343,7 @@
 //! # }
 //! ```
 //!
-//! For a complete example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
+//! For a complete example with resharing, see [commonware-dkg](https://docs.rs/commonware-dkg).
 
 use crate::{
     BatchVerifier, PublicKey, Secret, Signer,

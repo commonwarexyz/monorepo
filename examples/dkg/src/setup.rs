@@ -2,21 +2,13 @@
 
 use crate::{
     config::{self, NetworkConfig, NodeConfig, PeerConfig},
-    types::{self, BLOCKS_PER_EPOCH, FileSecretStore, MAX_PARTICIPANTS, Participants},
+    types::{BLOCKS_PER_EPOCH, MAX_PARTICIPANTS, Participants},
 };
-use clap::{Args, ValueEnum};
+use clap::Args;
 use commonware_consensus::types::Epoch;
-use commonware_cryptography::{
-    Signer,
-    bls12381::{
-        dkg::feldman_desmedt::{Output, deal},
-        primitives::{group::Share, variant::MinSig},
-    },
-    ed25519::{PrivateKey, PublicKey},
-};
-use commonware_glue::dkg::types::{EpochInfo, EpochOutcome};
+use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_math::algebra::Random;
-use commonware_utils::{Faults as _, N3f1, ordered::Map, sequence::Unit};
+use commonware_utils::{Faults as _, N3f1};
 use rand::rngs::StdRng;
 use std::{
     fs,
@@ -24,10 +16,7 @@ use std::{
     path::PathBuf,
 };
 
-type ReshareEpochInfo = EpochInfo<MinSig, PublicKey>;
-type TrustedBootstrap = (ReshareEpochInfo, Map<PublicKey, Share>);
-
-/// Generate every validator directory with node, network, and genesis config.
+/// Generate every validator directory with node and network config.
 #[derive(Args)]
 pub struct Setup {
     /// Directory where validator subdirectories will be generated.
@@ -49,19 +38,6 @@ pub struct Setup {
     /// IP address used for generated listen and dial addresses.
     #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
     pub host: IpAddr,
-
-    /// Initial secret generation path.
-    #[arg(long, value_enum, default_value = "trusted")]
-    pub bootstrap: Bootstrap,
-}
-
-/// How the initial threshold secret is generated.
-#[derive(Clone, Copy, ValueEnum)]
-pub enum Bootstrap {
-    /// Generate genesis and epoch-0 shares with a trusted dealer.
-    Trusted,
-    /// Generate only node and network config; run `dkg` to create genesis.
-    Dkg,
 }
 
 /// Generate the validator directories and print the commands to run next.
@@ -99,10 +75,6 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         committee_size: args.committee_size,
         peers,
     };
-    let bootstrap = match args.bootstrap {
-        Bootstrap::Trusted => Some(trusted_bootstrap(&network)?),
-        Bootstrap::Dkg => None,
-    };
 
     for (i, signer) in signers.into_iter().enumerate() {
         let node_dir = args.node_dir.join(format!("validator-{i}"));
@@ -114,35 +86,10 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         };
         config::write_json(&node_dir.join("node.json"), &node)?;
         config::write_json(&node_dir.join("network.json"), &network)?;
-
-        if let Some((genesis, shares)) = bootstrap.as_ref() {
-            types::write_genesis(&node_dir, genesis)?;
-            let store = FileSecretStore::load(node_dir.join("secrets.json"))?;
-            if let Some(share) = shares.get_value(&node.public_key()).cloned() {
-                store.put_initial_share(Epoch::zero(), share)?;
-            }
-        }
     }
 
     print_commands(&args, &network)?;
     Ok(())
-}
-
-fn trusted_bootstrap(network: &NetworkConfig) -> anyhow::Result<TrustedBootstrap> {
-    let participants = Participants::new(network)?;
-    let players = participants.get(Epoch::zero());
-    let mut rng = rand::make_rng::<StdRng>();
-    let (output, shares): (Output<MinSig, PublicKey>, Map<PublicKey, Share>) =
-        deal::<MinSig, _, N3f1>(&mut rng, types::SHARING_MODE, players.clone())?;
-    let genesis = EpochInfo {
-        outcome: EpochOutcome::Success,
-        epoch: Epoch::zero(),
-        output,
-        players,
-        next_players: participants.get(Epoch::new(1)),
-        directory: Unit,
-    };
-    Ok((genesis, shares))
 }
 
 fn validate(args: &Setup) -> anyhow::Result<()> {
@@ -178,20 +125,19 @@ fn port(args: &Setup, i: usize) -> anyhow::Result<u16> {
 }
 
 fn print_commands(args: &Setup, network: &NetworkConfig) -> anyhow::Result<()> {
-    if matches!(args.bootstrap, Bootstrap::Dkg) {
-        println!("Run DKG with:");
-        println!("mprocs {}", commands(args, "dkg", dkg_indexes(network)?));
-        println!("Run the cluster with:");
-        println!("mprocs {}", commands(args, "validator", 0..args.peers));
-        return Ok(());
-    }
-
-    println!("Run the cluster with:");
+    println!("Run bootstrap with:");
+    println!(
+        "mprocs {}",
+        commands(args, "bootstrap", bootstrap_indexes(network)?)
+    );
+    println!(
+        "Once every bootstrap logs \"bootstrap complete\", stop them all and run the cluster with:"
+    );
     println!("mprocs {}", commands(args, "validator", 0..args.peers));
     Ok(())
 }
 
-fn dkg_indexes(network: &NetworkConfig) -> anyhow::Result<Vec<usize>> {
+fn bootstrap_indexes(network: &NetworkConfig) -> anyhow::Result<Vec<usize>> {
     let players = Participants::new(network)?.get(Epoch::zero());
     Ok(network
         .participants
@@ -211,7 +157,7 @@ fn commands(args: &Setup, command: &str, indexes: impl IntoIterator<Item = usize
         .into_iter()
         .map(|i| {
             format!(
-                "\"cargo run --bin commonware-reshare -- {command} --node-dir {}\"",
+                "\"cargo run --bin commonware-dkg -- {command} --node-dir {}\"",
                 args.node_dir.join(format!("validator-{i}")).display()
             )
         })
@@ -222,13 +168,11 @@ fn commands(args: &Setup, command: &str, indexes: impl IntoIterator<Item = usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_glue::dkg::SecretStore as _;
-    use commonware_runtime::Runner as _;
 
     #[test]
-    fn setup_writes_node_configs_genesis_and_shares() {
+    fn setup_writes_only_node_and_network_configs() {
         let node_dir =
-            std::env::temp_dir().join(format!("commonware-reshare-setup-{}", std::process::id()));
+            std::env::temp_dir().join(format!("commonware-dkg-setup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&node_dir);
         run_inner(Setup {
             node_dir: node_dir.clone(),
@@ -236,7 +180,6 @@ mod tests {
             committee_size: 2,
             base_port: 4100,
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            bootstrap: Bootstrap::Trusted,
         })
         .unwrap();
 
@@ -245,15 +188,15 @@ mod tests {
         let network = NetworkConfig::load(&first).unwrap();
         assert_eq!(network.participants.len(), 3);
         assert_eq!(network.committee_size, 2);
-        assert!(types::read_genesis(&first).is_ok());
-
-        commonware_runtime::deterministic::Runner::default().start(|_| {
-            let mut store = FileSecretStore::load(first.join("secrets.json")).unwrap();
-            async move {
-                assert!(store.get_share(Epoch::zero()).await.is_some());
-            }
-        });
         assert_eq!(node.listen.port(), 4100);
+
+        // Genesis and secret material come only from `bootstrap`.
+        let mut files = std::fs::read_dir(&first)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        files.sort();
+        assert_eq!(files, ["network.json", "node.json"]);
         let _ = std::fs::remove_dir_all(node_dir);
     }
 
@@ -265,7 +208,6 @@ mod tests {
             committee_size: 3,
             base_port: 3000,
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            bootstrap: Bootstrap::Trusted,
         };
         assert!(validate(&args).is_err());
     }
@@ -278,13 +220,12 @@ mod tests {
             committee_size: 47,
             base_port: 3000,
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            bootstrap: Bootstrap::Trusted,
         };
         assert!(validate(&args).is_err());
     }
 
     #[test]
-    fn dkg_commands_only_include_epoch_zero_players() {
+    fn bootstrap_commands_only_include_epoch_zero_players() {
         let mut rng = rand::make_rng::<StdRng>();
         let participants = (0..4)
             .map(|_| PrivateKey::random(&mut rng).public_key())
@@ -295,38 +236,13 @@ mod tests {
             peers: Vec::new(),
         };
 
-        assert_eq!(dkg_indexes(&network).unwrap(), vec![0, 1]);
-    }
-
-    #[test]
-    fn setup_for_dkg_leaves_bootstrap_artifacts_unwritten() {
-        let node_dir = std::env::temp_dir().join(format!(
-            "commonware-reshare-setup-dkg-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&node_dir);
-        run_inner(Setup {
-            node_dir: node_dir.clone(),
-            peers: 3,
-            committee_size: 2,
-            base_port: 4200,
-            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            bootstrap: Bootstrap::Dkg,
-        })
-        .unwrap();
-
-        let first = node_dir.join("validator-0");
-        assert!(NodeConfig::load(&first).is_ok());
-        assert!(NetworkConfig::load(&first).is_ok());
-        assert!(!types::genesis_path(&first).exists());
-        assert!(!first.join("secrets.json").exists());
-        let _ = std::fs::remove_dir_all(node_dir);
+        assert_eq!(bootstrap_indexes(&network).unwrap(), vec![0, 1]);
     }
 
     #[test]
     fn setup_rejects_non_empty_directory() {
         let node_dir = std::env::temp_dir().join(format!(
-            "commonware-reshare-setup-non-empty-{}",
+            "commonware-dkg-setup-non-empty-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&node_dir);
@@ -338,7 +254,6 @@ mod tests {
             committee_size: 1,
             base_port: 3000,
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            bootstrap: Bootstrap::Trusted,
         });
         assert!(result.is_err());
         let _ = std::fs::remove_dir_all(node_dir);
