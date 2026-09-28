@@ -847,16 +847,22 @@ pub(crate) mod tests {
 
     /// An operation type under test: its values and mutations derive from a seed.
     pub(crate) trait TestOperation:
-        Operation<Self::Family, Metadata: PartialEq + std::fmt::Debug, Cfg = ()>
+        Operation<Self::Family, Metadata: PartialEq + std::fmt::Debug>
     {
         /// The Merkle family used by the operation.
         type Family: Family;
+
+        /// The codec config the witness journal decodes operations with.
+        fn codec_config() -> Self::Cfg;
 
         /// The value (and commit metadata) for `seed`.
         fn value(seed: u64) -> Self::Metadata;
 
         /// Add the one mutation derived from `seed` to `batch`.
         fn mutate(batch: TestBatch<Self>, seed: u64) -> TestBatch<Self>;
+
+        /// The operation [`Self::mutate`] adds for `seed`.
+        fn op(seed: u64) -> Self;
     }
 
     pub(crate) type TestDb<O> =
@@ -878,12 +884,15 @@ pub(crate) mod tests {
     const WITNESS_PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const WITNESS_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn witness_config(partition: &str, pooler: &impl BufferPooler) -> JournalConfig<()> {
+    fn witness_config<O: TestOperation>(
+        partition: &str,
+        pooler: &impl BufferPooler,
+    ) -> JournalConfig<O::Cfg> {
         JournalConfig {
             partition: format!("{partition}-witness"),
             items_per_section: NZU64!(64),
             compression: None,
-            codec_config: (),
+            codec_config: O::codec_config(),
             page_cache: CacheRef::from_pooler(pooler, WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
@@ -896,14 +905,14 @@ pub(crate) mod tests {
     ) -> TestDb<O> {
         let cfg = Config {
             strategy: Sequential,
-            witness: witness_config(partition, &context),
+            witness: witness_config::<O>(partition, &context),
         };
         Db::init(context, cfg, None).await.unwrap()
     }
 
     async fn open_bounded<O: TestOperation>(
         context: deterministic::Context,
-        witness: JournalConfig<()>,
+        witness: JournalConfig<O::Cfg>,
         cap: Location<O::Family>,
     ) -> Result<TestDb<O>, Error<O::Family>> {
         Db::init(
@@ -931,7 +940,7 @@ pub(crate) mod tests {
         context: deterministic::Context,
         partition: &str,
     ) -> witness::Journal<deterministic::Context, O::Family, Digest, O> {
-        let cfg = witness_config(partition, &context);
+        let cfg = witness_config::<O>(partition, &context);
         witness::Journal::init(context, cfg).await.unwrap()
     }
 
@@ -1021,7 +1030,7 @@ pub(crate) mod tests {
         partition: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb<O>, Error<O::Family>>> {
-        let witness_cfg = witness_config(partition, context);
+        let witness_cfg = witness_config::<O>(partition, context);
         let context = DelayedSyncContext {
             inner: context.child(label),
             pending: pending.clone(),
@@ -1764,7 +1773,7 @@ pub(crate) mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<O>(
                     context.child("cap"),
-                    witness_config("compact-rewind-meta", &context),
+                    witness_config::<O>("compact-rewind-meta", &context),
                     size_after_first,
                 )
                 .await
@@ -1810,7 +1819,7 @@ pub(crate) mod tests {
                     _ = db.sync().await.unwrap();
                     open_bounded::<O>(
                         context.child("cap"),
-                        witness_config(partition, &context),
+                        witness_config::<O>(partition, &context),
                         size_after_first,
                     )
                     .await
@@ -1900,7 +1909,7 @@ pub(crate) mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<O>(
                     context.child("cap"),
-                    witness_config(partition, &context),
+                    witness_config::<O>(partition, &context),
                     size_a,
                 )
                 .await
@@ -1988,7 +1997,7 @@ pub(crate) mod tests {
 
         /// Import this state over partition `dst` without journaling it.
         fn into_db(self, context: deterministic::Context, dst: &str) -> TestDb<O> {
-            let cfg = witness_config(dst, &context);
+            let cfg = witness_config::<O>(dst, &context);
             let db = TestDb::<O>::init_from_sync(
                 Sequential,
                 context,
@@ -2118,7 +2127,7 @@ pub(crate) mod tests {
             drop(db);
             let db = open_bounded::<O>(
                 context.child("imported"),
-                witness_config(dst, &context),
+                witness_config::<O>(dst, &context),
                 import.target.size,
             )
             .await
@@ -2225,7 +2234,7 @@ pub(crate) mod tests {
                 context.child("reopen"),
                 Config {
                     strategy: Sequential,
-                    witness: witness_config(dst, &context),
+                    witness: witness_config::<O>(dst, &context),
                 },
                 None,
             )
@@ -2307,7 +2316,7 @@ pub(crate) mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config::<O>(partition, &context),
             };
             let reopened = TestDb::<O>::init(context.child("reopen_witness"), cfg, None).await;
             assert!(matches!(reopened, Err(Error::DataCorrupted(_))));
@@ -2349,7 +2358,7 @@ pub(crate) mod tests {
             // The tip entry is intact, so reopen succeeds.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config::<O>(partition, &context),
             };
             let reopened = TestDb::<O>::init(context.child("reopen"), cfg, None)
                 .await
@@ -2362,7 +2371,7 @@ pub(crate) mod tests {
                     drop(reopened);
                     open_bounded::<O>(
                         context.child("cap"),
-                        witness_config(partition, &context),
+                        witness_config::<O>(partition, &context),
                         initialization_bound,
                     )
                     .await
@@ -2373,7 +2382,7 @@ pub(crate) mod tests {
             // The newer history survives: reopen still lands on the original tip.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config::<O>(partition, &context),
             };
             let reopened = TestDb::<O>::init(context.child("reopen2"), cfg, None)
                 .await
@@ -2405,7 +2414,7 @@ pub(crate) mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config::<O>(partition, &context),
             };
             let reopened = TestDb::<O>::init(context.child("reopen_witness"), cfg, None).await;
             assert!(matches!(
@@ -2425,25 +2434,16 @@ pub(crate) mod tests {
                 .merkleize(&db, Some(O::value(11)), Location::new(1))
                 .await;
             let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
-            let non_commit = O::mutation(
-                db.new_batch()
-                    .mutate(7)
-                    .mutations
-                    .into_iter()
-                    .next()
-                    .unwrap(),
-            );
-            drop(db);
+            drop(db.sync().await.unwrap());
 
             // Overwrite the persisted commit op with a mutation.
             let journal = open_witness_journal::<O>(context.child("tamper"), partition).await;
             let (_, size, pinned_nodes) = witness::tests::tip(&journal).await;
-            witness::tests::overwrite_tip(journal, non_commit, size, pinned_nodes).await;
+            witness::tests::overwrite_tip(journal, O::op(7), size, pinned_nodes).await;
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config::<O>(partition, &context),
             };
             let reopened = TestDb::<O>::init(context.child("reopen_witness"), cfg, None).await;
             assert!(matches!(
@@ -2477,7 +2477,7 @@ pub(crate) mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config::<O>(partition, &context),
             };
             let reopened = TestDb::<O>::init(context.child("reopen_witness"), cfg, None)
                 .await
@@ -2504,7 +2504,7 @@ pub(crate) mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<O>(
                     context.child("cap"),
-                    witness_config("compact-rewind-noop", &context),
+                    witness_config::<O>("compact-rewind-noop", &context),
                     size,
                 )
                 .await
@@ -2516,26 +2516,33 @@ pub(crate) mod tests {
         });
     }
 
+    /// Pruning past the tip keeps only the tip, even when every witness fills its own section.
     pub(crate) fn test_compact_prune_past_tip_keeps_tip<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
-            let partition = "compact-prune-past-tip";
-            let db = open_db::<O>(context.child("db"), partition).await;
-            let batch = db
-                .new_batch()
-                .mutate(1)
-                .merkleize(&db, Some(O::value(11)), Location::new(0))
-                .await;
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let mut witness = witness_config::<O>("compact-prune-past-tip", &context);
+            witness.items_per_section = NZU64!(1);
+            let cfg = Config {
+                strategy: Sequential,
+                witness,
+            };
+            let mut db = TestDb::<O>::init(context.child("db"), cfg.clone(), None)
+                .await
+                .unwrap();
+            for seed in 1..=3 {
+                (db, _) = apply_seed::<O>(db, seed).await;
+                db = db.sync().await.unwrap();
+            }
             let target = db.target();
+            assert_eq!(witness_entries(&db), 4);
 
-            // Prune with a boundary beyond the tip: the tip entry must survive.
-            let boundary = db.size() + 100;
-            let db = db.prune(boundary).await.unwrap();
+            let db = db.prune(target.size + 100).await.unwrap();
             assert_eq!(db.target(), target);
+            assert_eq!(witness_entries(&db), 1);
             drop(db);
 
-            let reopened = open_db::<O>(context.child("reopen"), partition).await;
+            let reopened = TestDb::<O>::init(context.child("reopen"), cfg, None)
+                .await
+                .unwrap();
             assert_eq!(reopened.target(), target);
             reopened.destroy().await.unwrap();
         });
@@ -2543,7 +2550,7 @@ pub(crate) mod tests {
 
     pub(crate) fn test_compact_initialization_zero_and_above_end<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = witness_config("compact-caps", &context);
+            let cfg = witness_config::<O>("compact-caps", &context);
             assert!(matches!(
                 open_bounded::<O>(context.child("zero"), cfg.clone(), Location::new(0)).await,
                 Err(Error::InvalidInitializationBound)
@@ -2589,7 +2596,7 @@ pub(crate) mod tests {
                 .await;
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
-            let cfg = witness_config("compact-rewind-between", &context);
+            let cfg = witness_config::<O>("compact-rewind-between", &context);
             drop(db);
             for (target, size, root) in [(5, 4, root_a), (3, 1, initial_root), (2, 1, initial_root)]
             {
@@ -2672,7 +2679,7 @@ pub(crate) mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<O>(
                     context.child("cap"),
-                    witness_config(partition, &context),
+                    witness_config::<O>(partition, &context),
                     size_a,
                 )
                 .await
@@ -2696,7 +2703,7 @@ pub(crate) mod tests {
         deterministic::Runner::default().start(|context| async move {
             // One entry per section so pruning takes effect at entry granularity (pruning is
             // section-aligned and never drops a partial section).
-            let mut witness_cfg = witness_config("compact-prune-rewind", &context);
+            let mut witness_cfg = witness_config::<O>("compact-prune-rewind", &context);
             witness_cfg.items_per_section = NZU64!(1);
             let cfg = Config {
                 strategy: Sequential,
@@ -2769,7 +2776,7 @@ pub(crate) mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<O>(
                     context.child("cap"),
-                    witness_config("compact-rewind-preserves-pre-advance", &context),
+                    witness_config::<O>("compact-rewind-preserves-pre-advance", &context),
                     size_after_first,
                 )
                 .await
@@ -2864,7 +2871,7 @@ pub(crate) mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<O>(
                     context.child("cap"),
-                    witness_config("compact-noop-after-rewind", &context),
+                    witness_config::<O>("compact-noop-after-rewind", &context),
                     Location::new(4),
                 )
                 .await
@@ -2915,7 +2922,7 @@ pub(crate) mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<O>(
                     context.child("cap"),
-                    witness_config("compact-rewind-makes-stale", &context),
+                    witness_config::<O>("compact-rewind-makes-stale", &context),
                     size_after_first,
                 )
                 .await
@@ -3019,8 +3026,7 @@ pub(crate) mod tests {
             assert_eq!(*child_start + child_ops.len() as u64, *child_end);
             assert_eq!(child_end, Location::new(16));
             assert_eq!(child_ops.len(), 2);
-            assert!(child_ops[0].metadata().is_none());
-            assert!(child_ops[0].has_floor().is_none());
+            assert_eq!(child_ops[0].encode(), O::op(14).encode());
             assert_eq!(child_ops[1].metadata(), Some(&O::value(15)));
             assert_eq!(child_ops[1].has_floor(), Some(floor));
 

@@ -68,10 +68,11 @@ mod tests {
     use crate::{
         merkle::{Location, mmb, mmr},
         qmdb::{
-            any::value::FixedEncoding,
+            any::value::{FixedEncoding, VariableEncoding},
             compact::db::tests::{TestBatch, TestOperation, compact_db_tests, open_db},
         },
     };
+    use commonware_codec::RangeCfg;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::sequence::U64;
@@ -81,12 +82,40 @@ mod tests {
     impl<F: Family> TestOperation for TestOp<F> {
         type Family = F;
 
+        fn codec_config() {}
+
         fn value(seed: u64) -> U64 {
             U64::new(seed)
         }
 
         fn mutate(batch: TestBatch<Self>, seed: u64) -> TestBatch<Self> {
             batch.append(U64::new(seed))
+        }
+
+        fn op(seed: u64) -> Self {
+            Self::Append(U64::new(seed))
+        }
+    }
+
+    type VariableTestOp<F = mmr::Family> = Operation<F, VariableEncoding<Vec<u8>>>;
+
+    impl<F: Family> TestOperation for VariableTestOp<F> {
+        type Family = F;
+
+        fn codec_config() -> (RangeCfg<usize>, ()) {
+            ((..=64).into(), ())
+        }
+
+        fn value(seed: u64) -> Vec<u8> {
+            seed.to_be_bytes().to_vec()
+        }
+
+        fn mutate(batch: TestBatch<Self>, seed: u64) -> TestBatch<Self> {
+            batch.append(Self::value(seed))
+        }
+
+        fn op(seed: u64) -> Self {
+            Self::Append(Self::value(seed))
         }
     }
 
@@ -96,6 +125,12 @@ mod tests {
         use super::*;
 
         compact_db_tests!(TestOp<mmb::Family>);
+    }
+
+    mod variable_tests {
+        use super::*;
+
+        compact_db_tests!(VariableTestOp);
     }
 
     /// Appends are ordered: the same values in a different order give a different root.

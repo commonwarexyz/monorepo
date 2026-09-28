@@ -83,12 +83,18 @@ mod tests {
     impl<F: Family> TestOperation for TestOp<F> {
         type Family = F;
 
+        fn codec_config() {}
+
         fn value(seed: u64) -> Digest {
             Sha256::hash(&[&seed.to_le_bytes()])
         }
 
         fn mutate(batch: TestBatch<Self>, seed: u64) -> TestBatch<Self> {
             batch.set(Sha256::hash(&[&seed.to_be_bytes()]), Self::value(seed))
+        }
+
+        fn op(seed: u64) -> Self {
+            Self::Set(Sha256::hash(&[&seed.to_be_bytes()]), Self::value(seed))
         }
     }
 
