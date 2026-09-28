@@ -7,6 +7,13 @@
 //! lockstep across lanes. This fills vectors even when each message is too
 //! short for BLAKE3's chunk-level parallelism within a single message.
 //!
+//! A batch of multi-chunk messages too small to fill the lanes instead packs
+//! the nodes of every message's tree into lanes, one tree level at a time:
+//! each full chunk takes its own lane and counter, then each partial final
+//! chunk, then each parent. It packs only messages with fewer full chunks
+//! than lanes, and only when that takes fewer passes over the full chunks
+//! (see [`batch`]).
+//!
 //! AVX-512 hashes 16 messages per batch, AVX2 8, and NEON 8 (two vectors per
 //! word), with narrower NEON kernels for smaller batches. Node pairs use a
 //! two-message kernel: on x86_64, AVX2 holds one message's state rows in each
@@ -21,8 +28,8 @@
 
 use super::{Digest, gather};
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-use blake3::{BLOCK_LEN, CHUNK_LEN, OUT_LEN};
+use alloc::{vec, vec::Vec};
+use blake3::{BLOCK_LEN, CHUNK_LEN, OUT_LEN, hazmat::HasherExt as _};
 
 #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
 mod aarch64;
@@ -290,8 +297,8 @@ unsafe fn chunk<V: Words<L>, const L: usize>(
     }
 }
 
-/// Chaining values of `L` full chunks of one message, where lane `i` holds
-/// chunk `first + i`.
+/// Non-root chaining values of one full chunk per lane, where lane `i` hashes
+/// `inputs[i]` as chunk `counters[i]` of its message.
 ///
 /// # Safety
 ///
@@ -300,21 +307,20 @@ unsafe fn chunk<V: Words<L>, const L: usize>(
 /// # Panics
 ///
 /// Panics if an input is shorter than [`CHUNK_LEN`].
-#[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
 #[inline(always)]
-unsafe fn chunks<V: Words<L>, const L: usize>(
+unsafe fn leaves<V: Words<L>, const L: usize>(
     inputs: [&[u8]; L],
-    first: u64,
+    counters: [u64; L],
 ) -> [[u8; OUT_LEN]; L] {
     // SAFETY: The caller establishes the target features `V` requires.
     unsafe {
         // Load each lane's counter as the first two words of a block, which
         // places the low and high words of every lane in two vectors.
-        let mut counters = [[0u8; BLOCK_LEN]; L];
-        for (lane, block) in counters.iter_mut().enumerate() {
-            block[..8].copy_from_slice(&(first + lane as u64).to_le_bytes());
+        let mut blocks = [[0u8; BLOCK_LEN]; L];
+        for (block, counter) in blocks.iter_mut().zip(counters) {
+            block[..8].copy_from_slice(&counter.to_le_bytes());
         }
-        let counters = V::load(counters.each_ref());
+        let counters = V::load(blocks.each_ref());
         let counter = [counters[0], counters[1]];
 
         let mut cv = iv::<V, L>();
@@ -337,21 +343,38 @@ unsafe fn chunks<V: Words<L>, const L: usize>(
     }
 }
 
-/// Non-root parent chaining values, where lane `i` merges the two child
-/// chaining values concatenated in `children[i]`.
+/// Non-root chaining values of the last chunk of every lane's message, where
+/// the messages have equal lengths and span more than one chunk.
 ///
 /// # Safety
 ///
 /// The caller must establish the target features `V` requires.
-#[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
+#[inline(always)]
+unsafe fn tails<V: Words<L>, const L: usize>(inputs: [&[u8]; L]) -> [[u8; OUT_LEN]; L] {
+    let len = inputs[0].len();
+    let index = (len - 1) / CHUNK_LEN;
+
+    // SAFETY: The caller establishes the target features `V` requires.
+    unsafe { V::store(chunk(inputs, index, len - index * CHUNK_LEN, 0)) }
+}
+
+/// Parent chaining values, where lane `i` merges the two child chaining
+/// values concatenated in `children[i]`.
+///
+/// `root` is [`ROOT`] when the parents are roots, and zero otherwise.
+///
+/// # Safety
+///
+/// The caller must establish the target features `V` requires.
 #[inline(always)]
 unsafe fn parents<V: Words<L>, const L: usize>(
     children: [&[u8; BLOCK_LEN]; L],
+    root: u32,
 ) -> [[u8; OUT_LEN]; L] {
     // SAFETY: The caller establishes the target features `V` requires.
     unsafe {
         let mut cv = iv::<V, L>();
-        compress(&mut cv, &V::load(children), 0, BLOCK_LEN, PARENT);
+        compress(&mut cv, &V::load(children), 0, BLOCK_LEN, PARENT | root);
         V::store(cv)
     }
 }
@@ -447,8 +470,21 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
 
 /// Hash one message, with its chunks and parents in SIMD lanes when it spans
 /// at least two full chunks and a kernel is available.
+///
+/// On aarch64, the [blake3] crate compresses a message of at most one chunk
+/// with portable code behind its incremental chunk state, so such a message
+/// is compressed with the portable words directly.
 #[inline]
 pub(super) fn hash_one(message: &[u8]) -> Digest {
+    #[cfg(target_arch = "aarch64")]
+    if message.len() <= CHUNK_LEN {
+        // SAFETY: The portable words require no target features.
+        let [digest] = unsafe {
+            let cv = chunk::<[u32; 1], 1>([message], 0, message.len(), ROOT);
+            <[u32; 1]>::store(cv)
+        };
+        return Digest(digest);
+    }
     #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
     if message.len() >= 2 * CHUNK_LEN
         && let Some(digest) = aarch64::hash_large(message)
@@ -505,27 +541,181 @@ pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option
     hash_many(&slices)
 }
 
+/// Lane kernels for one instruction set that hash one tree node per lane, so
+/// lanes may hold nodes of different messages.
+///
+/// A value exists only once the instruction set is available, so the methods
+/// are safe to call. Each call fills `L` lanes, of which the first `active`
+/// contribute output. Spare lanes hold valid inputs, and their outputs are
+/// ignored.
+trait Nodes<const L: usize> {
+    /// Non-root chaining values of one full chunk per lane, where lane `i`
+    /// hashes `inputs[i]` as chunk `counters[i]` of its message.
+    fn leaves(&self, inputs: [&[u8]; L], counters: [u64; L], active: usize) -> [[u8; OUT_LEN]; L];
+
+    /// Non-root chaining values of the last chunk of every lane's message,
+    /// where the messages have equal lengths and span more than one chunk.
+    fn tails(&self, inputs: [&[u8]; L], active: usize) -> [[u8; OUT_LEN]; L];
+
+    /// Parent chaining values, where lane `i` merges the two child chaining
+    /// values concatenated in `children[i]`, with `root` ([`ROOT`] or zero).
+    fn parents(
+        &self,
+        children: [&[u8; BLOCK_LEN]; L],
+        root: u32,
+        active: usize,
+    ) -> [[u8; OUT_LEN]; L];
+}
+
+/// Split `nodes` into groups of at most `L`, each with its number of nodes.
+/// Spare lanes of a group repeat its first node.
+fn groups<T: Copy, const L: usize>(
+    mut nodes: impl Iterator<Item = T>,
+) -> impl Iterator<Item = ([T; L], usize)> {
+    core::iter::from_fn(move || {
+        let first = nodes.next()?;
+        let mut group = [first; L];
+        let mut active = 1;
+        for (lane, node) in group[1..].iter_mut().zip(&mut nodes) {
+            *lane = node;
+            active += 1;
+        }
+        Some((group, active))
+    })
+}
+
+/// Hash equal-length `messages`, each longer than one chunk, with the nodes of
+/// every message's tree packed into lanes, appending the digests to
+/// `digests`.
+///
+/// Nodes at the same tree level are independent within and across messages,
+/// so each level fills lanes with the nodes of every message: first the full
+/// chunks, each with its own counter, then the partial final chunks, which
+/// share a counter and length. Each parent level merges adjacent pairs and
+/// moves an odd last value up unchanged, which builds BLAKE3's left-balanced
+/// tree, and the last level yields the roots. A lone full chunk in a group
+/// uses the `blake3` crate's single-block compression, which is faster than a
+/// kernel pass of spare lanes.
+///
+/// # Panics
+///
+/// Panics if the messages differ in length or span at most one chunk.
+fn pack<K: Nodes<L>, const L: usize>(kernels: &K, messages: &[&[u8]], digests: &mut Vec<Digest>) {
+    let count = messages.len();
+    let len = messages[0].len();
+    assert!(len > CHUNK_LEN, "packed messages span more than one chunk");
+    assert!(
+        messages.iter().all(|message| message.len() == len),
+        "BLAKE3 lane inputs must have equal lengths"
+    );
+    let full = len / CHUNK_LEN;
+
+    // Each level holds `width` chaining values per message, with node `j` of
+    // message `m` at `m * width + j`, and merges into the other region of one
+    // allocation.
+    let mut width = len.div_ceil(CHUNK_LEN);
+    let mut buffer = vec![[0u8; OUT_LEN]; count * (width + width.div_ceil(2))];
+    let (mut cvs, mut next) = buffer.split_at_mut(count * width);
+    let chunk = |(m, j): (usize, usize)| &messages[m][j * CHUNK_LEN..][..CHUNK_LEN];
+    let nodes = (0..count).flat_map(|m| (0..full).map(move |j| (m, j)));
+    for (group, active) in groups::<_, L>(nodes) {
+        if active == 1 {
+            let (m, j) = group[0];
+            let mut hasher = blake3::Hasher::new();
+            hasher.set_input_offset((j * CHUNK_LEN) as u64);
+            hasher.update(chunk((m, j)));
+            cvs[m * width + j] = hasher.finalize_non_root();
+            continue;
+        }
+        let counters = group.map(|(_, j)| j as u64);
+        let outputs = kernels.leaves(group.map(chunk), counters, active);
+        for ((m, j), output) in group.into_iter().zip(outputs).take(active) {
+            cvs[m * width + j] = output;
+        }
+    }
+    if full < width {
+        for (group, active) in groups::<_, L>(0..count) {
+            let outputs = kernels.tails(group.map(|m| messages[m]), active);
+            for (m, output) in group.into_iter().zip(outputs).take(active) {
+                cvs[m * width + full] = output;
+            }
+        }
+    }
+    while width > 1 {
+        let (pairs, merged) = (width / 2, width.div_ceil(2));
+        let root = if merged == 1 { ROOT } else { 0 };
+        let nodes = (0..count).flat_map(|m| (0..pairs).map(move |p| (m, p)));
+        let children = |(m, p): (usize, usize)| -> &[u8; BLOCK_LEN] {
+            cvs[m * width + 2 * p..][..2]
+                .as_flattened()
+                .try_into()
+                .expect("two chaining values")
+        };
+        for (group, active) in groups::<_, L>(nodes) {
+            let outputs = kernels.parents(group.map(children), root, active);
+            for ((m, p), output) in group.into_iter().zip(outputs).take(active) {
+                next[m * merged + p] = output;
+            }
+        }
+        if width % 2 == 1 {
+            for m in 0..count {
+                next[m * merged + pairs] = cvs[m * width + 2 * pairs];
+            }
+        }
+        core::mem::swap(&mut cvs, &mut next);
+        width = merged;
+    }
+    digests.extend(cvs[..count].iter().copied().map(Digest));
+}
+
 /// Hash `messages` in batches of `L` equal-length messages with `kernel`,
-/// hashing the rest individually with [`hash_one`]. The kernel receives each
-/// batch with its number of active lanes, and may hash a partial batch with a
-/// narrower kernel.
+/// hashing the rest individually with [`hash_one`] or with `pack`. The kernel
+/// receives each batch with its number of active lanes, and may hash a partial
+/// batch with a narrower kernel.
 ///
 /// A batch uses the kernel when it has at least `minimum` messages and more
 /// active lanes than hashing each message individually would fill. A single
 /// message of at least 4 chunks hashes its chunks in SIMD lanes, filling about
 /// `min(chunks, L)` lanes, and shorter messages fill fewer.
+///
+/// A batch of messages with fewer full chunks than lanes is instead
+/// [packed](pack) when that takes strictly fewer passes over the full chunks,
+/// where a pass hashes one full chunk in each lane and costs as much with idle
+/// lanes as with full ones. For `count` messages of `full` full chunks,
+/// packing takes `ceil(count * full / L)` passes, one message per lane takes
+/// `full`, and hashing individually takes `count`. A single message packs into
+/// as many passes as it hashes individually, so it never packs. Longer
+/// messages never pack, since packing saves at most one pass per message
+/// there.
 fn batch<const L: usize, M: AsRef<[u8]>>(
     messages: &[M],
     minimum: usize,
+    pack: impl Fn(&[&[u8]], &mut Vec<Digest>),
     kernel: impl Fn([&[u8]; L], usize) -> [[u8; OUT_LEN]; L],
 ) -> Vec<Digest> {
     let mut digests = Vec::with_capacity(messages.len());
     for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
-        let chunks = run[0].as_ref().len().div_ceil(CHUNK_LEN).max(1);
+        let len = run[0].as_ref().len();
+        let chunks = len.div_ceil(CHUNK_LEN).max(1);
         let fill = if chunks >= 4 { chunks.min(L) } else { 1 };
         let minimum = minimum.max((fill + 1).min(L));
+        let full = len / CHUNK_LEN;
         for batch in run.chunks(L) {
-            if batch.len() < minimum {
+            let individual = batch.len() < minimum;
+
+            // Packing hashes every chunk as a non-root node, so a message of
+            // one chunk never packs. A message of fewer than `L` full chunks
+            // takes one pass when hashed individually.
+            let passes = if individual { batch.len() } else { full };
+            if len > CHUNK_LEN && full < L && (batch.len() * full).div_ceil(L) < passes {
+                let mut inputs = [&[][..]; L];
+                for (input, message) in inputs.iter_mut().zip(batch) {
+                    *input = message.as_ref();
+                }
+                pack(&inputs[..batch.len()], &mut digests);
+                continue;
+            }
+            if individual {
                 digests.extend(batch.iter().map(|message| hash_one(message.as_ref())));
                 continue;
             }
@@ -546,6 +736,7 @@ fn batch<const L: usize, M: AsRef<[u8]>>(
 mod tests {
     use super::*;
     use commonware_utils::TestRng;
+    use core::cell::RefCell;
     use rand::Rng as _;
 
     /// Message lengths around block, chunk, and tree-shape boundaries.
@@ -637,47 +828,168 @@ mod tests {
         unsafe { hash::<[u32; 2], 2>([&short, &long]) };
     }
 
-    #[test]
-    fn test_batch_minimum() {
-        let calls = core::cell::Cell::new(0);
-        let active = core::cell::RefCell::new(Vec::new());
-        let kernel = |inputs: [&[u8]; 4], lanes: usize| {
-            calls.set(calls.get() + 1);
-            active.borrow_mut().push(lanes);
-            inputs.map(|input| *blake3::hash(input).as_bytes())
-        };
-        let check = |messages: &[Vec<u8>], minimum, expected_calls| {
-            calls.set(0);
-            active.borrow_mut().clear();
+    /// Portable kernels over `L` lanes that record the active lanes of each
+    /// call.
+    #[derive(Default)]
+    struct Recorder<const L: usize> {
+        hashes: RefCell<Vec<usize>>,
+        leaves: RefCell<Vec<usize>>,
+        tails: RefCell<Vec<usize>>,
+        parents: RefCell<Vec<usize>>,
+    }
+
+    impl<const L: usize> Recorder<L> {
+        /// Hash `L` equal-length messages, one per lane.
+        fn hash(&self, inputs: [&[u8]; L], active: usize) -> [[u8; OUT_LEN]; L] {
+            self.hashes.borrow_mut().push(active);
+
+            // SAFETY: The portable words require no target features.
+            unsafe { hash::<[u32; L], L>(inputs) }
+        }
+
+        /// Hash `messages` with [`batch`] and these kernels.
+        fn batch(&self, messages: &[Vec<u8>], minimum: usize) -> Vec<Digest> {
+            batch(
+                messages,
+                minimum,
+                |messages, digests| pack(self, messages, digests),
+                |inputs, active| self.hash(inputs, active),
+            )
+        }
+    }
+
+    impl<const L: usize> Nodes<L> for Recorder<L> {
+        fn leaves(
+            &self,
+            inputs: [&[u8]; L],
+            counters: [u64; L],
+            active: usize,
+        ) -> [[u8; OUT_LEN]; L] {
+            self.leaves.borrow_mut().push(active);
+
+            // SAFETY: The portable words require no target features.
+            unsafe { leaves::<[u32; L], L>(inputs, counters) }
+        }
+
+        fn tails(&self, inputs: [&[u8]; L], active: usize) -> [[u8; OUT_LEN]; L] {
+            self.tails.borrow_mut().push(active);
+
+            // SAFETY: The portable words require no target features.
+            unsafe { tails::<[u32; L], L>(inputs) }
+        }
+
+        fn parents(
+            &self,
+            children: [&[u8; BLOCK_LEN]; L],
+            root: u32,
+            active: usize,
+        ) -> [[u8; OUT_LEN]; L] {
+            self.parents.borrow_mut().push(active);
+
+            // SAFETY: The portable words require no target features.
+            unsafe { parents::<[u32; L], L>(children, root) }
+        }
+    }
+
+    /// Check `hash_many` against the reference for every count up to 33 at
+    /// lengths that pack, fall back, or end in a partial chunk.
+    pub(super) fn check_batch(hash_many: impl Fn(&[Vec<u8>]) -> Vec<Digest>) {
+        for len in [
+            1025,
+            2048,
+            3072,
+            4096,
+            5000,
+            6 * CHUNK_LEN + 1,
+            16384,
+            65536,
+        ] {
+            let messages: Vec<Vec<u8>> = (0..33).map(|lane| message(lane, len)).collect();
             let expected: Vec<Digest> = messages
                 .iter()
                 .map(|message| blake3::hash(message).into())
                 .collect();
-            assert_eq!(batch(messages, minimum, kernel), expected);
-            assert_eq!(calls.get(), expected_calls);
-        };
+            for count in 1..=messages.len() {
+                assert_eq!(
+                    hash_many(&messages[..count]),
+                    expected[..count],
+                    "len={len} count={count}"
+                );
+            }
+        }
+    }
 
-        // Runs shorter than 4 chunks batch once they reach the minimum and fill
-        // more than one lane.
-        let short: Vec<Vec<u8>> = (0..6).map(|i| vec![i; 100]).collect();
-        check(&short, 2, 2);
+    #[test]
+    fn test_portable_batch_matches_reference() {
+        let kernels = Recorder::<5>::default();
+        check_batch(|messages| kernels.batch(messages, 2));
+    }
 
-        // The kernel learns how many lanes of each batch are active.
-        assert_eq!(*active.borrow(), [4, 2]);
-        check(&short, 3, 1);
-        check(&short[..1], 1, 0);
-        let three: Vec<Vec<u8>> = (0..6).map(|i| vec![i; 3 * CHUNK_LEN]).collect();
-        check(&three, 1, 2);
-        check(&three[..1], 1, 0);
+    /// Check which kernels each batch uses, by the active lanes of each call
+    /// to the lockstep kernel, [`Nodes::leaves`], [`Nodes::tails`], and
+    /// [`Nodes::parents`].
+    #[test]
+    fn test_batch_packing() {
+        fn check<const L: usize>(messages: &[Vec<u8>], minimum: usize, expected: [&[usize]; 4]) {
+            let kernels = Recorder::<L>::default();
+            let digests: Vec<Digest> = messages
+                .iter()
+                .map(|message| blake3::hash(message).into())
+                .collect();
+            assert_eq!(kernels.batch(messages, minimum), digests);
+            let calls = [
+                kernels.hashes,
+                kernels.leaves,
+                kernels.tails,
+                kernels.parents,
+            ]
+            .map(RefCell::into_inner);
+            assert_eq!(calls, expected.map(<[usize]>::to_vec));
+        }
+        let run = |count: u8, len| -> Vec<Vec<u8>> { (0..count).map(|i| vec![i; len]).collect() };
 
-        // Runs of 4 or more chunks already fill lanes individually, so they
-        // need full batches.
-        let long: Vec<Vec<u8>> = (0..7).map(|i| vec![i; 4 * CHUNK_LEN]).collect();
-        check(&long, 1, 1);
-        check(&long[..3], 1, 0);
+        // Runs shorter than 4 chunks use the lockstep kernel once a batch
+        // reaches the minimum, and the kernel learns how many lanes of each
+        // batch are active.
+        check::<4>(&run(6, 100), 2, [&[4, 2], &[], &[], &[]]);
+        check::<4>(&run(6, 100), 3, [&[4], &[], &[], &[]]);
+        check::<4>(&run(1, 100), 1, [&[], &[], &[], &[]]);
+
+        // One full chunk per message takes one pass either way.
+        check::<4>(&run(3, CHUNK_LEN + 1), 2, [&[3], &[], &[], &[]]);
+
+        // Two messages of 3 chunks pack their 6 chunks into 2 passes instead
+        // of 3, then merge one pair each, then their roots. Four messages
+        // take 3 passes either way.
+        check::<4>(&run(6, 3 * CHUNK_LEN), 2, [&[4], &[4, 2], &[], &[2, 2]]);
+        check::<4>(&run(3, 3 * CHUNK_LEN), 2, [&[3], &[], &[], &[]]);
+
+        // Partial final chunks share one pass, one message per lane.
+        check::<4>(&run(2, 2 * CHUNK_LEN + 1), 2, [&[], &[4], &[2], &[2, 2]]);
+
+        // A lone chunk uses the `blake3` crate's compression.
+        check::<5>(&run(2, 3 * CHUNK_LEN), 2, [&[], &[5], &[], &[2, 2]]);
+
+        // Messages of one chunk hash that chunk as the root, and messages of
+        // at least one pass of full chunks save at most one pass each, so
+        // neither packs.
+        check::<4>(&run(2, CHUNK_LEN), 3, [&[], &[], &[], &[]]);
+        check::<4>(&run(2, 5 * CHUNK_LEN), 2, [&[], &[], &[], &[]]);
+
+        // Runs of 4 or more chunks hash short batches individually unless
+        // packing takes fewer passes.
+        check::<4>(&run(5, 4 * CHUNK_LEN), 2, [&[4], &[], &[], &[]]);
+        check::<4>(&run(3, 4 * CHUNK_LEN), 2, [&[], &[], &[], &[]]);
+        check::<8>(&run(2, 4 * CHUNK_LEN), 2, [&[], &[8], &[], &[4, 2]]);
+        check::<8>(
+            &run(6, 4 * CHUNK_LEN),
+            2,
+            [&[], &[8, 8, 8], &[], &[8, 4, 6]],
+        );
+        check::<8>(&run(7, 4 * CHUNK_LEN), 2, [&[7], &[], &[], &[]]);
 
         // Runs split at length changes.
         let mixed = vec![vec![0; 10], vec![1; 10], vec![2; 11], vec![3; 11]];
-        check(&mixed, 2, 2);
+        check::<4>(&mixed, 2, [&[2, 2], &[], &[], &[]]);
     }
 }

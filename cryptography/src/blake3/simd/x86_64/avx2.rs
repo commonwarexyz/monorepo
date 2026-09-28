@@ -145,3 +145,44 @@ pub(super) unsafe fn hash_x8(inputs: [&[u8]; LANES]) -> [[u8; OUT_LEN]; LANES] {
     // SAFETY: AVX2 is enabled for this function.
     unsafe { crate::blake3::simd::hash::<__m256i, LANES>(inputs) }
 }
+
+/// Non-root chaining values of one full chunk per AVX2 lane, with a
+/// counter per lane.
+///
+/// # Safety
+///
+/// The caller must establish AVX2 availability.
+#[target_feature(enable = "avx2")]
+pub(super) unsafe fn leaves_x8(
+    inputs: [&[u8]; LANES],
+    counters: [u64; LANES],
+) -> [[u8; OUT_LEN]; LANES] {
+    // SAFETY: AVX2 is enabled for this function.
+    unsafe { crate::blake3::simd::leaves::<__m256i, LANES>(inputs, counters) }
+}
+
+/// Non-root chaining values of the last chunk of every AVX2 lane's
+/// message.
+///
+/// # Safety
+///
+/// The caller must establish AVX2 availability.
+#[target_feature(enable = "avx2")]
+pub(super) unsafe fn tails_x8(inputs: [&[u8]; LANES]) -> [[u8; OUT_LEN]; LANES] {
+    // SAFETY: AVX2 is enabled for this function.
+    unsafe { crate::blake3::simd::tails::<__m256i, LANES>(inputs) }
+}
+
+/// Parent chaining values, one per AVX2 lane.
+///
+/// # Safety
+///
+/// The caller must establish AVX2 availability.
+#[target_feature(enable = "avx2")]
+pub(super) unsafe fn parents_x8(
+    children: [&[u8; BLOCK_LEN]; LANES],
+    root: u32,
+) -> [[u8; OUT_LEN]; LANES] {
+    // SAFETY: AVX2 is enabled for this function.
+    unsafe { crate::blake3::simd::parents::<__m256i, LANES>(children, root) }
+}

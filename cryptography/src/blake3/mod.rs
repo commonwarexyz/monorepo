@@ -1,13 +1,17 @@
 //! BLAKE3 implementation of the [Hasher] trait.
 //!
-//! Single messages use the [blake3] crate. [Hasher::hash_with] splits messages
-//! larger than 64 KiB along BLAKE3's tree and hashes the subtrees across the
-//! given strategy.
+//! Single messages use the [blake3] crate, except on aarch64, where a message
+//! of at most one chunk is compressed directly and, with NEON, a message of at
+//! least two full chunks hashes its chunks and parents in vector lanes.
+//! [Hasher::hash_with] splits messages larger than 64 KiB along BLAKE3's tree
+//! and hashes the subtrees across the given strategy.
 //!
 //! With AVX2 on x86_64, and on aarch64, equal-length node pairs of up to 128
 //! bytes use a two-message kernel. With AVX2 or AVX-512 on x86_64, and NEON on
 //! aarch64, runs of equal-length messages in [Hasher::hash_many] and
-//! [Hasher::hash_many_parts] use SIMD kernels with one message per vector lane.
+//! [Hasher::hash_many_parts] use SIMD kernels with one message per vector lane,
+//! or, when that takes fewer passes, the tree nodes of several short
+//! multi-chunk messages spread across lanes.
 //!
 //! # Example
 //! ```rust
@@ -181,6 +185,9 @@ impl Hasher for Blake3 {
             return blake3::hash(part).into();
         }
         if let Some((buffer, len)) = gather(parts) {
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            return simd::hash_one(&buffer[..len]);
+            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
             return blake3::hash(&buffer[..len]).into();
         }
         let mut hasher = CoreBlake3::new();
@@ -392,8 +399,8 @@ mod tests {
 
     #[test]
     fn test_blake3_hash_parts_boundaries() {
-        for total in (0..=300usize).chain([1023, 1024, 1025, 2049]) {
-            let data: Vec<u8> = (0..total).map(|i| i as u8).collect();
+        for total in (0..=1025usize).chain([2049]) {
+            let data = random(total, 0);
             let mid = total / 3;
             let parts: [&[u8]; 3] = [&data[..mid], &data[mid..2 * mid], &data[2 * mid..]];
             assert_eq!(Blake3::hash(&parts), reference(&parts), "total={total}");

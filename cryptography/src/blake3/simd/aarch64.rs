@@ -11,7 +11,7 @@
 //! with a separate chunk counter per lane, and merges their chaining values
 //! level by level in lanes.
 
-use super::{Digest, Words, batch};
+use super::{Digest, Nodes, Words, batch};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use blake3::{
@@ -688,22 +688,7 @@ pub(super) fn hash_pair(inputs: [&[u8]; 2]) -> [[u8; OUT_LEN]; 2] {
     unsafe { super::hash::<[u32; 2], 2>(inputs) }
 }
 
-/// Chaining values of `L` full chunks of one message with NEON words `V`.
-///
-/// # Safety
-///
-/// The caller must establish the target features `V` requires beyond NEON.
-#[target_feature(enable = "neon")]
-unsafe fn chunks_neon<V: Words<L>, const L: usize>(
-    inputs: [&[u8]; L],
-    first: u64,
-) -> [[u8; OUT_LEN]; L] {
-    // SAFETY: NEON is enabled for this function, and the caller establishes
-    // the rest.
-    unsafe { super::chunks::<V, L>(inputs, first) }
-}
-
-/// Non-root parent chaining values with NEON words `V`.
+/// Parent chaining values with NEON words `V`.
 ///
 /// # Safety
 ///
@@ -711,111 +696,185 @@ unsafe fn chunks_neon<V: Words<L>, const L: usize>(
 #[target_feature(enable = "neon")]
 unsafe fn parents_neon<V: Words<L>, const L: usize>(
     children: [&[u8; BLOCK_LEN]; L],
+    root: u32,
 ) -> [[u8; OUT_LEN]; L] {
     // SAFETY: NEON is enabled for this function, and the caller establishes
     // the rest.
-    unsafe { super::parents::<V, L>(children) }
+    unsafe { super::parents::<V, L>(children, root) }
 }
 
-/// Chaining values of two full chunks of one message with duplicated words.
+/// Non-root chaining values of one full chunk per lane, with a counter per
+/// lane, with NEON words `V`.
+///
+/// # Safety
+///
+/// The caller must establish the target features `V` requires beyond NEON.
+#[target_feature(enable = "neon")]
+unsafe fn leaves_neon<V: Words<L>, const L: usize>(
+    inputs: [&[u8]; L],
+    counters: [u64; L],
+) -> [[u8; OUT_LEN]; L] {
+    // SAFETY: NEON is enabled for this function, and the caller establishes
+    // the rest.
+    unsafe { super::leaves::<V, L>(inputs, counters) }
+}
+
+/// Non-root chaining values of the last chunk of every lane's message with
+/// NEON words `V`.
+///
+/// # Safety
+///
+/// The caller must establish the target features `V` requires beyond NEON.
+#[target_feature(enable = "neon")]
+unsafe fn tails_neon<V: Words<L>, const L: usize>(inputs: [&[u8]; L]) -> [[u8; OUT_LEN]; L] {
+    // SAFETY: NEON is enabled for this function, and the caller establishes
+    // the rest.
+    unsafe { super::tails::<V, L>(inputs) }
+}
+
+/// Two parent chaining values with duplicated words.
 ///
 /// # Safety
 ///
 /// The caller must establish NEON and SHA-3 extension availability.
 #[target_feature(enable = "neon,sha3")]
-unsafe fn chunks_dup(inputs: [&[u8]; 2], first: u64) -> [[u8; OUT_LEN]; 2] {
+unsafe fn parents_dup(children: [&[u8; BLOCK_LEN]; 2], root: u32) -> [[u8; OUT_LEN]; 2] {
     // SAFETY: NEON and the SHA-3 extension are enabled for this function.
-    unsafe { super::chunks::<Dup, 2>(inputs, first) }
+    unsafe { super::parents::<Dup, 2>(children, root) }
 }
 
-/// Two non-root parent chaining values with duplicated words.
+/// Non-root chaining values of two full chunks, with a counter per lane, with
+/// duplicated words.
 ///
 /// # Safety
 ///
 /// The caller must establish NEON and SHA-3 extension availability.
 #[target_feature(enable = "neon,sha3")]
-unsafe fn parents_dup(children: [&[u8; BLOCK_LEN]; 2]) -> [[u8; OUT_LEN]; 2] {
+unsafe fn leaves_dup(inputs: [&[u8]; 2], counters: [u64; 2]) -> [[u8; OUT_LEN]; 2] {
     // SAFETY: NEON and the SHA-3 extension are enabled for this function.
-    unsafe { super::parents::<Dup, 2>(children) }
+    unsafe { super::leaves::<Dup, 2>(inputs, counters) }
 }
 
-/// Available NEON extensions.
+/// Non-root chaining values of the last chunk of two messages with duplicated
+/// words.
+///
+/// # Safety
+///
+/// The caller must establish NEON and SHA-3 extension availability.
+#[target_feature(enable = "neon,sha3")]
+unsafe fn tails_dup(inputs: [&[u8]; 2]) -> [[u8; OUT_LEN]; 2] {
+    // SAFETY: NEON and the SHA-3 extension are enabled for this function.
+    unsafe { super::tails::<Dup, 2>(inputs) }
+}
+
+/// Available NEON extensions. A value exists only once NEON is available.
+///
+/// More than four active lanes use eight-lane words, two use duplicated words
+/// when the SHA-3 extension is available, and the rest use four-lane words.
+/// The eight- and four-lane words use SVE2 `XAR` when available.
 #[derive(Clone, Copy)]
 struct Features {
     sve2: bool,
     sha3: bool,
 }
 
-/// Chaining values of `active` (two to eight) full chunks of one message,
-/// where lane `i` holds chunk `first + i`. Spare lanes repeat the first chunk.
-///
-/// # Safety
-///
-/// The caller must establish NEON availability.
-unsafe fn chunk_cvs(
-    inputs: [&[u8]; 2 * LANES],
-    active: usize,
-    first: u64,
-    features: Features,
-) -> [[u8; OUT_LEN]; 2 * LANES] {
-    // SAFETY: The caller establishes NEON, and each extension is used only
-    // when detected.
-    unsafe {
-        if active > LANES {
-            if features.sve2 {
-                return chunks_neon::<Dual<Hybrid>, { 2 * LANES }>(inputs, first);
-            }
-            return chunks_neon::<Dual<uint32x4_t>, { 2 * LANES }>(inputs, first);
-        }
-        let mut outputs = [[0u8; OUT_LEN]; 2 * LANES];
-        if active == 2 && features.sha3 {
-            outputs[..2].copy_from_slice(&chunks_dup([inputs[0], inputs[1]], first));
-            return outputs;
-        }
-        let quad = [inputs[0], inputs[1], inputs[2], inputs[3]];
-        let quad = if features.sve2 {
-            chunks_neon::<Xar, LANES>(quad, first)
-        } else {
-            chunks_neon::<uint32x4_t, LANES>(quad, first)
-        };
-        outputs[..LANES].copy_from_slice(&quad);
-        outputs
+impl Features {
+    /// Hash equal-length `messages` with their nodes packed into lanes (see
+    /// [`super::pack`]), compiled once here rather than in each caller.
+    fn pack(&self, messages: &[&[u8]], digests: &mut Vec<Digest>) {
+        super::pack(self, messages, digests);
     }
 }
 
-/// Non-root parent chaining values of `active` (two to eight) child pairs.
-/// Spare lanes repeat the first pair.
-///
-/// # Safety
-///
-/// The caller must establish NEON availability.
-unsafe fn parent_cvs(
-    children: [&[u8; BLOCK_LEN]; 2 * LANES],
-    active: usize,
-    features: Features,
-) -> [[u8; OUT_LEN]; 2 * LANES] {
-    // SAFETY: The caller establishes NEON, and each extension is used only
-    // when detected.
-    unsafe {
-        if active > LANES {
-            if features.sve2 {
-                return parents_neon::<Dual<Hybrid>, { 2 * LANES }>(children);
+impl Nodes<{ 2 * LANES }> for Features {
+    fn leaves(
+        &self,
+        inputs: [&[u8]; 2 * LANES],
+        counters: [u64; 2 * LANES],
+        active: usize,
+    ) -> [[u8; OUT_LEN]; 2 * LANES] {
+        // SAFETY: NEON availability was established on construction, and each
+        // extension is used only when detected.
+        unsafe {
+            if active > LANES {
+                if self.sve2 {
+                    return leaves_neon::<Dual<Hybrid>, { 2 * LANES }>(inputs, counters);
+                }
+                return leaves_neon::<Dual<uint32x4_t>, { 2 * LANES }>(inputs, counters);
             }
-            return parents_neon::<Dual<uint32x4_t>, { 2 * LANES }>(children);
+            let mut outputs = [[0u8; OUT_LEN]; 2 * LANES];
+            if active == 2 && self.sha3 {
+                let pair = leaves_dup([inputs[0], inputs[1]], [counters[0], counters[1]]);
+                outputs[..2].copy_from_slice(&pair);
+                return outputs;
+            }
+            let quad = [inputs[0], inputs[1], inputs[2], inputs[3]];
+            let counters = [counters[0], counters[1], counters[2], counters[3]];
+            let quad = if self.sve2 {
+                leaves_neon::<Xar, LANES>(quad, counters)
+            } else {
+                leaves_neon::<uint32x4_t, LANES>(quad, counters)
+            };
+            outputs[..LANES].copy_from_slice(&quad);
+            outputs
         }
-        let mut outputs = [[0u8; OUT_LEN]; 2 * LANES];
-        if active == 2 && features.sha3 {
-            outputs[..2].copy_from_slice(&parents_dup([children[0], children[1]]));
-            return outputs;
+    }
+
+    fn tails(&self, inputs: [&[u8]; 2 * LANES], active: usize) -> [[u8; OUT_LEN]; 2 * LANES] {
+        // SAFETY: NEON availability was established on construction, and each
+        // extension is used only when detected.
+        unsafe {
+            if active > LANES {
+                if self.sve2 {
+                    return tails_neon::<Dual<Hybrid>, { 2 * LANES }>(inputs);
+                }
+                return tails_neon::<Dual<uint32x4_t>, { 2 * LANES }>(inputs);
+            }
+            let mut outputs = [[0u8; OUT_LEN]; 2 * LANES];
+            if active == 2 && self.sha3 {
+                outputs[..2].copy_from_slice(&tails_dup([inputs[0], inputs[1]]));
+                return outputs;
+            }
+            let quad = [inputs[0], inputs[1], inputs[2], inputs[3]];
+            let quad = if self.sve2 {
+                tails_neon::<Xar, LANES>(quad)
+            } else {
+                tails_neon::<uint32x4_t, LANES>(quad)
+            };
+            outputs[..LANES].copy_from_slice(&quad);
+            outputs
         }
-        let quad = [children[0], children[1], children[2], children[3]];
-        let quad = if features.sve2 {
-            parents_neon::<Xar, LANES>(quad)
-        } else {
-            parents_neon::<uint32x4_t, LANES>(quad)
-        };
-        outputs[..LANES].copy_from_slice(&quad);
-        outputs
+    }
+
+    fn parents(
+        &self,
+        children: [&[u8; BLOCK_LEN]; 2 * LANES],
+        root: u32,
+        active: usize,
+    ) -> [[u8; OUT_LEN]; 2 * LANES] {
+        // SAFETY: NEON availability was established on construction, and each
+        // extension is used only when detected.
+        unsafe {
+            if active > LANES {
+                if self.sve2 {
+                    return parents_neon::<Dual<Hybrid>, { 2 * LANES }>(children, root);
+                }
+                return parents_neon::<Dual<uint32x4_t>, { 2 * LANES }>(children, root);
+            }
+            let mut outputs = [[0u8; OUT_LEN]; 2 * LANES];
+            if active == 2 && self.sha3 {
+                outputs[..2].copy_from_slice(&parents_dup([children[0], children[1]], root));
+                return outputs;
+            }
+            let quad = [children[0], children[1], children[2], children[3]];
+            let quad = if self.sve2 {
+                parents_neon::<Xar, LANES>(quad, root)
+            } else {
+                parents_neon::<uint32x4_t, LANES>(quad, root)
+            };
+            outputs[..LANES].copy_from_slice(&quad);
+            outputs
+        }
     }
 }
 
@@ -854,8 +913,8 @@ unsafe fn reduce(input: &[u8], first: u64, target: usize) -> Vec<ChainingValue> 
         for (lane, chunk) in inputs.iter_mut().zip(span.chunks(CHUNK_LEN)) {
             *lane = chunk;
         }
-        // SAFETY: The caller establishes NEON.
-        let outputs = unsafe { chunk_cvs(inputs, active, first, features) };
+        let counters = core::array::from_fn(|lane| first + lane as u64);
+        let outputs = features.leaves(inputs, counters, active);
         cvs.extend_from_slice(&outputs[..active]);
     }
     if full * CHUNK_LEN < input.len() {
@@ -878,8 +937,7 @@ unsafe fn reduce(input: &[u8], first: u64, target: usize) -> Vec<ChainingValue> 
                 child[..OUT_LEN].copy_from_slice(left);
                 child[OUT_LEN..].copy_from_slice(right);
             }
-            // SAFETY: The caller establishes NEON.
-            let outputs = unsafe { parent_cvs(children.each_ref(), group.len(), features) };
+            let outputs = features.parents(children.each_ref(), 0, group.len());
             next.extend_from_slice(&outputs[..group.len()]);
         }
         next.extend_from_slice(rest);
@@ -921,9 +979,14 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     if !supported() {
         return None;
     }
-    Some(batch(messages, MINIMUM, |inputs, active| {
+    let features = Features {
+        sve2: supports_sve2(),
+        sha3: supports_sha3(),
+    };
+    let pack = |messages: &[&[u8]], digests: &mut _| features.pack(messages, digests);
+    Some(batch(messages, MINIMUM, pack, |inputs, active| {
         if active > LANES {
-            if supports_sve2() {
+            if features.sve2 {
                 // SAFETY: NEON and SVE2 availability were established above.
                 return unsafe { hash_x8_xar(inputs) };
             }
@@ -934,7 +997,7 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
         // Spare lanes repeat the first input, so a narrower kernel takes the
         // leading lanes and leaves the rest unused.
         let mut outputs = [[0u8; OUT_LEN]; 2 * LANES];
-        if active == 2 && supports_sha3() {
+        if active == 2 && features.sha3 {
             // SAFETY: NEON and SHA-3 extension availability were established
             // above.
             let pair = unsafe { hash_x2_dup([inputs[0], inputs[1]]) };
@@ -943,7 +1006,7 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
         }
         let quad = [inputs[0], inputs[1], inputs[2], inputs[3]];
         // SAFETY: NEON availability was established above.
-        outputs[..LANES].copy_from_slice(&unsafe { hash_quad(quad, supports_sve2()) });
+        outputs[..LANES].copy_from_slice(&unsafe { hash_quad(quad, features.sve2) });
         outputs
     }))
 }
@@ -1010,6 +1073,29 @@ mod tests {
                         "len={len} first={first}"
                     );
                 }
+            }
+        }
+    }
+
+    /// Check batches, then packed nodes with every combination of the
+    /// available extensions, so each narrower kernel runs. The reference
+    /// hashes the batches that take one message per lane.
+    #[test]
+    fn test_batch_matches_reference() {
+        assert!(supported());
+        super::super::tests::check_batch(|messages| hash_many(messages).unwrap());
+        let reference =
+            |inputs: [&[u8]; 2 * LANES], _| inputs.map(|input| *blake3::hash(input).as_bytes());
+        for sve2 in [false, true] {
+            for sha3 in [false, true] {
+                if (sve2 && !supports_sve2()) || (sha3 && !supports_sha3()) {
+                    continue;
+                }
+                let features = Features { sve2, sha3 };
+                let pack = |messages: &[&[u8]], digests: &mut _| features.pack(messages, digests);
+                super::super::tests::check_batch(|messages| {
+                    batch(messages, MINIMUM, pack, reference)
+                });
             }
         }
     }

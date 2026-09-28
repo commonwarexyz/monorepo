@@ -152,3 +152,44 @@ pub(super) unsafe fn hash_x16(inputs: [&[u8]; LANES]) -> [[u8; OUT_LEN]; LANES] 
     // SAFETY: AVX-512F is enabled for this function.
     unsafe { crate::blake3::simd::hash::<__m512i, LANES>(inputs) }
 }
+
+/// Non-root chaining values of one full chunk per AVX-512 lane, with a
+/// counter per lane.
+///
+/// # Safety
+///
+/// The caller must establish AVX-512F availability.
+#[target_feature(enable = "avx512f")]
+pub(super) unsafe fn leaves_x16(
+    inputs: [&[u8]; LANES],
+    counters: [u64; LANES],
+) -> [[u8; OUT_LEN]; LANES] {
+    // SAFETY: AVX-512F is enabled for this function.
+    unsafe { crate::blake3::simd::leaves::<__m512i, LANES>(inputs, counters) }
+}
+
+/// Non-root chaining values of the last chunk of every AVX-512 lane's
+/// message.
+///
+/// # Safety
+///
+/// The caller must establish AVX-512F availability.
+#[target_feature(enable = "avx512f")]
+pub(super) unsafe fn tails_x16(inputs: [&[u8]; LANES]) -> [[u8; OUT_LEN]; LANES] {
+    // SAFETY: AVX-512F is enabled for this function.
+    unsafe { crate::blake3::simd::tails::<__m512i, LANES>(inputs) }
+}
+
+/// Parent chaining values, one per AVX-512 lane.
+///
+/// # Safety
+///
+/// The caller must establish AVX-512F availability.
+#[target_feature(enable = "avx512f")]
+pub(super) unsafe fn parents_x16(
+    children: [&[u8; BLOCK_LEN]; LANES],
+    root: u32,
+) -> [[u8; OUT_LEN]; LANES] {
+    // SAFETY: AVX-512F is enabled for this function.
+    unsafe { crate::blake3::simd::parents::<__m512i, LANES>(children, root) }
+}
