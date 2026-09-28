@@ -692,8 +692,7 @@ pub enum InitError<E: Debug, T: Debug> {
     },
 }
 
-/// Validate the complete target before returning a managed database.
-/// Bounds alone do not identify a checkpoint: its commitment and retained range must also match.
+/// Validate the complete sync target before returning a managed database.
 fn validate_initialization<E, T>(
     db: T,
     expected: Option<T::SyncTarget>,
@@ -2167,6 +2166,59 @@ mod tests {
             let (_writer, snapshot, handle) = apply_and_finalize(writer, batch).await;
             drop(snapshot);
             handle.await.expect("empty batch database sync failed");
+        }
+
+        #[rstest]
+        #[case::any(PhantomData::<AnyFixed>, any_fixed_config)]
+        #[case::current(PhantomData::<CurrentUnorderedFixed>, current_fixed_config)]
+        #[case::immutable(PhantomData::<ImmutableFixed>, immutable_fixed_config)]
+        #[case::immutable_compact(
+            PhantomData::<ImmutableCompactFixed>, immutable_compact_fixed_config
+        )]
+        #[case::keyless(PhantomData::<KeylessFixed>, keyless_fixed_config)]
+        #[case::keyless_compact(
+            PhantomData::<KeylessCompactFixed>, keyless_compact_fixed_config
+        )]
+        fn merkleize_stale_batch_returns_error<T>(
+            #[case] _db: PhantomData<T>,
+            #[case] config: fn(&Context, &str) -> T::Config,
+        ) where
+            T: ManagedDb<Context> + 'static,
+            T::Unmerkleized: Unmerkleized<
+                    Merkleized = T::Merkleized,
+                    Error = commonware_storage::qmdb::Error<mmr::Family>,
+                >,
+            T::SyncTarget: Debug,
+        {
+            deterministic::Runner::default().start(|context| async move {
+                let config = config(&context, "db");
+                let database = T::init(context.child("db"), config, None).await.unwrap();
+                let (writer, reader) = split(database);
+                let stale = T::new_batch(reader.clone()).await;
+                let winner = T::new_batch(reader.clone())
+                    .await
+                    .merkleize()
+                    .await
+                    .unwrap();
+
+                // Batch creation releases the read guard, permitting a sibling to be applied.
+                let (_writer, ()) = writer
+                    .mutate(
+                        |database| async move { (T::apply(database, winner).await.unwrap(), ()) },
+                    )
+                    .await;
+
+                let error = match stale.merkleize().await {
+                    Err(error) => error,
+                    Ok(_) => panic!("stale batch must refuse merkleization"),
+                };
+                assert!(matches!(error, commonware_storage::qmdb::Error::StaleBatch));
+                assert!(matches!(
+                    crate::stateful::ExecutionError::from(error),
+                    crate::stateful::ExecutionError::Stale,
+                ));
+                assert!(T::new_batch(reader).await.merkleize().await.is_ok());
+            });
         }
 
         #[rstest]

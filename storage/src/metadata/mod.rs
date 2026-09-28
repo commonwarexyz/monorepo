@@ -766,6 +766,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
+            drop(blob);
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
@@ -806,6 +807,7 @@ mod tests {
 
             // The repaired copy must support a shrinking rewrite: a stale tail left behind by
             // recovery would survive the smaller write and poison the next reopen.
+            drop(blob);
             let mut metadata =
                 Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg.clone())
                     .await
@@ -859,10 +861,12 @@ mod tests {
             blob.write_at(0, b"corrupted".to_vec(), WriteOptions::SYNC)
                 .await
                 .unwrap();
+            drop(blob);
             let (blob, _) = context.open("test", b"right").await.unwrap();
             blob.write_at(0, b"corrupted".to_vec(), WriteOptions::SYNC)
                 .await
                 .unwrap();
+            drop(blob);
 
             // Both copies failing validation is impossible under a crash (syncs alternate and
             // drain), so reopening must fail loudly rather than adopt a fresh store.
@@ -917,6 +921,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
+            drop(blob);
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
@@ -969,6 +974,7 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
+            drop(blob);
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();

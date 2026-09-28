@@ -56,6 +56,7 @@ use commonware_storage::{
         self,
         any::unordered::fixed,
         immutable::fixed as immutable_fixed,
+        operation::Floored as _,
         sync::{Request, Source as QmdbSource, source},
     },
 };
@@ -71,6 +72,7 @@ use std::{collections::VecDeque, convert::Infallible, future::Future, sync::Arc,
 
 mod common;
 pub(crate) mod fixtures;
+mod floor;
 pub(crate) mod mocks;
 mod multi_db_app;
 mod ownership;
@@ -79,11 +81,12 @@ mod single_db_app;
 
 const NUM_VALIDATORS: u32 = 5;
 
-/// Only a refused stale read maps to Stale. Every other storage failure is
-/// fatal.
+/// Refused stale reads and merkleizations map to Stale; other storage failures are fatal.
 #[test]
 fn storage_errors_map_to_fatal() {
     let stale: ExecutionError = qmdb::Error::<mmr::Family>::StaleRead.into();
+    assert!(matches!(stale, ExecutionError::Stale));
+    let stale: ExecutionError = qmdb::Error::<mmr::Family>::StaleBatch.into();
     assert!(matches!(stale, ExecutionError::Stale));
     let direct: ExecutionError = qmdb::Error::<mmr::Family>::Runtime(RuntimeError::Closed).into();
     assert!(matches!(direct, ExecutionError::Fatal(_)));
@@ -1233,7 +1236,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
             (resolver_receiver, fixtures::IgnoreResolver),
         );
 
-        let plan = SyncPlan::init(&context, "certify-qmdb-stateful".to_string()).await;
+        let plan = SyncPlan::init(context.child("plan"), "certify-qmdb-stateful".to_string()).await;
         let publication_context = context.child("publication");
         let (snapshot_publisher, _snapshot_subscriber) = Publisher::new(&publication_context);
         let (stateful, stateful_mailbox) = StatefulActor::init(
@@ -1378,7 +1381,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                 DelayedContext,
                 scheme_mocks::Scheme<ed25519::PublicKey>,
                 Standard<Block>,
-            >::init(&delayed, "stable-leader-qmdb-stateful"),
+            >::init(delayed.child("metadata"), "stable-leader-qmdb-stateful"),
         )
         .await;
         let mut db_config = qmdb_config("stable-leader-qmdb-stateful", page_cache);
@@ -1576,7 +1579,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             verify_gates: verify_gates.clone(),
             finalize_gate: finalize_gate.clone(),
         };
-        let plan = SyncPlan::init(&context, "certify-multi-qmdb-stateful".to_string()).await;
+        let plan = SyncPlan::init(
+            context.child("plan"),
+            "certify-multi-qmdb-stateful".to_string(),
+        )
+        .await;
         let publication_context = context.child("publication");
         let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&publication_context);
         let (stateful, stateful_mailbox) = StatefulActor::init(
@@ -1758,6 +1765,31 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         {
             context.sleep(Duration::from_millis(10)).await;
         }
+
+        let (full, compact) = snapshot_subscriber.latest().unwrap();
+        let expected =
+            <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[5]);
+        let commit = expected.0.range.end() - 1;
+        let (source::Response::Operations { proof, operations }, _) = full
+            .serve(Request::Operations {
+                size: expected.0.range.end(),
+                start: commit,
+                max_ops: NZU64!(1),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("snapshot must serve the requested operations")
+        };
+        assert_eq!(operations[0].has_floor(), Some(expected.0.range.start()));
+        assert!(qmdb::verify_proof::<sha256::Sha256, _, _>(
+            &proof,
+            commit,
+            &operations,
+            &expected.0.root
+        ));
+        assert_eq!(compact.root(), expected.1.root);
+        assert_eq!(compact.size(), expected.1.size);
 
         stateful_actor.abort();
         marshal_actor.abort();

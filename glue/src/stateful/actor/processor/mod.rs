@@ -2050,7 +2050,7 @@ mod tests {
             prune_config: Option<PruneConfig>,
         ) -> Self {
             let databases = DbSet::<deterministic::Context>::init(
-                context.child("db_set"),
+                context.child("databases"),
                 config.clone(),
                 None,
             )

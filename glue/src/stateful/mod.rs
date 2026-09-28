@@ -58,15 +58,15 @@
 //! - **State sync** (floor attached): Run a one-time QMDB state sync from
 //!   marshal's configured floor block, populating each database via
 //!   [`db::StateSyncSet::sync`]. The actor retains finalized blocks and their
-//!   acknowledgements until marshal's pending-ack window fills, waits for the live
-//!   sync coordinator to record the newest block's target, and releases the batch.
+//!   acknowledgements in batches up to marshal's configured pending-ack window size, waits for
+//!   the live sync coordinator to record the newest block's target, and releases each batch.
 //!   If state sync completes before the window fills, the pending blocks are handled
 //!   during the transition to normal processing. Durable metadata records the selected
 //!   floor before database mutation and is marked complete only after the converged state
 //!   and any required handoff blocks are durable. A crash before completion restarts from
 //!   that floor. The storage target is advanced to the block backing marshal's durable
-//!   processed position when necessary, because marshal cannot redeliver acknowledged blocks
-//!   below that position. Journal state that has pruned the resulting range start is discarded
+//!   processed position when necessary, because marshal does not redeliver blocks at or below
+//!   that position. Journal state that has pruned the resulting range start is discarded
 //!   and rebuilt. Initialization removes state beyond the target and reuses the retained prefix.
 //!   A lagging floor sampled during restart cannot move the floor backward.
 //!   Subsequent restarts after completion take the marshal sync path to ensure a contiguous stream.
@@ -118,7 +118,7 @@ mod tests;
 /// Why a block execution failed.
 #[derive(Debug, Error)]
 pub enum ExecutionError {
-    /// A competing finalization invalidated the batch's reads mid-execution.
+    /// A competing finalization invalidated the batch's reads or merkleization.
     #[error("stale execution: a competing block was finalized")]
     Stale,
     /// Any other storage failure.
@@ -129,7 +129,7 @@ pub enum ExecutionError {
 impl<F: Family> From<qmdb::Error<F>> for ExecutionError {
     fn from(err: qmdb::Error<F>) -> Self {
         match err {
-            qmdb::Error::StaleRead => Self::Stale,
+            qmdb::Error::StaleRead | qmdb::Error::StaleBatch => Self::Stale,
             err => Self::Fatal(err.to_string()),
         }
     }
