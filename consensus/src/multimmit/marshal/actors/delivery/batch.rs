@@ -4,9 +4,12 @@
 //! the row with its body so delivery need not read it back. Descriptors and bodies are charged
 //! against one hot-byte budget.
 
-use crate::multimmit::{
-    marshal::{OutputIndex, storage::catalog::StoredRef},
-    types::{Body, TransactionBlock},
+use crate::{
+    multimmit::{
+        marshal::storage::catalog::StoredRef,
+        types::{Body, TransactionBlock},
+    },
+    types::OutputIndex,
 };
 use commonware_cryptography::{Digest, Hasher};
 use std::{mem::size_of, sync::Arc};

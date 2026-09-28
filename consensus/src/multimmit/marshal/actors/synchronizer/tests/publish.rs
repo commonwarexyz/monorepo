@@ -1,7 +1,7 @@
 //! Finalized publication batching and restart reconciliation tests.
 
 use super::*;
-use crate::{multimmit::marshal::OutputIndex, types::View};
+use crate::types::{OutputIndex, View};
 
 #[test]
 fn finalized_publication_does_not_reload_custodied_bodies() {

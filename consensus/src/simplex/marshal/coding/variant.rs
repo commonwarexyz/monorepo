@@ -1,8 +1,8 @@
 use crate::{
     CertifiableBlock, Heightable,
+    ancestry::BlockProvider,
     simplex::{
         marshal::{
-            ancestry::BlockProvider,
             coding::{
                 shards,
                 types::{CodedBlock, StoredCodedBlock, coding_config_for_participants},

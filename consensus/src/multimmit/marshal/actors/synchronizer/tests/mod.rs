@@ -12,7 +12,6 @@ use crate::{
     Epochable as _, Viewable as _,
     multimmit::{
         marshal::{
-            OutputIndex,
             actors::{
                 backfill::{CustodiedBlock, SharedHeaders, SharedHistory},
                 delivery,
@@ -40,7 +39,7 @@ use crate::{
             genesis_history,
         },
     },
-    types::{Epoch, Height, Participant, Round, View},
+    types::{Epoch, Height, OutputIndex, Participant, Round, View},
 };
 use commonware_actor::{
     Feedback,

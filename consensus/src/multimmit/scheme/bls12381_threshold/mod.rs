@@ -49,6 +49,7 @@ use super::Namespace;
 use crate::{
     Epochable,
     multimmit::{
+        checkpoint,
         config::Parameters,
         types::{ChainId, CodecConfig, Error as TypesError, LeaderBlock, VoteBody},
     },
@@ -418,6 +419,36 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Returns the public `2f+1` nullification sharing when this is a full verifier.
     pub const fn nullification_sharing(&self) -> Option<&Sharing<V>> {
         self.material.nullification_sharing()
+    }
+
+    /// Returns the scheme that certifies [`aggregation`](crate::aggregation) checkpoints with
+    /// this committee's `2f+1` nullification key, under the aggregation namespace `namespace`.
+    ///
+    /// A signer signs checkpoints with its nullification share, a full verifier also verifies
+    /// individual shares, and a certificate verifier verifies recovered certificates. See
+    /// [`checkpoint`].
+    pub fn checkpoint(&self, namespace: &[u8]) -> checkpoint::Scheme<P, V> {
+        let participants = self.participants().clone();
+        match &self.material {
+            Material::Signer {
+                keys,
+                nullification,
+                ..
+            } => checkpoint::Scheme::signer(
+                namespace,
+                participants,
+                nullification.clone(),
+                keys.nullification.clone(),
+            )
+            .expect("a signer's nullification share matches its sharing"),
+            Material::Verifier { nullification, .. } => {
+                checkpoint::Scheme::verifier(namespace, participants, nullification.clone())
+            }
+            Material::CertificateVerifier {
+                nullification_identity,
+                ..
+            } => checkpoint::Scheme::certificate_verifier(namespace, *nullification_identity),
+        }
     }
 
     /// Returns the DA threshold group identity.

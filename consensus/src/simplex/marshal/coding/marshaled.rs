@@ -84,10 +84,10 @@
 use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
     Heightable, Relay, Reporter,
+    ancestry::Ancestry,
     simplex::{
         Plan,
         marshal::{
-            ancestry::Ancestry,
             application::{
                 build::{self, Resolved},
                 gates::{self, GateOutcome, Gates},
@@ -236,7 +236,6 @@ where
     A: Application<
             E,
             Block = B,
-            SigningScheme = Z::Scheme,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
@@ -759,7 +758,6 @@ where
     A: Application<
             E,
             Block = B,
-            SigningScheme = Z::Scheme,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
@@ -1060,7 +1058,6 @@ where
     A: Application<
             E,
             Block = B,
-            SigningScheme = Z::Scheme,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,

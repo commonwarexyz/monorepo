@@ -13,10 +13,8 @@ use crate::dkg::{
 use commonware_actor::mailbox::Sender as ActorSender;
 use commonware_consensus::{
     Block as _, Heightable as _,
-    simplex::{
-        marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
-        scheme::Scheme as SimplexScheme,
-    },
+    ancestry::BoxedAncestry,
+    simplex::{marshal::core::Variant as MarshalVariant, scheme::Scheme as SimplexScheme},
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
@@ -1457,7 +1455,7 @@ mod tests {
         tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant, child},
     };
     use commonware_actor::Feedback;
-    use commonware_consensus::{Reporter, simplex::marshal};
+    use commonware_consensus::{Reporter, ancestry, simplex::marshal};
     use commonware_cryptography::{
         Signer,
         bls12381::{
@@ -1525,7 +1523,7 @@ mod tests {
         }
     }
 
-    impl marshal::ancestry::Ancestry<TestBlock> for StalledAncestry {
+    impl ancestry::Ancestry<TestBlock> for StalledAncestry {
         fn peek(&self) -> Option<&Digested<TestBlock>> {
             None
         }
@@ -1575,7 +1573,7 @@ mod tests {
         }
     }
 
-    impl marshal::ancestry::Ancestry<TestBlock> for GatedAncestry {
+    impl ancestry::Ancestry<TestBlock> for GatedAncestry {
         fn peek(&self) -> Option<&Digested<TestBlock>> {
             self.released.then(|| self.blocks.front()).flatten()
         }
@@ -1618,9 +1616,7 @@ mod tests {
     }
 
     fn empty_ancestry() -> BoxedAncestry<TestBlock> {
-        BoxedAncestry::new(marshal::ancestry::from_iter(
-            Vec::<Digested<TestBlock>>::new(),
-        ))
+        BoxedAncestry::new(ancestry::from_iter(Vec::<Digested<TestBlock>>::new()))
     }
 
     fn scan(
@@ -1922,7 +1918,7 @@ mod tests {
                     .await
             });
             let response = mailbox
-                .epoch_info(marshal::ancestry::from_iter([blocks[2].clone()]))
+                .epoch_info(ancestry::from_iter([blocks[2].clone()]))
                 .await;
             assert!(matches!(response, EpochInfoResponse::Available(_)));
         });
@@ -2395,10 +2391,8 @@ mod tests {
             // Admit the detached boundary request before the actor starts. It
             // must wait until finalized reporting establishes an exact anchor.
             let mut detached_mailbox = mailbox.clone();
-            let detached = detached_mailbox.epoch_info(marshal::ancestry::from_iter([
-                detached_four,
-                detached_midpoint,
-            ]));
+            let detached = detached_mailbox
+                .epoch_info(ancestry::from_iter([detached_four, detached_midpoint]));
             futures::pin_mut!(detached);
             assert!(detached.as_mut().now_or_never().is_none());
 
@@ -2413,7 +2407,7 @@ mod tests {
             // the actor can reconstruct the boundary view.
             let mut malformed_mailbox = mailbox.clone();
             let malformed =
-                malformed_mailbox.epoch_info(marshal::ancestry::from_iter([final_block.clone()]));
+                malformed_mailbox.epoch_info(ancestry::from_iter([final_block.clone()]));
             futures::pin_mut!(malformed);
             assert!(malformed.as_mut().now_or_never().is_none());
 
@@ -2604,7 +2598,7 @@ mod tests {
             // view at its first stream poll.
             let mut prime_mailbox = mailbox.clone();
             let primed = prime_mailbox
-                .epoch_info(marshal::ancestry::from_iter([
+                .epoch_info(ancestry::from_iter([
                     losing_six.clone(),
                     losing_five.clone(),
                 ]))
@@ -2616,7 +2610,7 @@ mod tests {
 
             let (release, gate) = oneshot::channel();
             let (tail, scan_started) = GatedAncestry::new([losing_five], gate);
-            let ancestry = marshal::ancestry::with_prefix([losing_six], tail);
+            let ancestry = ancestry::with_prefix([losing_six], tail);
             let mut raced_mailbox = mailbox.clone();
             let raced = raced_mailbox.epoch_info(ancestry);
             futures::pin_mut!(raced);

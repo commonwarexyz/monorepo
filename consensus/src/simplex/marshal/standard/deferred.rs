@@ -78,10 +78,10 @@
 use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
     Heightable, Relay, Reporter,
+    ancestry::Ancestry,
     simplex::{
         Plan,
         marshal::{
-            ancestry::Ancestry,
             application::{
                 build::{self, Resolved},
                 gates::{self, GateOutcome, Gates},
@@ -197,13 +197,7 @@ impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<
-            E,
-            Block = B,
-            SigningScheme = S,
-            Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
-        >,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>, Input = ()>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     ES: Epocher,
 {
@@ -556,13 +550,7 @@ impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<
-            E,
-            Block = B,
-            SigningScheme = S,
-            Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
-        >,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>, Input = ()>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     ES: Epocher,
 {
@@ -768,13 +756,7 @@ impl<E, S, A, B, ES> CertifiableAutomaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<
-            E,
-            Block = B,
-            SigningScheme = S,
-            Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
-        >,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>, Input = ()>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     ES: Epocher,
 {

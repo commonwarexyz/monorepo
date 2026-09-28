@@ -3,7 +3,7 @@
 use crate::application::Block;
 use commonware_actor::Feedback;
 use commonware_consensus::{Reporter, multimmit::marshal::Update};
-use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
 use commonware_utils::{Acknowledgement as _, channel::mpsc, sync::Mutex};
 use std::{collections::VecDeque, sync::Arc};
 
@@ -55,12 +55,12 @@ impl Reporter for OrderedReporter {
             block,
             acknowledgement,
         } = activity;
-        let reference = block.reference();
+        let header = block.inner().header();
         let ordered = OrderedBlock {
             index: index.get(),
-            chain: reference.chain().get(),
-            height: reference.height().get(),
-            digest: reference.digest(),
+            chain: header.chain().get(),
+            height: header.height().get(),
+            digest: block.digest(),
         };
         let mut ordering = self.ordering.lock();
         if ordering.len() == ORDERING_CAPACITY {
@@ -81,13 +81,10 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Encode as _, Read as _};
     use commonware_consensus::{
-        multimmit::{
-            marshal::OutputIndex,
-            types::{ChainId, Context as BlockContext},
-        },
-        types::{Epoch, Height},
+        multimmit::types::{ChainId, Context as BlockContext},
+        types::{Epoch, Height, OutputIndex},
     };
-    use commonware_cryptography::{Hasher as _, Sha256};
+    use commonware_cryptography::{Digested, Hasher as _, Sha256};
     use commonware_utils::acknowledgement::Exact;
     use std::{future::Future as _, pin::Pin, task::Poll};
 
@@ -102,8 +99,9 @@ mod tests {
         .unwrap();
         let mut encoded = Bytes::from_static(b"body").encode();
         let body = Body::read_cfg(&mut encoded, &Body::codec_config(4)).unwrap();
-        let block = Arc::new(Block::from_context(context, body));
+        let block = Block::from_context(context, body);
         let reference = block.reference();
+        let block = Digested::precomputed(block, reference.digest());
         let (mut reporter, mut redraws) = OrderedReporter::channel();
 
         for index in 1..=ORDERING_CAPACITY + 1 {
@@ -111,7 +109,7 @@ mod tests {
             assert_eq!(
                 reporter.report(Update {
                     index: OutputIndex::new(index as u64),
-                    block: Arc::clone(&block),
+                    block: block.clone(),
                     acknowledgement,
                 }),
                 Feedback::Ok

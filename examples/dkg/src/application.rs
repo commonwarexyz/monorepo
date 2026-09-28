@@ -1,10 +1,8 @@
 //! Stateful application that records each block's height in QMDB.
 
-use crate::types::{Block, Database, Scheme};
+use crate::types::{Block, Database};
 use commonware_consensus::{
-    Heightable as _,
-    simplex::{marshal::ancestry::Ancestry, types::Context},
-    types::Height,
+    Heightable as _, ancestry::Ancestry, simplex::types::Context, types::Height,
 };
 use commonware_cryptography::{
     Digestible as _, bls12381::primitives::variant::MinSig, ed25519, sha256,
@@ -52,7 +50,6 @@ impl<E> Application<E> for App
 where
     E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler,
 {
-    type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = Database<E>;

@@ -18,13 +18,13 @@ use commonware_broadcast::buffered;
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
+    ancestry::Ancestry,
     simplex::{
         self,
         config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
         marshal::{
             self,
-            ancestry::Ancestry,
             core::{Actor as MarshalActor, CommitmentFallback},
             resolver::p2p as marshal_resolver,
             standard::{Deferred, Standard},
@@ -283,7 +283,6 @@ impl App {
 }
 
 impl<E: Rng + Spawner + StorageContext> Application<E> for App {
-    type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = MultiDatabaseSet<E>;

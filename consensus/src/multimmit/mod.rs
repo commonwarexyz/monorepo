@@ -105,7 +105,10 @@
 //!   evidence, and the mapping from the paper to the code.
 //! - [`marshal`]: ordering, block custody, and delivery.
 //! - [`scheme`]: the aggregate and threshold signatures behind votes and certificates.
+//! - [`checkpoint`]: certificates over checkpoints of an execution of the finalized stream, from
+//!   the committee's own threshold key.
 
+pub mod checkpoint;
 pub mod config;
 #[cfg(any(test, feature = "mocks"))]
 pub(crate) mod fuzz;
