@@ -2099,6 +2099,39 @@ mod tests {
     }
 
     #[test_async]
+    async fn higher_notarization_does_not_complete_backfill_delivery() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+
+            // A peer may answer a background fetch above our floor with its own
+            // higher floor. That covers nothing at the requested view, so the
+            // fetch stays open.
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(6));
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: View::new(4),
+                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
+                        .encode(),
+                    asks: non_empty_vec![Ask::backfill()],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Ambiguous);
+        });
+    }
+
+    #[test_async]
     async fn already_certified_notarization_response_accepted() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
