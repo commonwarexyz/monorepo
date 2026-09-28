@@ -10,7 +10,8 @@ use super::{
 };
 use crate::{
     Blob as _, IoBufMut, Listener as _, Metrics as _, Network as _, Resolver as _, Runner as _,
-    Storage as _, WriteOptions, utils::extract_panic_message,
+    Sink as _, Storage as _, Stream as _, WriteOptions, network::mptcp::tests as mptcp,
+    utils::extract_panic_message,
 };
 use futures::{
     FutureExt,
@@ -23,7 +24,7 @@ use std::{
     fs::{self, File},
     future::{Pending, Ready},
     io::{self, Write as _},
-    os::unix::net::UnixStream,
+    os::{fd::AsFd as _, unix::net::UnixStream},
     panic::panic_any,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -240,6 +241,33 @@ fn forbid_park() -> ParkGuard {
 /// Fail at the idle boundary if this test root still requires runnable work.
 pub fn before_park() {
     assert!(!FORBID_PARK.get(), "callback work reached the idle path");
+}
+
+#[test]
+fn test_mptcp_config() {
+    assert!(!config().mptcp());
+    for enabled in [false, true] {
+        let cfg = config().with_mptcp(enabled);
+        assert_eq!(cfg.mptcp(), enabled);
+        Runner::new(cfg).start(|context| async move {
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let (mut sink, mut stream) =
+                context.dial(listener.local_addr().unwrap()).await.unwrap();
+            let (_, mut accepted_sink, mut accepted_stream) = listener.accept().await.unwrap();
+
+            // Dialed and accepted sockets use MPTCP only when configured and supported.
+            let negotiated = enabled && mptcp::supported().is_ok();
+            assert_eq!(mptcp::token(sink.as_fd()).is_some(), negotiated);
+            assert_eq!(mptcp::token(accepted_sink.as_fd()).is_some(), negotiated);
+            sink.send(b"ping".as_slice()).await.unwrap();
+            assert_eq!(accepted_stream.recv(4).await.unwrap().coalesce(), b"ping");
+            accepted_sink.send(b"pong".as_slice()).await.unwrap();
+            assert_eq!(stream.recv(4).await.unwrap().coalesce(), b"pong");
+        });
+    }
 }
 
 #[test]

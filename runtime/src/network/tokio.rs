@@ -1,14 +1,45 @@
 use crate::{BufferPool, Error, IoBufs};
-use std::{net::SocketAddr, time::Duration};
+use std::{io, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::{
-        TcpListener, TcpStream,
+        TcpListener, TcpSocket,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     time::timeout,
 };
 use tracing::warn;
+
+/// Listen backlog used by [TcpListener::bind].
+const BACKLOG: u32 = 128;
+
+cfg_if::cfg_if! {
+    if #[cfg(target_os = "linux")] {
+        use crate::network::mptcp;
+
+        /// Create a socket for `address`, requesting MPTCP if `mptcp` is set.
+        fn new_socket(address: SocketAddr, mptcp: bool) -> io::Result<TcpSocket> {
+            Ok(TcpSocket::from_std_stream(mptcp::socket(address, mptcp)?.into()))
+        }
+    } else {
+        /// Create a TCP socket for `address`. MPTCP is only requested on Linux.
+        fn new_socket(address: SocketAddr, _: bool) -> io::Result<TcpSocket> {
+            if address.is_ipv4() {
+                TcpSocket::new_v4()
+            } else {
+                TcpSocket::new_v6()
+            }
+        }
+    }
+}
+
+/// Bind a listener to `address` with the address reuse and backlog of [TcpListener::bind].
+fn listen(address: SocketAddr, mptcp: bool) -> io::Result<TcpListener> {
+    let socket = new_socket(address, mptcp)?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(address)?;
+    socket.listen(BACKLOG)
+}
 
 /// Implementation of [crate::Sink] for the [tokio] runtime.
 pub struct Sink {
@@ -213,6 +244,11 @@ pub struct Config {
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
     zero_linger: bool,
+    /// Whether to request Multipath TCP (MPTCP) for dialed and listening sockets.
+    ///
+    /// Only Linux requests MPTCP. Socket creation uses TCP when the kernel reports
+    /// MPTCP as unsupported or disabled.
+    mptcp: bool,
     /// Timeout for establishing an outbound TCP connection.
     ///
     /// If the timeout expires, `Network::dial` returns [`Error::Timeout`].
@@ -250,6 +286,11 @@ impl Config {
         self
     }
     /// See [Config]
+    pub const fn with_mptcp(mut self, mptcp: bool) -> Self {
+        self.mptcp = mptcp;
+        self
+    }
+    /// See [Config]
     pub const fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
         self.connect_timeout = connect_timeout;
         self
@@ -280,6 +321,10 @@ impl Config {
         self.zero_linger
     }
     /// See [Config]
+    pub const fn mptcp(&self) -> bool {
+        self.mptcp
+    }
+    /// See [Config]
     pub const fn connect_timeout(&self) -> Duration {
         self.connect_timeout
     }
@@ -302,6 +347,7 @@ impl Default for Config {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
+            mptcp: false,
             connect_timeout: Duration::from_secs(10),
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(60),
@@ -328,8 +374,7 @@ impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, crate::Error> {
-        TcpListener::bind(socket)
-            .await
+        listen(socket, self.cfg.mptcp)
             .map_err(|_| Error::BindFailed)
             .map(|listener| Listener {
                 cfg: self.cfg.clone(),
@@ -343,7 +388,8 @@ impl crate::Network for Network {
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
         // Create a new TCP stream
-        let stream = timeout(self.cfg.connect_timeout, TcpStream::connect(socket))
+        let connect = async { new_socket(socket, self.cfg.mptcp)?.connect(socket).await };
+        let stream = timeout(self.cfg.connect_timeout, connect)
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::ConnectionFailed)?;
@@ -389,24 +435,70 @@ mod tests {
         telemetry::metrics::Registry,
         tokio::Runner,
     };
+    #[cfg(target_os = "linux")]
+    use crate::{Supervisor as _, network::mptcp::tests as mptcp};
     use commonware_macros::test_group;
+    use rstest::rstest;
+    #[cfg(target_os = "linux")]
+    use std::os::fd::{AsFd, BorrowedFd};
     use std::time::{Duration, Instant};
+
+    #[cfg(target_os = "linux")]
+    impl AsFd for super::Sink {
+        fn as_fd(&self) -> BorrowedFd<'_> {
+            self.sink.as_ref().as_fd()
+        }
+    }
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
         BufferPool::new(BufferPoolConfig::for_network(), &mut registry)
     }
 
+    /// Construct a network with the given MPTCP setting and read/write timeout.
+    fn test_network(mptcp: bool, timeout: Duration) -> TokioNetwork::Network {
+        TokioNetwork::Network::new(
+            TokioNetwork::Config::default()
+                .with_read_timeout(timeout)
+                .with_write_timeout(timeout)
+                .with_mptcp(mptcp),
+            test_pool(),
+        )
+    }
+
+    #[rstest]
     #[test]
-    fn test_trait() {
+    fn test_trait(#[values(false, true)] mptcp: bool) {
+        // Linux negotiates MPTCP when requested and supported. Other platforms use TCP.
         Runner::default().start(|context| async move {
-            tests::test_network_trait(context, || {
-                TokioNetwork::Network::new(
-                    TokioNetwork::Config::default()
-                        .with_read_timeout(Duration::from_secs(15))
-                        .with_write_timeout(Duration::from_secs(15)),
-                    test_pool(),
-                )
+            tests::test_network_trait(context, || test_network(mptcp, Duration::from_secs(15)))
+                .await;
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[rstest]
+    #[test]
+    fn test_connect_timeout(#[values(false, true)] mptcp: bool) {
+        Runner::default().start(|context| async move {
+            let connect_timeout = Duration::from_millis(100);
+            let network = TokioNetwork::Network::new(
+                TokioNetwork::Config::default()
+                    .with_connect_timeout(connect_timeout)
+                    .with_mptcp(mptcp),
+                test_pool(),
+            );
+
+            tests::test_network_connect_timeout(context, network, connect_timeout).await;
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_mptcp_interop() {
+        Runner::default().start(|context| async move {
+            tests::test_network_mptcp_interop(context, |mptcp| {
+                test_network(mptcp, Duration::from_secs(15))
             })
             .await;
         });
@@ -414,15 +506,35 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_connect_timeout() {
-        Runner::default().start(|context| async move {
-            let connect_timeout = Duration::from_millis(100);
-            let network = TokioNetwork::Network::new(
-                TokioNetwork::Config::default().with_connect_timeout(connect_timeout),
-                test_pool(),
-            );
+    fn test_mptcp_fallback() {
+        mptcp::namespaced(concat!(module_path!(), "::test_mptcp_fallback"), || {
+            let netns = mptcp::Netns::new();
+            netns.set_mptcp_enabled(false);
+            let _entered = netns.enter();
+            Runner::default().start(|context| async move {
+                let network = || test_network(true, Duration::from_secs(15));
+                tests::test_network_mptcp_fallback(context.child("fallback"), network()).await;
+                tests::test_network_trait(context, network).await;
+            });
+        });
+    }
 
-            tests::test_network_connect_timeout(context, network, connect_timeout).await;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_mptcp_multipath() {
+        mptcp::namespaced(concat!(module_path!(), "::test_mptcp_multipath"), || {
+            for ipv6 in [false, true] {
+                if ipv6 && !mptcp::ipv6() {
+                    mptcp::skip("test_mptcp_multipath", "IPv6 unavailable");
+                    continue;
+                }
+                let paths = mptcp::Paths::new(ipv6);
+                let _entered = paths.client.enter();
+                Runner::default().start(|context| async move {
+                    let network = test_network(true, Duration::from_secs(30));
+                    tests::test_network_mptcp_multipath(context, network, &paths).await;
+                });
+            }
         });
     }
 
@@ -485,14 +597,16 @@ mod tests {
         assert!(elapsed < read_timeout);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_read_timeout_with_partial_data() {
+    async fn test_read_timeout_with_partial_data(#[values(false, true)] mptcp: bool) {
         // Use a short read timeout to make the test fast
         let read_timeout = Duration::from_millis(100);
         let network = TokioNetwork::Network::new(
             TokioNetwork::Config::default()
                 .with_read_timeout(read_timeout)
-                .with_write_timeout(Duration::from_secs(5)),
+                .with_write_timeout(Duration::from_secs(5))
+                .with_mptcp(mptcp),
             test_pool(),
         );
 

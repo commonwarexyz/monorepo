@@ -33,10 +33,12 @@ use crate::{
         request::{ConnectRequest, PollRequest, RecvRequest, Request, RequestOutput, SendRequest},
         sockaddr::SockAddr,
     },
+    network::mptcp,
 };
 use std::{
+    io,
     net::{SocketAddr, TcpListener},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -44,6 +46,9 @@ use tracing::warn;
 
 /// Default read buffer size (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Listen backlog used by [TcpListener::bind].
+const BACKLOG: libc::c_int = 128;
 
 /// Configuration for the io_uring network backend.
 #[derive(Clone, Debug)]
@@ -58,6 +63,11 @@ pub struct Config {
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
     pub zero_linger: bool,
+    /// Whether to request Multipath TCP (MPTCP) for dialed and listening sockets.
+    ///
+    /// Socket creation uses TCP when the kernel reports MPTCP as unsupported or
+    /// disabled.
+    pub mptcp: bool,
     /// Timeout for establishing an outbound TCP connection.
     ///
     /// If the timeout expires, `Network::dial` returns [`Error::Timeout`].
@@ -80,6 +90,7 @@ impl Default for Config {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
+            mptcp: false,
             connect_timeout: Duration::from_secs(10),
             read_write_timeout: Duration::from_secs(60),
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
@@ -95,6 +106,8 @@ pub struct Network {
     tcp_nodelay: Option<bool>,
     /// Whether to set `SO_LINGER` to zero on the socket.
     zero_linger: bool,
+    /// Whether to request MPTCP for dialed and listening sockets.
+    mptcp: bool,
     /// Timeout for establishing an outbound TCP connection.
     connect_timeout: Duration,
     /// Timeout budget applied to each send/recv call.
@@ -111,6 +124,7 @@ impl Network {
         Self {
             tcp_nodelay: cfg.tcp_nodelay,
             zero_linger: cfg.zero_linger,
+            mptcp: cfg.mptcp,
             connect_timeout: cfg.connect_timeout,
             read_write_timeout: cfg.read_write_timeout,
             read_buffer_size: cfg.read_buffer_size,
@@ -162,14 +176,48 @@ fn configure_socket(fd: &OwnedFd, tcp_nodelay: Option<bool>, zero_linger: bool) 
     }
 }
 
+/// Bind a nonblocking listener to `address` with the address reuse and backlog
+/// of [TcpListener::bind], requesting MPTCP if `mptcp` is set.
+fn listen(address: SocketAddr, mptcp: bool) -> io::Result<TcpListener> {
+    let fd = mptcp::socket(address, mptcp)?;
+    let reuse: libc::c_int = 1;
+
+    // SAFETY: `fd` owns the live socket throughout this call. The kernel reads
+    // exactly one initialized integer from `reuse` before setsockopt returns.
+    if unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_REUSEADDR,
+            std::ptr::from_ref(&reuse).cast(),
+            size_of_val(&reuse) as libc::socklen_t,
+        )
+    } == -1
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    let address = SockAddr::from(address);
+    let (raw, len) = address.as_raw();
+
+    // SAFETY: `fd` owns the live socket, and `address` stays alive and unmoved
+    // while bind reads `len` bytes from `raw`.
+    if unsafe { libc::bind(fd.as_raw_fd(), raw, len) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: `fd` owns the live, bound socket throughout this call.
+    if unsafe { libc::listen(fd.as_raw_fd(), BACKLOG) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(TcpListener::from(fd))
+}
+
 impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        let listener = TcpListener::bind(socket).map_err(|_| Error::BindFailed)?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|_| Error::BindFailed)?;
+        let listener = listen(socket, self.mptcp).map_err(|_| Error::BindFailed)?;
 
         Ok(Listener {
             tcp_nodelay: self.tcp_nodelay,
@@ -187,28 +235,7 @@ impl crate::Network for Network {
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
         // Include socket creation and time waiting for staging in the timeout.
         let deadline = Instant::now() + self.connect_timeout;
-        let family = if socket.is_ipv4() {
-            libc::AF_INET
-        } else {
-            libc::AF_INET6
-        };
-
-        // SAFETY: socket takes only integer flags and returns a fresh descriptor
-        // or -1. The successful descriptor is immediately placed in one owner.
-        let raw = unsafe {
-            libc::socket(
-                family,
-                libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-                0,
-            )
-        };
-        if raw < 0 {
-            return Err(Error::ConnectionFailed);
-        }
-
-        // SAFETY: `raw` is the unique successful result of socket above and has
-        // not been closed or placed in another owning descriptor.
-        let fd = Arc::new(unsafe { OwnedFd::from_raw_fd(raw) });
+        let fd = Arc::new(mptcp::socket(socket, self.mptcp).map_err(|_| Error::ConnectionFailed)?);
         let output = Operation::register(Request::Connect(ConnectRequest {
             fd: fd.clone(),
             address: Box::new(SockAddr::from(socket)),
@@ -569,16 +596,17 @@ mod tests {
     use crate::{
         BufferPool, BufferPoolConfig, Clock as _, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
         Network as _, Runner as _, Sink as _, Spawner as _, Stream as _, Supervisor as _, iouring,
-        network::tests,
+        network::{mptcp::tests as mptcp, tests},
         telemetry::metrics::{Register, Registry},
     };
     use commonware_macros::{select, test_group};
     use futures::FutureExt as _;
+    use rstest::rstest;
     use std::{
         io::{Read, Write},
         net::TcpStream,
         os::{
-            fd::{AsRawFd, OwnedFd},
+            fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
             unix::net::UnixStream,
         },
         pin::pin,
@@ -589,6 +617,12 @@ mod tests {
         task::{Context, Poll, Wake, Waker},
         time::{Duration, Instant},
     };
+
+    impl AsFd for Sink {
+        fn as_fd(&self) -> BorrowedFd<'_> {
+            self.fd.as_fd()
+        }
+    }
 
     #[derive(Default)]
     struct Notify(AtomicBool);
@@ -716,30 +750,81 @@ mod tests {
         drop(peer);
     }
 
+    /// Construct a network with the given MPTCP setting and read/write timeout.
+    fn test_mptcp_network(mptcp: bool, read_write_timeout: Duration) -> Network {
+        test_network(Config {
+            mptcp,
+            read_write_timeout,
+            ..Default::default()
+        })
+    }
+
+    #[rstest]
     #[test]
-    fn test_trait() {
+    fn test_trait(#[values(false, true)] mptcp: bool) {
         iouring::Runner::default().start(|context| async move {
             // Verify the io_uring backend satisfies the shared network trait suite.
             tests::test_network_trait(context, || {
-                test_network(Config {
-                    read_write_timeout: Duration::from_secs(15),
-                    ..Default::default()
-                })
+                test_mptcp_network(mptcp, Duration::from_secs(15))
+            })
+            .await;
+        });
+    }
+
+    #[rstest]
+    #[test]
+    fn test_connect_timeout(#[values(false, true)] mptcp: bool) {
+        iouring::Runner::default().start(|context| async move {
+            let connect_timeout = Duration::from_millis(100);
+            let network = test_network(Config {
+                mptcp,
+                connect_timeout,
+                ..Default::default()
+            });
+
+            tests::test_network_connect_timeout(context, network, connect_timeout).await;
+        });
+    }
+
+    #[test]
+    fn test_mptcp_interop() {
+        iouring::Runner::default().start(|context| async move {
+            tests::test_network_mptcp_interop(context, |mptcp| {
+                test_mptcp_network(mptcp, Duration::from_secs(15))
             })
             .await;
         });
     }
 
     #[test]
-    fn test_connect_timeout() {
-        iouring::Runner::default().start(|context| async move {
-            let connect_timeout = Duration::from_millis(100);
-            let network = test_network(Config {
-                connect_timeout,
-                ..Default::default()
+    fn test_mptcp_fallback() {
+        mptcp::namespaced(concat!(module_path!(), "::test_mptcp_fallback"), || {
+            let netns = mptcp::Netns::new();
+            netns.set_mptcp_enabled(false);
+            let _entered = netns.enter();
+            iouring::Runner::default().start(|context| async move {
+                let network = || test_mptcp_network(true, Duration::from_secs(15));
+                tests::test_network_mptcp_fallback(context.child("fallback"), network()).await;
+                tests::test_network_trait(context, network).await;
             });
+        });
+    }
 
-            tests::test_network_connect_timeout(context, network, connect_timeout).await;
+    #[test]
+    fn test_mptcp_multipath() {
+        mptcp::namespaced(concat!(module_path!(), "::test_mptcp_multipath"), || {
+            for ipv6 in [false, true] {
+                if ipv6 && !mptcp::ipv6() {
+                    mptcp::skip("test_mptcp_multipath", "IPv6 unavailable");
+                    continue;
+                }
+                let paths = mptcp::Paths::new(ipv6);
+                let _entered = paths.client.enter();
+                iouring::Runner::default().start(|context| async move {
+                    let network = test_mptcp_network(true, Duration::from_secs(30));
+                    tests::test_network_mptcp_multipath(context, network, &paths).await;
+                });
+            }
         });
     }
 
@@ -757,14 +842,12 @@ mod tests {
         });
     }
 
+    #[rstest]
     #[test]
-    fn test_read_timeout_with_partial_data() {
+    fn test_read_timeout_with_partial_data(#[values(false, true)] mptcp: bool) {
         iouring::Runner::default().start(|context| async move {
             let op_timeout = Duration::from_millis(100);
-            let network = test_network(Config {
-                read_write_timeout: op_timeout,
-                ..Default::default()
-            });
+            let network = test_mptcp_network(mptcp, op_timeout);
 
             let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
             let addr = listener.local_addr().unwrap();
@@ -1022,15 +1105,17 @@ mod tests {
         });
     }
 
+    #[rstest]
     #[test]
-    fn test_socket_options_on_accept_and_dial() {
-        iouring::Runner::default().start(|_| async {
+    fn test_socket_options_on_accept_and_dial(#[values(false, true)] mptcp: bool) {
+        iouring::Runner::default().start(|_| async move {
             for (tcp_nodelay, zero_linger) in
                 [(Some(true), true), (Some(false), false), (None, false)]
             {
                 let network = test_network(Config {
                     tcp_nodelay,
                     zero_linger,
+                    mptcp,
                     ..Default::default()
                 });
                 let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();

@@ -14,6 +14,66 @@
 //! `Runner` trait and drives execution of a runtime. The `Context` implements any number of the
 //! other traits to provide core functionality.
 //!
+//! # Multipath TCP
+//!
+//! The `tokio` and `iouring` runtimes can request Linux Multipath TCP (MPTCP) for
+//! dialed and listening sockets (disabled by default). Each connection remains one
+//! ordered byte stream behind the same [Network], [Listener], [Sink], and [Stream]
+//! interfaces, while the kernel schedules bytes across subflows and reassembles
+//! them. MPTCP does not remove head-of-line blocking between messages, and
+//! subflows that share a NIC or uplink share its capacity.
+//!
+//! The setting is best effort. Other platforms use TCP. On Linux, socket creation
+//! falls back to TCP only when the kernel reports MPTCP as unsupported or disabled
+//! (`EPROTONOSUPPORT`, `ENOPROTOOPT`, or `EINVAL`), and returns other errors such
+//! as permission, resource, or bind failures. When a peer or middlebox does not
+//! support MPTCP, the kernel continues the connection as TCP.
+//!
+//! Requesting MPTCP does not add subflows on its own. The host path manager
+//! decides which addresses and ports are used, within per-connection limits (at
+//! most 8 subflows and 8 accepted address announcements with the in-kernel path
+//! manager). For example, to let a connection to port 5000 add one subflow to an
+//! extra port announced by the listening host:
+//!
+//! ```text
+//! # Both hosts:
+//! sysctl -w net.mptcp.enabled=1
+//! ip mptcp limits set subflows 1 add_addr_accepted 1
+//!
+//! # Listening host:
+//! ip mptcp endpoint add 192.0.2.20 dev eth0 id 1 port 5001 signal
+//! ```
+//!
+//! A `signal` endpoint is announced to peers, and a `subflow` endpoint is used to
+//! open subflows from the local host. Each additional path needs its own route
+//! (for example, source-based policy routing for a second interface). Firewalls,
+//! NAT, and load balancers must permit the additional addresses and ports and
+//! forward MPTCP TCP options, or connections stay on their initial subflow or fall
+//! back to TCP. Inspect connections with `ss -Mani` and subflows with `ss -tani`.
+//!
+//! With MPTCP negotiated, a connection's traffic is not confined to the dialed or
+//! bound address:
+//!
+//! - The address returned by [Listener::accept] identifies only the initial
+//!   subflow. Checks keyed on it (such as private-address filtering, registered
+//!   address checks, and per-IP rate limits) do not apply to subflows joined later
+//!   from other peer addresses, and joined subflows are never surfaced to the
+//!   application.
+//! - A nonzero `add_addr_accepted` limit lets a peer direct the local host to open
+//!   subflows to addresses and ports the peer announces, which may include private
+//!   destinations. Keep it at 0 unless egress is restricted to trusted destinations.
+//! - A `signal` endpoint with a port accepts subflows on a port the application
+//!   never bound, and joined subflows bypass the listener's accept queue.
+//!
+//! Host configuration therefore owns which additional addresses and ports a
+//! connection may use.
+//!
+//! Zero linger (enabled by default) resets MPTCP connections on close only with
+//! Linux 7.1 or a stable kernel carrying the same fix. Older kernels close them
+//! gracefully, so the peer's sends can keep succeeding until the closing host's
+//! `net.mptcp.close_timeout` (60 seconds by default) expires. Closing with unread
+//! data resets the connection on all MPTCP kernels, as it does with TCP.
+//!
 //! # Status
 //!
 //! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.

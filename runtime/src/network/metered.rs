@@ -60,6 +60,13 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+impl<S: crate::Sink + std::os::fd::AsFd> std::os::fd::AsFd for Sink<S> {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.inner.as_fd()
+    }
+}
+
 /// Receives from the `inner` stream and tracks metrics for it.
 pub struct Stream<S: crate::Stream> {
     inner: S,
