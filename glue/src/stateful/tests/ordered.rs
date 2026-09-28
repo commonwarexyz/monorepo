@@ -53,7 +53,13 @@ use commonware_utils::{
 use futures::{FutureExt as _, StreamExt as _};
 use std::{convert::Infallible, future, num::NonZeroUsize, sync::Arc, time::Duration};
 
-type Databases = SingleDatabaseSet<deterministic::Context>;
+pub(super) type Databases = SingleDatabaseSet<deterministic::Context>;
+
+/// The sync targets of [`Databases`].
+pub(super) type Targets = <Databases as DatabaseSet<deterministic::Context>>::SyncTargets;
+
+/// A batch of [`Databases`] before merkleization.
+pub(super) type Batches = <Databases as DatabaseSet<deterministic::Context>>::Unmerkleized;
 
 /// Key of the counter every changed block adds its input's amount to.
 fn counter_key() -> Digest {
@@ -113,8 +119,8 @@ impl Block for Input {
 
 /// An executed block, which commits to the database state after its input.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct State {
-    height: Height,
+pub(super) struct State {
+    pub(super) height: Height,
     parent: Digest,
     input: Option<Digest>,
     root: Digest,
@@ -181,6 +187,172 @@ impl Executed<Digest> for State {
     }
 }
 
+impl State {
+    /// Returns the block at height zero, which commits to the databases' initial state.
+    pub(super) fn genesis() -> Self {
+        let target = Databases::initial_sync_targets();
+        Self {
+            height: Height::zero(),
+            parent: Digest::EMPTY,
+            input: None,
+            root: target.root,
+            range: target.range,
+        }
+    }
+
+    /// Returns the sync targets the block commits to.
+    pub(super) fn targets(&self) -> Targets {
+        Target::new(self.root, self.range.clone())
+    }
+}
+
+/// Executes an input worth `amount` on top of `parent`: adds it to the counter in `batches`, or
+/// leaves state unchanged for an input worth zero, which is invalid in every context.
+pub(super) async fn add<A>(
+    parent: &State,
+    context: Context<Digest>,
+    amount: u64,
+    mut batches: Batches,
+) -> Execution<A, deterministic::Context>
+where
+    A: Application<deterministic::Context, Block = State, Databases = Databases>,
+{
+    if amount == 0 {
+        return Execution::Unchanged {
+            block: State {
+                height: context.height,
+                parent: parent.digest(),
+                input: Some(context.input),
+                root: parent.root,
+                range: parent.range.clone(),
+            },
+        };
+    }
+    let counter = batches
+        .get(&counter_key())
+        .await
+        .expect("counter is readable")
+        .map_or(0, |value| digest_to_u64(&value));
+    batches = batches.write(counter_key(), Some(u64_to_digest(counter + amount)));
+    let merkleized = batches.merkleize().await.expect("batches merkleize");
+    let bounds = merkleized.bounds();
+    Execution::Changed {
+        block: State {
+            height: context.height,
+            parent: parent.digest(),
+            input: Some(context.input),
+            root: merkleized.root(),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+        },
+        merkleized,
+    }
+}
+
+/// What an input adds to the counter.
+pub(super) trait Worth {
+    /// Returns the amount the input adds.
+    fn worth(&self) -> u64;
+}
+
+/// Adds each ordered input's worth to the counter, rejecting inputs worth a multiple of seven.
+pub(super) struct Tally<I> {
+    /// The first input executed.
+    pub(super) first: Arc<Mutex<Option<Arc<I>>>>,
+    /// Heights of every applied block, in order.
+    pub(super) applied: Arc<Mutex<Vec<u64>>>,
+}
+
+impl<I> Clone for Tally<I> {
+    fn clone(&self) -> Self {
+        Self {
+            first: Arc::clone(&self.first),
+            applied: Arc::clone(&self.applied),
+        }
+    }
+}
+
+impl<I> Default for Tally<I> {
+    fn default() -> Self {
+        Self {
+            first: Arc::default(),
+            applied: Arc::default(),
+        }
+    }
+}
+
+impl<I> Tally<I> {
+    /// Returns the height of the newest applied block.
+    pub(super) fn applied(&self) -> u64 {
+        self.applied.lock().last().copied().unwrap_or(0)
+    }
+}
+
+impl<I: Block<Digest = Digest> + Worth> Application<deterministic::Context> for Tally<I> {
+    type Input = I;
+    type Block = State;
+    type Databases = Databases;
+    type Captured = ();
+
+    fn sync_targets(block: &State) -> Targets {
+        block.targets()
+    }
+
+    async fn genesis(&mut self) -> State {
+        State::genesis()
+    }
+
+    async fn execute(
+        &mut self,
+        (_, context): (deterministic::Context, Context<Digest>),
+        ancestry: impl Ancestry<State>,
+        input: Arc<I>,
+        batches: Batches,
+    ) -> Execution<Self, deterministic::Context> {
+        self.first.lock().get_or_insert_with(|| Arc::clone(&input));
+        let parent = Box::pin(ancestry)
+            .next()
+            .await
+            .expect("ancestry starts at the parent");
+        let worth = input.worth();
+        let amount = if worth.is_multiple_of(7) { 0 } else { worth };
+        add::<Self>(&parent, context, amount, batches).await
+    }
+
+    async fn capture(
+        &mut self,
+        _: deterministic::Context,
+        _: &State,
+        _: &<Databases as DatabaseSet<deterministic::Context>>::Merkleized,
+        _: <Databases as DatabaseSet<deterministic::Context>>::Readers,
+    ) {
+    }
+
+    async fn finalized(
+        &mut self,
+        _: deterministic::Context,
+        block: &State,
+        (): (),
+        _: <Databases as DatabaseSet<deterministic::Context>>::Readers,
+    ) {
+        self.applied.lock().push(block.height.get());
+    }
+}
+
+/// Waits until every tally applied a block at or above `height`.
+pub(super) async fn until_applied<'a, I: 'a>(
+    context: &deterministic::Context,
+    tallies: impl IntoIterator<Item = &'a Tally<I>> + Clone,
+    height: u64,
+) {
+    while !tallies
+        .clone()
+        .into_iter()
+        .all(|tally| tally.applied() >= height)
+    {
+        context.sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// A height whose block the application holds, and the signal that releases it.
 type Gate = Arc<Mutex<Option<(u64, oneshot::Receiver<()>)>>>;
 
@@ -208,7 +380,7 @@ impl Counter {
 }
 
 /// Reads the counter from applied state.
-async fn read_counter(databases: &Databases) -> u64 {
+pub(super) async fn read_counter(databases: &Databases) -> u64 {
     databases
         .read()
         .await
@@ -224,21 +396,12 @@ impl Application<deterministic::Context> for Counter {
     type Databases = Databases;
     type Captured = u64;
 
-    fn sync_targets(
-        block: &State,
-    ) -> <Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-        Target::new(block.root, block.range.clone())
+    fn sync_targets(block: &State) -> Targets {
+        block.targets()
     }
 
     async fn genesis(&mut self) -> State {
-        let target = <Databases as DatabaseSet<deterministic::Context>>::initial_sync_targets();
-        State {
-            height: Height::zero(),
-            parent: Digest::EMPTY,
-            input: None,
-            root: target.root,
-            range: target.range,
-        }
+        State::genesis()
     }
 
     async fn execute(
@@ -246,47 +409,20 @@ impl Application<deterministic::Context> for Counter {
         (_, context): (deterministic::Context, Context<Digest>),
         ancestry: impl Ancestry<State>,
         input: Arc<Input>,
-        mut batches: <Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        batches: Batches,
     ) -> Execution<Self, deterministic::Context> {
         self.executed.lock().push(context.height.get());
         let parent = Box::pin(ancestry)
             .next()
             .await
             .expect("ancestry starts at the parent");
-        if input.amount == 0 {
-            return Execution::Unchanged {
-                block: State {
-                    height: context.height,
-                    parent: parent.digest(),
-                    input: Some(context.input),
-                    root: parent.root,
-                    range: parent.range.clone(),
-                },
-            };
+        let mut execution = add::<Self>(&parent, context, input.amount, batches).await;
+        if let Execution::Changed { block, .. } = &mut execution
+            && self.lie
+        {
+            block.root = Digest::EMPTY;
         }
-        let counter = batches
-            .get(&counter_key())
-            .await
-            .expect("counter is readable")
-            .map_or(0, |value| digest_to_u64(&value));
-        batches = batches.write(counter_key(), Some(u64_to_digest(counter + input.amount)));
-        let merkleized = batches.merkleize().await.expect("batches merkleize");
-        let bounds = merkleized.bounds();
-        let root = if self.lie {
-            Digest::EMPTY
-        } else {
-            merkleized.root()
-        };
-        Execution::Changed {
-            block: State {
-                height: context.height,
-                parent: parent.digest(),
-                input: Some(context.input),
-                root,
-                range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
-            },
-            merkleized,
-        }
+        execution
     }
 
     async fn capture(

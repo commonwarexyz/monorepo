@@ -50,11 +50,13 @@
 //! reaches becomes the base: the executor archives it as applied, acknowledges every input at or
 //! below it without executing them, and executes the inputs after it.
 //!
-//! Marshal must resume the stream at or below the first target so that no input after the base is
-//! missing: install marshal's floor before offering the first target, and not again, even after a
-//! restart that resumes the sync. Marshal's jump to the installed floor may reach the executor
-//! after the first target; the inputs held from the earlier floor are then acknowledged and
-//! dropped.
+//! [`probe`] finds the newest certified block, and floors to resume marshal from, among the
+//! validators, and [`probe::join`] installs a floor and keeps offering newer blocks while the sync
+//! runs. Marshal must resume the stream at or below the first target so that no input after the
+//! base is missing: install marshal's floor before offering the first target, and not again, even
+//! after a restart that resumes the sync. Marshal's jump to the installed floor may reach the
+//! executor after the first target; the inputs held from the earlier floor are then acknowledged
+//! and dropped.
 //!
 //! Inputs keep arriving while the sync runs. Those at or below the first target, or at or below an
 //! update the application [recorded](Update::recorded), are acknowledged at once, because the base
@@ -81,6 +83,7 @@ mod checkpoints;
 pub use checkpoints::Checkpoints;
 mod mailbox;
 pub use mailbox::{Inbox, Mailbox, Stopped};
+pub mod probe;
 mod store;
 pub use store::StoreConfig;
 

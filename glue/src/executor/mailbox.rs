@@ -59,6 +59,8 @@ pub(super) enum Message<B: Digestible> {
         block: Arc<B>,
         response: oneshot::Sender<bool>,
     },
+    /// Answers whether the chain has neither a base nor a state sync target.
+    AwaitsFloor { response: oneshot::Sender<bool> },
 }
 
 /// Keeps every request in order, and drops reads whose caller left.
@@ -181,6 +183,14 @@ impl<B: Block> Mailbox<B> {
     pub async fn sync_to(&self, block: Arc<B>) -> bool {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Target { block, response });
+        receiver.await.unwrap_or(false)
+    }
+
+    /// Returns whether the chain has neither a base nor a state sync target, the only time
+    /// marshal's floor may be installed.
+    pub async fn awaits_floor(&self) -> bool {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::AwaitsFloor { response });
         receiver.await.unwrap_or(false)
     }
 }
