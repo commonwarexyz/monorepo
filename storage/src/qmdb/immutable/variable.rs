@@ -268,6 +268,11 @@ mod tests {
         test_variable_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_variable_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_variable_apply_after_ancestor_dropped => run_apply_after_ancestor_dropped, open;
+        test_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
+        test_variable_merkleize_across_prune => run_merkleize_across_prune, open;
+        test_variable_stale_fork_refuses => run_stale_fork_refuses, open;
+        test_variable_reads_ignore_inactive_operations => run_reads_ignore_inactive_operations, open;
+        test_variable_proof_refused_after_sibling_apply => run_proof_refused_after_sibling_apply, open;
         test_variable_bounded_initialization_preserves_collision_bucket =>
             run_bounded_initialization_preserves_collision_bucket, open_with_max;
         test_variable_bounded_initialization_after_reopen_repeated_key_gap =>

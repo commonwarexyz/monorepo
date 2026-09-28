@@ -385,19 +385,6 @@ pub(crate) type RetainedMerkleizeResult<F, D, U, S> = Result<
     crate::qmdb::Error<F>,
 >;
 
-/// Validate `current` against an effective database boundary and retained ancestor chain.
-fn validate_ancestor_chain<F: Family, D: Digest, U: update::Update, S: Strategy>(
-    current: Commitment<F, D>,
-    db_state: Commitment<F, D>,
-    ancestors: &[AncestorBatch<F, D, U, S>],
-) -> Result<(), crate::qmdb::Error<F>> {
-    chain::validate_batch_applicable(
-        current,
-        db_state,
-        ancestors.iter().map(|ancestor| ancestor.commitment()),
-    )
-}
-
 /// Batch-infrastructure state used during merkleization.
 ///
 /// Created by [`UnmerkleizedBatch::into_parts()`], which separates the pending mutations
@@ -791,13 +778,6 @@ where
     Operation<F, U>: Codec,
 {
     /// Validate `current` against the boundary and ancestor chain retained by this merkleizer.
-    fn validate_commitment(
-        &self,
-        current: Commitment<F, H::Digest>,
-    ) -> Result<(), crate::qmdb::Error<F>> {
-        validate_ancestor_chain(current, self.db_state, &self.ancestors)
-    }
-
     /// Returns `Some(op)` if `loc` falls in the batch or ancestor regions, and `None` when `loc` is
     /// in the committed region (`loc < db_size`).
     fn try_read_op_from_uncommitted(
@@ -1817,11 +1797,16 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let db = self
-            .on_chain(db)
-            .map_err(|_| crate::qmdb::Error::StaleBatch)?;
         let (mutations, merkleizer) = self.into_parts();
-        merkleizer.validate_commitment(db.commitment())?;
+        let db = chain::merkleizable(
+            db,
+            db.commitment(),
+            merkleizer.db_state,
+            merkleizer
+                .ancestors
+                .iter()
+                .map(|ancestor| ancestor.commitment()),
+        )?;
         Ok(Prepared {
             db,
             mutations,
@@ -2369,7 +2354,7 @@ where
             };
 
             // A key resolved via the ancestor diff must only match at its ancestor-diff
-            // location. A stale snapshot collision (the pre-parent DB snapshot still
+            // location. A stale index collision (the pre-parent DB index still
             // containing the key's old location) must contribute nothing: consuming its
             // mutation would misclassify a parent-deleted key's re-creation as an update
             // (or its redundant delete as a live delete), and feeding its next_key or
@@ -2450,7 +2435,7 @@ where
                 _ => unreachable!("expected update operation"),
             };
 
-            // Same stale-location guard as the mutation classifier above: the snapshot scan
+            // Same stale-location guard as the mutation classifier above: the index scan
             // sees only applied state, so a key the ancestor diff supersedes at another
             // location (or deletes) is stale here and must not steer the predecessor search.
             // The ancestor-diff walk below contributes the live version of such keys.
@@ -2902,9 +2887,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch
-    /// has no operations (a [`Db::to_batch`] snapshot).
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is off this batch's chain,
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
+    /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
+    /// operations (a [`Db::to_batch`] snapshot).
     pub fn proof<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -2915,6 +2901,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         db.log
             .speculative_proof(&self.journal_batch, inactive_peaks)
@@ -2933,8 +2920,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor.
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is off this batch's chain, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
+    /// dropped unapplied ancestor.
     pub fn pinned_nodes<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -2945,6 +2933,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         db.log
             .speculative_pinned_nodes(&self.journal_batch)
             .map_err(Into::into)
@@ -4598,6 +4587,55 @@ mod tests {
         });
     }
 
+    /// A batch's proof and pinned nodes are refused once a sibling is applied.
+    #[test]
+    fn proof_refused_after_sibling_apply() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("proof-sibling", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+
+            // Two siblings write the same key with different values.
+            let key = Sha256::hash(&[b"key"]);
+            let batch = db
+                .new_batch()
+                .write(key, Some(Sha256::hash(&[b"batch"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let sibling = db
+                .new_batch()
+                .write(key, Some(Sha256::hash(&[b"sibling"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            assert!(batch.proof(&db).is_ok());
+            assert!(batch.pinned_nodes(&db).is_ok());
+
+            // Applying the sibling moves the database off the batch's chain.
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+            assert!(matches!(
+                batch.proof(&db),
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            assert!(matches!(
+                batch.pinned_nodes(&db),
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Reads stay exact after the ancestor batches are dropped, because merkleization
     /// retains their diffs. Every ancestor write (including a delete) must resolve from
     /// the retained overlays instead of falling through to committed state.
@@ -6203,7 +6241,7 @@ mod tests {
             let k6 = colliding_digest(0xAA, 6);
             let k29 = colliding_digest(0xAA, 29);
 
-            // Seed both keys so the snapshot bucket contains two entries.
+            // Seed both keys so the index bucket contains two entries.
             let initial = db
                 .new_batch()
                 .write(k0, Some(colliding_digest(0xBB, 0)))
@@ -6416,7 +6454,7 @@ mod tests {
     /// Pins the stale-ancestor guard's position above the classifier's candidate pushes.
     ///
     /// The classifier resolves each mutated key's prior state by scanning its translated
-    /// bucket in the committed snapshot, and the same loop pushes each entry it examines
+    /// bucket in the committed index, and the same loop pushes each entry it examines
     /// into the next/prev candidate sets that stitch the ordered links. In this scenario the
     /// child updates a sibling that collides with a parent-deleted key, so the scan pulls
     /// the deleted key's stale committed location into the loop. Excluding that operation
@@ -6508,7 +6546,7 @@ mod tests {
     }
 
     /// While the parent's delete is pending, the deleted key's op remains in the
-    /// pre-parent snapshot, so a child write to the same bucket reads it during the
+    /// pre-parent index, so a child write to the same bucket reads it during the
     /// bucket scan. That stale op must contribute no candidates: they reorder the
     /// predecessor rewrites, so the root differs from the applied-parent path.
     #[test]

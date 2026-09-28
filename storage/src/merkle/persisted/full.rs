@@ -156,8 +156,8 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     ///
     /// Held in an [`Arc`] so [`Merkle::mem`] can hand a zero-copy, immutable view to jobs
     /// running off the calling task. Mutations go through [`Arc::make_mut`]: they are in-place
-    /// while no snapshot is alive and copy-on-write otherwise, so a snapshot never observes
-    /// later mutations.
+    /// while no view or snapshot is alive and copy-on-write otherwise, so neither observes later
+    /// mutations.
     pub(crate) mem: Arc<Mem<F, D>>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been
@@ -889,11 +889,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         f(&self.mem)
     }
 
-    /// Return a zero-copy, immutable snapshot of the committed Mem.
+    /// Return a zero-copy, immutable view of the committed Mem.
     ///
-    /// The snapshot never observes later mutations: mutators copy-on-write while a snapshot is
-    /// alive. Use this to move committed node fallback into a job running off the calling task
-    /// (see [`Merkle::mem`]); prefer [`Merkle::with_mem`] when a borrow suffices.
+    /// The view never observes later mutations: mutators copy-on-write while a view is alive.
+    /// Use this to move committed node fallback into a job running off the calling task; prefer
+    /// [`Merkle::with_mem`] when a borrow suffices.
     pub(crate) fn mem(&self) -> Arc<Mem<F, D>> {
         Arc::clone(&self.mem)
     }
@@ -910,7 +910,18 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         &self.strategy
     }
 
-    /// Capture an owned immutable [Snapshot] of the structure.
+    /// Capture an owned immutable [Snapshot] of the structure, sharing its in-memory nodes and
+    /// freezing its flushed journal.
+    ///
+    /// The snapshot keeps the structure's journal blobs open. While it is alive, an initialization that
+    /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
+    /// capture (for example by a prune) can be recreated. On filesystem-backed storage the
+    /// snapshot also holds the storage directory, so a second storage instance on that directory
+    /// waits for it to drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the journal capture fails, which consumes the structure.
     pub async fn snapshot(mut self) -> Result<(Self, Snapshot<F, E, D>), Error<F>> {
         let flushed;
         (self.journal, flushed) = self.journal.snapshot().await?;

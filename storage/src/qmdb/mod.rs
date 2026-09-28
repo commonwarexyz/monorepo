@@ -383,9 +383,12 @@ pub enum Error<F: Family> {
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
-    /// The batch was created from a different database state than the current one.
+    /// The batch cannot be merkleized or applied against the current database state: the
+    /// database moved off the batch's chain, an unapplied ancestor was dropped, or the batch
+    /// belongs to another database instance.
     ///
-    /// See [`chain`] for more details on staleness detection.
+    /// Reads report the same condition as [`Error::StaleRead`]. See [`chain`] for more details
+    /// on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
@@ -394,6 +397,13 @@ pub enum Error<F: Family> {
     /// current state.
     #[error("stale read: a non-ancestor batch was applied")]
     StaleRead,
+
+    /// A batch read asked for a location below the inactivity floor its chain commits to.
+    ///
+    /// Such locations may or may not be pruned depending on local history, so they are refused
+    /// on every node alike.
+    #[error("location below inactivity floor: {0}")]
+    BelowInactivityFloor(Location<F>),
 
     /// The batch's inactivity floor is lower than the database's current floor.
     #[error("floor regressed: batch floor {0} < current floor {1}")]

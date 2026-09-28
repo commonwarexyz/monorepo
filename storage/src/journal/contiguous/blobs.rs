@@ -313,7 +313,7 @@ impl<E: Context> Writable<E> {
         let sealed = match &self.sealed_snapshot {
             Some(sealed) => sealed.clone(),
             None => {
-                let sealed: Arc<[Sealed<E::Blob>]> = self.sealed.clone().into();
+                let sealed: Arc<[Sealed<E::Blob>]> = Arc::from(self.sealed.as_slice());
                 self.sealed_snapshot = Some(sealed.clone());
                 sealed
             }

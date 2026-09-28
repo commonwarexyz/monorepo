@@ -531,11 +531,6 @@ where
         ),
     )]
     async fn serve(&self, request: Request<F>) -> source::Result<Self> {
-        // Reject before the floor lookup so the error carries the requested size and the
-        // floor read never touches out-of-range locations.
-        if request.size() > self.size() {
-            return Err(crate::merkle::Error::RangeOutOfBounds(request.size()).into());
-        }
         let inactive_peaks = qmdb::inactive_peaks_at::<F, _>(&self.journal, request.size()).await?;
         let response = match request {
             Request::Operations {
