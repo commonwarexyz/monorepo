@@ -260,9 +260,9 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
 /// one-shot chain so participants that have not completed can catch up. Keep
 /// it running until every participant has completed.
 ///
-/// At startup, the engine asks the other participants for the final block's
-/// finalization, so a participant that fell behind catches up from peers that
-/// only serve the chain.
+/// At startup, the engine requests the final block's finalization in the
+/// background, retrying until it is available. This lets lagging participants
+/// catch up from peers that only serve the chain.
 ///
 /// A restarted engine does not run the ceremony again once this node has
 /// persisted its share or processed the final block. It reports the outcome
