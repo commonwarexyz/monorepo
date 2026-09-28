@@ -1,7 +1,7 @@
 //! The commit pipeline, delivery handoff, and delivery-cursor mirroring.
 
 use super::*;
-use crate::multimmit::marshal::OutputIndex;
+use crate::types::OutputIndex;
 
 #[test]
 fn warmed_commit_retains_every_requested_hot_body() {

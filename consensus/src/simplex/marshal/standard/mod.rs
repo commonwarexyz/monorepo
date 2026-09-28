@@ -76,13 +76,13 @@ mod tests {
     use crate::{
         Application as ConsensusApplication, Automaton, CertifiableAutomaton, Handoff, Heightable,
         Relay, Reporter, Viewable,
+        ancestry::{Ancestry, BlockProvider},
         simplex::{
             self, Plan,
             config::{ForwardPolicy, SkipBudget, SkipPolicy},
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             marshal::{
                 Identifier, Update,
-                ancestry::{Ancestry, BlockProvider},
                 application::{
                     gates::{GateOutcome, Gates},
                     relay,
@@ -2429,6 +2429,12 @@ mod tests {
     fn test_standard_get_finalization_by_height() {
         harness::get_finalization_by_height::<InlineHarness>();
         harness::get_finalization_by_height::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalization_floors() {
+        harness::finalization_floors::<InlineHarness>();
+        harness::finalization_floors::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
@@ -12558,7 +12564,6 @@ mod tests {
     impl ConsensusApplication<Runtime> for PipelineApp {
         type Block = B;
         type Context = Ctx;
-        type SigningScheme = S;
         type Input = ();
 
         async fn prepare(

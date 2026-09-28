@@ -14,10 +14,9 @@ use crate::{
     Reporter, Viewable as _,
     multimmit::{
         actors::util::ask_unreliable,
-        marshal::OutputIndex,
         types::{Activity, Artifact, BlockRef, Body, CertificateId, Lqc, TransactionBlock},
     },
-    types::View,
+    types::{OutputIndex, View},
 };
 use commonware_actor::{
     Feedback, Unreliable,

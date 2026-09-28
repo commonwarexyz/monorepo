@@ -1,11 +1,11 @@
 //! The durable delivery cursor.
 
-use crate::multimmit::marshal::{
-    OutputIndex,
-    storage::{
+use crate::{
+    multimmit::marshal::storage::{
         Error,
         record::{DurableRecord, OnMissing},
     },
+    types::OutputIndex,
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::Handle;

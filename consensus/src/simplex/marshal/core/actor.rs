@@ -895,6 +895,12 @@ where
                 let finalization = self.get_finalization_by_height(height).await;
                 response.send_lossy(finalization);
             }
+            Message::GetFinalizationAtOrBelow {
+                height, response, ..
+            } => {
+                let finalization = self.get_finalization_at_or_below(height).await;
+                response.send_lossy(finalization);
+            }
             Message::GetProcessed { response, .. } => {
                 response.send_lossy(self.floor.processed());
             }
@@ -2068,6 +2074,20 @@ where
             Ok(finalization) => finalization,
             Err(e) => panic!("failed to get finalization: {e}"),
         }
+    }
+
+    /// Get the newest finalization in the archive at or below `height`, with the height it
+    /// certifies.
+    async fn get_finalization_at_or_below(
+        &self,
+        height: Height,
+    ) -> Option<(Height, Finalization<P::Scheme, V::Commitment>)> {
+        let stored = Self::latest_finalization_height(&self.finalizations_by_height, height)?;
+        let finalization = self
+            .get_finalization_by_height(stored)
+            .await
+            .expect("finalization missing from stored range");
+        Some((stored, finalization))
     }
 
     /// Check whether a finalization exists in the archive at `height` without

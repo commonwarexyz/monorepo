@@ -56,13 +56,13 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Application, Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
+    ancestry::Ancestry,
     simplex::{
         self, Floor,
         config::{ForwardPolicy, SkipBudget, SkipPolicy},
         elector::RoundRobin,
         marshal::{
             self, Start,
-            ancestry::Ancestry,
             core::Actor as MarshalActor,
             resolver::p2p as marshal_resolver,
             standard::{Deferred, Standard},
@@ -726,7 +726,6 @@ where
     D: Directory<ed25519::PublicKey>,
     T: Strategy,
 {
-    type SigningScheme = ConsensusScheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block<V, D>;
     type Input = reshare::Input<(), V, ed25519::PrivateKey, D>;
