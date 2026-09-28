@@ -3,9 +3,12 @@
 use super::{
     actors::{catalog, promoter},
     storage::catalog::StoredRef,
-    types::{BodyValues, OutputIndex},
+    types::BodyValues,
 };
-use crate::multimmit::types::{BlockRef, Body, ChainId, TransactionBlock};
+use crate::multimmit::{
+    marshal::OutputIndex,
+    types::{BlockRef, Body, ChainId, TransactionBlock},
+};
 use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
 use std::sync::Arc;
 

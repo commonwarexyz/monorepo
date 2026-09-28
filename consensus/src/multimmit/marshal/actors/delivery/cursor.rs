@@ -1,11 +1,11 @@
 //! The durable delivery cursor.
 
 use crate::multimmit::marshal::{
+    OutputIndex,
     storage::{
         Error,
         record::{DurableRecord, OnMissing},
     },
-    types::OutputIndex,
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::Handle;
@@ -18,7 +18,7 @@ const STATE_VERSION: u8 = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CursorState {
     floor_generation: u64,
-    acknowledged: Option<OutputIndex>,
+    acknowledged: OutputIndex,
 }
 
 /// The catalog's durable recovery cut that the cursor must not exceed.
@@ -27,7 +27,7 @@ pub(crate) struct CatalogCut {
     /// Floor generation of the recovered catalog checkpoint.
     pub(crate) generation: u64,
     /// Committed output of the recovered catalog checkpoint.
-    pub(crate) committed: Option<OutputIndex>,
+    pub(crate) committed: OutputIndex,
 }
 
 /// Exclusive durable cursor state owned by the delivery actor.
@@ -82,11 +82,12 @@ impl<E: Context> DeliveryCursor<E> {
         self.state.floor_generation
     }
 
-    /// Returns the highest acknowledged output.
+    /// Returns the highest acknowledged output, or the floor's committed index if none has been
+    /// acknowledged since.
     ///
     /// The cursor advances when [`Self::start_acknowledgement`] starts its sync, so it may name an
     /// output whose acknowledgement is not yet durable.
-    pub(crate) const fn acknowledged(&self) -> Option<OutputIndex> {
+    pub(crate) const fn acknowledged(&self) -> OutputIndex {
         self.state.acknowledged
     }
 
@@ -101,12 +102,12 @@ impl<E: Context> DeliveryCursor<E> {
                 "acknowledgement generation does not match delivery generation",
             ));
         }
-        if Some(acknowledged) <= self.state.acknowledged {
+        if acknowledged <= self.state.acknowledged {
             return Err(Error::Invalid("delivery acknowledgement does not advance"));
         }
         let state = CursorState {
             floor_generation,
-            acknowledged: Some(acknowledged),
+            acknowledged,
         };
         let sync = self.record.put_start_sync(state).await?;
         self.state = state;
@@ -117,7 +118,7 @@ impl<E: Context> DeliveryCursor<E> {
     pub(crate) async fn reset(
         &mut self,
         floor_generation: u64,
-        acknowledged: Option<OutputIndex>,
+        acknowledged: OutputIndex,
     ) -> Result<(), Error> {
         if floor_generation <= self.state.floor_generation {
             return Err(Error::Invalid("delivery reset does not advance generation"));
@@ -146,7 +147,7 @@ impl Read for CursorState {
         }
         Ok(Self {
             floor_generation: u64::read(buf)?,
-            acknowledged: Option::<OutputIndex>::read(buf)?,
+            acknowledged: OutputIndex::read(buf)?,
         })
     }
 }
@@ -173,7 +174,7 @@ mod tests {
     use commonware_codec::{DecodeExt as _, Encode};
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
-    const fn cut(generation: u64, committed: Option<OutputIndex>) -> CatalogCut {
+    const fn cut(generation: u64, committed: OutputIndex) -> CatalogCut {
         CatalogCut {
             generation,
             committed,
@@ -184,7 +185,7 @@ mod tests {
     fn state_codec_is_versioned_and_canonical() {
         let state = CursorState {
             floor_generation: 7,
-            acknowledged: Some(OutputIndex::new(11)),
+            acknowledged: OutputIndex::new(11),
         };
         let encoded = state.encode();
         assert_eq!(encoded.len(), state.encode_size());
@@ -207,7 +208,7 @@ mod tests {
                 context.child("create"),
                 present.clone(),
                 OnMissing::Initialize,
-                cut(0, None),
+                cut(0, OutputIndex::zero()),
             )
             .await
             .unwrap();
@@ -217,7 +218,7 @@ mod tests {
                 context.child("present"),
                 present,
                 OnMissing::Reject,
-                cut(0, None),
+                cut(0, OutputIndex::zero()),
             )
             .await
             .unwrap();
@@ -226,7 +227,7 @@ mod tests {
                     context.child("missing"),
                     "delivery_missing".to_string(),
                     OnMissing::Reject,
-                    cut(0, None),
+                    cut(0, OutputIndex::zero()),
                 )
                 .await,
                 Err(Error::Inconsistent(_))
@@ -242,7 +243,7 @@ mod tests {
                 context.child("create"),
                 partition.clone(),
                 OnMissing::Initialize,
-                cut(3, None),
+                cut(3, OutputIndex::zero()),
             )
             .await
             .unwrap();
@@ -257,12 +258,12 @@ mod tests {
                 context.child("reopen"),
                 partition.clone(),
                 OnMissing::Reject,
-                cut(3, Some(OutputIndex::new(8))),
+                cut(3, OutputIndex::new(8)),
             )
             .await
             .unwrap();
             assert_eq!(store.floor_generation(), 3);
-            assert_eq!(store.acknowledged(), Some(OutputIndex::new(5)));
+            assert_eq!(store.acknowledged(), OutputIndex::new(5));
             drop(store);
 
             assert!(matches!(
@@ -270,7 +271,7 @@ mod tests {
                     context.child("generation_ahead"),
                     partition.clone(),
                     OnMissing::Reject,
-                    cut(2, Some(OutputIndex::new(8))),
+                    cut(2, OutputIndex::new(8)),
                 )
                 .await,
                 Err(Error::Inconsistent(_))
@@ -280,7 +281,7 @@ mod tests {
                     context.child("acknowledgement_ahead"),
                     partition,
                     OnMissing::Reject,
-                    cut(3, Some(OutputIndex::new(4))),
+                    cut(3, OutputIndex::new(4)),
                 )
                 .await,
                 Err(Error::Inconsistent(_))
@@ -296,7 +297,7 @@ mod tests {
                 context.child("create"),
                 partition.clone(),
                 OnMissing::Initialize,
-                cut(4, Some(OutputIndex::new(6))),
+                cut(4, OutputIndex::new(6)),
             )
             .await
             .unwrap();
@@ -306,24 +307,24 @@ mod tests {
                 context.child("advance"),
                 partition.clone(),
                 OnMissing::Reject,
-                cut(7, Some(OutputIndex::new(19))),
+                cut(7, OutputIndex::new(19)),
             )
             .await
             .unwrap();
             assert_eq!(store.floor_generation(), 7);
-            assert_eq!(store.acknowledged(), Some(OutputIndex::new(19)));
+            assert_eq!(store.acknowledged(), OutputIndex::new(19));
             drop(store);
 
             let store = DeliveryCursor::init(
                 context.child("reopen"),
                 partition,
                 OnMissing::Reject,
-                cut(7, Some(OutputIndex::new(19))),
+                cut(7, OutputIndex::new(19)),
             )
             .await
             .unwrap();
             assert_eq!(store.floor_generation(), 7);
-            assert_eq!(store.acknowledged(), Some(OutputIndex::new(19)));
+            assert_eq!(store.acknowledged(), OutputIndex::new(19));
         });
     }
 
@@ -334,7 +335,7 @@ mod tests {
                 context.child("store"),
                 "delivery_monotone".to_string(),
                 OnMissing::Initialize,
-                cut(2, None),
+                cut(2, OutputIndex::zero()),
             )
             .await
             .unwrap();
@@ -353,11 +354,14 @@ mod tests {
                 store.start_acknowledgement(2, OutputIndex::new(3)).await,
                 Err(Error::Invalid(_))
             ));
-            assert!(matches!(store.reset(2, None).await, Err(Error::Invalid(_))));
+            assert!(matches!(
+                store.reset(2, OutputIndex::zero()).await,
+                Err(Error::Invalid(_))
+            ));
 
-            store.reset(5, Some(OutputIndex::new(17))).await.unwrap();
+            store.reset(5, OutputIndex::new(17)).await.unwrap();
             assert_eq!(store.floor_generation(), 5);
-            assert_eq!(store.acknowledged(), Some(OutputIndex::new(17)));
+            assert_eq!(store.acknowledged(), OutputIndex::new(17));
         });
     }
 
@@ -372,9 +376,7 @@ mod tests {
             async fn commit(seed: u64) -> Vec<u8> {
                 let state = CursorState {
                     floor_generation: seed,
-                    acknowledged: seed
-                        .is_multiple_of(2)
-                        .then_some(OutputIndex::new(seed.rotate_left(17))),
+                    acknowledged: OutputIndex::new(seed.rotate_left(17)),
                 };
                 let encoded = state.encode();
                 assert_eq!(CursorState::decode(encoded.clone()).unwrap(), state);

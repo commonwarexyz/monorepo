@@ -7,6 +7,7 @@ use crate::multimmit::{
         blocks::FinalBlockMeta,
         catalog_state::{CatalogState, CommitCleanup, next_lqc_index},
         commit::Commit,
+        floors::FloorRecord,
     },
     types::Body,
 };
@@ -100,15 +101,31 @@ where
             blocks: !outputs.is_empty(),
         };
         let floor_generation = checkpoint.floor_generation();
+        // The checkpoint ends the final sweep of the last selected L-QC, so it is that L-QC's
+        // floor. Earlier L-QCs of the same commit share its view and sweep, and record none. A
+        // floor needs a finalized opening of its history, which only genesis lacks.
+        let floor = selected
+            .last()
+            .zip(plan.lqc_indices.last())
+            .zip(checkpoint.history_index())
+            .map(|((selected, &ordinal), history_index)| {
+                let record = FloorRecord::new(history_index, checkpoint.emitted_frontier().clone())
+                    .expect("a checkpoint's emitted frontier fits the output index");
+                (ordinal, selected.id, record)
+            });
         let mut lqc = self.final_lqc.take()?;
+        let mut floors = self.final_floors.take()?;
         let mut histories = self.final_history.take()?;
         let mut blocks = self.final_blocks.take()?;
-        let (lqc, histories, blocks) = futures::try_join!(
+        let ((lqc, floors), histories, blocks) = futures::try_join!(
             async move {
                 for (selected, index) in selected.into_iter().zip(plan.lqc_indices) {
                     lqc = lqc.put(index, selected.id.get(), selected.proof).await?;
                 }
-                Ok::<_, Error>(lqc)
+                if let Some((ordinal, id, record)) = floor {
+                    floors = floors.put(ordinal, id.get(), record).await?;
+                }
+                Ok::<_, Error>((lqc, floors))
             },
             async move {
                 let indices = plan.history_start.into_iter().flat_map(|start| start..);
@@ -134,6 +151,7 @@ where
             },
         )?;
         self.final_lqc.restore(lqc);
+        self.final_floors.restore(floors);
         self.final_history.restore(histories);
         self.final_blocks.restore(blocks);
         if touched.lqc {
@@ -160,18 +178,27 @@ where
     ) -> Result<Vec<Handle<()>>, Error> {
         let touched = publication.touched;
         let lqc = self.final_lqc.take()?;
+        let floors = self.final_floors.take()?;
         let histories = self.final_history.take()?;
         let blocks = self.final_blocks.take()?;
-        let ((lqc, lqc_sync), (histories, history_sync), (blocks, block_sync)) = futures::try_join!(
+        let (
+            (lqc, lqc_sync),
+            (floors, floor_sync),
+            (histories, history_sync),
+            (blocks, block_sync),
+        ) = futures::try_join!(
             start_sync_if(lqc, touched.lqc),
+            start_sync_if(floors, touched.lqc),
             start_sync_if(histories, touched.history),
             start_sync_if(blocks, touched.blocks),
         )?;
         self.final_lqc.restore(lqc);
+        self.final_floors.restore(floors);
         self.final_history.restore(histories);
         self.final_blocks.restore(blocks);
         Ok(lqc_sync
             .into_iter()
+            .chain(floor_sync)
             .chain(history_sync)
             .chain(block_sync)
             .collect())

@@ -2,7 +2,7 @@
 
 use super::batch::{DeliveryOutput, DurableBatch};
 use crate::multimmit::{
-    marshal::{storage::catalog::StoredRef, types::OutputIndex},
+    marshal::{OutputIndex, storage::catalog::StoredRef},
     types::{Body, TransactionBlock},
 };
 use commonware_cryptography::Hasher;
@@ -124,10 +124,7 @@ where
             let stored = *output.stored();
             encoded_bytes = encoded_bytes.saturating_add(stored.encoded_len);
             refs.push(stored);
-            let Some(following) = next.next() else {
-                break;
-            };
-            next = following;
+            next = next.next();
         }
         refs
     }

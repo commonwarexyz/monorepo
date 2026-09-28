@@ -65,6 +65,8 @@ where
     pub(super) subscription_callers: NonZeroUsize,
     /// Blocks the public mailbox stages, kept for the relay when one exists.
     pub(super) staged: Option<Arc<Mutex<Staged<H, B>>>>,
+    /// Most delivered outputs awaiting application acknowledgement.
+    pub(super) max_pending_acks: NonZeroUsize,
 }
 
 /// Runs routed requests as bounded jobs and coalesced subscriptions.
@@ -109,6 +111,7 @@ where
             max_jobs,
             subscription_callers,
             staged,
+            max_pending_acks,
         } = config;
         let (sender, receiver) =
             actor_mailbox::new_unreliable(context.child("mailbox"), mailbox_size);
@@ -119,6 +122,7 @@ where
             backfill.clone(),
             Arc::new(SubscriptionSlots::new(subscription_callers)),
             staged,
+            max_pending_acks,
         );
         let router = Self {
             metrics: Metrics::new(&context),
@@ -223,7 +227,8 @@ where
     /// the supervisor, so enqueue results are ignored.
     fn on_hint(&mut self, activity: Activity<V, H::Digest>) {
         match activity {
-            Activity::TransactionProposed { .. } => {}
+            // The public mailbox hands certificate records to the catalog directly.
+            Activity::TransactionProposed { .. } | Activity::CertificateRecorded { .. } => {}
             Activity::CommitmentsAccepted { commitments } => {
                 let _ = self.synchronizer.commitments(commitments);
             }
