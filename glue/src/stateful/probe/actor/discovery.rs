@@ -1,7 +1,7 @@
 use super::service::Service;
 use crate::stateful::probe::{mailbox::Message, sample::Sample, wire};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Buf, Decode, Encode, Error as CodecError, ReadExt};
+use commonware_codec::{Buf, Decode, Error as CodecError, ReadExt};
 use commonware_consensus::{
     Epochable,
     marshal::core::Variant,
@@ -18,7 +18,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, IoBuf, Metrics, Spawner};
 use commonware_utils::{
     NonZeroDuration,
     channel::{fallible::OneshotExt, oneshot},
@@ -252,7 +252,7 @@ where
         };
         sender.send(
             Recipients::Some(scheme.participants().iter().cloned().collect()),
-            wire::Message::<S, V>::Request.encode(),
+            IoBuf::encode(&wire::Message::<S, V>::Request),
             false,
         );
     }

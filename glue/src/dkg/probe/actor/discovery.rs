@@ -9,7 +9,7 @@ use crate::{
     stateful::probe::sample::Sample,
 };
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Buf, Encode as _, Error as CodecError, Read};
+use commonware_codec::{Buf, Error as CodecError, Read};
 use commonware_consensus::{
     Epochable, Heightable,
     marshal::core::Variant,
@@ -20,7 +20,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, IoBuf, Metrics, Spawner};
 use commonware_utils::{
     NonZeroDuration,
     channel::{fallible::OneshotExt as _, oneshot},
@@ -245,7 +245,7 @@ where
                     .cloned()
                     .collect(),
             ),
-            wire::Message::<S, V>::LatestRequest.encode(),
+            IoBuf::encode(&wire::Message::<S, V>::LatestRequest),
             false,
         );
     }
@@ -257,7 +257,7 @@ where
     ) {
         boundary_sender.send(
             Recipients::All,
-            wire::Message::<S, V>::BoundaryRequest(epoch).encode(),
+            IoBuf::encode(&wire::Message::<S, V>::BoundaryRequest(epoch)),
             false,
         );
     }
@@ -542,7 +542,7 @@ where
         debug!(epoch = %pending.epoch, ?commitment, "requesting boundary block");
         boundary_sender.send(
             Recipients::One(candidate.peer.clone()),
-            wire::Message::<S, V>::BlockRequest(pending.epoch).encode(),
+            IoBuf::encode(&wire::Message::<S, V>::BlockRequest(pending.epoch)),
             false,
         );
         pending.in_flight = Some(candidate);
@@ -604,7 +604,7 @@ mod tests {
     use super::*;
     use crate::dkg::tests::mocks;
     use bytes::{BufMut, Bytes};
-    use commonware_codec::{EncodeSize, Read, Write};
+    use commonware_codec::{Encode as _, EncodeSize, Read, Write};
     use commonware_coding::ReedSolomon;
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable,

@@ -26,7 +26,7 @@ use super::manager::{
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
+    Blob, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay, Writer},
 };
 use commonware_utils::{Cached, NZUsize};
@@ -364,7 +364,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         // Encode the item
         let offset = match blob.try_append_value(item) {
             Some(offset) => offset,
-            None => blob.append_owned(item.encode_mut().into()).await?,
+            None => blob.append_owned(IoBuf::encode(item)).await?,
         };
         if !offset.is_multiple_of(Self::CHUNK_SIZE_U64) {
             return Err(Error::InvalidBlobSize(section, offset));

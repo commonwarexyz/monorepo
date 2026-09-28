@@ -1,6 +1,6 @@
 use crate::stateful::probe::{mailbox::Message, sample, wire};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Encode, ReadExt as _};
+use commonware_codec::ReadExt as _;
 use commonware_consensus::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
     simplex::{scheme::Scheme, types::Finalization},
@@ -8,7 +8,7 @@ use commonware_consensus::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, IoBuf, Metrics, Spawner};
 use commonware_utils::channel::fallible::OneshotExt;
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
@@ -94,7 +94,7 @@ where
                 };
                 sender.send(
                     Recipients::One(peer),
-                    wire::Message::<S, V>::Response(finalization).encode(),
+                    IoBuf::encode(&wire::Message::<S, V>::Response(finalization)),
                     false,
                 );
             },

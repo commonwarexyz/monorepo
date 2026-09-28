@@ -1,6 +1,6 @@
 use crate::encrypted::Error;
 use commonware_codec::{
-    Encode, EncodeSize, Write,
+    EncodeSize, Write,
     varint::{Decoder, MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Buf, IoBuf, IoBufMut, IoBufs, Sink, Stream};
@@ -66,7 +66,7 @@ pub async fn send_frame<S: Sink>(
     let mut bufs = bufs.into();
 
     let frame = build_frame(bufs.len(), max_message_size, |prefix| {
-        bufs.prepend(IoBuf::from(prefix.encode()));
+        bufs.prepend(IoBuf::encode(&prefix));
         Ok(bufs)
     })?;
     sink.send(frame).await.map_err(Error::SendFailed)

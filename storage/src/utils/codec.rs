@@ -1,7 +1,28 @@
-//! Fixed-size retained bytes for checking storage decode ownership.
+//! Codec fixtures for checking storage encoding and decode ownership.
 
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Error, FixedSize, Read, Write, util::at_least};
+
+/// Claims a fixed encoded size but writes the configured number of bytes.
+pub(crate) struct MisreportedSize<const N: usize>(pub(crate) usize);
+
+impl<const N: usize> FixedSize for MisreportedSize<N> {
+    const SIZE: usize = N;
+}
+
+impl<const N: usize> Write for MisreportedSize<N> {
+    fn write(&self, buf: &mut impl BufMut) {
+        buf.put_bytes(0, self.0);
+    }
+}
+
+impl<const N: usize> Read for MisreportedSize<N> {
+    type Cfg = ();
+
+    fn read_cfg(_: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        unreachable!("misreported encodings must not be persisted");
+    }
+}
 
 /// A fixed-size byte view for checking shared decoding.
 #[derive(Clone, Debug)]

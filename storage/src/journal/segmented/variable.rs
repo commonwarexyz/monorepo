@@ -88,7 +88,7 @@ use crate::journal::{
     },
 };
 use bytes::Bytes;
-use commonware_codec::{Codec, CodecShared, Copying, Encode as _, varint::MAX_U32_VARINT_SIZE};
+use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
     Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay},
@@ -211,7 +211,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
             let blob = self.manager.get_or_create(section).await?;
             let offset = match blob.try_append_value(&frame) {
                 Some(offset) => offset,
-                None => blob.append_owned(frame.encode_mut().into()).await?,
+                None => blob.append_owned(IoBuf::encode(&frame)).await?,
             };
             (offset, frame.item_len)
         };
