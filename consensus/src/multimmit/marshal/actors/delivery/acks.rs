@@ -5,7 +5,7 @@
 //! window of unacknowledged outputs never waits on storage, and only one sync is in flight.
 
 use super::actor::Error;
-use crate::multimmit::marshal::OutputIndex;
+use crate::types::OutputIndex;
 use commonware_macros::select;
 use commonware_runtime::telemetry::metrics::histogram::Timer;
 use commonware_utils::acknowledgement::{Canceled, ExactWaiter};

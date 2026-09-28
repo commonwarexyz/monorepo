@@ -1,6 +1,6 @@
 //! Catalog metrics.
 
-use crate::multimmit::marshal::{OutputIndex, actors::metrics::saturating_u64};
+use crate::{multimmit::marshal::actors::metrics::saturating_u64, types::OutputIndex};
 use commonware_runtime::{
     Clock, Metrics as RuntimeMetrics,
     telemetry::metrics::{

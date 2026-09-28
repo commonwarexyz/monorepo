@@ -1,13 +1,15 @@
 //! Point reads from pending and finalized catalog storage.
 
 use super::{CatalogStore, StoredRef};
-use crate::multimmit::{
-    marshal::{
-        OutputIndex,
-        storage::{Error, blocks::BlockMeta, floors::FloorRecord},
-        types::{Floor, MaybeFloor},
+use crate::{
+    multimmit::{
+        marshal::{
+            storage::{Error, blocks::BlockMeta, floors::FloorRecord},
+            types::{Floor, MaybeFloor},
+        },
+        types::{BlockRef, Body, CertificateId, Lqc, TipRecord, TransactionBlockHeader},
     },
-    types::{BlockRef, Body, CertificateId, Lqc, TipRecord, TransactionBlockHeader},
+    types::OutputIndex,
 };
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 use commonware_storage::{

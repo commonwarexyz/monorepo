@@ -81,11 +81,8 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Encode as _, Read as _};
     use commonware_consensus::{
-        multimmit::{
-            marshal::OutputIndex,
-            types::{ChainId, Context as BlockContext},
-        },
-        types::{Epoch, Height},
+        multimmit::types::{ChainId, Context as BlockContext},
+        types::{Epoch, Height, OutputIndex},
     };
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_utils::acknowledgement::Exact;

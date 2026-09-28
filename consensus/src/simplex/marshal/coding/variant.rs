@@ -1,8 +1,8 @@
 use crate::{
     CertifiableBlock,
+    ancestry::BlockProvider,
     simplex::{
         marshal::{
-            ancestry::BlockProvider,
             coding::{
                 shards,
                 types::{

@@ -12,10 +12,8 @@ use crate::stateful::{
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     Heightable,
-    simplex::marshal::{
-        ancestry::BlockProvider,
-        core::{Mailbox as MarshalMailbox, Variant},
-    },
+    ancestry::BlockProvider,
+    simplex::marshal::core::{Mailbox as MarshalMailbox, Variant},
     types::Height,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -523,7 +521,7 @@ mod tests {
             fixtures,
             mocks::{
                 FlushControl, TestApp, TestBlock, TestDatabases, TestDb, TestMerkleized,
-                TestScheme, TestUnmerkleized, anchor, test_databases,
+                TestUnmerkleized, anchor, test_databases,
             },
         },
     };
@@ -531,13 +529,9 @@ mod tests {
     use commonware_consensus::{
         Application as _, Automaton as _, CertifiableAutomaton as _, CertifiableBlock as _,
         Handoff, Heightable as _, Reporter as _, Reporters,
+        ancestry::{self, Ancestry},
         simplex::{
-            marshal::{
-                Update,
-                ancestry::{self, Ancestry},
-                core::Processed,
-                standard::Deferred,
-            },
+            marshal::{Update, core::Processed, standard::Deferred},
             mocks::scheme as scheme_mocks,
             types::Activity,
         },
@@ -592,7 +586,6 @@ mod tests {
     }
 
     impl Application<deterministic::Context> for GatedApp {
-        type SigningScheme = TestScheme;
         type Context = <TestApp as Application<deterministic::Context>>::Context;
         type Block = TestBlock;
         type Databases = TestDatabases;
@@ -685,7 +678,6 @@ mod tests {
     }
 
     impl Application<deterministic::Context> for ReadGatedApp {
-        type SigningScheme = TestScheme;
         type Context = <TestApp as Application<deterministic::Context>>::Context;
         type Block = TestBlock;
         type Databases = TestDatabases;
@@ -774,7 +766,6 @@ mod tests {
     }
 
     impl Application<deterministic::Context> for ReplayGatedApp {
-        type SigningScheme = TestScheme;
         type Context = <TestApp as Application<deterministic::Context>>::Context;
         type Block = TestBlock;
         type Databases = TestDatabases;

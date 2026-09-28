@@ -8,10 +8,8 @@ use commonware_actor::{
 use commonware_consensus::{
     Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Handoff, Reporter,
     Viewable,
-    simplex::marshal::{
-        Update,
-        ancestry::{Ancestry, BoxedAncestry},
-    },
+    ancestry::{Ancestry, BoxedAncestry},
+    simplex::marshal::Update,
 };
 use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
@@ -287,7 +285,6 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    type SigningScheme = A::SigningScheme;
     type Context = A::Context;
     type Block = A::Block;
     type Input = A::Input;

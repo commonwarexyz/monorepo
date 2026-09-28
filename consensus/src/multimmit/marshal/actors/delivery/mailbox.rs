@@ -1,10 +1,9 @@
 //! Notifications from the catalog to delivery.
 
 use super::batch::DurableBatch;
-use crate::multimmit::{
-    actors::util::Completion,
-    marshal::{OutputIndex, actors::catalog},
-    types::Body,
+use crate::{
+    multimmit::{actors::util::Completion, marshal::actors::catalog, types::Body},
+    types::OutputIndex,
 };
 use commonware_actor::{
     Feedback,
