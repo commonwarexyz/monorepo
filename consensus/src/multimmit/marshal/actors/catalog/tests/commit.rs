@@ -1,6 +1,7 @@
 //! The commit pipeline, delivery handoff, and delivery-cursor mirroring.
 
 use super::*;
+use crate::multimmit::marshal::OutputIndex;
 
 #[test]
 fn warmed_commit_retains_every_requested_hot_body() {
@@ -104,7 +105,7 @@ fn live_handoff_takes_priority_over_materialized_history() {
         let DeliveryOutput::Hot(output) = &batch.outputs[0] else {
             panic!("the retained output carries its body");
         };
-        assert_eq!(output.stored.index, OutputIndex::new(1));
+        assert_eq!(output.stored.index, OutputIndex::new(2));
         assert_eq!(output.block.as_ref(), second.as_ref());
 
         drop(client);
@@ -146,7 +147,7 @@ fn recovered_handoff_survives_live_cache_eviction() {
             history_index: current.history_index(),
             ordered: current.ordered().to_vec(),
             emitted,
-            committed: Some(OutputIndex::ZERO),
+            floor_index: current.floor_index(),
         })
         .unwrap();
         client
@@ -154,11 +155,11 @@ fn recovered_handoff_survives_live_cache_eviction() {
                 Commit {
                     selected: Vec::new(),
                     history: Vec::new(),
-                    outputs: vec![output_row(OutputIndex::ZERO, &recovered)],
+                    outputs: vec![output_row(OutputIndex::new(1), &recovered)],
                     checkpoint,
                 },
                 vec![hot_output(
-                    OutputIndex::ZERO,
+                    OutputIndex::new(1),
                     &recovered,
                     current.floor_generation(),
                 )],
@@ -174,7 +175,7 @@ fn recovered_handoff_survives_live_cache_eviction() {
         let DeliveryOutput::Hot(output) = &batch.outputs[0] else {
             panic!("the handed-off output carries its body");
         };
-        assert_eq!(output.stored.index, OutputIndex::ZERO);
+        assert_eq!(output.stored.index, OutputIndex::new(1));
         assert_eq!(output.block.as_ref(), recovered.as_ref());
 
         drop(client);
@@ -229,10 +230,10 @@ fn commits_buffer_a_second_cut_before_the_first_is_durable() {
 
         let first_archive_syncs = syncs.calls();
         assert!(first_archive_syncs > 0, "first archive cut did not start");
-        assert_eq!(client.progress().await.unwrap().committed, None);
+        assert_eq!(client.progress().await.unwrap().committed, OutputIndex::zero());
         assert!(matches!(
             client
-                .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024 * 1024))
+                .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024 * 1024))
                 .await,
             Err(error) if error.is_rejected()
         ));
@@ -253,7 +254,7 @@ fn commits_buffer_a_second_cut_before_the_first_is_durable() {
             overlap_syncs >= 2,
             "checkpoint publication did not overlap the next archive cut"
         );
-        assert_eq!(client.progress().await.unwrap().committed, None);
+        assert_eq!(client.progress().await.unwrap().committed, OutputIndex::zero());
 
         let second_archives = {
             let mut pending = syncs.lock();
@@ -291,11 +292,11 @@ fn commits_buffer_a_second_cut_before_the_first_is_durable() {
         first_wait.await.unwrap();
         assert_eq!(
             client.progress().await.unwrap().committed,
-            Some(OutputIndex::ZERO)
+            OutputIndex::new(1)
         );
         assert_eq!(
             client
-                .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024 * 1024))
+                .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024 * 1024))
                 .await
                 .unwrap()[0]
                 .reference,
@@ -303,7 +304,7 @@ fn commits_buffer_a_second_cut_before_the_first_is_durable() {
         );
         assert!(matches!(
             client
-                .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024 * 1024))
+                .output_refs(OutputIndex::new(2), NZUsize!(1), NZUsize!(1024 * 1024))
                 .await,
             Err(error) if error.is_rejected()
         ));
@@ -316,24 +317,24 @@ fn commits_buffer_a_second_cut_before_the_first_is_durable() {
         second_wait.await.unwrap();
         assert_eq!(
             client.progress().await.unwrap().committed,
-            Some(OutputIndex::new(1))
+            OutputIndex::new(2)
         );
         assert_eq!(
             client
-                .output_refs(OutputIndex::ZERO, NZUsize!(2), NZUsize!(1024 * 1024))
+                .output_refs(OutputIndex::new(1), NZUsize!(2), NZUsize!(1024 * 1024))
                 .await
                 .unwrap()
                 .len(),
             2
         );
         let singleton = client
-            .output_refs(OutputIndex::ZERO, NZUsize!(2), NZUsize!(1))
+            .output_refs(OutputIndex::new(1), NZUsize!(2), NZUsize!(1))
             .await
             .unwrap();
         assert_eq!(singleton.len(), 1);
         assert_eq!(singleton[0].reference, first.reference());
         let batch = client
-            .output_refs(OutputIndex::ZERO, NZUsize!(2), NZUsize!(1024 * 1024))
+            .output_refs(OutputIndex::new(1), NZUsize!(2), NZUsize!(1024 * 1024))
             .await
             .unwrap();
         assert_eq!(batch.len(), 2);
@@ -414,7 +415,7 @@ fn ready_checkpoint_completion_precedes_buffered_progress() {
         for receiver in progress {
             assert_eq!(
                 receiver.await.unwrap().unwrap().committed,
-                Some(OutputIndex::ZERO)
+                OutputIndex::new(1)
             );
         }
         token.wait().await.unwrap();
@@ -463,7 +464,7 @@ fn acknowledgement_durability_is_independent_of_commit_publication() {
             history_index: current.history_index(),
             ordered: current.ordered().to_vec(),
             emitted: first_emitted.clone(),
-            committed: Some(OutputIndex::ZERO),
+            floor_index: current.floor_index(),
         })
         .unwrap();
         drive_pending_syncs(
@@ -471,7 +472,7 @@ fn acknowledgement_durability_is_independent_of_commit_publication() {
             client.commit(Commit {
                 selected: Vec::new(),
                 history: Vec::new(),
-                outputs: vec![output_row(OutputIndex::ZERO, &first)],
+                outputs: vec![output_row(OutputIndex::new(1), &first)],
                 checkpoint: first_checkpoint,
             }),
         )
@@ -482,7 +483,7 @@ fn acknowledgement_durability_is_independent_of_commit_publication() {
                 .pending
                 .lock()
                 .iter()
-                .any(|(index, _)| *index == OutputIndex::ZERO)
+                .any(|(index, _)| *index == OutputIndex::new(1))
             {
                 break;
             }
@@ -508,7 +509,7 @@ fn acknowledgement_durability_is_independent_of_commit_publication() {
             history_index: current.history_index(),
             ordered: current.ordered().to_vec(),
             emitted: second_emitted,
-            committed: Some(OutputIndex::new(1)),
+            floor_index: current.floor_index(),
         })
         .unwrap();
 
@@ -518,7 +519,7 @@ fn acknowledgement_durability_is_independent_of_commit_publication() {
                 Commit {
                     selected: Vec::new(),
                     history: Vec::new(),
-                    outputs: vec![output_row(OutputIndex::new(1), &second)],
+                    outputs: vec![output_row(OutputIndex::new(2), &second)],
                     checkpoint: second_checkpoint,
                 },
                 Vec::new(),
@@ -535,7 +536,7 @@ fn acknowledgement_durability_is_independent_of_commit_publication() {
             commit_syncs = calls;
         }
         assert!(commit_syncs > 0, "commit durability did not start");
-        assert!(reporter.acknowledge(OutputIndex::ZERO));
+        assert!(reporter.acknowledge(OutputIndex::new(1)));
         for _ in 0..100 {
             if syncs.calls() > commit_syncs {
                 break;
@@ -547,14 +548,14 @@ fn acknowledgement_durability_is_independent_of_commit_publication() {
         let acknowledgement_sync = syncs.lock().pop().unwrap();
         let _ = acknowledgement_sync.release.send(Ok(()));
         for _ in 0..100 {
-            if client.progress().await.unwrap().acknowledged == Some(OutputIndex::ZERO) {
+            if client.progress().await.unwrap().acknowledged == OutputIndex::new(1) {
                 break;
             }
             context.sleep(std::time::Duration::from_millis(1)).await;
         }
         assert_eq!(
             client.progress().await.unwrap().acknowledged,
-            Some(OutputIndex::ZERO)
+            OutputIndex::new(1)
         );
 
         let mut publication = Box::pin(commit.wait());
@@ -611,7 +612,7 @@ fn application_ready_acknowledgements_refill_while_cursor_sync_is_active() {
             history_index: current.history_index(),
             ordered: current.ordered().to_vec(),
             emitted,
-            committed: Some(OutputIndex::new(3)),
+            floor_index: current.floor_index(),
         })
         .unwrap();
         drive_pending_syncs(
@@ -622,7 +623,7 @@ fn application_ready_acknowledgements_refill_while_cursor_sync_is_active() {
                 outputs: blocks
                     .iter()
                     .enumerate()
-                    .map(|(index, block)| output_row(OutputIndex::new(index as u64), block))
+                    .map(|(index, block)| output_row(OutputIndex::new(index as u64 + 1), block))
                     .collect(),
                 checkpoint,
             }),
@@ -630,10 +631,10 @@ fn application_ready_acknowledgements_refill_while_cursor_sync_is_active() {
         .await
         .unwrap();
 
-        wait_for_report(&context, &reporter, OutputIndex::ZERO).await;
+        wait_for_report(&context, &reporter, OutputIndex::new(1)).await;
         syncs.arm();
         let syncs_before = syncs.calls();
-        assert!(reporter.acknowledge(OutputIndex::ZERO));
+        assert!(reporter.acknowledge(OutputIndex::new(1)));
         for _ in 0..100 {
             if syncs.calls() > syncs_before {
                 break;
@@ -642,7 +643,7 @@ fn application_ready_acknowledgements_refill_while_cursor_sync_is_active() {
         }
         assert_eq!(syncs.calls(), syncs_before + 1);
 
-        for index in 1..4 {
+        for index in 2..=4 {
             let index = OutputIndex::new(index);
             wait_for_report(&context, &reporter, index).await;
             assert!(reporter.acknowledge(index));
@@ -654,7 +655,10 @@ fn application_ready_acknowledgements_refill_while_cursor_sync_is_active() {
             context.sleep(std::time::Duration::from_millis(1)).await;
         }
         assert_eq!(syncs.calls(), syncs_before + 1);
-        assert_eq!(client.progress().await.unwrap().acknowledged, None);
+        assert_eq!(
+            client.progress().await.unwrap().acknowledged,
+            OutputIndex::zero()
+        );
         let metrics = context.encode();
         assert_eq!(metric_total(&metrics, "delivery_pending_durability"), 4);
         assert_eq!(metric_total(&metrics, "delivery_in_flight"), 0);
@@ -671,14 +675,14 @@ fn application_ready_acknowledgements_refill_while_cursor_sync_is_active() {
         let acknowledgement_sync = syncs.lock().pop().unwrap();
         acknowledgement_sync.release.send(Ok(())).unwrap();
         for _ in 0..100 {
-            if client.progress().await.unwrap().acknowledged == Some(OutputIndex::new(3)) {
+            if client.progress().await.unwrap().acknowledged == OutputIndex::new(4) {
                 break;
             }
             context.sleep(std::time::Duration::from_millis(1)).await;
         }
         assert_eq!(
             client.progress().await.unwrap().acknowledged,
-            Some(OutputIndex::new(3))
+            OutputIndex::new(4)
         );
         let metrics = context.encode();
         assert_eq!(metric_total(&metrics, "delivery_pending_durability"), 0);
@@ -734,7 +738,7 @@ fn commit_block_byte_bound_rejects_multi_block_overshoot_but_allows_a_single_blo
             history_index: current.history_index(),
             ordered: current.ordered().to_vec(),
             emitted,
-            committed: Some(OutputIndex::new(1)),
+            floor_index: current.floor_index(),
         })
         .unwrap();
         let result = client
@@ -743,8 +747,8 @@ fn commit_block_byte_bound_rejects_multi_block_overshoot_but_allows_a_single_blo
                     selected: Vec::new(),
                     history: Vec::new(),
                     outputs: vec![
-                        output_row(OutputIndex::ZERO, &first),
-                        output_row(OutputIndex::new(1), &second),
+                        output_row(OutputIndex::new(1), &first),
+                        output_row(OutputIndex::new(2), &second),
                     ],
                     checkpoint: oversized,
                 },
@@ -764,7 +768,7 @@ fn commit_block_byte_bound_rejects_multi_block_overshoot_but_allows_a_single_blo
             history_index: current.history_index(),
             ordered: current.ordered().to_vec(),
             emitted,
-            committed: Some(OutputIndex::ZERO),
+            floor_index: current.floor_index(),
         })
         .unwrap();
         client
@@ -772,7 +776,7 @@ fn commit_block_byte_bound_rejects_multi_block_overshoot_but_allows_a_single_blo
                 Commit {
                     selected: Vec::new(),
                     history: Vec::new(),
-                    outputs: vec![output_row(OutputIndex::ZERO, &first)],
+                    outputs: vec![output_row(OutputIndex::new(1), &first)],
                     checkpoint: singleton,
                 },
                 Vec::new(),
@@ -804,8 +808,8 @@ fn commit_rejects_an_oversized_batch_before_publication() {
                 record: lifecycle.record.clone(),
             }],
             outputs: vec![
-                output_row(OutputIndex::ZERO, &lifecycle.block),
-                output_row(OutputIndex::new(1), &lifecycle.other_chain),
+                output_row(OutputIndex::new(1), &lifecycle.block),
+                output_row(OutputIndex::new(2), &lifecycle.other_chain),
             ],
             checkpoint: checkpoint(
                 &lifecycle.committee,
@@ -814,17 +818,20 @@ fn commit_rejects_an_oversized_batch_before_publication() {
                 lifecycle.history,
                 0,
                 emitted,
-                Some(OutputIndex::new(1)),
+                OutputIndex::zero(),
             ),
         };
         assert!(matches!(
             client.commit(oversized).await,
             Err(error) if error.is_rejected()
         ));
-        assert_eq!(client.progress().await.unwrap().committed, None);
+        assert_eq!(
+            client.progress().await.unwrap().committed,
+            OutputIndex::zero()
+        );
         assert!(matches!(
             client
-                .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024 * 1024))
+                .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024 * 1024))
                 .await,
             Err(error) if error.is_rejected()
         ));
@@ -859,26 +866,23 @@ fn delivery_cursor_mirror_rejects_contradictions_and_survives_reopen() {
 
         assert!(matches!(
             client
-                .reset_delivery_cursor(0, Some(OutputIndex::new(1)))
+                .reset_delivery_cursor(0, OutputIndex::new(2))
                 .await,
             Err(error) if error.is_rejected()
         ));
         delivery_store
-            .start_acknowledgement(0, OutputIndex::ZERO)
+            .start_acknowledgement(0, OutputIndex::new(1))
             .await
             .unwrap()
             .await
             .unwrap();
-        assert_eq!(
-            client.delivery_cursor(0, Some(OutputIndex::ZERO)),
-            Feedback::Ok
-        );
-        while client.progress().await.unwrap().acknowledged != Some(OutputIndex::ZERO) {
+        assert_eq!(client.delivery_cursor(0, OutputIndex::new(1)), Feedback::Ok);
+        while client.progress().await.unwrap().acknowledged != OutputIndex::new(1) {
             context.sleep(std::time::Duration::from_millis(1)).await;
         }
         assert!(matches!(
             delivery_store
-                .start_acknowledgement(0, OutputIndex::ZERO)
+                .start_acknowledgement(0, OutputIndex::new(1))
                 .await,
             Err(StorageError::Invalid(_))
         ));
@@ -893,12 +897,12 @@ fn delivery_cursor_mirror_rejects_contradictions_and_survives_reopen() {
             MarshalProgress {
                 floor_generation: 0,
                 floor: lifecycle.proof.id::<Sha256>(),
-                committed: Some(OutputIndex::ZERO),
-                acknowledged: Some(OutputIndex::ZERO),
+                committed: OutputIndex::new(1),
+                acknowledged: OutputIndex::new(1),
             }
         );
         let reopened = client
-            .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024 * 1024))
+            .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024 * 1024))
             .await
             .unwrap()[0]
             .reference;

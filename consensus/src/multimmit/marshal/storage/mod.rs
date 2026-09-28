@@ -9,6 +9,8 @@
 //!   history live in prunable archives indexed by view; blocks live in segmented pending custody
 //!   ([`pending`]).
 //! - Finalized: rows recorded by a commit. L-QC and history rows hold the artifacts themselves.
+//!   An L-QC that establishes a floor is recorded with the frontier where its final sweep ends
+//!   ([`floors::FloorRecord`]), at the same ordinal and with the same retention.
 //!   Block rows ([`blocks::FinalBlockMeta`]) hold only the header, the encoded length and the
 //!   floor generation that committed them; the body stays in pending custody until it is pruned
 //!   or copied into the immutable body archive by the promoter.
@@ -86,6 +88,7 @@ pub(super) mod blocks;
 pub(super) mod catalog;
 pub(super) mod catalog_state;
 pub(super) mod commit;
+pub(super) mod floors;
 pub(super) mod pending;
 pub(super) mod record;
 pub(super) mod scratch;

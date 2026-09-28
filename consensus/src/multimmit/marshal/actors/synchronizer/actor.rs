@@ -11,11 +11,12 @@ use crate::{
     Viewable as _,
     multimmit::{
         marshal::{
+            OutputIndex,
             actors::metrics,
             config::Retention,
             protocol::{order::HistoryState, paths::PathCache},
             storage::scratch::{BlockStack, HistoryStack},
-            types::{LqcVerifier, OutputIndex},
+            types::LqcVerifier,
             wire::max_block_segment_items,
         },
         types::{BlockRef, Body, CertificateId, CodecConfig, TransactionBlockHeader},
@@ -150,8 +151,11 @@ where
     pub(super) floor_view: View,
     /// Index of the newest opened tip-history record, if any.
     pub(super) history_index: Option<u64>,
-    /// Index of the newest planned output, if any.
-    pub(super) committed: Option<OutputIndex>,
+    /// Index of the newest planned output, or the checkpoint's committed index if none has been
+    /// planned since.
+    pub(super) committed: OutputIndex,
+    /// Committed index at the installed floor. Output rows are dense above it.
+    pub(super) floor_index: OutputIndex,
     /// Ordered and emitted frontiers with the active tip history.
     pub(super) state: HistoryState<H::Digest>,
     /// Durability of the started commits, in start order.
@@ -210,6 +214,7 @@ where
             floor_view,
             history_index,
             committed,
+            floor_index,
             state,
             pending_commits,
             metrics,
@@ -234,6 +239,7 @@ where
             floor_view,
             history_index,
             committed,
+            floor_index,
             state,
             pending_commits,
             metrics,
@@ -303,6 +309,7 @@ where
             floor_view,
             history_index: checkpoint.history_index(),
             committed: checkpoint.committed(),
+            floor_index: checkpoint.floor_index(),
             state,
             pending_commits: Pool::default(),
             metrics,
@@ -494,6 +501,7 @@ where
         self.floor = checkpoint.floor();
         self.history_index = checkpoint.history_index();
         self.committed = checkpoint.committed();
+        self.floor_index = checkpoint.floor_index();
         self.state = HistoryState::new(
             checkpoint.history(),
             checkpoint.ordered().to_vec(),

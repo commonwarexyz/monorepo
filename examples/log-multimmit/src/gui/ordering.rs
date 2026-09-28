@@ -106,7 +106,7 @@ mod tests {
         let reference = block.reference();
         let (mut reporter, mut redraws) = OrderedReporter::channel();
 
-        for index in 0..=ORDERING_CAPACITY {
+        for index in 1..=ORDERING_CAPACITY + 1 {
             let (acknowledgement, mut waiter) = Exact::handle();
             assert_eq!(
                 reporter.report(Update {
@@ -127,8 +127,8 @@ mod tests {
         assert_eq!(redraws.try_recv(), Ok(()));
         assert!(redraws.try_recv().is_err());
         assert_eq!(ordering.len(), ORDERING_CAPACITY);
-        assert_eq!(ordering.first().unwrap().index, 1);
-        assert_eq!(ordering.last().unwrap().index, ORDERING_CAPACITY as u64);
+        assert_eq!(ordering.first().unwrap().index, 2);
+        assert_eq!(ordering.last().unwrap().index, ORDERING_CAPACITY as u64 + 1);
         assert!(ordering.iter().all(|ordered| {
             ordered.chain == reference.chain().get()
                 && ordered.height == reference.height().get()

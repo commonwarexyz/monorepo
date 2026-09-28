@@ -385,7 +385,7 @@ mod tests {
         Automaton as _, Epochable as _, Relay as _, Reporter as _,
         multimmit::{
             Artifact,
-            marshal::{self, ArchiveConfig, LqcVerifier, Start, Update},
+            marshal::{self, ArchiveConfig, LqcVerifier, OutputIndex, Start, Update},
             mocks::{
                 Committee,
                 cluster::{QUOTA, link_all, start_network},
@@ -779,7 +779,7 @@ mod tests {
             for (index, block) in [remote, block].into_iter().enumerate() {
                 let (acknowledgement, waiter) = Exact::handle();
                 reporter.report(Update {
-                    index: marshal::OutputIndex::new(index as u64),
+                    index: OutputIndex::new(index as u64 + 1),
                     block,
                     acknowledgement,
                 });

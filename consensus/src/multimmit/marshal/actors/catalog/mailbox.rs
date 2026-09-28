@@ -2,28 +2,29 @@
 //!
 //! Requests travel on three lanes. Commands keep mailbox order, so a lookup observes every
 //! admission queued before it. Independent reads ([`Read`]) may overtake queued admissions and
-//! must not be used to establish custody. Cursor updates mirror delivery's durable cursor.
+//! must not be used to establish custody. Cursor updates mirror delivery's durable cursor and the
+//! engine's per-chain releases, both of which bound pruning.
 
 use super::metrics::Operation;
 use crate::{
     multimmit::{
         actors::util::{Completion, ask, reliable_policy},
         marshal::{
-            MarshalProgress,
+            MarshalProgress, OutputIndex,
             actors::delivery,
             storage::{
                 catalog::{Admission, InstallRequest, StoredRef},
                 catalog_state::Checkpoint,
                 commit::Commit,
             },
-            types::{BodyValues, CustodyValues, MaybeLqc, OutputIndex, Reply},
+            types::{BodyValues, CustodyValues, MaybeFloor, MaybeLqc, Reply},
         },
         types::{
             BlockRef, Body, CertificateId, ChainId, Lqc, TipRecord, TransactionBlock,
             TransactionBlockHeader,
         },
     },
-    types::View,
+    types::{Height, View},
 };
 use commonware_actor::{
     Feedback,
@@ -176,6 +177,11 @@ where
         commitment: H::Digest,
         reply: Reply<Option<Arc<TipRecord<H::Digest>>>, Error>,
     },
+    /// Returns the retained floor with the highest index at or below `at` and the durable commit.
+    FloorAt {
+        at: OutputIndex,
+        reply: Reply<MaybeFloor<V, H::Digest>, Error>,
+    },
     /// Walks history openings back from `commitment` within the item and byte bounds.
     HistorySegment {
         commitment: H::Digest,
@@ -204,9 +210,9 @@ where
         request: InstallRequest<V, H::Digest>,
         reply: Reply<delivery::ResetWaiter, Error>,
     },
-    /// Prunes finalized storage for the delivery cursor of `floor_generation`.
+    /// Prunes what the newest floor at or below `below` and delivery's cursor makes obsolete.
     Prune {
-        floor_generation: u64,
+        below: OutputIndex,
         reply: Reply<(), Error>,
     },
     /// Reclaims pending bodies the promoter copied through `frontiers`.
@@ -237,6 +243,7 @@ where
             Self::FinalLqc { .. } => Operation::FinalLqc,
             Self::LatestLqc { .. } => Operation::LatestLqc,
             Self::History { .. } => Operation::History,
+            Self::FloorAt { .. } => Operation::FloorAt,
             Self::HistorySegment { .. } => Operation::HistorySegment,
             Self::WaitForCustody { .. } => Operation::WaitForCustody,
             Self::Bodies { .. } => Operation::Bodies,
@@ -328,38 +335,71 @@ pub(super) struct Traced<M> {
 
 reliable_policy!(impl<M> for Traced<M>);
 
-/// A delivery-cursor change mirrored into catalog progress and pruning.
+/// A cursor change mirrored into catalog progress and pruning.
 pub(super) enum CursorMessage {
     /// Delivery durably acknowledged through `acknowledged`.
     Update {
         floor_generation: u64,
-        acknowledged: Option<OutputIndex>,
+        acknowledged: OutputIndex,
     },
     /// Delivery durably reset its cursor for a new floor generation.
     Reset {
         floor_generation: u64,
-        acknowledged: Option<OutputIndex>,
+        acknowledged: OutputIndex,
         reply: Reply<(), Error>,
     },
+    /// The engine no longer verifies `chain`'s blocks at or below `released`.
+    Release { chain: ChainId, released: Height },
+}
+
+impl CursorMessage {
+    /// Returns the stable metric and span label of this change.
+    pub(super) const fn kind(&self) -> Operation {
+        match self {
+            Self::Update { .. } | Self::Reset { .. } => Operation::DeliveryCursor,
+            Self::Release { .. } => Operation::Release,
+        }
+    }
 }
 
 impl Policy for CursorMessage {
     type Overflow = VecDeque<Self>;
 
-    /// Coalesces an update into a trailing update of the same generation; resets stay barriers.
+    /// Coalesces an update into the newest delivery change if that is an update of the same
+    /// generation, and a release into the queued release of its chain. Resets stay barriers.
+    ///
+    /// Releases commute with delivery changes, so they neither separate updates nor wait behind
+    /// resets, and the overflow holds at most one release per chain.
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        if let Self::Update {
-            floor_generation,
-            acknowledged,
-        } = &message
-            && let Some(Self::Update {
-                floor_generation: last_generation,
-                acknowledged: last_acknowledged,
-            }) = overflow.back_mut()
-            && last_generation == floor_generation
-        {
-            *last_acknowledged = (*last_acknowledged).max(*acknowledged);
-            return;
+        match &message {
+            Self::Update {
+                floor_generation,
+                acknowledged,
+            } => {
+                if let Some(Self::Update {
+                    floor_generation: last_generation,
+                    acknowledged: last_acknowledged,
+                }) = overflow
+                    .iter_mut()
+                    .rev()
+                    .find(|queued| !matches!(queued, Self::Release { .. }))
+                    && last_generation == floor_generation
+                {
+                    *last_acknowledged = (*last_acknowledged).max(*acknowledged);
+                    return;
+                }
+            }
+            Self::Release { chain, released } => {
+                if let Some(Self::Release {
+                    released: queued, ..
+                }) = overflow.iter_mut().find(
+                    |queued| matches!(queued, Self::Release { chain: queued, .. } if queued == chain),
+                ) {
+                    *queued = (*queued).max(*released);
+                    return;
+                }
+            }
+            Self::Reset { .. } => {}
         }
         overflow.push_back(message);
     }
@@ -586,6 +626,21 @@ where
             .await
     }
 
+    /// Returns the retained floor with the highest index at or below both `at` and the durable
+    /// commit, with that index.
+    #[tracing::instrument(
+        name = "multimmit.marshal.catalog.request",
+        level = "debug",
+        skip_all,
+        fields(operation = "floor_at")
+    )]
+    pub(crate) async fn floor_at(
+        &self,
+        at: OutputIndex,
+    ) -> Result<MaybeFloor<V, H::Digest>, Error> {
+        self.command(|reply| Command::FloorAt { at, reply }).await
+    }
+
     /// Walks up to `max_items` history openings back from `commitment`, encoding within
     /// `max_bytes`.
     #[tracing::instrument(
@@ -673,19 +728,16 @@ where
             .await
     }
 
-    /// Prunes finalized storage up to delivery's cursor for `floor_generation`.
+    /// Prunes what the newest floor at or below both `below` and delivery's cursor makes
+    /// obsolete.
     #[tracing::instrument(
         name = "multimmit.marshal.catalog.request",
         level = "debug",
         skip_all,
         fields(operation = "prune")
     )]
-    pub(crate) async fn prune(&self, floor_generation: u64) -> Result<(), Error> {
-        self.command(|reply| Command::Prune {
-            floor_generation,
-            reply,
-        })
-        .await
+    pub(crate) async fn prune(&self, below: OutputIndex) -> Result<(), Error> {
+        self.command(|reply| Command::Prune { below, reply }).await
     }
 
     /// Reclaims pending bodies the promoter durably copied through `frontiers`.
@@ -736,7 +788,7 @@ where
     pub(crate) fn delivery_cursor(
         &self,
         floor_generation: u64,
-        acknowledged: Option<OutputIndex>,
+        acknowledged: OutputIndex,
     ) -> Feedback {
         self.cursors.enqueue(CursorMessage::Update {
             floor_generation,
@@ -744,11 +796,19 @@ where
         })
     }
 
+    /// Mirrors the engine's release of `chain`'s blocks at or below `released` into pruning.
+    ///
+    /// The catalog applies cursor changes ahead of commands, so a later prune observes it.
+    pub(crate) fn release(&self, chain: ChainId, released: Height) -> Feedback {
+        self.cursors
+            .enqueue(CursorMessage::Release { chain, released })
+    }
+
     /// Mirrors delivery's durable generation reset and waits until the catalog applied it.
     pub(crate) async fn reset_delivery_cursor(
         &self,
         floor_generation: u64,
-        acknowledged: Option<OutputIndex>,
+        acknowledged: OutputIndex,
     ) -> Result<(), Error> {
         ask(
             |message| self.cursors.enqueue(message),
@@ -951,40 +1011,94 @@ mod tests {
         assert_eq!(read.kind().as_str(), "bodies");
     }
 
-    fn update(floor_generation: u64, acknowledged: Option<u64>) -> CursorMessage {
+    fn update(floor_generation: u64, acknowledged: u64) -> CursorMessage {
         CursorMessage::Update {
             floor_generation,
-            acknowledged: acknowledged.map(OutputIndex::new),
+            acknowledged: OutputIndex::new(acknowledged),
         }
     }
 
-    fn acknowledged(message: &CursorMessage) -> Option<OutputIndex> {
+    fn release(chain: u32, released: u64) -> CursorMessage {
+        CursorMessage::Release {
+            chain: ChainId::new(chain),
+            released: Height::new(released),
+        }
+    }
+
+    fn acknowledged(message: &CursorMessage) -> OutputIndex {
         match message {
             CursorMessage::Update { acknowledged, .. }
             | CursorMessage::Reset { acknowledged, .. } => *acknowledged,
+            CursorMessage::Release { .. } => panic!("a release has no acknowledgement"),
         }
+    }
+
+    fn released(message: &CursorMessage) -> (ChainId, Height) {
+        let CursorMessage::Release { chain, released } = message else {
+            panic!("expected a release");
+        };
+        (*chain, *released)
     }
 
     #[test]
     fn cursor_overflow_coalesces_updates_between_resets() {
         let mut overflow = VecDeque::new();
-        CursorMessage::handle(&mut overflow, update(3, Some(1)));
-        CursorMessage::handle(&mut overflow, update(3, Some(4)));
+        CursorMessage::handle(&mut overflow, update(3, 1));
+        CursorMessage::handle(&mut overflow, update(3, 4));
         assert_eq!(overflow.len(), 1);
-        assert_eq!(acknowledged(&overflow[0]), Some(OutputIndex::new(4)));
+        assert_eq!(acknowledged(&overflow[0]), OutputIndex::new(4));
 
         CursorMessage::handle(
             &mut overflow,
             CursorMessage::Reset {
                 floor_generation: 4,
-                acknowledged: None,
+                acknowledged: OutputIndex::zero(),
                 reply: reply(),
             },
         );
-        CursorMessage::handle(&mut overflow, update(4, Some(2)));
-        CursorMessage::handle(&mut overflow, update(4, Some(7)));
+        CursorMessage::handle(&mut overflow, update(4, 2));
+        CursorMessage::handle(&mut overflow, update(4, 7));
         assert_eq!(overflow.len(), 3);
         assert!(matches!(overflow[1], CursorMessage::Reset { .. }));
-        assert_eq!(acknowledged(&overflow[2]), Some(OutputIndex::new(7)));
+        assert_eq!(acknowledged(&overflow[2]), OutputIndex::new(7));
+    }
+
+    #[test]
+    fn cursor_overflow_keeps_one_release_per_chain() {
+        let mut overflow = VecDeque::new();
+        CursorMessage::handle(&mut overflow, update(3, 1));
+        CursorMessage::handle(&mut overflow, release(0, 5));
+        CursorMessage::handle(&mut overflow, release(1, 2));
+        CursorMessage::handle(
+            &mut overflow,
+            CursorMessage::Reset {
+                floor_generation: 4,
+                acknowledged: OutputIndex::zero(),
+                reply: reply(),
+            },
+        );
+        CursorMessage::handle(&mut overflow, release(0, 9));
+        CursorMessage::handle(&mut overflow, release(1, 1));
+
+        // Releases merge across the reset and never lower a queued release.
+        assert_eq!(overflow.len(), 4);
+        assert_eq!(released(&overflow[1]), (ChainId::new(0), Height::new(9)));
+        assert_eq!(released(&overflow[2]), (ChainId::new(1), Height::new(2)));
+        assert_eq!(overflow[1].kind().as_str(), "release");
+    }
+
+    #[test]
+    fn cursor_overflow_coalesces_updates_across_releases() {
+        let mut overflow = VecDeque::new();
+        CursorMessage::handle(&mut overflow, update(3, 1));
+        CursorMessage::handle(&mut overflow, release(0, 5));
+        CursorMessage::handle(&mut overflow, update(3, 4));
+        assert_eq!(overflow.len(), 2);
+        assert_eq!(acknowledged(&overflow[0]), OutputIndex::new(4));
+        assert_eq!(overflow[0].kind().as_str(), "delivery_cursor");
+
+        // An update of a new generation does not merge into an older one.
+        CursorMessage::handle(&mut overflow, update(4, 7));
+        assert_eq!(overflow.len(), 3);
     }
 }

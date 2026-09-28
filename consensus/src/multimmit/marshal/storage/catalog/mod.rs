@@ -8,7 +8,8 @@
 //! # Commit
 //!
 //! 1. [`CatalogStore::buffer_commit`] validates the commit against the current record and buffers
-//!    its finalized L-QC, history, and output rows.
+//!    its finalized L-QC, history, and output rows, and the floor its last selected L-QC
+//!    establishes.
 //! 2. [`CatalogStore::start_finalized_sync`] makes the touched finalized archives durable.
 //! 3. [`CatalogStore::start_sync_publication`] publishes the checkpoint with a commit-cleanup
 //!    obligation.
@@ -19,7 +20,8 @@
 //!
 //! 1. Begin: durably record the target checkpoint, pending floors, and encoded artifacts as an
 //!    install intent while the current checkpoint stays visible.
-//! 2. Archive: make the floor L-QC and history opening durable in the finalized archives.
+//! 2. Archive: make the floor L-QC, its floor, and the history opening durable in the finalized
+//!    archives.
 //! 3. Finish: apply the pending floors, then publish the target checkpoint.
 //!
 //! [`CatalogStore::open`] leaves an interrupted installation pending, because its target
@@ -37,12 +39,13 @@ mod tests;
 use super::{
     Error,
     archive::{
-        FinalBlockRows, FinalHistory, FinalLqc, FinalizedArchive, PendingHistory, PendingLqc,
+        FinalBlockRows, FinalFloors, FinalHistory, FinalLqc, FinalizedArchive, PendingHistory,
+        PendingLqc,
     },
     blocks::BlockMeta,
     catalog_state::{
         CatalogState, Checkpoint, CheckpointCodecConfig, CheckpointParts, CommitCleanup,
-        PendingFloors,
+        PendingFloors, frontier_index,
     },
     commit::OutputRow,
     pending::{JournalBuffers, PendingBlocks, PendingConfig, Retirement},
@@ -51,8 +54,9 @@ use super::{
 use crate::{
     multimmit::{
         marshal::{
+            OutputIndex,
             config::{ArchiveConfig, ArchiveMode, Config, Retention, Start},
-            types::{Families, OutputIndex},
+            types::Families,
         },
         types::{
             BlockRef, Body, CertificateId, CodecConfig, Lqc, TipRecord, TransactionBlock,
@@ -248,6 +252,8 @@ where
     B: Body<H>,
 {
     final_lqc: Owned<FinalLqc<T, E, H, V>>,
+    /// Floors established by finalized L-QCs, at the same ordinals and with the same retention.
+    final_floors: Owned<FinalFloors<T, E, H>>,
     final_history: Owned<FinalHistory<T, E, H>>,
     final_blocks: Owned<FinalBlockRows<T, E, H>>,
     pending_lqc: Owned<PendingLqc<T, E, H, V>>,
@@ -268,6 +274,9 @@ where
     /// Whether finalized block rows retain their bodies in pending custody until application
     /// pruning, rather than in the immutable body archive.
     prunable_blocks: bool,
+    /// Per chain, the highest height the engine reported it no longer verifies. Pruning keeps
+    /// every block above it, and every block of a chain without a report.
+    released: Vec<Option<Height>>,
     codec_config: CodecConfig,
 }
 
@@ -296,6 +305,14 @@ where
             &config.archive,
             name("final_lqc"),
             config.codec_config,
+        )
+        .await?;
+        let final_floors = open_finalized(
+            context.child("final_floors"),
+            layout.lqc,
+            &config.archive,
+            name("final_floors"),
+            chains,
         )
         .await?;
         let final_history = open_finalized(
@@ -383,8 +400,13 @@ where
         }
         let accepted_lqc_index = state.lqc_index();
         let mut store = Self {
-            allocated_lqc_index: accepted_lqc_index.max(final_lqc.last_index()),
+            // A crash can leave L-QCs or floors past the published checkpoint, and their ordinals
+            // must not be reused.
+            allocated_lqc_index: accepted_lqc_index
+                .max(final_lqc.last_index())
+                .max(final_floors.last_index()),
             final_lqc: Owned::new(final_lqc),
+            final_floors: Owned::new(final_floors),
             final_history: Owned::new(final_history),
             final_blocks: Owned::new(final_blocks),
             pending_lqc: Owned::new(pending_lqc),
@@ -395,6 +417,7 @@ where
             accepted_cleanup: state.commit_cleanup().unwrap_or_default(),
             state,
             prunable_blocks: layout.blocks == ArchiveMode::Prunable,
+            released: vec![None; chains],
             codec_config: config.codec_config,
         };
         if fresh {
@@ -418,7 +441,7 @@ where
                 history_index: None,
                 ordered: genesis.tips().to_vec(),
                 emitted: genesis.tips().to_vec(),
-                committed: None,
+                floor_index: OutputIndex::zero(),
             },
             // A floor start installs the floor over its own parent, so the target checkpoint
             // stays hidden behind an install intent until its artifacts are archived.
@@ -436,7 +459,10 @@ where
                 history_index: None,
                 ordered: floor.history().tips().to_vec(),
                 emitted: floor.history().tips().to_vec(),
-                committed: None,
+                // No row exists below the floor, so the parent's floor covers its whole frontier.
+                floor_index: frontier_index(floor.history().tips()).ok_or(Error::Invalid(
+                    "state-sync floor frontier overflows the output index",
+                ))?,
             },
         };
         Checkpoint::try_from(parts).map_err(|_| Error::Invalid("startup frontier is not canonical"))
@@ -468,7 +494,9 @@ where
             history_index: Some(0),
             ordered: history.tips().to_vec(),
             emitted: floor.emitted().to_vec(),
-            committed: None,
+            floor_index: frontier_index(floor.emitted()).ok_or(Error::Invalid(
+                "state-sync floor frontier overflows the output index",
+            ))?,
         })
         .map_err(|_| Error::Invalid("startup frontier is not canonical"))?;
         let floors = PendingFloors {

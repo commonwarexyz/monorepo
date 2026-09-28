@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     multimmit::{
-        marshal::{storage::catalog::StoredRef, types::OutputIndex},
+        marshal::{OutputIndex, storage::catalog::StoredRef},
         testing::TestBody,
         types::{ChainId, TransactionBlock, TransactionBlockHeader},
     },
@@ -69,29 +69,22 @@ fn durable_batch(
 #[test]
 fn restart_cursor_is_exactly_after_durable_acknowledgement() {
     let pending = PendingAcks::new(NonZeroUsize::MIN);
-    assert_eq!(pending.next(None).unwrap(), Some(OutputIndex::ZERO));
-    assert_eq!(
-        pending.next(Some(OutputIndex::new(41))).unwrap(),
-        Some(OutputIndex::new(42))
-    );
-    assert!(matches!(
-        pending.next(Some(OutputIndex::new(u64::MAX))),
-        Err(Error::IndexExhausted)
-    ));
+    assert_eq!(pending.next(OutputIndex::zero()), OutputIndex::new(1));
+    assert_eq!(pending.next(OutputIndex::new(41)), OutputIndex::new(42));
 }
 
 #[test]
 fn batch_builder_rejects_outputs_past_its_budget() {
-    let first = output(0);
-    let second = output(1);
+    let first = output(1);
+    let second = output(2);
     let max_bytes = DeliveryOutput::Hot(first.clone()).retained_bytes();
-    let mut builder = DurableBatch::builder(0, OutputIndex::new(1), max_bytes);
+    let mut builder = DurableBatch::builder(0, OutputIndex::new(2), max_bytes);
     assert!(builder.push(DeliveryOutput::Hot(first)).is_ok());
     assert_eq!(builder.bytes(), max_bytes);
     let Err(DeliveryOutput::Hot(rejected)) = builder.push(DeliveryOutput::Hot(second)) else {
         panic!("an output past the budget was accepted");
     };
-    assert_eq!(rejected.stored.index, OutputIndex::new(1));
+    assert_eq!(rejected.stored.index, OutputIndex::new(2));
     let batch = builder.build();
     assert_eq!(batch.outputs.len(), 1);
 }
@@ -100,26 +93,26 @@ fn batch_builder_rejects_outputs_past_its_budget() {
 fn overflow_coalesces_body_handoff_without_losing_committed_progress() {
     deterministic::Runner::default().start(|context| async move {
         let (client, mut receiver) = channel::<Sha256, TestBody>(context);
-        let max_bytes = DeliveryOutput::Hot(output(1)).retained_bytes()
-            + DeliveryOutput::Hot(output(2)).retained_bytes();
+        let max_bytes = DeliveryOutput::Hot(output(2)).retained_bytes()
+            + DeliveryOutput::Hot(output(3)).retained_bytes();
         let batch = |index| durable_batch(0, index, vec![output(index)], max_bytes);
 
-        assert_eq!(client.committed(batch(0)), Feedback::Ok);
-        assert_eq!(client.committed(batch(1)), Feedback::Backoff);
+        assert_eq!(client.committed(batch(1)), Feedback::Ok);
         assert_eq!(client.committed(batch(2)), Feedback::Backoff);
         assert_eq!(client.committed(batch(3)), Feedback::Backoff);
+        assert_eq!(client.committed(batch(4)), Feedback::Backoff);
         assert!(matches!(receiver.recv().await, Some(Message::Committed(_))));
         let Some(Message::Committed(batch)) = receiver.recv().await else {
             panic!("overflow did not retain the hot delivery handoff");
         };
-        assert_eq!(batch.committed, OutputIndex::new(3));
+        assert_eq!(batch.committed, OutputIndex::new(4));
         assert_eq!(
             batch
                 .outputs
                 .iter()
                 .map(|output| output.stored().index)
                 .collect::<Vec<_>>(),
-            vec![OutputIndex::new(1), OutputIndex::new(2)]
+            vec![OutputIndex::new(2), OutputIndex::new(3)]
         );
         assert!(receiver.try_recv().is_err());
     });
@@ -131,11 +124,11 @@ fn newest_reset_supersedes_older_overflow() {
         let (client, mut receiver) = channel(context);
         let batch = |index| durable_batch(0, index, vec![output(index)], u64::MAX);
 
-        assert_eq!(client.committed(batch(0)), Feedback::Ok);
-        let first = client.reset(1, None).unwrap();
-        assert_eq!(client.committed(batch(1)), Feedback::Backoff);
-        let second = client.reset(2, Some(OutputIndex::ZERO)).unwrap();
+        assert_eq!(client.committed(batch(1)), Feedback::Ok);
+        let first = client.reset(1, OutputIndex::zero()).unwrap();
         assert_eq!(client.committed(batch(2)), Feedback::Backoff);
+        let second = client.reset(2, OutputIndex::new(1)).unwrap();
+        assert_eq!(client.committed(batch(3)), Feedback::Backoff);
         assert!(matches!(receiver.recv().await, Some(Message::Committed(_))));
         let Some(Message::Reset {
             floor_generation,
@@ -146,7 +139,7 @@ fn newest_reset_supersedes_older_overflow() {
             panic!("newest reset was not retained");
         };
         assert_eq!(floor_generation, 2);
-        assert_eq!(acknowledged, Some(OutputIndex::ZERO));
+        assert_eq!(acknowledged, OutputIndex::new(1));
         assert_eq!(waiters.len(), 2);
         for waiter in waiters {
             waiter.send_lossy(Ok(()));
@@ -156,91 +149,91 @@ fn newest_reset_supersedes_older_overflow() {
         let Some(Message::Committed(batch)) = receiver.recv().await else {
             panic!("post-reset publication was not retained");
         };
-        assert_eq!(batch.committed, OutputIndex::new(2));
+        assert_eq!(batch.committed, OutputIndex::new(3));
         assert!(receiver.try_recv().is_err());
     });
 }
 
 #[test]
 fn delivery_cache_retains_the_earliest_byte_bounded_prefix() {
-    let first = output(0);
-    let second = output(1);
-    let third = output(2);
+    let first = output(1);
+    let second = output(2);
+    let third = output(3);
     let max = usize::try_from(first.stored.encoded_len + second.stored.encoded_len).unwrap();
     let mut cache = DeliveryCache::new(NonZeroUsize::new(max).unwrap());
     cache.insert(
-        durable_batch(4, 2, vec![first, second, third], u64::MAX),
-        OutputIndex::ZERO,
+        durable_batch(4, 3, vec![first, second, third], u64::MAX),
+        OutputIndex::new(1),
     );
 
-    assert!(cache.take_hot(OutputIndex::ZERO).is_some());
     assert!(cache.take_hot(OutputIndex::new(1)).is_some());
-    assert!(cache.take_hot(OutputIndex::new(2)).is_none());
-    cache.insert(
-        durable_batch(3, 3, vec![output(3)], u64::MAX),
-        OutputIndex::new(4),
-    );
+    assert!(cache.take_hot(OutputIndex::new(2)).is_some());
     assert!(cache.take_hot(OutputIndex::new(3)).is_none());
+    cache.insert(
+        durable_batch(3, 4, vec![output(4)], u64::MAX),
+        OutputIndex::new(5),
+    );
+    assert!(cache.take_hot(OutputIndex::new(4)).is_none());
 
     let mut cache = DeliveryCache::new(NonZeroUsize::MIN);
     cache.insert(
-        durable_batch(4, 0, vec![output(0)], u64::MAX),
-        OutputIndex::ZERO,
+        durable_batch(4, 1, vec![output(1)], u64::MAX),
+        OutputIndex::new(1),
     );
-    assert!(cache.take_hot(OutputIndex::ZERO).is_none());
+    assert!(cache.take_hot(OutputIndex::new(1)).is_none());
 }
 
 #[test]
 fn delivery_cache_takes_descriptors_up_to_the_next_hot_output() {
     let mut builder = DurableBatch::builder(0, OutputIndex::new(3), u64::MAX);
-    for index in 0..2 {
+    for index in 1..=2 {
         assert!(
             builder
                 .push(DeliveryOutput::Descriptor(output(index).stored))
                 .is_ok()
         );
     }
-    assert!(builder.push(DeliveryOutput::Hot(output(2))).is_ok());
+    assert!(builder.push(DeliveryOutput::Hot(output(3))).is_ok());
     let mut cache = DeliveryCache::new(NonZeroUsize::new(usize::MAX).unwrap());
-    cache.insert(builder.build(), OutputIndex::ZERO);
+    cache.insert(builder.build(), OutputIndex::new(1));
 
-    assert!(cache.take_hot(OutputIndex::ZERO).is_none());
+    assert!(cache.take_hot(OutputIndex::new(1)).is_none());
     let refs = cache.take_refs(
-        OutputIndex::ZERO,
+        OutputIndex::new(1),
         NonZeroUsize::new(8).unwrap(),
         NonZeroUsize::new(usize::MAX).unwrap(),
     );
     assert_eq!(
         refs.iter().map(|stored| stored.index).collect::<Vec<_>>(),
-        vec![OutputIndex::ZERO, OutputIndex::new(1)]
+        vec![OutputIndex::new(1), OutputIndex::new(2)]
     );
-    assert!(cache.take_hot(OutputIndex::new(2)).is_some());
+    assert!(cache.take_hot(OutputIndex::new(3)).is_some());
 }
 
 #[test]
 fn pending_acknowledgements_are_bounded_and_retire_fifo() {
     let mut pending = PendingAcks::new(NonZeroUsize::new(2).unwrap());
-    assert_eq!(pending.next(None).unwrap(), Some(OutputIndex::ZERO));
+    let genesis = OutputIndex::zero();
+    assert_eq!(pending.next(genesis), OutputIndex::new(1));
 
     let (first, first_waiter) = Exact::handle();
-    pending.push(OutputIndex::ZERO, first_waiter);
+    pending.push(OutputIndex::new(1), first_waiter);
     let (second, second_waiter) = Exact::handle();
-    pending.push(OutputIndex::new(1), second_waiter);
+    pending.push(OutputIndex::new(2), second_waiter);
     assert!(!pending.has_capacity());
-    assert_eq!(pending.next(None).unwrap(), Some(OutputIndex::new(2)));
+    assert_eq!(pending.next(genesis), OutputIndex::new(3));
 
     second.acknowledge();
     assert!(pending.try_current().is_none());
     first.acknowledge();
     let result = pending.try_current().unwrap();
     let acknowledged = pending.complete(result).unwrap();
-    assert_eq!(acknowledged.through, OutputIndex::new(1));
+    assert_eq!(acknowledged.through, OutputIndex::new(2));
     assert_eq!(acknowledged.outputs, 2);
     assert!(pending.is_empty());
 
     let (last, last_waiter) = Exact::handle();
     pending.push(OutputIndex::new(u64::MAX), last_waiter);
-    assert_eq!(pending.next(None).unwrap(), None);
     last.acknowledge();
     let result = pending.try_current().unwrap();
     let acknowledged = pending.complete(result).unwrap();
@@ -252,7 +245,7 @@ fn pending_acknowledgements_are_bounded_and_retire_fifo() {
 fn canceled_acknowledgement_stops_fifo_retirement() {
     let mut pending = PendingAcks::new(NonZeroUsize::MIN);
     let (acknowledgement, waiter) = Exact::handle();
-    pending.push(OutputIndex::ZERO, waiter);
+    pending.push(OutputIndex::new(1), waiter);
     drop(acknowledgement);
 
     let result = pending.try_current().unwrap();
@@ -268,7 +261,7 @@ fn completed_cursor_sync_precedes_ready_application_acknowledgements() {
         let metrics = Metrics::new(&context);
         let mut pending = PendingAcks::new(NonZeroUsize::MIN);
         let (first, waiter) = Exact::handle();
-        pending.push(OutputIndex::ZERO, waiter);
+        pending.push(OutputIndex::new(1), waiter);
         first.acknowledge();
         let result = pending.try_current().unwrap();
         let acknowledged = pending.complete(result).unwrap();
@@ -281,7 +274,7 @@ fn completed_cursor_sync_precedes_ready_application_acknowledgements() {
         );
 
         let (next, waiter) = Exact::handle();
-        pending.push(OutputIndex::new(1), waiter);
+        pending.push(OutputIndex::new(2), waiter);
         next.acknowledge();
         assert!(matches!(
             pending.next_event().await,
@@ -289,7 +282,7 @@ fn completed_cursor_sync_precedes_ready_application_acknowledgements() {
         ));
         assert_eq!(
             pending.complete_sync(Ok(())).unwrap().through,
-            OutputIndex::ZERO
+            OutputIndex::new(1)
         );
         assert_eq!(pending.in_flight(), 1);
     });
@@ -301,9 +294,9 @@ fn ready_acknowledgements_release_capacity_during_cursor_sync() {
         let metrics = Metrics::new(&context);
         let mut pending = PendingAcks::new(NonZeroUsize::new(2).unwrap());
         let (first, first_waiter) = Exact::handle();
-        pending.push(OutputIndex::ZERO, first_waiter);
+        pending.push(OutputIndex::new(1), first_waiter);
         let (second, second_waiter) = Exact::handle();
-        pending.push(OutputIndex::new(1), second_waiter);
+        pending.push(OutputIndex::new(2), second_waiter);
         first.acknowledge();
         second.acknowledge();
 
@@ -319,15 +312,16 @@ fn ready_acknowledgements_release_capacity_during_cursor_sync() {
         assert_eq!(pending.pending_durability(), 2);
         assert!(pending.has_capacity());
         assert_eq!(pending.in_flight(), 0);
-        assert_eq!(pending.next(None).unwrap(), Some(OutputIndex::new(2)));
+        let genesis = OutputIndex::zero();
+        assert_eq!(pending.next(genesis), OutputIndex::new(3));
 
         let (third, third_waiter) = Exact::handle();
-        pending.push(OutputIndex::new(2), third_waiter);
+        pending.push(OutputIndex::new(3), third_waiter);
         let (fourth, fourth_waiter) = Exact::handle();
-        pending.push(OutputIndex::new(3), fourth_waiter);
+        pending.push(OutputIndex::new(4), fourth_waiter);
         assert!(!pending.has_capacity());
         assert_eq!(pending.in_flight(), 2);
-        assert_eq!(pending.next(None).unwrap(), Some(OutputIndex::new(4)));
+        assert_eq!(pending.next(genesis), OutputIndex::new(5));
 
         third.acknowledge();
         fourth.acknowledge();
@@ -339,7 +333,7 @@ fn ready_acknowledgements_release_capacity_during_cursor_sync() {
         assert!(pending.has_capacity());
         assert_eq!(pending.in_flight(), 0);
         assert_eq!(pending.pending_durability(), 4);
-        assert_eq!(pending.next(None).unwrap(), Some(OutputIndex::new(4)));
+        assert_eq!(pending.next(genesis), OutputIndex::new(5));
 
         pending.complete_sync(Ok(())).unwrap();
         assert!(pending.has_capacity());
