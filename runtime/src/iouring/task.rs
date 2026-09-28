@@ -321,7 +321,10 @@ impl State {
                         state & REFS > REF_ONE,
                         "idle task would release its last reference"
                     );
-                    (Self::with_lifecycle(state, IDLE) - REF_ONE, AfterPending::Done)
+                    (
+                        Self::with_lifecycle(state, IDLE) - REF_ONE,
+                        AfterPending::Done,
+                    )
                 }
                 // A wake arrived and published nothing, so the polled token
                 // becomes the next one, keeping its reference.
@@ -1498,7 +1501,10 @@ pub mod tests {
             task.wake_by_ref();
         }
         assert!(scheduled(&mailbox).is_empty());
-        assert!(matches!(tokens.pop().unwrap().poll(|_| {}), AfterPoll::Done));
+        assert!(matches!(
+            tokens.pop().unwrap().poll(|_| {}),
+            AfterPoll::Done
+        ));
         assert_eq!(refs(&handles[1]), 2);
 
         // A cleared arena has already released every slot.
