@@ -40,8 +40,7 @@
 //! Initialization fails if pruning removed history needed by the selected commit.
 //!
 //! Initialization durably removes later history before returning successfully. The bound does not
-//! limit future appends. Close all existing users of the storage before reopening.
-//! To require an exact checkpoint, also check the recovered root and range.
+//! limit future appends. To require an exact checkpoint, also check the recovered root and range.
 //!
 //! # Ownership
 //!
@@ -390,7 +389,7 @@ pub enum Error<F: Family> {
     StaleBatch,
 
     /// A batch read found that a non-ancestor batch was applied to the database (or that
-    /// it was rewound off the batch's chain). The caller should fork a new batch from the
+    /// it was reinitialized off the batch's chain). The caller should fork a new batch from the
     /// current state.
     #[error("stale read: a non-ancestor batch was applied")]
     StaleRead,

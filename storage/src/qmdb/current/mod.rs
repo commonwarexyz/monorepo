@@ -12,13 +12,13 @@
 //!
 //! A batch remains usable only while its ancestor chain is still the committed prefix of the
 //! DB. Once a non-ancestor batch is applied, that batch and all of its descendants are stale.
-//! Reads and merkleization refuse with `StaleRead`, and applying is rejected with
+//! Reads refuse with `StaleRead`, and merkleization and application are rejected with
 //! `StaleBatch` (see [`crate::qmdb::chain`]).
 //!
 //! Concretely
 //! - Build `A`, apply `A`, then build `B` from `A` -- `B` reads and merkleizes normally.
-//! - Build siblings `B1` and `B2`, apply `B1` -- `B2.get()` and `B2.merkleize()` refuse with
-//!   `StaleRead`, and `apply_batch(B2)` is rejected with `StaleBatch`.
+//! - Build siblings `B1` and `B2`, apply `B1` -- `B2.get()` returns `StaleRead`, while
+//!   `B2.merkleize()` and `apply_batch(B2)` return `StaleBatch`.
 //! - Hold `view = db.to_batch()`, mutate the DB through another branch -- `view`'s reads
 //!   refuse from then on.
 //!
@@ -1967,6 +1967,308 @@ pub mod tests {
     // These exercise the current wrapper's batch methods (root, ops_root,
     // MerkleizedBatch::get, batch chaining) which layer bitmap and grafted tree
     // computation on top of the `any` batch.
+
+    #[test_traced]
+    fn test_current_foreign_db_merkleize_rejected() {
+        deterministic::Runner::default().start(|context| async move {
+            let db_a = UnorderedFixedDb::init(
+                context.child("a"),
+                fixed_config::<OneCap>("foreign-a", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let db_b = UnorderedFixedDb::init(
+                context.child("b"),
+                fixed_config::<OneCap>("foreign-b", &context),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let seed_a = db_a
+                .new_batch()
+                .write(key(1), Some(val(1)))
+                .merkleize(&db_a, None)
+                .await
+                .unwrap();
+            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let seed_b = db_b
+                .new_batch()
+                .write(key(2), Some(val(2)))
+                .merkleize(&db_b, None)
+                .await
+                .unwrap();
+            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+
+            assert_eq!(db_a.bounds().end, db_b.bounds().end);
+            assert_ne!(db_a.ops_root(), db_b.ops_root());
+            assert_ne!(db_a.root(), db_b.root());
+
+            let staged_keys = [key(1)];
+            let staged_refs: Vec<_> = staged_keys.iter().collect();
+            assert!(matches!(
+                db_a.new_batch().stage(&staged_refs, &db_b).await,
+                Err(Error::StaleRead)
+            ));
+
+            let batch = db_a.new_batch().write(key(1), Some(val(3)));
+            assert!(matches!(
+                batch.merkleize(&db_b, None).await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
+
+    fn current_unordered_merkleize_uses_supplied_bitmap<F: merkle::Graftable>() {
+        type TestDb<F> =
+            unordered::fixed::Db<F, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+        deterministic::Runner::default().start(|context| async move {
+            let config_b = fixed_config::<OneCap>("supplied-bitmap-unordered-b", &context);
+            let db_a = TestDb::<F>::init(
+                context.child("a"),
+                fixed_config::<OneCap>("supplied-bitmap-unordered-a", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let db_b = TestDb::<F>::init(context.child("b"), config_b.clone(), None)
+                .await
+                .unwrap();
+
+            // Identical committed states span complete and partial bitmap chunks.
+            let mut seed_a = db_a.new_batch();
+            let mut seed_b = db_b.new_batch();
+            for i in 0..300 {
+                seed_a = seed_a.write(key(i), Some(val(i)));
+                seed_b = seed_b.write(key(i), Some(val(i)));
+            }
+            let seed_a = seed_a.merkleize(&db_a, None).await.unwrap();
+            let seed_b = seed_b.merkleize(&db_b, None).await.unwrap();
+            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+            assert_eq!(db_a.root(), db_b.root());
+            assert_eq!(db_a.ops_root(), db_b.ops_root());
+
+            let pending = db_a.new_batch().write(key(2), Some(val(302)));
+            let staged_keys = [key(2)];
+            let staged_refs: Vec<_> = staged_keys.iter().collect();
+            let (_, staged) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
+
+            // A advances on a sibling while B retains the batches' original commitment.
+            let sibling = db_a
+                .new_batch()
+                .write(key(1), Some(val(301)))
+                .merkleize(&db_a, None)
+                .await
+                .unwrap();
+            let (db_a, _) = db_a.apply_batch(sibling).await.unwrap();
+            assert_ne!(db_a.root(), db_b.root());
+
+            // Merkleization must read B's bitmap, including chunks changed only by A's sibling.
+            let expected = db_b
+                .new_batch()
+                .write(key(2), Some(val(302)))
+                .merkleize(&db_b, None)
+                .await
+                .unwrap();
+            let pending = pending.merkleize(&db_b, None).await.unwrap();
+            let staged = staged
+                .merkleize(vec![(0, Some(val(302)))], Vec::new(), None, &db_b)
+                .await
+                .unwrap();
+            for actual in [&pending, &staged] {
+                assert_eq!(actual.root(), expected.root());
+                assert_eq!(actual.ops_root(), expected.ops_root());
+            }
+
+            // Reopening recomputes the root from persisted operations and bitmap state.
+            let (db_b, _) = db_b.apply_batch(staged).await.unwrap();
+            let db_b = db_b.commit().await.unwrap();
+            drop(db_b);
+            let reopened = TestDb::<F>::init(context.child("reopen"), config_b, None)
+                .await
+                .unwrap();
+            assert_eq!(reopened.root(), expected.root());
+            assert_eq!(reopened.ops_root(), expected.ops_root());
+            assert_eq!(reopened.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(reopened.get(&key(2)).await.unwrap(), Some(val(302)));
+            reopened.destroy().await.unwrap();
+            db_a.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_current_unordered_merkleize_uses_supplied_bitmap_mmr() {
+        current_unordered_merkleize_uses_supplied_bitmap::<mmr::Family>();
+    }
+
+    #[test_traced]
+    fn test_current_unordered_merkleize_uses_supplied_bitmap_mmb() {
+        current_unordered_merkleize_uses_supplied_bitmap::<mmb::Family>();
+    }
+
+    fn current_ordered_merkleize_uses_supplied_bitmap<F: merkle::Graftable>() {
+        type TestDb<F> =
+            ordered::fixed::Db<F, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+        deterministic::Runner::default().start(|context| async move {
+            let config_b = fixed_config::<OneCap>("supplied-bitmap-ordered-b", &context);
+            let db_a = TestDb::<F>::init(
+                context.child("a"),
+                fixed_config::<OneCap>("supplied-bitmap-ordered-a", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let db_b = TestDb::<F>::init(context.child("b"), config_b.clone(), None)
+                .await
+                .unwrap();
+
+            // Identical committed states span complete and partial bitmap chunks.
+            let mut seed_a = db_a.new_batch();
+            let mut seed_b = db_b.new_batch();
+            for i in 0..300 {
+                seed_a = seed_a.write(key(i), Some(val(i)));
+                seed_b = seed_b.write(key(i), Some(val(i)));
+            }
+            let seed_a = seed_a.merkleize(&db_a, None).await.unwrap();
+            let seed_b = seed_b.merkleize(&db_b, None).await.unwrap();
+            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+            assert_eq!(db_a.root(), db_b.root());
+            assert_eq!(db_a.ops_root(), db_b.ops_root());
+
+            let pending = db_a.new_batch().write(key(2), Some(val(302)));
+            let staged_keys = [key(2)];
+            let staged_refs: Vec<_> = staged_keys.iter().collect();
+            let (_, staged) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
+
+            // A advances on a sibling while B retains the batches' original commitment.
+            let sibling = db_a
+                .new_batch()
+                .write(key(1), Some(val(301)))
+                .merkleize(&db_a, None)
+                .await
+                .unwrap();
+            let (db_a, _) = db_a.apply_batch(sibling).await.unwrap();
+            assert_ne!(db_a.root(), db_b.root());
+
+            // Merkleization must read B's bitmap, including chunks changed only by A's sibling.
+            let expected = db_b
+                .new_batch()
+                .write(key(2), Some(val(302)))
+                .merkleize(&db_b, None)
+                .await
+                .unwrap();
+            let pending = pending.merkleize(&db_b, None).await.unwrap();
+            let staged = staged
+                .merkleize(vec![(0, Some(val(302)))], Vec::new(), None, &db_b)
+                .await
+                .unwrap();
+            for actual in [&pending, &staged] {
+                assert_eq!(actual.root(), expected.root());
+                assert_eq!(actual.ops_root(), expected.ops_root());
+            }
+
+            // Reopening recomputes the root from persisted operations and bitmap state.
+            let (db_b, _) = db_b.apply_batch(staged).await.unwrap();
+            let db_b = db_b.commit().await.unwrap();
+            drop(db_b);
+            let reopened = TestDb::<F>::init(context.child("reopen"), config_b, None)
+                .await
+                .unwrap();
+            assert_eq!(reopened.root(), expected.root());
+            assert_eq!(reopened.ops_root(), expected.ops_root());
+            assert_eq!(reopened.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(reopened.get(&key(2)).await.unwrap(), Some(val(302)));
+            reopened.destroy().await.unwrap();
+            db_a.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_current_ordered_merkleize_uses_supplied_bitmap_mmr() {
+        current_ordered_merkleize_uses_supplied_bitmap::<mmr::Family>();
+    }
+
+    #[test_traced]
+    fn test_current_ordered_merkleize_uses_supplied_bitmap_mmb() {
+        current_ordered_merkleize_uses_supplied_bitmap::<mmb::Family>();
+    }
+
+    #[test_traced]
+    fn test_current_merkleize_rejects_stale_sibling() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = OrderedFixedDb::init(
+                context.child("db"),
+                fixed_config::<OneCap>("stale-unmerkleized", &context),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let seed = db
+                .new_batch()
+                .write(key(1), Some(val(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            let stale = db.new_batch().write(key(1), Some(val(2)));
+            let sibling = db
+                .new_batch()
+                .write(key(1), Some(val(3)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+
+            assert!(matches!(
+                stale.merkleize(&db, None).await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_current_staged_merkleize_rejects_stale_sibling() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = UnorderedFixedDb::init(
+                context.child("db"),
+                fixed_config::<OneCap>("stale-staged", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let target = key(1);
+
+            let seed = db
+                .new_batch()
+                .write(target, Some(val(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            let staged_keys = [&target];
+            let (_, staged) = db.new_batch().stage(&staged_keys, &db).await.unwrap();
+            let sibling = db
+                .new_batch()
+                .write(target, Some(val(2)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+
+            assert!(matches!(
+                staged
+                    .merkleize(vec![(0, Some(val(3)))], Vec::new(), None, &db)
+                    .await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
 
     /// Bitmap chunk size in bits for the `N = 32` database aliases above.
     const CHUNK_BITS: u64 = commonware_utils::bitmap::BitMap::<32>::CHUNK_SIZE_BITS;
@@ -4004,7 +4306,7 @@ pub mod tests {
     }
 
     /// Reopening at an ancestor state keeps a live descendant on-chain, but its overlays were
-    /// built on the later committed bitmap. Merkleizing a child must refuse with `StaleRead`
+    /// built on the later committed bitmap. Merkleizing a child must refuse with `StaleBatch`
     /// rather than read those overlays over the recovered bitmap.
     fn child_merkleize_after_bounded_reopen_is_stale<F: merkle::Graftable>() {
         type TestDb<F> =
@@ -4060,7 +4362,7 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .err();
-            assert!(matches!(err, Some(Error::StaleRead)));
+            assert!(matches!(err, Some(Error::StaleBatch)));
 
             db.destroy().await.unwrap();
         });
