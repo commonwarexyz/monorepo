@@ -4,7 +4,7 @@
 //! may share an index. Finalized artifacts use [`FinalizedArchive`], a write-once archive whose
 //! backend (prunable or immutable) is fixed per family when the namespace is created.
 
-use super::{Error, blocks::FinalBlockMeta};
+use super::{Error, blocks::FinalBlockMeta, floors::FloorRecord};
 use crate::multimmit::types::{Lqc, TipRecord, TransactionBlock};
 use commonware_codec::{Buf, BufsMut, CodecShared, EncodeSize, Read, Write};
 use commonware_cryptography::Hasher;
@@ -32,6 +32,9 @@ pub(crate) type FinalLqc<T, E, H, V> = FinalizedArchive<T, E, Digest<H>, Arc<Lqc
 /// Finalized tip-history openings, indexed by history ordinal and keyed by commitment.
 pub(crate) type FinalHistory<T, E, H> =
     FinalizedArchive<T, E, Digest<H>, Arc<TipRecord<Digest<H>>>>;
+
+/// Floors established by finalized L-QCs, indexed by L-QC ordinal and keyed by certificate digest.
+pub(crate) type FinalFloors<T, E, H> = FinalizedArchive<T, E, Digest<H>, FloorRecord<Digest<H>>>;
 
 /// Dense finalized output rows, indexed by output and keyed by block digest.
 ///
@@ -202,6 +205,14 @@ where
     /// Returns the highest retained index, if the archive is non-empty.
     pub(crate) fn last_index(&self) -> Option<u64> {
         dispatch!(&self.0, archive => archive.last_index())
+    }
+
+    /// Returns the lowest retained index at or above `from`, if any.
+    pub(crate) fn next_index(&self, from: u64) -> Option<u64> {
+        dispatch!(&self.0, archive => archive
+            .ranges_from(from)
+            .next()
+            .map(|(start, _)| start.max(from)))
     }
 
     /// Buffers a value at an exact `(index, key)` identity.
@@ -398,6 +409,30 @@ mod tests {
                     first_retained
                 );
                 assert_eq!(archive.get_by_key(&second).await.unwrap(), Some(20));
+            });
+        }
+    }
+
+    #[test]
+    fn next_index_skips_gaps() {
+        for (kind, prefix) in [
+            (Kind::Prunable, "next-prunable"),
+            (Kind::Immutable, "next-immutable"),
+        ] {
+            let runner = deterministic::Runner::default();
+            runner.start(|context| async move {
+                let mut archive = open(context.child("storage"), kind, prefix).await;
+                assert_eq!(archive.next_index(0), None);
+                for index in [1, 2, 7, 12] {
+                    let key = Key::new([u8::try_from(index).unwrap(); 32]);
+                    archive = archive.put(index, key, index).await.unwrap();
+                }
+
+                assert_eq!(archive.next_index(0), Some(1));
+                assert_eq!(archive.next_index(2), Some(2));
+                assert_eq!(archive.next_index(3), Some(7));
+                assert_eq!(archive.next_index(12), Some(12));
+                assert_eq!(archive.next_index(13), None);
             });
         }
     }

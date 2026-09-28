@@ -276,6 +276,7 @@ where
             max_jobs: self.bounds.router_jobs,
             subscription_callers: self.bounds.subscription_callers,
             staged: self.staged,
+            max_pending_acks: self.capacities.max_pending_acks,
         });
         let children = Children {
             catalog: catalog_handle,

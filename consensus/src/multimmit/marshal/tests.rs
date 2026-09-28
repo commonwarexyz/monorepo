@@ -6,8 +6,8 @@ use crate::{
         config::max_outbox_effects,
         marshal::{
             ArchiveConfig, ArchiveMode, Config, Error as MailboxError, Floor, LqcVerifier, Mailbox,
-            MarshalProgress, OutputIndex, Prune, Relay, ServiceHandle, Start, Update,
-            actors::catalog, open, storage::catalog::StoredRef,
+            MarshalProgress, OutputIndex, Relay, ServiceHandle, Start, Update, actors::catalog,
+            open, storage::catalog::StoredRef,
         },
         mocks::{
             Committee,
@@ -740,6 +740,19 @@ impl Certified {
             .collect()
     }
 
+    /// Reports that the engine durably recorded a certificate for each chain's tip and no longer
+    /// verifies any block at or below it.
+    fn release(&self, mailbox: &TestMailbox) {
+        let mut reporter = mailbox.clone();
+        for certified in self.tips() {
+            let feedback = reporter.report(Activity::CertificateRecorded {
+                certified,
+                released: certified.height(),
+            });
+            assert!(feedback.accepted());
+        }
+    }
+
     async fn submit(&self, mailbox: &TestMailbox) {
         for block in self.blocks.iter().flatten() {
             mailbox.put_block(Arc::clone(block)).await.unwrap();
@@ -973,7 +986,7 @@ fn local_two_chain_delivery_is_offset_major_and_header_exact() {
         let delivered = harness.wait_updates(0, 4).await;
         let expected = batch.offset_major();
         for (offset, (actual, block)) in delivered.iter().zip(&expected).enumerate() {
-            assert_eq!(actual.index, OutputIndex::new(offset as u64));
+            assert_eq!(actual.index, OutputIndex::new(offset as u64 + 1));
             assert_eq!(actual.block.as_ref(), block.as_ref());
         }
         assert_ne!(
@@ -983,9 +996,7 @@ fn local_two_chain_delivery_is_offset_major_and_header_exact() {
         assert_ne!(delivered[0].block.header(), delivered[1].block.header());
         assert_eq!(delivered[0].block.body(), delivered[1].block.body());
         harness
-            .wait_progress(0, |progress| {
-                progress.acknowledged == Some(OutputIndex::new(3))
-            })
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(4))
             .await;
         let metrics = harness.context.encode();
         assert_eq!(
@@ -1093,8 +1104,8 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
         let initial = harness.wait_updates(0, 2).await;
         let initial_progress = harness
             .wait_progress(0, |progress| {
-                progress.committed == Some(OutputIndex::new(1))
-                    && progress.acknowledged == Some(OutputIndex::new(1))
+                progress.committed == OutputIndex::new(2)
+                    && progress.acknowledged == OutputIndex::new(2)
             })
             .await;
         assert_eq!(initial.len(), 2);
@@ -1102,7 +1113,7 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
         assert_eq!(initial_progress.floor, batch.id());
         let expected = batch.offset_major();
         for (index, (actual, expected)) in initial.iter().zip(&expected).enumerate() {
-            assert_eq!(actual.index, OutputIndex::new(index as u64));
+            assert_eq!(actual.index, OutputIndex::new(index as u64 + 1));
             assert_eq!(actual.block.as_ref(), expected.as_ref());
         }
 
@@ -1141,13 +1152,13 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
 
         let delivered = harness.wait_updates(0, 3).await;
         for (index, (actual, expected)) in delivered.iter().zip(&expected).enumerate() {
-            assert_eq!(actual.index, OutputIndex::new(index as u64));
+            assert_eq!(actual.index, OutputIndex::new(index as u64 + 1));
             assert_eq!(actual.block.as_ref(), expected.as_ref());
         }
         let progress = harness
             .wait_progress(0, |progress| {
-                progress.committed == Some(OutputIndex::new(2))
-                    && progress.acknowledged == Some(OutputIndex::new(2))
+                progress.committed == OutputIndex::new(3)
+                    && progress.acknowledged == OutputIndex::new(3)
             })
             .await;
         assert_eq!(progress.floor, batch.id());
@@ -2249,7 +2260,7 @@ fn production_engine_reporter_survives_engine_and_marshal_restart() {
         let delivered = wait_delivered(&context, &reporter, PARTICIPANTS as usize).await;
         assert_eq!(delivered.len(), PARTICIPANTS as usize);
         for (index, delivered) in delivered.iter().enumerate() {
-            assert_eq!(delivered.index, OutputIndex::new(index as u64));
+            assert_eq!(delivered.index, OutputIndex::new(index as u64 + 1));
             assert_eq!(
                 delivered.block.reference(),
                 delivered.block.header().block_ref::<Sha256>()
@@ -2258,7 +2269,7 @@ fn production_engine_reporter_survives_engine_and_marshal_restart() {
         let first_progress = attached.mailbox.progress().await.unwrap();
         assert_eq!(
             first_progress.acknowledged,
-            Some(OutputIndex::new(PARTICIPANTS as u64 - 1))
+            OutputIndex::new(PARTICIPANTS as u64)
         );
 
         cluster.crash(0).await;
@@ -2390,14 +2401,12 @@ fn crash_redelivers_only_until_acknowledgement_is_durable() {
         assert_eq!(first[1].block.as_ref(), expected[1].as_ref());
         assert_eq!(
             harness.reporter(0).pending(),
-            vec![OutputIndex::ZERO, OutputIndex::new(1)]
+            vec![OutputIndex::new(1), OutputIndex::new(2)]
         );
         let progress = harness
-            .wait_progress(0, |progress| {
-                progress.committed == Some(OutputIndex::new(1))
-            })
+            .wait_progress(0, |progress| progress.committed == OutputIndex::new(2))
             .await;
-        assert_eq!(progress.acknowledged, None);
+        assert_eq!(progress.acknowledged, OutputIndex::zero());
         let metrics = harness.context.encode();
         assert_eq!(
             metric_total(&metrics, "delivery_hot_outputs_total"),
@@ -2412,27 +2421,23 @@ fn crash_redelivers_only_until_acknowledgement_is_durable() {
 
         assert_eq!(
             harness.reporter(0).acknowledge_next(),
-            Some(OutputIndex::ZERO)
+            Some(OutputIndex::new(1))
         );
         harness
-            .wait_progress(0, |progress| {
-                progress.acknowledged == Some(OutputIndex::ZERO)
-            })
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(1))
             .await;
         harness.crash(0).await;
         harness.start(0).await;
         let redelivered = harness.wait_updates(0, 3).await;
-        assert_eq!(redelivered[2].index, OutputIndex::new(1));
+        assert_eq!(redelivered[2].index, OutputIndex::new(2));
         assert_eq!(redelivered[2].block.as_ref(), expected[1].as_ref());
-        assert_eq!(harness.reporter(0).pending(), vec![OutputIndex::new(1)]);
+        assert_eq!(harness.reporter(0).pending(), vec![OutputIndex::new(2)]);
         assert_eq!(
             harness.reporter(0).acknowledge_next(),
-            Some(OutputIndex::new(1))
+            Some(OutputIndex::new(2))
         );
         harness
-            .wait_progress(0, |progress| {
-                progress.acknowledged == Some(OutputIndex::new(1))
-            })
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(2))
             .await;
         let metrics = harness.context.encode();
         assert_eq!(
@@ -2450,8 +2455,8 @@ fn crash_redelivers_only_until_acknowledgement_is_durable() {
         harness.start(0).await;
         harness
             .wait_progress(0, |progress| {
-                progress.committed == Some(OutputIndex::new(1))
-                    && progress.acknowledged == Some(OutputIndex::new(1))
+                progress.committed == OutputIndex::new(2)
+                    && progress.acknowledged == OutputIndex::new(2)
             })
             .await;
         harness.context.sleep(Duration::from_millis(100)).await;
@@ -2480,36 +2485,36 @@ fn delivery_pipelines_exact_acknowledgements_up_to_the_configured_bound() {
         let delivered = harness.wait_updates(0, 3).await;
         assert_eq!(
             delivered.iter().map(|item| item.index).collect::<Vec<_>>(),
-            vec![OutputIndex::ZERO, OutputIndex::new(1), OutputIndex::new(2)]
+            vec![
+                OutputIndex::new(1),
+                OutputIndex::new(2),
+                OutputIndex::new(3)
+            ]
         );
         harness.context.sleep(Duration::from_millis(100)).await;
         assert_eq!(harness.reporter(0).delivered().len(), 3);
 
         let reporter = harness.reporter(0);
-        assert!(reporter.acknowledge(OutputIndex::new(1)));
         assert!(reporter.acknowledge(OutputIndex::new(2)));
+        assert!(reporter.acknowledge(OutputIndex::new(3)));
         harness.context.sleep(Duration::from_millis(100)).await;
         assert_eq!(
             harness.mailbox(0).progress().await.unwrap().acknowledged,
-            None
+            OutputIndex::zero()
         );
-        assert_eq!(reporter.pending(), vec![OutputIndex::ZERO]);
+        assert_eq!(reporter.pending(), vec![OutputIndex::new(1)]);
 
-        assert!(reporter.acknowledge(OutputIndex::ZERO));
+        assert!(reporter.acknowledge(OutputIndex::new(1)));
         harness
-            .wait_progress(0, |progress| {
-                progress.acknowledged == Some(OutputIndex::new(2))
-            })
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(3))
             .await;
         let delivered = harness.wait_updates(0, 4).await;
-        assert_eq!(delivered[3].index, OutputIndex::new(3));
-        assert_eq!(reporter.pending(), vec![OutputIndex::new(3)]);
+        assert_eq!(delivered[3].index, OutputIndex::new(4));
+        assert_eq!(reporter.pending(), vec![OutputIndex::new(4)]);
 
-        assert!(reporter.acknowledge(OutputIndex::new(3)));
+        assert!(reporter.acknowledge(OutputIndex::new(4)));
         harness
-            .wait_progress(0, |progress| {
-                progress.acknowledged == Some(OutputIndex::new(3))
-            })
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(4))
             .await;
         harness.shutdown().await;
     });
@@ -2555,12 +2560,12 @@ fn sustained_one_output_commits_remain_dense_and_memory_only() {
 
         let delivered = harness.wait_updates(0, expected.len()).await;
         for (offset, (actual, expected)) in delivered.iter().zip(&expected).enumerate() {
-            assert_eq!(actual.index, OutputIndex::new(offset as u64));
+            assert_eq!(actual.index, OutputIndex::new(offset as u64 + 1));
             assert_eq!(actual.block.as_ref(), expected.as_ref());
         }
-        let last = OutputIndex::new(u64::try_from(expected.len() - 1).unwrap());
+        let last = OutputIndex::new(u64::try_from(expected.len()).unwrap());
         harness
-            .wait_progress(0, |progress| progress.acknowledged == Some(last))
+            .wait_progress(0, |progress| progress.acknowledged == last)
             .await;
         let metrics = harness.context.encode();
         assert_eq!(
@@ -2639,12 +2644,12 @@ fn sustained_history_catchup_remains_dense_and_memory_only() {
 
         let delivered = harness.wait_updates(0, OUTPUTS).await;
         for (offset, (actual, expected)) in delivered.iter().zip(&expected).enumerate() {
-            assert_eq!(actual.index, OutputIndex::new(offset as u64));
+            assert_eq!(actual.index, OutputIndex::new(offset as u64 + 1));
             assert_eq!(actual.block.as_ref(), expected.as_ref());
         }
-        let last = OutputIndex::new(u64::try_from(OUTPUTS - 1).unwrap());
+        let last = OutputIndex::new(u64::try_from(OUTPUTS).unwrap());
         harness
-            .wait_progress(0, |progress| progress.acknowledged == Some(last))
+            .wait_progress(0, |progress| progress.acknowledged == last)
             .await;
 
         let metrics = harness.context.encode();
@@ -2683,23 +2688,23 @@ fn delivery_pressure_materializes_evicted_hot_blocks_from_custody() {
             ],
         );
         let expected = batch.offset_major();
-        let committed = OutputIndex::new(u64::try_from(expected.len() - 1).unwrap());
+        let committed = OutputIndex::new(u64::try_from(expected.len()).unwrap());
         let mailbox = harness.mailbox(0);
         batch.submit(&mailbox).await;
         batch.finalize(&mailbox);
 
         harness.wait_updates(0, 1).await;
         harness
-            .wait_progress(0, |progress| progress.committed == Some(committed))
+            .wait_progress(0, |progress| progress.committed == committed)
             .await;
         for (offset, block) in expected.iter().enumerate() {
-            let index = OutputIndex::new(u64::try_from(offset).unwrap());
+            let index = OutputIndex::new(u64::try_from(offset + 1).unwrap());
             let delivered = harness.wait_updates(0, offset + 1).await;
             assert_eq!(delivered[offset].index, index);
             assert_eq!(delivered[offset].block.as_ref(), block.as_ref());
             assert_eq!(harness.reporter(0).acknowledge_next(), Some(index));
             harness
-                .wait_progress(0, |progress| progress.acknowledged == Some(index))
+                .wait_progress(0, |progress| progress.acknowledged == index)
                 .await;
         }
         let metrics = harness.context.encode();
@@ -2752,12 +2757,12 @@ fn durable_output_descriptors_avoid_finalized_metadata_rereads() {
 
         let delivered = harness.wait_updates(0, expected.len()).await;
         for (offset, (actual, expected)) in delivered.iter().zip(&expected).enumerate() {
-            assert_eq!(actual.index, OutputIndex::new(offset as u64));
+            assert_eq!(actual.index, OutputIndex::new(offset as u64 + 1));
             assert_eq!(actual.block.as_ref(), expected.as_ref());
         }
-        let last = OutputIndex::new(u64::try_from(expected.len() - 1).unwrap());
+        let last = OutputIndex::new(u64::try_from(expected.len()).unwrap());
         harness
-            .wait_progress(0, |progress| progress.acknowledged == Some(last))
+            .wait_progress(0, |progress| progress.acknowledged == last)
             .await;
 
         let metrics = harness.context.encode();
@@ -2795,13 +2800,11 @@ fn delivery_materializes_only_the_cold_prefix_before_a_retained_hot_output() {
 
         let delivered = harness.wait_updates(0, 2).await;
         for (offset, (actual, expected)) in delivered.iter().zip(&expected).enumerate() {
-            assert_eq!(actual.index, OutputIndex::new(offset as u64));
+            assert_eq!(actual.index, OutputIndex::new(offset as u64 + 1));
             assert_eq!(actual.block.as_ref(), expected.as_ref());
         }
         harness
-            .wait_progress(0, |progress| {
-                progress.acknowledged == Some(OutputIndex::new(1))
-            })
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(2))
             .await;
 
         let metrics = harness.context.encode();
@@ -2920,7 +2923,7 @@ fn floor_installation_retires_the_pending_delivery_window() {
         harness.wait_updates(0, 2).await;
         harness
             .wait_progress(0, |progress| {
-                progress.committed == Some(OutputIndex::new(1)) && progress.acknowledged.is_none()
+                progress.committed == OutputIndex::new(2) && progress.acknowledged.is_zero()
             })
             .await;
 
@@ -2942,11 +2945,12 @@ fn floor_installation_retires_the_pending_delivery_window() {
             ))
             .await
             .unwrap();
+        // The floor's frontier is at height two on both chains, so its index is four.
         harness
             .wait_progress(0, |progress| {
                 progress.floor_generation == 1
-                    && progress.committed == Some(OutputIndex::new(1))
-                    && progress.acknowledged == Some(OutputIndex::new(1))
+                    && progress.committed == OutputIndex::new(4)
+                    && progress.acknowledged == OutputIndex::new(4)
             })
             .await;
         harness.reporter(0).discard_pending();
@@ -2964,8 +2968,315 @@ fn floor_installation_retires_the_pending_delivery_window() {
         continuation.submit(&mailbox).await;
         continuation.finalize(&mailbox);
         let delivered = harness.wait_updates(0, 4).await;
-        assert_eq!(delivered[2].index, OutputIndex::new(2));
-        assert_eq!(delivered[3].index, OutputIndex::new(3));
+        assert_eq!(delivered[2].index, OutputIndex::new(5));
+        assert_eq!(delivered[3].index, OutputIndex::new(6));
+
+        // Once the engine releases every block, pruning at the floor reclaims both generations'
+        // rows below it and their bodies, except each chain's newest, which its next block builds
+        // on.
+        let reporter = harness.reporter(0);
+        assert!(reporter.acknowledge(OutputIndex::new(5)));
+        assert!(reporter.acknowledge(OutputIndex::new(6)));
+        harness
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(6))
+            .await;
+        continuation.release(&mailbox);
+        mailbox.prune(OutputIndex::new(6)).await.unwrap();
+        for block in first.blocks.iter().flatten() {
+            assert!(
+                mailbox
+                    .get_block(block.reference())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for chain in &continuation.blocks {
+            for (offset, block) in chain.iter().enumerate() {
+                let retained = mailbox.get_block(block.reference()).await.unwrap();
+                assert_eq!(retained.is_some(), offset + 1 == chain.len());
+            }
+        }
+
+        harness.crash(0).await;
+        harness.start(0).await;
+        let reopened = harness
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(6))
+            .await;
+        assert_eq!(reopened.committed, OutputIndex::new(6));
+        harness.shutdown().await;
+    });
+}
+
+#[test]
+fn a_read_below_the_floor_index_resumes_at_each_later_generation() {
+    runner(114).start(|context| async move {
+        let mut harness = Harness::new(context, 114, [false, true]).await;
+        harness.max_pending_acks = NZUsize!(2);
+        harness.start(0).await;
+        let mailbox = harness.mailbox(0);
+        let first = certify(
+            &harness.committee,
+            1,
+            initial_history(&harness.committee),
+            harness.committee.config.genesis().tips(),
+            vec![vec![body(80)], vec![body(81)]],
+        );
+        first.submit(&mailbox).await;
+        first.finalize(&mailbox);
+        harness.wait_updates(0, 2).await;
+
+        // Each floor's frontier is two heights above the previous generation's rows, so the
+        // first generation holds rows one and two, the second floor index four and rows five and
+        // six, and the third floor index eight.
+        let mut tips = first.tips();
+        let mut history = first.history.commitment::<Sha256>();
+        for (view, generation, index) in [(2, 1, 4), (4, 2, 8)] {
+            let record = Arc::new(TipRecord::at_tips(history, tips.clone()).unwrap());
+            let floor = certify(
+                &harness.committee,
+                view,
+                record,
+                &tips,
+                vec![vec![body(80 + view)], vec![body(90 + view)]],
+            );
+            mailbox
+                .install_floor(Floor::new(
+                    Arc::clone(&floor.proof),
+                    Arc::clone(&floor.history),
+                    floor.tips(),
+                ))
+                .await
+                .unwrap();
+            harness
+                .wait_progress(0, |progress| {
+                    progress.floor_generation == generation
+                        && progress.committed == OutputIndex::new(index)
+                })
+                .await;
+            harness.reporter(0).discard_pending();
+            if generation == 2 {
+                break;
+            }
+            let record = Arc::new(
+                TipRecord::at_tips(floor.history.commitment::<Sha256>(), floor.tips()).unwrap(),
+            );
+            let continuation = certify(
+                &harness.committee,
+                view + 1,
+                record,
+                &floor.tips(),
+                vec![vec![body(100 + view)], vec![body(110 + view)]],
+            );
+            continuation.submit(&mailbox).await;
+            continuation.finalize(&mailbox);
+            harness.wait_updates(0, 4).await;
+            tips = continuation.tips();
+            history = continuation.history.commitment::<Sha256>();
+        }
+
+        // A read that begins in a gap below the floor index resumes at the next generation's
+        // rows, and one past them finds none below the newest floor.
+        let catalog = harness.catalog(0);
+        let mut reads = Vec::new();
+        for start in [1, 3, 7] {
+            let refs = catalog
+                .output_refs(OutputIndex::new(start), NZUsize!(4), NZUsize!(1024 * 1024))
+                .await
+                .unwrap();
+            reads.push(
+                refs.iter()
+                    .map(|output| output.index.get())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(reads, vec![vec![1, 2], vec![5, 6], vec![]]);
+        harness.shutdown().await;
+    });
+}
+
+#[test]
+fn a_served_floor_resumes_a_fresh_node_at_the_same_indices() {
+    runner(113).start(|context| async move {
+        let mut harness = Harness::new(context, 113, [true, true]).await;
+        harness.start(0).await;
+        let source = harness.mailbox(0);
+
+        // Three views each certify one block per chain, so their floors end at indices 2, 4, 6.
+        let mut history = initial_history(&harness.committee);
+        let mut tips = harness.committee.config.genesis().tips().to_vec();
+        let mut views = Vec::new();
+        for view in 1..=3u64 {
+            let bodies = vec![vec![body(90 + 2 * view)], vec![body(91 + 2 * view)]];
+            let certified = certify(&harness.committee, view, history, &tips, bodies);
+            certified.submit(&source).await;
+            certified.finalize(&source);
+            let id = certified.id();
+            harness
+                .wait_progress(0, |progress| progress.floor == id)
+                .await;
+            history = Arc::new(
+                TipRecord::at_tips(certified.history.commitment::<Sha256>(), certified.tips())
+                    .unwrap(),
+            );
+            tips = certified.tips();
+            views.push(certified);
+        }
+        let delivered = harness.wait_updates(0, 6).await;
+
+        let floor_at = |at| {
+            let source = source.clone();
+            async move { source.floor_at(OutputIndex::new(at)).await.unwrap() }
+        };
+        assert!(floor_at(1).await.is_none());
+        for (at, index, view) in [(2, 2, 0), (3, 2, 0), (5, 4, 1), (100, 6, 2)] {
+            let (found, floor) = floor_at(at).await.unwrap();
+            assert_eq!(found, OutputIndex::new(index));
+            assert_eq!(floor.anchor().id::<Sha256>(), views[view].id());
+            assert_eq!(floor.emitted(), views[view].tips().as_slice());
+        }
+
+        // With every block released, pruning at index five keeps the floor at or below it, every
+        // output after that floor, and each chain's newest block at the floor, which its next
+        // block builds on.
+        harness
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(6))
+            .await;
+        views[2].release(&source);
+        source.prune(OutputIndex::new(5)).await.unwrap();
+        assert!(floor_at(3).await.is_none());
+        let (found, _) = floor_at(5).await.unwrap();
+        assert_eq!(found, OutputIndex::new(4));
+        for (position, view) in views.iter().enumerate() {
+            for chain in &view.blocks {
+                for (offset, block) in chain.iter().enumerate() {
+                    let local = source.get_block(block.reference()).await.unwrap();
+                    let retained = position == 2 || (position == 1 && offset + 1 == chain.len());
+                    assert_eq!(local.is_some(), retained);
+                }
+            }
+        }
+
+        // A fresh node installs the floor at index four and receives the outputs after it at the
+        // indices the source assigned.
+        harness.start(1).await;
+        let target = harness.mailbox(1);
+        let (_, floor) = floor_at(4).await.unwrap();
+        target.install_floor(floor).await.unwrap();
+        harness
+            .wait_progress(1, |progress| progress.committed == OutputIndex::new(4))
+            .await;
+        views[2].submit(&target).await;
+        views[2].finalize(&target);
+        let resumed = harness.wait_updates(1, 2).await;
+        for (resumed, delivered) in resumed.iter().zip(&delivered[4..]) {
+            assert_eq!(resumed.index, delivered.index);
+            assert_eq!(resumed.block.as_ref(), delivered.block.as_ref());
+        }
+        harness.shutdown().await;
+    });
+}
+
+/// Returns, per chain, whether each view's block is still held.
+async fn held(mailbox: &TestMailbox, views: &[Certified]) -> Vec<Vec<bool>> {
+    let mut held = vec![Vec::new(); CHAINS];
+    for view in views {
+        for (chain, blocks) in view.blocks.iter().enumerate() {
+            for block in blocks {
+                let local = mailbox.get_block(block.reference()).await.unwrap();
+                held[chain].push(local.is_some());
+            }
+        }
+    }
+    held
+}
+
+/// Reports that the engine durably recorded `certified` and no longer verifies its chain's
+/// blocks at or below `released`.
+fn record(mailbox: &TestMailbox, certified: BlockRef<Sha256Digest>, released: u64) {
+    let mut reporter = mailbox.clone();
+    let feedback = reporter.report(Activity::CertificateRecorded {
+        certified,
+        released: Height::new(released),
+    });
+    assert!(feedback.accepted());
+}
+
+#[test]
+fn pruning_keeps_every_block_the_engine_may_still_verify() {
+    runner(135).start(|context| async move {
+        let mut harness = Harness::new(context, 135, [true, true]).await;
+        harness.start(0).await;
+        let mailbox = harness.mailbox(0);
+
+        // Four views each certify one block per chain, at heights one through four.
+        let mut history = initial_history(&harness.committee);
+        let mut tips = harness.committee.config.genesis().tips().to_vec();
+        let mut views = Vec::new();
+        for view in 1..=4u64 {
+            let bodies = vec![vec![body(120 + 2 * view)], vec![body(121 + 2 * view)]];
+            let certified = certify(&harness.committee, view, history, &tips, bodies);
+            history = Arc::new(
+                TipRecord::at_tips(certified.history.commitment::<Sha256>(), certified.tips())
+                    .unwrap(),
+            );
+            tips = certified.tips();
+            views.push(certified);
+        }
+        for view in &views[..3] {
+            view.submit(&mailbox).await;
+            view.finalize(&mailbox);
+        }
+        harness
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(6))
+            .await;
+
+        // Without a release, pruning at the floor at index six keeps every block, and the output
+        // at that index stays readable.
+        mailbox.prune(OutputIndex::new(6)).await.unwrap();
+        assert_eq!(held(&mailbox, &views[..3]).await, [[true; 3]; 2]);
+        let refs = harness
+            .catalog(0)
+            .output_refs(OutputIndex::new(6), NZUsize!(1), NZUsize!(1024 * 1024))
+            .await
+            .unwrap();
+        assert_eq!(refs[0].index, OutputIndex::new(6));
+
+        // Chain zero's engine may still verify height two and above.
+        let tips = views[2].tips();
+        record(&mailbox, tips[0], 1);
+        mailbox.prune(OutputIndex::new(6)).await.unwrap();
+        assert_eq!(
+            held(&mailbox, &views[..3]).await,
+            [[false, true, true], [true; 3]]
+        );
+
+        // A stale release never lowers the bound, and each chain keeps its newest pruned block,
+        // which its next block builds on, even once the engine releases it.
+        record(&mailbox, tips[0], 3);
+        record(&mailbox, tips[0], 0);
+        record(&mailbox, tips[1], 3);
+        mailbox.prune(OutputIndex::new(6)).await.unwrap();
+        assert_eq!(
+            held(&mailbox, &views[..3]).await,
+            [[false, false, true], [false, false, true]]
+        );
+
+        // Releases are not durable: after a restart, nothing more is pruned until the engine
+        // reports them again.
+        harness.crash(0).await;
+        harness.start(0).await;
+        let mailbox = harness.mailbox(0);
+        views[3].submit(&mailbox).await;
+        views[3].finalize(&mailbox);
+        harness
+            .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(8))
+            .await;
+        mailbox.prune(OutputIndex::new(8)).await.unwrap();
+        assert_eq!(held(&mailbox, &views[2..]).await, [[true; 2]; 2]);
+        views[3].release(&mailbox);
+        mailbox.prune(OutputIndex::new(8)).await.unwrap();
+        assert_eq!(held(&mailbox, &views[2..]).await, [[false, true]; 2]);
         harness.shutdown().await;
     });
 }
@@ -3001,7 +3312,9 @@ async fn run_floor_case(
             progress.floor_generation == 1 && progress.floor == floor_id
         })
         .await;
-    assert_eq!(progress.committed, None);
+    // The floor's frontier is at height one on both chains, so its index is two.
+    assert_eq!(progress.committed, OutputIndex::new(2));
+    assert_eq!(progress.acknowledged, OutputIndex::new(2));
     assert!(harness.reporter(0).delivered().is_empty());
 
     let mailbox = harness.mailbox(0);
@@ -3029,17 +3342,23 @@ async fn run_floor_case(
     continuation.submit(&mailbox).await;
     continuation.finalize(&mailbox);
     let delivered = harness.wait_updates(0, 4).await;
-    for (actual, block) in delivered.iter().zip(continuation.offset_major()) {
+    for (offset, (actual, block)) in delivered
+        .iter()
+        .zip(continuation.offset_major())
+        .enumerate()
+    {
+        assert_eq!(actual.index, OutputIndex::new(offset as u64 + 3));
         assert_eq!(actual.block.as_ref(), block.as_ref());
     }
     harness
         .wait_progress(0, |progress| {
             progress.floor_generation == 1
                 && progress.floor == continuation_id
-                && progress.acknowledged == Some(OutputIndex::new(3))
+                && progress.acknowledged == OutputIndex::new(6)
         })
         .await;
-    mailbox.prune(Prune::new(1)).await.unwrap();
+    continuation.release(&mailbox);
+    mailbox.prune(OutputIndex::new(6)).await.unwrap();
 
     harness.crash(0).await;
     harness.start(0).await;
@@ -3047,11 +3366,12 @@ async fn run_floor_case(
         .wait_progress(0, |progress| {
             progress.floor_generation == 1
                 && progress.floor == continuation_id
-                && progress.acknowledged == Some(OutputIndex::new(3))
+                && progress.acknowledged == OutputIndex::new(6)
         })
         .await;
-    assert_eq!(reopened.committed, Some(OutputIndex::new(3)));
-    assert!(harness.mailbox(0).prune(Prune::new(0)).await.is_err());
+    assert_eq!(reopened.committed, OutputIndex::new(6));
+    // A delayed request below the current floor prunes nothing it still needs.
+    harness.mailbox(0).prune(OutputIndex::new(2)).await.unwrap();
     assert_eq!(
         harness
             .mailbox(0)
@@ -3082,6 +3402,18 @@ async fn run_floor_case(
         archive_modes[2] == ArchiveMode::Immutable,
         "block retention follows its independently selected backend"
     );
+    for chain in &continuation.blocks {
+        let newest = chain.last().unwrap().reference();
+        assert!(
+            harness
+                .mailbox(0)
+                .get_block(newest)
+                .await
+                .unwrap()
+                .is_some(),
+            "the block each chain builds on next survives pruning"
+        );
+    }
     assert!(
         harness
             .mailbox(0)
@@ -3172,7 +3504,7 @@ async fn run_anchor_jump_case(
     ];
     let delivered = harness.wait_updates(0, expected.len()).await;
     for (offset, (actual, block)) in delivered.iter().zip(expected).enumerate() {
-        assert_eq!(actual.index, OutputIndex::new(offset as u64));
+        assert_eq!(actual.index, OutputIndex::new(offset as u64 + 1));
         assert_eq!(actual.block.as_ref(), block.as_ref());
     }
     assert_ne!(
@@ -3180,9 +3512,7 @@ async fn run_anchor_jump_case(
         first.blocks[0][0].reference().digest()
     );
     harness
-        .wait_progress(0, |progress| {
-            progress.acknowledged == Some(OutputIndex::new(6))
-        })
+        .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(7))
         .await;
 
     harness.crash(0).await;
@@ -3200,9 +3530,7 @@ async fn run_anchor_jump_case(
     fourth.submit(&mailbox).await;
     fourth.finalize(&mailbox);
     harness
-        .wait_progress(0, |progress| {
-            progress.acknowledged == Some(OutputIndex::new(8))
-        })
+        .wait_progress(0, |progress| progress.acknowledged == OutputIndex::new(9))
         .await;
     assert_eq!(
         harness

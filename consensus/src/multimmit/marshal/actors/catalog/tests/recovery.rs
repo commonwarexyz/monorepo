@@ -1,6 +1,7 @@
 //! Reopening after crashes at commit and cleanup boundaries.
 
 use super::*;
+use crate::multimmit::marshal::OutputIndex;
 
 #[test]
 fn distinct_same_view_lqcs_reopen_and_prune_by_ordinal() {
@@ -43,7 +44,7 @@ fn distinct_same_view_lqcs_reopen_and_prune_by_ordinal() {
             history_index: Some(0),
             ordered: current.ordered().to_vec(),
             emitted: current.emitted().to_vec(),
-            committed: current.committed(),
+            floor_index: current.floor_index(),
         })
         .unwrap();
         client
@@ -78,7 +79,7 @@ fn distinct_same_view_lqcs_reopen_and_prune_by_ordinal() {
             spawn_catalog(reopen_config, context.child("reopen")).await;
         assert!(client.final_lqc(first_id).await.unwrap());
         assert!(client.final_lqc(second_id).await.unwrap());
-        client.prune(0).await.unwrap();
+        client.prune(OutputIndex::zero()).await.unwrap();
         assert!(!client.final_lqc(first_id).await.unwrap());
         assert!(client.final_lqc(second_id).await.unwrap());
         drop(client);
@@ -142,7 +143,7 @@ fn archive_durable_checkpoint_volatile_commit_replays_exactly(#[case] all_archiv
             },
             ordered: current.ordered().to_vec(),
             emitted,
-            committed: Some(OutputIndex::ZERO),
+            floor_index: current.floor_index(),
         })
         .unwrap();
 
@@ -164,7 +165,7 @@ fn archive_durable_checkpoint_volatile_commit_replays_exactly(#[case] all_archiv
             } else {
                 Vec::new()
             },
-            outputs: vec![output_row(OutputIndex::ZERO, &block)],
+            outputs: vec![output_row(OutputIndex::new(1), &block)],
             checkpoint: checkpoint.clone(),
         };
         syncs.arm();
@@ -180,21 +181,24 @@ fn archive_durable_checkpoint_volatile_commit_replays_exactly(#[case] all_archiv
 
         let (client, handle, _delivery) =
             open(&context, "reopened_checkpoint_crash", &committee).await;
-        assert_eq!(client.progress().await.unwrap().committed, None);
+        assert_eq!(
+            client.progress().await.unwrap().committed,
+            OutputIndex::zero()
+        );
         assert!(matches!(
             client
-                .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024 * 1024))
+                .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024 * 1024))
                 .await,
             Err(error) if error.is_rejected()
         ));
         client.commit(batch()).await.unwrap();
         assert_eq!(
             client.progress().await.unwrap().committed,
-            Some(OutputIndex::ZERO)
+            OutputIndex::new(1)
         );
         assert_eq!(
             client
-                .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024 * 1024))
+                .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024 * 1024))
                 .await
                 .unwrap()[0]
                 .reference,
@@ -277,7 +281,7 @@ fn archive_ahead_lqc_ordinal_is_skipped_after_reopen() {
                     history_index: Some(0),
                     ordered: current.ordered().to_vec(),
                     emitted: current.emitted().to_vec(),
-                    committed: current.committed(),
+                    floor_index: current.floor_index(),
                 })
                 .unwrap()
             };
@@ -333,7 +337,7 @@ fn archive_ahead_lqc_ordinal_is_skipped_after_reopen() {
                 .unwrap();
             assert!(client.final_lqc(first_id).await.unwrap());
             assert!(client.final_lqc(second_id).await.unwrap());
-            client.prune(0).await.unwrap();
+            client.prune(OutputIndex::zero()).await.unwrap();
             assert_eq!(
                 client.final_lqc(first_id).await.unwrap(),
                 mode == ArchiveMode::Immutable
@@ -396,7 +400,7 @@ fn immutable_commit_recovers_canonical_body_and_reclaims_losing_candidates() {
                     commitment: history,
                     record,
                 }],
-                outputs: vec![output_row(OutputIndex::ZERO, &canonical)],
+                outputs: vec![output_row(OutputIndex::new(1), &canonical)],
                 checkpoint: Checkpoint::try_from(CheckpointParts {
                     epoch: committee.config.epoch(),
                     floor_generation: 0,
@@ -410,7 +414,7 @@ fn immutable_commit_recovers_canonical_body_and_reclaims_losing_candidates() {
                     history_index: Some(0),
                     ordered: genesis.tips().to_vec(),
                     emitted,
-                    committed: Some(OutputIndex::ZERO),
+                    floor_index: OutputIndex::zero(),
                 })
                 .unwrap(),
             })
@@ -450,6 +454,13 @@ fn immutable_commit_recovers_canonical_body_and_reclaims_losing_candidates() {
             None => (None, None),
         };
         let bodies = Bodies::new(client.clone(), promoter);
+        // Pending custody is reclaimed only below what the engine no longer verifies, which it
+        // reports again when it starts.
+        assert!(
+            client
+                .release(losing_reference.chain(), losing_reference.height())
+                .accepted()
+        );
         for _ in 0..100 {
             if client.block(losing_reference).await.unwrap().is_none() {
                 break;
@@ -462,7 +473,7 @@ fn immutable_commit_recovers_canonical_body_and_reclaims_losing_candidates() {
         );
         assert!(client.block(losing_reference).await.unwrap().is_none());
         let outputs = client
-            .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024 * 1024))
+            .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024 * 1024))
             .await
             .unwrap();
         assert_eq!(outputs[0].reference, reference);
@@ -578,7 +589,7 @@ fn reopen_replays_cleanup_owed_by_published_commits() {
         let (client, handle, _delivery) = open(&context, "block_cleanup_recovery", committee).await;
         assert_eq!(
             client
-                .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024 * 1024))
+                .output_refs(OutputIndex::new(1), NZUsize!(1), NZUsize!(1024 * 1024))
                 .await
                 .unwrap()[0]
                 .reference,
