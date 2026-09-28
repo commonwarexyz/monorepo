@@ -407,8 +407,27 @@ pub(crate) mod tests {
             let mut restrictive = cfg.clone();
             restrictive.witness.codec_config = restrictive_cfg;
             assert!(matches!(
-                Db::<F, _, O, Sha256, _>::init(context.child("reject_metadata"), restrictive, None)
-                    .await,
+                Db::<F, _, O, Sha256, _>::init(
+                    context.child("reject_metadata"),
+                    restrictive.clone(),
+                    None
+                )
+                .await,
+                Err(Error::Journal(crate::journal::Error::Codec(
+                    CodecError::InvalidLength(3)
+                )))
+            ));
+            // An import whose commit the restrictive config rejects fails before it can replace
+            // the partition's contents.
+            assert!(matches!(
+                Db::<F, _, O, Sha256, _>::init_from_sync(
+                    Sequential,
+                    context.child("reject_import"),
+                    restrictive.witness.clone(),
+                    Location::new(0),
+                    Vec::new(),
+                    O::commit(Some(vec![1, 2, 3]), Location::new(0)),
+                ),
                 Err(Error::Journal(crate::journal::Error::Codec(
                     CodecError::InvalidLength(3)
                 )))

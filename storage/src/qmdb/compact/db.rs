@@ -273,7 +273,8 @@ where
     }
 
     /// Build a compact db from state fetched by the sync engine: `last_commit_op` must be a
-    /// commit whose floor is at or below `last_commit_loc`.
+    /// commit whose floor is at or below `last_commit_loc`, and must decode under `cfg`'s codec
+    /// config (otherwise [`Error::Journal`]).
     ///
     /// The imported witness lives only in memory, and the partition `cfg` names is not opened,
     /// until the first [`Self::apply_batch`], [`Self::commit`], [`Self::sync`], or
@@ -290,13 +291,17 @@ where
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: O,
     ) -> Result<Self, Error<F>> {
+        // Reject a commit this db could not decode on reopen, before anything replaces the
+        // destination's contents.
+        let (cfg, codec_cfg) = witness::split_config(cfg);
+        O::decode_cfg(last_commit_op.encode(), &codec_cfg)
+            .map_err(|err| Error::Journal(crate::journal::Error::Codec(err)))?;
         let imported = Witness {
             commit: last_commit_op,
             size: last_commit_loc + 1,
             pinned_nodes,
         };
         let Rebuilt { merkle, tip } = witness::restore::<F, O, H, S>(strategy, imported)?;
-        let (cfg, _) = witness::split_config(cfg);
         Ok(Self {
             merkle,
             storage: Storage::Replacing(Box::new(Destination { context, cfg })),
