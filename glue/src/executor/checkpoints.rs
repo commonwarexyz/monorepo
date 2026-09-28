@@ -85,7 +85,8 @@ impl<S: Scheme, B: Block> Automaton for Checkpoints<S, B> {
     /// Answers with the digest of the block `checkpoint` certifies once it is executed.
     ///
     /// Dropping the answer, which aggregation treats as declining the checkpoint, means the block
-    /// was executed but is no longer retained.
+    /// was executed but is no longer retained, or lies below the block a state sync started the
+    /// chain from.
     async fn propose(&mut self, checkpoint: Height) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
         if let Some(height) = self.height(checkpoint) {
