@@ -126,11 +126,21 @@ pub mod probe;
 mod tests;
 
 /// Why a block execution failed.
+///
+/// | Variant | [`verify`](Application::verify) | [`propose`](Application::propose) | [`apply`](Application::apply) of an ancestor | [`apply`](Application::apply) of a finalized block |
+/// | --- | --- | --- | --- | --- |
+/// | [`Stale`](Self::Stale) | re-checked once the anchor moves | cannot occur | re-checked once the anchor moves | panics |
+/// | [`Invalid`](Self::Invalid) | answers `false`, nothing cached | declines | the ancestry is invalid | panics |
+/// | [`Fatal`](Self::Fatal) | panics | panics | panics | panics |
 #[derive(Debug, Error)]
 pub enum ExecutionError {
     /// A competing finalization invalidated the batch's reads or merkleization.
     #[error("stale execution: a competing block was finalized")]
     Stale,
+    /// The block's execution is invalid for its inputs, for example because it declares an
+    /// inactivity floor that regresses or passes its commit, or reads below its chain's floor.
+    #[error("invalid execution: {0}")]
+    Invalid(String),
     /// Any other storage failure.
     #[error("storage failure: {0}")]
     Fatal(String),
@@ -139,7 +149,14 @@ pub enum ExecutionError {
 impl<F: Family> From<qmdb::Error<F>> for ExecutionError {
     fn from(err: qmdb::Error<F>) -> Self {
         match err {
+            // `Stale` waits for the anchor to move, so a `StaleBatch` not caused by an anchor move
+            // would wait forever. Its two other sources, a batch from another database instance
+            // and an unapplied ancestor dropped while the database is unchanged, cannot occur
+            // here: [`Stateful`] owns one instance per database and keeps every pending ancestor.
             qmdb::Error::StaleRead | qmdb::Error::StaleBatch => Self::Stale,
+            qmdb::Error::FloorRegressed(..)
+            | qmdb::Error::FloorBeyondSize(..)
+            | qmdb::Error::BelowInactivityFloor(_) => Self::Invalid(err.to_string()),
             err => Self::Fatal(err.to_string()),
         }
     }

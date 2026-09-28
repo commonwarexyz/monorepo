@@ -416,6 +416,15 @@ where
                 );
                 return Attempt::Stale;
             }
+            Some(Err(ExecutionError::Invalid(reason))) => {
+                debug!(
+                    parent_digest = ?parent.digest,
+                    ?block_digest,
+                    reason,
+                    "verification rejected: invalid execution"
+                );
+                return Attempt::Done(VerificationResult::Decided(false));
+            }
             Some(Err(err @ ExecutionError::Fatal(_))) => {
                 panic!("application verification failed: {err}")
             }

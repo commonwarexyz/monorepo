@@ -81,13 +81,23 @@ mod single_db_app;
 
 const NUM_VALIDATORS: u32 = 5;
 
-/// Refused stale reads and merkleizations map to Stale; other storage failures are fatal.
+/// Refused stale reads and merkleizations map to Stale, input-dependent refusals to Invalid, and
+/// other storage failures to Fatal.
 #[test]
 fn storage_errors_map_to_fatal() {
     let stale: ExecutionError = qmdb::Error::<mmr::Family>::StaleRead.into();
     assert!(matches!(stale, ExecutionError::Stale));
     let stale: ExecutionError = qmdb::Error::<mmr::Family>::StaleBatch.into();
     assert!(matches!(stale, ExecutionError::Stale));
+    let loc = mmr::Location::new(1);
+    for err in [
+        qmdb::Error::<mmr::Family>::FloorRegressed(loc, loc),
+        qmdb::Error::<mmr::Family>::FloorBeyondSize(loc, loc),
+        qmdb::Error::<mmr::Family>::BelowInactivityFloor(loc),
+    ] {
+        let invalid: ExecutionError = err.into();
+        assert!(matches!(invalid, ExecutionError::Invalid(_)));
+    }
     let direct: ExecutionError = qmdb::Error::<mmr::Family>::Runtime(RuntimeError::Closed).into();
     assert!(matches!(direct, ExecutionError::Fatal(_)));
     let nested: ExecutionError =

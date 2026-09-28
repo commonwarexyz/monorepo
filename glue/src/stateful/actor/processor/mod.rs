@@ -655,7 +655,8 @@ where
         &self,
         parent: &<A::Block as Digestible>::Digest,
     ) -> Result<UnmerkleizedOf<A::Databases, E>, PrepareBatchesError> {
-        self.execution.fork_batches(parent).await
+        let (mut never, _live) = oneshot::channel::<()>();
+        self.execution.fork_batches(parent, &mut never).await
     }
 
     #[cfg(test)]
@@ -910,7 +911,8 @@ where
                     panic!("application proposal failed: {err}")
                 }
                 Some(Err(err)) => {
-                    // Stale is unreachable for the same reason as above.
+                    // An invalid execution declines. Stale is unreachable for the same reason as
+                    // above.
                     warn!(?parent_digest, ?err, "proposal declined by error");
                     debug_assert!(
                         !matches!(err, ExecutionError::Stale),
@@ -1055,9 +1057,15 @@ where
     }
 
     /// Forks batches from a known parent.
-    async fn fork_batches(
+    ///
+    /// Forking from the processed anchor takes read access, which waits while a finalization
+    /// applies. That wait ends early with [`PrepareBatchesError::Cancelled`] if `cancellation`
+    /// fires, and a fork that would overlap a finalization refuses with
+    /// [`PrepareBatchesError::Stale`] without waiting.
+    async fn fork_batches<C: Cancellation>(
         &self,
         parent: &BlockDigest<A, E>,
+        cancellation: &mut C,
     ) -> Result<UnmerkleizedOf<A::Databases, E>, PrepareBatchesError> {
         {
             let state = self.state.lock();
@@ -1067,9 +1075,16 @@ where
             if state.processed.digest != *parent {
                 return Err(PrepareBatchesError::Invalid);
             }
+            if state.finalizing {
+                return Err(PrepareBatchesError::Stale);
+            }
         }
 
-        let batches = A::Databases::new_batches(&self.readers).await;
+        let Some(batches) =
+            await_or_cancel(cancellation, A::Databases::new_batches(&self.readers)).await
+        else {
+            return Err(PrepareBatchesError::Cancelled);
+        };
 
         // A finalization mutates the databases before the anchor moves, so a
         // fork taken meanwhile can hold post-apply state under the pre-apply
@@ -1124,7 +1139,7 @@ where
         let consensus_context = block.context();
         let round = consensus_context.round();
 
-        let batches = self.fork_batches(&parent_digest).await?;
+        let batches = self.fork_batches(&parent_digest, cancellation).await?;
 
         let Some(applied) = await_or_cancel(
             cancellation,
@@ -1147,6 +1162,10 @@ where
             // A block finalized while this replay executed. The requester
             // re-checks canonical state, so this replay never panics on it.
             Err(ExecutionError::Stale) => return Err(PrepareBatchesError::Stale),
+            Err(ExecutionError::Invalid(reason)) => {
+                warn!(?target_digest, block = ?digest, reason, "rebuild replay execution invalid");
+                return Err(PrepareBatchesError::Invalid);
+            }
             Err(err @ ExecutionError::Fatal(_)) => panic!("application replay failed: {err}"),
         };
 
@@ -1255,7 +1274,7 @@ where
                 .await?;
         }
 
-        self.fork_batches(&parent_digest).await
+        self.fork_batches(&parent_digest, cancellation).await
     }
 
     /// Walks back from `target` to the nearest cached block or the processed anchor, then replays
@@ -2438,6 +2457,57 @@ mod tests {
         });
     }
 
+    /// A replay cancelled while its fork waits for read access behind a busy writer returns at
+    /// once and releases its replay flight, instead of waiting for the writer.
+    #[test]
+    fn cancelled_replay_releases_flight_while_writer_is_busy() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let (block, _) = harness.build_child(&genesis, View::new(1)).await;
+            let cfg = qmdb_config("held-writer", &context);
+            let db = Qmdb::init(context.child("held_db"), cfg, None)
+                .await
+                .unwrap();
+            let writer = crate::stateful::db::Writer::new("held-writer", db);
+            harness.processor.execution.readers = writer.reader();
+            let (release, released) = oneshot::channel::<()>();
+            let mut mutation = Box::pin(writer.mutate(|db| async move {
+                let _ = released.await;
+                (db, ())
+            }));
+            assert!(futures::poll!(&mut mutation).is_pending());
+
+            let replays = ReplayFlights::default();
+            let (mut cancellation, cancelled) = oneshot::channel::<()>();
+            let execution = &harness.processor.execution;
+            let mut replay = Box::pin(execution.replay_shared(
+                &mut harness.processor.app,
+                &context,
+                block.digest(),
+                Arc::new(block),
+                &mut cancellation,
+                &replays,
+            ));
+            assert!(futures::poll!(&mut replay).is_pending());
+            assert!(!replays.is_empty());
+            drop(cancelled);
+            assert!(
+                matches!(
+                    futures::poll!(&mut replay),
+                    std::task::Poll::Ready(Err(PrepareBatchesError::Cancelled))
+                ),
+                "caller cancellation must not wait for the database writer"
+            );
+            assert!(
+                replays.is_empty(),
+                "cancelled owner must release its replay flight"
+            );
+            release.send(()).unwrap();
+            let (_writer, ()) = mutation.await;
+        });
+    }
+
     /// A fork taken from the anchor while a finalization is mid-flight (databases
     /// applied, anchor not yet advanced) refuses instead of handing out the winner's
     /// state under the loser's anchor.
@@ -2463,8 +2533,12 @@ mod tests {
 
             // Inside the window, a fork from the anchor must refuse, since the databases
             // are already at the winner, but the anchor still names genesis.
+            let (mut never, _live) = oneshot::channel::<()>();
             assert!(matches!(
-                verifier.execution.fork_batches(&genesis.digest()).await,
+                verifier
+                    .execution
+                    .fork_batches(&genesis.digest(), &mut never)
+                    .await,
                 Err(PrepareBatchesError::Stale)
             ));
 
@@ -2585,8 +2659,12 @@ mod tests {
                 result = &mut started => result.expect("finalized hook should start"),
             }
 
+            let (mut never, _live) = oneshot::channel::<()>();
             assert!(
-                execution.fork_batches(&winner.digest()).await.is_ok(),
+                execution
+                    .fork_batches(&winner.digest(), &mut never)
+                    .await
+                    .is_ok(),
                 "the applying block must stay forkable for jobs that are still running",
             );
 

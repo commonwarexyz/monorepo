@@ -836,6 +836,8 @@ mod tests {
         finalized_gate: Arc<Mutex<Option<ApplicationGate>>>,
         gate_height: Height,
         unexecutable: Option<Height>,
+        /// Height whose `apply` and `verify` return [`ExecutionError::Invalid`].
+        invalid: Option<Height>,
         apply_calls: Arc<AtomicUsize>,
         capture_calls: Arc<AtomicUsize>,
         verify_calls: Arc<AtomicUsize>,
@@ -872,7 +874,7 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
+            ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Result<Option<TestMerkleized>, ExecutionError> {
             self.verify_calls.fetch_add(1, Ordering::SeqCst);
@@ -880,6 +882,10 @@ mod tests {
             if let Some(mut gate) = gate {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
+            }
+            if self.invalid.is_some() && self.invalid == ancestry.peek().map(|block| block.height())
+            {
+                return Err(ExecutionError::Invalid("test".into()));
             }
             Ok(Some(TestMerkleized))
         }
@@ -900,6 +906,9 @@ mod tests {
             if let Some(mut gate) = gate {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
+            }
+            if self.invalid == Some(block.height()) {
+                return Err(ExecutionError::Invalid("test".into()));
             }
             Ok(Some(TestMerkleized))
         }
@@ -1800,6 +1809,7 @@ mod tests {
                 finalized_gate: Arc::default(),
                 gate_height: parent.height(),
                 unexecutable: None,
+                invalid: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
@@ -1861,6 +1871,146 @@ mod tests {
         });
     }
 
+    /// Spawns processing over a [`ReplayGatedApp`] anchored at genesis.
+    async fn spawn_replay_gated(
+        context: &deterministic::Context,
+        prefix: &str,
+        app: ReplayGatedApp,
+    ) -> (
+        Mailbox<deterministic::Context, ReplayGatedApp>,
+        fixtures::MarshalFixture,
+        Handle<()>,
+    ) {
+        let mut signing = context.child("signing");
+        let scheme = scheme_mocks::fixture(&mut signing, prefix.as_bytes(), 1).schemes[0].clone();
+        let marshal = fixtures::marshal_fixture_with_finalized_block(
+            context.child("marshal"),
+            prefix,
+            scheme,
+            &TestBlock::new(0, 0),
+            NZUsize!(1),
+            true,
+        )
+        .await;
+        let processor = Processor::new(
+            app,
+            test_databases(),
+            anchor(0, 0),
+            StatefulMetrics::new(context),
+            None,
+        );
+        let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+        let publication_context = context.child("publication");
+        let (publisher, _subscriber) = Publisher::new(&publication_context);
+        let processing = Processing {
+            context: ContextCell::new(context.child("processing")),
+            mailbox: receiver,
+            provider: (),
+            marshal: marshal.mailbox.clone(),
+            snapshot_publisher: publisher,
+        };
+        let actor = context
+            .child("loop")
+            .spawn(move |_| processing.run(processor, Vec::new()));
+        (Mailbox::new(sender), marshal, actor)
+    }
+
+    /// An invalid execution answers `false` and caches nothing, so asking again re-executes.
+    #[test]
+    fn invalid_verification_answers_false_uncached() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let block = TestBlock::child(&TestBlock::new(0, 0), 1);
+            let verify_calls = Arc::new(AtomicUsize::new(0));
+            let app = ReplayGatedApp {
+                gates: Arc::default(),
+                verify_gate: Arc::default(),
+                finalized_gate: Arc::default(),
+                gate_height: block.height(),
+                unexecutable: None,
+                invalid: Some(block.height()),
+                apply_calls: Arc::new(AtomicUsize::new(0)),
+                capture_calls: Arc::new(AtomicUsize::new(0)),
+                verify_calls: verify_calls.clone(),
+                applied_finalizations: Arc::default(),
+            };
+            let (mut mailbox, marshal, actor) =
+                spawn_replay_gated(&context, "invalid-verify", app).await;
+
+            for attempt in 1..=2 {
+                assert!(
+                    !mailbox
+                        .verify(
+                            (context.child("verify"), block.context()),
+                            ancestry::from_iter([
+                                Arc::new(block.clone()),
+                                Arc::new(TestBlock::new(0, 0)),
+                            ]),
+                        )
+                        .await
+                );
+                assert_eq!(verify_calls.load(Ordering::SeqCst), attempt);
+            }
+            actor.abort();
+            drop(marshal.guards);
+        });
+    }
+
+    /// An ancestor whose replay is invalid rejects every verification sharing that replay, with
+    /// one execution and no panic.
+    #[test]
+    fn invalid_ancestor_replay_rejects_every_waiter() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let first = TestBlock::child(&parent, 2);
+            let second = TestBlock::child(&parent, 3);
+            let (gate, started, release) = application_gate();
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let verify_calls = Arc::new(AtomicUsize::new(0));
+            let app = ReplayGatedApp {
+                gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                verify_gate: Arc::default(),
+                finalized_gate: Arc::default(),
+                gate_height: parent.height(),
+                unexecutable: None,
+                invalid: Some(parent.height()),
+                apply_calls: apply_calls.clone(),
+                capture_calls: Arc::new(AtomicUsize::new(0)),
+                verify_calls: verify_calls.clone(),
+                applied_finalizations: Arc::default(),
+            };
+            let (mailbox, marshal, actor) =
+                spawn_replay_gated(&context, "invalid-ancestor", app).await;
+
+            // Both verifications need the parent replayed. The first owns the replay and parks at
+            // the gate, and the second waits on it.
+            let mut first_verifier = mailbox.clone();
+            let mut first = Box::pin(first_verifier.verify(
+                (context.child("first"), first.context()),
+                ancestry::from_iter([Arc::new(first.clone()), Arc::new(parent.clone())]),
+            ));
+            assert!(poll!(&mut first).is_pending());
+            started.await.expect("parent replay should start");
+            let mut second_verifier = mailbox.clone();
+            let mut second = Box::pin(second_verifier.verify(
+                (context.child("second"), second.context()),
+                ancestry::from_iter([Arc::new(second.clone()), Arc::new(parent)]),
+            ));
+            assert!(poll!(&mut second).is_pending());
+            context.sleep(Duration::from_millis(100)).await;
+
+            release
+                .send(())
+                .expect("the parent replay should be parked");
+            assert!(!first.await);
+            assert!(!second.await);
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 0);
+            actor.abort();
+            drop(marshal.guards);
+        });
+    }
+
     #[test]
     fn unexecutable_parent_rejects_child() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -1887,6 +2037,7 @@ mod tests {
                 finalized_gate: Arc::default(),
                 gate_height: parent.height(),
                 unexecutable: Some(parent.height()),
+                invalid: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
@@ -2359,6 +2510,7 @@ mod tests {
                 finalized_gate: Arc::default(),
                 gate_height: finalized.height(),
                 unexecutable: None,
+                invalid: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: capture_calls.clone(),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
@@ -2444,6 +2596,7 @@ mod tests {
                 finalized_gate: Arc::default(),
                 gate_height: genesis.height(),
                 unexecutable: None,
+                invalid: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: capture_calls.clone(),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
@@ -2604,6 +2757,7 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
                 gate_height: parent.height(),
                 unexecutable: None,
+                invalid: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
@@ -2719,6 +2873,7 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: parent.height(),
                 unexecutable: None,
+                invalid: None,
                 apply_calls: Arc::new(AtomicUsize::new(0)),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
@@ -2805,6 +2960,7 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: parent.height(),
                 unexecutable: None,
+                invalid: None,
                 apply_calls: Arc::new(AtomicUsize::new(0)),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
@@ -2891,6 +3047,7 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: finalized.height(),
                 unexecutable: None,
+                invalid: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
@@ -2984,6 +3141,7 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: first.height(),
                 unexecutable: None,
+                invalid: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
@@ -3101,6 +3259,7 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
                 gate_height: first.height(),
                 unexecutable: None,
+                invalid: None,
                 apply_calls: Arc::new(AtomicUsize::new(0)),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
@@ -3218,6 +3377,7 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: parent.height(),
                 unexecutable: None,
+                invalid: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
@@ -3606,6 +3766,7 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
                 gate_height: block1.height(),
                 unexecutable: None,
+                invalid: None,
                 apply_calls: Arc::new(AtomicUsize::new(0)),
                 capture_calls: capture_calls.clone(),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
