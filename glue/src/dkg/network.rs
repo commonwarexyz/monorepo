@@ -266,11 +266,16 @@ mod tests {
     use commonware_runtime::{
         Clock as _, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
-    use commonware_stream::encrypted::Handshake;
+    use commonware_stream::{
+        cups::{self, Cups},
+        sake::{self, Sake},
+        sake_cups,
+    };
     use commonware_utils::{NZU32, NZUsize, channel::mpsc, sync::Mutex};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::Arc,
+        time::Duration,
     };
 
     type PublicKey = ed25519::PublicKey;
@@ -491,7 +496,15 @@ mod tests {
             let (mut dealer_network, dealer_oracle) = lookup::Network::new(
                 context.child("dealer"),
                 lookup::Config::local(
-                    Handshake::new(dealer_signer),
+                    sake_cups(
+                        Sake {
+                            signer: dealer_signer,
+                            version: sake::Version::V1,
+                            synchrony_bound: Duration::from_secs(5),
+                            max_handshake_age: Duration::from_secs(10),
+                        },
+                        Cups::new(cups::Version::V1),
+                    ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     dealer_socket,
                     NZUsize!(2),
@@ -501,7 +514,15 @@ mod tests {
             let (mut participant_network, participant_oracle) = lookup::Network::new(
                 context.child("participant"),
                 lookup::Config::local(
-                    Handshake::new(participant_signer),
+                    sake_cups(
+                        Sake {
+                            signer: participant_signer,
+                            version: sake::Version::V1,
+                            synchrony_bound: Duration::from_secs(5),
+                            max_handshake_age: Duration::from_secs(10),
+                        },
+                        Cups::new(cups::Version::V1),
+                    ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     participant_socket,
                     NZUsize!(2),

@@ -12,7 +12,7 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
-    Sha256, Signer as _,
+    ChaCha20Poly1305, Sha256, Signer as _,
     bls12381::primitives::{
         group,
         sharing::{ModeVersion, Sharing},
@@ -25,7 +25,13 @@ use commonware_p2p::{Manager as _, authenticated};
 use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
-use commonware_stream::{Config as StreamConfig, encrypted::Handshake, utils::Timeout};
+use commonware_stream::{
+    Upgrader as _,
+    cups::{self, Cups},
+    sake::{self, Sake, Version},
+    sake_cups,
+    utils::Timeout,
+};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -161,22 +167,30 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
-    let indexer_handshake = StreamConfig::new(
-        Timeout::new(
-            Handshake {
+    let indexer_handshake = Timeout::new(
+        (
+            Sake {
                 signer: signer.clone(),
+                version: Version::V1,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(60),
             },
-            Duration::from_secs(5),
+            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
-        INDEXER_NAMESPACE,
-        MAX_MESSAGE_SIZE,
+        Duration::from_secs(5),
     );
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        Handshake::new(signer),
+        sake_cups(
+            Sake {
+                signer,
+                version: sake::Version::V1,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+            },
+            Cups::new(cups::Version::V1),
+        ),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -193,7 +207,14 @@ fn main() {
             .await
             .expect("Failed to dial indexer");
         let indexer = indexer_handshake
-            .dial(context.child("dialer"), indexer, stream, sink)
+            .dial(
+                context.child("dialer"),
+                INDEXER_NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                indexer,
+                stream,
+                sink,
+            )
             .await
             .expect("Failed to upgrade connection with indexer");
 
