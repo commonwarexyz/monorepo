@@ -5,9 +5,8 @@ use commonware_runtime::{
     tokio::Config,
 };
 use commonware_storage::freezer::Identifier;
-use commonware_utils::TestRng;
+use commonware_utils::{TestRng, futures::try_join_all};
 use criterion::{Criterion, criterion_group};
-use futures::future::try_join_all;
 use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
