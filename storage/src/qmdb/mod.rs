@@ -414,8 +414,9 @@ pub enum Error<F: Family> {
     #[error("location below inactivity floor: {0}")]
     BelowInactivityFloor(Location<F>),
 
-    /// The batch's inactivity floor is lower than the database's current floor.
-    #[error("floor regressed: batch floor {0} < current floor {1}")]
+    /// The batch's inactivity floor is lower than the floor it builds on: its parent's, or the
+    /// database's for a batch with no parent.
+    #[error("floor regressed: batch floor {0} < prior floor {1}")]
     FloorRegressed(Location<F>, Location<F>),
 
     /// The batch's inactivity floor exceeds its own commit operation's location. The floor

@@ -336,7 +336,8 @@ where
 /// the batch later are only valid while every batch applied to the DB since this batch was
 /// merkleized is an ancestor of this batch. Applying a batch from a different fork is rejected
 /// with [`crate::qmdb::Error::StaleBatch`], and reading through it is refused with
-/// [`crate::qmdb::Error::StaleRead`] (see [`crate::qmdb::chain`] for more details).
+/// [`crate::qmdb::Error::StaleRead`]. Applying one of this batch's own descendants also makes reads
+/// through it stale (see [`crate::qmdb::chain`] for more details).
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy> {
@@ -777,7 +778,6 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Validate `current` against the boundary and ancestor chain retained by this merkleizer.
     /// Returns `Some(op)` if `loc` falls in the batch or ancestor regions, and `None` when `loc` is
     /// in the committed region (`loc < db_size`).
     fn try_read_op_from_uncommitted(
@@ -1874,6 +1874,10 @@ where
     }
 
     /// Read through: mutations -> ancestor diffs -> committed DB.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on the batch's chain.
     pub async fn get<E, C, I, const N: usize>(
         &self,
         key: &U::Key,
@@ -1896,6 +1900,10 @@ where
     /// [`stage`](Self::stage) for keys that may be written. When the writable subset is known and
     /// much smaller than the full read set, call `get_many` for the read-only keys first, then
     /// [`stage`](Self::stage) only the writable keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on the batch's chain.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -2940,6 +2948,10 @@ where
     }
 
     /// Read through: local diff -> retained ancestor diffs -> committed DB.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on the batch's chain.
     pub async fn get<E, C, I, H, const N: usize>(
         &self,
         key: &U::Key,
@@ -2966,6 +2978,10 @@ where
     /// Batch read multiple keys.
     ///
     /// Returns results in the same order as the input keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on the batch's chain.
     pub async fn get_many<E, C, I, H, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -4451,6 +4467,57 @@ mod tests {
             assert!(matches!(
                 db.validate_batch(&loser),
                 Err(crate::qmdb::Error::StaleBatch)
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Applying a batch's child moves the database past the parent's own states, so reads
+    /// through the parent refuse while the child keeps reading.
+    #[test]
+    fn descendant_apply_makes_parent_reads_stale() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("descendant-apply", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+
+            let key = Sha256::hash(&[b"key"]);
+            let parent_write = Sha256::hash(&[b"parent"]);
+            let parent = db
+                .new_batch()
+                .write(key, Some(parent_write))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            assert_eq!(parent.get(&key, &db).await.unwrap(), Some(parent_write));
+            let child_write = Sha256::hash(&[b"child"]);
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(key, Some(child_write))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(child.clone()).await.unwrap();
+            assert_eq!(child.get(&key, &db).await.unwrap(), Some(child_write));
+            assert!(matches!(
+                parent.get(&key, &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            assert!(matches!(
+                parent.get_many(&[&key], &db).await,
+                Err(crate::qmdb::Error::StaleRead)
             ));
 
             db.destroy().await.unwrap();
