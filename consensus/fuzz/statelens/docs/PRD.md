@@ -344,21 +344,28 @@ R-P3-3. After fuzzing and any investigation, the operator discards the checkout.
 R-INS-1. **No code removal.** The agent may add code, fields, ghost state, helper functions, module-level statics, and hooks. It must not delete or change existing logic. The only allowed change to an existing line is wrapping an expression in a block, keeping its tokens; each such edit is listed in the plan. The only intended behavior change is a panic when an invariant is violated.
 When the agent adds code, it must mark it as instrumentation with a comment line `// [statelens] <tag>` directly above it. Tags: `INV-NNNN` for assertions and invariant probes, `ghost:INV-NNNN` for ghost state, `beacon:<label>` for beacon probes, and `me` for code added only to make the replica index available.
 
-R-INS-2. **Byzantine guard.** Every assertion, every probe, and every ghost-state access is guarded. The StateLens macros and ghost-state accessors call `statelens::should_check(me)`, which skips replicas that `statelens::is_byzantine(me)` reports as compromised, so no call site can omit the guard. `me` is the replica's own participant index; R-S-INS-1 and R-M-INS-1 give its sources in each subsystem. `is_byzantine` reads the compromised set published by the harness (section 8.4). A replica with no participant index (`me() == None`) is treated as honest. For testing, `STATELENS_BYZANTINE=check` checks compromised replicas like honest ones, and `STATELENS_BYZANTINE=panic` panics when one reaches an instrumented site (AC-7).
+R-INS-2. **Byzantine guard.** Every assertion, every probe, and every access to `Ghost` or `Global` is guarded. The StateLens macros and ghost-state accessors call `statelens::should_check(me)`, which skips replicas that `statelens::is_byzantine(me)` reports as compromised, so no call site can omit the guard. Ghost fields added to existing structs (R-INS-5) may be updated without the guard: each belongs to one replica, its updates change no behavior (R-INS-3), and only guarded assertions and probes act on it, so a compromised replica's fields are updated but never checked. `STATELENS_BYZANTINE` does not apply to these updates. `me` is the replica's own participant index; R-S-INS-1 and R-M-INS-1 give its sources in each subsystem. `is_byzantine` reads the compromised set published by the harness (section 8.4). A replica with no participant index (`me() == None`) is treated as honest. For testing, `STATELENS_BYZANTINE=check` checks compromised replicas like honest ones, and `STATELENS_BYZANTINE=panic` panics when one reaches an instrumented site (AC-7).
 
-R-INS-3. **Determinism.** Assertions, probes, and ghost updates must not:
+R-INS-3. **Non-interference.** Assertions, probes, and ghost updates observe program state without changing the semantics or control logic of the protocol or its implementation. Until an invariant is violated, an instrumented replica takes the same branches, keeps the same state, and sends the same messages as the original code. Instrumentation may compute from any state it can reach, but it writes only its own state: ghost state, probe counters, and the replica-index fields it adds (R-INS-2). It must not:
+- assign to or mutate existing variables, fields, or collections, whether directly, through `&mut` methods, or through interior mutability;
+- call methods whose reads change state that any code, tests included, can observe, such as an LRU lookup that changes the eviction order;
+- add a `return`, `break`, `continue`, or `?` that can leave or skip original code, or change which branch the original code takes;
+- keep in ghost state a handle whose count or lifetime any code, tests included, can observe: channel endpoints, `Arc`s such as marshal's blocks, or values whose `Drop` has an effect;
+- clone a block; keep its digest and height instead;
 - `await`;
 - spawn tasks or take locks;
 - touch the runtime context, RNG, clock, network, storage, metrics, or logging;
 - change the order or content of messages;
 - consume values the original code later relies on.
 
-This keeps a crash reproducible from the same input on the same instrumented tree.
+Tests count because the test gate runs them on the instrumented tree. Exception: instrumentation may force a memoized decode, such as `Lazy::get` or `==` on a `Lazy`, even on original values; filling that cache is not a write. Ghost state may keep clones of decoded messages that hold `Bytes`, such as votes. No other cache is exempt: filling `CodedBlock::shards`, for example, runs an erasure encode, can panic, and changes what `shard()` returns.
+
+This also keeps a crash reproducible from the same input on the same instrumented tree.
 
 R-INS-4. **Assertion form.** Assertions use the StateLens macros `sl_assert!(me, "INV-NNNN", cond, ...)` and `sl_implies!(me, "INV-NNNN", pre, post, ...)`, invoked by module path (`crate::simplex::statelens::sl_implies!`), because `simplex` is declared inside `stability_scope!`. Marshal code invokes them by the same path. A violation panics with a message starting `[statelens][INV-NNNN] replica=<index>`, followed by the invariant title and a short dump of the values involved. One invariant may produce several assertion sites.
 
 R-INS-5. **Ghost state.**
-- Ghost fields may be added to existing structs (e.g. `voter::State`, `voter::Round`, `batcher::Round`, `resolver::State`).
+- Ghost fields may be added to existing structs (e.g. `voter::State`, `voter::Round`, `batcher::Round`, `resolver::State`). Their updates need no Byzantine guard (R-INS-2).
 - Cross-actor and cross-restart invariants may use per-replica ghost state (`Ghost`, `with_ghost`) in `statelens.rs`, keyed by participant index and shared by all actors and components of the replica, in both subsystems.
 - `protocol`-scope invariants may use ghost state shared by all honest replicas (`Global`, `with_global`).
 - Ghost state lives for one run: it is cleared before every fuzz input and whenever a fresh deterministic runtime starts (for example each seed of a multi-seed test), and it survives a crash-restart from a checkpoint. Keeping it per thread is safe because the deterministic runtime runs all tasks on the calling thread.

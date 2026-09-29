@@ -44,15 +44,32 @@ probes that tell the fuzzer when an execution reached a new internal state.
    fields and their updates, `beacon:<label>` for beacon probes, and `me` for code added
    only to make the replica index available.
 3. Observe only honest replicas. The macros, `with_ghost` and `with_global` apply the
-   Byzantine guard themselves. Always pass the replica's own index as `me`, obtained as
-   the subsystem rules say. Never hard-code or guess an index, and never pass `None` for
-   an index you could not obtain: `None` means the replica is not a participant and
-   turns the guard off. Leave such a site without instrumentation and say so in the
-   plan.
-4. No side effects on the protocol. Instrumentation must not `await`, spawn tasks, take
-   locks, or use the runtime context, RNG, clock, network, storage, metrics or logging.
-   It must not send or reorder messages, and must not move or consume values the
-   original code uses later; clone small values if you need them after a move.
+   Byzantine guard themselves. Ghost fields you add to existing structs may be updated
+   without the guard, but act on them only through the macros. Always pass the
+   replica's own index as `me`, obtained as the subsystem rules say. Never hard-code or
+   guess an index, and never pass `None` for an index you could not obtain: `None`
+   means the replica is not a participant and turns the guard off. Leave such a site
+   without instrumentation and say so in the plan.
+4. Observe, do not interfere. Instrumentation observes program state without changing
+   the semantics or control logic of the protocol or its implementation: until an
+   invariant is violated, the replica takes the same branches, keeps the same state and
+   sends the same messages as the original code. Write only StateLens state: ghost
+   fields, `Ghost` and `Global`, and the `me` fields you add. Do not assign to or mutate
+   existing variables, fields or collections, whether directly, through `&mut` methods,
+   or through interior mutability (`Cell`, `RefCell`, atomics), and do not call methods
+   whose reads change state that any code, tests included, can observe (for example an
+   LRU `get` that changes the eviction order). Exception: you may force a memoized
+   decode, such as `Lazy::get` or `==` on a `Lazy`, even on original values. No other
+   cache is exempt: filling `CodedBlock::shards`, for example, runs an erasure encode,
+   can panic, and changes what `shard()` returns. Do not add a `return`, `break`,
+   `continue` or `?` that can leave or skip original code. Do not keep in ghost state a
+   handle whose count or lifetime any code, tests included, can observe: channel
+   endpoints, `Arc`s such as blocks, or values whose `Drop` has an effect. Do not clone
+   blocks; keep a block's digest and height instead. Clones of decoded messages that
+   hold `Bytes`, such as votes, are fine. Do not `await`, spawn tasks, take locks, or
+   use the runtime context, RNG, clock, network, storage, metrics or logging. Do not
+   send or reorder messages, and do not move or consume values the original code uses
+   later; clone small values if you need them after a move.
 5. No accidental panics. Only an invariant violation may panic. Use saturating or
    checked arithmetic (tests run with overflow checks). Do not use `unwrap`, `expect`,
    or indexing that can go out of bounds.
