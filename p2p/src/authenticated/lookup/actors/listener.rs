@@ -13,7 +13,7 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_stream::Handshake;
+use commonware_stream::Upgrader;
 use commonware_utils::{IpAddrExt, NZUsize, channel::ring, concurrency::Limiter, net::SubnetMask};
 use futures::{Sink, StreamExt};
 use rand_core::CryptoRng;
@@ -60,9 +60,9 @@ impl Mailbox {
 }
 
 /// Configuration for the listener actor.
-pub struct Config<H: Handshake> {
+pub struct Config<U: Upgrader> {
     pub address: SocketAddr,
-    pub stream: Arc<StreamConfig<H>>,
+    pub stream: Arc<StreamConfig<U>>,
     pub allow_private_ips: bool,
     pub bypass_ip_check: bool,
     pub max_concurrent_handshakes: NonZeroU32,
@@ -70,11 +70,11 @@ pub struct Config<H: Handshake> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Handshake> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, U: Upgrader> {
     context: ContextCell<E>,
 
     address: SocketAddr,
-    stream: Arc<StreamConfig<H>>,
+    stream: Arc<StreamConfig<U>>,
     allow_private_ips: bool,
     bypass_ip_check: bool,
     handshake_limiter: Limiter,
@@ -88,11 +88,11 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metri
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Handshake> Actor<E, H>
+impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, U: Upgrader> Actor<E, U>
 where
-    H::PublicKey: PublicKey,
+    U::PublicKey: PublicKey,
 {
-    pub fn new(context: E, cfg: Config<H>, updates: Updates) -> Self {
+    pub fn new(context: E, cfg: Config<U>, updates: Updates) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(
             "handshakes_blocked",
@@ -134,15 +134,15 @@ where
     async fn handshake(
         context: E,
         address: SocketAddr,
-        stream: Arc<StreamConfig<H>>,
+        stream: Arc<StreamConfig<U>>,
         sink: SinkOf<E>,
         raw_stream: StreamOf<E>,
-        tracker: tracker::Mailbox<H::PublicKey>,
+        tracker: tracker::Mailbox<U::PublicKey>,
         mut supervisor: SpawnerMailbox<
             spawner::Message<
-                H::Sender<StreamOf<E>, SinkOf<E>>,
-                H::Receiver<StreamOf<E>, SinkOf<E>>,
-                H::PublicKey,
+                U::Sender<StreamOf<E>, SinkOf<E>>,
+                U::Receiver<StreamOf<E>, SinkOf<E>>,
+                U::PublicKey,
             >,
         >,
     ) {
@@ -179,12 +179,12 @@ where
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<H::PublicKey>,
+        tracker: tracker::Mailbox<U::PublicKey>,
         supervisor: SpawnerMailbox<
             spawner::Message<
-                H::Sender<StreamOf<E>, SinkOf<E>>,
-                H::Receiver<StreamOf<E>, SinkOf<E>>,
-                H::PublicKey,
+                U::Sender<StreamOf<E>, SinkOf<E>>,
+                U::Receiver<StreamOf<E>, SinkOf<E>>,
+                U::PublicKey,
             >,
         >,
     ) -> Handle<()> {
@@ -194,12 +194,12 @@ where
     #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
-        tracker: tracker::Mailbox<H::PublicKey>,
+        tracker: tracker::Mailbox<U::PublicKey>,
         supervisor: SpawnerMailbox<
             spawner::Message<
-                H::Sender<StreamOf<E>, SinkOf<E>>,
-                H::Receiver<StreamOf<E>, SinkOf<E>>,
-                H::PublicKey,
+                U::Sender<StreamOf<E>, SinkOf<E>>,
+                U::Receiver<StreamOf<E>, SinkOf<E>>,
+                U::PublicKey,
             >,
         >,
     ) {
@@ -368,7 +368,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake::new(
+            let handshake: StreamHandshake<_> = (
                 sake::Exchange::new(sake::Config {
                     signer: PrivateKey::from_seed(1),
                     version: Version::V1,
@@ -541,7 +541,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake::new(
+            let handshake: StreamHandshake<_> = (
                 sake::Exchange::new(sake::Config {
                     signer: PrivateKey::from_seed(1),
                     version: Version::V1,
@@ -631,7 +631,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake::new(
+            let handshake: StreamHandshake<_> = (
                 sake::Exchange::new(sake::Config {
                     signer: PrivateKey::from_seed(1),
                     version: Version::V1,
@@ -721,7 +721,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake::new(
+            let handshake: StreamHandshake<_> = (
                 sake::Exchange::new(sake::Config {
                     signer: PrivateKey::from_seed(1),
                     version: Version::V1,

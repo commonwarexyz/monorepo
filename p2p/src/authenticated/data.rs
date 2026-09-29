@@ -1,7 +1,7 @@
 use crate::Channel;
 use commonware_codec::{Buf, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write, varint::UInt};
 use commonware_runtime::{BufMut, BufferPool, IoBuf, IoBufs};
-use commonware_stream::Handshake;
+use commonware_stream::Upgrader;
 
 /// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,8 +54,8 @@ pub const MAX_PAYLOAD_OVERHEAD: u32 = 1 + 10 + 5;
 /// # Panics
 ///
 /// Panics if the stream's limit cannot accommodate p2p framing overhead.
-pub const fn max_size<H: Handshake>() -> u32 {
-    H::MAX_SIZE
+pub const fn max_size<U: Upgrader>() -> u32 {
+    U::MAX_SIZE
         .checked_sub(MAX_PAYLOAD_OVERHEAD)
         .expect("stream message limit too small for p2p framing")
 }

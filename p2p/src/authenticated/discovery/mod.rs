@@ -15,8 +15,8 @@
 //!
 //! ## Authentication
 //!
-//! [`Config`] and [`Network`] use [`commonware_stream::Handshake`] to authenticate peers
-//! and supply their message streams. [`Network`] additionally requires [`Handshake`]
+//! [`Config`] and [`Network`] use [`commonware_stream::Upgrader`] to authenticate peers
+//! and supply their message streams. [`Network`] additionally requires [`Upgrader`]
 //! to sign discovery gossip under the same identity.
 //!
 //! ## Discovery
@@ -170,7 +170,7 @@
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::{Upgrade, cups::{self, Cups}, sake::{self, Version}};
+//! use commonware_stream::{cups::{self, Cups}, sake::{self, Version}};
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -208,7 +208,7 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
-//!     Upgrade::new(
+//!     (
 //!         sake::Exchange::new(sake::Config::new(signer.clone(), Version::V1)),
 //!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 //!     ),
@@ -249,7 +249,7 @@
 //! ```
 
 use commonware_cryptography::{PublicKey, Signer, Verifier};
-use commonware_stream::{Transport, Upgrade, sake};
+use commonware_stream::{Transport, sake};
 
 mod actors;
 mod config;
@@ -266,15 +266,15 @@ pub use config::{Bootstrapper, Config};
 pub use network::Network;
 
 /// Authenticates connections and signs discovery gossip under the same local identity.
-pub trait Handshake: commonware_stream::Handshake<PublicKey: PublicKey> {
+pub trait Upgrader: commonware_stream::Upgrader<PublicKey: PublicKey> {
     /// Signs a namespaced message with the identity returned by
-    /// [`public_key`](commonware_stream::Handshake::public_key).
+    /// [`public_key`](commonware_stream::Upgrader::public_key).
     fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
 }
 
-impl<S: Signer, T: Transport> Handshake for Upgrade<sake::Exchange<S>, T> {
+impl<S: Signer, T: Transport> Upgrader for (sake::Exchange<S>, T) {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
-        self.exchange().sign(namespace, message)
+        self.0.sign(namespace, message)
     }
 }
 

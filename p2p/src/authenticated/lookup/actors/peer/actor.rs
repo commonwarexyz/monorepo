@@ -199,7 +199,7 @@ mod tests {
         deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::{
-        Handshake as _,
+        Upgrader as _,
         cups::{self, Cups},
         sake::{self, Version},
         utils::Timeout,
@@ -247,7 +247,7 @@ mod tests {
     }
 
     fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
-        let handshake = StreamHandshake::new(
+        let handshake = (
             sake::Exchange::new(sake::Config {
                 signer,
                 version: Version::V1,

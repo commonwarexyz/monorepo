@@ -198,7 +198,7 @@ impl<S: Signer> crate::Exchange for Exchange<S> {
 mod test {
     use super::*;
     use crate::{
-        Handshake as _, Transport as _, Upgrade,
+        Transport as _, Upgrader as _,
         cups::{self, Cups},
         utils::{Timeout, TimeoutError},
     };
@@ -225,7 +225,7 @@ mod test {
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
     type TestCups = Cups<ChaCha20Poly1305>;
-    type TestUpgrade = Upgrade<Exchange<PrivateKey>, TestCups>;
+    type TestUpgrade = (Exchange<PrivateKey>, TestCups);
 
     /// Returns the record version that pairs with the SAKE `version`.
     const fn record_version(version: Version) -> cups::Version {
@@ -268,7 +268,7 @@ mod test {
     /// only when `max_message_size` exceeds it.
     #[test]
     fn test_max_message_size_bounds() {
-        const MAX_SIZE: u32 = <TestUpgrade as crate::Handshake>::MAX_SIZE;
+        const MAX_SIZE: u32 = <TestUpgrade as crate::Upgrader>::MAX_SIZE;
         assert_eq!(MAX_SIZE, <TestCups as crate::Transport>::MAX_SIZE);
         deterministic::Runner::default().start(|context| async move {
             for max_message_size in [0, MAX_SIZE, MAX_SIZE + 1] {
@@ -322,7 +322,7 @@ mod test {
 
     /// Returns a handshake that signs with `signer` at `version` and keys `records`.
     fn transport(signer: PrivateKey, version: Version, records: cups::Version) -> TestUpgrade {
-        TestUpgrade::new(
+        (
             Exchange::new(Config {
                 signer,
                 version,
@@ -1044,13 +1044,13 @@ mod test {
             let listener_public_key = listener_signer.public_key();
             let listener_handshake = transport_handshake(listener_signer, Version::V1);
             let scope = records(Version::V1).namespace();
-            let dialer_context = dialer_handshake.exchange().clone().context(
+            let dialer_context = dialer_handshake.0.clone().context(
                 &context,
                 NAMESPACE,
                 scope,
                 listener_public_key.clone(),
             );
-            let listener_context = listener_handshake.exchange().clone().context(
+            let listener_context = listener_handshake.0.clone().context(
                 &context,
                 NAMESPACE,
                 scope,

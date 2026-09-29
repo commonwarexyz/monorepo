@@ -3,7 +3,7 @@
 use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
-    Handshake as _, Upgrade,
+    Upgrader as _,
     cups::{self, Cups},
     sake::{self, Config, Version},
     utils::Timeout,
@@ -11,9 +11,6 @@ use commonware_stream::{
 use futures::join;
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
-
-/// SAKE handshake that keys CUPS records.
-type Handshake<S> = Upgrade<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
 
 /// Returns the records that pair with the SAKE `version`.
 fn records(version: Version) -> Cups<ChaCha20Poly1305> {
@@ -120,7 +117,7 @@ fn fuzz(input: FuzzInput) {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Handshake::new(
+        let dialer_handshake = (
             sake::Exchange::new(Config {
                 signer: dialer_signer.clone(),
                 version: input.version,
@@ -131,7 +128,7 @@ fn fuzz(input: FuzzInput) {
         );
         let dialer_handshake = Timeout::new(dialer_handshake, handshake_timeout);
 
-        let listener_handshake = Handshake::new(
+        let listener_handshake = (
             sake::Exchange::new(Config {
                 signer: listener_signer.clone(),
                 version: input.version,

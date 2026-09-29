@@ -21,7 +21,6 @@ use commonware_glue::dkg::{
 use commonware_p2p::authenticated::{self, discovery};
 use commonware_runtime::{Strategizer, Supervisor as _, tokio};
 use commonware_stream::{
-    Upgrade,
     cups::{self, Cups},
     sake::{self, Version},
 };
@@ -53,7 +52,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        Upgrade::new(
+        (
             sake::Exchange::new(sake::Config::new(node.signer.clone(), Version::V1)),
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),

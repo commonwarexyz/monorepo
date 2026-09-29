@@ -6,7 +6,7 @@ use commonware_runtime::{
     Handle, Runner as _, Sink as _, Spawner, Stream as _, Supervisor as _, deterministic, mocks,
 };
 use commonware_stream::{
-    Handshake as StreamHandshake, Upgrade,
+    Upgrader as StreamUpgrader,
     cups::{self, Cups},
     sake::{self, Config, Version},
     utils::{
@@ -19,7 +19,7 @@ use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
 /// SAKE handshake that keys CUPS records.
-type Handshake<S> = Upgrade<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
+type Upgrader<S> = (sake::Exchange<S>, Cups<ChaCha20Poly1305>);
 
 /// Returns the records that pair with the SAKE `version`.
 fn records(version: Version) -> Cups<ChaCha20Poly1305> {
@@ -82,11 +82,11 @@ impl<'a> arbitrary::Arbitrary<'a> for Message {
     }
 }
 
-/// Sending half of a [Handshake] connection over mock channels.
-type Sender = <Handshake<PrivateKey> as StreamHandshake>::Sender<mocks::Stream, mocks::Sink>;
+/// Sending half of an [Upgrader] connection over mock channels.
+type Sender = <Upgrader<PrivateKey> as StreamUpgrader>::Sender<mocks::Stream, mocks::Sink>;
 
-/// Receiving half of a [Handshake] connection over mock channels.
-type Receiver = <Handshake<PrivateKey> as StreamHandshake>::Receiver<mocks::Stream, mocks::Sink>;
+/// Receiving half of an [Upgrader] connection over mock channels.
+type Receiver = <Upgrader<PrivateKey> as StreamUpgrader>::Receiver<mocks::Stream, mocks::Sink>;
 
 #[derive(Debug)]
 pub struct FuzzInput {
@@ -139,7 +139,7 @@ fn fuzz(input: FuzzInput) {
         let (listener_sink, mut adversary_l_stream) = mocks::Channel::init();
         let (mut adversary_l_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Handshake::new(
+        let dialer_handshake = (
             sake::Exchange::new(Config {
                 signer: dialer_signer.clone(),
                 version,
@@ -150,7 +150,7 @@ fn fuzz(input: FuzzInput) {
         );
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
-        let listener_handshake = Handshake::new(
+        let listener_handshake = (
             sake::Exchange::new(Config {
                 signer: listener_signer.clone(),
                 version,

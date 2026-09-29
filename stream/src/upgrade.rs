@@ -1,34 +1,12 @@
 //! Pair an [Exchange] with a [Transport].
 
-use crate::{Exchange, Handshake, Transport};
+use crate::{Exchange, Transport, Upgrader};
 use commonware_runtime::{BufferPooler, Clock, Sink, Stream};
 use rand_core::CryptoRng;
 use std::future::Future;
 
-/// Implements [Handshake] by running the key exchange `K`, then keying the transport `T` with the
-/// agreed ciphers.
-#[derive(Clone)]
-pub struct Upgrade<K, T> {
-    exchange: K,
-    transport: T,
-}
-
-impl<K, T> Upgrade<K, T> {
-    /// Creates an upgrade that runs `exchange` and keys `transport`.
-    pub const fn new(exchange: K, transport: T) -> Self {
-        Self {
-            exchange,
-            transport,
-        }
-    }
-
-    /// Returns the key exchange.
-    pub const fn exchange(&self) -> &K {
-        &self.exchange
-    }
-}
-
-impl<K, T> Handshake for Upgrade<K, T>
+/// Runs the key exchange `K`, then keys the transport `T` with the agreed ciphers.
+impl<K, T> Upgrader for (K, T)
 where
     K: Exchange,
     T: Transport,
@@ -41,7 +19,7 @@ where
     type Receiver<I: Stream, O: Sink> = T::Receiver<I>;
 
     fn public_key(&self) -> Self::PublicKey {
-        self.exchange.public_key()
+        self.0.public_key()
     }
 
     async fn dial<E, I, O>(
@@ -63,22 +41,20 @@ where
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
+        let (exchange, transport) = self;
 
         // Agree on ciphers bound to this transport, then key it on the same connection.
-        let (send, recv) = self
-            .exchange
+        let (send, recv) = exchange
             .dial(
                 context,
                 namespace,
-                self.transport.namespace(),
+                transport.namespace(),
                 peer,
                 &mut stream,
                 &mut sink,
             )
             .await?;
-        Ok(self
-            .transport
-            .split(send, recv, stream, sink, max_message_size, pool))
+        Ok(transport.split(send, recv, stream, sink, max_message_size, pool))
     }
 
     async fn listen<E, I, O, B, F>(
@@ -102,22 +78,20 @@ where
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
+        let (exchange, transport) = self;
 
         // Agree on ciphers bound to this transport, then key it on the same connection.
-        let (peer, send, recv) = self
-            .exchange
+        let (peer, send, recv) = exchange
             .listen(
                 context,
                 namespace,
-                self.transport.namespace(),
+                transport.namespace(),
                 bouncer,
                 &mut stream,
                 &mut sink,
             )
             .await?;
-        let (sender, receiver) =
-            self.transport
-                .split(send, recv, stream, sink, max_message_size, pool);
+        let (sender, receiver) = transport.split(send, recv, stream, sink, max_message_size, pool);
         Ok((peer, sender, receiver))
     }
 }

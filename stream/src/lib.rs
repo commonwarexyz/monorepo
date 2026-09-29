@@ -18,7 +18,6 @@ commonware_macros::stability_scope!(BETA {
     pub mod cups;
     pub mod sake;
     mod upgrade;
-    pub use upgrade::Upgrade;
     pub mod utils;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
@@ -37,7 +36,7 @@ commonware_macros::stability_scope!(BETA {
     ///
     /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping the handshake
     /// future cancels the attempt, and implementations must release the underlying connection.
-    pub trait Handshake: Clone + Send + Sync + 'static {
+    pub trait Upgrader: Clone + Send + Sync + 'static {
         /// Largest plaintext message supported by the established streams, in bytes.
         const MAX_SIZE: u32;
 
@@ -362,7 +361,7 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
-        impl Handshake for OpaqueHandshake {
+        impl Upgrader for OpaqueHandshake {
             const MAX_SIZE: u32 = u32::MAX;
 
             type PublicKey = OpaqueIdentity;

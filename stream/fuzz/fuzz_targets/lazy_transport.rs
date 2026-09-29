@@ -3,7 +3,7 @@
 use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
-    Handshake as StreamHandshake, Upgrade,
+    Upgrader as StreamUpgrader,
     cups::{self, Cups},
     sake::{self, Config, Version},
     utils::Timeout,
@@ -13,7 +13,7 @@ use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
 
 /// SAKE handshake that keys CUPS records.
-type Handshake<S> = Upgrade<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
+type Upgrader<S> = (sake::Exchange<S>, Cups<ChaCha20Poly1305>);
 
 /// Returns the records that pair with the SAKE `version`.
 fn records(version: Version) -> Cups<ChaCha20Poly1305> {
@@ -26,11 +26,11 @@ fn records(version: Version) -> Cups<ChaCha20Poly1305> {
 static NAMESPACE: &[u8] = b"lazy_fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 1023 * 1024; // ~1MB buffer
 
-/// Sending half of a [Handshake] connection over mock channels.
-type Sender = <Handshake<PrivateKey> as StreamHandshake>::Sender<mocks::Stream, mocks::Sink>;
+/// Sending half of an [Upgrader] connection over mock channels.
+type Sender = <Upgrader<PrivateKey> as StreamUpgrader>::Sender<mocks::Stream, mocks::Sink>;
 
-/// Receiving half of a [Handshake] connection over mock channels.
-type Receiver = <Handshake<PrivateKey> as StreamHandshake>::Receiver<mocks::Stream, mocks::Sink>;
+/// Receiving half of an [Upgrader] connection over mock channels.
+type Receiver = <Upgrader<PrivateKey> as StreamUpgrader>::Receiver<mocks::Stream, mocks::Sink>;
 
 struct TransportPair {
     dialer_sender: Sender,
@@ -47,7 +47,7 @@ fn connect(version: Version) -> TransportPair {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Handshake::new(
+        let dialer_handshake = (
             sake::Exchange::new(Config {
                 signer: dialer_signer.clone(),
                 version,
@@ -58,7 +58,7 @@ fn connect(version: Version) -> TransportPair {
         );
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(2));
 
-        let listener_handshake = Handshake::new(
+        let listener_handshake = (
             sake::Exchange::new(Config {
                 signer: listener_signer.clone(),
                 version,

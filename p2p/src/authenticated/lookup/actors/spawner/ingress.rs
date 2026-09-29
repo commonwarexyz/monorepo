@@ -60,7 +60,7 @@ mod tests {
     };
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
-        Handshake,
+        Upgrader,
         cups::{self, Cups},
         sake::{self, Version},
         utils::Timeout,
@@ -72,13 +72,12 @@ mod tests {
     const STREAM_NAMESPACE: &[u8] = b"test_lookup_spawner_ingress";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Sender = <StreamHandshake<PrivateKey> as Handshake>::Sender<mocks::Stream, mocks::Sink>;
-    type Receiver =
-        <StreamHandshake<PrivateKey> as Handshake>::Receiver<mocks::Stream, mocks::Sink>;
+    type Sender = <StreamHandshake<PrivateKey> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
+    type Receiver = <StreamHandshake<PrivateKey> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
     type Connection = (Sender, Receiver);
 
     fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
-        let handshake = StreamHandshake::new(
+        let handshake = (
             sake::Exchange::new(sake::Config {
                 signer,
                 version: Version::V1,

@@ -1,4 +1,4 @@
-use crate::Handshake;
+use crate::Upgrader;
 use commonware_macros::select;
 use commonware_runtime::{BufferPooler, Clock, Sink, Stream};
 use rand_core::CryptoRng;
@@ -16,7 +16,7 @@ pub enum TimeoutError<E> {
 
 /// Applies a timeout to each handshake attempt.
 ///
-/// The deadline starts when [`Handshake::dial`] or [`Handshake::listen`] is called.
+/// The deadline starts when [`Upgrader::dial`] or [`Upgrader::listen`] is called.
 /// It covers the entire attempt, including the listener's peer admission check.
 /// Expiration drops the handshake future and releases its connection.
 ///
@@ -25,15 +25,14 @@ pub enum TimeoutError<E> {
 /// ```
 /// use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
 /// use commonware_stream::{
-///     Upgrade,
 ///     cups::{self, Cups},
 ///     sake::{Config, Exchange, Version},
 ///     utils::Timeout,
 /// };
 /// use std::time::Duration;
 ///
-/// let handshake = Timeout::new(
-///     Upgrade::new(
+/// let upgrader = Timeout::new(
+///     (
 ///         Exchange::new(Config::new(PrivateKey::from_seed(0), Version::V1)),
 ///         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 ///     ),
@@ -41,25 +40,25 @@ pub enum TimeoutError<E> {
 /// );
 /// ```
 #[derive(Clone)]
-pub struct Timeout<H> {
-    handshake: H,
+pub struct Timeout<U> {
+    handshake: U,
     timeout: Duration,
 }
 
-impl<H> Timeout<H> {
+impl<U> Timeout<U> {
     /// Wraps a handshake with a deadline for each connection attempt.
-    pub const fn new(handshake: H, timeout: Duration) -> Self {
+    pub const fn new(handshake: U, timeout: Duration) -> Self {
         Self { handshake, timeout }
     }
 }
 
-impl<H: Handshake> Handshake for Timeout<H> {
-    const MAX_SIZE: u32 = H::MAX_SIZE;
+impl<U: Upgrader> Upgrader for Timeout<U> {
+    const MAX_SIZE: u32 = U::MAX_SIZE;
 
-    type PublicKey = H::PublicKey;
-    type Error = TimeoutError<H::Error>;
-    type Sender<I: Stream, O: Sink> = H::Sender<I, O>;
-    type Receiver<I: Stream, O: Sink> = H::Receiver<I, O>;
+    type PublicKey = U::PublicKey;
+    type Error = TimeoutError<U::Error>;
+    type Sender<I: Stream, O: Sink> = U::Sender<I, O>;
+    type Receiver<I: Stream, O: Sink> = U::Receiver<I, O>;
 
     fn public_key(&self) -> Self::PublicKey {
         self.handshake.public_key()

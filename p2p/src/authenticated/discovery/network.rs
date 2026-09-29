@@ -1,7 +1,7 @@
 //! Implementation of an `authenticated` network.
 
 use super::{
-    Handshake,
+    Upgrader,
     actors::{dialer, listener, spawner, tracker},
     config::Config,
 };
@@ -39,21 +39,21 @@ const IP_SUFFIX: &[u8] = b"_IP";
 /// Implementation of an `authenticated` network.
 pub struct Network<
     E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-    H: Handshake,
+    U: Upgrader,
 > {
     context: ContextCell<E>,
-    cfg: Config<H>,
+    cfg: Config<U>,
     max_frame_size: u32,
     max_peer_set_size: u64,
 
-    channels: Channels<H::PublicKey>,
-    tracker: tracker::Actor<E, H::PublicKey>,
-    tracker_mailbox: tracker::Mailbox<H::PublicKey>,
-    info_verifier: InfoVerifier<H::PublicKey>,
+    channels: Channels<U::PublicKey>,
+    tracker: tracker::Actor<E, U::PublicKey>,
+    tracker_mailbox: tracker::Mailbox<U::PublicKey>,
+    info_verifier: InfoVerifier<U::PublicKey>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, H: Handshake>
-    Network<E, H>
+impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader>
+    Network<E, U>
 {
     /// Create a new instance of an `authenticated` network.
     ///
@@ -69,11 +69,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// # Panics
     ///
     /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
-    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
-        // `max_size` subtracts framing overhead from `H::MAX_SIZE`, so this bound guarantees
+    pub fn new(context: E, cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
+        // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
         // that adding the overhead back cannot overflow.
         assert!(
-            cfg.max_message_size <= max_size::<H>(),
+            cfg.max_message_size <= max_size::<U>(),
             "maximum message size exceeds stream limit"
         );
         let max_frame_size = cfg
@@ -193,8 +193,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         channel: Channel,
         rate: Quota,
     ) -> (
-        channels::Sender<H::PublicKey, E>,
-        channels::Receiver<H::PublicKey>,
+        channels::Sender<U::PublicKey, E>,
+        channels::Receiver<U::PublicKey>,
     ) {
         let context = self
             .context
@@ -226,8 +226,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
 
     async fn run(
         self,
-        router: router::Actor<E, H::PublicKey>,
-        router_mailbox: router::Mailbox<H::PublicKey>,
+        router: router::Actor<E, U::PublicKey>,
+        router_mailbox: router::Mailbox<U::PublicKey>,
     ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();

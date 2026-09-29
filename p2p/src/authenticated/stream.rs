@@ -3,10 +3,9 @@
 #[cfg(test)]
 use commonware_cryptography::{ChaCha20Poly1305, Signer};
 use commonware_runtime::{BufferPooler, Clock, Sink, Stream};
-use commonware_stream::Handshake;
+use commonware_stream::Upgrader;
 #[cfg(test)]
 use commonware_stream::{
-    Upgrade,
     cups::{self, Cups},
     sake::{self, Version},
 };
@@ -15,12 +14,12 @@ use std::future::Future;
 
 /// SAKE handshake that keys CUPS records, shared by tests.
 #[cfg(test)]
-pub(crate) type StreamHandshake<S> = Upgrade<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
+pub(crate) type StreamHandshake<S> = (sake::Exchange<S>, Cups<ChaCha20Poly1305>);
 
 /// Returns a version 1 [StreamHandshake] that signs with `signer`.
 #[cfg(test)]
 pub(crate) const fn sake_handshake<S: Signer>(signer: S) -> StreamHandshake<S> {
-    Upgrade::new(
+    (
         sake::Exchange::new(sake::Config::new(signer, Version::V1)),
         Cups::new(cups::Version::V1),
     )
@@ -28,22 +27,22 @@ pub(crate) const fn sake_handshake<S: Signer>(signer: S) -> StreamHandshake<S> {
 
 /// Reuses a handshake with a fixed namespace and plaintext message limit.
 ///
-/// Works with any [Handshake] implementation, cloning it for each connection attempt.
-pub(crate) struct Config<H: Handshake> {
-    handshake: H,
+/// Works with any [Upgrader] implementation, cloning it for each connection attempt.
+pub(crate) struct Config<U: Upgrader> {
+    handshake: U,
     namespace: Vec<u8>,
     max_message_size: u32,
 }
 
-impl<H: Handshake> Config<H> {
+impl<U: Upgrader> Config<U> {
     /// Configures the namespace and plaintext message limit for every connection.
     ///
     /// # Panics
     ///
-    /// Panics if `max_message_size` exceeds [`Handshake::MAX_SIZE`].
-    pub(crate) fn new(handshake: H, namespace: impl Into<Vec<u8>>, max_message_size: u32) -> Self {
+    /// Panics if `max_message_size` exceeds [`Upgrader::MAX_SIZE`].
+    pub(crate) fn new(handshake: U, namespace: impl Into<Vec<u8>>, max_message_size: u32) -> Self {
         assert!(
-            max_message_size <= H::MAX_SIZE,
+            max_message_size <= U::MAX_SIZE,
             "maximum message size exceeds stream limit"
         );
         Self {
@@ -58,10 +57,10 @@ impl<H: Handshake> Config<H> {
     pub(crate) fn dial<C, I, O>(
         &self,
         context: C,
-        peer: H::PublicKey,
+        peer: U::PublicKey,
         stream: I,
         sink: O,
-    ) -> impl Future<Output = Result<(H::Sender<I, O>, H::Receiver<I, O>), H::Error>> + Send
+    ) -> impl Future<Output = Result<(U::Sender<I, O>, U::Receiver<I, O>), U::Error>> + Send
     where
         C: BufferPooler + Clock + CryptoRng,
         I: Stream,
@@ -88,12 +87,12 @@ impl<H: Handshake> Config<H> {
         bouncer: B,
         stream: I,
         sink: O,
-    ) -> impl Future<Output = Result<(H::PublicKey, H::Sender<I, O>, H::Receiver<I, O>), H::Error>> + Send
+    ) -> impl Future<Output = Result<(U::PublicKey, U::Sender<I, O>, U::Receiver<I, O>), U::Error>> + Send
     where
         C: BufferPooler + Clock + CryptoRng,
         I: Stream,
         O: Sink,
-        B: FnOnce(H::PublicKey) -> F + Send,
+        B: FnOnce(U::PublicKey) -> F + Send,
         F: Future<Output = bool> + Send,
     {
         self.handshake.clone().listen(

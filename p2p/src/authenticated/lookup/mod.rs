@@ -14,7 +14,7 @@
 //!
 //! ## Authentication
 //!
-//! [`Config`] and [`Network`] are generic over [`commonware_stream::Handshake`], which
+//! [`Config`] and [`Network`] are generic over [`commonware_stream::Upgrader`], which
 //! authenticates peers and supplies their message streams. The handshake defines the
 //! public key type and supplies the local identity.
 //!
@@ -123,7 +123,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::{Upgrade, cups::{self, Cups}, sake::{self, Version}};
+//! use commonware_stream::{cups::{self, Cups}, sake::{self, Version}};
 //! use commonware_utils::{NZU32, NZUsize, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -159,7 +159,7 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = lookup::Config::local(
-//!     Upgrade::new(
+//!     (
 //!         sake::Exchange::new(sake::Config::new(signer.clone(), Version::V1)),
 //!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 //!     ),
@@ -236,7 +236,7 @@ mod tests {
         telemetry::metrics::{count_running_tasks, metric_samples},
         tokio,
     };
-    use commonware_stream::{Handshake, Receiver as StreamReceiver, Sender as StreamSender, sake};
+    use commonware_stream::{Receiver as StreamReceiver, Sender as StreamSender, Upgrader, sake};
     use commonware_utils::{
         Hostname, NZU32, NZUsize, TryCollect,
         channel::mpsc,
@@ -2343,15 +2343,15 @@ mod tests {
         }
     }
 
-    impl<const MAX_SIZE: u32> Handshake for TestHandshake<MAX_SIZE> {
+    impl<const MAX_SIZE: u32> Upgrader for TestHandshake<MAX_SIZE> {
         const MAX_SIZE: u32 = MAX_SIZE;
 
         type PublicKey = ed25519::PublicKey;
         type Error = TestHandshakeError;
         type Sender<I: Stream, O: Sink> =
-            TestSender<<StreamHandshake<ed25519::PrivateKey> as Handshake>::Sender<I, O>>;
+            TestSender<<StreamHandshake<ed25519::PrivateKey> as Upgrader>::Sender<I, O>>;
         type Receiver<I: Stream, O: Sink> =
-            TestReceiver<<StreamHandshake<ed25519::PrivateKey> as Handshake>::Receiver<I, O>>;
+            TestReceiver<<StreamHandshake<ed25519::PrivateKey> as Upgrader>::Receiver<I, O>>;
 
         fn public_key(&self) -> Self::PublicKey {
             self.application_key.clone()

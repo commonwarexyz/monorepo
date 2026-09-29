@@ -1,7 +1,7 @@
 //! SAKE stream conformance tests.
 
 use crate::{
-    Handshake as _, Upgrade,
+    Upgrader as _,
     cups::{self, Cups},
     sake::{Config, Exchange, Version},
 };
@@ -73,7 +73,7 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
         };
 
         // Complete the handshake.
-        let listener_handshake = Upgrade::new(
+        let listener_handshake = (
             Exchange::new(Config::new(listener.clone(), version)),
             Cups::<ChaCha20Poly1305>::new(records),
         );
@@ -89,20 +89,20 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
                 )
                 .await
         });
-        let (mut dialer_tx, mut dialer_rx) = Upgrade::new(
+        let (mut dialer_tx, mut dialer_rx) = (
             Exchange::new(Config::new(dialer, version)),
             Cups::<ChaCha20Poly1305>::new(records),
         )
-        .dial(
-            context.child("dialer"),
-            NAMESPACE,
-            MAX_MESSAGE_SIZE,
-            listener.public_key(),
-            dialer_stream,
-            dialer_sink,
-        )
-        .await
-        .unwrap();
+            .dial(
+                context.child("dialer"),
+                NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                listener.public_key(),
+                dialer_stream,
+                dialer_sink,
+            )
+            .await
+            .unwrap();
         let (_, mut listener_tx, mut listener_rx) = handle.await.unwrap().unwrap();
 
         // Send one record of each length class in each direction.
