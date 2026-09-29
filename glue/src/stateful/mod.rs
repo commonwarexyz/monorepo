@@ -130,7 +130,7 @@ mod tests;
 ///
 /// | Variant | [`verify`](Application::verify) | [`propose`](Application::propose) | [`apply`](Application::apply) of an ancestor | [`apply`](Application::apply) of a finalized block |
 /// | --- | --- | --- | --- | --- |
-/// | [`Stale`](Self::Stale) | re-checked once the anchor moves | cannot occur | re-checked once the anchor moves | panics |
+/// | [`Stale`](Self::Stale) | re-checked once the anchor moves | declines (debug-asserted unreachable) | re-checked once the anchor moves | panics |
 /// | [`Invalid`](Self::Invalid) | answers `false`, nothing cached | declines | the ancestry is invalid | panics |
 /// | [`Fatal`](Self::Fatal) | panics | panics | panics | panics |
 ///
@@ -189,7 +189,8 @@ pub struct Input<Upstream, Provider> {
 ///
 /// Implementors execute blocks against [`DatabaseSet::Unmerkleized`] batches and return
 /// [`DatabaseSet::Merkleized`] batches (see the [module docs](crate::stateful)). Every execution
-/// method reads through `batches`, which is the only database access an implementor is given. A
+/// method reads through `batches`, the only database access execution is given (`capture` and
+/// `finalized` also receive readers, for observation only). A
 /// batch overlays speculative ancestor state and falls back to applied state for anything it does
 /// not cover, so it is always the complete view for its branch.
 ///
@@ -288,8 +289,8 @@ where
     /// finalized block is applied waits for that apply and then continues. Actor shutdown drops
     /// it with everything else.
     ///
-    /// Once a block that is not an ancestor of `batches` is finalized, every batch operation
-    /// refuses with [`ExecutionError::Stale`]. That block may be a competitor or the candidate
+    /// Once a block that is not an ancestor of `batches` is finalized, every batch read and
+    /// merkleization refuses with [`ExecutionError::Stale`] (writes never refuse). That block may be a competitor or the candidate
     /// itself, finalized from a separate replay. [`Stateful`] then re-checks the block against the
     /// new canonical state and retries or answers from it.
     fn verify(

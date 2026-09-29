@@ -43,7 +43,8 @@ enum PrepareFailure {
     Invalid,
     /// Preparation ended without a verdict because its request was cancelled.
     Cancelled,
-    /// A competing finalization landed mid-preparation. Re-check the candidate
+    /// A finalization of a non-ancestor (possibly the candidate itself) landed
+    /// mid-preparation. Re-check the candidate
     /// against the new canonical state.
     Stale,
 }
@@ -52,7 +53,7 @@ enum PrepareFailure {
 enum Attempt {
     /// The attempt finished with a result.
     Done(VerificationResult),
-    /// A competing finalization made the attempt's batches stale. Re-check the
+    /// A finalization of a non-ancestor made the attempt's batches stale. Re-check the
     /// candidate against the new canonical state and try again.
     Stale,
 }
@@ -178,7 +179,7 @@ where
             }
 
             // Reconstruct the candidate's parent state. This is the only phase
-            // shared across requests, keyed by the acquired parent's block digest.
+            // shared across requests, keyed by each replayed ancestor's block digest.
             let mut attempt_ancestry = ancestry.clone();
             let parent = match self
                 .prepare_parent(

@@ -830,6 +830,7 @@ mod tests {
             _captured: Self::Captured,
             _readers: ReadersOf<Self::Databases, deterministic::Context>,
         ) {
+            crate::stateful::tests::mocks::pass_finalized_gate().await;
         }
     }
 
@@ -3036,9 +3037,9 @@ mod tests {
     }
 
     /// A valid descendant whose parent replay crosses the parent's own
-    /// finalization is retried against the new anchor, not answered false.
+    /// finalization answers true, not false.
     #[test]
-    fn parent_finalized_during_replay_retries_and_answers_true() {
+    fn parent_finalized_during_replay_answers_true() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let parent = TestBlock::child(&genesis, 1);
@@ -3109,9 +3110,8 @@ mod tests {
                 .await
                 .expect("finalized parent should be acknowledged");
 
-            // The parked replay resumes and fails against the moved anchor, so
-            // the verifier retries, forks the candidate from the new anchor, and
-            // answers true.
+            // The parked replay resumes. Its parent is now the processed anchor,
+            // so the candidate forks from the anchor and answers true.
             apply_release
                 .send(())
                 .expect("the parent replay should still be live");
@@ -3213,8 +3213,10 @@ mod tests {
         });
     }
 
+    /// Two finalizations landing while a descendant's ancestry replays leave its original
+    /// attempt valid, and the replay repeats no work already cached.
     #[test]
-    fn consecutive_finalizations_retry_descendant_replay() {
+    fn consecutive_finalizations_preserve_descendant_replay() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let first = TestBlock::child(&genesis, 1);
@@ -3304,16 +3306,16 @@ mod tests {
                 .expect("first finalized block should be acknowledged");
             verify_started
                 .await
-                .expect("descendant verification should re-run after the first finalization");
+                .expect("descendant verification should run once its ancestry replays");
 
             let (acknowledgement, second_waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(second), acknowledgement));
             second_waiter
                 .await
                 .expect("second finalized block should be acknowledged");
-            // Each cancellation drops the attempt holding this gate, so releasing
-            // it is best-effort.
-            let _ = verify_release.send(());
+            verify_release
+                .send(())
+                .expect("descendant verification is parked");
             let valid = verify_child.await;
             actor.abort();
             drop(marshal.guards);
@@ -3321,9 +3323,10 @@ mod tests {
                 valid,
                 "a descendant of both finalized blocks must verify, not be rejected",
             );
-            assert!(
-                verify_calls.load(Ordering::SeqCst) > 1,
-                "the descendant should have re-run against the applied state",
+            assert_eq!(
+                verify_calls.load(Ordering::SeqCst),
+                2,
+                "the first block and the descendant each verify once",
             );
             assert_eq!(
                 apply_calls.load(Ordering::SeqCst),
@@ -5294,6 +5297,80 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
             drop(guards);
+        });
+    }
+
+    /// Ancestry that yields its head at once and the rest only after `gate` resolves.
+    #[derive(Clone)]
+    struct SplitAncestry {
+        head: Option<Arc<TestBlock>>,
+        rest: VecDeque<Arc<TestBlock>>,
+        gate: futures::future::Shared<oneshot::Receiver<()>>,
+    }
+
+    impl Stream for SplitAncestry {
+        type Item = Arc<TestBlock>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if let Some(head) = self.head.take() {
+                return Poll::Ready(Some(head));
+            }
+            if self.gate.poll_unpin(cx).is_pending() {
+                return Poll::Pending;
+            }
+            Poll::Ready(self.rest.pop_front())
+        }
+    }
+
+    impl Ancestry<TestBlock> for SplitAncestry {
+        fn peek(&self) -> Option<&TestBlock> {
+            self.head.as_deref()
+        }
+    }
+
+    /// A verification whose fork refuses inside a finalization's window waits for the anchor to
+    /// move rather than retrying at once, then answers from the new canonical chain.
+    #[test]
+    fn stale_fork_inside_the_finalize_window_waits_for_the_anchor() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, _control, _subscriber, _marshal, actor) =
+                spawn_processing(&context, "stale-fork-window", None).await;
+            let genesis = TestBlock::new(0, 0);
+            let winner = TestBlock::child(&genesis, 1);
+            let loser = TestBlock::child(&genesis, 2);
+
+            // Start the loser's verification, parked before it reaches its parent.
+            let (parent_release, parent_gate) = oneshot::channel();
+            let ancestry = SplitAncestry {
+                head: Some(Arc::new(loser.clone())),
+                rest: VecDeque::from([Arc::new(genesis)]),
+                gate: parent_gate.shared(),
+            };
+            let mut verifier = mailbox.clone();
+            let mut verify =
+                Box::pin(verifier.verify((context.child("verify"), loser.context()), ancestry));
+            assert!(poll!(&mut verify).is_pending());
+            processing_fence(&context, &mailbox).await;
+
+            // Park the winner's finalization inside its window.
+            let (hook_started, hook_release) = TestApp::gate_next_finalized();
+            let (acknowledgement, _waiter) = Exact::handle();
+            mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            hook_started
+                .await
+                .expect("finalization must reach its hook");
+
+            // The verification's fork refuses inside the window, and it waits for the anchor.
+            parent_release
+                .send(())
+                .expect("verification is parked on its parent");
+            context.sleep(Duration::from_millis(50)).await;
+            assert!(poll!(&mut verify).is_pending());
+
+            // Once the winner lands, the loser is answered from the canonical chain.
+            hook_release.send(()).expect("finalization is parked");
+            assert!(!verify.await);
+            actor.abort();
         });
     }
 

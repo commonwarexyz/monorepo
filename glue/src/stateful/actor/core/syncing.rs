@@ -206,7 +206,8 @@ where
     /// A full window records its newest block as the sync target and then acknowledges every
     /// retained block. Returns the converged [`Artifact`] with the classified handoffs if state
     /// sync finished first, and no handoff otherwise (including when the actor stops while
-    /// retargeting). Panics if marshal delivers more blocks than its window.
+    /// retargeting). Panics if marshal delivers more blocks than its window, or if the syncer
+    /// stops while the actor is not stopping.
     async fn finalized(
         mut self,
         block: Arc<A::Block>,
@@ -1035,9 +1036,25 @@ mod tests {
         });
     }
 
-    /// A syncer that exits on shutdown ends the retarget quietly and acknowledges nothing.
+    /// A syncer that loses its artifact without shutdown fails loudly instead of leaving the
+    /// actor stuck in state sync.
     #[test]
-    fn retarget_exits_quietly_when_syncer_stops_on_shutdown() {
+    #[should_panic(expected = "syncer stopped before publishing state sync artifact")]
+    fn syncing_panics_when_syncer_drops_its_artifact_without_shutdown() {
+        deterministic::Runner::default().start(|context| async move {
+            let marshal = harness_marshal(context.child("marshal")).await;
+            let (harness, _mailbox, _syncer_receiver, completion) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+            drop(completion);
+            harness.syncing.run().await;
+        });
+    }
+
+    /// A full acknowledgement window that arrives after shutdown ends quietly without
+    /// retargeting and acknowledges nothing. (A retarget that the syncer abandons because
+    /// shutdown fired mid-poll needs a multi-threaded runtime to reach.)
+    #[test]
+    fn full_window_after_shutdown_exits_without_retargeting() {
         deterministic::Runner::default().start(|context| async move {
             let marshal = harness_marshal(context.child("marshal")).await;
             let (harness, _mailbox, syncer_receiver, _completion) =
@@ -1055,6 +1072,98 @@ mod tests {
             assert_eq!(syncing.pending_finalizations.len(), 1);
             drop(syncing);
             assert!(waiter.await.is_err());
+        });
+    }
+
+    /// A stop while the handoff starts its barrier exits within the stop deadline and leaves the
+    /// block unacknowledged.
+    #[test]
+    fn shutdown_interrupts_handoff_barrier_start() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (harness, artifact) =
+                TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+            let (acknowledgement, waiter) = Exact::handle();
+            let sync_done = harness.syncing.metrics.sync_done.clone();
+            let (started, _release) = TestDb::gate_next_finalize();
+            let transition = context.child("transition").spawn(move |_| {
+                harness.syncing.transition(
+                    artifact,
+                    Some(FinalizedHandoff::Apply(
+                        Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
+                        acknowledgement,
+                    )),
+                )
+            });
+            started.await.expect("the handoff must start its barrier");
+
+            let stopper = context.child("stopper");
+            let stop = context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
+            assert!(
+                stop.await.expect("stop task should finish").is_ok(),
+                "shutdown must interrupt the handoff's barrier start",
+            );
+            transition.await.expect("transition should exit cleanly");
+            assert!(waiter.await.is_err());
+            assert_eq!(sync_done.get(), 0);
+        });
+    }
+
+    /// A stop while the handoff records its completion exits within the stop deadline without
+    /// recording it.
+    #[test]
+    fn shutdown_interrupts_handoff_completion_write() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            let marshal = harness_marshal(context.child("marshal")).await;
+            let (harness, _stateful_mailbox, _syncer_receiver, _completion) =
+                TestHarness::new_syncing_on(delayed, marshal).await;
+            let artifact = Artifact {
+                databases: test_databases(),
+                anchor: anchor(7, 9),
+            };
+            let sync_done = harness.syncing.metrics.sync_done.clone();
+
+            // Park the completion write.
+            pending.arm();
+            let gate = next_pending_sync(&pending);
+            let (acknowledgement, waiter) = Exact::handle();
+            let transition = context.child("transition").spawn(move |_| {
+                harness.syncing.transition(
+                    artifact,
+                    Some(FinalizedHandoff::Apply(
+                        Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
+                        acknowledgement,
+                    )),
+                )
+            });
+            gate.blocked
+                .await
+                .expect("the handoff must write its completion");
+            assert!(
+                waiter.await.is_ok(),
+                "the durable handoff block is acknowledged"
+            );
+
+            let stopper = context.child("stopper");
+            let stop = context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
+            assert!(
+                stop.await.expect("stop task should finish").is_ok(),
+                "shutdown must interrupt the completion write",
+            );
+            transition.await.expect("transition should exit cleanly");
+            assert_eq!(
+                sync_done.get(),
+                0,
+                "an interrupted handoff must not report completion"
+            );
         });
     }
 

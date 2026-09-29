@@ -88,7 +88,8 @@
 //!
 //! Database failures are fatal. [`DatabaseSet`] implementations panic when a database fails to
 //! open, apply, capture a snapshot, finalize, or prune, and [`Barrier::durable`] panics when a
-//! deferred sync fails. A mutation that is cancelled also loses its database until restart (see
+//! deferred sync fails. These panics do not check for shutdown, unlike the application errors the
+//! actor handles. A mutation that is cancelled also loses its database until restart (see
 //! [`Writer`]). A database that fails state sync is reported through the error returned by
 //! [`StateSyncSet::sync`].
 
@@ -137,6 +138,13 @@ pub use tips::{CompactTips, RETAINED_TIPS};
 ///
 /// Concrete types expose reads and writes (`get`, `write`, `set`, `append`, and so on) as
 /// inherent methods. Batches carry a [`Reader`] to the database they were created from.
+///
+/// [`Stateful`](super::Stateful) never cancels a batch whose branch loses: it relies on the
+/// batch itself. Once a batch that is not an ancestor of this one is applied to the database, its
+/// reads and [`Self::merkleize`] must refuse, and the refusal must reach the application as an
+/// error it maps to [`ExecutionError::Stale`](super::ExecutionError::Stale) (the QMDB families
+/// return [`StaleRead`](commonware_storage::qmdb::Error::StaleRead) and
+/// [`StaleBatch`](commonware_storage::qmdb::Error::StaleBatch)).
 pub trait Unmerkleized: Sized + Send {
     /// The sealed batch returned by [`Self::merkleize`].
     type Merkleized: Merkleized;
@@ -145,6 +153,12 @@ pub trait Unmerkleized: Sized + Send {
     type Error: Send;
 
     /// Computes the state root over every mutation and seals the batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a batch that is not an ancestor of this one was applied since the
+    /// batch was created (see the trait docs), or if the batch is invalid for its inputs, such as
+    /// an inactivity floor that regresses or passes its commit.
     fn merkleize(self) -> impl Future<Output = Result<Self::Merkleized, Self::Error>> + Send;
 }
 
@@ -419,6 +433,9 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     fn readers(&self) -> Self::Readers;
 
     /// Creates a batch over each database's applied state.
+    ///
+    /// Each member forks under its own read guard, so the members of a set can straddle an apply
+    /// that lands between them. Callers that need one consistent state re-check it afterwards.
     fn new_batches(readers: &Self::Readers) -> impl Future<Output = Self::Unmerkleized> + Send;
 
     /// Creates child batches of a pending merkleized parent.

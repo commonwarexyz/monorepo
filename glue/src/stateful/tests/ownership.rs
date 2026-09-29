@@ -3,10 +3,8 @@
 //! - snapshots publish ahead of their parked flush, and the next capture waits
 //!   for it as real storage does ([`publication_runs_ahead_of_a_parked_flush`])
 //!
-//! The deterministic runtime advances time by one 1 ms cycle per scheduling
-//! round, and skips ahead only once every task is parked, so `blocked_on`
-//! resolving to its timeout shows the probed future stayed pending across at
-//! least a thousand rounds.
+//! `blocked_on` resolving to its timeout shows the probed future stayed pending
+//! until the deterministic clock reached that deadline.
 
 use super::mocks::{FlushControl, TestDb, TestMerkleized};
 use crate::stateful::db::{Barrier, DatabaseSet, Publisher, Single};

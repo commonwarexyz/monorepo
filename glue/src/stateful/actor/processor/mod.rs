@@ -390,7 +390,8 @@ enum PrepareBatchesError {
     Incomplete,
     /// The request future was dropped while waiting.
     Cancelled,
-    /// A competing finalization landed mid-preparation. The caller re-checks
+    /// A finalization of a non-ancestor (possibly the candidate itself) landed
+    /// mid-preparation. The caller re-checks
     /// against the new canonical state.
     Stale,
 }
@@ -854,7 +855,10 @@ where
     /// state are cached in `pending`. Sends `None` on `response` if the
     /// ancestry is invalid, the application declines to propose, or the
     /// proposal goes stale (debug-asserted unreachable, since no finalization
-    /// can interleave a proposal). A fatal application error panics unless shutdown has fired.
+    /// can interleave a proposal). If the parent's ancestry is incomplete, sends
+    /// nothing and returns once `response` closes; the actor defers every
+    /// message but verifications meanwhile. A fatal application error panics
+    /// unless shutdown has fired.
     pub(super) fn propose<S, V>(
         &self,
         context: &E,
@@ -1104,10 +1108,10 @@ where
 
     /// Forks batches from a known parent.
     ///
-    /// Forking from the processed anchor takes read access, which waits while a finalization
-    /// applies. That wait ends early with [`PrepareBatchesError::Cancelled`] if `cancellation`
-    /// fires, and a fork that would overlap a finalization refuses with
-    /// [`PrepareBatchesError::Stale`] without waiting.
+    /// Forking from the processed anchor takes read access, which waits out any mutation holding
+    /// the write lock, and ends early with [`PrepareBatchesError::Cancelled`] if `cancellation`
+    /// fires. It refuses with [`PrepareBatchesError::Stale`] if a finalization is in flight before
+    /// the wait, or overlapped it.
     async fn fork_batches<C: Cancellation>(
         &self,
         parent: &BlockDigest<A, E>,
@@ -1248,8 +1252,8 @@ where
     ///
     /// One request executes the replay and the others wait for its result. If the executing
     /// request is cancelled, a remaining request takes over. A waiter adopts the executing
-    /// request's failure, except [`PrepareBatchesError::Stale`], which it re-claims because
-    /// staleness depends on each request's own view of the anchor.
+    /// request's failure, except [`PrepareBatchesError::Stale`], which it re-claims so it judges
+    /// staleness against its own view of the anchor rather than inheriting another's.
     async fn replay_shared<C>(
         &self,
         app: &mut A,
@@ -2910,6 +2914,61 @@ mod tests {
 
             release.send(()).expect("fork is parked");
             assert!(matches!(fork.await, Err(PrepareBatchesError::Stale)));
+            drop(processor);
+        });
+    }
+
+    /// A fork waiting for its batches when a finalization opens its window refuses once the wait
+    /// ends, even though the anchor has not moved yet, so a batch set cannot straddle the apply.
+    #[test]
+    fn fork_refuses_when_a_finalization_opens_during_its_wait() {
+        deterministic::Runner::default().start(|context| async move {
+            let processor = Processor::new(
+                mocks::TestApp::default(),
+                mocks::test_databases(),
+                mocks::anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let genesis = mocks::TestBlock::new(0, 0);
+            let child = mocks::TestBlock::child(&genesis, 1);
+            // Cache the child, so its finalization forks nothing from the anchor.
+            assert!(processor.execution.cache_pending(
+                child.digest(),
+                PendingEntry {
+                    round: child.context().round,
+                    parent: genesis.digest(),
+                    merkleized: mocks::TestMerkleized,
+                    provenance: Provenance::Verified,
+                },
+            ));
+            let verifier = processor.verifier();
+            let (fork_started, fork_release) = mocks::TestDb::gate_next_new_batch();
+            let (mut never, _live) = oneshot::channel::<()>();
+            let parent = genesis.digest();
+            let mut fork = Box::pin(verifier.execution.fork_batches(&parent, &mut never));
+            assert!(futures::poll!(&mut fork).is_pending());
+            fork_started.await.expect("fork must reach new_batches");
+
+            // Park the finalization inside its window: applied, anchor not yet moved.
+            let (hook_started, hook_release) = mocks::TestApp::gate_next_finalized();
+            let context_cell = ContextCell::new(context.child("processor"));
+            let finalize = processor.finalize(context_cell.as_present(), &child, false);
+            futures::pin_mut!(finalize);
+            select! {
+                _ = &mut finalize => panic!("finalize must park on its hook"),
+                result = hook_started => result.expect("finalize must reach its hook"),
+            }
+            {
+                let state = verifier.execution.state.lock();
+                assert!(state.finalizing, "the finalizing window must be open");
+                assert_eq!(state.processed.digest, genesis.digest());
+            }
+
+            fork_release.send(()).expect("fork is parked");
+            assert!(matches!(fork.await, Err(PrepareBatchesError::Stale)));
+            hook_release.send(()).expect("finalize is parked");
+            let (processor, _applied) = finalize.await;
             drop(processor);
         });
     }

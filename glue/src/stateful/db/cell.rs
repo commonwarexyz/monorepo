@@ -26,11 +26,8 @@ use std::{
 
 enum State<T> {
     Live(T),
-    /// Held while a mutation owns the database. An interrupted mutation drops its writer, which
-    /// then replaces this with `Closed`.
-    Poisoned,
-    /// The writer dropped and reclaimed the database.
-    Closed,
+    /// A mutation owns the database, or the writer dropped and reclaimed it.
+    Gone,
 }
 
 struct Cell<T> {
@@ -52,14 +49,14 @@ impl<T> Cell<T> {
         }
         match AsyncRwLockReadGuard::try_map(guard, |state| match state {
             State::Live(db) => Some(db),
-            State::Poisoned | State::Closed => None,
+            State::Gone => None,
         }) {
             Ok(guard) => ReadGuard(guard),
             Err(guard) => {
-                // A mutation was interrupted or the writer is gone. Park until
-                // this task is dropped with the actor.
+                // An interrupted mutation lost the database. Park until this task is dropped
+                // with the actor.
                 drop(guard);
-                tracing::debug!(cell = self.label, "database cell poisoned, parking reader");
+                tracing::debug!(cell = self.label, "database cell lost, parking reader");
                 future::pending().await
             }
         }
@@ -85,7 +82,7 @@ impl<T> Drop for Writer<T> {
     fn drop(&mut self) {
         self.0.closed.store(true, Ordering::Relaxed);
         if let Some(mut guard) = self.0.state.try_write() {
-            *guard = State::Closed;
+            *guard = State::Gone;
         }
     }
 }
@@ -110,14 +107,14 @@ impl<T> Writer<T> {
     ///
     /// Starts once every granted read guard drops, each covering at most one
     /// storage call, since new read guards queue behind it. Dropping the future
-    /// mid-flight poisons the cell, and later reads park.
+    /// loses the database, and later reads park.
     pub async fn mutate<F, Fut, R>(self, mutation: F) -> (Self, R)
     where
         F: FnOnce(T) -> Fut,
         Fut: Future<Output = (T, R)>,
     {
         let mut guard = self.0.state.write().await;
-        let State::Live(db) = std::mem::replace(&mut *guard, State::Poisoned) else {
+        let State::Live(db) = std::mem::replace(&mut *guard, State::Gone) else {
             unreachable!("a writer only exists while its cell is live")
         };
         let (db, result) = mutation(db).await;
@@ -292,6 +289,17 @@ mod tests {
             let guard = reader.read().await;
             drop(writer);
             drop(guard);
+
+            // The database is still in the cell, but the closed writer parks later reads.
+            {
+                let read = second.read();
+                futures::pin_mut!(read);
+                assert!(
+                    read.as_mut().now_or_never().is_none(),
+                    "a read after the writer drops must park, not serve frozen state",
+                );
+            }
+
             drop(reader);
             assert_eq!(drops.load(Ordering::SeqCst), 0);
             drop(second);
@@ -299,7 +307,43 @@ mod tests {
         });
     }
 
-    /// Dropping a mutation mid-flight poisons the cell, and later reads park.
+    /// A read queued behind a mutation that is dropped mid-flight parks, and the database is
+    /// dropped with the mutation.
+    #[test]
+    fn interrupted_mutation_parks_queued_reader() {
+        deterministic::Runner::default().start(|_context| async move {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (writer, reader) = split(DropCounter(drops.clone()));
+            let (started_tx, started) = oneshot::channel::<()>();
+
+            let mut mutation = Box::pin(writer.mutate(|db| async move {
+                let _ = started_tx.send(());
+                future::pending::<()>().await;
+                (db, ())
+            }));
+            assert!(mutation.as_mut().now_or_never().is_none());
+            started.await.expect("mutation must reach its closure");
+
+            let read = reader.read();
+            futures::pin_mut!(read);
+            assert!(
+                read.as_mut().now_or_never().is_none(),
+                "the read queues behind the mutation"
+            );
+            drop(mutation);
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "the mutation drops the database"
+            );
+            assert!(
+                read.as_mut().now_or_never().is_none(),
+                "the queued read must park, not observe a gap",
+            );
+        });
+    }
+
+    /// Dropping a mutation mid-flight loses the database, and later reads park.
     #[test]
     fn interrupted_mutation_parks_readers() {
         deterministic::Runner::default().start(|_context| async move {

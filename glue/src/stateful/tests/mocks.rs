@@ -125,6 +125,11 @@ thread_local! {
     static SNAPSHOT_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
     /// Single-use gate consumed by the next [`TestDb`] batch fork, which holds no read guard.
     static NEW_BATCH_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
+    /// Single-use gate consumed by the next [`TestApp`] finalized hook, which runs inside the
+    /// finalizing window.
+    static FINALIZED_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
+    /// Single-use gate consumed by the next [`TestDb`] finalize, before it starts its flush.
+    static FINALIZE_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
 }
 
 /// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
@@ -198,6 +203,11 @@ impl TestDb {
     pub(crate) fn gate_next_new_batch() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
         CallGate::install(&NEW_BATCH_GATE)
     }
+
+    /// Gates the next finalize on this thread, like [`Self::gate_next_snapshot`].
+    pub(crate) fn gate_next_finalize() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        CallGate::install(&FINALIZE_GATE)
+    }
 }
 
 impl<E: Send> ManagedDb<E> for TestDb {
@@ -246,6 +256,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
 
     async fn finalize(mut self) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
         self.settle().await;
+        CallGate::pass(&FINALIZE_GATE).await;
         let snapshot = self.finalized;
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
@@ -383,6 +394,11 @@ pub(crate) struct TestApp {
 }
 
 impl TestApp {
+    /// Gates the next finalized hook on this thread, like [`TestDb::gate_next_snapshot`].
+    pub(crate) fn gate_next_finalized() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        CallGate::install(&FINALIZED_GATE)
+    }
+
     pub(crate) fn observe_finalization() -> (Self, Arc<AtomicUsize>) {
         let hooks: Arc<AtomicUsize> = Arc::default();
         (
@@ -466,10 +482,17 @@ impl<
         _captured: Self::Captured,
         _readers: ReadersOf<Self::Databases, E>,
     ) {
+        pass_finalized_gate().await;
         if let Some(hooks) = &self.finalization_hooks {
             hooks.fetch_add(1, Ordering::SeqCst);
         }
     }
+}
+
+/// Parks on the gate [`TestApp::gate_next_finalized`] installed on this thread, if any. Test
+/// applications call it from their finalized hooks.
+pub(crate) async fn pass_finalized_gate() {
+    CallGate::pass(&FINALIZED_GATE).await;
 }
 
 pub(crate) fn test_databases() -> TestDatabases {

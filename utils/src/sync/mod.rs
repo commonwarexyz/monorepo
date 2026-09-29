@@ -89,7 +89,8 @@ impl<T> TracedAsyncRwLock<T> {
         self.inner.write().await
     }
 
-    /// Acquire an exclusive write guard if no other guard is held, without waiting.
+    /// Acquire an exclusive write guard without waiting, if no guard is held or granted to a
+    /// waiter. Records no lock-wait span, since it never waits.
     pub fn try_write(&self) -> Option<AsyncRwLockWriteGuard<'_, T>> {
         self.inner.try_write().ok()
     }

@@ -69,7 +69,16 @@ use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
     MarshalPrunedBelow, QmdbPruned,
 };
-use std::{collections::VecDeque, convert::Infallible, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    convert::Infallible,
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 mod common;
 pub(crate) mod fixtures;
@@ -86,7 +95,7 @@ const NUM_VALIDATORS: u32 = 5;
 /// Refused stale reads and merkleizations map to Stale, input-dependent refusals to Invalid, and
 /// other storage failures to Fatal.
 #[test]
-fn storage_errors_map_to_fatal() {
+fn storage_errors_map_to_execution_errors() {
     let stale: ExecutionError = qmdb::Error::<mmr::Family>::StaleRead.into();
     assert!(matches!(stale, ExecutionError::Stale));
     let stale: ExecutionError = qmdb::Error::<mmr::Family>::StaleBatch.into();
@@ -963,6 +972,9 @@ struct GatedMultiApp {
     finalize_gate: Arc<Mutex<Option<ApplicationGate>>>,
     /// The readers handed to the latest `finalized` call.
     readers: Arc<Mutex<Option<MultiReaders>>>,
+    /// Verifications that went stale, which a verification finishing on its original attempt
+    /// never does.
+    stale_verifies: Arc<AtomicUsize>,
 }
 
 impl Application<deterministic::Context> for GatedMultiApp {
@@ -1016,13 +1028,17 @@ impl Application<deterministic::Context> for GatedMultiApp {
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
         }
-        <MultiApp as Application<deterministic::Context>>::verify(
+        let result = <MultiApp as Application<deterministic::Context>>::verify(
             &mut self.inner,
             context,
             ancestry,
             batches,
         )
-        .await
+        .await;
+        if matches!(result, Err(ExecutionError::Stale)) {
+            self.stale_verifies.fetch_add(1, Ordering::SeqCst);
+        }
+        result
     }
 
     async fn apply(
@@ -1596,11 +1612,13 @@ fn verification_survives_prune_on_real_qmdbs() {
         let verify_gates = Arc::new(Mutex::new(VecDeque::new()));
         let finalize_gate = Arc::new(Mutex::new(None));
         let readers = Arc::new(Mutex::new(None));
+        let stale_verifies = Arc::new(AtomicUsize::new(0));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
             verify_gates: verify_gates.clone(),
             finalize_gate: finalize_gate.clone(),
             readers: readers.clone(),
+            stale_verifies: stale_verifies.clone(),
         };
         let plan = SyncPlan::init(
             context.child("plan"),
@@ -1776,6 +1794,11 @@ fn verification_survives_prune_on_real_qmdbs() {
                 panic!("verification did not complete after pruning");
             },
         }
+        assert_eq!(
+            stale_verifies.load(Ordering::SeqCst),
+            0,
+            "the verification must finish on its original attempt",
+        );
 
         stateful_actor.abort();
         marshal_actor.abort();
@@ -1851,11 +1874,13 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
 
         let verify_gates = Arc::new(Mutex::new(VecDeque::new()));
         let finalize_gate = Arc::new(Mutex::new(None));
+        let stale_verifies = Arc::new(AtomicUsize::new(0));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
             verify_gates: verify_gates.clone(),
             finalize_gate: finalize_gate.clone(),
             readers: Arc::default(),
+            stale_verifies: stale_verifies.clone(),
         };
         let plan = SyncPlan::init(
             context.child("plan"),
@@ -2000,7 +2025,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         // Released, the verifications finish on the attempts they were already
         // running when the finalizations landed.
         for release in verify_releases {
-            let _ = release.send(());
+            release.send(()).expect("verification should remain active");
         }
         for (index, certification) in certifications {
             select! {
@@ -2012,6 +2037,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 },
             }
         }
+        assert_eq!(
+            stale_verifies.load(Ordering::SeqCst),
+            0,
+            "the verifications must finish on their original attempts",
+        );
 
         let mut descendant_finalizations = Vec::new();
         for block in &blocks[3..] {

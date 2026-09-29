@@ -14,7 +14,7 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_cryptography::certificate::Scheme;
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
 use commonware_storage::Context;
 use commonware_utils::{
@@ -175,8 +175,15 @@ where
                         .expect("ring sender lives until the artifact is published");
                     if tip_updates.send(update).await.is_err() {
                         // A closed target channel means state sync accepts no more targets. Wait
-                        // for its result instead of failing.
-                        match (&mut task).await {
+                        // for its result instead of failing, unless the actor stops first.
+                        let result = select! {
+                            _ = &mut shutdown => {
+                                debug!("syncer received stop signal, shutting down");
+                                break;
+                            },
+                            result = &mut task => result,
+                        };
+                        match result {
                             Ok((databases, anchor)) => {
                                 task = None.into();
                                 let completion = self
@@ -316,13 +323,17 @@ mod tests {
 
         async fn sync(
             context: deterministic::Context,
-            _config: Self::Config,
+            config: Self::Config,
             _resolvers: (),
             anchor: Anchor<Sha256Digest>,
             _targets: Self::SyncTargets,
             tip_updates: ring::Receiver<TipUpdate<Sha256Digest, Self::SyncTargets>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<(Self, Anchor<Sha256Digest>), Self::Error> {
+            if config == CLOSE_AND_HANG {
+                drop(tip_updates);
+                return futures::future::pending().await;
+            }
             // Hold the ring receiver without draining it. The 1 s sleep spans many scheduling
             // rounds of the deterministic clock, so the actor forwards a tip update into the
             // ring buffer first. Completing then drops the receiver with the update still
@@ -332,6 +343,9 @@ mod tests {
             Ok((Self::default(), anchor))
         }
     }
+
+    /// A [`WedgeSet`] config whose sync closes its target channel at once and never finishes.
+    const CLOSE_AND_HANG: u64 = 1;
 
     #[derive(Clone)]
     struct WedgeApp;
@@ -1120,6 +1134,66 @@ mod tests {
             let artifact = receiver.await.expect("artifact must publish");
             assert_eq!(artifact.anchor.height, Height::zero());
             actor.await.expect("syncer actor failed");
+        });
+    }
+
+    /// A stop while the syncer waits on a sync that closed its target channel exits within the
+    /// stop deadline.
+    #[test]
+    fn stop_interrupts_wait_on_closed_target_channel() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncer-closed-ring", 1);
+            let block = TestBlock::new(0, 0);
+            let finalization = fixtures::finalization(&fixture, 0, Sha256::fill(0));
+            let MarshalFixture {
+                mailbox: marshal,
+                floor,
+                guards: _guards,
+            } = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "syncer-closed-ring",
+                fixture.schemes[0].clone(),
+                Some((&block, finalization.clone())),
+                NZUsize!(1),
+                true,
+            )
+            .await;
+
+            let (sender, _receiver) = oneshot::channel();
+            let (syncer, mailbox) =
+                Syncer::<_, WedgeApp, (), TestScheme, TestVariant>::new(Config {
+                    context: context.child("syncer"),
+                    db_config: CLOSE_AND_HANG,
+                    sync_config: SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: 1,
+                        update_channel_size: NZUsize!(1),
+                        max_retained_roots: 1,
+                    },
+                    resolvers: (),
+                    finalization,
+                    marshal: (marshal, floor),
+                    completion: sender,
+                });
+            let actor = syncer.start();
+
+            // The retarget finds the target channel closed and waits on the sync itself.
+            let update = context
+                .child("update")
+                .spawn(move |_| async move { mailbox.retarget(anchor(1, 1), 1).await });
+            context.sleep(Duration::from_millis(100)).await;
+
+            let stopper = context.child("stopper");
+            let stop = context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
+            assert!(
+                stop.await.expect("stop task should finish").is_ok(),
+                "shutdown must interrupt the wait on the sync",
+            );
+            actor.await.expect("syncer actor failed");
+            assert_eq!(update.await.expect("update task failed"), None);
         });
     }
 }
