@@ -305,7 +305,7 @@ where
             marshal,
             snapshot_publisher,
         }
-        .run(processor, Vec::new(), None)
+        .run(processor, Vec::new())
         .await
     }
 }

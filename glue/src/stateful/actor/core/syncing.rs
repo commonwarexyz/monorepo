@@ -40,7 +40,7 @@ use commonware_utils::{
 use futures::FutureExt as _;
 use rand_core::Rng;
 use std::{collections::VecDeque, mem, sync::Arc};
-use tracing::{Instrument as _, debug, error, info_span, warn};
+use tracing::{Instrument as _, debug, info_span, warn};
 
 /// A retained finalization classified against the converged sync anchor.
 ///
@@ -126,7 +126,11 @@ where
                 debug!("syncing loop received shutdown signal");
             },
             Ok(artifact) = &mut self.completion else {
-                error!("syncer stopped before publishing state sync artifact");
+                // The syncer stops only on shutdown, which can fire while this arm is polled.
+                assert!(
+                    (&mut shutdown).now_or_never().is_some(),
+                    "syncer stopped before publishing state sync artifact"
+                );
                 break;
             } => {
                 let handoffs =
@@ -252,14 +256,8 @@ where
             // retained finalizations are handed off under the newest recorded target.
             let artifact = select! {
                 _ = self.context.stopped() => return (self, None),
-                artifact = &mut self.completion => match artifact {
-                    Ok(artifact) => artifact,
-                    Err(_) => {
-                        // The consumed receiver must not be polled again. Leave a dead one so
-                        // the loop's completion arm logs and stops.
-                        self.completion = oneshot::channel().1;
-                        return (self, None);
-                    }
+                artifact = &mut self.completion => {
+                    artifact.expect("syncer sends the artifact before reporting SyncCompleted")
                 },
             };
             let handoffs = classify(artifact.anchor, mem::take(&mut self.pending_finalizations));
@@ -310,17 +308,19 @@ where
 
         // Serving must not wait for the next finalization, so the synced state
         // alone publishes first.
-        select! {
-            _ = &mut shutdown => {
-                warn!(height = completed_height.get(), "exiting mid-handoff on shutdown");
-                return;
-            },
-            driven = processor.publish_snapshot(&mut snapshot_publisher) => {
-                processor = driven;
-            },
-        }
+        let Some(driven) = until_stopped(&mut shutdown, || {
+            processor.publish_snapshot(&mut snapshot_publisher)
+        })
+        .await
+        else {
+            warn!(
+                height = completed_height.get(),
+                "exiting mid-handoff on shutdown"
+            );
+            return;
+        };
+        processor = driven;
 
-        let mut pending_prune = None;
         let mut pending_acknowledgements = Vec::new();
 
         for handoff in handoffs {
@@ -333,46 +333,47 @@ where
                     if !processor.redelivered(block.as_ref()) {
                         // Exiting on stop leaves the block unacknowledged, and
                         // marshal redelivers it after a restart.
-                        let applied;
-                        select! {
-                            _ = &mut shutdown => {
-                                warn!(
-                                    height = block.height().get(),
-                                    "exiting mid-handoff on shutdown"
-                                );
-                                return;
-                            },
-                            driven = processor.finalize(context.as_present(), block.as_ref(), false) => {
-                                (processor, applied) = driven;
-                            },
-                        }
+                        let height = block.height();
+                        let present = context.as_present();
+                        let Some((driven, applied)) = until_stopped(&mut shutdown, || {
+                            processor.finalize(present, block.as_ref(), false)
+                        })
+                        .await
+                        else {
+                            warn!(height = height.get(), "exiting mid-handoff on shutdown");
+                            return;
+                        };
+                        processor = driven;
+
+                        // Pruning schedules only once a full marshal window has been observed, and
+                        // the handoff applies at most one acknowledgement window, which is smaller.
+                        debug_assert!(
+                            applied.prune.is_none(),
+                            "no prune is due during the handoff"
+                        );
 
                         // Cheap members serve every replayed block, as in processing.
                         match applied.publication {
                             Publication::Snapshot(snapshots) => {
-                                snapshot_publisher.publish(block.height(), snapshots);
+                                snapshot_publisher.publish(height, snapshots);
                             }
                             Publication::None if A::Databases::ANY_CHEAP_SNAPSHOT => {
-                                select! {
-                                    _ = &mut shutdown => {
-                                        warn!(
-                                            height = block.height().get(),
-                                            "exiting mid-handoff on shutdown"
-                                        );
-                                        return;
-                                    },
-                                    driven = processor.refresh_snapshot(&mut snapshot_publisher) => {
-                                        processor = driven;
-                                    },
-                                }
+                                let Some(driven) = until_stopped(&mut shutdown, || {
+                                    processor.refresh_snapshot(&mut snapshot_publisher)
+                                })
+                                .await
+                                else {
+                                    warn!(height = height.get(), "exiting mid-handoff on shutdown");
+                                    return;
+                                };
+                                processor = driven;
                             }
                             Publication::None => {}
                             Publication::WithBarrier(..) => {
                                 unreachable!("the handoff requests no barrier per block")
                             }
                         }
-                        pending_prune = applied.prune.or(pending_prune);
-                        completed_height = block.height();
+                        completed_height = height;
                     }
                     pending_acknowledgements.push(acknowledgement);
                 }
@@ -382,37 +383,33 @@ where
         // Acknowledge applied handoffs only after one barrier makes the whole applied suffix
         // durable.
         if !pending_acknowledgements.is_empty() {
-            let (snapshots, barrier);
-            select! {
-                _ = &mut shutdown => {
-                    warn!(
-                        height = completed_height.get(),
-                        "exiting mid-handoff on shutdown"
-                    );
-                    return;
-                },
-                driven = processor.sync() => {
-                    (processor, snapshots, barrier) = driven;
-                },
-            }
+            let Some((driven, snapshots, barrier)) =
+                until_stopped(&mut shutdown, || processor.sync()).await
+            else {
+                warn!(
+                    height = completed_height.get(),
+                    "exiting mid-handoff on shutdown"
+                );
+                return;
+            };
+            processor = driven;
 
             // The snapshots serve immediately; peers verify what they fetch
             // against a finalized root, so serving safely runs ahead of disk.
             snapshot_publisher.publish(completed_height, snapshots);
-            let durable = select! {
-                _ = &mut shutdown => {
-                    warn!(height = completed_height.get(), "exiting mid-handoff on shutdown");
-                    return;
-                },
-                durable = barrier.durable() => durable,
+            let Some(durable) = until_stopped(&mut shutdown, || barrier.durable()).await else {
+                warn!(
+                    height = completed_height.get(),
+                    "exiting mid-handoff on shutdown"
+                );
+                return;
             };
             if !durable {
-                if shutdown.now_or_never().is_none() {
-                    error!(
-                        height = completed_height.get(),
-                        "database barrier aborted without shutdown, stopping sync handoff"
-                    );
-                }
+                // A barrier ends without durability only when shutdown tears it down.
+                assert!(
+                    shutdown.now_or_never().is_some(),
+                    "database barrier aborted without shutdown during the sync handoff"
+                );
                 return;
             }
             for acknowledgement in pending_acknowledgements {
@@ -426,18 +423,19 @@ where
 
         // Completion is an irreversible startup floor. Persist it only after every handoff through
         // `completed_height` is durable and before processing takes new work.
-        select! {
-            _ = &mut shutdown => {
-                warn!(height = completed_height.get(), "exiting mid-handoff on shutdown");
-                return;
-            },
-            _ = plan.set_completed(completed_height) => {},
+        if until_stopped(&mut shutdown, || plan.set_completed(completed_height))
+            .await
+            .is_none()
+        {
+            warn!(
+                height = completed_height.get(),
+                "exiting mid-handoff on shutdown"
+            );
+            return;
         }
         let _ = metrics.sync_done.try_set(1);
         drop(shutdown);
 
-        // A prune that became due during the handoff runs from processing, which prunes only
-        // durable state and stops on shutdown.
         Processing {
             context,
             mailbox,
@@ -445,8 +443,29 @@ where
             marshal,
             snapshot_publisher,
         }
-        .run(processor, deferred_verifications, pending_prune)
+        .run(processor, deferred_verifications)
         .await
+    }
+}
+
+/// Returns a future that awaits the operation `make` builds, or yields `None` once `shutdown`
+/// fires.
+///
+/// The operation is built and boxed before this returns, so no poll frame holds it by value (see
+/// [`Verifications::until_stopped`](super::verifications::Handler::until_stopped)).
+fn until_stopped<'a, F>(
+    shutdown: &'a mut (impl Future + Unpin),
+    make: impl FnOnce() -> F,
+) -> impl Future<Output = Option<F::Output>> + 'a
+where
+    F: Future + 'a,
+{
+    let operation = Box::pin(make());
+    async move {
+        select! {
+            _ = &mut *shutdown => None,
+            output = operation => Some(output),
+        }
     }
 }
 
@@ -516,10 +535,8 @@ mod tests {
         classify,
     };
     use crate::stateful::{
-        PruneConfig,
         actor::{
             metrics::Metrics as StatefulMetrics,
-            processor::Pruning,
             syncer::{self, Artifact, SyncPlan},
         },
         db::{Anchor, Publisher, Single, Subscriber},
@@ -860,15 +877,6 @@ mod tests {
                 databases: test_databases(),
                 anchor: anchor(7, 9),
             };
-            harness.syncing.pruning = Some(Pruning::new(
-                PruneConfig {
-                    maintenance_interval: NZUsize!(1),
-                    retained_marshal_blocks: 0,
-                    retained_qmdb_blocks: 0,
-                },
-                harness.syncing.marshal.max_pending_acks(),
-                0,
-            ));
             let control = FlushControl::default();
             artifact.databases = Single::from(TestDb::gated(control.clone()));
             let (application, hooks) = TestApp::observe_finalization();
@@ -940,12 +948,9 @@ mod tests {
                 .send(Ok(()))
                 .expect("transition must be waiting on the metadata flush");
 
-            // The prune that became due during the handoff runs once processing takes over.
-            while control.pruned.lock().is_empty() {
+            while sync_done.get() == 0 {
                 context.sleep(Duration::from_millis(10)).await;
             }
-            assert_eq!(control.pruned.lock().as_slice(), &[8]);
-            assert_eq!(sync_done.get(), 1);
             drop(stateful_mailbox);
             transition.await.expect("transition failed");
             assert!(reflected_waiter.await.is_ok());
@@ -967,43 +972,48 @@ mod tests {
 
     #[test]
     fn aborted_handoff_flush_cancels_ack_and_keeps_sync_incomplete() {
-        deterministic::Runner::default().start(|context| async move {
-            let (harness, mut artifact) =
-                TestHarness::new(context.child("harness"), anchor(7, 9)).await;
-            artifact.databases =
-                Single::from(TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))));
+        deterministic::Runner::new(deterministic::Config::default().with_catch_panics(true)).start(
+            |context| async move {
+                let (harness, mut artifact) =
+                    TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+                artifact.databases =
+                    Single::from(TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))));
 
-            let (acknowledgement, waiter) = Exact::handle();
-            let sync_done = harness.syncing.metrics.sync_done.clone();
-            harness
-                .syncing
-                .transition(
-                    artifact,
-                    Some(FinalizedHandoff::Apply(
-                        Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
-                        acknowledgement,
-                    )),
+                let (acknowledgement, waiter) = Exact::handle();
+                let sync_done = harness.syncing.metrics.sync_done.clone();
+                let syncing = harness.syncing;
+                let transition = context.child("transition").spawn(move |_| {
+                    syncing.transition(
+                        artifact,
+                        Some(FinalizedHandoff::Apply(
+                            Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
+                            acknowledgement,
+                        )),
+                    )
+                });
+
+                // A barrier that ends without durability while the actor is not stopping panics.
+                assert!(
+                    transition.await.is_err(),
+                    "an aborted handoff flush must panic"
+                );
+                assert!(
+                    waiter.await.is_err(),
+                    "an aborted handoff must cancel marshal's acknowledgement",
+                );
+                assert_eq!(
+                    sync_done.get(),
+                    0,
+                    "an aborted handoff must not report completion",
+                );
+                let reopened = SyncPlan::<_, TestScheme, TestVariant>::init(
+                    context.child("plan"),
+                    "syncing-test",
                 )
                 .await;
-
-            assert!(
-                waiter.await.is_err(),
-                "an aborted handoff must cancel marshal's acknowledgement",
-            );
-            assert!(
-                harness.subscriber.latest().is_none(),
-                "serving must shut off once the handoff stops",
-            );
-            assert_eq!(
-                sync_done.get(),
-                0,
-                "an aborted handoff must not report completion",
-            );
-            let reopened =
-                SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), "syncing-test")
-                    .await;
-            assert_eq!(reopened.completed(), None);
-        });
+                assert_eq!(reopened.completed(), None);
+            },
+        );
     }
 
     /// Losing the syncer without shutdown fails loudly once a full acknowledgement window
@@ -1135,7 +1145,12 @@ mod tests {
     #[case::success(true)]
     #[case::failure(false)]
     fn live_floor_reports_handoff_once_after_durability(#[case] succeeds: bool) {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_timeout(Some(Duration::from_secs(10)))
+                .with_catch_panics(true),
+        )
+        .start(|context| async move {
             let mut signing = context.child("signing");
             let fixture =
                 scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_SYNCING_LIVE_FLOOR", 1);
@@ -1294,10 +1309,10 @@ mod tests {
             );
             let release = control.flushes.lock().remove(0);
             if !succeeds {
-                // A failed flush stops the handoff. After restart, marshal is still at block 1
+                // A failed flush panics the handoff. After restart, marshal is still at block 1
                 // and state sync is still in progress.
                 drop(release);
-                transition.await.expect("failed durability stops handoff");
+                assert!(transition.await.is_err(), "failed durability must panic");
                 marshal.abort().await;
                 let restarted = fixtures::marshal_fixture_with_reporter(
                     context.child("restart"),

@@ -102,6 +102,29 @@ where
         Self::respond(result);
     }
 
+    /// Returns a future that awaits the operation `make` builds while continuing to complete
+    /// verification attempts, or yields `None` once `shutdown` fires.
+    ///
+    /// The operation is built and boxed before this returns, so no poll frame ever holds it by
+    /// value. Debug builds give every temporary its own stack slot, and the actor loop would
+    /// otherwise hold one per operation it runs.
+    pub(super) fn until_stopped<'a, T, F>(
+        &'a mut self,
+        shutdown: &'a mut (impl Future + Unpin),
+        make: impl FnOnce() -> F,
+    ) -> impl Future<Output = Option<T>> + 'a
+    where
+        F: Future<Output = T> + 'a,
+    {
+        let operation = Box::pin(make());
+        async move {
+            select! {
+                _ = &mut *shutdown => None,
+                output = self.drive(operation) => Some(output),
+            }
+        }
+    }
+
     /// Awaits `operation` while continuing to complete verification attempts.
     pub(super) async fn drive<T>(&mut self, operation: impl Future<Output = T>) -> T {
         futures::pin_mut!(operation);
