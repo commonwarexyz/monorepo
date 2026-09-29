@@ -380,6 +380,11 @@ where
     }
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::RangeOutOfBounds`] if `loc` exceeds the operation count, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
         self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
@@ -3616,8 +3621,8 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // child: 1 append + commit at loc 4, declaring floor=5 (one past its commit). A floor of 3
-        // would be valid for the parent alone, so the child's bound must include its parent's ops.
+        // child: 1 append + commit at loc 4, declaring floor=5 (one past its commit). The error
+        // names commit location 4, so the bound counts the parent's operations.
         let Err(err) = parent
             .new_batch::<H>()
             .append(V::Value::make(2))

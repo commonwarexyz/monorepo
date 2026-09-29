@@ -1552,7 +1552,7 @@ mod tests {
     // the parent's Commit participates in the per-commit monotonicity invariant even
     // before it is applied.
     #[test_traced("INFO")]
-    fn test_compact_ancestor_floor_regressed() {
+    fn test_compact_chained_floor_regression() {
         deterministic::Runner::default().start(|context| async move {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "immutable-regressed-ancestor-floor")

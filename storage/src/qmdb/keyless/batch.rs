@@ -53,8 +53,8 @@ where
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`]. Reads through it refuse with
-/// [`crate::qmdb::Error::StaleRead`] once a batch that is not its ancestor is applied, whether
-/// from a different fork or one of its own descendants (see [`crate::qmdb::chain`]).
+/// [`crate::qmdb::Error::StaleRead`] once any batch other than itself or an ancestor is applied,
+/// whether from a different fork or one of its own descendants (see [`crate::qmdb::chain`]).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy>
 where

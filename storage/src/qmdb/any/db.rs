@@ -401,6 +401,11 @@ where
     }
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::RangeOutOfBounds`] if `loc` exceeds the operation count, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub async fn pinned_nodes_at(
         &self,
         loc: Location<F>,
@@ -486,8 +491,9 @@ where
     /// but is not a commit op, either because the caller passed a non-commit-boundary size or
     /// because pruning removed the commit that would have governed it. Returns
     /// [`crate::merkle::Error::RangeOutOfBounds`] if `historical_size` exceeds the log or
-    /// `start_loc >= historical_size`, and a pruned-data error if a required operation or node
-    /// was pruned.
+    /// `start_loc >= historical_size`, [`crate::qmdb::Error::DataCorrupted`] if the governing
+    /// commit's floor lies past it, and a pruned-data error if a required operation or node was
+    /// pruned.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.db.historical_proof",

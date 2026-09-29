@@ -92,7 +92,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Commit and release the prefix. Its Merkle nodes now resolve through the snapshot.
+        // Commit and release the prefix. Its Merkle nodes now resolve through the view.
         merkle.apply_batch(&prefix).unwrap();
         drop(prefix);
 
