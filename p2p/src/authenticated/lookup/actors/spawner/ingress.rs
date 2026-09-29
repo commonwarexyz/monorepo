@@ -5,19 +5,19 @@ use commonware_stream::{Receiver, Sender};
 use std::collections::VecDeque;
 
 /// Messages that can be processed by the spawner actor.
-pub enum Message<Si: Sender, St: Receiver, P: PublicKey> {
+pub enum Message<S: Sender, R: Receiver, P: PublicKey> {
     /// Notify the spawner to create a new task for the given peer.
     Spawn {
         /// The peer's public key.
         peer: P,
         /// The connection to the peer.
-        connection: (Si, St),
+        connection: (S, R),
         /// The reservation for the peer.
         reservation: Reservation<P>,
     },
 }
 
-impl<Si: Sender, St: Receiver, P: PublicKey> UnreliablePolicy for Message<Si, St, P> {
+impl<S: Sender, R: Receiver, P: PublicKey> UnreliablePolicy for Message<S, R, P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -28,14 +28,14 @@ impl<Si: Sender, St: Receiver, P: PublicKey> UnreliablePolicy for Message<Si, St
     }
 }
 
-impl<Si: Sender, St: Receiver, P: PublicKey> Mailbox<Message<Si, St, P>> {
+impl<S: Sender, R: Receiver, P: PublicKey> Mailbox<Message<S, R, P>> {
     /// Send a message to the actor to spawn a new task for the given peer.
     ///
     /// This may be rejected when the spawner is backlogged, or return closed after shutdown, which
     /// is harmless since stale connections do not need to be spawned.
     pub fn spawn(
         &mut self,
-        connection: (Si, St),
+        connection: (S, R),
         reservation: Reservation<P>,
     ) -> Unreliable<Feedback> {
         self.0.enqueue(Message::Spawn {

@@ -21,9 +21,9 @@ pub fn genesis<H: Hasher>() -> H::Digest {
 }
 
 /// Configuration for the application.
-pub struct Config<Si: Sender, St: Receiver> {
+pub struct Config<S: Sender, R: Receiver> {
     /// Sender and receiver of the upgraded connection to the indexer.
-    pub indexer: (Si, St),
+    pub indexer: (S, R),
 
     /// Signing scheme for this network.
     pub this_network: Scheme,

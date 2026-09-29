@@ -25,19 +25,17 @@ use rand_core::CryptoRng;
 use tracing::{debug, info};
 
 /// Application actor.
-pub struct Application<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sender, St: Receiver> {
-    context: R,
-    indexer: (Si, St),
+pub struct Application<E: CryptoRng + Spawner + Metrics, H: Hasher, S: Sender, R: Receiver> {
+    context: E,
+    indexer: (S, R),
     this_network: <MinSig as Variant>::Public,
     other_network: Scheme,
     mailbox: ActorReceiver<Message<H::Digest>>,
 }
 
-impl<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sender, St: Receiver>
-    Application<R, H, Si, St>
-{
+impl<E: CryptoRng + Spawner + Metrics, H: Hasher, S: Sender, R: Receiver> Application<E, H, S, R> {
     /// Create a new application actor.
-    pub fn new(context: R, config: Config<Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
+    pub fn new(context: E, config: Config<S, R>) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let this_network = *config.this_network.identity();
         (
