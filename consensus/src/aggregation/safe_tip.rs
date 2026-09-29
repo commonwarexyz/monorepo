@@ -1,13 +1,13 @@
 use crate::types::Height;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    N3f1,
+    Faults,
     ordered::{Quorum, Set},
 };
 use std::collections::{BTreeMap, HashMap, btree_map};
 
 /// A data structure that keeps track of the reported tip for each validator.
-/// It can efficiently query the `f`th highest tip, where `f` is the maximum number of faults
+/// It can efficiently query the `f + 1`th highest tip, where `f` is the maximum number of faults
 /// that can be tolerated for the given set of validators.
 pub struct SafeTip<P: PublicKey> {
     /// For each validator, the maximum tip that it has reported.
@@ -36,18 +36,18 @@ impl<P: PublicKey> Default for SafeTip<P> {
 }
 
 impl<P: PublicKey> SafeTip<P> {
-    /// Initializes an instance with the given validators.
+    /// Initializes an instance with the given validators, tolerating the faults of `M`.
     ///
     /// # Panics
     ///
     /// Panics if the validator set is empty.
-    pub fn init(&mut self, validators: &Set<P>) {
+    pub fn init<M: Faults>(&mut self, validators: &Set<P>) {
         // Ensure the validator set is not empty
         assert!(!validators.is_empty());
 
         // Get the number of validators and the maximum number of faults
         let n = validators.len();
-        let f = validators.max_faults::<N3f1>() as usize;
+        let f = validators.max_faults::<M>() as usize;
 
         // Initialize the tips map
         let mut tips = HashMap::with_capacity(n);
@@ -252,7 +252,7 @@ mod tests {
         Signer,
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_utils::TryCollect;
+    use commonware_utils::{N3f1, TryCollect};
     use rstest::rstest;
 
     fn key(i: u64) -> PublicKey {
@@ -265,7 +265,7 @@ mod tests {
             .map(|i| key(i as u64))
             .try_collect::<Set<_>>()
             .unwrap();
-        safe_tip.init(&validators);
+        safe_tip.init::<N3f1>(&validators);
         (safe_tip, validators)
     }
 
@@ -294,13 +294,13 @@ mod tests {
         // Test init with empty validator set
         let mut safe_tip = SafeTip::<PublicKey>::default();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            safe_tip.init(&[].try_into().unwrap());
+            safe_tip.init::<N3f1>(&[].try_into().unwrap());
         }));
         assert!(result.is_err());
 
         // Test reconcile with size mismatch
         let mut safe_tip = SafeTip::<PublicKey>::default();
-        safe_tip.init(&[key(1), key(2), key(3), key(4)].try_into().unwrap());
+        safe_tip.init::<N3f1>(&[key(1), key(2), key(3), key(4)].try_into().unwrap());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             safe_tip.reconcile(&[key(1), key(2), key(3)].try_into().unwrap());
         }));
@@ -358,7 +358,7 @@ mod tests {
     fn test_reconcile() {
         let mut safe_tip = SafeTip::<PublicKey>::default();
         let old_validators = &[key(1), key(2), key(3), key(4)];
-        safe_tip.init(&old_validators.try_into().unwrap());
+        safe_tip.init::<N3f1>(&old_validators.try_into().unwrap());
 
         safe_tip.update(key(1), Height::new(10));
         safe_tip.update(key(2), Height::new(20));
@@ -387,7 +387,7 @@ mod tests {
     fn test_reconcile_identical() {
         let mut safe_tip = SafeTip::<PublicKey>::default();
         let validators = &[key(1), key(2), key(3), key(4)];
-        safe_tip.init(&validators.try_into().unwrap());
+        safe_tip.init::<N3f1>(&validators.try_into().unwrap());
 
         // Set some initial tips
         safe_tip.update(key(1), Height::new(10));
