@@ -16,12 +16,6 @@ use thiserror::Error;
 /// Size of the length field in a version 1 header, excluding its tag.
 const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
 
-/// Namespace that identifies version 0 records.
-const NAMESPACE_V0: &[u8] = b"_COMMONWARE_STREAM_CUPS_V0";
-
-/// Namespace that identifies version 1 records.
-const NAMESPACE_V1: &[u8] = b"_COMMONWARE_STREAM_CUPS";
-
 /// Returns the tag size of `C` as a record length.
 const fn tag_size<C: Cipher>() -> u32 {
     let size = <C::Tag as FixedSize>::SIZE;
@@ -146,14 +140,6 @@ impl<H, C: Cipher> Cups<H, C> {
     /// Version 0 prefixes count the tag, so the payload and tag must fit in a `u32`.
     pub const MAX_SIZE: u32 = max_size::<C>();
 
-    /// Returns the namespace identifying the record format of this version.
-    pub const fn namespace(&self) -> &'static [u8] {
-        match self.version {
-            Version::V0 => NAMESPACE_V0,
-            Version::V1 => NAMESPACE_V1,
-        }
-    }
-
     /// Returns the size of the header that precedes a record carrying `len` payload bytes.
     ///
     /// # Panics
@@ -182,6 +168,8 @@ impl<H, C: Cipher> Cups<H, C> {
             .and_then(|size| size.checked_add(<C::Tag as FixedSize>::SIZE))
             .expect("record size exceeds usize")
     }
+
+    /// Splits the negotiated ciphers into the sender and receiver halves of a connection.
     fn split<I: Stream, O: Sink>(
         version: Version,
         send: C,
@@ -241,18 +229,10 @@ impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
-        let record_namespace = self.namespace();
         let version = self.version;
         let (send, recv) = self
             .handshake
-            .dial(
-                context,
-                namespace,
-                record_namespace,
-                peer,
-                &mut stream,
-                &mut sink,
-            )
+            .dial(context, namespace, peer, &mut stream, &mut sink)
             .await?;
         Ok(Self::split(
             version,
@@ -286,18 +266,10 @@ impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
-        let record_namespace = self.namespace();
         let version = self.version;
         let (peer, send, recv) = self
             .handshake
-            .listen(
-                context,
-                namespace,
-                record_namespace,
-                bouncer,
-                &mut stream,
-                &mut sink,
-            )
+            .listen(context, namespace, bouncer, &mut stream, &mut sink)
             .await?;
         let (sender, receiver) =
             Self::split(version, send, recv, stream, sink, max_message_size, pool);
@@ -618,7 +590,7 @@ mod test {
     const TAG_SIZE: u32 = tag_size::<RecordCipher>();
     const MAX_SIZE: u32 = TestCups::MAX_SIZE;
 
-    /// A handshake independent of SAKE that checks the namespace CUPS binds to its keys.
+    /// A handshake independent of SAKE that checks the namespace CUPS passes to it, then fails.
     #[derive(Clone)]
     struct RejectingHandshake;
 
@@ -632,7 +604,6 @@ mod test {
             self,
             _context: E,
             namespace: &[u8],
-            transport: &'static [u8],
             _peer: (),
             _stream: &mut I,
             _sink: &mut O,
@@ -644,7 +615,6 @@ mod test {
             O: Sink,
         {
             assert_eq!(namespace, b"application");
-            assert_eq!(transport, NAMESPACE_V1);
             Err(std::io::Error::other("rejected"))
         }
 
@@ -652,7 +622,6 @@ mod test {
             self,
             _context: E,
             namespace: &[u8],
-            transport: &'static [u8],
             _bouncer: B,
             _stream: &mut I,
             _sink: &mut O,
@@ -666,36 +635,41 @@ mod test {
             F: Future<Output = bool> + Send,
         {
             assert_eq!(namespace, b"application");
-            assert_eq!(transport, NAMESPACE_V1);
             Err(std::io::Error::other("rejected"))
         }
     }
 
+    /// Checks that Cups runs a handshake other than SAKE and passes it the application namespace.
     #[test]
     fn test_custom_handshake() {
         deterministic::Runner::default().start(|context| async move {
-            let cups = Cups::<_, RecordCipher>::new(RejectingHandshake, Version::V1);
-            let _: &RejectingHandshake = &cups.handshake;
-            let (sink, stream) = mocks::Channel::init();
-            assert!(
-                cups.clone()
-                    .dial(context.child("dial"), b"application", 1, (), stream, sink)
+            for version in [Version::V0, Version::V1] {
+                let cups = Cups::<_, RecordCipher>::new(RejectingHandshake, version);
+
+                // Dial.
+                let (sink, stream) = mocks::Channel::init();
+                assert!(
+                    cups.clone()
+                        .dial(context.child("dial"), b"application", 1, (), stream, sink)
+                        .await
+                        .is_err()
+                );
+
+                // Listen.
+                let (sink, stream) = mocks::Channel::init();
+                assert!(
+                    cups.listen(
+                        context.child("listen"),
+                        b"application",
+                        1,
+                        |_| async { true },
+                        stream,
+                        sink
+                    )
                     .await
                     .is_err()
-            );
-            let (sink, stream) = mocks::Channel::init();
-            assert!(
-                cups.listen(
-                    context.child("listen"),
-                    b"application",
-                    1,
-                    |_| async { true },
-                    stream,
-                    sink
-                )
-                .await
-                .is_err()
-            );
+                );
+            }
         });
     }
 

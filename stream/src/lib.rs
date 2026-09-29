@@ -162,9 +162,7 @@ commonware_macros::stability_scope!(BETA {
     /// Implementations must authenticate each peer's declared identity and bind the supplied
     /// application namespace and both peer identities to the agreed ciphers. A successful dial must
     /// authenticate the expected peer. A listen may succeed only if the bouncer returns `true` for
-    /// the same authenticated peer that is returned. Implementations should also bind `transport`,
-    /// the record namespace supplied by the upgrader, so that peers with different record
-    /// formats fail the handshake.
+    /// the same authenticated peer that is returned.
     ///
     /// Implementations must not consume bytes from `stream` past the final handshake message because
     /// the caller reuses `stream` and `sink` for the transport.
@@ -189,7 +187,6 @@ commonware_macros::stability_scope!(BETA {
             self,
             context: E,
             namespace: &[u8],
-            transport: &'static [u8],
             peer: Self::PublicKey,
             stream: &mut I,
             sink: &mut O,
@@ -210,7 +207,6 @@ commonware_macros::stability_scope!(BETA {
             self,
             context: E,
             namespace: &[u8],
-            transport: &'static [u8],
             bouncer: B,
             stream: &mut I,
             sink: &mut O,

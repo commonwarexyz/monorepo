@@ -13,7 +13,7 @@ use std::future::Future;
 ///
 /// Clones the upgrader for each connection attempt.
 pub(crate) struct Config<U: Upgrader> {
-    handshake: U,
+    upgrader: U,
     namespace: Vec<u8>,
     max_message_size: u32,
 }
@@ -24,13 +24,13 @@ impl<U: Upgrader> Config<U> {
     /// # Panics
     ///
     /// Panics if `max_message_size` exceeds [`Upgrader::MAX_SIZE`].
-    pub(crate) fn new(handshake: U, namespace: impl Into<Vec<u8>>, max_message_size: u32) -> Self {
+    pub(crate) fn new(upgrader: U, namespace: impl Into<Vec<u8>>, max_message_size: u32) -> Self {
         assert!(
             max_message_size <= U::MAX_SIZE,
             "maximum message size exceeds stream limit"
         );
         Self {
-            handshake,
+            upgrader,
             namespace: namespace.into(),
             max_message_size,
         }
@@ -50,7 +50,7 @@ impl<U: Upgrader> Config<U> {
         I: Stream,
         O: Sink,
     {
-        self.handshake.clone().dial(
+        self.upgrader.clone().dial(
             context,
             &self.namespace,
             self.max_message_size,
@@ -79,7 +79,7 @@ impl<U: Upgrader> Config<U> {
         B: FnOnce(U::PublicKey) -> F + Send,
         F: Future<Output = bool> + Send,
     {
-        self.handshake.clone().listen(
+        self.upgrader.clone().listen(
             context,
             &self.namespace,
             self.max_message_size,
@@ -101,7 +101,7 @@ mod tests {
     const NAMESPACE: &[u8] = b"test_namespace";
     const LIMIT: u32 = 1024;
 
-    fn handshake(seed: u64) -> SakeCups<PrivateKey, ChaCha20Poly1305> {
+    fn upgrader(seed: u64) -> SakeCups<PrivateKey, ChaCha20Poly1305> {
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer: PrivateKey::from_seed(seed),
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn test_max_message_size_within_limit() {
         for max_message_size in [0, SakeCups::<PrivateKey, ChaCha20Poly1305>::MAX_SIZE] {
-            Config::new(handshake(0), NAMESPACE, max_message_size);
+            Config::new(upgrader(0), NAMESPACE, max_message_size);
         }
     }
 
@@ -124,7 +124,7 @@ mod tests {
     #[should_panic(expected = "maximum message size exceeds stream limit")]
     fn test_max_message_size_above_limit() {
         Config::new(
-            handshake(0),
+            upgrader(0),
             NAMESPACE,
             SakeCups::<PrivateKey, ChaCha20Poly1305>::MAX_SIZE + 1,
         );
@@ -138,8 +138,8 @@ mod tests {
             .start(|context| async move {
                 let (dialer_sink, listener_stream) = mocks::Channel::init();
                 let (listener_sink, dialer_stream) = mocks::Channel::init();
-                let config = Config::new(handshake(0), NAMESPACE, LIMIT);
-                let listener = handshake(1);
+                let config = Config::new(upgrader(0), NAMESPACE, LIMIT);
+                let listener = upgrader(1);
                 let listener_key = listener.public_key();
 
                 // Listen with the bare upgrader while dialing through the config.
