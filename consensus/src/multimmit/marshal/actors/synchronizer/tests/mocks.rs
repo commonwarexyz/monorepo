@@ -231,6 +231,18 @@ impl Fetcher<Sha256, MinPk, TestBody> for MockFetcher {
         references: Vec<BlockRef<Sha256Digest>>,
     ) -> Result<Vec<CustodiedBlock<Sha256, TestBody>>, Self::Error> {
         self.range_calls.fetch_add(1, Ordering::Relaxed);
+        // Peers serve a run by walking parents from its head, so an unlinked run fails there.
+        for pair in references.windows(2) {
+            let parent = self
+                .blocks
+                .get(pair[0].chain().get() as usize)
+                .and_then(|blocks| blocks.iter().find(|block| block.reference() == pair[0]))
+                .map(|block| block.header().parent_ref());
+            assert!(
+                parent.is_none_or(|parent| parent == pair[1]),
+                "producer block run is not parent-linked"
+            );
+        }
         let limit = self.range_limit.unwrap_or(references.len());
         let mut custody = Vec::with_capacity(limit.min(references.len()));
         for reference in references.into_iter().take(limit) {
