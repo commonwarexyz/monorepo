@@ -250,7 +250,7 @@ where
             }
 
             Err(format!(
-                "delayed validator did not re-enter state sync and advance after restart; entries={} sync_height={sync_height:?} processed_height={processed_height}",
+                "late joiner did not recover (entries={}, synced={sync_height:?}, processed={processed_height})",
                 state.state_sync_entries(),
             ))
         })
