@@ -17,8 +17,7 @@
 //!
 //! [`Config`] and [`Network`] are generic over [`commonware_stream::Upgrader`], which
 //! authenticates peers and supplies their message streams. [`Network`] also requires this
-//! module's [`Upgrader`], which signs discovery gossip under the same identity. [`Cups`]
-//! implements it when its handshake implements [`Handshake`].
+//! module's [`Upgrader`], which signs discovery gossip under the same identity.
 //!
 //! ## Discovery
 //!

@@ -110,6 +110,8 @@ pub enum Version {
 pub struct Cups<H, C> {
     /// Handshake used to authenticate peers and derive directional record keys.
     pub handshake: H,
+
+    /// Record format of the streams.
     version: Version,
 
     // `fn() -> C` keeps `Cups` `Send` and `Sync` for any `C`.
