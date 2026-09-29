@@ -1,11 +1,12 @@
 use crate::utils::codec::{Error as FrameError, recv_frame, send_frame};
 use commonware_codec::{DecodeExt, Encode, Error as CodecError, FixedSize};
 use commonware_cryptography::{
-    Cipher, Signer,
+    Signer,
     handshake::sake::{
         Ack, Context, Error as HandshakeError, Syn, SynAck, Version, dial_end, dial_start,
         listen_end, listen_start,
     },
+    transcript::Transcript,
 };
 use commonware_formatting::hex;
 use commonware_runtime::{Clock, Sink, Stream};
@@ -44,19 +45,16 @@ impl From<HandshakeError> for Error {
 /// # Examples
 ///
 /// ```
-/// use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
-/// use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}};
+/// use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+/// use commonware_stream::sake::{Sake, Version};
 /// use std::time::Duration;
 ///
-/// let upgrader = Cups::<_, ChaCha20Poly1305>::new(
-///     Sake {
-///         signer: PrivateKey::from_seed(0),
-///         synchrony_bound: Duration::from_secs(5),
-///         max_handshake_age: Duration::from_secs(10),
-///         version: Version::V1,
-///     },
-///     cups::Version::V1,
-/// );
+/// let handshake = Sake {
+///     signer: PrivateKey::from_seed(0),
+///     synchrony_bound: Duration::from_secs(5),
+///     max_handshake_age: Duration::from_secs(10),
+///     version: Version::V1,
+/// };
 /// ```
 #[derive(Clone)]
 pub struct Sake<S> {
@@ -93,13 +91,16 @@ impl<S> Sake<S> {
 }
 
 /// Sends a handshake message bounded by its fixed encoded size.
-async fn send_handshake_frame<M, T>(sink: &mut T, message: M) -> Result<(), FrameError>
+fn send_handshake_frame<M, T>(
+    sink: &mut T,
+    message: M,
+) -> impl Future<Output = Result<(), FrameError>> + Send
 where
     M: Encode + FixedSize,
     T: Sink,
 {
     let max_size = u32::try_from(M::SIZE).expect("handshake frame should fit in u32");
-    send_frame(sink, message.encode(), max_size).await
+    send_frame(sink, message.encode(), max_size)
 }
 
 /// Receives and decodes a handshake message bounded by its fixed encoded size.
@@ -124,16 +125,15 @@ impl<S: Signer> crate::Handshake for Sake<S> {
         self.signer.public_key()
     }
 
-    async fn dial<C, E, I, O>(
+    async fn dial<E, I, O>(
         self,
         context: E,
         namespace: &[u8],
         peer: S::PublicKey,
         stream: &mut I,
         sink: &mut O,
-    ) -> Result<(C, C), Self::Error>
+    ) -> Result<Transcript, Self::Error>
     where
-        C: Cipher,
         E: Clock + CryptoRng,
         I: Stream,
         O: Sink,
@@ -148,21 +148,20 @@ impl<S: Signer> crate::Handshake for Sake<S> {
 
         let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _>(stream).await?;
 
-        let (ack, send, recv) = dial_end(state, syn_ack)?;
+        let (ack, transcript) = dial_end(state, syn_ack)?;
         send_handshake_frame(sink, ack).await?;
-        Ok((send, recv))
+        Ok(transcript)
     }
 
-    async fn listen<C, E, I, O, B, F>(
+    async fn listen<E, I, O, B, F>(
         self,
         context: E,
         namespace: &[u8],
         bouncer: B,
         stream: &mut I,
         sink: &mut O,
-    ) -> Result<(S::PublicKey, C, C), Self::Error>
+    ) -> Result<(S::PublicKey, Transcript), Self::Error>
     where
-        C: Cipher,
         E: Clock + CryptoRng,
         I: Stream,
         O: Sink,
@@ -186,8 +185,8 @@ impl<S: Signer> crate::Handshake for Sake<S> {
 
         let ack = recv_handshake_frame::<Ack, _>(stream).await?;
 
-        let (send, recv) = listen_end(state, ack)?;
-        Ok((peer, send, recv))
+        let transcript = listen_end(state, ack)?;
+        Ok((peer, transcript))
     }
 }
 
@@ -458,14 +457,12 @@ mod test {
         Ok(())
     }
 
-    /// Connects a dialer and a listener configured with the given SAKE versions and records, then
-    /// sends one message from the dialer to the listener.
-    ///
-    /// Returns the handshake error, or the result of receiving that message.
+    /// Connects peers configured with the given SAKE and CUPS versions. Exchanges messages only
+    /// when their record formats agree.
     fn connect_with(
         dialer: (Version, cups::Version),
         listener: (Version, cups::Version),
-    ) -> Result<Result<(), cups::Error>, Error> {
+    ) -> Result<(), Error> {
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(move |context| async move {
             let dialer_signer = PrivateKey::from_seed(42);
@@ -503,45 +500,46 @@ mod test {
             });
 
             // The listener verifies the first signed message, so its error is the informative one.
-            let (peer, _, mut receiver) = listener_handle.await.unwrap()?;
+            let (peer, mut listener_sender, mut listener_receiver) =
+                listener_handle.await.unwrap()?;
             assert_eq!(peer, dialer_signer.public_key());
-            let (mut sender, _) = dialer_handle.await.unwrap()?;
+            let (mut dialer_sender, mut dialer_receiver) = dialer_handle.await.unwrap()?;
 
-            // Send one message and report whether it arrives intact.
-            sender.send(&b"hello"[..]).await.unwrap();
-            Ok(receiver.recv().await.map(|message| {
-                assert_eq!(message.coalesce(), &b"hello"[..]);
-            }))
+            // Check delivery in both directions when the record formats match.
+            if dialer.1 == listener.1 {
+                dialer_sender.send(&b"hello"[..]).await.unwrap();
+                assert_eq!(listener_receiver.recv().await.unwrap().coalesce(), b"hello");
+                listener_sender.send(&b"world"[..]).await.unwrap();
+                assert_eq!(dialer_receiver.recv().await.unwrap().coalesce(), b"world");
+            }
+            Ok(())
         })
     }
 
-    /// Checks that a handshake succeeds only when the dialer and listener run the same SAKE
-    /// version.
+    /// Checks that SAKE versions authenticate and matching CUPS formats exchange both directions.
     #[test]
     fn test_versions() {
-        for dialer in [Version::V0, Version::V1] {
-            for listener in [Version::V0, Version::V1] {
-                let result =
-                    connect_with((dialer, cups::Version::V1), (listener, cups::Version::V1));
-                if dialer == listener {
-                    result.unwrap().unwrap();
+        let versions = [
+            (Version::V0, cups::Version::V0),
+            (Version::V0, cups::Version::V1),
+            (Version::V1, cups::Version::V0),
+            (Version::V1, cups::Version::V1),
+        ];
+        for dialer in versions {
+            for listener in versions {
+                let result = connect_with(dialer, listener);
+                if dialer.0 == listener.0 {
+                    result.unwrap();
                 } else {
-                    assert!(matches!(
-                        result,
-                        Err(Error::HandshakeError(HandshakeError::InvalidSignature))
-                    ));
+                    assert!(
+                        matches!(
+                            result,
+                            Err(Error::HandshakeError(HandshakeError::InvalidSignature))
+                        ),
+                        "{dialer:?} -> {listener:?}: {result:?}"
+                    );
                 }
             }
-        }
-    }
-
-    /// Checks that peers with different record versions complete the handshake and then fail to
-    /// open the first record.
-    #[test]
-    fn test_record_versions() {
-        for version in [Version::V0, Version::V1] {
-            let result = connect_with((version, cups::Version::V0), (version, cups::Version::V1));
-            assert!(matches!(result, Ok(Err(cups::Error::OpenFailed))));
         }
     }
 

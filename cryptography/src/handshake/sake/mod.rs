@@ -1,17 +1,16 @@
 //! Simple Authenticated Key Exchange (SAKE).
 //!
-//! SAKE derives one [Cipher](crate::Cipher) per direction from signed ephemeral X25519 keys.
-//! It uses a BLAKE3 [Transcript](crate::transcript::Transcript) and identity signatures from any
-//! [Signer](crate::Signer).
+//! SAKE establishes a shared secret [Transcript](crate::transcript::Transcript) from signed
+//! ephemeral X25519 keys. It uses BLAKE3 and identity signatures from any [Signer](crate::Signer).
 //!
 //! _This construction is unrelated to [EAP-SAKE] or the [symmetric-key SAKE] protocol._
 //!
 //! # Protocol
 //!
-//! Both peers supply an application namespace, their own signer, the expected peer identity,
-//! a [Version], and local and accepted peer timestamps in milliseconds through [Context]. Let
-//! `D` and `L` be their public identities, `t_D` and `t_L` their timestamps, and `X` and `Y`
-//! their fresh ephemeral public keys.
+//! Each peer supplies a [Context] with an application namespace, its signer, the expected peer
+//! identity, a local timestamp, an accepted peer timestamp range, and a [Version]. Timestamps
+//! are in milliseconds. Let `D` and `L` be the public identities, `t_D` and `t_L` their
+//! timestamps, and `X` and `Y` their fresh ephemeral public keys.
 //!
 //! ```text
 //! Dialer                                       Listener
@@ -26,33 +25,32 @@
 //!    exchange, commits the shared secret, and returns [SynAck] with its key confirmation.
 //! 3. [dial_end] checks `t_L`, verifies `sig_L`, and performs the same exchange. It rejects a
 //!    non-contributory result or incorrect listener confirmation, then returns [Ack] and the
-//!    send and receive ciphers. The dialer must send [Ack] before application data.
-//! 4. [listen_end] verifies the dialer's confirmation before returning its send and receive
-//!    ciphers. The listener may then accept application data.
+//!    secret transcript. The dialer must send [Ack] before application data.
+//! 4. [listen_end] verifies the dialer's confirmation before returning the same secret
+//!    transcript. The listener may then accept application data.
 //!
 //! # Transcript
 //!
 //! The transcript commits the application namespace as one packet, then forks it with the
-//! version's protocol namespace. Each field below is committed as a separate encoded packet,
-//! in order. Signatures authenticate the transcript at the indicated point and are not themselves
-//! committed.
+//! version's protocol namespace. V1 then commits a single-byte mode packet containing `1`; V0
+//! omits it. Each field below is committed as a separate encoded packet, in order. Signatures
+//! authenticate the transcript at the indicated point and are not themselves committed.
 //!
 //! | Point | V0 fields | V1 fields |
 //! |-------|-----------|-----------|
 //! | Before `sig_D` | `t_D, L, X` | `t_D, L, D, X` |
 //! | Before `sig_L` | `t_D, L, X, D, t_L, Y` | `t_D, L, D, X, t_L, Y` |
-//! | Before key derivation | Append the X25519 shared secret | Append the X25519 shared secret |
+//! | Before confirmation | Append the X25519 shared secret | Append the X25519 shared secret |
 //!
-//! From the final transcript `T`, `Cipher::random(T.noise(b"cipher_l2d"))` derives the
-//! listener-to-dialer cipher and `Cipher::random(T.noise(b"cipher_d2l"))` derives the reverse
-//! direction. The confirmations are `T.fork(b"confirmation_l2d").summarize()` and
-//! `T.fork(b"confirmation_d2l").summarize()`. Separate labels bind each output to its purpose
-//! and direction.
+//! From the final transcript `T`, the confirmations are
+//! `T.fork(b"confirmation_l2d").summarize()` and `T.fork(b"confirmation_d2l").summarize()`.
+//! Separate labels bind each confirmation to its direction. Successful completion returns `T`
+//! for a record protocol to derive its traffic keys.
 //!
 //! # Versions
 //!
 //! Both peers must use the same [Version]. Versions have identical message encodings but
-//! different signatures and derived keys. A mismatch fails signature verification.
+//! different signatures and secret transcripts. A mismatch fails signature verification.
 //!
 //! - [Version::V0] uses `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` and
 //!   [transcript::Version::V0](crate::transcript::Version::V0). Its fixed packet schema makes
@@ -72,7 +70,7 @@
 //!
 //! Fresh ephemeral secrets provide forward secrecy against later compromise of the identity
 //! signing keys, provided the ephemeral secrets and secret transcript state have been erased.
-//! Protecting application messages requires a record protocol using the derived ciphers.
+//! Protecting application messages requires a record protocol using keys derived from the transcript.
 //!
 //! The construction does not hide identities or provide 0-RTT data or resumption. The transcript
 //! does not bind the selected cipher or a record format. Peers must agree on them out of band.

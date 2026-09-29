@@ -39,9 +39,12 @@ fn connect() -> Result<(ChaCha20Poly1305, ChaCha20Poly1305), Error> {
         ),
         msg1,
     )?;
-    let (msg3, d_send, _) = dial_end(d_state, msg2)?;
-    let (_, l_recv) = listen_end(l_state, msg3)?;
-    Ok((d_send, l_recv))
+    let (msg3, dialer) = dial_end(d_state, msg2)?;
+    let listener = listen_end(l_state, msg3)?;
+    Ok((
+        Random::random(dialer.noise(b"cipher_d2l")),
+        Random::random(listener.noise(b"cipher_d2l")),
+    ))
 }
 
 criterion_main!(sake::benches, transport::benches);

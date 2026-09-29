@@ -79,12 +79,14 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
     .unwrap();
     log.extend(listener_greeting_ack.encode());
 
-    let (dialer_ack, mut dialer_tx, mut dialer_rx) =
-        dial_end::<ChaCha20Poly1305, _>(dialer_state, listener_greeting_ack).unwrap();
+    let (dialer_ack, dialer_transcript) = dial_end(dialer_state, listener_greeting_ack).unwrap();
     log.extend(dialer_ack.encode());
 
-    let (mut listener_tx, mut listener_rx) =
-        listen_end::<ChaCha20Poly1305>(listener_state, dialer_ack).unwrap();
+    let listener_transcript = listen_end(listener_state, dialer_ack).unwrap();
+    let mut dialer_tx = Random::random(dialer_transcript.noise(b"cipher_d2l"));
+    let mut dialer_rx = Random::random(dialer_transcript.noise(b"cipher_l2d"));
+    let mut listener_tx = Random::random(listener_transcript.noise(b"cipher_l2d"));
+    let mut listener_rx = Random::random(listener_transcript.noise(b"cipher_d2l"));
 
     // Exchange several messages in each direction so successive nonces are covered.
     for _ in 0..3 {

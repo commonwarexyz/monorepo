@@ -3,15 +3,13 @@ use super::{
     exchange::{EphemeralPublicKey, SecretKey},
 };
 use crate::{
-    Cipher, PublicKey, Signature, Signer, Verifier,
+    PublicKey, Signature, Signer, Verifier,
     transcript::{self, Summary, Transcript},
 };
-use commonware_codec::{Buf, Encode, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, Encode, FixedSize, Mode, Read, ReadExt, Write, mode, modes};
 use core::ops::Range;
 use rand_core::CryptoRng;
 
-const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
-const LABEL_CIPHER_D2L: &[u8] = b"cipher_d2l";
 const LABEL_CONFIRMATION_L2D: &[u8] = b"confirmation_l2d";
 const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 
@@ -29,12 +27,20 @@ pub enum Version {
     V1,
 }
 
+impl From<Version> for Mode {
+    fn from(version: Version) -> Self {
+        match version {
+            Version::V0 => mode!(0),
+            Version::V1 => mode!(1),
+        }
+    }
+}
+
 impl Version {
     /// Returns the protocol namespace forked from the application namespace.
     ///
-    /// Each version must produce transcripts that no other version produces. V0 and V1 rely on this
-    /// namespace for that, because after [Syn] their transcripts can otherwise commit identical
-    /// bytes.
+    /// V0 has its own namespace. Subsequent versions share the SAKE namespace and commit their
+    /// mode before the handshake fields.
     const fn namespace(self) -> &'static [u8] {
         match self {
             Self::V0 => b"_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE",
@@ -199,7 +205,7 @@ pub struct DialState<P> {
 }
 
 /// State maintained by the listener during handshake.
-/// Tracks the transcript that derives the expected confirmation and the ciphers.
+/// Retains the secret transcript until the dialer's confirmation is verified.
 pub struct ListenState {
     transcript: Transcript,
 }
@@ -227,7 +233,11 @@ impl<S, P> Context<S, P> {
         peer_identity: P,
         version: Version,
     ) -> Self {
-        let transcript = Transcript::new(namespace, version.transcript()).fork(version.namespace());
+        let mut transcript =
+            Transcript::new(namespace, version.transcript()).fork(version.namespace());
+        if let Some(modes) = modes![version] {
+            transcript.commit(modes.encode());
+        }
         Self {
             version,
             transcript,
@@ -287,12 +297,12 @@ pub fn dial_start<S: Signer, P: PublicKey>(
 }
 
 /// Completes a handshake as the dialer.
-/// Verifies the listener's [SynAck] and returns the [Ack] to send, the send cipher, and the
-/// receive cipher.
-pub fn dial_end<C: Cipher, P: PublicKey>(
+/// Verifies the listener's [SynAck] and returns the [Ack] to send and the confirmed secret
+/// transcript. The caller must send [Ack] before using the transcript for application data.
+pub fn dial_end<P: PublicKey>(
     state: DialState<P>,
     msg: SynAck<<P as Verifier>::Signature>,
-) -> Result<(Ack, C, C), Error> {
+) -> Result<(Ack, Transcript), Error> {
     let DialState {
         esk,
         peer_identity,
@@ -312,15 +322,13 @@ pub fn dial_end<C: Cipher, P: PublicKey>(
         return Err(Error::InvalidSignature);
     }
 
-    // Commit the shared secret, then derive both ciphers and confirmations from the transcript.
+    // Commit the shared secret, then derive the confirmations from the transcript.
     let Some(shared) = esk.exchange(&msg.epk) else {
         return Err(Error::InvalidEphemeralKey);
     };
     shared
         .secret
         .expose(|secret| transcript.commit(secret.as_ref()));
-    let recv = C::random(transcript.noise(LABEL_CIPHER_L2D));
-    let send = C::random(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
     let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
 
@@ -333,8 +341,7 @@ pub fn dial_end<C: Cipher, P: PublicKey>(
         Ack {
             confirmation: confirmation_d2l,
         },
-        send,
-        recv,
+        transcript,
     ))
 }
 
@@ -407,23 +414,20 @@ pub fn listen_start<S: Signer, P: PublicKey>(
 }
 
 /// Completes the handshake as the listener.
-/// Verifies the dialer's confirmation and returns the send and receive ciphers.
-pub fn listen_end<C: Cipher>(state: ListenState, msg: Ack) -> Result<(C, C), Error> {
+/// Verifies the dialer's confirmation and returns the confirmed secret transcript.
+pub fn listen_end(state: ListenState, msg: Ack) -> Result<Transcript, Error> {
     let confirmation_d2l = state.transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
     if msg.confirmation != confirmation_d2l {
         return Err(Error::InvalidConfirmation);
     }
 
-    // Derive the ciphers only after the dialer proves it holds the same transcript.
-    let send = C::random(state.transcript.noise(LABEL_CIPHER_L2D));
-    let recv = C::random(state.transcript.noise(LABEL_CIPHER_D2L));
-    Ok((send, recv))
+    Ok(state.transcript)
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{ChaCha20Poly1305, Signer, ed25519::PrivateKey, secp256r1::standard};
+    use crate::{ChaCha20Poly1305, Cipher, Signer, ed25519::PrivateKey, secp256r1::standard};
     use commonware_codec::{Codec, Copying, DecodeExt};
     use commonware_math::algebra::Random;
     use commonware_utils::{test_rng, union_unique};
@@ -481,13 +485,22 @@ mod test {
                 msg1,
             )?;
             test_encode_roundtrip(&msg2);
-            let (msg3, d_send, d_recv) = dial_end::<ChaCha20Poly1305, _>(d_state, msg2)?;
+            let (msg3, dialer) = dial_end(d_state, msg2)?;
             test_encode_roundtrip(&msg3);
-            let (l_send, l_recv) = listen_end::<ChaCha20Poly1305>(l_state, msg3)?;
+            let listener = listen_end(l_state, msg3)?;
+            assert_eq!(dialer.summarize(), listener.summarize());
 
             // Each send cipher pairs with the peer's receive cipher.
-            exchange(d_send, l_recv, b"message 1");
-            exchange(l_send, d_recv, b"message 2");
+            for (sender, receiver, label, message) in [
+                (&dialer, &listener, b"cipher_d2l", b"message 1"),
+                (&listener, &dialer, b"cipher_l2d", b"message 2"),
+            ] {
+                exchange::<ChaCha20Poly1305>(
+                    Random::random(sender.noise(label)),
+                    Random::random(receiver.noise(label)),
+                    message,
+                );
+            }
         }
 
         Ok(())
@@ -533,16 +546,16 @@ mod test {
             let (d_state, _, mut msg2) = start(&mut rng);
             msg2.confirmation = wrong;
             assert!(matches!(
-                dial_end::<ChaCha20Poly1305, _>(d_state, msg2),
+                dial_end(d_state, msg2),
                 Err(Error::InvalidConfirmation)
             ));
 
             // The listener rejects an Ack carrying the wrong confirmation.
             let (d_state, l_state, msg2) = start(&mut rng);
-            let (mut msg3, _, _) = dial_end::<ChaCha20Poly1305, _>(d_state, msg2).unwrap();
+            let (mut msg3, _) = dial_end(d_state, msg2).unwrap();
             msg3.confirmation = wrong;
             assert!(matches!(
-                listen_end::<ChaCha20Poly1305>(l_state, msg3),
+                listen_end(l_state, msg3),
                 Err(Error::InvalidConfirmation)
             ));
         }
@@ -672,6 +685,9 @@ mod test {
     ) -> Transcript {
         let mut transcript =
             Transcript::new(b"test_namespace", version.transcript()).fork(version.namespace());
+        if version == Version::V1 {
+            transcript.commit(&[1][..]);
+        }
         transcript
             .commit(syn.time_ms.encode())
             .commit(listener.encode());
@@ -797,9 +813,13 @@ mod test {
                 transcript: claimed,
                 ..state
             };
-            let (ack, send, _) = dial_end::<ChaCha20Poly1305, _>(state, syn_ack).unwrap();
-            let (_, recv) = listen_end::<ChaCha20Poly1305>(listen_state, ack).unwrap();
-            exchange(send, recv, b"hello");
+            let (ack, dialer) = dial_end(state, syn_ack).unwrap();
+            let listener = listen_end(listen_state, ack).unwrap();
+            exchange::<ChaCha20Poly1305>(
+                Random::random(dialer.noise(b"cipher_d2l")),
+                Random::random(listener.noise(b"cipher_d2l")),
+                b"hello",
+            );
         }
     }
 }

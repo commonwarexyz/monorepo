@@ -159,7 +159,27 @@ impl Conformance for CupsV1 {
     }
 }
 
+/// Pins a SAKE V0 connection carrying CUPS V1 records.
+struct SakeV0CupsV1;
+
+impl Conformance for SakeV0CupsV1 {
+    async fn commit(seed: u64) -> Vec<u8> {
+        exchange(seed, Version::V0, cups::Version::V1)
+    }
+}
+
+/// Pins a SAKE V1 connection carrying CUPS V0 records.
+struct SakeV1CupsV0;
+
+impl Conformance for SakeV1CupsV0 {
+    async fn commit(seed: u64) -> Vec<u8> {
+        exchange(seed, Version::V1, cups::Version::V0)
+    }
+}
+
 conformance_tests! {
     CupsV0 => 256,
     CupsV1 => 256,
+    SakeV0CupsV1 => 256,
+    SakeV1CupsV0 => 256,
 }

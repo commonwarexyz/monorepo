@@ -2,8 +2,10 @@ use crate::{
     Handshake, Upgrader,
     utils::codec::{Error as FrameError, recv_frame, validate_frame_len},
 };
-use commonware_codec::{Copying, DecodeExt, EncodeSize, FixedSize, Write, varint::UInt};
-use commonware_cryptography::Cipher;
+use commonware_codec::{
+    Copying, DecodeExt, Encode, EncodeSize, FixedSize, Mode, Write, mode, modes, varint::UInt,
+};
+use commonware_cryptography::{Cipher, transcript::Transcript};
 use commonware_runtime::{
     BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink,
     Stream,
@@ -15,6 +17,10 @@ use thiserror::Error;
 
 /// Size of the length field in a version 1 header, excluding its tag.
 const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
+
+const CUPS_NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_CUPS";
+const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
+const LABEL_CIPHER_D2L: &[u8] = b"cipher_d2l";
 
 /// Returns the tag size of `C` as a record length.
 const fn tag_size<C: Cipher>() -> u32 {
@@ -100,9 +106,18 @@ pub enum Version {
     V1,
 }
 
+impl From<Version> for Mode {
+    fn from(version: Version) -> Self {
+        match version {
+            Version::V0 => mode!(0),
+            Version::V1 => mode!(1),
+        }
+    }
+}
+
 /// A handshake `H` and CUPS records of one [Version], sealed by `C`.
 pub struct Cups<H, C> {
-    /// Handshake used to authenticate peers and derive directional record keys.
+    /// Handshake used to authenticate peers and agree on a secret transcript.
     pub handshake: H,
 
     /// Record format of the streams.
@@ -135,6 +150,18 @@ impl<H, C> Cups<H, C> {
 }
 
 impl<H, C: Cipher> Cups<H, C> {
+    /// Derives listener-to-dialer and dialer-to-listener ciphers from the secret transcript.
+    fn ciphers(mut transcript: Transcript, version: Version) -> (C, C) {
+        if let Some(modes) = modes![version] {
+            transcript = transcript.fork(CUPS_NAMESPACE);
+            transcript.commit(modes.encode());
+        }
+        (
+            C::random(transcript.noise(LABEL_CIPHER_L2D)),
+            C::random(transcript.noise(LABEL_CIPHER_D2L)),
+        )
+    }
+
     /// Largest supported plaintext message, in bytes.
     ///
     /// Version 0 prefixes count the tag, so the payload and tag must fit in a `u32`.
@@ -230,10 +257,11 @@ impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
         );
         let pool = context.network_buffer_pool().clone();
         let version = self.version;
-        let (send, recv) = self
+        let transcript = self
             .handshake
             .dial(context, namespace, peer, &mut stream, &mut sink)
             .await?;
+        let (recv, send) = Self::ciphers(transcript, version);
         Ok(Self::split(
             version,
             send,
@@ -267,10 +295,11 @@ impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
         );
         let pool = context.network_buffer_pool().clone();
         let version = self.version;
-        let (peer, send, recv) = self
+        let (peer, transcript) = self
             .handshake
             .listen(context, namespace, bouncer, &mut stream, &mut sink)
             .await?;
+        let (send, recv) = Self::ciphers(transcript, version);
         let (sender, receiver) =
             Self::split(version, send, recv, stream, sink, max_message_size, pool);
         Ok((peer, sender, receiver))
@@ -576,7 +605,7 @@ impl<C: Cipher, I: Stream> Receiver<C, I> {
 mod test {
     use super::*;
     use commonware_codec::Encode;
-    use commonware_cryptography::ChaCha20Poly1305;
+    use commonware_cryptography::{ChaCha20Poly1305, transcript::Version as TranscriptVersion};
     use commonware_math::algebra::Random;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_utils::TestRng;
@@ -590,44 +619,51 @@ mod test {
     const TAG_SIZE: u32 = tag_size::<RecordCipher>();
     const MAX_SIZE: u32 = TestCups::MAX_SIZE;
 
-    /// A handshake independent of SAKE that checks the namespace CUPS passes to it, then fails.
+    /// Supplies a deterministic test transcript to both roles, or rejects the handshake.
     #[derive(Clone)]
-    struct RejectingHandshake;
+    struct TestHandshake(Option<TranscriptVersion>);
 
-    impl Handshake for RejectingHandshake {
+    impl TestHandshake {
+        fn transcript(&self, namespace: &[u8]) -> Result<Transcript, std::io::Error> {
+            let framing = self.0.ok_or_else(|| std::io::Error::other("rejected"))?;
+            let mut transcript = Transcript::new(namespace, framing);
+            transcript.commit(b"test shared secret".as_slice());
+            Ok(transcript)
+        }
+    }
+
+    impl Handshake for TestHandshake {
         type PublicKey = ();
         type Error = std::io::Error;
 
         fn public_key(&self) -> Self::PublicKey {}
 
-        async fn dial<C, E, I, O>(
+        async fn dial<E, I, O>(
             self,
             _context: E,
             namespace: &[u8],
             _peer: (),
             _stream: &mut I,
             _sink: &mut O,
-        ) -> Result<(C, C), Self::Error>
+        ) -> Result<Transcript, Self::Error>
         where
-            C: Cipher,
             E: Clock + CryptoRng,
             I: Stream,
             O: Sink,
         {
             assert_eq!(namespace, b"application");
-            Err(std::io::Error::other("rejected"))
+            self.transcript(namespace)
         }
 
-        async fn listen<C, E, I, O, B, F>(
+        async fn listen<E, I, O, B, F>(
             self,
             _context: E,
             namespace: &[u8],
-            _bouncer: B,
+            bouncer: B,
             _stream: &mut I,
             _sink: &mut O,
-        ) -> Result<(Self::PublicKey, C, C), Self::Error>
+        ) -> Result<(Self::PublicKey, Transcript), Self::Error>
         where
-            C: Cipher,
             E: Clock + CryptoRng,
             I: Stream,
             O: Sink,
@@ -635,16 +671,95 @@ mod test {
             F: Future<Output = bool> + Send,
         {
             assert_eq!(namespace, b"application");
-            Err(std::io::Error::other("rejected"))
+            if !bouncer(()).await {
+                return Err(std::io::Error::other("rejected"));
+            }
+            Ok(((), self.transcript(namespace)?))
         }
     }
 
-    /// Checks that Cups runs a handshake other than SAKE and passes it the application namespace.
+    /// Pins the CUPS fork, canonical mode, and directional cipher derivation under both framings.
+    #[test]
+    fn test_cipher_derivation() {
+        for framing in [TranscriptVersion::V0, TranscriptVersion::V1] {
+            for version in [Version::V0, Version::V1] {
+                let transcript = TestHandshake(Some(framing))
+                    .transcript(b"application")
+                    .unwrap();
+                let (actual_l2d, actual_d2l) =
+                    Cups::<(), RecordCipher>::ciphers(transcript, version);
+
+                let mut expected = TestHandshake(Some(framing))
+                    .transcript(b"application")
+                    .unwrap();
+                if version == Version::V1 {
+                    expected = expected.fork(b"_COMMONWARE_STREAM_CUPS");
+                    expected.commit(&[1][..]);
+                }
+                let expected_l2d = RecordCipher::random(expected.noise(b"cipher_l2d"));
+                let expected_d2l = RecordCipher::random(expected.noise(b"cipher_d2l"));
+                for (actual, expected) in [(actual_l2d, expected_l2d), (actual_d2l, expected_d2l)] {
+                    let mut actual = Some(actual);
+                    let mut expected = Some(expected);
+                    let mut a = b"oracle".to_vec();
+                    let mut b = a.clone();
+                    assert_eq!(
+                        seal(&mut actual, &mut a).unwrap(),
+                        seal(&mut expected, &mut b).unwrap()
+                    );
+                    assert_eq!(a, b);
+                }
+            }
+        }
+    }
+
+    /// A custom handshake supplies matching transcripts to both CUPS roles.
+    #[test]
+    fn test_custom_handshake_round_trip() {
+        for framing in [TranscriptVersion::V0, TranscriptVersion::V1] {
+            for version in [Version::V0, Version::V1] {
+                deterministic::Runner::default().start(|context| async move {
+                    let (dial_sink, listen_stream) = mocks::Channel::init();
+                    let (listen_sink, dial_stream) = mocks::Channel::init();
+                    let cups = Cups::<_, RecordCipher>::new(TestHandshake(Some(framing)), version);
+                    let (mut dial_sender, mut dial_receiver) = cups
+                        .clone()
+                        .dial(
+                            context.child("dial"),
+                            b"application",
+                            64,
+                            (),
+                            dial_stream,
+                            dial_sink,
+                        )
+                        .await
+                        .unwrap();
+                    let (_, mut listen_sender, mut listen_receiver) = cups
+                        .listen(
+                            context.child("listen"),
+                            b"application",
+                            64,
+                            |_| async { true },
+                            listen_stream,
+                            listen_sink,
+                        )
+                        .await
+                        .unwrap();
+                    dial_sender.send(b"dial".as_slice()).await.unwrap();
+                    assert_eq!(listen_receiver.recv().await.unwrap().coalesce(), b"dial");
+                    listen_sender.send(b"listen".as_slice()).await.unwrap();
+                    assert_eq!(dial_receiver.recv().await.unwrap().coalesce(), b"listen");
+                });
+            }
+        }
+    }
+
+    /// Checks that CUPS forwards the application namespace and handshake errors in either role.
     #[test]
     fn test_custom_handshake() {
         deterministic::Runner::default().start(|context| async move {
             for version in [Version::V0, Version::V1] {
-                let cups = Cups::<_, RecordCipher>::new(RejectingHandshake, version);
+                let cups = Cups::<_, RecordCipher>::new(TestHandshake(None), version);
 
                 // Dialing runs the handshake with the application namespace and returns its error.
                 let (sink, stream) = mocks::Channel::init();

@@ -10,7 +10,7 @@
 )]
 
 commonware_macros::stability_scope!(BETA {
-    use commonware_cryptography::Cipher;
+    use commonware_cryptography::transcript::Transcript;
     use commonware_runtime::{BufferPooler, Clock, IoBufs, Sink, Stream};
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
@@ -157,12 +157,14 @@ commonware_macros::stability_scope!(BETA {
         fn recv(&mut self) -> impl Future<Output = Result<IoBufs, Self::Error>> + Send;
     }
 
-    /// Authenticates a raw connection and agrees on one [Cipher] per direction.
+    /// Authenticates a raw connection and agrees on a secret [Transcript].
     ///
     /// Implementations must authenticate each peer's declared identity and bind the supplied
-    /// application namespace and both peer identities to the agreed ciphers. A successful dial must
-    /// authenticate the expected peer. A listen may succeed only if the bouncer returns `true` for
-    /// the same authenticated peer that is returned.
+    /// application namespace and both peer identities to the same fresh secret transcript. Its
+    /// state must be unpredictable to parties outside the connection, and each role must verify
+    /// peer possession before returning it. A successful dial must authenticate the
+    /// expected peer. A listen may succeed only if the bouncer returns `true` for the same
+    /// authenticated peer that is returned.
     ///
     /// Implementations must not consume bytes from `stream` past the final handshake message because
     /// the caller reuses `stream` and `sink` for the transport.
@@ -181,38 +183,35 @@ commonware_macros::stability_scope!(BETA {
         /// The identity must remain stable across attempts and clones of this handshake.
         fn public_key(&self) -> Self::PublicKey;
 
-        /// Authenticates an outbound connection to `peer` and returns the send and receive
-        /// ciphers.
-        fn dial<C, E, I, O>(
+        /// Authenticates an outbound connection to `peer` and returns its secret transcript.
+        fn dial<E, I, O>(
             self,
             context: E,
             namespace: &[u8],
             peer: Self::PublicKey,
             stream: &mut I,
             sink: &mut O,
-        ) -> impl Future<Output = Result<(C, C), Self::Error>> + Send
+        ) -> impl Future<Output = Result<Transcript, Self::Error>> + Send
         where
-            C: Cipher,
             E: Clock + CryptoRng,
             I: Stream,
             O: Sink;
 
         /// Authenticates an inbound connection accepted by `bouncer` and returns the peer with the
-        /// send and receive ciphers.
+        /// secret transcript.
         ///
         /// The bouncer may receive an unverified identity claim before authentication completes.
         /// Accepting this claim permits authentication to continue. Only a successful handshake
         /// proves the returned peer's identity.
-        fn listen<C, E, I, O, B, F>(
+        fn listen<E, I, O, B, F>(
             self,
             context: E,
             namespace: &[u8],
             bouncer: B,
             stream: &mut I,
             sink: &mut O,
-        ) -> impl Future<Output = Result<(Self::PublicKey, C, C), Self::Error>> + Send
+        ) -> impl Future<Output = Result<(Self::PublicKey, Transcript), Self::Error>> + Send
         where
-            C: Cipher,
             E: Clock + CryptoRng,
             I: Stream,
             O: Sink,

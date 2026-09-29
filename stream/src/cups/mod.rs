@@ -6,10 +6,16 @@
 //!
 //! # Setup
 //!
-//! [Cups] runs its [handshake](crate::Handshake), then wraps the agreed ciphers in [Sender] and
-//! [Receiver] halves. Peer authentication, key establishment, and application namespace binding come
-//! from the handshake. Both peers must use the same [Version] and cipher. CUPS does not negotiate
-//! them. The caller sets a plaintext message limit no greater than [Cups::MAX_SIZE].
+//! [Cups] runs its [handshake](crate::Handshake) to obtain a confirmed secret transcript `T`.
+//! [V0](Version::V0) uses `T` unchanged. [V1](Version::V1) replaces `T` with
+//! `T.fork(b"_COMMONWARE_STREAM_CUPS")`, then commits a single-byte mode packet containing `1`.
+//! `Cipher::random(T.noise(b"cipher_l2d"))` derives the listener-to-dialer cipher, and
+//! `Cipher::random(T.noise(b"cipher_d2l"))` derives the reverse direction. CUPS wraps these
+//! ciphers in [Sender] and [Receiver] halves.
+//!
+//! Both peers must configure the same [Version] and cipher out of band. These settings are not
+//! included in SAKE signatures or confirmations. The caller sets a plaintext message limit no
+//! greater than [Cups::MAX_SIZE].
 //!
 //! # Records
 //!
@@ -43,9 +49,9 @@
 //! records. Callers must discard the connection after an I/O error or cancellation, as required
 //! by [crate::Sender] and [crate::Receiver], and after any receive error.
 //!
-//! V0 exposes record lengths and boundaries. V1 encrypts them, but transport sizes and timing
-//! still reveal traffic patterns. CUPS adds no padding or authenticated end-of-stream marker,
-//! so it does not establish whether a closed connection delivered every intended message.
+//! V0 exposes record lengths; V1 encrypts the length field. Transport sizes and timing still
+//! reveal traffic patterns. CUPS adds no padding or authenticated end-of-stream marker, so it
+//! does not establish whether a closed connection delivered every intended message.
 //!
 //! CUPS does not evolve keys itself. A cipher may rekey internally. Exhaustion requires a new
 //! connection.
