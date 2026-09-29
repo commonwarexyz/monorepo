@@ -328,12 +328,13 @@ where
     A: Automaton<Context = Height, Digest = Sha256Digest>,
 {
     Config {
-        schedule: Schedule {
-            epoch: scope.epoch,
-            first: scope.first,
-            last: scope.last,
-            interval: NonZeroU64::new(1).unwrap(),
-        },
+        schedule: Schedule::new(
+            scope.epoch,
+            scope.first,
+            scope.last,
+            NonZeroU64::new(1).unwrap(),
+        )
+        .unwrap(),
         floor: scope.first,
         scheme,
         automaton,
@@ -418,7 +419,8 @@ where
                     window: 3,
                 },
             );
-            cfg.schedule.interval = NonZeroU64::new(interval).unwrap();
+            cfg.schedule =
+                Schedule::new(epoch, first, last, NonZeroU64::new(interval).unwrap()).unwrap();
             let (engine, _mailbox) = Engine::new(child.child("engine"), cfg);
             let network = registrations.remove(participant).unwrap();
             handles.push(engine.start(network));
@@ -1668,7 +1670,13 @@ async fn run_floor(
             window,
         },
     );
-    cfg.schedule.interval = NonZeroU64::new(5).unwrap();
+    cfg.schedule = Schedule::new(
+        Epoch::new(13),
+        Height::new(120),
+        Height::new(135),
+        NonZeroU64::new(5).unwrap(),
+    )
+    .unwrap();
     cfg.floor = Height::new(floor);
     let (engine, _mailbox) = Engine::new(context.child("engine"), cfg);
     assert_eq!(
@@ -1706,5 +1714,69 @@ fn test_floor_and_window_can_change_across_restarts() {
         let (requested, reported) = run_floor(&context, &fixture, "past", 136, 2).await;
         assert!(requested.is_empty());
         assert_eq!(reported, BTreeSet::from([120, 125, 130, 135]));
+    });
+}
+
+#[test_traced("INFO")]
+fn test_floored_node_joins_live_peers() {
+    deterministic::Runner::timed(Duration::from_secs(20)).start(|mut context| async move {
+        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
+        let epoch = Epoch::new(21);
+        let (first, last) = (Height::new(100), Height::new(120));
+        // Checkpoints are 100, 105, 110, 115, and 120. The last node synced past 110.
+        let floors = [100, 100, 100, 111];
+        let (oracle, mut registrations) =
+            simulation(context.child("simulation"), &fixture, true).await;
+        let mut handles = Vec::new();
+        let mut observations = Vec::new();
+        for (index, participant) in fixture.participants.iter().enumerate() {
+            let child = context.child("validator").with_attribute("index", index);
+            let application = ImmediateApplication::default();
+            let requested = application.requested.clone();
+            let reporter = RecordingReporter::default();
+            let certificates = reporter.certificates.clone();
+            let mut cfg = config(
+                &child,
+                fixture.schemes[index].clone(),
+                application,
+                reporter,
+                oracle.control(participant.clone()),
+                EngineScope {
+                    partition: format!("aggregation-floored-{index}"),
+                    epoch,
+                    first,
+                    last,
+                    window: 2,
+                },
+            );
+            cfg.schedule = Schedule::new(epoch, first, last, NonZeroU64::new(5).unwrap()).unwrap();
+            cfg.floor = Height::new(floors[index]);
+            let (engine, _mailbox) = Engine::new(child.child("engine"), cfg);
+            handles.push(engine.start(registrations.remove(participant).unwrap()));
+            observations.push((requested, certificates));
+        }
+
+        for result in join_all(handles).await {
+            assert_eq!(
+                result.expect("aggregation engine failed"),
+                EngineOutcome::Completed
+            );
+        }
+        // Acks below the floor are ignored without penalizing the live peers that send them.
+        assert!(oracle.blocked().await.unwrap().is_empty());
+        for (index, (requested, certificates)) in observations.into_iter().enumerate() {
+            let expected: BTreeSet<_> = (100..=120)
+                .step_by(5)
+                .filter(|height| *height >= floors[index])
+                .collect();
+            let requested: BTreeSet<_> = requested.lock().iter().map(|h| h.get()).collect();
+            let certified: BTreeSet<_> = certificates
+                .lock()
+                .iter()
+                .map(|certificate| certificate.item.position.get())
+                .collect();
+            assert_eq!(requested, expected, "{index}");
+            assert_eq!(certified, expected, "{index}");
+        }
     });
 }

@@ -25,10 +25,10 @@ pub struct Config<
     /// Lowest height this engine certifies.
     ///
     /// Checkpoints below `floor` are skipped. A node that state-syncs to a checkpoint can set
-    /// `floor` above it to avoid certifying older checkpoints. A `floor` above `schedule.last`
+    /// `floor` above it to avoid certifying older checkpoints. A `floor` above the last checkpoint
     /// completes the engine immediately. Changing `floor` across restarts is safe.
     pub floor: Height,
-    /// Fixed signing scheme for `schedule.epoch`.
+    /// Fixed signing scheme for the schedule's epoch.
     pub scheme: S,
     /// Provides the canonical digest for each checkpoint.
     ///

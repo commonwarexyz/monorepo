@@ -91,21 +91,60 @@ impl Namespace {
 ///
 /// Every node must derive the same schedule for an epoch from authenticated history. The
 /// checkpoints are `last` and each lower height whose distance from `last` is a multiple of
-/// `interval`, down to `first`.
-/// An `interval` of one aggregates every height in the range.
+/// `interval`, down to `first`. An `interval` of one aggregates every height in the range.
+///
+/// Counting down from `last` makes the epoch's final height a checkpoint. That certificate is the
+/// last one the epoch's committee signs, so it anchors the handoff to the next epoch. Consecutive
+/// checkpoints are at most `interval` apart, including across contiguous epochs. A schedule has
+/// exactly `ceil((last - first + 1) / interval)` checkpoints. When `last + 1` is a multiple of
+/// `interval`, the checkpoints are the heights `h` where `h + 1` is a multiple of `interval`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Schedule {
-    /// Epoch whose scheme signs the checkpoints.
-    pub epoch: Epoch,
-    /// Lowest height the schedule may include, inclusive.
-    pub first: Height,
-    /// Last checkpoint, inclusive.
-    pub last: Height,
-    /// Distance between consecutive checkpoints.
-    pub interval: NonZeroU64,
+    epoch: Epoch,
+    first: Height,
+    last: Height,
+    interval: NonZeroU64,
 }
 
 impl Schedule {
+    /// Creates a schedule, or returns `None` if `first` exceeds `last`.
+    pub const fn new(
+        epoch: Epoch,
+        first: Height,
+        last: Height,
+        interval: NonZeroU64,
+    ) -> Option<Self> {
+        if first.get() > last.get() {
+            return None;
+        }
+        Some(Self {
+            epoch,
+            first,
+            last,
+            interval,
+        })
+    }
+
+    /// Returns the epoch whose scheme signs the checkpoints.
+    pub const fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
+    /// Returns the lowest height the schedule may include.
+    pub const fn first(&self) -> Height {
+        self.first
+    }
+
+    /// Returns the last checkpoint.
+    pub const fn last(&self) -> Height {
+        self.last
+    }
+
+    /// Returns the distance between consecutive checkpoints.
+    pub const fn interval(&self) -> NonZeroU64 {
+        self.interval
+    }
+
     /// Returns whether `height` is a checkpoint.
     pub const fn contains(&self, height: Height) -> bool {
         self.first.get() <= height.get()
@@ -443,7 +482,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         R: CryptoRng,
         S: scheme::Scheme<D>,
     {
-        self.epoch == schedule.epoch
+        self.epoch == schedule.epoch()
             && schedule.contains(self.item.position)
             && scheme.verify_certificate::<_, D>(rng, &self.item, &self.certificate, strategy)
     }
@@ -603,12 +642,13 @@ mod tests {
             &Sequential,
         )
         .unwrap();
-        let schedule = Schedule {
-            epoch: Epoch::new(1),
-            first: Height::new(0),
-            last: Height::new(130),
-            interval: NonZeroU64::new(10).unwrap(),
-        };
+        let schedule = Schedule::new(
+            Epoch::new(1),
+            Height::new(0),
+            Height::new(130),
+            NonZeroU64::new(10).unwrap(),
+        )
+        .unwrap();
         assert!(certificate.verify_for(&mut rng, &schemes[0], &schedule, &Sequential));
 
         let mut wrong_epoch = certificate.clone();
@@ -616,21 +656,25 @@ mod tests {
         assert!(!wrong_epoch.verify_for(&mut rng, &schemes[0], &schedule, &Sequential));
 
         // A quorum-signed certificate off the schedule is rejected.
-        let off_schedule = Schedule {
-            last: Height::new(131),
-            ..schedule
-        };
+        let off_schedule = Schedule::new(
+            Epoch::new(1),
+            Height::new(0),
+            Height::new(131),
+            NonZeroU64::new(10).unwrap(),
+        )
+        .unwrap();
         assert!(!certificate.verify_for(&mut rng, &schemes[0], &off_schedule, &Sequential));
     }
 
     #[test]
     fn test_schedule() {
-        let schedule = Schedule {
-            epoch: Epoch::new(1),
-            first: Height::new(10),
-            last: Height::new(35),
-            interval: NonZeroU64::new(10).unwrap(),
-        };
+        let schedule = Schedule::new(
+            Epoch::new(1),
+            Height::new(10),
+            Height::new(35),
+            NonZeroU64::new(10).unwrap(),
+        )
+        .unwrap();
         let checkpoints: Vec<_> = (0..50)
             .map(Height::new)
             .filter(|height| schedule.contains(*height))
@@ -644,25 +688,33 @@ mod tests {
         assert_eq!(schedule.next(Height::new(15)), Some(Height::new(25)));
         assert_eq!(schedule.next(Height::new(35)), None);
 
-        let dense = Schedule {
-            interval: NonZeroU64::new(1).unwrap(),
-            ..schedule
-        };
+        let dense = Schedule::new(
+            Epoch::new(1),
+            Height::new(10),
+            Height::new(35),
+            NonZeroU64::new(1).unwrap(),
+        )
+        .unwrap();
         assert!((10..=35).all(|height| dense.contains(Height::new(height))));
         assert!(!dense.contains(Height::new(9)) && !dense.contains(Height::new(36)));
 
-        let max = Schedule {
-            epoch: Epoch::new(1),
-            first: Height::new(u64::MAX - 5),
-            last: Height::new(u64::MAX),
-            interval: NonZeroU64::new(4).unwrap(),
-        };
+        let max = Schedule::new(
+            Epoch::new(1),
+            Height::new(u64::MAX - 5),
+            Height::new(u64::MAX),
+            NonZeroU64::new(4).unwrap(),
+        )
+        .unwrap();
         assert_eq!(max.ceil(Height::zero()), Some(Height::new(u64::MAX - 4)));
         assert_eq!(
             max.next(Height::new(u64::MAX - 4)),
             Some(Height::new(u64::MAX))
         );
         assert_eq!(max.next(Height::new(u64::MAX)), None);
+
+        let one = NonZeroU64::new(1).unwrap();
+        assert!(Schedule::new(Epoch::new(1), Height::new(2), Height::new(1), one).is_none());
+        assert!(Schedule::new(Epoch::new(1), Height::new(1), Height::new(1), one).is_some());
     }
 
     #[test]

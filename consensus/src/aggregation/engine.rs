@@ -206,13 +206,9 @@ where
     T: Strategy,
     R: Recoverer,
 {
-    /// Creates an engine. Panics if the schedule is empty.
+    /// Creates an engine.
     pub fn new(context: E, cfg: Config<S, D, A, Z, B, T, R>) -> (Self, Mailbox<S, D>) {
         let schedule = cfg.schedule;
-        assert!(
-            schedule.first <= schedule.last,
-            "aggregation schedule must not be empty"
-        );
         let frontier = schedule.ceil(cfg.floor);
         let metrics = metrics::Metrics::init(&context);
         let mailbox_capacity =
@@ -239,7 +235,7 @@ where
             blocker: cfg.blocker,
             strategy: cfg.strategy,
             window: cfg.window.get(),
-            frontier: frontier.unwrap_or(schedule.last),
+            frontier: frontier.unwrap_or(schedule.last()),
             complete: frontier.is_none(),
             digest_requests: FuturesPool::default(),
             pending: BTreeMap::new(),
@@ -562,7 +558,7 @@ where
         }
         let certificate = Certificate::from_acks(
             &self.scheme,
-            self.schedule.epoch,
+            self.schedule.epoch(),
             non_empty![@matching],
             &self.strategy,
         )
@@ -595,7 +591,7 @@ where
         certificate: Certificate<S, D>,
     ) -> CertificateOutcome {
         let position = certificate.item.position;
-        if certificate.epoch != self.schedule.epoch || !self.schedule.contains(position) {
+        if certificate.epoch != self.schedule.epoch() || !self.schedule.contains(position) {
             return CertificateOutcome::Invalid;
         }
         if !self.pending.contains_key(&position) {
@@ -640,7 +636,7 @@ where
     const fn recovery_key(&self, position: Height) -> RecoveryKey {
         RecoveryKey {
             namespace: self.recovery_namespace,
-            epoch: self.schedule.epoch,
+            epoch: self.schedule.epoch(),
             position,
         }
     }
@@ -675,7 +671,7 @@ where
             self.replay_certificate(certificate);
         }
         self.journal = Some(journal);
-        info!(epoch = %self.schedule.epoch, frontier = %self.frontier, complete = self.complete, "replayed aggregation journal");
+        info!(epoch = %self.schedule.epoch(), frontier = %self.frontier, complete = self.complete, "replayed aggregation journal");
         restarted
     }
 
@@ -828,12 +824,8 @@ mod tests {
             let (mut engine, _) = Engine::new(
                 context.child("engine"),
                 Config {
-                    schedule: Schedule {
-                        epoch,
-                        first: position,
-                        last: position,
-                        interval: NonZeroU64::new(1).unwrap(),
-                    },
+                    schedule: Schedule::new(epoch, position, position, NonZeroU64::new(1).unwrap())
+                        .unwrap(),
                     floor: position,
                     scheme,
                     automaton: NoopAutomaton,

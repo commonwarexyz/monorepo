@@ -47,10 +47,10 @@ impl Write for Identity {
     fn write(&self, writer: &mut impl BufMut) {
         self.namespace.write(writer);
         self.committee.write(writer);
-        self.schedule.epoch.write(writer);
-        self.schedule.first.write(writer);
-        self.schedule.last.write(writer);
-        self.schedule.interval.get().write(writer);
+        self.schedule.epoch().write(writer);
+        self.schedule.first().write(writer);
+        self.schedule.last().write(writer);
+        self.schedule.interval().get().write(writer);
     }
 }
 
@@ -61,14 +61,15 @@ impl Read for Identity {
         Ok(Self {
             namespace: RecoveryNamespace::read(reader)?,
             committee: Sha256Digest::read(reader)?,
-            schedule: Schedule {
-                epoch: Epoch::read(reader)?,
-                first: Height::read(reader)?,
-                last: Height::read(reader)?,
-                interval: NonZeroU64::new(u64::read(reader)?).ok_or(CodecError::Invalid(
-                    "consensus::aggregation::journal::Identity",
-                    "zero interval",
-                ))?,
+            schedule: {
+                const CONTEXT: &str = "consensus::aggregation::journal::Identity";
+                let epoch = Epoch::read(reader)?;
+                let first = Height::read(reader)?;
+                let last = Height::read(reader)?;
+                let interval = NonZeroU64::new(u64::read(reader)?)
+                    .ok_or(CodecError::Invalid(CONTEXT, "zero interval"))?;
+                Schedule::new(epoch, first, last, interval)
+                    .ok_or(CodecError::Invalid(CONTEXT, "empty schedule"))?
             },
         })
     }
@@ -78,10 +79,10 @@ impl EncodeSize for Identity {
     fn encode_size(&self) -> usize {
         self.namespace.encode_size()
             + self.committee.encode_size()
-            + self.schedule.epoch.encode_size()
-            + self.schedule.first.encode_size()
-            + self.schedule.last.encode_size()
-            + self.schedule.interval.get().encode_size()
+            + self.schedule.epoch().encode_size()
+            + self.schedule.first().encode_size()
+            + self.schedule.last().encode_size()
+            + self.schedule.interval().get().encode_size()
     }
 }
 
@@ -267,8 +268,8 @@ where
 
     pub async fn append(&mut self, certificate: Certificate<S, D>) -> Result<(), JournalError> {
         // Consecutive checkpoints have consecutive indices, so sections fill evenly at any interval.
-        let index = (certificate.item.position.get() - self.schedule.first.get())
-            / self.schedule.interval.get();
+        let index = (certificate.item.position.get() - self.schedule.first().get())
+            / self.schedule.interval().get();
         let section = index / self.checkpoints_per_section.get();
         let record = Record::Certificate(certificate);
         rebind(&mut self.inner, |journal| journal.append(section, &record)).await?;
@@ -298,12 +299,7 @@ mod tests {
     fn config(context: &deterministic::Context, partition: &str) -> JournalConfig {
         JournalConfig {
             partition: partition.into(),
-            schedule: Schedule {
-                epoch: EPOCH,
-                first: FIRST,
-                last: LAST,
-                interval: NonZeroU64::new(2).unwrap(),
-            },
+            schedule: Schedule::new(EPOCH, FIRST, LAST, NonZeroU64::new(2).unwrap()).unwrap(),
             write_buffer: NZUsize!(4096),
             replay_buffer: NZUsize!(4096),
             checkpoints_per_section: NonZeroU64::new(2).unwrap(),
@@ -429,35 +425,16 @@ mod tests {
                 );
             }
 
-            let schedule = config.schedule;
+            let interval = config.schedule.interval();
+            let schedule =
+                |epoch, first, last, interval| Schedule::new(epoch, first, last, interval).unwrap();
             let mismatches = [
-                (
-                    "epoch",
-                    Schedule {
-                        epoch: EPOCH.next(),
-                        ..schedule
-                    },
-                ),
-                (
-                    "first",
-                    Schedule {
-                        first: FIRST.next(),
-                        ..schedule
-                    },
-                ),
-                (
-                    "last",
-                    Schedule {
-                        last: LAST.next(),
-                        ..schedule
-                    },
-                ),
+                ("epoch", schedule(EPOCH.next(), FIRST, LAST, interval)),
+                ("first", schedule(EPOCH, FIRST.next(), LAST, interval)),
+                ("last", schedule(EPOCH, FIRST, LAST.next(), interval)),
                 (
                     "interval",
-                    Schedule {
-                        interval: NonZeroU64::new(1).unwrap(),
-                        ..schedule
-                    },
+                    schedule(EPOCH, FIRST, LAST, NonZeroU64::new(1).unwrap()),
                 ),
             ];
             for (name, schedule) in mismatches {
