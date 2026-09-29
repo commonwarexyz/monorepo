@@ -1756,6 +1756,7 @@ dependencies = [
  "proptest",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
+ "rustoleum",
  "thiserror 2.0.18",
 ]
 
@@ -6342,6 +6343,50 @@ dependencies = [
  "rustls-pki-types",
  "untrusted 0.9.0",
 ]
+
+[[package]]
+name = "rustoleum"
+version = "0.1.0"
+dependencies = [
+ "rustoleum-front",
+ "rustoleum-macros",
+]
+
+[[package]]
+name = "rustoleum-front"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "proc-macro2",
+ "quote",
+ "rustoleum-kernel",
+ "rustoleum-memguard",
+ "rustoleum-targets",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "rustoleum-kernel"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "rustoleum-memguard",
+]
+
+[[package]]
+name = "rustoleum-macros"
+version = "0.1.0"
+
+[[package]]
+name = "rustoleum-memguard"
+version = "0.1.0"
+
+[[package]]
+name = "rustoleum-targets"
+version = "0.1.0"
 
 [[package]]
 name = "rustversion"

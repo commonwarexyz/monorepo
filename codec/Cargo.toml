@@ -29,6 +29,10 @@ arbitrary = [
 	"std",
 ]
 
+[build-dependencies]
+# the rustoleum verifier (wip/augment toolchain), run by build.rs
+rustoleum = { path = "../../wt-aug/crates/rustoleum", features = ["build"] }
+
 [dependencies]
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true

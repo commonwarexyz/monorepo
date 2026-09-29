@@ -312,3 +312,15 @@ opt-level = 3
 
 [profile.test.package.x25519-dalek]
 opt-level = 3
+
+# The rustoleum verifier runs inside codec/build.rs: run it optimized.
+[profile.dev.build-override]
+opt-level = 3
+[profile.release.build-override]
+opt-level = 3
+[profile.dev.package.rustoleum-kernel]
+opt-level = 3
+[profile.dev.package.rustoleum-front]
+opt-level = 2
+[profile.dev.package.rustoleum-memguard]
+opt-level = 3
