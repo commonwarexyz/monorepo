@@ -1509,16 +1509,19 @@ pub(super) mod tests {
         ));
 
         // Anything at or above the frozen size is rejected.
-        assert!(
+        assert!(matches!(
             crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
-                .await
-                .is_err()
-        );
-        assert!(
-            crate::qmdb::historical_proof(&snapshot, op_count, op_count, NZU64!(1))
-                .await
-                .is_err()
-        );
+                .await,
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::RangeOutOfBounds(_)
+            ))
+        ));
+        assert!(matches!(
+            crate::qmdb::historical_proof(&snapshot, op_count, op_count, NZU64!(1)).await,
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::RangeOutOfBounds(_)
+            ))
+        ));
 
         db.destroy().await.unwrap();
     }
@@ -3531,13 +3534,13 @@ pub(super) mod tests {
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
 
         // to_batch root matches committed root.
-        let snapshot = db.to_batch();
-        assert_eq!(snapshot.root(), db.root());
+        let view = db.to_batch();
+        assert_eq!(view.root(), db.root());
 
         // Chain a child from that batch, apply it.
         let key2 = Sha256::hash(&[&[2]]);
         let v2 = Sha256::fill(20u8);
-        let child = snapshot
+        let child = view
             .new_batch::<Sha256>()
             .set(key2, v2)
             .merkleize(&db, None, Location::new(0))

@@ -321,7 +321,7 @@ where
     }
 
     /// Snapshot of the grafted tree for use in batch chains.
-    pub(super) fn grafted_snapshot(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>> {
+    pub(super) fn grafted_batch(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>> {
         merkle::batch::MerkleizedBatch::from_mem_with_strategy(
             &self.grafted_tree,
             self.strategy.clone(),
@@ -332,7 +332,7 @@ where
     pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<F, H, U, N, S> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
-            self.grafted_snapshot(),
+            self.grafted_batch(),
             BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
         )
     }
@@ -1675,11 +1675,13 @@ mod tests {
             ));
 
             // Anything above the frozen size is rejected.
-            assert!(
+            assert!(matches!(
                 crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
-                    .await
-                    .is_err()
-            );
+                    .await,
+                Err(crate::qmdb::Error::Merkle(
+                    crate::merkle::Error::RangeOutOfBounds(_)
+                ))
+            ));
 
             db.destroy().await.unwrap();
         });

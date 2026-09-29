@@ -1038,16 +1038,19 @@ pub(crate) mod tests {
         ));
 
         // Anything at or above the frozen size is rejected.
-        assert!(
+        assert!(matches!(
             crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
-                .await
-                .is_err()
-        );
-        assert!(
-            crate::qmdb::historical_proof(&snapshot, op_count, op_count, NZU64!(1))
-                .await
-                .is_err()
-        );
+                .await,
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::RangeOutOfBounds(_)
+            ))
+        ));
+        assert!(matches!(
+            crate::qmdb::historical_proof(&snapshot, op_count, op_count, NZU64!(1)).await,
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::RangeOutOfBounds(_)
+            ))
+        ));
 
         db.destroy().await.unwrap();
     }
@@ -2175,10 +2178,10 @@ pub(crate) mod tests {
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
 
-        let snapshot = db.to_batch();
-        assert_eq!(snapshot.root(), db.root());
+        let view = db.to_batch();
+        assert_eq!(view.root(), db.root());
 
-        let child_batch = snapshot.new_batch::<Sha256>();
+        let child_batch = view.new_batch::<Sha256>();
         let loc2 = child_batch.size();
         let child_batch = child_batch.append(V::Value::make(20));
         let merkleized = child_batch
