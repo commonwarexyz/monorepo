@@ -251,6 +251,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> std::fmt::Debug for Merkle<F
     }
 }
 
+/// Nodes resolved without a journal read (`None` where a read is still needed), plus the
+/// strictly increasing journal positions to read.
+type ProbedNodes<D> = (Vec<Option<D>>, Vec<u64>);
+
 /// Prefix used for nodes in the metadata prefixed U8 key.
 const NODE_PREFIX: u8 = 0;
 
@@ -720,10 +724,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
     /// Resolve `positions` from memory and the node cache, returning the resolved slots and the
     /// strictly increasing journal positions still to read.
-    fn probe_nodes(
-        &self,
-        positions: &[Position<F>],
-    ) -> Result<(Vec<Option<D>>, Vec<u64>), Error<F>> {
+    fn probe_nodes(&self, positions: &[Position<F>]) -> Result<ProbedNodes<D>, Error<F>> {
         assert!(
             positions.is_sorted_by(|a, b| a < b),
             "positions must be strictly increasing"
