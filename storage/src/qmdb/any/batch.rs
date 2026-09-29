@@ -29,6 +29,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::{bitmap, iter::zip_eq, range::contains_cyclic};
 use core::{
     cmp::Ordering,
+    num::NonZeroUsize,
     ops::{
         Bound::{Excluded, Included},
         Range,
@@ -282,19 +283,13 @@ where
     base: Base<F, H::Digest, U, S>,
 }
 
-/// An operation visited by [`UnmerkleizedBatch::pop_floor`].
-pub struct FloorEntry<F: Family, U: update::Update> {
-    /// The operation's original location.
+/// An active update evicted by [`UnmerkleizedBatch::pop_active`].
+pub struct ActiveEntry<F: Family, U: update::Update> {
+    /// The update's original location.
     pub location: Location<F>,
-    /// The operation at this location, including inactive updates, deletes, and commits.
-    pub operation: Operation<F, U>,
-    /// Whether this was a live update immediately before the step.
-    ///
-    /// Pending writes or deletions make an update inactive. Deletes and commits are always
-    /// inactive for floor raising, including the previous commit that the new commit replaces.
-    /// An active update is evicted; write its key and value back to preserve it at the tip.
+    /// The evicted update. Write its key and value back to preserve it at the tip.
     /// Ordered databases regenerate its successor link from the final key set.
-    pub active: bool,
+    pub update: U,
 }
 
 /// Pending mutations whose old locations were already resolved by staged reads, sorted
@@ -1778,7 +1773,7 @@ where
 
     /// Disable automatic floor raising for this batch.
     ///
-    /// The floor stays at its inherited boundary until [`Self::pop_floor`] advances it.
+    /// The floor stays at its inherited boundary until [`Self::pop_active`] advances it.
     /// If the final state is empty, merkleization sets the floor to the new commit location.
     /// New batches created from the merkleized result use the automatic policy by default.
     pub fn with_manual_floor(mut self) -> Self {
@@ -1787,18 +1782,19 @@ where
         self
     }
 
-    /// Advance the floor by one operation, evicting it if it is a live update.
+    /// Evict the next active update, skipping inactive operations.
     ///
-    /// Returns the batch and the operation's location, payload, and activity before the step.
-    /// Inactive operations are returned without changing any key. The scan stops at the batch's
-    /// original tip: new writes and reinserted entries cannot be popped again in the same batch.
-    /// Returns `None` at that tip, without advancing the floor.
+    /// `quota` limits the number of inactive operations skipped in this call; `None` is
+    /// unlimited. Reaching the quota returns `None` immediately, retaining the advanced floor
+    /// so a subsequent call resumes there. Also returns `None` at the batch's original tip.
+    /// New writes and reinserts are outside the scan. Pending writes and deletions make old
+    /// updates inactive; deletes and commits are always inactive for floor raising.
     ///
     /// Calling this method selects [`Self::with_manual_floor`], even when it returns `None`.
     /// Merkleization performs no additional automatic moves; an empty final state sets the floor
-    /// to the new commit location. Eviction records a deletion; write an active update's key and
-    /// value back to preserve it, or write a replacement value. Changes remain speculative until
-    /// the batch is applied.
+    /// to the new commit location. Eviction records a deletion; write the returned update's key
+    /// and value back to preserve it, or write a replacement value. Changes remain speculative
+    /// until the batch is applied.
     ///
     /// # Errors
     ///
@@ -1806,10 +1802,11 @@ where
     /// Reading an operation can also return a journal error. Cancellation or an error consumes
     /// the batch without modifying `db`.
     #[allow(clippy::type_complexity)]
-    pub async fn pop_floor<E, C, I, const N: usize>(
+    pub async fn pop_active<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Self, Option<FloorEntry<F, U>>), crate::qmdb::Error<F>>
+        quota: Option<NonZeroUsize>,
+    ) -> Result<(Self, Option<ActiveEntry<F, U>>), crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -1817,42 +1814,40 @@ where
     {
         let ancestors = self.validate_commitment(db.commitment())?;
         let mut batch = self.with_manual_floor();
-        let location = batch.manual_floor.expect("manual floor selected");
+        let mut location = batch.manual_floor.expect("manual floor selected");
         let tip = batch.base.base_state().size;
-        if location >= tip {
-            return Ok((batch, None));
-        }
         let db_size = db.log.size();
-        let operation = if location < db_size {
-            db.log.read(*location).await?
-        } else {
-            read_op_from_ancestors(&ancestors, *location, *db_size).clone()
-        };
-        let active = if let Operation::Update(update) = &operation {
-            let key = update::Update::key(update);
-            let active = !batch.mutations.contains_key(key)
-                && resolve_in_ancestors(&ancestors, key).map_or_else(
-                    || db.snapshot.get(key).any(|&loc| loc == location),
-                    |entry| entry.loc() == Some(location),
-                );
-            if active {
-                batch.mutations.insert(key.clone(), None);
+        let mut remaining = quota.map(NonZeroUsize::get);
+        while location < tip {
+            let operation = if location < db_size {
+                db.log.read(*location).await?
+            } else {
+                read_op_from_ancestors(&ancestors, *location, *db_size).clone()
+            };
+            batch.manual_floor = Some(location + 1);
+            if let Operation::Update(update) = operation {
+                let key = update::Update::key(&update);
+                let active = !batch.mutations.contains_key(key)
+                    && resolve_in_ancestors(&ancestors, key).map_or_else(
+                        || db.snapshot.get(key).any(|&loc| loc == location),
+                        |entry| entry.loc() == Some(location),
+                    );
+                if active {
+                    batch.mutations.insert(key.clone(), None);
+                    return Ok((batch, Some(ActiveEntry { location, update })));
+                }
             }
-            active
-        } else {
-            false
-        };
-        batch.manual_floor = Some(location + 1);
+            if let Some(remaining) = &mut remaining {
+                *remaining -= 1;
+                if *remaining == 0 {
+                    break;
+                }
+            }
+            location += 1;
+        }
         // Ancestors must remain alive until every operation read has completed.
         drop(ancestors);
-        Ok((
-            batch,
-            Some(FloorEntry {
-                location,
-                operation,
-                active,
-            }),
-        ))
+        Ok((batch, None))
     }
 
     /// Validate that `current` is a state on this batch's live chain, returning strong ancestor
@@ -3367,11 +3362,12 @@ mod trait_impls {
             Self::with_manual_floor(self)
         }
 
-        async fn pop_floor(
+        async fn pop_active(
             self,
             db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        ) -> Result<(Self, Option<FloorEntry<F, Self::Update>>), crate::qmdb::Error<F>> {
-            Self::pop_floor(self, db).await
+            quota: Option<NonZeroUsize>,
+        ) -> Result<(Self, Option<ActiveEntry<F, Self::Update>>), crate::qmdb::Error<F>> {
+            Self::pop_active(self, db, quota).await
         }
 
         fn merkleize(
@@ -3412,11 +3408,12 @@ mod trait_impls {
             Self::with_manual_floor(self)
         }
 
-        async fn pop_floor(
+        async fn pop_active(
             self,
             db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        ) -> Result<(Self, Option<FloorEntry<F, Self::Update>>), crate::qmdb::Error<F>> {
-            Self::pop_floor(self, db).await
+            quota: Option<NonZeroUsize>,
+        ) -> Result<(Self, Option<ActiveEntry<F, Self::Update>>), crate::qmdb::Error<F>> {
+            Self::pop_active(self, db, quota).await
         }
 
         fn merkleize(

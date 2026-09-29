@@ -7,7 +7,7 @@ use crate::{
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use commonware_runtime::Handle;
-use core::num::NonZeroU64;
+use core::num::{NonZeroU64, NonZeroUsize};
 use std::{future::Future, ops::Range};
 
 /// Unmerkleized batch of operations.
@@ -25,16 +25,17 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     /// Disable automatic floor raising for this batch.
     fn with_manual_floor(self) -> Self;
 
-    /// Advance by one operation, returning its activity and evicting it if active.
+    /// Evict the next active update, skipping at most `quota` inactive operations.
     #[allow(clippy::type_complexity)]
-    fn pop_floor(
+    fn pop_active(
         self,
         db: &Db,
+        quota: Option<NonZeroUsize>,
     ) -> impl Future<
         Output = Result<
             (
                 Self,
-                Option<super::batch::FloorEntry<Self::Family, Self::Update>>,
+                Option<super::batch::ActiveEntry<Self::Family, Self::Update>>,
             ),
             Error<Self::Family>,
         >,

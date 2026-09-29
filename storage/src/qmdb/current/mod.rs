@@ -5006,7 +5006,7 @@ pub mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_current_ordered_pop_floor_reinsert_and_ancestor_proofs() {
+    fn test_current_ordered_pop_active_reinsert_and_ancestor_proofs() {
         deterministic::Runner::default().start(|context| async move {
             let ctx = context.child("db");
             let partition = "current-ordered-pop-floor-ancestor";
@@ -5030,8 +5030,7 @@ pub mod tests {
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            // A pending ancestor supersedes the middle base operation. Every original
-            // operation consumes one call, including the inactive middle update.
+            // A pending ancestor supersedes the middle base operation.
             let parent = db
                 .new_batch()
                 .with_manual_floor()
@@ -5039,41 +5038,30 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            let (child, initial) = parent.new_batch::<Sha256>().pop_floor(&db).await.unwrap();
-            let initial = initial.expect("initial commit consumes a step");
-            assert_eq!(initial.location, db.inactivity_floor_loc());
-            assert!(!initial.active);
-            assert!(matches!(initial.operation, Operation::CommitFloor(None, _)));
-            let (child, first) = child.pop_floor(&db).await.unwrap();
-            let first = first.expect("oldest key should be evicted");
-            assert!(first.active);
-            let Operation::Update(first_update) = first.operation else {
-                panic!("expected first update");
-            };
-            assert_eq!(*first_update.key(), keys[0]);
-            assert_eq!(first_update.into_value(), val(0));
-            let (child, middle) = child
-                .write(keys[0], Some(val(10)))
-                .pop_floor(&db)
+            let (child, initial) = parent
+                .new_batch::<Sha256>()
+                .pop_active(&db, NonZeroUsize::new(1))
                 .await
                 .unwrap();
-            let middle = middle.expect("inactive ancestor update consumes a step");
-            assert!(!middle.active);
-            let Operation::Update(middle_update) = middle.operation else {
-                panic!("expected middle update");
-            };
-            assert_eq!(*middle_update.key(), keys[1]);
-            assert_eq!(middle_update.into_value(), val(1));
-            assert_eq!(middle.location, Location::new(*first.location + 1));
-            let (child, second) = child.pop_floor(&db).await.unwrap();
+            assert!(initial.is_none(), "initial commit exhausts the quota");
+            let (child, first) = child.pop_active(&db, None).await.unwrap();
+            let first = first.expect("oldest key should be evicted");
+            assert_eq!(*first.update.key(), keys[0]);
+            assert_eq!(first.update.into_value(), val(0));
+            let (child, middle) = child
+                .write(keys[0], Some(val(10)))
+                .pop_active(&db, NonZeroUsize::new(1))
+                .await
+                .unwrap();
+            assert!(
+                middle.is_none(),
+                "inactive ancestor update exhausts the quota"
+            );
+            let (child, second) = child.pop_active(&db, None).await.unwrap();
             let second = second.expect("last base key should be evicted");
-            assert!(second.active);
-            let Operation::Update(second_update) = second.operation else {
-                panic!("expected last update");
-            };
-            assert_eq!(*second_update.key(), keys[2]);
-            assert_eq!(second_update.into_value(), val(2));
-            assert_eq!(second.location, Location::new(*middle.location + 1));
+            assert_eq!(*second.update.key(), keys[2]);
+            assert_eq!(second.update.into_value(), val(2));
+            assert_eq!(second.location, Location::new(*first.location + 2));
 
             let child = child.merkleize(&db, None).await.unwrap();
             let speculative_root = child.root();
@@ -5125,7 +5113,7 @@ pub mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_current_ordered_pop_floor_to_empty_proves_exclusion() {
+    fn test_current_ordered_pop_active_to_empty_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
             let ctx = context.child("db");
             let db: OrderedFixedDb = OrderedFixedDb::init(
@@ -5143,19 +5131,11 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(seed).await.unwrap();
-            let (batch, evicted) = db.new_batch().pop_floor(&db).await.unwrap();
+            let (batch, evicted) = db.new_batch().pop_active(&db, None).await.unwrap();
             let evicted = evicted.expect("one live key");
-            assert!(evicted.active);
-            let Operation::Update(update) = evicted.operation else {
-                panic!("expected update");
-            };
+            let update = evicted.update;
             assert_eq!((*update.key(), update.into_value()), (k, val(7)));
-            let (batch, commit) = batch.pop_floor(&db).await.unwrap();
-            let commit = commit.expect("commit consumes a step");
-            assert!(!commit.active);
-            assert!(matches!(commit.operation, Operation::CommitFloor(..)));
-            assert_eq!(commit.location, Location::new(*evicted.location + 1));
-            let (batch, none) = batch.pop_floor(&db).await.unwrap();
+            let (batch, none) = batch.pop_active(&db, None).await.unwrap();
             assert!(none.is_none());
             let batch = batch.merkleize(&db, None).await.unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
@@ -5171,7 +5151,7 @@ pub mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_current_unordered_staged_update_preserves_manual_pop_floor() {
+    fn test_current_unordered_staged_update_preserves_manual_pop_active() {
         deterministic::Runner::default().start(|context| async move {
             let ctx = context.child("db");
             let partition = "current-unordered-staged-pop-floor";
@@ -5197,17 +5177,9 @@ pub mod tests {
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            let (batch, initial) = db.new_batch().pop_floor(&db).await.unwrap();
-            let initial = initial.expect("initial commit consumes a step");
-            assert_eq!(initial.location, db.inactivity_floor_loc());
-            assert!(!initial.active);
-            assert!(matches!(initial.operation, Operation::CommitFloor(None, _)));
-            let (batch, evicted) = batch.pop_floor(&db).await.unwrap();
+            let (batch, evicted) = db.new_batch().pop_active(&db, None).await.unwrap();
             let evicted = evicted.expect("oldest committed key");
-            assert!(evicted.active);
-            let Operation::Update(update) = evicted.operation else {
-                panic!("expected update");
-            };
+            let update = evicted.update;
             assert_eq!((*update.key(), update.into_value()), (keys[0], val(0)));
             let expected_floor = Location::new(*evicted.location + 1);
             let staged_keys = [&keys[2]];

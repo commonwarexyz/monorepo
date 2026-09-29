@@ -35,7 +35,7 @@ use commonware_utils::{
     Widen,
     bitmap::{self, Readable as _},
 };
-use core::ops::Range;
+use core::{num::NonZeroUsize, ops::Range};
 use std::sync::Arc;
 
 /// Speculative chunk-level bitmap overlay.
@@ -378,7 +378,7 @@ where
         self
     }
 
-    /// Disable automatic floor advancement for this batch. [`pop_floor`](Self::pop_floor)
+    /// Disable automatic floor advancement for this batch. [`pop_active`](Self::pop_active)
     /// advances through the original prefix; an empty final state moves the floor to the
     /// new commit location.
     pub fn with_manual_floor(mut self) -> Self {
@@ -386,22 +386,26 @@ where
         self
     }
 
-    /// Advance the floor by one original operation and return that operation and its activity.
-    /// Active updates are removed from the batch's view; write the update's key and value back
-    /// to preserve it. Inactive updates, deletes, and commits still consume one step.
-    /// Returns `None` at the batch's original tip, excluding its new writes and reinserts.
+    /// Evict the next active update, skipping inactive operations.
+    ///
+    /// `quota` limits inactive skips per call; `None` is unlimited. Returns `None` immediately
+    /// upon reaching the quota or the original tip, retaining the advanced floor for the next
+    /// call. New writes and reinserts are outside the scan. Write the returned update's key and
+    /// value back to preserve it. See [`any::batch::UnmerkleizedBatch::pop_active`].
+    ///
     /// Calling this method selects manual floor advancement even when it returns `None`.
     /// Merkleization performs no additional automatic moves; an empty final state sets the floor
-    /// to the new commit location. See [`any::batch::FloorEntry`] for activity semantics.
+    /// to the new commit location.
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleBatch`] when `db` is not the batch's live database instance or
     /// its parent bitmap does not match the committed database.
-    pub async fn pop_floor<E, C, I>(
+    pub async fn pop_active<E, C, I>(
         self,
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Self, Option<any::batch::FloorEntry<F, U>>), Error<F>>
+        quota: Option<NonZeroUsize>,
+    ) -> Result<(Self, Option<any::batch::ActiveEntry<F, U>>), Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -413,7 +417,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, entry) = inner.pop_floor(&db.any).await?;
+        let (inner, entry) = inner.pop_active(&db.any, quota).await?;
         Ok((
             Self {
                 inner,
@@ -1369,11 +1373,12 @@ mod trait_impls {
             Self::with_manual_floor(self)
         }
 
-        async fn pop_floor(
+        async fn pop_active(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        ) -> Result<(Self, Option<any::batch::FloorEntry<F, Self::Update>>), Error<F>> {
-            Self::pop_floor(self, db).await
+            quota: Option<NonZeroUsize>,
+        ) -> Result<(Self, Option<any::batch::ActiveEntry<F, Self::Update>>), Error<F>> {
+            Self::pop_active(self, db, quota).await
         }
 
         async fn merkleize(
@@ -1414,11 +1419,12 @@ mod trait_impls {
             Self::with_manual_floor(self)
         }
 
-        async fn pop_floor(
+        async fn pop_active(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        ) -> Result<(Self, Option<any::batch::FloorEntry<F, Self::Update>>), Error<F>> {
-            Self::pop_floor(self, db).await
+            quota: Option<NonZeroUsize>,
+        ) -> Result<(Self, Option<any::batch::ActiveEntry<F, Self::Update>>), Error<F>> {
+            Self::pop_active(self, db, quota).await
         }
 
         async fn merkleize(
