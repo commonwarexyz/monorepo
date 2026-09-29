@@ -332,12 +332,12 @@ where
 /// # Branch validity
 ///
 /// A `MerkleizedBatch` is a branch-scoped view rooted at a specific committed prefix of the DB,
-/// not an immutable snapshot. Reads through the chain, constructing child batches, and applying
-/// the batch later are only valid while every batch applied to the DB since this batch was
-/// merkleized is an ancestor of this batch. Applying a batch from a different fork is rejected
-/// with [`crate::qmdb::Error::StaleBatch`], and reading through it is refused with
-/// [`crate::qmdb::Error::StaleRead`]. Applying one of this batch's own descendants also makes reads
-/// through it stale (see [`crate::qmdb::chain`] for more details).
+/// not an immutable snapshot. Reads through it pass only while the DB sits on one of the chain's
+/// own states: the state the chain forked from, an ancestor's tip, or this batch's own tip (once
+/// it is applied). After any other batch is applied (a sibling fork, or one of this batch's own
+/// descendants), reads refuse with [`crate::qmdb::Error::StaleRead`], and applying the batch or
+/// merkleizing a child of it is rejected with [`crate::qmdb::Error::StaleBatch`] (see
+/// [`crate::qmdb::chain`] for more details).
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy> {
@@ -1620,6 +1620,7 @@ where
             resolutions,
         } = self;
         let mut prepared = batch.prepare(db)?;
+        let db = prepared.db;
 
         // Bound the steps the floor raise can take: only emitted ops consume steps, and an
         // op is emitted per location-resolved update plus per upsert or prior mutation on a
@@ -2710,6 +2711,8 @@ where
     /// Includes this batch's changes and its ancestors' changes. The query key need not be
     /// active. Returns `None` if there is no greater key, without wrapping.
     ///
+    /// # Errors
+    ///
     /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on this batch's chain.
     pub async fn get_next_key<E, C, I, H, const N: usize>(
         &self,
@@ -2736,6 +2739,8 @@ where
     ///
     /// Includes this batch's changes and its ancestors' changes. The query key need not be
     /// active. Returns `None` if there is no smaller key, without wrapping.
+    ///
+    /// # Errors
     ///
     /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on this batch's chain.
     pub async fn get_prev_key<E, C, I, H, const N: usize>(
@@ -2862,6 +2867,10 @@ where
     /// All unapplied ancestors in the chain must be kept alive until the child (or any
     /// descendant) is merkleized. Otherwise, `merkleize` returns
     /// [`crate::qmdb::Error::StaleBatch`].
+    ///
+    /// Creating a child from a stale parent is allowed. The child's reads, merkleization, and
+    /// apply are refused ([`crate::qmdb::Error::StaleRead`], [`crate::qmdb::Error::StaleBatch`])
+    /// while the database remains off this chain's states.
     #[tracing::instrument(
         name = "qmdb.any.batch.new.from_batch",
         level = "debug",
@@ -4020,6 +4029,9 @@ mod tests {
                 child.pinned_nodes(&db).unwrap(),
             );
             let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+            // At the parent's tip, the child proves from the live store with the same result.
+            assert_eq!(child.proof(&db).unwrap(), child_proof);
+            assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
             let (db, child_range) = db.apply_batch(child).await.unwrap();
             assert_eq!(parent_start, parent_range.start);
             assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
@@ -4348,6 +4360,7 @@ mod tests {
             let batch = build();
 
             let db = db.prune(floor).await.unwrap();
+            assert!(*db.bounds().start > 0, "the prune must drop history");
 
             assert_eq!(
                 batch.get(&cold, &db).await.unwrap(),
@@ -4977,6 +4990,7 @@ mod tests {
             let floor = db.sync_boundary();
             assert!(floor > base_floor);
             let db = db.prune(floor).await.unwrap();
+            assert!(*db.bounds().start > 0, "the prune must drop history");
 
             // The surviving child still merkleizes to the same root.
             let merkleized = child.merkleize(&db, None).await.unwrap();

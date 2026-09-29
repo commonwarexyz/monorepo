@@ -351,12 +351,16 @@ pub enum Error<F: Family> {
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
-    /// The batch cannot be merkleized or applied against the current database state: the
-    /// database moved off the batch's chain, an unapplied ancestor was dropped, or the batch
-    /// belongs to another database instance.
+    /// The batch cannot be merkleized or applied against the current database state.
     ///
-    /// Reads report the same condition as [`Error::StaleRead`]. See [`chain`] for more details
-    /// on staleness detection.
+    /// Causes:
+    /// - The database moved off the batch's chain. Reads report this case as
+    ///   [`Error::StaleRead`].
+    /// - Merkleize only: an unapplied ancestor was dropped, so the chain no longer reaches the live
+    ///   database. Reads stay exact, since each merkleized batch retains its ancestors' overlays.
+    /// - Current merkleize only: the batch was built against another database instance.
+    ///
+    /// See [`chain`] for more details on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 

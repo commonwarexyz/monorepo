@@ -847,8 +847,8 @@ mod tests {
         test_keyless_fixed_floor_at_commit_loc_accepted => run_floor_at_commit_loc_accepted, db;
         test_keyless_fixed_bounded_initialization_after_reopen_with_floor =>
             run_bounded_initialization_after_reopen_with_floor, bounded_indexed;
-        test_keyless_fixed_ancestor_floor_regression_rejected => run_ancestor_floor_regression_rejected, db;
-        test_keyless_fixed_ancestor_floor_beyond_commit_loc_rejected => run_ancestor_floor_beyond_commit_loc_rejected, db;
+        test_keyless_fixed_chained_floor_regression_rejected => run_chained_floor_regression_rejected, db;
+        test_keyless_fixed_chained_floor_beyond_commit_rejected => run_chained_floor_beyond_commit_rejected, db;
         test_keyless_fixed_chained_apply_with_valid_floors_succeeds => run_chained_apply_with_valid_floors_succeeds, db;
         test_keyless_fixed_single_commit_live_set => run_single_commit_live_set, reopen_indexed;
         test_keyless_fixed_commit_after_sync_recovery => run_commit_after_sync_recovery, reopen_indexed;

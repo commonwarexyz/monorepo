@@ -207,12 +207,10 @@ where
 
         // Check this batch's pending appends.
         if loc_val >= self.base.size {
-            let idx = (loc_val - *self.base.size) as usize;
-            return if idx < self.appends.len() {
-                Ok(Some(self.appends[idx].clone()))
-            } else {
-                Ok(None)
-            };
+            let pending = usize::try_from(loc_val - *self.base.size)
+                .ok()
+                .and_then(|idx| self.appends.get(idx));
+            return Ok(pending.cloned());
         }
         check_floor(loc, self.floor(&*db))?;
 
@@ -272,12 +270,10 @@ where
 
             // Check this batch's pending appends.
             if loc_val >= self.base.size {
-                let idx = (loc_val - *self.base.size) as usize;
-                results.push(if idx < self.appends.len() {
-                    Some(self.appends[idx].clone())
-                } else {
-                    None
-                });
+                let pending = usize::try_from(loc_val - *self.base.size)
+                    .ok()
+                    .and_then(|idx| self.appends.get(idx));
+                results.push(pending.cloned());
                 continue;
             }
 

@@ -7,8 +7,11 @@
 //! database while others may not.
 //!
 //! Reads through a batch are gated: a committed read first proves the live database is one of the
-//! chain's own states and otherwise refuses with [`Error::StaleRead`]. Merkleize runs the same
-//! staleness check against the chain's live ancestors and refuses with [`Error::StaleBatch`].
+//! chain's own states and otherwise refuses with [`Error::StaleRead`]. The chain's own states are
+//! the state it forked from (its database boundary), each ancestor's tip, and the batch's own tip.
+//! Membership compares full commitments (size and root). Any other state refuses, including one
+//! reached by applying a descendant of the batch. Merkleize runs the same staleness check against
+//! the chain's live ancestors and refuses with [`Error::StaleBatch`].
 //!
 //! Before applying a batch to the DB, the internal validation checks two things shared across QMDB
 //! variants (any, current, immutable, keyless):

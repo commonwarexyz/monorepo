@@ -521,8 +521,8 @@ mod tests {
         test_fixed_floor_monotonicity => run_floor_monotonicity, open;
         test_fixed_floor_monotonicity_violation => run_floor_monotonicity_violation, open;
         test_fixed_floor_beyond_size => run_floor_beyond_size, open;
-        test_fixed_chained_ancestor_floor_regression => run_chained_ancestor_floor_regression, open;
-        test_fixed_chained_ancestor_floor_beyond_size => run_chained_ancestor_floor_beyond_size, open;
+        test_fixed_chained_floor_regression => run_chained_floor_regression, open;
+        test_fixed_chained_floor_beyond_commit => run_chained_floor_beyond_commit, open;
         test_fixed_bounded_initialization_restores_floor => run_bounded_initialization_restores_floor, open_with_max;
         test_fixed_single_commit_live_set => run_single_commit_live_set, open;
         test_fixed_bounded_initialization_after_reopen_with_floor_change =>

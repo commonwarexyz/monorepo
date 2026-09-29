@@ -519,8 +519,9 @@ where
     ///
     /// Violations return [`Error::FloorRegressed`] or [`Error::FloorBeyondSize`] identifying
     /// the offending floor and the bound it crossed (the prior validated floor, or the commit
-    /// location, respectively). Floor validation happens before any journal mutation, so on floor
-    /// errors the on-disk state is unchanged and reopening recovers the database as it was.
+    /// location, respectively). [`batch::UnmerkleizedBatch::merkleize`] already enforces both
+    /// invariants, so a batch it produced never fails them here. Apply re-checks them as a guard,
+    /// before any journal mutation.
     ///
     /// Returns the range of locations written.
     ///
@@ -1250,6 +1251,9 @@ pub(crate) mod tests {
         );
         let (parent_proof, child_proof) = (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
         let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+        // At the parent's tip, the child proves from the live store with the same result.
+        assert_eq!(child.proof(&db).unwrap(), child_proof);
+        assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
         let (db, child_range) = db.apply_batch(child).await.unwrap();
         assert_eq!(parent_start, parent_range.start);
         assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
@@ -3428,12 +3432,10 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// A chained batch that applies a tip with a floor *lower than* its parent's floor must
-    /// be rejected — the parent's `Commit` is written to the journal by the same
-    /// `journal.apply_batch` call, so its floor participates in the per-commit monotonicity
-    /// invariant.
+    /// A chained batch that declares a floor below its parent's floor is refused at merkleize,
+    /// even though the floor is still at or above the database's floor.
     #[boxed]
-    pub(crate) async fn run_ancestor_floor_regression_rejected<F, V, C, H, S: Strategy>(
+    pub(crate) async fn run_chained_floor_regression_rejected<F, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         F: Family,
@@ -3470,7 +3472,7 @@ pub(crate) mod tests {
     /// A chained batch whose floor exceeds its own commit location, counted past its parent's
     /// operations, is refused at merkleize.
     #[boxed]
-    pub(crate) async fn run_ancestor_floor_beyond_commit_loc_rejected<F, V, C, H, S: Strategy>(
+    pub(crate) async fn run_chained_floor_beyond_commit_rejected<F, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         F: Family,

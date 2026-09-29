@@ -541,6 +541,9 @@ where
     ///   previous commit's floor.
     /// - [`Error::FloorBeyondSize`] if any commit in the chain declares a floor beyond its own
     ///   commit location.
+    ///
+    /// Merkleize already enforces both floor rules, so a batch it produced never fails them here.
+    /// Apply re-checks them as a guard.
     #[tracing::instrument(name = "qmdb.keyless.compact.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         mut self,
@@ -3065,7 +3068,7 @@ mod tests {
     // A chained batch whose floor exceeds its own commit location, counted past its parent's
     // operations, is refused at merkleize.
     #[test_traced("INFO")]
-    fn test_compact_ancestor_floor_beyond_size() {
+    fn test_compact_chained_floor_beyond_commit() {
         deterministic::Runner::default().start(|context| async move {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "keyless-ancestor-floor-beyond").await;

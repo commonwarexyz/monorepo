@@ -39,7 +39,7 @@ fn assert_bad_floor_error<F: Family>(err: &Error<F>, kind: BadFloorExpect) {
 }
 
 /// What floor value a fuzz-generated commit should carry. The `Bad*` variants intentionally
-/// produce floors that must be rejected; the handler asserts the expected error variant and
+/// produce floors that merkleize must reject; the handler asserts the expected error variant and
 /// that the DB state is untouched.
 #[derive(Debug, Clone, Copy)]
 enum FloorKind {
@@ -75,11 +75,11 @@ enum Operation {
         metadata_bytes: Option<Vec<u8>>,
         floor_kind: FloorKind,
     },
-    /// Build a two-level batch chain (parent → child) and apply the child directly. The
-    /// parent's floor is intentionally invalid (regressed or beyond its own commit location);
-    /// this exercises the per-ancestor validation path in `apply_batch`.
+    /// Build a two-level batch chain (parent -> child) with a valid parent and a child floor that
+    /// regresses below the parent's floor or passes the child's own commit location. Merkleizing
+    /// the child must fail.
     BadChainedCommit {
-        ancestor_kind: FloorKind,
+        child_kind: FloorKind,
     },
     Get {
         loc_offset: u32,
@@ -163,12 +163,12 @@ impl<'a> Arbitrary<'a> for Operation {
                 cap: u.arbitrary()?,
             }),
             12 => {
-                // Only Bad* kinds make sense here — the ancestor is guaranteed unapplied.
-                let ancestor_kind = match u.arbitrary::<bool>()? {
+                // Only Bad* kinds make sense here.
+                let child_kind = match u.arbitrary::<bool>()? {
                     false => FloorKind::BadRegression,
                     true => FloorKind::BadBeyondCommit,
                 };
-                Ok(Operation::BadChainedCommit { ancestor_kind })
+                Ok(Operation::BadChainedCommit { child_kind })
             }
             _ => unreachable!(),
         }
@@ -298,10 +298,11 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor).await.unwrap();
+                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor).await;
 
                     match expect_err {
                         None => {
+                            let merkleized = merkleized.expect("valid floor should merkleize");
                             let (db, _) = db
                                 .apply_batch(merkleized)
                                 .await
@@ -309,75 +310,51 @@ fn fuzz_family<F: Family, S: Strategy>(
                             db.commit().await.expect("Commit should not fail")
                         }
                         Some(kind) => {
-                            // Snapshot state; the reject must not mutate persisted state.
-                            let before_last_commit = db.bounds().end - 1;
-                            let before_floor = db.inactivity_floor_loc();
-                            let before_root = db.root();
-                            let err = match db.apply_batch(merkleized).await {
-                                Ok(_) => panic!("bad floor must be rejected"),
-                                Err(err) => err,
+                            // Merkleize validates the floor, so the batch never reaches apply.
+                            let Err(err) = merkleized else {
+                                panic!("bad floor must be rejected");
                             };
                             assert_bad_floor_error(&err, kind);
-                            // Reopen and verify the reject persisted nothing.
-                            let db = reopen(&context, suffix, &strategy, &mut restarts).await;
-                            assert_eq!(db.bounds().end - 1, before_last_commit);
-                            assert_eq!(db.inactivity_floor_loc(), before_floor);
-                            assert_eq!(db.root(), before_root);
                             db
                         }
                     }
                 }
 
-                Operation::BadChainedCommit { ancestor_kind } => {
+                Operation::BadChainedCommit { child_kind } => {
                     let end = db.bounds().end;
-                    let current_floor = db.inactivity_floor_loc();
 
-                    // Parent batch: base = end, 1 append lands at `end`, commit lands at `end + 1`.
-                    // So parent's total_size = end + 2 and parent_commit_loc = end + 1.
+                    // Parent: one append at `end`, commit at `end + 1`, floor at its commit.
+                    // Child: one append at `end + 2`, commit at `end + 3`.
                     let parent_commit_loc = end.as_u64() + 1;
-                    let (parent_floor, kind) = match ancestor_kind {
-                        FloorKind::BadRegression => {
-                            if current_floor.as_u64() == 0 {
-                                // No regression possible; skip this op (no-op).
-                                continue;
-                            }
-                            (
-                                Location::<F>::new(current_floor.as_u64() - 1),
-                                BadFloorExpect::Regression,
-                            )
-                        }
+                    let child_commit_loc = parent_commit_loc + 2;
+                    let (child_floor, kind) = match child_kind {
+                        FloorKind::BadRegression => (
+                            Location::<F>::new(parent_commit_loc - 1),
+                            BadFloorExpect::Regression,
+                        ),
                         FloorKind::BadBeyondCommit => (
-                            Location::<F>::new(parent_commit_loc + 1),
+                            Location::<F>::new(child_commit_loc + 1),
                             BadFloorExpect::BeyondSize,
                         ),
                         _ => continue, // only bad kinds are meaningful here
                     };
 
-                    // Don't drain pending_appends — keep them for future ops. Build from scratch.
+                    // Don't drain pending_appends; keep them for future ops.
                     let parent = db
                         .new_batch()
                         .append(vec![0u8; 1])
-                        .merkleize(&db, None, parent_floor).await.unwrap();
-                    // child: valid on its own; only the ancestor should trip the check.
-                    let child_floor = parent_floor; // stay ≥ parent_floor even if parent is bad
-                    let child = parent
+                        .merkleize(&db, None, Location::<F>::new(parent_commit_loc))
+                        .await
+                        .expect("valid parent should merkleize");
+                    let Err(err) = parent
                         .new_batch::<Sha256>()
                         .append(vec![1u8; 1])
-                        .merkleize(&db, None, child_floor).await.unwrap();
-
-                    let before_last_commit = db.bounds().end - 1;
-                    let before_floor = db.inactivity_floor_loc();
-                    let before_root = db.root();
-                    let err = match db.apply_batch(child).await {
-                        Ok(_) => panic!("bad ancestor floor must be rejected"),
-                        Err(err) => err,
+                        .merkleize(&db, None, child_floor)
+                        .await
+                    else {
+                        panic!("bad child floor must be rejected");
                     };
                     assert_bad_floor_error(&err, kind);
-                    // Reopen and verify the reject persisted nothing.
-                    let db = reopen(&context, suffix, &strategy, &mut restarts).await;
-                    assert_eq!(db.bounds().end - 1, before_last_commit);
-                    assert_eq!(db.inactivity_floor_loc(), before_floor);
-                    assert_eq!(db.root(), before_root);
                     db
                 }
 

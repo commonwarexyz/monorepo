@@ -316,12 +316,10 @@ where
 /// That committed bitmap evolves in place as [`Db::apply_batch`](super::db::Db::apply_batch) and
 /// [`Db::prune`](super::db::Db::prune) update the DB.
 ///
-/// Reads through this batch's chain, constructing child batches from it, and applying it later are
-/// only semantically correct while its ancestor chain is still the committed prefix of the DB. In
-/// other words, every successful [`apply_batch`](super::db::Db::apply_batch) since this batch was
-/// merkleized must have applied an ancestor of this batch.
+/// Reads through this batch pass only while the DB sits on one of the chain's own states: the
+/// state the chain forked from, an ancestor's tip, or this batch's own tip (once it is applied).
 ///
-/// Once a non-ancestor batch is applied (a sibling fork, or one of this batch's own descendants),
+/// Once any other batch is applied (a sibling fork, or one of this batch's own descendants),
 /// this batch is stale, as is every descendant the applied batch is not an ancestor of. Reading
 /// through a stale batch refuses with [`Error::StaleRead`]. Merkleization and application are
 /// rejected with [`Error::StaleBatch`] without mutating committed state (see
