@@ -541,7 +541,7 @@ mod test {
                 } else {
                     assert!(matches!(
                         result,
-                        Err(Error::HandshakeError(HandshakeError::HandshakeFailed))
+                        Err(Error::HandshakeError(HandshakeError::InvalidSignature))
                     ));
                 }
             }

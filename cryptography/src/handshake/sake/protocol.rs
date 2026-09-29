@@ -253,6 +253,8 @@ pub fn dial_start<S: Signer, P: PublicKey>(
         peer_identity,
         mut transcript,
     } = ctx;
+
+    // Generate an ephemeral key and commit the timestamp and listener identity.
     let esk = SecretKey::new(rng);
     let epk = esk.public();
     let dialer_identity = my_identity.public_key().encode();
@@ -297,6 +299,8 @@ pub fn dial_end<C: Cipher, P: PublicKey>(
         mut transcript,
         ok_timestamps,
     } = state;
+
+    // Check the listener's timestamp and verify its signature over the transcript.
     if !ok_timestamps.contains(&msg.time_ms) {
         return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
     }
@@ -305,10 +309,12 @@ pub fn dial_end<C: Cipher, P: PublicKey>(
         .commit(msg.epk.encode())
         .verify(&peer_identity, &msg.sig)
     {
-        return Err(Error::HandshakeFailed);
+        return Err(Error::InvalidSignature);
     }
+
+    // Commit the shared secret, then derive both ciphers and confirmations from the transcript.
     let Some(shared) = esk.exchange(&msg.epk) else {
-        return Err(Error::HandshakeFailed);
+        return Err(Error::InvalidEphemeralKey);
     };
     shared
         .secret
@@ -317,8 +323,10 @@ pub fn dial_end<C: Cipher, P: PublicKey>(
     let send = C::random(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
     let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
+
+    // Accept the listener only if it derived the same transcript.
     if msg.confirmation != confirmation_l2d {
-        return Err(Error::HandshakeFailed);
+        return Err(Error::InvalidConfirmation);
     }
 
     Ok((
@@ -345,6 +353,8 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         ok_timestamps,
         mut transcript,
     } = ctx;
+
+    // Check the dialer's timestamp and commit it with the listener identity.
     if !ok_timestamps.contains(&msg.time_ms) {
         return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
     }
@@ -362,19 +372,23 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         .commit(msg.epk.encode())
         .verify(&peer_identity, &msg.sig)
     {
-        return Err(Error::HandshakeFailed);
+        return Err(Error::InvalidSignature);
     }
     if !version.binds_identity_before_syn() {
         transcript.commit(dialer_identity);
     }
+
+    // Sign the listener's timestamp and ephemeral key.
     let esk = SecretKey::new(rng);
     let epk = esk.public();
     let sig = transcript
         .commit(current_time.encode())
         .commit(epk.encode())
         .sign(&my_identity);
+
+    // Commit the shared secret and derive the confirmation the dialer must match.
     let Some(shared) = esk.exchange(&msg.epk) else {
-        return Err(Error::HandshakeFailed);
+        return Err(Error::InvalidEphemeralKey);
     };
     shared
         .secret
@@ -397,7 +411,7 @@ pub fn listen_start<S: Signer, P: PublicKey>(
 pub fn listen_end<C: Cipher>(state: ListenState, msg: Ack) -> Result<(C, C), Error> {
     let confirmation_d2l = state.transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
     if msg.confirmation != confirmation_d2l {
-        return Err(Error::HandshakeFailed);
+        return Err(Error::InvalidConfirmation);
     }
 
     // Derive the ciphers only after the dialer proves it holds the same transcript.
@@ -479,6 +493,61 @@ mod test {
         Ok(())
     }
 
+    /// Rejects a [SynAck] or [Ack] whose confirmation does not match the transcript.
+    #[test]
+    fn test_mismatched_confirmation_fails() {
+        for version in VERSIONS {
+            let mut rng = test_rng();
+            let dialer_crypto = PrivateKey::random(&mut rng);
+            let listener_crypto = PrivateKey::random(&mut rng);
+            let wrong = Transcript::new(b"wrong", version.transcript()).summarize();
+            let start = |rng: &mut _| {
+                let (d_state, msg1) = dial_start(
+                    &mut *rng,
+                    Context::new(
+                        b"test_namespace",
+                        0,
+                        0..1,
+                        dialer_crypto.clone(),
+                        listener_crypto.public_key(),
+                        version,
+                    ),
+                );
+                let (l_state, msg2) = listen_start(
+                    &mut *rng,
+                    Context::new(
+                        b"test_namespace",
+                        0,
+                        0..1,
+                        listener_crypto.clone(),
+                        dialer_crypto.public_key(),
+                        version,
+                    ),
+                    msg1,
+                )
+                .unwrap();
+                (d_state, l_state, msg2)
+            };
+
+            // The dialer rejects a SynAck carrying the wrong confirmation.
+            let (d_state, _, mut msg2) = start(&mut rng);
+            msg2.confirmation = wrong;
+            assert!(matches!(
+                dial_end::<ChaCha20Poly1305, _>(d_state, msg2),
+                Err(Error::InvalidConfirmation)
+            ));
+
+            // The listener rejects an Ack carrying the wrong confirmation.
+            let (d_state, l_state, msg2) = start(&mut rng);
+            let (mut msg3, _, _) = dial_end::<ChaCha20Poly1305, _>(d_state, msg2).unwrap();
+            msg3.confirmation = wrong;
+            assert!(matches!(
+                listen_end::<ChaCha20Poly1305>(l_state, msg3),
+                Err(Error::InvalidConfirmation)
+            ));
+        }
+    }
+
     /// Rejects a [Syn] signed under a different application namespace.
     #[test]
     fn test_mismatched_namespace_fails() {
@@ -512,7 +581,7 @@ mod test {
                 msg1,
             );
 
-            assert!(matches!(result, Err(Error::HandshakeFailed)));
+            assert!(matches!(result, Err(Error::InvalidSignature)));
         }
     }
 
@@ -551,7 +620,7 @@ mod test {
                 msg1,
             );
 
-            assert!(matches!(result, Err(Error::HandshakeFailed)));
+            assert!(matches!(result, Err(Error::InvalidSignature)));
         }
     }
 
@@ -589,7 +658,7 @@ mod test {
                 msg1,
             );
 
-            assert!(matches!(result, Err(Error::HandshakeFailed)));
+            assert!(matches!(result, Err(Error::InvalidSignature)));
         }
     }
 
@@ -718,7 +787,7 @@ mod test {
             // V1 fails the [Syn] signature check because the signature covers the real dialer
             // identity.
             if version == Version::V1 {
-                assert!(matches!(result, Err(Error::HandshakeFailed)));
+                assert!(matches!(result, Err(Error::InvalidSignature)));
                 continue;
             }
 
