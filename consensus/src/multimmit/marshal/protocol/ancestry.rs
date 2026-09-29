@@ -20,7 +20,7 @@ pub(crate) enum Error {
     /// The walk needs no more headers.
     #[error("ancestry walk is already complete")]
     Complete,
-    /// The walk reached the lower frontier's height at another block.
+    /// The two frontiers name different blocks at one height.
     #[error("producer-chain frontiers fork")]
     Fork,
     /// A header belongs to another epoch.
@@ -44,19 +44,20 @@ pub(crate) struct Bounds<D: Digest> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Ancestry<D: Digest> {
     cursor: BlockRef<D>,
-    expected: BlockRef<D>,
+    low: BlockRef<D>,
 }
 
 impl<D: Digest> Ancestry<D> {
-    /// Starts proving the common frontier of `target` and `emitted`.
+    /// Starts resolving the common frontier of `target` and `emitted`.
     ///
-    /// The higher reference is descended to the lower height. Equal heights must already name the
-    /// same header, and completion requires the discovered ancestor to equal the lower reference.
+    /// The higher reference is descended to the lower height, and equal heights must already name
+    /// the same header. The ancestor found there may lie on another branch than the lower
+    /// reference, since an anchor may jump branches; callers decide whether the two must match.
     pub(crate) fn common(target: BlockRef<D>, emitted: BlockRef<D>) -> Result<Self, Error> {
         if target.chain() != emitted.chain() {
             return Err(Error::Chain);
         }
-        let (cursor, expected) = match target.height().cmp(&emitted.height()) {
+        let (cursor, low) = match target.height().cmp(&emitted.height()) {
             Ordering::Greater => (target, emitted),
             Ordering::Less => (emitted, target),
             Ordering::Equal => {
@@ -66,12 +67,12 @@ impl<D: Digest> Ancestry<D> {
                 (target, target)
             }
         };
-        Ok(Self { cursor, expected })
+        Ok(Self { cursor, low })
     }
 
     /// Returns the next block reference whose header is required.
     pub(crate) fn next(&self) -> Option<BlockRef<D>> {
-        (self.cursor.height() != self.expected.height()).then_some(self.cursor)
+        (self.cursor.height() != self.low.height()).then_some(self.cursor)
     }
 
     /// Returns the number of headers still required to reach the common frontier.
@@ -80,7 +81,7 @@ impl<D: Digest> Ancestry<D> {
             self.cursor
                 .height()
                 .get()
-                .checked_sub(self.expected.height().get())
+                .checked_sub(self.low.height().get())
                 .expect("the ancestry cursor does not cross its frontier"),
         )
         .unwrap_or(usize::MAX)
@@ -89,7 +90,7 @@ impl<D: Digest> Ancestry<D> {
     /// Returns the interval the walk has yet to authenticate.
     pub(crate) const fn bounds(&self) -> Bounds<D> {
         Bounds {
-            low: self.expected,
+            low: self.low,
             high: self.cursor,
         }
     }
@@ -125,20 +126,13 @@ impl<D: Digest> Ancestry<D> {
         {
             return Err(Error::Coordinate);
         }
-        if parent.height() == self.expected.height() && self.expected != parent {
-            return Err(Error::Fork);
-        }
         self.cursor = parent;
         Ok(())
     }
 
-    /// Returns the target reference once no more headers are required.
+    /// Returns the ancestor at the lower height once no more headers are required.
     pub(crate) fn finish(&self) -> Option<BlockRef<D>> {
-        if self.cursor == self.expected {
-            Some(self.cursor)
-        } else {
-            None
-        }
+        self.next().is_none().then_some(self.cursor)
     }
 }
 
@@ -267,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn common_frontier_rejects_coordinates_and_forks() {
+    fn common_frontier_resolves_forks_and_rejects_coordinates() {
         let canonical = chain(0, 3, 40);
         let fork = chain(0, 1, 50);
         let high = canonical[2].block_ref::<Sha256>();
@@ -276,10 +270,11 @@ mod tests {
         ancestry
             .accept::<Sha256>(Epoch::new(7), &canonical[2])
             .unwrap();
-        assert_eq!(
-            ancestry.accept::<Sha256>(Epoch::new(7), &canonical[1]),
-            Err(Error::Fork)
-        );
+        ancestry
+            .accept::<Sha256>(Epoch::new(7), &canonical[1])
+            .unwrap();
+        assert_eq!(ancestry.next(), None);
+        assert_eq!(ancestry.finish(), Some(canonical[0].block_ref::<Sha256>()));
         assert_eq!(
             Ancestry::common(
                 high,
