@@ -20,6 +20,94 @@ fn floor_fixture(
     (current, floor)
 }
 
+/// Returns an L-QC for `history` whose voters leave every chain at its anchor. Each chain proposes
+/// `payloads`, so a chain with any falls short and halts the final sweep.
+fn anchored_lqc(
+    committee: &Committee<MinPk>,
+    view: u64,
+    history: Sha256Digest,
+    anchors: Vec<BlockRef<Sha256Digest>>,
+    payloads: Vec<Vec<Sha256Digest>>,
+) -> Arc<Lqc<MinPk, Sha256Digest>> {
+    let chains = anchors.len();
+    let proposals = anchors
+        .into_iter()
+        .zip(payloads)
+        .map(|(anchor, payloads)| {
+            ChainProposal::new(
+                anchor.chain(),
+                Anchor::Tip(anchor),
+                payloads,
+                committee.codec().pipeline_depth(),
+            )
+            .unwrap()
+        })
+        .collect();
+    let leader = LeaderBlock::new(
+        Round::new(committee.config.epoch(), View::new(view)),
+        committee.config.genesis().vqc(),
+        history,
+        proposals,
+        committee.codec(),
+    )
+    .unwrap();
+    let vote = VoteBody::for_leader(
+        DigestedLeader::new::<Sha256>(&leader),
+        vec![Position::new(0); chains],
+        vec![Extension::empty(); chains],
+        committee.codec(),
+    )
+    .unwrap();
+    let votes = (0..committee.codec().view_quorum())
+        .map(|signer| committee.signers[signer].sign_vote(vote.clone()).unwrap())
+        .collect::<Vec<_>>();
+    Arc::new(
+        committee
+            .verifier
+            .assemble_lqc::<Sha256, _>(leader, &votes, &Sequential)
+            .unwrap(),
+    )
+}
+
+#[test]
+fn floor_installs_an_anchor_jump_from_an_unextended_ordered_tip() {
+    deterministic::Runner::default().start(|context| async move {
+        let committee = committee(17, 2, PathLimits::new(2, 1).unwrap());
+        let epoch = committee.config.epoch();
+        let genesis = committee.config.genesis();
+        let tips = genesis.tips().to_vec();
+        let canonical = chain(epoch, tips[1], 1);
+        let rival = branch(epoch, tips[1], 2, b"rival");
+        let parent = genesis_history::<Sha256>(genesis);
+        let history = Arc::new(TipRecord::at_tips(parent, vec![tips[0], tip(&canonical)]).unwrap());
+        // Chain 0 falls short of its proposal, which halts the sweep before chain 1 jumps to the
+        // rival. Nothing is emitted past the ordered tips.
+        let anchor = anchored_lqc(
+            &committee,
+            1,
+            history.commitment::<Sha256>(),
+            vec![tips[0], tip(&rival)],
+            vec![vec![digest(b"short payload", 0)], Vec::new()],
+        );
+        let emitted = history.tips().to_vec();
+        let floor = Floor::new(anchor, history, emitted);
+        let mut actor = actor(
+            &context,
+            checkpoint(epoch, parent, tips.clone(), tips),
+            vec![
+                Vec::new(),
+                canonical.iter().chain(&rival).cloned().collect(),
+            ],
+            committee.codec(),
+            4,
+        )
+        .await;
+
+        actor.install_floor(floor).await.unwrap();
+        assert_eq!(actor.catalog.installed, 1);
+    });
+}
+
 #[test]
 fn incompatible_floor_resumes_without_installing() {
     deterministic::Runner::default().start(|context| async move {

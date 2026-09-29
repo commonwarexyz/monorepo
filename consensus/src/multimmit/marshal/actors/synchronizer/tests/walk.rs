@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::multimmit::testing::expect_within;
+use proptest::{collection::vec as proptest_vec, prelude::*};
 
 #[test]
 fn full_commit_window_consumes_header_input_before_durability() {
@@ -534,48 +535,345 @@ fn adjacent_history_openings_share_backfill_concurrency(#[case] known: bool) {
     });
 }
 
+/// Opens one single-chain history record with tip `target` over `ordered` and `emitted`, and
+/// commits its outputs.
+async fn open_single_chain(
+    context: &deterministic::Context,
+    seed: u64,
+    ordered: BlockRef<Sha256Digest>,
+    emitted: BlockRef<Sha256Digest>,
+    blocks: Vec<Arc<TestBlock>>,
+    target: BlockRef<Sha256Digest>,
+) -> (TestSynchronizer, Result<(), Error>) {
+    let committee = committee(seed, 1, PathLimits::new(1, 1).unwrap());
+    let epoch = committee.config.epoch();
+    let history = digest(b"jump history", seed);
+    let record = Arc::new(TipRecord::at_tips(history, vec![target]).unwrap());
+    let commitment = record.commitment::<Sha256>();
+    let mut actor = actor(
+        context,
+        checkpoint(epoch, history, vec![ordered], vec![emitted]),
+        vec![blocks],
+        committee.codec(),
+        8,
+    )
+    .await;
+    let mut batch = PublicationBatch::new(actor.bounds.max_commit_outputs, 0);
+    let result = actor
+        .open(HistoryLink { commitment, record }, &mut batch)
+        .await;
+    if result.is_ok() {
+        actor.commit(batch).await.unwrap();
+    }
+    (actor, result)
+}
+
+#[test]
+fn opening_reads_an_anchor_jump_off_its_own_tip() {
+    deterministic::Runner::default().start(|context| async move {
+        let epoch = committee(65, 1, PathLimits::new(1, 1).unwrap())
+            .config
+            .epoch();
+        let canonical = chain(epoch, base(0, 0), 2);
+        // An equivocating producer's rival of the ordered tip, certified and anchored above it.
+        let rival = branch(epoch, canonical[0].reference(), 2, b"rival");
+        let ordered = canonical[1].reference();
+        let blocks = canonical.iter().chain(&rival).cloned().collect();
+
+        let (actor, result) =
+            open_single_chain(&context, 65, ordered, ordered, blocks, tip(&rival)).await;
+        result.unwrap();
+        assert_eq!(actor.catalog.outputs, vec![rival[1].reference()]);
+    });
+}
+
+#[test]
+fn anchor_jump_cannot_replace_blocks_emitted_past_the_ordered_tip() {
+    deterministic::Runner::default().start(|context| async move {
+        let epoch = committee(66, 1, PathLimits::new(1, 1).unwrap())
+            .config
+            .epoch();
+        let canonical = chain(epoch, base(0, 0), 2);
+        let rival = branch(epoch, canonical[0].reference(), 2, b"rival");
+        let blocks = canonical.iter().chain(&rival).cloned().collect();
+
+        // A final sweep emitted height 2 past the ordered tip, so later openings must keep it.
+        let (actor, result) = open_single_chain(
+            &context,
+            66,
+            canonical[0].reference(),
+            canonical[1].reference(),
+            blocks,
+            tip(&rival),
+        )
+        .await;
+        assert!(matches!(result, Err(Error::Order(order::Error::Conflict))));
+        assert!(actor.catalog.outputs.is_empty());
+    });
+}
+
+/// Synchronizes a single-chain L-QC that commits to two history openings with tips `tips`, over
+/// `ordered` and `emitted`.
+///
+/// Returns the custody windows started: one per walk, plus one for the final sweep.
+async fn synchronize_two_openings(
+    actor: &mut TestSynchronizer,
+    committee: &Committee<MinPk>,
+    history: Sha256Digest,
+    tips: [BlockRef<Sha256Digest>; 2],
+) -> (Result<(), Error>, u64) {
+    let first = Arc::new(TipRecord::at_tips(history, vec![tips[0]]).unwrap());
+    let first_id = first.commitment::<Sha256>();
+    let second = Arc::new(TipRecord::at_tips(first_id, vec![tips[1]]).unwrap());
+    let second_id = second.commitment::<Sha256>();
+    let proof = lqc_with_history(committee, 1, second_id, tips[1]);
+    let id = proof.id::<Sha256>();
+    actor.fetcher.histories = vec![(first_id, first), (second_id, second)];
+    let windows = actor.metrics.windows.clone();
+    let result = actor
+        .synchronize_proofs(BTreeMap::from([(id, proof)]))
+        .await;
+    (result, windows.get())
+}
+
 #[rstest]
 #[case(false)]
 #[case(true)]
-fn history_window_authenticates_intermediate_tips(#[case] known: bool) {
+fn history_window_opens_one_record_at_a_time_across_an_anchor_jump(#[case] known: bool) {
     deterministic::Runner::default().start(|context| async move {
         let committee = committee(36, 1, PathLimits::new(1, 1).unwrap());
         let epoch = committee.config.epoch();
         let base = base(0, 0);
-        let blocks = vec![chain(epoch, base, 2)];
+        let canonical = chain(epoch, base, 3);
+        let rival = branch(epoch, canonical[0].reference(), 1, b"rival");
         let history = digest(b"boundary history", 0);
-        let fork = BlockRef::new(ChainId::new(0), Height::new(1), digest(b"fork", 1));
-        let first = Arc::new(TipRecord::at_tips(history, vec![fork]).unwrap());
-        let first_id = first.commitment::<Sha256>();
-        let second =
-            Arc::new(TipRecord::at_tips(first_id, vec![blocks[0][1].reference()]).unwrap());
-        let second_id = second.commitment::<Sha256>();
-        let proof = lqc_with_history(&committee, 1, second_id, blocks[0][1].reference());
-        let id = proof.id::<Sha256>();
         let mut actor = actor(
             &context,
             checkpoint(epoch, history, vec![base], vec![base]),
-            blocks.clone(),
+            vec![canonical.iter().chain(&rival).cloned().collect()],
             committee.codec(),
             8,
         )
         .await;
         if known {
-            actor.commitments.insert(&selected(actor.epoch, &blocks));
+            actor
+                .commitments
+                .insert(&selected(actor.epoch, std::slice::from_ref(&canonical)));
         }
 
-        actor.fetcher.histories = vec![(first_id, first), (second_id, second)];
+        // The first opening orders the rival at height 2. The second anchors the canonical tip,
+        // whose own path passes a different block at that height.
+        let (result, windows) = synchronize_two_openings(
+            &mut actor,
+            &committee,
+            history,
+            [tip(&rival), tip(&canonical)],
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(
+            actor.catalog.outputs,
+            vec![
+                canonical[0].reference(),
+                rival[0].reference(),
+                canonical[2].reference()
+            ]
+        );
+        assert_eq!(windows, 3);
+    });
+}
 
-        assert!(matches!(
-            actor
-                .synchronize_proofs(BTreeMap::from([(id, proof)]))
-                .await,
-            Err(Error::Invalid(
-                "producer ancestry conflicts with a history boundary"
-            ))
-        ));
+#[test]
+fn history_window_walks_a_first_opening_jump_once() {
+    deterministic::Runner::default().start(|context| async move {
+        let committee = committee(67, 1, PathLimits::new(1, 1).unwrap());
+        let epoch = committee.config.epoch();
+        let base = base(0, 0);
+        let canonical = chain(epoch, base, 1);
+        let rival = branch(epoch, base, 3, b"rival");
+        let ordered = canonical[0].reference();
+        let history = digest(b"first jump history", 0);
+        let mut actor = actor(
+            &context,
+            checkpoint(epoch, history, vec![ordered], vec![ordered]),
+            vec![canonical.iter().chain(&rival).cloned().collect()],
+            committee.codec(),
+            8,
+        )
+        .await;
+
+        // Both openings lie on the rival path, which leaves the ordered tip below it.
+        let (result, windows) = synchronize_two_openings(
+            &mut actor,
+            &committee,
+            history,
+            [rival[1].reference(), rival[2].reference()],
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(
+            actor.catalog.outputs,
+            vec![rival[1].reference(), rival[2].reference()]
+        );
+        assert_eq!(windows, 2);
+    });
+}
+
+#[test]
+fn history_window_resumes_a_first_opening_jump_from_a_mid_window_commit() {
+    deterministic::Runner::default().start(|context| async move {
+        let committee = committee(70, 1, PathLimits::new(1, 1).unwrap());
+        let epoch = committee.config.epoch();
+        let base = base(0, 0);
+        let canonical = chain(epoch, base, 1);
+        let rival = branch(epoch, base, 4, b"rival");
+        let ordered = canonical[0].reference();
+        let history = digest(b"first jump cut history", 0);
+        // A commit inside the window over openings [R2, R4] emitted R2 and R3 before recording
+        // either opening.
+        let mut actor = actor(
+            &context,
+            checkpoint(epoch, history, vec![ordered], vec![rival[2].reference()]),
+            vec![canonical.iter().chain(&rival).cloned().collect()],
+            committee.codec(),
+            8,
+        )
+        .await;
+
+        let (result, windows) = synchronize_two_openings(
+            &mut actor,
+            &committee,
+            history,
+            [rival[1].reference(), tip(&rival)],
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(actor.catalog.outputs, vec![rival[3].reference()]);
+        assert_eq!(windows, 2);
+    });
+}
+
+#[test]
+fn history_window_opens_one_record_at_a_time_after_a_jump_from_its_first_tip() {
+    deterministic::Runner::default().start(|context| async move {
+        let committee = committee(68, 1, PathLimits::new(1, 1).unwrap());
+        let epoch = committee.config.epoch();
+        let base = base(0, 0);
+        let canonical = chain(epoch, base, 1);
+        let rival = branch(epoch, base, 3, b"rival");
+        let history = digest(b"first tip jump history", 0);
+        // A final sweep emitted the first opening's tip past the ordered tip.
+        let mut actor = actor(
+            &context,
+            checkpoint(epoch, history, vec![base], vec![canonical[0].reference()]),
+            vec![canonical.iter().chain(&rival).cloned().collect()],
+            committee.codec(),
+            8,
+        )
+        .await;
+
+        let (result, windows) = synchronize_two_openings(
+            &mut actor,
+            &committee,
+            history,
+            [canonical[0].reference(), tip(&rival)],
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(
+            actor.catalog.outputs,
+            vec![rival[1].reference(), rival[2].reference()]
+        );
+        assert_eq!(windows, 3);
+    });
+}
+
+#[test]
+fn history_window_rejects_a_jump_that_replaces_emitted_blocks() {
+    deterministic::Runner::default().start(|context| async move {
+        let committee = committee(69, 1, PathLimits::new(1, 1).unwrap());
+        let epoch = committee.config.epoch();
+        let base = base(0, 0);
+        let canonical = chain(epoch, base, 2);
+        let rival = branch(epoch, base, 4, b"rival");
+        let history = digest(b"replacing jump history", 0);
+        // A final sweep emitted height 2 past the ordered tip, and no opening passes it.
+        let mut actor = actor(
+            &context,
+            checkpoint(epoch, history, vec![base], vec![tip(&canonical)]),
+            vec![canonical.iter().chain(&rival).cloned().collect()],
+            committee.codec(),
+            8,
+        )
+        .await;
+
+        let (result, _) = synchronize_two_openings(
+            &mut actor,
+            &committee,
+            history,
+            [rival[2].reference(), tip(&rival)],
+        )
+        .await;
+        assert!(matches!(result, Err(Error::Order(order::Error::Conflict))));
         assert!(actor.catalog.outputs.is_empty());
     });
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// Windowed and one-at-a-time openings both match `Horiz` when anchors jump among sibling
+    /// branches: each opening appends its own tip's blocks above the previous tip.
+    #[test]
+    fn history_windows_match_horizontal_order_across_anchor_jumps(
+        steps in proptest_vec((0usize..3, 1u64..3), 1..6),
+        single in any::<bool>(),
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = committee(71, 1, PathLimits::new(1, 1).unwrap());
+            let epoch = committee.config.epoch();
+            let base = base(0, 0);
+            let branches = [b"left".as_slice(), b"middle", b"right"]
+                .map(|label| branch(epoch, base, 12, label));
+            let history = digest(b"differential history", 0);
+            let mut records = Vec::with_capacity(steps.len());
+            let mut expected = Vec::new();
+            let mut parent = history;
+            let mut height = 0u64;
+            for (branch, delta) in &steps {
+                let blocks = &branches[*branch];
+                expected.extend(
+                    blocks[height as usize..(height + delta) as usize]
+                        .iter()
+                        .map(|block| block.reference()),
+                );
+                height += delta;
+                let tip = blocks[height as usize - 1].reference();
+                let record = Arc::new(TipRecord::at_tips(parent, vec![tip]).unwrap());
+                parent = record.commitment::<Sha256>();
+                records.push((parent, record));
+            }
+            let tip = records.last().unwrap().1.tips()[0];
+            let proof = lqc_with_history(&committee, 1, parent, tip);
+            let id = proof.id::<Sha256>();
+            // A one-output commit bound also caps each window at one opening.
+            let mut actor = actor(
+                &context,
+                checkpoint(epoch, history, vec![base], vec![base]),
+                vec![branches.iter().flatten().cloned().collect()],
+                committee.codec(),
+                if single { 1 } else { 8 },
+            )
+            .await;
+            actor.fetcher.histories = records;
+
+            actor
+                .synchronize_proofs(BTreeMap::from([(id, proof)]))
+                .await
+                .unwrap();
+            assert_eq!(actor.catalog.outputs, expected);
+        });
+    }
 }
 
 #[test]
