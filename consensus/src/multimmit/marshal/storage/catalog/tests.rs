@@ -55,17 +55,18 @@ fn config(
         CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10)),
     );
     archive.items_per_section = NZU64!(1);
-    let mut config = Config::new(
+    Config::new(
         Start::Genesis(committee.config.genesis().clone()),
         prefix.into(),
         committee.codec(),
         (),
         archive,
-    );
-    config.retention.lqc = ArchiveMode::Prunable;
-    config.retention.history = ArchiveMode::Immutable;
-    config.retention.blocks = ArchiveMode::Prunable;
-    config
+    )
+    .with_retention(Retention {
+        lqc: ArchiveMode::Prunable,
+        history: ArchiveMode::Immutable,
+        blocks: ArchiveMode::Prunable,
+    })
 }
 
 /// Opens the store and completes any recovery its record owes, as the catalog does at start.

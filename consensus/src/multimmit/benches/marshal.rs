@@ -189,14 +189,14 @@ fn stage_blocks() -> Duration {
             TwoCap,
             CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(64)),
         );
-        let mut config = Config::new(
+        let config = Config::new(
             Start::Genesis(committee.config.genesis().clone()),
             "multimmit_marshal_bench".into(),
             committee.codec(),
             (),
             archive,
-        );
-        config.capacities.pending_segment_items = NZU64!(4096);
+        )
+        .with_pending_segment_items(NZU64!(4096));
         let (service, bridge) =
             open::<_, TwoCap, Sha256, MinPk, Body, _>(context.child("marshal"), config, buffer)
                 .await

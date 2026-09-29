@@ -6,8 +6,8 @@ use crate::{
         config::max_outbox_effects,
         marshal::{
             ArchiveConfig, ArchiveMode, Config, Error as MailboxError, Floor, LqcVerifier, Mailbox,
-            MarshalProgress, OutputIndex, Relay, ServiceHandle, Start, Update, actors::catalog,
-            open, storage::catalog::StoredRef,
+            MarshalProgress, OutputIndex, Relay, Retention, ServiceHandle, Start, Update,
+            actors::catalog, open, storage::catalog::StoredRef,
         },
         mocks::{
             Committee,
@@ -557,26 +557,28 @@ impl Harness {
             CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
         );
         archive.items_per_section = NZU64!(2);
-        let mut config = Config::new(
+        Config::new(
             Start::Genesis(self.committee.config.genesis().clone()),
             format!("multimmit_marshal_e2e_{}_{}", self.seed, index),
             self.committee.codec(),
             (),
             archive,
-        );
-        config.capacities.catalog_mailbox_size = self.catalog_mailbox_size;
-        config.capacities.admission_cut_capacity = self.catalog_mailbox_size;
-        config.capacities.pending_segment_items =
-            NonZeroU64::new(self.catalog_mailbox_size.get() as u64).unwrap();
-        config.capacities.resolver_mailbox_size = NZUsize!(64);
-        config.capacities.backfill_concurrency = config.capacities.resolver_mailbox_size;
-        config.capacities.max_commit_outputs = self.max_commit_outputs;
-        config.limits.max_hot_block_bytes = self.max_hot_block_bytes;
-        config.capacities.max_pending_acks = self.max_pending_acks;
-        config.retention.lqc = self.archive_modes[0];
-        config.retention.history = self.archive_modes[1];
-        config.retention.blocks = self.archive_modes[2];
-        config
+        )
+        .with_catalog_mailbox_size(self.catalog_mailbox_size)
+        .with_admission_cut_capacity(self.catalog_mailbox_size)
+        .with_pending_segment_items(
+            NonZeroU64::new(self.catalog_mailbox_size.get() as u64).unwrap(),
+        )
+        .with_resolver_mailbox_size(NZUsize!(64))
+        .with_backfill_concurrency(NZUsize!(64))
+        .with_max_commit_outputs(self.max_commit_outputs)
+        .with_max_hot_block_bytes(self.max_hot_block_bytes)
+        .with_max_pending_acks(self.max_pending_acks)
+        .with_retention(Retention {
+            lqc: self.archive_modes[0],
+            history: self.archive_modes[1],
+            blocks: self.archive_modes[2],
+        })
     }
 
     async fn start(&mut self, index: usize) {
