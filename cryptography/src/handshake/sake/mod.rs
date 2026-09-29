@@ -1,6 +1,6 @@
 //! Simple Authenticated Key Exchange (SAKE).
 //!
-//! This construction is unrelated to [EAP-SAKE] or the [symmetric-key SAKE] protocol.
+//! _This construction is unrelated to [EAP-SAKE] or the [symmetric-key SAKE] protocol._
 //!
 //! # Construction
 //!
@@ -17,9 +17,9 @@
 //! [Cipher](crate::Cipher) for the two directional traffic ciphers.
 //!
 //! Both public identities are inputs to the core exchange and are incorporated into the transcript
-//! with the timestamps, ephemeral keys, and shared secret in a fixed order. Identities are visible,
-//! not hidden by the construction. SAKE has no 0-RTT mode or resumption mechanism. Application
-//! data can be sent only after the three messages complete.
+//! with the timestamps, ephemeral keys, and shared secret in a fixed order. The construction does
+//! not hide identities. SAKE has no 0-RTT mode or resumption mechanism. Application data can be
+//! sent only after the three messages complete.
 //!
 //! The BLAKE3 transcript first commits the caller-provided application namespace as one packet. A
 //! protocol built on SAKE may then fork it with its own label ([Context::fork]). SAKE then forks it

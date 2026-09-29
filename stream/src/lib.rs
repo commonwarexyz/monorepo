@@ -443,8 +443,8 @@ commonware_macros::stability_scope!(BETA {
             });
         }
 
-        /// Measures the handshake deadline from the dial or listen call, not the first poll, and
-        /// releases the transport once the attempt expires.
+        /// Starts the handshake deadline at the dial or listen call and releases the connection once
+        /// the attempt expires.
         #[test]
         fn handshake_starts_timeout_when_called() {
             for dialer in [false, true] {

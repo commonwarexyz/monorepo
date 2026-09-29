@@ -1,7 +1,7 @@
 //! Counter Unidirectional Packet Stream (CUPS).
 //!
 //! CUPS protects ordered message records using a separate key and implicit counter for each
-//! direction. "Packet" refers to a framed message on an ordered byte stream, not a datagram.
+//! direction. "Packet" refers to a framed message on an ordered byte stream.
 //!
 //! # Keys
 //!

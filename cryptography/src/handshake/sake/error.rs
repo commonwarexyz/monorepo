@@ -4,10 +4,7 @@ use thiserror::Error;
 /// Errors relating to the handshake.
 #[derive(Error, Debug)]
 pub enum Error {
-    /// The handshake failed.
-    ///
-    /// The error does not say why. The application cannot act on the reason, and revealing it
-    /// could help an adversary.
+    /// A peer's signature, ephemeral key, or confirmation was invalid.
     #[error("handshake failed")]
     HandshakeFailed,
     /// The timestamp is not in the allowable bounds
