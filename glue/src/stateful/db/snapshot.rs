@@ -4,8 +4,10 @@
 //! cell containing the latest published snapshots. Snapshots are captured and
 //! published when a barrier starts over applied state, or after every finalized
 //! block when the set's snapshots are cheap (see
-//! [`DatabaseSet::CHEAP_SNAPSHOT`](super::DatabaseSet::CHEAP_SNAPSHOT)). Served
-//! state may therefore run ahead of disk. That is safe because peers verify
+//! [`DatabaseSet::CHEAP_SNAPSHOT`](super::DatabaseSet::CHEAP_SNAPSHOT)). A set with
+//! both cheap and costly members refreshes only its cheap members after every
+//! finalized block, so its members can serve different heights. Served state may
+//! therefore run ahead of disk. That is safe because peers verify
 //! everything they fetch against a finalized root, and finalized state survives
 //! any local crash by replay. Every publish site labels at the latest applied
 //! height, so publication stays monotone (asserted in [`Publisher::publish`]).
@@ -36,8 +38,10 @@ struct Cell<S> {
 
 /// Publication metrics.
 struct Metrics {
-    /// Height of the latest published snapshots.
+    /// Height at which every member was last published.
     height: Registered<Gauge>,
+    /// Height at which the cheap members of a mixed set were last refreshed.
+    refreshed: Registered<Gauge>,
     /// Publications since startup.
     published: Registered<Counter>,
 }
@@ -46,12 +50,19 @@ impl Metrics {
     fn register<E: RuntimeMetrics>(context: &E) -> Self {
         let height = context.register(
             "published_height",
-            "Height of the latest published snapshots, or -1 when nothing is servable",
+            "Height at which every member was last published, or -1 when nothing is servable",
             Gauge::default(),
         );
         height.set(-1);
+        let refreshed = context.register(
+            "refreshed_height",
+            "Height at which the cheap members of a mixed set were last refreshed, or -1",
+            Gauge::default(),
+        );
+        refreshed.set(-1);
         Self {
             height,
+            refreshed,
             published: context.register(
                 "publications",
                 "Publications since startup",
@@ -88,8 +99,29 @@ impl<S> Publisher<S> {
         )
     }
 
-    /// Replace the served set with `snapshots`, taken at `height`.
+    /// Replace the served set with `snapshots`, every member taken at `height`.
     pub(crate) fn publish(&mut self, height: Height, snapshots: S) {
+        self.replace(height, snapshots);
+        let _ = self.cell.metrics.height.try_set(height.get());
+    }
+
+    /// Replace the served set with `snapshots`, whose cheap members were taken at `height` and
+    /// whose other members come from an earlier publication (see
+    /// [`DatabaseSet::refresh_cheap`](super::DatabaseSet::refresh_cheap)).
+    pub(crate) fn refresh(&mut self, height: Height, snapshots: S) {
+        self.replace(height, snapshots);
+        let _ = self.cell.metrics.refreshed.try_set(height.get());
+    }
+
+    /// The served set, or `None` before the first publish.
+    pub(crate) fn served(&self) -> Option<Arc<S>> {
+        match &*self.cell.state.lock() {
+            State::Published(snapshots) => Some(snapshots.clone()),
+            State::Empty | State::Closed => None,
+        }
+    }
+
+    fn replace(&mut self, height: Height, snapshots: S) {
         assert!(
             self.last_published.is_none_or(|last| height >= last),
             "published height must not regress"
@@ -99,7 +131,6 @@ impl<S> Publisher<S> {
             &mut *self.cell.state.lock(),
             State::Published(Arc::new(snapshots)),
         );
-        let _ = self.cell.metrics.height.try_set(height.get());
         self.cell.metrics.published.inc();
 
         // Releasing the last reference to a snapshot can close storage handles, so do it
@@ -114,6 +145,7 @@ impl<S> Drop for Publisher<S> {
         // the cell so reads decline instead.
         let replaced = replace(&mut *self.cell.state.lock(), State::Closed);
         self.cell.metrics.height.set(-1);
+        self.cell.metrics.refreshed.set(-1);
         drop(replaced);
     }
 }
@@ -147,7 +179,8 @@ impl<S> Subscriber<S> {
 
 impl<S, M> Subscriber<S, M> {
     /// The latest published snapshots, or `None` before the first publish or
-    /// after the publisher drops.
+    /// after the publisher drops. The members of a set with cheap and costly
+    /// members may reflect different heights.
     pub fn latest(&self) -> Option<M>
     where
         M: Clone,
@@ -165,15 +198,21 @@ mod tests {
     use super::*;
     use commonware_runtime::{Runner as _, deterministic};
 
-    /// The value of the `published_height` gauge.
-    fn published_height(context: &deterministic::Context) -> i64 {
+    /// The value of the gauge `name`.
+    fn gauge(context: &deterministic::Context, name: &str) -> i64 {
+        let prefix = format!("{name} ");
         context
             .encode()
             .lines()
-            .find_map(|line| line.strip_prefix("published_height "))
+            .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::to_string))
             .expect("gauge must be registered")
             .parse()
             .expect("gauge must be an integer")
+    }
+
+    /// The value of the `published_height` gauge.
+    fn published_height(context: &deterministic::Context) -> i64 {
+        gauge(context, "published_height")
     }
 
     #[test]
@@ -197,6 +236,28 @@ mod tests {
             assert!(subscriber.latest().is_none());
             assert_eq!(held, 8);
             assert_eq!(published_height(&context), -1);
+        });
+    }
+
+    /// A refresh replaces the served set without moving the full publication height.
+    #[test]
+    fn refresh_serves_new_cheap_members() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut publisher, subscriber) = Publisher::<(u32, u32)>::new(&context);
+            let cheap = subscriber.view(|set| &set.0);
+            let costly = subscriber.view(|set| &set.1);
+            assert!(publisher.served().is_none());
+
+            publisher.publish(Height::new(1), (1, 10));
+            publisher.refresh(Height::new(2), (2, 10));
+            assert_eq!(publisher.served().as_deref(), Some(&(2, 10)));
+            assert_eq!((cheap.latest(), costly.latest()), (Some(2), Some(10)));
+            assert_eq!(published_height(&context), 1);
+            assert_eq!(gauge(&context, "refreshed_height"), 2);
+
+            drop(publisher);
+            assert!(cheap.latest().is_none());
+            assert_eq!(gauge(&context, "refreshed_height"), -1);
         });
     }
 

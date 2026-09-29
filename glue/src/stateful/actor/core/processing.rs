@@ -24,7 +24,7 @@ use crate::stateful::{
         },
         processor::{Applied, Processor, Prune, Publication},
     },
-    db::{Barrier, Publisher, SnapshotsOf},
+    db::{Barrier, DatabaseSet, Publisher, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -484,36 +484,55 @@ where
                             },
                         }
 
-                        // Keep the publication bookkeeping under the same span.
-                        let _span = process.entered();
                         let Applied { publication, prune } = applied;
-                        debug!(
-                            height = block.height().get(),
-                            "applied finalized database batch"
-                        );
-
-                        // Acknowledge only once a barrier covers this height, so marshal's
-                        // processed height never passes durable state and an unsynced suffix
-                        // is replayed after restart.
                         let height = block.height();
-                        durability.record(height, acknowledgement);
+                        let refresh = {
+                            // Keep the publication bookkeeping under the same span.
+                            let _span = process.clone().entered();
+                            debug!(height = height.get(), "applied finalized database batch");
 
-                        // Snapshots serve immediately, ahead of the barrier that covers them.
-                        match publication {
-                            Publication::None => {}
-                            Publication::Snapshot(snapshots) => {
-                                self.snapshot_publisher.publish(height, snapshots);
-                            }
-                            Publication::WithBarrier(snapshots, barrier) => {
-                                self.snapshot_publisher.publish(height, snapshots);
-                                durability.set_barrier(height, barrier);
-                            }
-                        }
+                            // Acknowledge only once a barrier covers this height, so marshal's
+                            // processed height never passes durable state and an unsynced suffix
+                            // is replayed after restart.
+                            durability.record(height, acknowledgement);
 
-                        // Defer pruning to the loop so it can settle durability at one
-                        // database mutation boundary.
-                        if let Some(prune) = prune {
-                            pending_prune = Some(prune);
+                            // Defer pruning to the loop so it can settle durability at one
+                            // database mutation boundary.
+                            if let Some(prune) = prune {
+                                pending_prune = Some(prune);
+                            }
+
+                            // Snapshots serve immediately, ahead of the barrier that covers them.
+                            match publication {
+                                Publication::None => {
+                                    <A::Databases as DatabaseSet<E>>::ANY_CHEAP_SNAPSHOT
+                                }
+                                Publication::Snapshot(snapshots) => {
+                                    self.snapshot_publisher.publish(height, snapshots);
+                                    false
+                                }
+                                Publication::WithBarrier(snapshots, barrier) => {
+                                    self.snapshot_publisher.publish(height, snapshots);
+                                    durability.set_barrier(height, barrier);
+                                    false
+                                }
+                            }
+                        };
+
+                        // A compact member serves only the exact state it published, so a mixed
+                        // set refreshes its cheap members every block.
+                        if refresh {
+                            select! {
+                                _ = &mut shutdown => {
+                                    warn!(height = height.get(), "exiting mid-refresh on shutdown");
+                                    return;
+                                },
+                                driven = verifications
+                                    .drive(processor.refresh_snapshot(&mut self.snapshot_publisher))
+                                    .instrument(process) => {
+                                    processor = driven;
+                                },
+                            }
                         }
                     }
                     Step::Prune(prune) => {
