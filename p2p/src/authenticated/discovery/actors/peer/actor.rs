@@ -284,7 +284,7 @@ mod tests {
     use super::*;
     use crate::{
         Receiver as _,
-        authenticated::{discovery::actors::tracker, router, stream::SakeCups},
+        authenticated::{discovery::actors::tracker, router},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
@@ -296,7 +296,7 @@ mod tests {
         telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::{
-        Upgrader as _,
+        SakeCups, Upgrader as _,
         cups::{self, Cups},
         sake::{Sake, Version},
         utils::Timeout,

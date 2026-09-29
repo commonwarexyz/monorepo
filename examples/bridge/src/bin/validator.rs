@@ -28,7 +28,8 @@ use commonware_runtime::{
 use commonware_stream::{
     Upgrader as _,
     cups::{self, Cups},
-    sake::{Sake, Version},
+    sake::{self, Sake, Version},
+    sake_cups,
     utils::Timeout,
 };
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
@@ -181,9 +182,9 @@ fn main() {
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        (
-            Sake::new(signer, Version::V1),
-            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+        sake_cups(
+            Sake::new(signer, sake::Version::V1),
+            Cups::new(cups::Version::V1),
         ),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

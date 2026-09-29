@@ -6,7 +6,7 @@ use commonware_runtime::{
     Handle, Runner as _, Sink as _, Spawner, Stream as _, Supervisor as _, deterministic, mocks,
 };
 use commonware_stream::{
-    Upgrader as StreamUpgrader,
+    SakeCups, Upgrader as StreamUpgrader,
     cups::{self, Cups},
     sake::{Sake, Version},
     utils::{
@@ -17,9 +17,6 @@ use commonware_stream::{
 use futures::future::{Either, select};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
-
-/// SAKE handshake that keys CUPS records.
-type Upgrader<S> = (Sake<S>, Cups<ChaCha20Poly1305>);
 
 /// Returns the records that pair with the SAKE `version`.
 fn records(version: Version) -> Cups<ChaCha20Poly1305> {
@@ -83,10 +80,10 @@ impl<'a> arbitrary::Arbitrary<'a> for Message {
 }
 
 /// Sending half of an [Upgrader] connection over mock channels.
-type Sender = <Upgrader<PrivateKey> as StreamUpgrader>::Sender<mocks::Stream, mocks::Sink>;
+type Sender = <SakeCups<PrivateKey> as StreamUpgrader>::Sender<mocks::Stream, mocks::Sink>;
 
 /// Receiving half of an [Upgrader] connection over mock channels.
-type Receiver = <Upgrader<PrivateKey> as StreamUpgrader>::Receiver<mocks::Stream, mocks::Sink>;
+type Receiver = <SakeCups<PrivateKey> as StreamUpgrader>::Receiver<mocks::Stream, mocks::Sink>;
 
 #[derive(Debug)]
 pub struct FuzzInput {

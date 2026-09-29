@@ -162,7 +162,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sender, I: Rece
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{discovery::types, stream::SakeCups};
+    use crate::authenticated::discovery::types;
     use commonware_actor::{Feedback, Unreliable, mailbox};
     use commonware_cryptography::{
         Signer as _,
@@ -171,7 +171,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
-        Upgrader,
+        SakeCups, Upgrader,
         cups::{self, Cups},
         sake::{Sake, Version},
         utils::Timeout,

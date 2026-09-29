@@ -25,7 +25,7 @@ use commonware_consensus::{
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
-use commonware_cryptography::{ChaCha20Poly1305, ed25519, sha256::Sha256};
+use commonware_cryptography::{ed25519, sha256::Sha256};
 use commonware_glue::{
     dkg::{
         SecretStore as _,
@@ -45,7 +45,8 @@ use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_stream::{
     cups::{self, Cups},
-    sake::{Sake, Version},
+    sake::{self, Sake},
+    sake_cups,
 };
 use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
@@ -78,9 +79,9 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        (
-            Sake::new(node.signer.clone(), Version::V1),
-            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+        sake_cups(
+            Sake::new(node.signer.clone(), sake::Version::V1),
+            Cups::new(cups::Version::V1),
         ),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,

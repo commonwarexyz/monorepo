@@ -10,7 +10,7 @@
 )]
 
 commonware_macros::stability_scope!(BETA {
-    use commonware_cryptography::Cipher;
+    use commonware_cryptography::{ChaCha20Poly1305, Cipher};
     use commonware_runtime::{BufferPool, BufferPooler, Clock, IoBufs, Sink, Stream};
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
@@ -18,6 +18,14 @@ commonware_macros::stability_scope!(BETA {
     pub mod cups;
     pub mod sake;
     mod upgrade;
+
+    /// [SAKE](sake::Sake) paired with [CUPS](cups::Cups) records sealed by [ChaCha20Poly1305].
+    pub type SakeCups<S> = (sake::Sake<S>, cups::Cups<ChaCha20Poly1305>);
+
+    /// Pairs `sake` with `cups` records sealed by [ChaCha20Poly1305].
+    pub const fn sake_cups<S>(sake: sake::Sake<S>, cups: cups::Cups<ChaCha20Poly1305>) -> SakeCups<S> {
+        (sake, cups)
+    }
     pub mod utils;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.

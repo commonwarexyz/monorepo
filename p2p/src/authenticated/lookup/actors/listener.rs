@@ -320,7 +320,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::stream::SakeCups;
     use commonware_actor::mailbox;
     use commonware_cryptography::{
         Signer as _,
@@ -333,6 +332,7 @@ mod tests {
     use commonware_stream::{
         cups::{self, Cups},
         sake::{Sake, Version},
+        sake_cups,
         utils::Timeout,
     };
     use commonware_utils::{NZU32, NZUsize};
@@ -368,7 +368,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake: SakeCups<_> = (
+            let handshake = sake_cups(
                 Sake {
                     version: Version::V1,
                     signer: PrivateKey::from_seed(1),
@@ -541,7 +541,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake: SakeCups<_> = (
+            let handshake = sake_cups(
                 Sake {
                     version: Version::V1,
                     signer: PrivateKey::from_seed(1),
@@ -631,7 +631,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake: SakeCups<_> = (
+            let handshake = sake_cups(
                 Sake {
                     version: Version::V1,
                     signer: PrivateKey::from_seed(1),
@@ -721,7 +721,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake: SakeCups<_> = (
+            let handshake = sake_cups(
                 Sake {
                     version: Version::V1,
                     signer: PrivateKey::from_seed(1),

@@ -314,13 +314,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        Ingress, Manager,
-        authenticated::{discovery::actors::peer, stream::sake_cups},
-    };
+    use crate::{Ingress, Manager, authenticated::discovery::actors::peer};
     use commonware_codec::Encode;
     use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_stream::{cups, cups::Cups, sake, sake::Sake, sake_cups};
     use commonware_utils::NZUsize;
     use std::{net::SocketAddr, time::Duration};
 
@@ -334,7 +332,10 @@ mod tests {
             let peer = peer_signer.public_key();
             let address = SocketAddr::from(([127, 0, 0, 1], 7000));
             let cfg = Config::local(
-                sake_cups(signer.clone()),
+                sake_cups(
+                    Sake::new(signer.clone(), sake::Version::V1),
+                    Cups::new(cups::Version::V1),
+                ),
                 b"discovery-test",
                 address,
                 address,

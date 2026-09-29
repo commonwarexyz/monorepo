@@ -168,9 +168,9 @@
 //!
 //! ```rust
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
-//! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
+//! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}};
+//! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}, sake_cups};
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -208,10 +208,7 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
-//!     (
-//!         Sake::new(signer.clone(), Version::V1),
-//!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
-//!     ),
+//!     sake_cups(Sake::new(signer.clone(), Version::V1), Cups::new(cups::Version::V1)),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr
@@ -288,7 +285,6 @@ mod tests {
             channels,
             relay::Relay,
             router::{Actor as RouterActor, Config as RouterConfig, Messenger as RouterMessenger},
-            stream::SakeCups,
         },
     };
     use commonware_actor::{Feedback, Unreliable};
@@ -300,6 +296,7 @@ mod tests {
         telemetry::metrics::{count_running_tasks, metric_samples},
         tokio,
     };
+    use commonware_stream::SakeCups;
     use commonware_utils::{NZU32, NZUsize, TryCollect, channel::mpsc, hostname, ordered::Set};
     use rand_core::{CryptoRng, Rng};
     use std::{

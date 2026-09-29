@@ -225,7 +225,6 @@ mod tests {
         authenticated::{
             dialing::Dialable,
             discovery::actors::tracker::{Metadata, ingress::Releaser},
-            stream::sake_cups,
         },
     };
     use commonware_actor::mailbox;
@@ -235,7 +234,12 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-    use commonware_stream::utils::Timeout;
+    use commonware_stream::{
+        cups::{self, Cups},
+        sake::{self, Sake},
+        sake_cups,
+        utils::Timeout,
+    };
     use commonware_utils::NZUsize;
     use std::{
         net::{Ipv4Addr, SocketAddr},
@@ -261,7 +265,13 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(sake_cups(signer), Duration::from_secs(5)),
+                        Timeout::new(
+                            sake_cups(
+                                Sake::new(signer, sake::Version::V1),
+                                Cups::new(cups::Version::V1),
+                            ),
+                            Duration::from_secs(5),
+                        ),
                         b"test",
                         1024,
                     )),
@@ -316,7 +326,13 @@ mod tests {
 
             let dialer_cfg = Config {
                 stream: Arc::new(StreamConfig::new(
-                    Timeout::new(sake_cups(signer), Duration::from_secs(5)),
+                    Timeout::new(
+                        sake_cups(
+                            Sake::new(signer, sake::Version::V1),
+                            Cups::new(cups::Version::V1),
+                        ),
+                        Duration::from_secs(5),
+                    ),
                     b"test",
                     1024,
                 )),
@@ -406,7 +422,13 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(sake_cups(signer), Duration::from_secs(5)),
+                        Timeout::new(
+                            sake_cups(
+                                Sake::new(signer, sake::Version::V1),
+                                Cups::new(cups::Version::V1),
+                            ),
+                            Duration::from_secs(5),
+                        ),
                         b"test",
                         1024,
                     )),
@@ -470,7 +492,13 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(sake_cups(signer), Duration::from_secs(5)),
+                        Timeout::new(
+                            sake_cups(
+                                Sake::new(signer, sake::Version::V1),
+                                Cups::new(cups::Version::V1),
+                            ),
+                            Duration::from_secs(5),
+                        ),
                         b"test",
                         1024,
                     )),
@@ -553,7 +581,13 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(sake_cups(signer), Duration::from_secs(5)),
+                        Timeout::new(
+                            sake_cups(
+                                Sake::new(signer, sake::Version::V1),
+                                Cups::new(cups::Version::V1),
+                            ),
+                            Duration::from_secs(5),
+                        ),
                         b"test",
                         1024,
                     )),

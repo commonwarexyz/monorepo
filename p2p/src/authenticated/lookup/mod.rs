@@ -121,9 +121,9 @@
 //!
 //! ```rust
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
-//! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
+//! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}};
+//! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}, sake_cups};
 //! use commonware_utils::{NZU32, NZUsize, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -159,10 +159,7 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = lookup::Config::local(
-//!     (
-//!         Sake::new(signer.clone(), Version::V1),
-//!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
-//!     ),
+//!     sake_cups(Sake::new(signer.clone(), Version::V1), Cups::new(cups::Version::V1)),
 //!     application_namespace,
 //!     my_addr,
 //!     max_peers_per_set,
@@ -224,7 +221,6 @@ mod tests {
             MAX_PAYLOAD_OVERHEAD, channels,
             relay::Relay,
             router::{Actor as RouterActor, Config as RouterConfig, Messenger as RouterMessenger},
-            stream::{SakeCups, sake_cups},
         },
     };
     use commonware_actor::{Feedback, Unreliable};
@@ -236,7 +232,12 @@ mod tests {
         telemetry::metrics::{count_running_tasks, metric_samples},
         tokio,
     };
-    use commonware_stream::{Receiver as StreamReceiver, Sender as StreamSender, Upgrader, sake};
+    use commonware_stream::{
+        Receiver as StreamReceiver, SakeCups, Sender as StreamSender, Upgrader,
+        cups::{self, Cups},
+        sake::{self, Sake},
+        sake_cups,
+    };
     use commonware_utils::{
         Hostname, NZU32, NZUsize, TryCollect,
         channel::mpsc,
@@ -2384,16 +2385,19 @@ mod tests {
                 .map(|(transport, _)| transport.clone())
                 .ok_or(TestHandshakeError::UnknownApplicationIdentity)?;
             self.authenticate().await?;
-            let (sender, receiver) = sake_cups(self.transport_signer)
-                .dial(
-                    context,
-                    namespace,
-                    max_message_size,
-                    transport_peer,
-                    stream,
-                    sink,
-                )
-                .await?;
+            let (sender, receiver) = sake_cups(
+                Sake::new(self.transport_signer, sake::Version::V1),
+                Cups::new(cups::Version::V1),
+            )
+            .dial(
+                context,
+                namespace,
+                max_message_size,
+                transport_peer,
+                stream,
+                sink,
+            )
+            .await?;
 
             Ok((
                 TestSender { inner: sender },
@@ -2423,36 +2427,39 @@ mod tests {
             );
             self.observations.listens.fetch_add(1, Ordering::Relaxed);
             let handshake = self.clone();
-            let (transport_peer, sender, receiver) = sake_cups(self.transport_signer.clone())
-                .listen(
-                    context,
-                    namespace,
-                    max_message_size,
-                    move |transport_peer| async move {
-                        let Some(application_peer) =
-                            handshake.transport_to_application.get(&transport_peer)
-                        else {
-                            return false;
-                        };
-                        let acceptable = bouncer(application_peer.clone()).await;
-                        if !acceptable
-                            || handshake
-                                .observations
-                                .reject_inbound
-                                .load(Ordering::Relaxed)
-                        {
-                            handshake
-                                .observations
-                                .rejections
-                                .fetch_add(1, Ordering::Relaxed);
-                            return false;
-                        }
-                        handshake.authenticate().await.is_ok()
-                    },
-                    stream,
-                    sink,
-                )
-                .await?;
+            let (transport_peer, sender, receiver) = sake_cups(
+                Sake::new(self.transport_signer.clone(), sake::Version::V1),
+                Cups::new(cups::Version::V1),
+            )
+            .listen(
+                context,
+                namespace,
+                max_message_size,
+                move |transport_peer| async move {
+                    let Some(application_peer) =
+                        handshake.transport_to_application.get(&transport_peer)
+                    else {
+                        return false;
+                    };
+                    let acceptable = bouncer(application_peer.clone()).await;
+                    if !acceptable
+                        || handshake
+                            .observations
+                            .reject_inbound
+                            .load(Ordering::Relaxed)
+                    {
+                        handshake
+                            .observations
+                            .rejections
+                            .fetch_add(1, Ordering::Relaxed);
+                        return false;
+                    }
+                    handshake.authenticate().await.is_ok()
+                },
+                stream,
+                sink,
+            )
+            .await?;
 
             // Observe every authenticated identity, including sessions p2p discards before delivery.
             let application_peer = self.transport_to_application[&transport_peer].clone();

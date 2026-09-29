@@ -1,7 +1,7 @@
 use clap::{Arg, Command};
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{
-    ChaCha20Poly1305, Signer as _,
+    Signer as _,
     ed25519::{PrivateKey, PublicKey},
 };
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
@@ -18,7 +18,8 @@ use commonware_runtime::{
 };
 use commonware_stream::{
     cups::{self, Cups},
-    sake::{Sake, Version},
+    sake::{self, Sake},
+    sake_cups,
 };
 use commonware_utils::{TryCollect, ordered::Set, probability, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
@@ -134,9 +135,9 @@ fn main() {
         // Configure network
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
         let mut p2p_cfg = discovery::Config::local(
-            (
-                Sake::new(signer.clone(), Version::V1),
-                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+            sake_cups(
+                Sake::new(signer.clone(), sake::Version::V1),
+                Cups::new(cups::Version::V1),
             ),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),

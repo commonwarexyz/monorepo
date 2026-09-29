@@ -3,7 +3,7 @@
 use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
-    Upgrader as StreamUpgrader,
+    SakeCups, Upgrader as StreamUpgrader,
     cups::{self, Cups},
     sake::{Sake, Version},
     utils::Timeout,
@@ -11,9 +11,6 @@ use commonware_stream::{
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
-
-/// SAKE handshake that keys CUPS records.
-type Upgrader<S> = (Sake<S>, Cups<ChaCha20Poly1305>);
 
 /// Returns the records that pair with the SAKE `version`.
 fn records(version: Version) -> Cups<ChaCha20Poly1305> {
@@ -27,10 +24,10 @@ static NAMESPACE: &[u8] = b"lazy_fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 1023 * 1024; // ~1MB buffer
 
 /// Sending half of an [Upgrader] connection over mock channels.
-type Sender = <Upgrader<PrivateKey> as StreamUpgrader>::Sender<mocks::Stream, mocks::Sink>;
+type Sender = <SakeCups<PrivateKey> as StreamUpgrader>::Sender<mocks::Stream, mocks::Sink>;
 
 /// Receiving half of an [Upgrader] connection over mock channels.
-type Receiver = <Upgrader<PrivateKey> as StreamUpgrader>::Receiver<mocks::Stream, mocks::Sink>;
+type Receiver = <SakeCups<PrivateKey> as StreamUpgrader>::Receiver<mocks::Stream, mocks::Sink>;
 
 struct TransportPair {
     dialer_sender: Sender,

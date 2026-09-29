@@ -49,10 +49,7 @@ impl<P: PublicKey, O: Sender, I: Receiver> Mailbox<Message<O, I, P>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{
-        discovery::actors::tracker::{self, Metadata},
-        stream::SakeCups,
-    };
+    use crate::authenticated::discovery::actors::tracker::{self, Metadata};
     use commonware_actor::mailbox;
     use commonware_cryptography::{
         Signer as _,
@@ -60,7 +57,7 @@ mod tests {
     };
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
-        Upgrader,
+        SakeCups, Upgrader,
         cups::{self, Cups},
         sake::{Sake, Version},
         utils::Timeout,

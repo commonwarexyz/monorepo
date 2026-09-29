@@ -2,6 +2,13 @@
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
 use commonware_stream::Upgrader;
+#[cfg(test)]
+use commonware_stream::{
+    SakeCups,
+    cups::{self, Cups},
+    sake::{self, Sake},
+    sake_cups,
+};
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -199,10 +206,13 @@ impl<U: Upgrader> Config<U> {
 }
 
 #[cfg(test)]
-impl<C: Signer> Config<crate::authenticated::stream::SakeCups<C>> {
+impl<C: Signer> Config<SakeCups<C>> {
     pub fn test(signer: C, listen: SocketAddr, max_message_size: u32) -> Self {
         let mut config = Self::local(
-            crate::authenticated::stream::sake_cups(signer),
+            sake_cups(
+                Sake::new(signer, sake::Version::V1),
+                Cups::new(cups::Version::V1),
+            ),
             b"test_namespace",
             listen,
             NZUsize!(32),

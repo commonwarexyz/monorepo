@@ -188,7 +188,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{router, stream::SakeCups};
+    use crate::authenticated::router;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         Signer,
@@ -199,7 +199,7 @@ mod tests {
         deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::{
-        Upgrader as _,
+        SakeCups, Upgrader as _,
         cups::{self, Cups},
         sake::{Sake, Version},
         utils::Timeout,

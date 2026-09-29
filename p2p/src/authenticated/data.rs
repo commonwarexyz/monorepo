@@ -111,10 +111,10 @@ impl arbitrary::Arbitrary<'_> for Data {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::stream::SakeCups;
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_cryptography::ed25519;
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
+    use commonware_stream::SakeCups;
 
     #[test]
     fn test_max_size_bounds() {

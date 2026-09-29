@@ -1,6 +1,6 @@
 use arbitrary::Arbitrary;
 use commonware_codec::codec::FixedSize;
-use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519};
+use commonware_cryptography::{Signer, ed25519};
 use commonware_p2p::{
     Address, AddressableManager as _, Blocker, Channel, Manager as _, Receiver, Recipients, Sender,
     authenticated::{
@@ -14,7 +14,8 @@ use commonware_runtime::{
 };
 use commonware_stream::{
     cups::{self, Cups},
-    sake::{Sake, Version},
+    sake::{self, Sake},
+    sake_cups,
 };
 use commonware_utils::{
     NZU32, NZUsize, TryCollect,
@@ -238,9 +239,9 @@ impl NetworkScheme for Discovery {
 
         // Create config with recommended defaults
         let mut config = discovery::Config::recommended(
-            (
-                Sake::new(peer.info.signer.clone(), Version::V1),
-                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+            sake_cups(
+                Sake::new(peer.info.signer.clone(), sake::Version::V1),
+                Cups::new(cups::Version::V1),
             ),
             b"fuzz_namespace",
             peer.info.address,
@@ -319,9 +320,9 @@ impl NetworkScheme for Lookup {
     ) -> PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle> {
         // Create lookup config - no bootstrappers needed since we register addresses directly
         let mut config = lookup::Config::recommended(
-            (
-                Sake::new(peer.info.signer.clone(), Version::V1),
-                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+            sake_cups(
+                Sake::new(peer.info.signer.clone(), sake::Version::V1),
+                Cups::new(cups::Version::V1),
             ),
             b"fuzz_namespace",
             peer.info.address,

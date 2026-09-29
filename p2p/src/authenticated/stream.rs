@@ -1,26 +1,13 @@
 //! Connection upgrades shared by the dialer and listener actors.
 
 #[cfg(test)]
-use commonware_cryptography::{ChaCha20Poly1305, Signer};
+use commonware_cryptography::Signer;
 use commonware_runtime::{BufferPooler, Clock, Sink, Stream};
-use commonware_stream::Upgrader;
 #[cfg(test)]
-use commonware_stream::{
-    cups::{self, Cups},
-    sake::{Sake, Version},
-};
+use commonware_stream::SakeCups;
+use commonware_stream::Upgrader;
 use rand_core::CryptoRng;
 use std::future::Future;
-
-/// SAKE handshake that keys CUPS records, shared by tests.
-#[cfg(test)]
-pub(crate) type SakeCups<S> = (Sake<S>, Cups<ChaCha20Poly1305>);
-
-/// Returns a version 1 [SakeCups] that signs with `signer`.
-#[cfg(test)]
-pub(crate) const fn sake_cups<S: Signer>(signer: S) -> SakeCups<S> {
-    (Sake::new(signer, Version::V1), Cups::new(cups::Version::V1))
-}
 
 /// Reuses a handshake with a fixed namespace and plaintext message limit.
 ///
@@ -108,13 +95,16 @@ mod tests {
     use super::*;
     use commonware_cryptography::ed25519::PrivateKey;
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
-    use commonware_stream::cups;
+    use commonware_stream::{cups, cups::Cups, sake, sake::Sake, sake_cups};
 
     const NAMESPACE: &[u8] = b"test_namespace";
     const LIMIT: u32 = 1024;
 
     fn handshake(seed: u64) -> SakeCups<PrivateKey> {
-        sake_cups(PrivateKey::from_seed(seed))
+        sake_cups(
+            Sake::new(PrivateKey::from_seed(seed), sake::Version::V1),
+            Cups::new(cups::Version::V1),
+        )
     }
 
     #[test]
