@@ -34,6 +34,7 @@ pub trait Operation<F: Family>:
     /// Build a commit operation.
     fn commit(metadata: Option<Self::Metadata>, inactivity_floor_loc: Location<F>) -> Self;
 
-    /// The metadata carried by a commit operation; `None` for any other operation.
+    /// The metadata carried by a commit operation; `None` for a commit without metadata or any
+    /// other operation.
     fn metadata(&self) -> Option<&Self::Metadata>;
 }

@@ -24,6 +24,8 @@ use commonware_utils::channel::mpsc;
 use std::{ops::Deref, sync::Arc};
 
 /// A speculative batch over a shared compact database.
+///
+/// Keyless batches add operations with `append` and immutable batches with `set`.
 pub struct CompactUnmerkleized<F, E, O, H, S>
 where
     F: Family,
@@ -574,9 +576,6 @@ mod tests {
         /// Add the mutation derived from `seed` to a storage batch.
         fn mutate(batch: TestBatch<mmr::Family, Self>, seed: u64) -> TestBatch<mmr::Family, Self>;
 
-        /// Add the mutation derived from `seed` to an adapter batch.
-        fn mutate_managed(batch: AdapterBatch<Self>, seed: u64) -> AdapterBatch<Self>;
-
         /// The commit metadata for `seed`.
         fn commit_metadata(seed: u64) -> Self::Metadata;
 
@@ -613,10 +612,6 @@ mod tests {
         type Full = FullKeylessDb;
 
         fn mutate(batch: TestBatch<mmr::Family, Self>, seed: u64) -> TestBatch<mmr::Family, Self> {
-            batch.append(U64::new(seed))
-        }
-
-        fn mutate_managed(batch: AdapterBatch<Self>, seed: u64) -> AdapterBatch<Self> {
             batch.append(U64::new(seed))
         }
 
@@ -669,10 +664,6 @@ mod tests {
             batch.set(immutable_key(seed), immutable_value(seed))
         }
 
-        fn mutate_managed(batch: AdapterBatch<Self>, seed: u64) -> AdapterBatch<Self> {
-            batch.set(immutable_key(seed), immutable_value(seed))
-        }
-
         fn commit_metadata(seed: u64) -> Digest {
             immutable_value(seed + 1000)
         }
@@ -707,6 +698,15 @@ mod tests {
             }
             (Arc::new(source), targets)
         }
+    }
+
+    /// Add the mutation derived from `seed` to an adapter batch.
+    fn mutate_managed<O: AdapterOperation>(
+        mut batch: AdapterBatch<O>,
+        seed: u64,
+    ) -> AdapterBatch<O> {
+        batch.batch = O::mutate(batch.batch, seed);
+        batch
     }
 
     fn compact_config(context: &impl BufferPooler, suffix: &str) -> Config<(), Sequential> {
@@ -807,12 +807,12 @@ mod tests {
     fn managed_db_apply_and_finalize_persists_batches<O: AdapterOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let config = compact_config(&context, "managed-db");
-            let db = AdapterDb::<O>::init(context.child("db"), config, None)
+            let db = AdapterDb::<O>::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let batch = O::mutate_managed(db.new_batch_for_test::<_>().await, 7)
+            let batch = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 7)
                 .with_inactivity_floor(Location::new(1))
                 .with_metadata(O::commit_metadata(7));
             let merkleized = UnmerkleizedTrait::merkleize(batch).await.unwrap();
@@ -837,6 +837,18 @@ mod tests {
             let target = <AdapterDb<O> as ManagedDb<_>>::sync_target(&guard);
             assert_eq!(target.root, expected_root);
             assert_eq!(target.size, Location::new(3));
+            drop(guard);
+            drop(db);
+
+            let reopened =
+                <AdapterDb<O> as ManagedDb<_>>::init(context.child("reopen"), config, None)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                <AdapterDb<O> as ManagedDb<_>>::sync_target(&reopened),
+                target
+            );
+            assert_eq!(reopened.get_metadata(), Some(O::commit_metadata(7)));
         });
     }
 
@@ -848,7 +860,7 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let first = O::mutate_managed(db.new_batch_for_test::<_>().await, 1)
+            let first = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 1)
                 .with_metadata(O::commit_metadata(1));
             let first = UnmerkleizedTrait::merkleize(first).await.unwrap();
             let first_target = Target {
@@ -861,7 +873,7 @@ mod tests {
                 .unwrap();
             slot.put(database);
 
-            let second = O::mutate_managed(db.new_batch_for_test::<_>().await, 2)
+            let second = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 2)
                 .with_metadata(O::commit_metadata(2));
             let second = UnmerkleizedTrait::merkleize(second).await.unwrap();
             let (slot, database) = db.write().await;
@@ -897,7 +909,7 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let batch = O::mutate_managed(db.new_batch_for_test::<_>().await, 7)
+            let batch = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 7)
                 .with_inactivity_floor(Location::new(1))
                 .with_metadata(O::commit_metadata(7));
             let merkleized = UnmerkleizedTrait::merkleize(batch).await.unwrap();
@@ -930,12 +942,12 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let batch = O::mutate_managed(db.new_batch_for_test::<_>().await, 1)
+            let batch = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 1)
                 .with_metadata(O::commit_metadata(1));
             let batch = UnmerkleizedTrait::merkleize(batch).await.unwrap();
             DatabaseSet::apply(&db, batch).await;
             let target = DatabaseSet::committed_targets(&db).await;
-            DatabaseSet::finalize(&db).await.durable().await;
+            assert!(DatabaseSet::finalize(&db).await.durable().await);
             drop(db);
             let db = <Shared<AdapterDb<O>> as DatabaseSet<_>>::init(
                 context.child("aligned_cap"),
@@ -1106,13 +1118,11 @@ mod tests {
         );
     }
 
-    /// The seeds of the stale and latest batches the superseding tests sync.
-    const SUPERSEDE_SEEDS: [u64; 2] = [7, 8];
-
     async fn state_sync_supersedes_in_flight_stale_compact_target<O, S>(
         context: deterministic::Context,
         source: Arc<S>,
         targets: Vec<Target>,
+        latest_metadata: O::Metadata,
     ) where
         O: AdapterOperation,
         S: sync::Source<Family = mmr::Family, Digest = Digest, Op = O> + Send + Sync + 'static,
@@ -1156,10 +1166,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(synced.target(), latest_target);
-        assert_eq!(
-            synced.get_metadata(),
-            Some(O::commit_metadata(SUPERSEDE_SEEDS[1]))
-        );
+        assert_eq!(synced.get_metadata(), Some(latest_metadata));
     }
 
     fn managed_db_initializes_multiple_commit_ranges<O: AdapterOperation>() {
@@ -1325,12 +1332,11 @@ mod tests {
                 fn state_sync_supersedes_in_flight_stale_target_from_compact_source() {
                     deterministic::Runner::default().start(|context| async move {
                         let (source, targets) =
-                            compact_source::<$operation>(context.child("source"), &SUPERSEDE_SEEDS)
-                                .await;
+                            compact_source::<$operation>(context.child("source"), &[7, 8]).await;
                         super::state_sync_supersedes_in_flight_stale_compact_target::<
                             $operation,
                             _,
-                        >(context, source, targets)
+                        >(context, source, targets, <$operation>::commit_metadata(8))
                         .await;
                     });
                 }
@@ -1339,12 +1345,11 @@ mod tests {
                 fn state_sync_supersedes_in_flight_stale_target_from_full_source() {
                     deterministic::Runner::default().start(|context| async move {
                         let (source, targets) =
-                            <$operation>::full_source(context.child("source"), &SUPERSEDE_SEEDS)
-                                .await;
+                            <$operation>::full_source(context.child("source"), &[7, 8]).await;
                         super::state_sync_supersedes_in_flight_stale_compact_target::<
                             $operation,
                             _,
-                        >(context, source, targets)
+                        >(context, source, targets, <$operation>::commit_metadata(8))
                         .await;
                     });
                 }

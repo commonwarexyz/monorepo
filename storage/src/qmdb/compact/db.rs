@@ -388,6 +388,9 @@ where
 
     /// Check that `batch` can be applied to the database in its current state, without
     /// applying it.
+    ///
+    /// [`Self::apply_batch`] runs the same validation but consumes the database when it
+    /// fails; callers that want to reject a bad batch and keep the handle can check first.
     pub fn validate_batch(
         &self,
         batch: &MerkleizedBatch<F, H::Digest, O, S>,
@@ -3110,6 +3113,138 @@ pub(crate) mod tests {
         });
     }
 
+    /// Bounded initialization selects by size wherever an import placed its witness: at position
+    /// 1, where imports land now, or at the old journal end, where earlier versions placed them
+    /// and left positions above sizes. A cap below the import finds no retained witness.
+    pub(crate) fn test_compact_bounded_initialization_after_import<O: TestOperation>() {
+        for at_old_end in [false, true] {
+            deterministic::Runner::default().start(|context| async move {
+                let import =
+                    Import::<O>::build(context.child("src"), "compact-import-bounded-src", 1).await;
+
+                // The destination has used positions 0 through 3.
+                let dst_cfg = sectioned_witness_config::<O>("compact-import-bounded-dst", &context);
+                seed_witness_sections::<O>(context.child("dst"), dst_cfg.clone(), 3).await;
+                let (journal_cfg, _) = witness::split_config(dst_cfg.clone());
+                let position = if at_old_end {
+                    // Clear the journal at its end and append the imported witness there.
+                    let journal = witness::Journal::<_, O::Family, Digest>::init_at_size(
+                        context.child("old_end"),
+                        journal_cfg.clone(),
+                        4,
+                    )
+                    .await
+                    .unwrap();
+                    let imported = Witness {
+                        commit: import.commit.clone(),
+                        size: import.target.size,
+                        pinned_nodes: import.pinned_nodes.clone(),
+                    };
+                    let (journal, _) = journal.append(&imported.stored()).await.unwrap();
+                    drop(journal.sync().await.unwrap());
+                    4
+                } else {
+                    let imported = TestDb::<O>::init_from_sync(
+                        context.child("import"),
+                        Config {
+                            strategy: Sequential,
+                            witness: dst_cfg.clone(),
+                        },
+                        import.target.size - 1,
+                        import.pinned_nodes.clone(),
+                        import.commit.clone(),
+                    )
+                    .unwrap();
+                    drop(imported.commit().await.unwrap());
+                    1
+                };
+                let journal = witness::Journal::<_, O::Family, Digest>::init(
+                    context.child("placed"),
+                    journal_cfg,
+                )
+                .await
+                .unwrap();
+                assert_eq!(journal.bounds(), position..position + 1);
+                drop(journal);
+
+                // Three more commits follow the import. `states` holds the size and root of the
+                // import and each commit.
+                let mut states = vec![(import.target.size, import.target.root)];
+                states.extend(
+                    seed_witness_sections::<O>(context.child("reopen"), dst_cfg.clone(), 3).await,
+                );
+
+                // Open at each recorded size from the tip down. Each open discards the witnesses
+                // above its selection, so the caps must descend.
+                for (size, root) in states.into_iter().rev() {
+                    let db = open_bounded::<O>(
+                        context.child("bounded").with_attribute("cap", *size),
+                        dst_cfg.clone(),
+                        size,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(db.size(), size);
+                    assert_eq!(db.root(), root);
+                }
+
+                // Only the imported witness remains, and every smaller cap finds nothing without
+                // discarding it.
+                for cap in (1..*import.target.size).map(Location::new) {
+                    assert!(matches!(
+                        open_bounded::<O>(
+                            context.child("pruned").with_attribute("cap", *cap),
+                            dst_cfg.clone(),
+                            cap,
+                        )
+                        .await,
+                        Err(Error::HistoricalFloorPruned(found)) if found == cap
+                    ));
+                }
+                let db = TestDb::<O>::init(
+                    context.child("latest"),
+                    Config {
+                        strategy: Sequential,
+                        witness: dst_cfg,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+                assert_eq!(db.target(), import.target);
+                db.destroy().await.unwrap();
+            });
+        }
+    }
+
+    /// A batch that fails validation leaves a pending import unjournaled, so the destination's
+    /// previous state still reopens.
+    pub(crate) fn test_compact_import_rejected_batch_keeps_destination<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let dst = "compact-import-rejected-dst";
+            let import =
+                Import::<O>::build(context.child("src"), "compact-import-rejected-src", 2).await;
+            let previous = commit_seed::<O>(context.child("seed"), dst, 1).await;
+            let imported = import.into_db(context.child("import"), dst);
+
+            // A floor beyond the batch's own commit location fails validation.
+            let floor = imported.size() + 1;
+            let batch = imported
+                .new_batch()
+                .merkleize(&imported, None, floor)
+                .await
+                .unwrap();
+            assert!(matches!(
+                imported.apply_batch(batch).await,
+                Err(Error::FloorBeyondSize(..))
+            ));
+
+            let db = open_db::<O>(context.child("reopen"), dst).await;
+            assert_eq!(db.target(), previous);
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// A bounded initialization whose selection fails leaves the witness offsets watermark
     /// acknowledging every synced witness.
     pub(crate) fn test_compact_failed_bounded_selection_preserves_acknowledged_offsets<
@@ -3906,6 +4041,8 @@ pub(crate) mod tests {
                 test_compact_bounded_initialization_ignores_discarded_witness_sections,
                 test_compact_bounded_initialization_repairs_retained_witness_section,
                 test_compact_bounded_initialization_after_genesis_import,
+                test_compact_bounded_initialization_after_import,
+                test_compact_import_rejected_batch_keeps_destination,
                 test_compact_failed_bounded_selection_preserves_acknowledged_offsets,
                 test_compact_prune_past_tip_keeps_tip,
                 test_compact_initialization_zero_and_above_end,
