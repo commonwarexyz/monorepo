@@ -33,6 +33,11 @@ thiserror.workspace = true
 tracing = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
+[build-dependencies]
+# the rustoleum verifier (the ar2-mmr toolchain), run by build.rs: it verifies
+# the MMR position and peak arithmetic in place (rustoleum/mmr/)
+rustoleum = { path = "../../ar2-mmr/crates/rustoleum", features = ["build"] }
+
 [dev-dependencies]
 commonware-bench.workspace = true
 commonware-conformance.workspace = true
