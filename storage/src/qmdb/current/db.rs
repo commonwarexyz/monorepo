@@ -1563,6 +1563,7 @@ mod tests {
             let boundary = db.sync_boundary();
             assert!(boundary > base);
             let db = db.prune(boundary).await.unwrap();
+            assert!(*db.bounds().start > 0, "the prune must drop history");
 
             // The surviving child still merkleizes to the same root.
             let merkleized = child.merkleize(&db, None).await.unwrap();

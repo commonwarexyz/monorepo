@@ -3489,8 +3489,8 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // child: 1 append + commit at loc 4, declaring floor=5 (one past its commit). A floor of 3
-        // would be valid for the parent alone, so the child's bound must include its parent's ops.
+        // child: 1 append + commit at loc 4, declaring floor=5 (one past its commit). The error
+        // names commit location 4, so the bound counts the parent's operations.
         let Err(err) = parent
             .new_batch::<H>()
             .append(V::Value::make(2))

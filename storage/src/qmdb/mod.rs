@@ -355,7 +355,8 @@ pub enum Error<F: Family> {
     ///
     /// Causes:
     /// - The database moved off the batch's chain. Reads report this case as
-    ///   [`Error::StaleRead`].
+    ///   [`Error::StaleRead`]. Apply also refuses at the batch's own tip (it is already applied),
+    ///   where reads still pass.
     /// - Merkleize only: an unapplied ancestor was dropped, so the chain no longer reaches the live
     ///   database. Reads stay exact, since each merkleized batch retains its ancestors' overlays.
     /// - Current merkleize only: the batch was built against another database instance.
@@ -364,9 +365,9 @@ pub enum Error<F: Family> {
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
-    /// A batch read found that a non-ancestor batch was applied to the database (or that
-    /// it was reinitialized off the batch's chain). The caller should fork a new batch from the
-    /// current state.
+    /// A batch read found the database on none of the batch's chain states: a batch other than
+    /// this one or an ancestor was applied (or the database was reinitialized off the chain).
+    /// The caller should fork a new batch from the current state.
     #[error("stale read: a non-ancestor batch was applied")]
     StaleRead,
 
