@@ -36,6 +36,8 @@ pub(super) struct ProducerWalk<D: Digest> {
     emitted: Height,
     /// History tips the walk must pass through, ascending by height.
     boundaries: Vec<BlockRef<D>>,
+    /// Whether the walk passed another block at a history boundary's height.
+    diverged: bool,
 }
 
 impl<D: Digest> ProducerWalk<D> {
@@ -50,6 +52,7 @@ impl<D: Digest> ProducerWalk<D> {
             stage_max,
             emitted: emitted.height(),
             boundaries: Vec::new(),
+            diverged: false,
         })
     }
 
@@ -57,8 +60,8 @@ impl<D: Digest> ProducerWalk<D> {
     /// `tips`, oldest first.
     ///
     /// The walk descends from the higher of the newest tip and `emitted` to the lower of the
-    /// oldest tip and `emitted`, and must pass through every tip and `emitted`. It stages the
-    /// references above `emitted` up to the newest tip.
+    /// oldest tip and `emitted`, and must pass through every tip and `emitted`, or it ends as
+    /// diverged. It stages the references above `emitted` up to the newest tip.
     pub(super) fn window(
         tips: &[BlockRef<D>],
         emitted: BlockRef<D>,
@@ -120,6 +123,7 @@ impl<D: Digest> ProducerWalk<D> {
             stage_max: (target.height() > emitted.height()).then_some(target.height()),
             emitted: emitted.height(),
             boundaries,
+            diverged: false,
         })
     }
 
@@ -135,25 +139,39 @@ impl<D: Digest> ProducerWalk<D> {
             && reference.height() > self.emitted
     }
 
-    /// Checks `reference` against the history boundary at its height, if any.
+    /// Checks `reference` against the history boundary at its height, if any, and ends the walk
+    /// as diverged on a mismatch.
     fn pass_boundary(&mut self, reference: BlockRef<D>) -> Result<(), Error> {
         if let Some(boundary) = self
             .boundaries
             .pop_if(|boundary| boundary.height() == reference.height())
             && boundary != reference
         {
-            return Err(Error::Invalid(
-                "producer ancestry conflicts with a history boundary",
-            ));
+            self.diverge()?;
         }
+        Ok(())
+    }
+
+    /// Ends the walk without staging more references.
+    ///
+    /// A later opening's anchor left a boundary's branch, so the window's openings do not share
+    /// one path and must be opened one at a time.
+    fn diverge(&mut self) -> Result<(), Error> {
+        let low = self.ancestry.bounds().low;
+        self.ancestry = Ancestry::common(low, low)?;
+        self.stage_max = None;
+        self.boundaries.clear();
+        self.diverged = true;
         Ok(())
     }
 }
 
 /// The result of walking every producer chain of a pass.
 pub(super) struct WalkPlan<D: Digest> {
-    /// Resolved common frontier on every chain.
+    /// On every chain, the higher reference's ancestor at the lower one's height.
     pub common: Vec<BlockRef<D>>,
+    /// Whether a window walk diverged on some chain, leaving the plan incomplete.
+    pub diverged: bool,
     /// Authenticated forward path per chain, where the path cache already covered the walk.
     ///
     /// Chains without a path staged their references in the block stack.
@@ -239,6 +257,7 @@ impl<D: Digest> AncestryWalker<D> {
 
     /// Returns the common frontiers and forward paths once every walk finished.
     fn finish(self) -> Result<WalkPlan<D>, Error> {
+        let diverged = self.walks.iter().any(|walk| walk.diverged);
         let common = self
             .walks
             .into_iter()
@@ -255,6 +274,7 @@ impl<D: Digest> AncestryWalker<D> {
             .collect::<Result<_, _>>()?;
         Ok(WalkPlan {
             common,
+            diverged,
             forward: self.forward,
         })
     }
@@ -312,7 +332,8 @@ where
         self.walk(walks, FetchReason::Finality).await
     }
 
-    /// Resolves the common frontiers of `targets` and `emitted` without staging anything.
+    /// Resolves, on every chain, the higher of `targets` and `emitted` descended to the lower one's
+    /// height, without staging anything.
     pub(super) async fn common_frontiers(
         &mut self,
         targets: &[BlockRef<H::Digest>],
@@ -401,9 +422,8 @@ where
                 .iter()
                 .any(|boundary| path.get(boundary.height()) != Some(*boundary))
             {
-                return Err(Error::Invalid(
-                    "producer ancestry conflicts with a history boundary",
-                ));
+                walk.diverge()?;
+                continue;
             }
             walk.boundaries.clear();
             walk.ancestry = Ancestry::common(low, low)?;

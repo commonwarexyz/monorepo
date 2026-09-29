@@ -20,7 +20,7 @@ use crate::{
             config::{ArchiveMode, Retention},
             protocol::{
                 floor::Error as FloorError,
-                order::{Slot, SlotStream},
+                order::{self, Slot, SlotStream},
             },
             storage::{
                 catalog_state::{Checkpoint, CheckpointParts, PendingFloors},
@@ -207,11 +207,22 @@ fn base(chain: u32, height: u64) -> BlockRef<Sha256Digest> {
 }
 
 fn chain(epoch: Epoch, base: BlockRef<Sha256Digest>, count: usize) -> Vec<Arc<TestBlock>> {
+    branch(epoch, base, count, b"body parent")
+}
+
+/// Returns `count` blocks above `base` whose bodies are derived from `label`, so distinct labels
+/// fork at `base`.
+fn branch(
+    epoch: Epoch,
+    base: BlockRef<Sha256Digest>,
+    count: usize,
+    label: &[u8],
+) -> Vec<Arc<TestBlock>> {
     let mut parent = base.digest();
     (1..=count)
         .map(|offset| {
             let height = base.height().get() + offset as u64;
-            let body = TestBody::new(digest(b"body parent", height), Height::new(height), height);
+            let body = TestBody::new(digest(label, height), Height::new(height), height);
             let header = TransactionBlockHeader::new(
                 epoch,
                 base.chain(),
