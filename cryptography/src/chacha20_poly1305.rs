@@ -21,32 +21,6 @@ const NONCE_SIZE_BYTES: usize = 12;
 /// ChaCha20-Poly1305 uses a 256-bit (32 byte) key.
 const KEY_SIZE_BYTES: usize = 32;
 
-struct CounterNonce {
-    inner: u128,
-}
-
-impl CounterNonce {
-    /// Creates a new counter nonce starting at zero.
-    pub const fn new() -> Self {
-        Self { inner: 0 }
-    }
-
-    /// Increments the counter and returns the current value as bytes.
-    /// Returns `None` if the counter would overflow.
-    pub fn inc(&mut self) -> Option<[u8; NONCE_SIZE_BYTES]> {
-        if self.inner >= 1 << (8 * NONCE_SIZE_BYTES) {
-            return None;
-        }
-        let out = self.inner.to_le_bytes();
-        self.inner += 1;
-
-        // Extract only the lower 96 bits (12 bytes) for the nonce
-        let mut nonce = [0u8; NONCE_SIZE_BYTES];
-        nonce.copy_from_slice(&out[..NONCE_SIZE_BYTES]);
-        Some(nonce)
-    }
-}
-
 cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
         use aws_lc_rs::aead::{self, CHACHA20_POLY1305, LessSafeKey, UnboundKey};
@@ -127,8 +101,24 @@ cfg_if::cfg_if! {
 
 /// ChaCha20-Poly1305 [Cipher] with an implicit counter nonce.
 pub struct ChaCha20Poly1305 {
-    nonce: CounterNonce,
+    nonce: u128,
     key: Secret<Key>,
+}
+
+impl ChaCha20Poly1305 {
+    /// Returns the current nonce and advances the counter, or `None` if no nonce remains.
+    fn next_nonce(&mut self) -> Option<[u8; NONCE_SIZE_BYTES]> {
+        if self.nonce >= 1 << (8 * NONCE_SIZE_BYTES) {
+            return None;
+        }
+        let out = self.nonce.to_le_bytes();
+        self.nonce += 1;
+
+        // Extract only the lower 96 bits (12 bytes) for the nonce
+        let mut nonce = [0u8; NONCE_SIZE_BYTES];
+        nonce.copy_from_slice(&out[..NONCE_SIZE_BYTES]);
+        Some(nonce)
+    }
 }
 
 impl Random for ChaCha20Poly1305 {
@@ -136,7 +126,7 @@ impl Random for ChaCha20Poly1305 {
         let mut key_bytes = Zeroizing::new([0u8; KEY_SIZE_BYTES]);
         rng.fill_bytes(key_bytes.as_mut());
         Self {
-            nonce: CounterNonce::new(),
+            nonce: 0,
             key: Secret::new(Key::from_key(&key_bytes)),
         }
     }
@@ -147,14 +137,14 @@ impl Cipher for ChaCha20Poly1305 {
 
     #[inline]
     fn seal(mut self, aad: &[u8], data: &mut [u8]) -> Option<(Self, Self::Tag)> {
-        let nonce = self.nonce.inc()?;
+        let nonce = self.next_nonce()?;
         let tag = self.key.expose(|key| key.encrypt(&nonce, aad, data))?;
         Some((self, FixedBytes::new(tag)))
     }
 
     #[inline]
     fn open(mut self, aad: &[u8], data: &mut [u8], tag: &Self::Tag) -> Option<Self> {
-        let nonce = self.nonce.inc()?;
+        let nonce = self.next_nonce()?;
         let tag: &[u8; TAG_SIZE] = tag.as_ref().try_into().expect("tag size is fixed");
         self.key.expose(|key| key.decrypt(&nonce, aad, data, tag))?;
         Some(self)
@@ -238,7 +228,7 @@ mod tests {
     fn test_exhausted_counter_fails() {
         // Set the counter to its limit so no nonce remains.
         let exhausted = |mut cipher: ChaCha20Poly1305| {
-            cipher.nonce.inner = 1 << (8 * NONCE_SIZE_BYTES);
+            cipher.nonce = 1 << (8 * NONCE_SIZE_BYTES);
             cipher
         };
         let send = exhausted(ChaCha20Poly1305::random(test_rng()));

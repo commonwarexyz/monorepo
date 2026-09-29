@@ -6,7 +6,7 @@ use commonware_runtime::{
     Handle, Runner as _, Sink as _, Spawner, Stream as _, Supervisor as _, deterministic, mocks,
 };
 use commonware_stream::{
-    Handshake as StreamHandshake, Session,
+    Handshake as StreamHandshake, Upgrade,
     cups::{self, Cups},
     sake::{self, Config, Version},
     utils::{
@@ -18,7 +18,7 @@ use futures::future::{Either, select};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
-type Handshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
+type Handshake<S> = Upgrade<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
 
 /// Returns the records that pair with the SAKE `version`.
 fn records(version: Version) -> Cups<ChaCha20Poly1305> {

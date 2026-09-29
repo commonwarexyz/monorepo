@@ -1,7 +1,7 @@
 //! SAKE stream conformance tests.
 
 use crate::{
-    Handshake as _, Session,
+    Handshake as _, Upgrade,
     cups::{self, Cups},
     sake::{Config, Exchange, Version},
 };
@@ -72,7 +72,7 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
         };
 
         // Complete the handshake.
-        let listener_handshake = Session::new(
+        let listener_handshake = Upgrade::new(
             Exchange::new(Config::new(listener.clone(), version)),
             Cups::<ChaCha20Poly1305>::new(records),
         );
@@ -88,7 +88,7 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
                 )
                 .await
         });
-        let (mut dialer_tx, mut dialer_rx) = Session::new(
+        let (mut dialer_tx, mut dialer_rx) = Upgrade::new(
             Exchange::new(Config::new(dialer, version)),
             Cups::<ChaCha20Poly1305>::new(records),
         )

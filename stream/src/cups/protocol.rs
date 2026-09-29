@@ -125,7 +125,14 @@ impl<C: Cipher> Cups<C> {
     ///
     /// Panics if `len` exceeds the largest record payload, `u32::MAX` minus the tag size.
     pub fn header_len(&self, len: usize) -> usize {
-        header_len::<C>(self.version, len)
+        let len = u32::try_from(len)
+            .ok()
+            .filter(|len| *len <= <Self as crate::Records>::MAX_SIZE)
+            .expect("payload exceeds stream limit");
+        match self.version {
+            Version::V0 => UInt(len + tag_size::<C>()).encode_size(),
+            Version::V1 => v1_header_size::<C>(),
+        }
     }
 
     /// Returns the encoded size of a record carrying `len` payload bytes.
@@ -135,7 +142,10 @@ impl<C: Cipher> Cups<C> {
     /// Panics if `len` exceeds the largest record payload, `u32::MAX` minus the tag size, or if the
     /// record size does not fit in a `usize`.
     pub fn record_len(&self, len: usize) -> usize {
-        record_len::<C>(self.version, len)
+        self.header_len(len)
+            .checked_add(len)
+            .and_then(|size| size.checked_add(<C::Tag as FixedSize>::SIZE))
+            .expect("record size exceeds usize")
     }
 }
 
@@ -179,26 +189,6 @@ impl<C: Cipher> crate::Records for Cups<C> {
             },
         )
     }
-}
-
-/// Returns the size of the header that precedes a `version` record carrying `len` payload bytes.
-fn header_len<C: Cipher>(version: Version, len: usize) -> usize {
-    let len = u32::try_from(len)
-        .ok()
-        .filter(|len| *len <= <Cups<C> as crate::Records>::MAX_SIZE)
-        .expect("payload exceeds stream limit");
-    match version {
-        Version::V0 => UInt(len + tag_size::<C>()).encode_size(),
-        Version::V1 => v1_header_size::<C>(),
-    }
-}
-
-/// Returns the encoded size of a `version` record carrying `len` payload bytes.
-fn record_len<C: Cipher>(version: Version, len: usize) -> usize {
-    header_len::<C>(version, len)
-        .checked_add(len)
-        .and_then(|size| size.checked_add(<C::Tag as FixedSize>::SIZE))
-        .expect("record size exceeds usize")
 }
 
 /// Appends the header for an encrypted payload of `len` bytes, consuming a cipher position when
@@ -283,7 +273,7 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
     /// The returned size includes the header, ciphertext, and AEAD tags.
     fn encrypted_frame_len(&self, len: usize) -> Result<usize, Error> {
         validate_frame_len(len, self.max_message_size)?;
-        Ok(record_len::<C>(self.version, len))
+        Ok(Cups::<C>::new(self.version).record_len(len))
     }
 
     /// Appends one encrypted frame directly into caller-provided storage.
@@ -516,6 +506,43 @@ mod test {
     const TAG_SIZE: u32 = tag_size::<RecordCipher>();
     const MAX_SIZE: u32 = <Records as crate::Records>::MAX_SIZE;
 
+    /// Returns the cipher every test peer derives, so each side replays the other's positions.
+    fn cipher() -> Option<RecordCipher> {
+        Some(RecordCipher::random(TestRng::new(0)))
+    }
+
+    /// Returns a sender of `version` records into `sink`.
+    fn sender(
+        context: &deterministic::Context,
+        sink: mocks::Sink,
+        max_message_size: u32,
+        version: Version,
+    ) -> Sender<RecordCipher, mocks::Sink> {
+        Sender {
+            cipher: cipher(),
+            sink,
+            max_message_size,
+            pool: context.network_buffer_pool().clone(),
+            version,
+        }
+    }
+
+    /// Returns a receiver of `version` records from `stream`.
+    fn receiver(
+        context: &deterministic::Context,
+        stream: mocks::Stream,
+        max_message_size: u32,
+        version: Version,
+    ) -> Receiver<RecordCipher, mocks::Stream> {
+        Receiver {
+            cipher: cipher(),
+            stream,
+            max_message_size,
+            pool: context.network_buffer_pool().clone(),
+            version,
+        }
+    }
+
     /// Seals `msg` with `cipher` into a new buffer.
     fn sealed(cipher: &mut Option<ChaCha20Poly1305>, msg: &[u8]) -> Vec<u8> {
         let mut buf = msg.to_vec();
@@ -531,18 +558,12 @@ mod test {
         for version in [Version::V0, Version::V1] {
             deterministic::Runner::default().start(|context| async move {
                 let (sink, mut stream) = mocks::Channel::init();
-                let mut sender = Sender {
-                    cipher: Some(ChaCha20Poly1305::random(TestRng::new(0))),
-                    sink,
-                    max_message_size: 64,
-                    pool: context.network_buffer_pool().clone(),
-                    version,
-                };
+                let mut sender = sender(&context, sink, 64, version);
                 let messages = [&b""[..], &b"hello"[..], &[7; 64][..]];
                 sender.send_many(messages).await.unwrap();
 
                 // A cipher from the same seed reproduces the sender's key and nonce sequence.
-                let mut cipher = Some(ChaCha20Poly1305::random(TestRng::new(0)));
+                let mut cipher = cipher();
                 for message in messages {
                     let len = message.len() as u32;
 
@@ -554,7 +575,7 @@ mod test {
                     };
                     expected.extend(sealed(&mut cipher, message));
                     assert_eq!(
-                        record_len::<RecordCipher>(version, message.len()),
+                        Records::new(version).record_len(message.len()),
                         expected.len()
                     );
                     assert_eq!(
@@ -576,7 +597,7 @@ mod test {
     #[test]
     #[should_panic(expected = "payload exceeds stream limit")]
     fn test_header_len_rejects_oversized_payload() {
-        header_len::<RecordCipher>(Version::V1, Widen::<usize>::widen(u32::MAX));
+        Records::new(Version::V1).header_len(Widen::<usize>::widen(u32::MAX));
     }
 
     /// Checks that a version 0 receiver reports the payload length of an oversized record, which
@@ -585,13 +606,7 @@ mod test {
     fn test_v0_recv_too_large_reports_payload_len() {
         deterministic::Runner::default().start(|context| async move {
             let (mut sink, stream) = mocks::Channel::init();
-            let mut receiver = Receiver {
-                cipher: Some(ChaCha20Poly1305::random(TestRng::new(0))),
-                stream,
-                max_message_size: MAX_MESSAGE_SIZE,
-                pool: context.network_buffer_pool().clone(),
-                version: Version::V0,
-            };
+            let mut receiver = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V0);
             let len = MAX_MESSAGE_SIZE + 1;
             let prefix = UInt(len + TAG_SIZE).encode().to_vec();
             sink.send(prefix).await.unwrap();
@@ -614,27 +629,15 @@ mod test {
         deterministic::Runner::default().start(|context| async move {
             // A length prefix that never terminates is an invalid varint.
             let (mut sink, stream) = mocks::Channel::init();
-            let mut receiver = Receiver {
-                cipher: Some(ChaCha20Poly1305::random(TestRng::new(0))),
-                stream,
-                max_message_size: MAX_MESSAGE_SIZE,
-                pool: context.network_buffer_pool().clone(),
-                version: Version::V0,
-            };
+            let mut invalid = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V0);
             sink.send(vec![0xFF; 5]).await.unwrap();
-            assert!(matches!(receiver.recv().await, Err(Error::InvalidVarint)));
+            assert!(matches!(invalid.recv().await, Err(Error::InvalidVarint)));
 
             // A closed peer fails the read of the length prefix.
             let (sink, stream) = mocks::Channel::init();
-            let mut receiver = Receiver {
-                cipher: Some(ChaCha20Poly1305::random(TestRng::new(0))),
-                stream,
-                max_message_size: MAX_MESSAGE_SIZE,
-                pool: context.network_buffer_pool().clone(),
-                version: Version::V0,
-            };
+            let mut closed = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V0);
             drop(sink);
-            assert!(matches!(receiver.recv().await, Err(Error::RecvFailed(_))));
+            assert!(matches!(closed.recv().await, Err(Error::RecvFailed(_))));
         });
     }
 
@@ -643,13 +646,7 @@ mod test {
     fn test_v0_record_shorter_than_tag_rejected() {
         deterministic::Runner::default().start(|context| async move {
             let (mut sink, stream) = mocks::Channel::init();
-            let mut receiver = Receiver {
-                cipher: Some(ChaCha20Poly1305::random(TestRng::new(0))),
-                stream,
-                max_message_size: MAX_MESSAGE_SIZE,
-                pool: context.network_buffer_pool().clone(),
-                version: Version::V0,
-            };
+            let mut receiver = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V0);
             let mut record = UInt(TAG_SIZE - 1).encode().to_vec();
             record.resize(record.len() + Tag::SIZE - 1, 0);
             sink.send(record).await.unwrap();
@@ -662,14 +659,8 @@ mod test {
     fn test_recv_after_failure_closed() {
         deterministic::Runner::default().start(|context| async move {
             let (mut sink, stream) = mocks::Channel::init();
-            let mut receiver = Receiver {
-                cipher: Some(ChaCha20Poly1305::random(TestRng::new(0))),
-                stream,
-                max_message_size: MAX_MESSAGE_SIZE,
-                pool: context.network_buffer_pool().clone(),
-                version: Version::V1,
-            };
-            let mut cipher = Some(ChaCha20Poly1305::random(TestRng::new(0)));
+            let mut receiver = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V1);
+            let mut cipher = cipher();
 
             // A corrupted header fails to open.
             let mut header = sealed(&mut cipher, &0u32.to_be_bytes());
@@ -723,13 +714,7 @@ mod test {
         for version in [Version::V0, Version::V1] {
             deterministic::Runner::default().start(|context| async move {
                 let (sink, mut stream) = mocks::Channel::init();
-                let mut sender = Sender {
-                    cipher: Some(ChaCha20Poly1305::random(TestRng::new(0))),
-                    sink,
-                    max_message_size: MAX_MESSAGE_SIZE,
-                    pool: context.network_buffer_pool().clone(),
-                    version,
-                };
+                let mut sender = sender(&context, sink, MAX_MESSAGE_SIZE, version);
                 let oversized = vec![0u8; MAX_MESSAGE_SIZE as usize + 1];
 
                 // Both send paths report the payload length, excluding the tag.
@@ -762,14 +747,8 @@ mod test {
         ] {
             deterministic::Runner::default().start(|context| async move {
                 let (mut sink, stream) = mocks::Channel::init();
-                let mut receiver = Receiver {
-                    cipher: Some(ChaCha20Poly1305::random(TestRng::new(0))),
-                    stream,
-                    max_message_size: MAX_MESSAGE_SIZE,
-                    pool: context.network_buffer_pool().clone(),
-                    version: Version::V1,
-                };
-                let mut cipher = Some(ChaCha20Poly1305::random(TestRng::new(0)));
+                let mut receiver = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V1);
+                let mut cipher = cipher();
                 let mut header = sealed(&mut cipher, &length.to_be_bytes());
                 if let Some(offset) = corrupt {
                     header[offset] ^= 1;

@@ -111,12 +111,10 @@ impl arbitrary::Arbitrary<'_> for Data {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authenticated::stream::StreamHandshake;
     use commonware_codec::{Decode as _, Encode as _, Error};
-    use commonware_cryptography::{ChaCha20Poly1305, ed25519};
+    use commonware_cryptography::ed25519;
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
-    use commonware_stream::{Session, cups::Cups, sake};
-
-    type StreamHandshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
 
     #[test]
     fn test_max_size_bounds() {

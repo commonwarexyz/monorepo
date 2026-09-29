@@ -49,20 +49,22 @@ impl<P: PublicKey, O: Sender, I: Receiver> Mailbox<Message<O, I, P>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::discovery::actors::tracker::{self, Metadata};
+    use crate::authenticated::{
+        discovery::actors::tracker::{self, Metadata},
+        stream::StreamHandshake,
+    };
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        ChaCha20Poly1305, Signer as _,
+        Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
-        Handshake, Session,
+        Handshake,
         cups::{self, Cups},
         sake::{self, Version},
         utils::Timeout,
     };
-    type StreamHandshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
     use commonware_utils::NZUsize;
     use futures::FutureExt as _;
     use std::time::Duration;

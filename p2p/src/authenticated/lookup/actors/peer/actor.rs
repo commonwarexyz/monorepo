@@ -188,10 +188,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::router;
+    use crate::authenticated::{router, stream::StreamHandshake};
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        ChaCha20Poly1305, Signer,
+        Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
@@ -199,12 +199,11 @@ mod tests {
         deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::{
-        Handshake as _, Session,
+        Handshake as _,
         cups::{self, Cups},
         sake::{self, Version},
         utils::Timeout,
     };
-    type StreamHandshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
     use commonware_utils::NZUsize;
     use std::{
         num::NonZeroU32,

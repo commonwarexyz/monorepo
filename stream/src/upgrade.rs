@@ -8,13 +8,13 @@ use std::future::Future;
 /// Implements [Handshake] by running the key exchange `K`, then keying the records `R` with the
 /// agreed ciphers.
 #[derive(Clone)]
-pub struct Session<K, R> {
+pub struct Upgrade<K, R> {
     exchange: K,
     records: R,
 }
 
-impl<K, R> Session<K, R> {
-    /// Creates a session that runs `exchange` and keys `records`.
+impl<K, R> Upgrade<K, R> {
+    /// Creates an upgrade that runs `exchange` and keys `records`.
     pub const fn new(exchange: K, records: R) -> Self {
         Self { exchange, records }
     }
@@ -25,7 +25,7 @@ impl<K, R> Session<K, R> {
     }
 }
 
-impl<K, R> Handshake for Session<K, R>
+impl<K, R> Handshake for Upgrade<K, R>
 where
     K: Exchange,
     R: Records,

@@ -17,7 +17,7 @@ use commonware_runtime::{
     tokio,
 };
 use commonware_stream::{
-    Session,
+    Upgrade,
     cups::{self, Cups},
     sake::{self, Version},
 };
@@ -135,7 +135,7 @@ fn main() {
         // Configure network
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
         let mut p2p_cfg = discovery::Config::local(
-            Session::new(
+            Upgrade::new(
                 sake::Exchange::new(sake::Config::new(signer.clone(), Version::V1)),
                 Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),

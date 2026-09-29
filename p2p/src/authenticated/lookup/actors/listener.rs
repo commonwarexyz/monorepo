@@ -320,9 +320,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authenticated::stream::StreamHandshake;
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        ChaCha20Poly1305, Signer as _,
+        Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::test_traced;
@@ -330,12 +331,10 @@ mod tests {
         Error as RuntimeError, Runner as _, Stream, Supervisor as _, deterministic,
     };
     use commonware_stream::{
-        Session,
         cups::{self, Cups},
         sake::{self, Version},
         utils::Timeout,
     };
-    type StreamHandshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
     use commonware_utils::{NZU32, NZUsize};
     use std::{
         net::{IpAddr, Ipv4Addr},

@@ -284,11 +284,11 @@ mod tests {
     use super::*;
     use crate::{
         Receiver as _,
-        authenticated::{discovery::actors::tracker, router},
+        authenticated::{discovery::actors::tracker, router, stream::StreamHandshake},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        ChaCha20Poly1305, Signer,
+        Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
@@ -296,12 +296,11 @@ mod tests {
         telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::{
-        Handshake as _, Session,
+        Handshake as _,
         cups::{self, Cups},
         sake::{self, Version},
         utils::Timeout,
     };
-    type StreamHandshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
     use commonware_utils::{NZU32, NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},

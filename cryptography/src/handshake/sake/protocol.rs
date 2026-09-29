@@ -684,60 +684,35 @@ mod test {
         transcript
     }
 
-    /// Checks that a V1 [Syn] signature covers the dialer identity.
+    /// Checks that a V1 [Syn] signature covers the dialer identity and that a V0 [Syn] signature
+    /// omits it.
     #[test]
-    fn test_v1_syn_signature_covers_dialer_identity() {
-        let mut rng = test_rng();
-        let dialer_crypto = PrivateKey::random(&mut rng);
-        let listener_crypto = PrivateKey::random(&mut rng);
-        let dialer = dialer_crypto.public_key();
-        let listener = listener_crypto.public_key();
+    fn test_syn_signature_dialer_identity() {
+        for (version, covers) in [(Version::V0, false), (Version::V1, true)] {
+            let mut rng = test_rng();
+            let dialer_crypto = PrivateKey::random(&mut rng);
+            let listener_crypto = PrivateKey::random(&mut rng);
+            let dialer = dialer_crypto.public_key();
+            let listener = listener_crypto.public_key();
 
-        let (_, syn) = dial_start(
-            &mut rng,
-            Context::new(
-                b"test_namespace",
-                Version::V1,
-                0,
-                0..1,
-                dialer_crypto,
-                listener.clone(),
-            ),
-        );
+            let (_, syn) = dial_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    version,
+                    0,
+                    0..1,
+                    dialer_crypto,
+                    listener.clone(),
+                ),
+            );
 
-        // The signature is only valid over a transcript that includes the dialer identity.
-        assert!(
-            syn_transcript(Version::V1, &syn, &listener, Some(&dialer)).verify(&dialer, &syn.sig)
-        );
-        assert!(!syn_transcript(Version::V1, &syn, &listener, None).verify(&dialer, &syn.sig));
-    }
-
-    /// Checks that a V0 [Syn] signature omits the dialer identity.
-    #[test]
-    fn test_v0_syn_signature_omits_dialer_identity() {
-        let mut rng = test_rng();
-        let dialer_crypto = PrivateKey::random(&mut rng);
-        let listener_crypto = PrivateKey::random(&mut rng);
-        let dialer = dialer_crypto.public_key();
-        let listener = listener_crypto.public_key();
-
-        let (_, syn) = dial_start(
-            &mut rng,
-            Context::new(
-                b"test_namespace",
-                Version::V0,
-                0,
-                0..1,
-                dialer_crypto,
-                listener.clone(),
-            ),
-        );
-
-        // The signature is only valid over a transcript that omits the dialer identity.
-        assert!(syn_transcript(Version::V0, &syn, &listener, None).verify(&dialer, &syn.sig));
-        assert!(
-            !syn_transcript(Version::V0, &syn, &listener, Some(&dialer)).verify(&dialer, &syn.sig)
-        );
+            // The signature verifies only over the transcript layout of its version.
+            let with = syn_transcript(version, &syn, &listener, Some(&dialer));
+            let without = syn_transcript(version, &syn, &listener, None);
+            assert_eq!(with.verify(&dialer, &syn.sig), covers, "{version:?}");
+            assert_eq!(without.verify(&dialer, &syn.sig), !covers, "{version:?}");
+        }
     }
 
     /// Derives the second public key under which an ECDSA signature over `summary` verifies.

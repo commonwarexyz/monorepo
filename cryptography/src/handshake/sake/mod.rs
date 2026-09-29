@@ -43,8 +43,6 @@
 //! - [Version::V1] commits both identities before every signature, so each signature covers the
 //!   signer's own identity, and uses [transcript::Version::V1](crate::transcript::Version::V1).
 //!
-//! [dial_end] and [listen_end] return a send and a receive [Cipher](crate::Cipher).
-//!
 //! # Timing
 //!
 //! Callers provide the accepted timestamp range to limit replay and clock skew. Because this core
@@ -67,18 +65,3 @@ pub use protocol::{
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
-
-#[cfg(test)]
-mod test {
-    #[cfg(feature = "arbitrary")]
-    mod conformance {
-        use crate::handshake::sake::{Ack, Syn, SynAck};
-        use commonware_codec::conformance::CodecConformance;
-
-        commonware_conformance::conformance_tests! {
-            CodecConformance<Syn<crate::ed25519::Signature>>,
-            CodecConformance<SynAck<crate::ed25519::Signature>>,
-            CodecConformance<Ack>,
-        }
-    }
-}

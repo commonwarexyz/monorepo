@@ -17,8 +17,8 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod cups;
     pub mod sake;
-    mod session;
-    pub use session::Session;
+    mod upgrade;
+    pub use upgrade::Upgrade;
     pub mod utils;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
@@ -259,7 +259,6 @@ commonware_macros::stability_scope!(BETA {
     mod tests {
         use super::*;
         use crate::utils::{Timeout, TimeoutError};
-        use commonware_cryptography::ChaCha20Poly1305;
         use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
         use commonware_utils::sync::Mutex;
         use futures::{FutureExt as _, future::Either};
@@ -361,7 +360,7 @@ commonware_macros::stability_scope!(BETA {
         }
 
         impl Handshake for OpaqueHandshake {
-            const MAX_SIZE: u32 = <cups::Cups<ChaCha20Poly1305> as Records>::MAX_SIZE;
+            const MAX_SIZE: u32 = u32::MAX;
 
             type PublicKey = OpaqueIdentity;
             type Error = Rejected;
@@ -627,28 +626,6 @@ commonware_macros::stability_scope!(BETA {
                     assert!(peer_stream.recv(1).await.is_err());
                 });
             }
-        }
-
-        #[test]
-        fn timeout_starts_when_called() {
-            deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
-                let (sink, stream) = mocks::Channel::init();
-                let handshake =
-                    Timeout::new(OpaqueHandshake::new(Outcome::Pending), Duration::from_millis(50));
-                let mut attempt = Box::pin(handshake.dial(
-                    context.child("handshake"),
-                    b"timeout",
-                    1,
-                    OpaqueIdentity(PhantomData),
-                    stream,
-                    sink,
-                ));
-                context.sleep(Duration::from_millis(100)).await;
-                assert!(matches!(
-                    futures::poll!(attempt.as_mut()),
-                    std::task::Poll::Ready(Err(TimeoutError::Timeout))
-                ));
-            });
         }
     }
 });

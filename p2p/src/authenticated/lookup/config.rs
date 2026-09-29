@@ -1,13 +1,7 @@
 #[cfg(test)]
-use commonware_cryptography::{ChaCha20Poly1305, Signer};
+use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
 use commonware_stream::Handshake;
-#[cfg(test)]
-use commonware_stream::{
-    Session,
-    cups::{self, Cups},
-    sake::{self, Version},
-};
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -205,13 +199,10 @@ impl<H: Handshake> Config<H> {
 }
 
 #[cfg(test)]
-impl<C: Signer> Config<Session<sake::Exchange<C>, Cups<ChaCha20Poly1305>>> {
+impl<C: Signer> Config<crate::authenticated::stream::StreamHandshake<C>> {
     pub fn test(signer: C, listen: SocketAddr, max_message_size: u32) -> Self {
         let mut config = Self::local(
-            Session::new(
-                sake::Exchange::new(sake::Config::new(signer, Version::V1)),
-                Cups::new(cups::Version::V1),
-            ),
+            crate::authenticated::stream::sake_handshake(signer),
             b"test_namespace",
             listen,
             NZUsize!(32),

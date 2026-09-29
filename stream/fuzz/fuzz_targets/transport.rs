@@ -3,7 +3,7 @@
 use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
-    Handshake as _, Session,
+    Handshake as _, Upgrade,
     cups::{self, Cups},
     sake::{self, Config, Version},
     utils::Timeout,
@@ -11,7 +11,7 @@ use commonware_stream::{
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
-type Handshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
+type Handshake<S> = Upgrade<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
 
 /// Returns the records that pair with the SAKE `version`.
 fn records(version: Version) -> Cups<ChaCha20Poly1305> {

@@ -7,9 +7,9 @@ use std::time::Duration;
 ///
 /// ```
 /// use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
-/// use commonware_stream::{Session, cups::{self, Cups}, sake::{Config, Exchange, Version}};
+/// use commonware_stream::{Upgrade, cups::{self, Cups}, sake::{Config, Exchange, Version}};
 ///
-/// let handshake = Session::new(
+/// let handshake = Upgrade::new(
 ///     Exchange::new(Config::new(PrivateKey::from_seed(0), Version::V1)),
 ///     Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 /// );

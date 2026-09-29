@@ -3,7 +3,7 @@
 //!
 //! [Exchange] implements [crate::Exchange], deriving one
 //! [Cipher](commonware_cryptography::Cipher) per direction. Pair it with [crate::Records] (for
-//! example [Cups](crate::cups::Cups)) in a [crate::Session] to establish streams.
+//! example [Cups](crate::cups::Cups)) in a [crate::Upgrade] to establish streams.
 //!
 //! The core SAKE protocol receives both peer identities as inputs. [Exchange] first sends the
 //! dialer's public key in a framed, cleartext prelude, separate from SAKE's three messages. The

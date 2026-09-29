@@ -25,7 +25,7 @@ pub enum TimeoutError<E> {
 /// ```
 /// use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
 /// use commonware_stream::{
-///     Session,
+///     Upgrade,
 ///     cups::{self, Cups},
 ///     sake::{Config, Exchange, Version},
 ///     utils::Timeout,
@@ -33,7 +33,7 @@ pub enum TimeoutError<E> {
 /// use std::time::Duration;
 ///
 /// let handshake = Timeout::new(
-///     Session::new(
+///     Upgrade::new(
 ///         Exchange::new(Config::new(PrivateKey::from_seed(0), Version::V1)),
 ///         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 ///     ),

@@ -9,10 +9,10 @@ use commonware_cryptography::{
     },
 };
 use commonware_formatting::hex;
-use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
+use commonware_runtime::{Clock, Sink, Stream};
 use commonware_utils::{DurationExt, SystemTimeExt};
 use rand_core::CryptoRng;
-use std::{future::Future, ops::Range};
+use std::future::Future;
 use thiserror::Error;
 
 /// Errors that can occur when establishing a stream.
@@ -24,16 +24,8 @@ pub enum Error {
     UnableToDecode(CodecError),
     #[error("peer rejected: {}", hex(_0))]
     PeerRejected(Vec<u8>),
-    #[error("recv failed")]
-    RecvFailed(RuntimeError),
-    #[error("recv too large: {0} bytes")]
-    RecvTooLarge(usize),
-    #[error("invalid varint length prefix")]
-    InvalidVarint,
-    #[error("send failed")]
-    SendFailed(RuntimeError),
-    #[error("send too large: {0} bytes")]
-    SendTooLarge(usize),
+    #[error(transparent)]
+    Frame(#[from] FrameError),
 }
 
 impl From<CodecError> for Error {
@@ -45,18 +37,6 @@ impl From<CodecError> for Error {
 impl From<HandshakeError> for Error {
     fn from(value: HandshakeError) -> Self {
         Self::HandshakeError(value)
-    }
-}
-
-impl From<FrameError> for Error {
-    fn from(value: FrameError) -> Self {
-        match value {
-            FrameError::RecvFailed(err) => Self::RecvFailed(err),
-            FrameError::RecvTooLarge(len) => Self::RecvTooLarge(len),
-            FrameError::InvalidVarint => Self::InvalidVarint,
-            FrameError::SendFailed(err) => Self::SendFailed(err),
-            FrameError::SendTooLarge(len) => Self::SendTooLarge(len),
-        }
     }
 }
 
@@ -72,15 +52,6 @@ impl<S> Exchange<S> {
         Self { config }
     }
 
-    /// Computes the current time and acceptable timestamp range.
-    fn time_information(&self, ctx: &impl Clock) -> (u64, Range<u64>) {
-        let current_time_ms = ctx.current().epoch().as_millis_u64();
-        let ok_timestamps = (current_time_ms
-            .saturating_sub(self.config.max_handshake_age.as_millis_u64()))
-            ..(current_time_ms.saturating_add(self.config.synchrony_bound.as_millis_u64()));
-        (current_time_ms, ok_timestamps)
-    }
-
     /// Returns the SAKE context for a handshake with `peer` in `namespace`.
     ///
     /// Each version must produce transcripts that no other version produces, so peers on different
@@ -93,7 +64,10 @@ impl<S> Exchange<S> {
         records: &'static [u8],
         peer: P,
     ) -> Context<S, P> {
-        let (current_time, ok_timestamps) = self.time_information(clock);
+        let current_time = clock.current().epoch().as_millis_u64();
+        let ok_timestamps = current_time
+            .saturating_sub(self.config.max_handshake_age.as_millis_u64())
+            ..current_time.saturating_add(self.config.synchrony_bound.as_millis_u64());
         let version = self.config.version;
         let context = Context::new(
             namespace,
@@ -216,7 +190,7 @@ impl<S: Signer> crate::Exchange for Exchange<S> {
 mod test {
     use super::*;
     use crate::{
-        Handshake as _, Records as _, Session,
+        Handshake as _, Records as _, Upgrade,
         cups::{self, Cups},
         utils::{Timeout, TimeoutError},
     };
@@ -229,6 +203,7 @@ mod test {
     use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use futures::FutureExt as _;
     use std::{
+        ops::Range,
         panic::AssertUnwindSafe,
         sync::{
             Arc,
@@ -241,7 +216,7 @@ mod test {
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
 
     type Records = Cups<ChaCha20Poly1305>;
-    type Transport = Session<Exchange<PrivateKey>, Records>;
+    type Transport = Upgrade<Exchange<PrivateKey>, Records>;
 
     /// Returns the record version that pairs with the SAKE `version`.
     const fn record_version(version: Version) -> cups::Version {
@@ -273,7 +248,10 @@ mod test {
                     sink,
                 )
                 .await;
-            assert!(matches!(result, Err(Error::SendFailed(_))));
+            assert!(matches!(
+                result,
+                Err(Error::Frame(FrameError::SendFailed(_)))
+            ));
         });
     }
 
@@ -288,10 +266,7 @@ mod test {
                 for dialer in [true, false] {
                     let (sink, _) = mocks::Channel::init();
                     let (_, stream) = mocks::Channel::init();
-                    let handshake = Transport::new(
-                        Exchange::new(Config::new(PrivateKey::from_seed(0), Version::V1)),
-                        records(Version::V1),
-                    );
+                    let handshake = transport_handshake(PrivateKey::from_seed(0), Version::V1);
                     let attempt = async {
                         if dialer {
                             handshake
@@ -333,8 +308,8 @@ mod test {
         });
     }
 
-    /// Returns a handshake that signs with `signer` at `version`.
-    fn transport_handshake(signer: PrivateKey, version: Version) -> Transport {
+    /// Returns a handshake that signs with `signer` at `version` and keys `records`.
+    fn transport(signer: PrivateKey, version: Version, records: cups::Version) -> Transport {
         Transport::new(
             Exchange::new(Config {
                 signer,
@@ -342,8 +317,13 @@ mod test {
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             }),
-            records(version),
+            Cups::new(records),
         )
+    }
+
+    /// Returns a handshake that signs with `signer` at `version` and keys the paired records.
+    fn transport_handshake(signer: PrivateKey, version: Version) -> Transport {
+        transport(signer, version, record_version(version))
     }
 
     /// Returns a frame length prefix that declares one byte more than the encoding of `message`.
@@ -493,22 +473,10 @@ mod test {
         executor.start(move |context| async move {
             let dialer_signer = PrivateKey::from_seed(42);
             let listener_signer = PrivateKey::from_seed(24);
-            let handshake = |signer, (version, records): (Version, cups::Version)| {
-                Transport::new(
-                    Exchange::new(Config {
-                        signer,
-                        version,
-                        synchrony_bound: Duration::from_secs(1),
-                        max_handshake_age: Duration::from_secs(1),
-                    }),
-                    Cups::new(records),
-                )
-            };
-
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
-            let dialer_handshake = handshake(dialer_signer.clone(), dialer);
-            let listener_handshake = handshake(listener_signer.clone(), listener);
+            let dialer_handshake = transport(dialer_signer.clone(), dialer.0, dialer.1);
+            let listener_handshake = transport(listener_signer.clone(), listener.0, listener.1);
 
             // Run both sides of the handshake.
             let listener_handle = context.child("listener").spawn(move |context| async move {
@@ -1007,7 +975,7 @@ mod test {
             // application limit.
             assert!(matches!(
                 result,
-                Err(TimeoutError::Handshake(Error::RecvTooLarge(n)))
+                Err(TimeoutError::Handshake(Error::Frame(FrameError::RecvTooLarge(n))))
                     if n == peer.encode().len() + 1
             ));
         });
@@ -1071,7 +1039,7 @@ mod test {
             // larger application-sized receive path is considered.
             assert!(matches!(
                 result,
-                Err(TimeoutError::Handshake(Error::RecvTooLarge(n)))
+                Err(TimeoutError::Handshake(Error::Frame(FrameError::RecvTooLarge(n))))
                     if n == syn_ack.encode().len() + 1
             ));
         });

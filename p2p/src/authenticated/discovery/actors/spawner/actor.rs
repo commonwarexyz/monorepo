@@ -162,21 +162,20 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sender, I: Rece
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::discovery::types;
+    use crate::authenticated::{discovery::types, stream::StreamHandshake};
     use commonware_actor::{Feedback, Unreliable, mailbox};
     use commonware_cryptography::{
-        ChaCha20Poly1305, Signer as _,
+        Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
-        Handshake, Session,
+        Handshake,
         cups::{self, Cups},
         sake::{self, Version},
         utils::Timeout,
     };
-    type StreamHandshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
     use commonware_utils::{NZUsize, SystemTimeExt};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},

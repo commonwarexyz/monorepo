@@ -3,9 +3,11 @@
 use crate::{
     ChaCha20Poly1305, Cipher, Signer,
     ed25519::PrivateKey,
-    handshake::sake::{Context, Version, dial_end, dial_start, listen_end, listen_start},
+    handshake::sake::{
+        Ack, Context, Syn, SynAck, Version, dial_end, dial_start, listen_end, listen_start,
+    },
 };
-use commonware_codec::Encode;
+use commonware_codec::{Encode, conformance::CodecConformance};
 use commonware_conformance::{Conformance, conformance_tests};
 use commonware_math::algebra::Random;
 use rand::{RngExt as _, SeedableRng};
@@ -123,4 +125,7 @@ impl Conformance for SakeV1 {
 conformance_tests! {
     SakeV0 => 4096,
     SakeV1 => 4096,
+    CodecConformance<Syn<crate::ed25519::Signature>>,
+    CodecConformance<SynAck<crate::ed25519::Signature>>,
+    CodecConformance<Ack>,
 }

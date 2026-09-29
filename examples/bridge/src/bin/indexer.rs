@@ -26,7 +26,7 @@ use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
 use commonware_stream::{
-    Handshake as _, Session,
+    Handshake as _, Upgrade,
     cups::{self, Cups},
     sake::{self, Version},
     utils::Timeout,
@@ -243,7 +243,7 @@ fn main() {
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
         let handshake = Timeout::new(
-            Session::new(
+            Upgrade::new(
                 sake::Exchange::new(sake::Config {
                     signer,
                     version: Version::V1,
