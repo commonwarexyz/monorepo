@@ -37,6 +37,7 @@ use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
 };
+use futures::FutureExt as _;
 use rand_core::Rng;
 use std::{collections::VecDeque, mem, sync::Arc};
 use tracing::{Instrument as _, debug, error, info_span, warn};
@@ -238,6 +239,14 @@ where
                 A::sync_targets(newest.as_ref()),
             ) => outcome,
         };
+        // The syncer exits only on shutdown, which can fire while `retarget` is polled.
+        let Some(outcome) = outcome else {
+            assert!(
+                self.context.stopped().now_or_never().is_some(),
+                "syncer stopped unexpectedly"
+            );
+            return (self, None);
+        };
         if outcome == syncer::UpdateOutcome::SyncCompleted {
             // The syncer sent the artifact on the completion channel. Collect it here so the
             // retained finalizations are handed off under the newest recorded target.
@@ -265,7 +274,8 @@ where
 
     /// Hands the converged state to [`Processing`].
     ///
-    /// Returns without recording completion if shutdown interrupts the handoff.
+    /// Returns without recording completion if shutdown interrupts the handoff or its barrier is
+    /// not durable.
     async fn transition(
         self,
         artifact: Artifact<E, A>,
@@ -374,6 +384,12 @@ where
                 durable = barrier.durable() => durable,
             };
             if !durable {
+                if shutdown.now_or_never().is_none() {
+                    error!(
+                        height = completed_height.get(),
+                        "database barrier aborted without shutdown, stopping sync handoff"
+                    );
+                }
                 return;
             }
             for acknowledgement in pending_acknowledgements {
@@ -513,7 +529,7 @@ mod tests {
         reschedule,
     };
     use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
-    use futures::poll;
+    use futures::{FutureExt as _, poll};
     use std::{
         collections::VecDeque,
         sync::{Arc, atomic::Ordering},
@@ -953,8 +969,7 @@ mod tests {
             );
             assert!(
                 harness.subscriber.latest().is_none(),
-                "an aborted handoff must never serve, and the subscriber must decline \
-                 once the writer is gone",
+                "serving must shut off once the handoff stops",
             );
             assert_eq!(
                 sync_done.get(),
@@ -965,6 +980,48 @@ mod tests {
                 SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), "syncing-test")
                     .await;
             assert_eq!(reopened.completed(), None);
+        });
+    }
+
+    /// Losing the syncer without shutdown fails loudly once a full acknowledgement window
+    /// retargets. The harness marshal holds one pending acknowledgement.
+    #[test]
+    #[should_panic(expected = "syncer stopped unexpectedly")]
+    fn retarget_panics_when_syncer_stops_without_shutdown() {
+        deterministic::Runner::default().start(|context| async move {
+            let marshal = harness_marshal(context.child("marshal")).await;
+            let (harness, _mailbox, syncer_receiver, _completion) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+            drop(syncer_receiver);
+            assert_eq!(harness.syncing.marshal.max_pending_acks(), 1);
+            let (acknowledgement, _waiter) = Exact::handle();
+            let _ = harness
+                .syncing
+                .finalized(Arc::new(TestBlock::new(8, 10)), acknowledgement)
+                .await;
+        });
+    }
+
+    /// A syncer that exits on shutdown ends the retarget quietly and acknowledges nothing.
+    #[test]
+    fn retarget_exits_quietly_when_syncer_stops_on_shutdown() {
+        deterministic::Runner::default().start(|context| async move {
+            let marshal = harness_marshal(context.child("marshal")).await;
+            let (harness, _mailbox, syncer_receiver, _completion) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+            // Polling `stop` once fires the signal.
+            let _ = context.child("stopper").stop(0, None).now_or_never();
+            drop(syncer_receiver);
+            assert_eq!(harness.syncing.marshal.max_pending_acks(), 1);
+            let (acknowledgement, waiter) = Exact::handle();
+            let (syncing, handoff) = harness
+                .syncing
+                .finalized(Arc::new(TestBlock::new(8, 10)), acknowledgement)
+                .await;
+            assert!(handoff.is_none());
+            assert_eq!(syncing.pending_finalizations.len(), 1);
+            drop(syncing);
+            assert!(waiter.await.is_err());
         });
     }
 

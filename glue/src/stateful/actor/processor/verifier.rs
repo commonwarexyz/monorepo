@@ -1,6 +1,7 @@
 use super::{
     Application, Cancellation, Execution, PendingEntry, PrepareBatchesError, Provenance,
     ReplayFlights, VerificationResult, await_or_cancel, fetch_ancestor, is_already_processed,
+    panic_unless_stopping,
 };
 use crate::stateful::{
     ExecutionError,
@@ -16,6 +17,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_runtime::{Clock, Metrics, Spawner};
+use futures::future;
 use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{debug, info_span, warn};
@@ -426,7 +428,8 @@ where
                 return Attempt::Done(VerificationResult::Decided(false));
             }
             Some(Err(err @ ExecutionError::Fatal(_))) => {
-                panic!("application verification failed: {err}")
+                panic_unless_stopping(context, "application verification", &err);
+                return future::pending().await;
             }
             None => {
                 debug!(

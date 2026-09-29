@@ -132,6 +132,9 @@ mod tests;
 /// | [`Stale`](Self::Stale) | re-checked once the anchor moves | cannot occur | re-checked once the anchor moves | panics |
 /// | [`Invalid`](Self::Invalid) | answers `false`, nothing cached | declines | the ancestry is invalid | panics |
 /// | [`Fatal`](Self::Fatal) | panics | panics | panics | panics |
+///
+/// Once shutdown has fired, a failure that would panic is logged instead and its operation never
+/// completes, since a stopping runtime can fail storage mid-operation.
 #[derive(Debug, Error)]
 pub enum ExecutionError {
     /// A competing finalization invalidated the batch's reads or merkleization.

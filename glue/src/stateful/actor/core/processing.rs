@@ -647,7 +647,7 @@ mod tests {
         channel::oneshot,
         sync::Mutex,
     };
-    use futures::{Stream, StreamExt as _, poll};
+    use futures::{FutureExt as _, Stream, StreamExt as _, poll};
     use std::{
         collections::VecDeque,
         pin::Pin,
@@ -4755,11 +4755,25 @@ mod tests {
         });
     }
 
-    /// An application whose proposal path observes fatal storage.
-    #[derive(Clone)]
-    struct FatalProposeApp;
+    /// An application whose every execution observes fatal storage, optionally firing shutdown
+    /// in the same poll first, unless it has a fixed block to propose.
+    #[derive(Clone, Default)]
+    struct FaultyApp {
+        stop: bool,
+        proposal: Option<TestBlock>,
+    }
 
-    impl Application<deterministic::Context> for FatalProposeApp {
+    impl FaultyApp {
+        fn fail(&self, context: deterministic::Context) -> ExecutionError {
+            if self.stop {
+                // Polling `stop` once fires the signal.
+                let _ = context.stop(0, None).now_or_never();
+            }
+            ExecutionError::Fatal("disk failed".into())
+        }
+    }
+
+    impl Application<deterministic::Context> for FaultyApp {
         type SigningScheme = TestScheme;
         type Context = <TestApp as Application<deterministic::Context>>::Context;
         type Block = TestBlock;
@@ -4773,35 +4787,41 @@ mod tests {
         }
 
         async fn genesis(&mut self) -> Self::Block {
-            panic!("fatal-propose application genesis is not used")
+            panic!("faulty application genesis is not used")
         }
 
         async fn propose(
             &mut self,
-            _context: (deterministic::Context, Self::Context),
+            context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
-            Err(ExecutionError::Fatal("disk failed".into()))
+            if let Some(block) = self.proposal.clone() {
+                return Ok(Some(Proposed {
+                    block,
+                    merkleized: TestMerkleized,
+                }));
+            }
+            Err(self.fail(context.0))
         }
 
         async fn verify(
             &mut self,
-            _context: (deterministic::Context, Self::Context),
+            context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Result<Option<TestMerkleized>, ExecutionError> {
-            panic!("fatal-propose application verify is not used")
+            Err(self.fail(context.0))
         }
 
         async fn apply(
             &mut self,
-            _context: (deterministic::Context, Self::Context),
+            context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
             _batches: TestUnmerkleized,
         ) -> Result<Option<TestMerkleized>, ExecutionError> {
-            Ok(Some(TestMerkleized))
+            Err(self.fail(context.0))
         }
 
         async fn capture(
@@ -4823,61 +4843,183 @@ mod tests {
         }
     }
 
+    /// Where a [`FaultyApp`] test drives its request.
+    #[derive(Clone, Copy)]
+    enum FatalSite {
+        Propose,
+        Verify,
+        FinalizeReplay,
+    }
+
+    /// Spawns processing over `app` and sends one request that reaches `site`. Returns the actor
+    /// handle, the marshal guards, and the request's pending outcome.
+    async fn spawn_faulty(
+        context: &deterministic::Context,
+        app: FaultyApp,
+        site: FatalSite,
+    ) -> (Handle<()>, Box<dyn std::any::Any>, FatalOutcome) {
+        let mut signing = context.child("signing");
+        let scheme = scheme_mocks::fixture(&mut signing, b"fatal-app", 1).schemes[0].clone();
+        let marshal = fixtures::marshal_fixture(
+            context.child("marshal_fixture"),
+            "fatal-app",
+            scheme,
+            None,
+            NZUsize!(1),
+            false,
+        )
+        .await;
+        let processor = Processor::new(
+            app,
+            test_databases(),
+            anchor(0, 0),
+            StatefulMetrics::new(context),
+            None,
+        );
+        let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+        let mut mailbox = Mailbox::new(sender);
+        let publication_context = context.child("publication");
+        let (publisher, _subscriber) = Publisher::new(&publication_context);
+        let processing = Processing {
+            context: ContextCell::new(context.child("processing")),
+            mailbox: receiver,
+            provider: (),
+            marshal: marshal.mailbox,
+            snapshot_publisher: publisher,
+        };
+        let actor = context
+            .child("loop")
+            .spawn(move |_| processing.run(processor, Vec::new(), None));
+
+        let genesis = TestBlock::new(0, 0);
+        let block = TestBlock::child(&genesis, 1);
+        let outcome = match site {
+            FatalSite::Propose => {
+                FatalOutcome::Proposal(context.child("propose").spawn(move |context| async move {
+                    mailbox
+                        .propose(
+                            (context, block.context()),
+                            ancestry::from_iter([Arc::new(genesis)]),
+                            (),
+                        )
+                        .await
+                }))
+            }
+            FatalSite::Verify => {
+                let verify = context.child("verify").spawn(move |context| async move {
+                    mailbox
+                        .verify(
+                            (context, block.context()),
+                            ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
+                        )
+                        .await
+                });
+                FatalOutcome::Verdict(verify)
+            }
+            FatalSite::FinalizeReplay => {
+                let (acknowledgement, waiter) = Exact::handle();
+                mailbox.report(Update::Block(Arc::new(block), acknowledgement));
+                FatalOutcome::Acknowledgement(waiter)
+            }
+        };
+        (actor, marshal.guards, outcome)
+    }
+
+    /// The pending result of the request a [`FaultyApp`] test sent.
+    enum FatalOutcome {
+        Proposal(Handle<Option<TestBlock>>),
+        Verdict(Handle<bool>),
+        Acknowledgement(<Exact as commonware_utils::Acknowledgement>::Waiter),
+    }
+
+    /// Drives `site` into fatal storage without shutdown, which must panic.
+    fn fatal_execution_panics(site: FatalSite) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (_actor, _guards, _outcome) =
+                spawn_faulty(&context, FaultyApp::default(), site).await;
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
+
     /// Fatal storage observed during a proposal takes the actor down instead
     /// of masking a broken database behind an ordinary decline.
     #[test]
     #[should_panic(expected = "application proposal failed")]
     fn fatal_proposal_panics_processing() {
+        fatal_execution_panics(FatalSite::Propose);
+    }
+
+    #[test]
+    #[should_panic(expected = "application verification failed")]
+    fn fatal_verification_panics_processing() {
+        fatal_execution_panics(FatalSite::Verify);
+    }
+
+    #[test]
+    #[should_panic(expected = "finalize replay failed")]
+    fn fatal_finalize_replay_panics_processing() {
+        fatal_execution_panics(FatalSite::FinalizeReplay);
+    }
+
+    /// Fatal storage observed after shutdown fired in the same poll exits the actor quietly,
+    /// without a verdict, a proposal, or an acknowledgement.
+    #[rstest::rstest]
+    #[case::propose(FatalSite::Propose)]
+    #[case::verify(FatalSite::Verify)]
+    #[case::finalize_replay(FatalSite::FinalizeReplay)]
+    fn fatal_execution_during_shutdown_exits_quietly(#[case] site: FatalSite) {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let mut signing = context.child("signing");
-            let scheme =
-                scheme_mocks::fixture(&mut signing, b"fatal-propose", 1).schemes[0].clone();
-            let marshal = fixtures::marshal_fixture(
-                context.child("marshal_fixture"),
-                "fatal-propose",
-                scheme,
-                None,
-                NZUsize!(1),
-                false,
-            )
-            .await;
-            let processor = Processor::new(
-                FatalProposeApp,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-            );
-            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
-            let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
-                mailbox: receiver,
-                provider: (),
-                marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
+            let app = FaultyApp {
+                stop: true,
+                proposal: None,
             };
-            let _actor = context
-                .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new(), None));
+            let (actor, guards, outcome) = spawn_faulty(&context, app, site).await;
+            actor.await.expect("the actor should exit cleanly");
+            match outcome {
+                FatalOutcome::Proposal(proposal) => {
+                    assert_eq!(proposal.await.expect("proposal task"), None);
+                }
+                FatalOutcome::Verdict(mut verdict) => {
+                    for _ in 0..16 {
+                        assert!(poll!(&mut verdict).is_pending(), "no verdict may resolve");
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                }
+                FatalOutcome::Acknowledgement(waiter) => {
+                    assert!(waiter.await.is_err(), "the block must stay unacknowledged");
+                }
+            }
+            drop(guards);
+        });
+    }
 
-            let genesis = TestBlock::new(0, 0);
-            let proposal_context = TestBlock::child(&genesis, 1).context();
-            let _ = mailbox
-                .propose(
-                    (context.child("propose"), proposal_context),
-                    ancestry::from_iter([Arc::new(genesis)]),
-                    (),
-                )
-                .await;
-
-            // The actor panics while handling the proposal.
+    /// Proposes `block` for a request at view 1 on genesis, which must panic.
+    fn misframed_proposal_panics(block: TestBlock) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let app = FaultyApp {
+                stop: false,
+                proposal: Some(block),
+            };
+            let (_actor, _guards, _outcome) = spawn_faulty(&context, app, FatalSite::Propose).await;
             loop {
                 context.sleep(Duration::from_millis(100)).await;
             }
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "proposed block must extend the requested parent")]
+    fn proposal_with_other_parent_panics() {
+        misframed_proposal_panics(TestBlock::child(&TestBlock::new(0, 7), 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "proposed block must carry the requested round")]
+    fn proposal_with_other_round_panics() {
+        // Genesis has the empty digest, so this block extends it at view 2 instead of 1.
+        misframed_proposal_panics(TestBlock::new(2, 1));
     }
 
     /// An application still parked inside execution when shutdown begins.

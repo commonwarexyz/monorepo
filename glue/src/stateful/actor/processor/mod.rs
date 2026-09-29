@@ -75,7 +75,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use futures::{Stream, StreamExt};
+use futures::{FutureExt as _, Stream, StreamExt, future};
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
@@ -154,7 +154,8 @@ where
     /// during that window could take post-apply state under the pre-apply
     /// anchor, so they refuse.
     finalizing: bool,
-    /// Woken when the anchor moves and the finalizing window closes.
+    /// Woken when the anchor moves and the finalizing window closes. A cancelled waiter's
+    /// sender stays until the next registration or anchor move.
     anchor_waiters: Vec<oneshot::Sender<()>>,
 }
 
@@ -766,8 +767,12 @@ where
                     Ok(None) => panic!("finalize replay could not execute a finalized block"),
                     // Impossible on a correct node, since the batches were just forked
                     // from applied state, mutation authority is unique, and
-                    // there is no caller to answer with a refusal.
-                    Err(err) => panic!("finalize replay failed: {err}"),
+                    // there is no caller to answer with a refusal. Parking leaves the
+                    // block unapplied and unacknowledged.
+                    Err(err) => {
+                        panic_unless_stopping(context, "finalize replay", &err);
+                        future::pending().await
+                    }
                 };
                 assert!(
                     A::Databases::matches_sync_targets(&batch, &sync_targets),
@@ -825,7 +830,7 @@ where
     /// state are cached in `pending`. Sends `None` on `response` if the
     /// ancestry is invalid, the application declines to propose, or the
     /// proposal goes stale (debug-asserted unreachable, since no finalization
-    /// can interleave a proposal). A fatal application error panics.
+    /// can interleave a proposal). A fatal application error panics unless shutdown has fired.
     pub(super) fn propose<S, V>(
         &self,
         context: &E,
@@ -912,7 +917,8 @@ where
             {
                 Some(Ok(result)) => result,
                 Some(Err(err @ ExecutionError::Fatal(_))) => {
-                    panic!("application proposal failed: {err}")
+                    panic_unless_stopping(context, "application proposal", &err);
+                    return future::pending().await;
                 }
                 Some(Err(err)) => {
                     // An invalid execution declines. Stale is unreachable for the same reason as
@@ -938,6 +944,18 @@ where
             assert!(
                 A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)),
                 "proposed state must match block commitments",
+            );
+            // The cache keys the entry by the requested parent and round, which verification
+            // and replay later read back from the block itself.
+            assert_eq!(
+                block.parent(),
+                parent_digest,
+                "proposed block must extend the requested parent",
+            );
+            assert_eq!(
+                block.context().round(),
+                round,
+                "proposed block must carry the requested round",
             );
             assert!(
                 execution.cache_pending(
@@ -1116,6 +1134,7 @@ where
                     return;
                 }
                 let (sender, receiver) = oneshot::channel();
+                state.anchor_waiters.retain(|waiter| !waiter.is_closed());
                 state.anchor_waiters.push(sender);
                 receiver
             };
@@ -1170,7 +1189,11 @@ where
                 warn!(?target_digest, block = ?digest, reason, "rebuild replay execution invalid");
                 return Err(PrepareBatchesError::Invalid);
             }
-            Err(err @ ExecutionError::Fatal(_)) => panic!("application replay failed: {err}"),
+            // Parking keeps the flight, so live waiters stay parked instead of re-claiming.
+            Err(err @ ExecutionError::Fatal(_)) => {
+                panic_unless_stopping(context, "application replay", &err);
+                return future::pending().await;
+            }
         };
 
         if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
@@ -1489,6 +1512,17 @@ where
     await_or_cancel(cancellation, stream.next()).await
 }
 
+/// Panics with `err` unless shutdown has fired.
+///
+/// A stopping runtime can fail an application dependency mid-operation, so once shutdown is
+/// observed the caller parks instead of reporting a crash.
+fn panic_unless_stopping(context: &impl Spawner, operation: &str, err: &ExecutionError) {
+    if context.stopped().now_or_never().is_none() {
+        panic!("{operation} failed: {err}");
+    }
+    warn!(%err, "{operation} failed during shutdown");
+}
+
 /// Returns the output of `future`, or `None` if `cancellation` fires first.
 async fn await_or_cancel<C, T, F>(cancellation: &mut C, future: F) -> Option<T>
 where
@@ -1576,7 +1610,7 @@ mod tests {
     use commonware_utils::{
         NZU16, NZU64, NZUsize, channel::oneshot, non_empty_range, range::NonEmptyRange, sync::Mutex,
     };
-    use futures::StreamExt;
+    use futures::{FutureExt as _, StreamExt};
     use std::{
         collections::{BTreeMap, VecDeque},
         future::Future,
@@ -1784,6 +1818,13 @@ mod tests {
         }
     }
 
+    /// Makes `apply` of `target` fail with fatal storage, firing shutdown first if `stop` is set.
+    #[derive(Clone, Copy)]
+    struct FatalApply {
+        target: Digest,
+        stop: bool,
+    }
+
     fn apply_gate() -> (ApplyGate, oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (started, started_rx) = oneshot::channel();
         let (release, release_rx) = oneshot::channel();
@@ -1817,6 +1858,7 @@ mod tests {
         finalized_observer: Option<Arc<Mutex<Vec<FinalizedObservation>>>>,
         apply_probe: Option<ApplicationProbe>,
         finalized_probe: Option<ApplicationProbe>,
+        fatal_apply: Option<FatalApply>,
     }
 
     impl ExecutionApp {
@@ -1826,6 +1868,7 @@ mod tests {
                 finalized_observer: None,
                 apply_probe: None,
                 finalized_probe: None,
+                fatal_apply: None,
             }
         }
 
@@ -1837,6 +1880,7 @@ mod tests {
                     finalized_observer: Some(observations.clone()),
                     apply_probe: None,
                     finalized_probe: None,
+                    fatal_apply: None,
                 },
                 observations,
             )
@@ -1922,13 +1966,22 @@ mod tests {
 
         async fn apply(
             &mut self,
-            _context: (deterministic::Context, Self::Context),
+            context: (deterministic::Context, Self::Context),
             block: &Self::Block,
             batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
         ) -> Result<Option<MerkleizedOf<Self::Databases, deterministic::Context>>, ExecutionError>
         {
             if let Some(probe) = &self.apply_probe {
                 probe.call(block.digest()).await;
+            }
+            if let Some(fatal) = self.fatal_apply
+                && fatal.target == block.digest()
+            {
+                if fatal.stop {
+                    // Polling `stop` once fires the signal.
+                    let _ = context.0.stop(0, None).now_or_never();
+                }
+                return Err(ExecutionError::Fatal("disk failed".into()));
             }
             Self::execute(block.height(), block.context.round.view(), batches)
                 .await
@@ -2545,6 +2598,147 @@ mod tests {
             );
             release.send(()).unwrap();
             let (_writer, ()) = mutation.await;
+        });
+    }
+
+    /// Fatal storage in an ancestor replay without shutdown panics.
+    #[test]
+    #[should_panic(expected = "application replay failed")]
+    fn fatal_replay_panics() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let (block, _) = harness.build_child(&genesis, View::new(1)).await;
+            harness.processor.app.fatal_apply = Some(FatalApply {
+                target: block.digest(),
+                stop: false,
+            });
+            let replays = ReplayFlights::default();
+            let (mut live, _cancelled) = oneshot::channel::<()>();
+            let _ = harness
+                .processor
+                .execution
+                .replay_shared(
+                    &mut harness.processor.app,
+                    &context,
+                    block.digest(),
+                    Arc::new(block),
+                    &mut live,
+                    &replays,
+                )
+                .await;
+        });
+    }
+
+    /// Fatal storage in an ancestor replay after shutdown fired in the same poll parks the
+    /// owner with its flight, so a live waiter stays parked instead of re-claiming it.
+    #[test]
+    fn fatal_replay_during_shutdown_parks_owner_and_waiter() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let (block, _) = harness.build_child(&genesis, View::new(1)).await;
+            let (gate, started, release) = apply_gate();
+            let probe = ApplicationProbe::new(block.digest(), [gate]);
+            harness.processor.app.apply_probe = Some(probe.clone());
+            harness.processor.app.fatal_apply = Some(FatalApply {
+                target: block.digest(),
+                stop: true,
+            });
+            let replays = ReplayFlights::default();
+            let execution = &harness.processor.execution;
+            let block = Arc::new(block);
+
+            // The owner parks on the apply gate while a second request waits on its flight.
+            let mut owner_app = harness.processor.app.clone();
+            let (mut owner_live, _owner_cancelled) = oneshot::channel::<()>();
+            let mut owner = Box::pin(execution.replay_shared(
+                &mut owner_app,
+                &context,
+                block.digest(),
+                block.clone(),
+                &mut owner_live,
+                &replays,
+            ));
+            assert!(futures::poll!(&mut owner).is_pending());
+            started.await.expect("owner must reach apply");
+            let mut waiter_app = harness.processor.app.clone();
+            let (mut waiter_live, _waiter_cancelled) = oneshot::channel::<()>();
+            let mut waiter = Box::pin(execution.replay_shared(
+                &mut waiter_app,
+                &context,
+                block.digest(),
+                block.clone(),
+                &mut waiter_live,
+                &replays,
+            ));
+            assert!(futures::poll!(&mut waiter).is_pending());
+
+            // Releasing the gate fires shutdown and fails the apply in the owner's next poll.
+            release.send(()).expect("owner is parked");
+            for _ in 0..8 {
+                assert!(futures::poll!(&mut owner).is_pending());
+                assert!(futures::poll!(&mut waiter).is_pending());
+            }
+            assert!(context.stopped().now_or_never().is_some());
+            assert_eq!(probe.calls(), 1, "the waiter must not re-claim the replay");
+            assert!(!replays.is_empty(), "the parked owner keeps its flight");
+        });
+    }
+
+    /// Cancelled anchor waiters are dropped at the next registration, so churn inside one
+    /// finalizing window keeps at most one dead sender, and the anchor move wakes every live one.
+    #[test]
+    fn anchor_waiters_drop_cancelled_registrations() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let winner = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            // Park the finalize inside its window.
+            let (gate, started, release) = apply_gate();
+            harness.processor.app.finalized_probe =
+                Some(ApplicationProbe::new(winner.digest(), [gate]));
+            let verifier = harness.processor.verifier();
+            let execution = &verifier.execution;
+            let processor = harness.processor;
+            let finalize = processor.finalize(harness.context_cell.as_present(), &winner, true);
+            futures::pin_mut!(finalize);
+            select! {
+                _ = &mut finalize => panic!("finalize must park on the probe"),
+                result = started => result.expect("finalize must reach the probe"),
+            }
+            let seen = execution.processed();
+            let waiters = || execution.state.lock().anchor_waiters.len();
+
+            // Sequential churn: each registration drops the previous cancelled one.
+            for _ in 0..8 {
+                let mut waiter = Box::pin(execution.anchor_past(&seen));
+                assert!(futures::poll!(&mut waiter).is_pending());
+                drop(waiter);
+                assert_eq!(waiters(), 1);
+            }
+
+            // A burst of cancellations stays until the next registration.
+            let mut burst = Vec::new();
+            for _ in 0..4 {
+                let mut waiter = Box::pin(execution.anchor_past(&seen));
+                assert!(futures::poll!(&mut waiter).is_pending());
+                burst.push(waiter);
+            }
+            drop(burst);
+            assert_eq!(waiters(), 4);
+            let mut live = Box::pin(execution.anchor_past(&seen));
+            assert!(futures::poll!(&mut live).is_pending());
+            assert_eq!(waiters(), 1);
+
+            // The anchor move wakes the live waiter and empties the list.
+            release.send(()).expect("finalize is parked");
+            let (processor, applied) = finalize.await;
+            assert_eq!(waiters(), 0);
+            live.await;
+            assert_durable(applied.publication.into_barrier()).await;
+            drop(processor);
         });
     }
 

@@ -90,34 +90,32 @@ where
     ///
     /// Returns [`UpdateOutcome::Observed`] once the update is recorded, or
     /// [`UpdateOutcome::SyncCompleted`] if state sync finished first. The converged artifact then
-    /// arrives on the completion channel.
-    ///
-    /// Panics if the syncer has stopped.
+    /// arrives on the completion channel. Returns `None` if the syncer has stopped.
     pub async fn retarget(
         &self,
         anchor: Anchor<BlockDigest<A, E>>,
         targets: SyncTargets<A, E>,
-    ) -> UpdateOutcome {
+    ) -> Option<UpdateOutcome> {
         loop {
             let (update, observed) = TipUpdate::with_observation(anchor, targets.clone());
             let (response, receiver) = oneshot::channel();
             let feedback = self.sender.enqueue(Message::Retarget { update, response });
-            assert!(feedback.accepted(), "syncer must outlive retarget callers",);
+            if !feedback.accepted() {
+                return None;
+            }
 
-            let Ok(outcome) = receiver.await else {
-                // The syncer dropped the message unanswered. With one sequential caller no newer
-                // update can displace it, so the syncer stopped, and the retry's enqueue panics.
-                continue;
-            };
+            // The syncer answers every message it handles. With one sequential caller no newer
+            // update can displace this one, so a dropped response means the syncer stopped.
+            let outcome = receiver.await.ok()?;
             if outcome == UpdateOutcome::SyncCompleted {
-                return outcome;
+                return Some(outcome);
             }
 
             // Wait until the live sync coordinator has recorded the new tip update.
             // Enqueueing it into Syncer is not enough to prove the eventual sync
             // artifact includes the target or to discard its handoff state.
             if observed.await.is_ok() {
-                return UpdateOutcome::Observed;
+                return Some(UpdateOutcome::Observed);
             }
 
             // The active coordinator dropped before recording this update.
@@ -166,14 +164,14 @@ mod tests {
 
             assert_eq!(
                 retarget.await,
-                UpdateOutcome::SyncCompleted,
+                Some(UpdateOutcome::SyncCompleted),
                 "retry should report the completed sync"
             );
         });
     }
 
     #[test]
-    fn retarget_retries_when_response_is_displaced() {
+    fn retarget_reports_stopped_syncer_when_response_is_dropped() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
@@ -181,27 +179,28 @@ mod tests {
 
             assert!(retarget.as_mut().now_or_never().is_none());
 
-            // Drop the message without responding, as overflow displacement does.
+            // A stopping syncer drops the message it was handling without responding.
             let Some(message) = receiver.recv().await else {
                 panic!("first update should be sent");
             };
             drop(message);
 
-            assert!(retarget.as_mut().now_or_never().is_none());
-
-            let Some(Message::Retarget { response, .. }) = receiver.recv().await else {
-                panic!("displaced response should trigger a retry");
-            };
+            assert_eq!(retarget.await, None);
             assert!(
-                response.send(UpdateOutcome::SyncCompleted).is_ok(),
-                "response receiver should be alive"
+                receiver.try_recv().is_err(),
+                "a stopped syncer gets no retry"
             );
+        });
+    }
 
-            assert_eq!(
-                retarget.await,
-                UpdateOutcome::SyncCompleted,
-                "retry should report the completed sync"
-            );
+    #[test]
+    fn retarget_reports_stopped_syncer_when_mailbox_is_closed() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
+            drop(receiver);
+
+            assert_eq!(mailbox.retarget(anchor(7, 9), 7).await, None);
         });
     }
 
@@ -228,7 +227,7 @@ mod tests {
 
             assert_eq!(
                 retarget.await,
-                UpdateOutcome::Observed,
+                Some(UpdateOutcome::Observed),
                 "recorded update should report observation"
             );
         });

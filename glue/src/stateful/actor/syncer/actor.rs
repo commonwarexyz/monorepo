@@ -1104,7 +1104,7 @@ mod tests {
             let outcome = update.await.expect("update task failed");
             assert_eq!(
                 outcome,
-                UpdateOutcome::SyncCompleted,
+                Some(UpdateOutcome::SyncCompleted),
                 "stranded update must report the completed sync"
             );
 
