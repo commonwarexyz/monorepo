@@ -6,8 +6,12 @@
 //! are tracked as [`AncestorBounds`] in newest-first order. Some may already be applied to the
 //! database while others may not.
 //!
+//! Reads through a batch are gated: a committed read first proves the live database is one of the
+//! chain's own states and otherwise refuses with [`Error::StaleRead`]. Merkleize runs the same
+//! staleness check against the chain's live ancestors and refuses with [`Error::StaleBatch`].
+//!
 //! Before applying a batch to the DB, the internal validation checks two things shared across QMDB
-//! variants (any, immutable, keyless):
+//! variants (any, current, immutable, keyless):
 //!
 //! - The batch is not stale: the current DB state must match either the batch's recorded DB state
 //!   or one of its ancestor states.
@@ -33,10 +37,11 @@ use std::{
 /// A database reference proven to be on a batch chain's own states, required for every
 /// committed read through the chain.
 ///
-/// Committed-read helpers take this instead of a bare database reference, so a read path
-/// that skips the check fails to compile. It is only created by [`Bounds::on_chain`]
-/// and [`Commitment::on_chain`], which check whatever commitment the caller supplies, so
-/// callers must pair the database with its own commitment (every current caller does).
+/// Committed-read helpers take this instead of a bare database reference, so calling one without
+/// the check fails to compile. Public database methods reached through [`Deref`] are not covered.
+/// It is only created by [`Bounds::on_chain`], [`Commitment::on_chain`], and [`merkleizable`],
+/// which check whatever commitment the caller supplies, so callers must pair the database with its
+/// own commitment (every current caller does).
 /// Holding the wrapped reference also freezes the database for the duration of the call.
 /// Every state mutation takes the database by value, so no apply, prune, or reinitialization can
 /// interleave with a checked read.
@@ -142,9 +147,9 @@ impl<F: Family, D: Digest> Bounds<F, D> {
 
     /// Check that the live state is one this chain accounts for -- the batch's own tip
     /// (reads through an already applied batch stay valid), the chain's database
-    /// boundary, or an ancestor's tip. Anything else means a foreign batch was applied
-    /// or the database was reinitialized off the chain, so the read is refused with
-    /// [`Error::StaleRead`] rather than mixing two forks.
+    /// boundary, or an ancestor's tip. Anything else means a batch the chain does not lead through
+    /// was applied (a foreign fork, or a descendant of this batch) or the database was
+    /// reinitialized off the chain, so the read is refused with [`Error::StaleRead`].
     ///
     /// A passing read is exact: the live state is one of this chain's own states, and the
     /// chain's retained diffs shadow every key its unapplied batches touched. Membership
@@ -246,9 +251,10 @@ where
 /// Advance the inherited DB boundary past ancestors no longer reachable through the weak parent
 /// chain.
 ///
-/// A dropped ancestor may be applied or not. Either way the batch can no longer read its state
-/// through the chain, so the boundary moves up to the oldest live ancestor's base, and a database
-/// still below that base fails [`validate_batch_applicable`].
+/// A dropped ancestor may be applied or not. Either way merkleize can no longer reach its
+/// operations through the chain, so the boundary moves up to the oldest live ancestor's base, and a
+/// database still below that base fails [`validate_batch_applicable`]. Reads are unaffected, since
+/// merkleized batches retain their ancestors' diffs.
 pub(crate) fn effective_boundary<F: Family, D: Digest>(
     inherited: Commitment<F, D>,
     oldest_live_base: Option<Commitment<F, D>>,
@@ -409,12 +415,13 @@ mod tests {
 
     #[test]
     fn on_chain_accepts_own_states_only() {
+        // Ancestors are newest-first, and the batch builds on the newest one's tip.
         let bounds = Bounds::<F, D> {
-            base: state(10, 1),
+            base: state(16, 16),
             db: state(10, 1),
             tip: state(18, 18),
-            ancestors: vec![ancestor(loc(10), 12, 12), ancestor(loc(14), 16, 16)],
-            inactivity_floor: loc(11),
+            ancestors: vec![ancestor(loc(14), 16, 16), ancestor(loc(10), 12, 12)],
+            inactivity_floor: loc(14),
         };
         // Own tip, database boundary, and ancestor tips are readable.
         assert!(bounds.on_chain(&(), state(18, 18)).is_ok());

@@ -1443,6 +1443,8 @@ mod tests {
             // Path A. Merkleize while the parent is still pending.
             let child_pre = build(&parent);
             let read_pre = child_pre.get(&untouched, &db).await.unwrap();
+            // Key 2 falls through to its committed value.
+            assert_eq!(read_pre, Some(Sha256::hash(&[&42u64.to_be_bytes()])));
             let root_pre = child_pre.merkleize(&db, None).await.unwrap().root();
 
             // Apply the parent.

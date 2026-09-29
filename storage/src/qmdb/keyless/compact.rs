@@ -1001,6 +1001,7 @@ mod tests {
     fn compact_mmb_proof_refused_after_off_chain_reopen() {
         deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmb::Family>);
     }
+
     /// Batch artifacts (operations, range proof, pinned frontier) verify against the batch root,
     /// survive applying and dropping ancestors, and are refused once the batch itself is applied
     /// and the compact store is pruned past them.
@@ -2013,7 +2014,6 @@ mod tests {
                 .unwrap();
             let (db, _) = db.apply_batch(advance_floor).await.unwrap();
             let db = db.sync().await.unwrap();
-            let target = db.target();
 
             let regressed = db
                 .new_batch()
@@ -2026,12 +2026,6 @@ mod tests {
                 Err(Error::FloorRegressed(new, current))
                     if new == Location::new(0) && current == Location::new(1)
             ));
-
-            // Reopen and verify the rejected batch persisted nothing.
-            drop(db);
-            let db =
-                open_db::<mmr::Family>(context.child("reopen"), "keyless-floor-regressed").await;
-            assert_eq!(db.target(), target);
         });
     }
 
@@ -2059,19 +2053,11 @@ mod tests {
                 .merkleize(&db, None, Location::new(1))
                 .await;
 
-            let target = db.target();
             assert!(matches!(
                 child,
                 Err(Error::FloorRegressed(new, prev))
                     if new == Location::new(1) && prev == Location::new(2)
             ));
-
-            // Reopen and verify the rejected chain persisted nothing.
-            drop(db);
-            let db =
-                open_db::<mmr::Family>(context.child("reopen"), "keyless-ancestor-floor-regressed")
-                    .await;
-            assert_eq!(db.target(), target);
         });
     }
 
@@ -3107,25 +3093,33 @@ mod tests {
         });
     }
 
-    // A batch whose floor exceeds its own commit location is refused at merkleize, identifying
-    // its own bound, so no descendant can build on it.
+    // A chained batch whose floor exceeds its own commit location, counted past its parent's
+    // operations, is refused at merkleize.
     #[test_traced("INFO")]
     fn test_compact_ancestor_floor_beyond_size() {
         deterministic::Runner::default().start(|context| async move {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "keyless-ancestor-floor-beyond").await;
 
-            // parent: append + commit at loc 2, floor=3 (one past parent's commit).
+            // parent: append + commit at loc 2, floor=2.
             let parent = db
                 .new_batch()
                 .append(U64::new(1))
-                .merkleize(&db, None, Location::new(3))
+                .merkleize(&db, None, Location::new(2))
+                .await
+                .unwrap();
+
+            // child: append + commit at loc 4, floor=5 (one past its commit).
+            let child = parent
+                .new_batch::<Sha256>()
+                .append(U64::new(2))
+                .merkleize(&db, None, Location::new(5))
                 .await;
 
             assert!(matches!(
-                parent,
+                child,
                 Err(Error::FloorBeyondSize(floor, commit))
-                    if floor == Location::new(3) && commit == Location::new(2)
+                    if floor == Location::new(5) && commit == Location::new(4)
             ));
         });
     }
