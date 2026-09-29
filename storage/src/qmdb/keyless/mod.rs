@@ -154,6 +154,11 @@ where
     /// Initialize from the latest retained commit, discarding uncommitted operations.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
     /// `None` selects the latest retained state.
+    ///
+    /// The selected commit's inactivity floor may precede the retained start, after a bounded
+    /// recovery past a prune or a sync of a range that starts above the floor. Batch reads between
+    /// the two then fail with [`crate::journal::Error::ItemPruned`], where a database retaining
+    /// them answers, so batch reads agree across nodes only when each retains its floor.
     #[boxed]
     pub async fn init(
         context: E,

@@ -403,6 +403,22 @@ mod tests {
             assert_eq!(client.bounds(), Location::new(5)..source_end);
             assert_eq!(*client.sync_boundary(), 0);
             assert_eq!(client.root(), source_root);
+
+            // Batch reads between the floor and the retained start are pruned, not refused.
+            let batch = client.new_batch();
+            assert!(matches!(
+                batch.get(Location::new(2), &client).await,
+                Err(crate::qmdb::Error::Journal(
+                    crate::journal::Error::ItemPruned(2)
+                ))
+            ));
+            assert!(
+                batch
+                    .get(Location::new(5), &client)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
         });
     }
 

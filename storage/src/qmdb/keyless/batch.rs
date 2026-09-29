@@ -97,7 +97,8 @@ where
 /// Refuse a read of `loc` below the chain's inactivity `floor`.
 ///
 /// Whether such a location is still retained depends on local pruning, so every node refuses it
-/// alike.
+/// alike. Locations at or above the floor are retained on every node, unless a database was
+/// recovered or synced with its floor below its retained start (see [`Keyless::init`]).
 fn check_floor<F: Family>(loc: Location<F>, floor: Location<F>) -> Result<(), Error<F>> {
     if loc < floor {
         return Err(Error::BelowInactivityFloor(loc));
@@ -189,6 +190,9 @@ where
     /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
     /// [`Error::BelowInactivityFloor`] if `loc` is below the inactivity floor this batch builds
     /// on.
+    /// [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) is returned instead for a
+    /// location between the floor and the retained start, which only a database recovered or
+    /// synced with its floor below its retained start has (see [`Keyless::init`]).
     pub async fn get<E, C>(
         &self,
         loc: Location<F>,
@@ -234,6 +238,9 @@ where
     /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
     /// [`Error::BelowInactivityFloor`] if any location is below the inactivity floor this batch
     /// builds on.
+    /// [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) is returned instead for a
+    /// location between the floor and the retained start, which only a database recovered or
+    /// synced with its floor below its retained start has (see [`Keyless::init`]).
     ///
     /// # Panics
     ///
@@ -478,6 +485,9 @@ where
     ///
     /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
     /// [`Error::BelowInactivityFloor`] if `loc` is below this batch's inactivity floor.
+    /// [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) is returned instead for a
+    /// location between the floor and the retained start, which only a database recovered or
+    /// synced with its floor below its retained start has (see [`Keyless::init`]).
     pub async fn get<E, H, C>(
         &self,
         loc: Location<F>,
@@ -515,6 +525,9 @@ where
     ///
     /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
     /// [`Error::BelowInactivityFloor`] if any location is below this batch's inactivity floor.
+    /// [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) is returned instead for a
+    /// location between the floor and the retained start, which only a database recovered or
+    /// synced with its floor below its retained start has (see [`Keyless::init`]).
     ///
     /// # Panics
     ///
