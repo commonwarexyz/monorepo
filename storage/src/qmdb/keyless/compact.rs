@@ -12,22 +12,23 @@ use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 
-impl<F: Family, V: ValueEncoding> compact::sealed::Sealed for Operation<F, V> {}
+impl<F: Family, V: ValueEncoding> compact::sealed::Sealed<F> for Operation<F, V> {
+    type Mutations = Vec<V::Value>;
+    const NAME: &'static str = "keyless";
+
+    fn mutation(value: V::Value) -> Self {
+        Self::Append(value)
+    }
+}
 
 impl<F: Family, V: ValueEncoding> compact::Operation<F> for Operation<F, V>
 where
     Self: CodecShared,
 {
     type Metadata = V::Value;
-    type Mutations = Vec<V::Value>;
-    const NAME: &'static str = "keyless";
 
     fn commit(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Self {
         Self::Commit(metadata, inactivity_floor_loc)
-    }
-
-    fn mutation(value: V::Value) -> Self {
-        Self::Append(value)
     }
 
     fn metadata(&self) -> Option<&V::Value> {

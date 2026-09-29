@@ -13,22 +13,23 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use std::collections::BTreeMap;
 
-impl<F: Family, K: Key, V: ValueEncoding> compact::sealed::Sealed for Operation<F, K, V> {}
+impl<F: Family, K: Key, V: ValueEncoding> compact::sealed::Sealed<F> for Operation<F, K, V> {
+    type Mutations = BTreeMap<K, V::Value>;
+    const NAME: &'static str = "immutable";
+
+    fn mutation((key, value): (K, V::Value)) -> Self {
+        Self::Set(key, value)
+    }
+}
 
 impl<F: Family, K: Key, V: ValueEncoding> compact::Operation<F> for Operation<F, K, V>
 where
     Self: CodecShared,
 {
     type Metadata = V::Value;
-    type Mutations = BTreeMap<K, V::Value>;
-    const NAME: &'static str = "immutable";
 
     fn commit(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Self {
         Self::Commit(metadata, inactivity_floor_loc)
-    }
-
-    fn mutation((key, value): (K, V::Value)) -> Self {
-        Self::Set(key, value)
     }
 
     fn metadata(&self) -> Option<&V::Value> {
