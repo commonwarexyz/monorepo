@@ -1749,8 +1749,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     /// to the target player. Similarly, that player MUST be convinced that this dealer
     /// sent it that message, without any possibility of impersonation. An authenticated
     /// channel provides both guarantees, such as one established with
-    /// [SAKE](crate::handshake::sake) or
-    /// [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
+    /// [SAKE](crate::handshake::sake).
     #[allow(clippy::type_complexity)]
     pub fn start<M: Faults>(
         mut rng: impl CryptoRng,
@@ -2050,8 +2049,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     ///
     /// It's important that nobody can impersonate the dealer, and that the
     /// private message was not exposed to anyone else. An authenticated channel
-    /// provides both, such as one established with [SAKE](crate::handshake::sake) or
-    /// [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
+    /// provides both, such as one established with [SAKE](crate::handshake::sake).
     ///
     /// Returns [`DealerMessageError`] if the message is invalid, `Ok(None)` if a
     /// message from this dealer was already processed, and `Ok(Some(_))` with
