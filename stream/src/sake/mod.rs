@@ -12,9 +12,7 @@
 //!
 //! The SAKE [Version] and the [CUPS version](crate::cups::Version) are configured separately.
 //! Peers with different CUPS versions complete the handshake and then fail to open the first
-//! record. [Version::V1] forks the transcript with a namespace of this module
-//! ([Context::fork](commonware_cryptography::handshake::sake::Context::fork)), so it differs from
-//! that of a SAKE handshake another protocol runs with the same application namespace.
+//! record.
 //!
 //! Peers must agree on a unique, application-specific namespace, a [Version], and the record
 //! format, and their clocks must be within the configured timestamp acceptance windows. The version

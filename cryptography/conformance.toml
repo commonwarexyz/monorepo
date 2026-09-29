@@ -158,7 +158,7 @@ hash = "bea1070b8a090397b3cdf1e99794503755898c21f33efbed621b8d9b1dc6dd31"
 n_cases = 4096
 hash = "1fd94dbec97e35f2cc9500f4d0615b94593c111d276c415337c6961a6d225382"
 
-["commonware_cryptography::handshake::sake::key_exchange::conformance::CodecConformance<EphemeralPublicKey>"]
+["commonware_cryptography::handshake::sake::exchange::conformance::CodecConformance<EphemeralPublicKey>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 

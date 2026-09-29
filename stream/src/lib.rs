@@ -1,4 +1,4 @@
-//! Exchange authenticated messages over arbitrary byte streams.
+//! Exchange messages over arbitrary transport.
 //!
 //! # Status
 //!

@@ -21,10 +21,9 @@
 //! not hide identities. SAKE has no 0-RTT mode or resumption mechanism. Application data can be
 //! sent only after the three messages complete.
 //!
-//! The BLAKE3 transcript first commits the caller-provided application namespace as one packet. A
-//! protocol built on SAKE may then fork it with its own label ([Context::fork]). SAKE then forks it
-//! with the protocol namespace of the [Version]: `_COMMONWARE_CRYPTOGRAPHY_SAKE` for [Version::V1]
-//! and `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` for [Version::V0]. Distinct labels derive the
+//! The BLAKE3 transcript first commits the caller-provided application namespace as one packet,
+//! then forks it with the protocol namespace of the [Version]: `_COMMONWARE_CRYPTOGRAPHY_SAKE` for
+//! [Version::V1] and `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` for [Version::V0]. Distinct labels derive the
 //! listener-to-dialer and dialer-to-listener traffic keys and confirmations. These namespace bytes,
 //! transcript order, and labels are protocol constants.
 //!
@@ -55,7 +54,7 @@
 mod error;
 pub use error::Error;
 
-mod key_exchange;
+mod exchange;
 
 mod protocol;
 pub use protocol::{

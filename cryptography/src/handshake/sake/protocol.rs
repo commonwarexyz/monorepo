@@ -1,6 +1,6 @@
 use super::{
     Error,
-    key_exchange::{EphemeralPublicKey, SecretKey},
+    exchange::{EphemeralPublicKey, SecretKey},
 };
 use crate::{
     Cipher, PublicKey, Signature, Signer, Verifier,
@@ -227,7 +227,7 @@ impl<S, P> Context<S, P> {
         peer_identity: P,
         version: Version,
     ) -> Self {
-        let transcript = Transcript::new(namespace, version.transcript());
+        let transcript = Transcript::new(namespace, version.transcript()).fork(version.namespace());
         Self {
             version,
             transcript,
@@ -236,15 +236,6 @@ impl<S, P> Context<S, P> {
             my_identity,
             peer_identity,
         }
-    }
-
-    /// Forks the transcript with the label of a protocol built on SAKE.
-    ///
-    /// SAKE forks its own protocol namespace after every label added here, so handshakes that
-    /// different protocols run with the same application namespace do not share a transcript.
-    pub fn fork(mut self, label: &'static [u8]) -> Self {
-        self.transcript = self.transcript.fork(label);
-        self
     }
 }
 
@@ -260,9 +251,8 @@ pub fn dial_start<S: Signer, P: PublicKey>(
         ok_timestamps,
         my_identity,
         peer_identity,
-        transcript,
+        mut transcript,
     } = ctx;
-    let mut transcript = transcript.fork(version.namespace());
     let esk = SecretKey::new(rng);
     let epk = esk.public();
     let dialer_identity = my_identity.public_key().encode();
@@ -353,9 +343,8 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         my_identity,
         peer_identity,
         ok_timestamps,
-        transcript,
+        mut transcript,
     } = ctx;
-    let mut transcript = transcript.fork(version.namespace());
     if !ok_timestamps.contains(&msg.time_ms) {
         return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
     }
@@ -524,65 +513,6 @@ mod test {
             );
 
             assert!(matches!(result, Err(Error::HandshakeFailed)));
-        }
-    }
-
-    /// Accepts a [Syn] only when the dialer and listener fork the transcript with the same labels.
-    #[test]
-    fn test_mismatched_fork_fails() {
-        let fork = |context: Context<_, _>, label: Option<&'static [u8]>| match label {
-            Some(label) => context.fork(label),
-            None => context,
-        };
-        for version in VERSIONS {
-            for (dialer_label, listener_label) in [
-                (Some(&b"a"[..]), Some(&b"a"[..])),
-                (Some(b"a"), Some(b"b")),
-                (Some(b"a"), None),
-                (None, Some(b"a")),
-            ] {
-                let mut rng = test_rng();
-                let dialer_crypto = PrivateKey::random(&mut rng);
-                let listener_crypto = PrivateKey::random(&mut rng);
-
-                let (_, msg1) = dial_start(
-                    &mut rng,
-                    fork(
-                        Context::new(
-                            b"namespace",
-                            0,
-                            0..1,
-                            dialer_crypto.clone(),
-                            listener_crypto.public_key(),
-                            version,
-                        ),
-                        dialer_label,
-                    ),
-                );
-
-                let result = listen_start(
-                    &mut rng,
-                    fork(
-                        Context::new(
-                            b"namespace",
-                            0,
-                            0..1,
-                            listener_crypto,
-                            dialer_crypto.public_key(),
-                            version,
-                        ),
-                        listener_label,
-                    ),
-                    msg1,
-                );
-
-                // Only matching labels produce the transcript the dialer signed.
-                if dialer_label == listener_label {
-                    assert!(result.is_ok());
-                } else {
-                    assert!(matches!(result, Err(Error::HandshakeFailed)));
-                }
-            }
         }
     }
 

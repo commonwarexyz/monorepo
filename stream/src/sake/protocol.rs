@@ -14,9 +14,6 @@ use rand_core::CryptoRng;
 use std::{future::Future, time::Duration};
 use thiserror::Error;
 
-/// Namespace that [Version::V1] forks into the transcript of every handshake run by [Sake].
-const NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_SAKE";
-
 /// Errors that can occur during a SAKE handshake.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -78,29 +75,20 @@ pub struct Sake<S> {
 
 impl<S> Sake<S> {
     /// Returns the SAKE context for a handshake with `peer` in `namespace`.
-    ///
-    /// Each version must produce transcripts that no other version produces, so peers on different
-    /// versions fail the handshake. Version 1 also forks the transcript with [NAMESPACE], so it
-    /// differs from that of SAKE run directly with the same application namespace.
     fn context<P>(self, clock: &impl Clock, namespace: &[u8], peer: P) -> Context<S, P> {
         // Accept peer timestamps from `max_handshake_age` before now up to, but excluding,
         // `synchrony_bound` after now.
         let current_time = clock.current().epoch().as_millis_u64();
         let ok_timestamps = current_time.saturating_sub(self.max_handshake_age.as_millis_u64())
             ..current_time.saturating_add(self.synchrony_bound.as_millis_u64());
-        let version = self.version;
-        let context = Context::new(
+        Context::new(
             namespace,
             current_time,
             ok_timestamps,
             self.signer,
             peer,
-            version,
-        );
-        match version {
-            Version::V0 => context,
-            Version::V1 => context.fork(NAMESPACE),
-        }
+            self.version,
+        )
     }
 }
 
