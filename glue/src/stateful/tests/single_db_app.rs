@@ -470,15 +470,19 @@ impl EngineDefinition for SingleDbEngine {
         let genesis_block = Block::genesis(initial_target.root, initial_target.range);
 
         let stateful_startup_context = context.child("stateful_startup");
-        let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
-        let should_state_sync = plan.should_state_sync(self.enable_state_sync && delayed);
+        let mut plan = SyncPlan::init(
+            stateful_startup_context.child("plan"),
+            partition_prefix.clone(),
+        )
+        .await;
+        let should_state_sync = plan.should_sync(self.enable_state_sync && delayed);
         let provider = ConstantProvider::new(scheme.clone());
 
         let (probe, probe_mailbox) = Probe::new(ProbeConfig {
             context: context.child("probe"),
             provider: provider.clone(),
             strategy: Sequential,
-            capacity: NZUsize!(100),
+            mailbox_size: NZUsize!(100),
             blocker: oracle.control(public_key.clone()),
             minimum_epoch: Epoch::zero(),
             retry_timeout: NZDuration!(Duration::from_millis(100)),
@@ -486,7 +490,7 @@ impl EngineDefinition for SingleDbEngine {
         probe.start(probe_network);
         let mut state_sync_height = if should_state_sync {
             let finalization = probe_mailbox.subscribe().await.expect("probe stopped");
-            plan = plan.with_floor(finalization);
+            plan = plan.set_floor(finalization).await;
             None
         } else {
             self.sync_heights.lock().get(public_key).copied()
@@ -542,7 +546,7 @@ impl EngineDefinition for SingleDbEngine {
 
         // Stateful actor
         let application = App::new(genesis_block.clone());
-        let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+        let (stateful_actor, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application,
