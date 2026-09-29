@@ -12,6 +12,7 @@ use futures::join;
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
+/// SAKE handshake that keys CUPS records.
 type Handshake<S> = Upgrade<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
 
 /// Returns the records that pair with the SAKE `version`.

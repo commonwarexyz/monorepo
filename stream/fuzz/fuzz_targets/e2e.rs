@@ -18,6 +18,7 @@ use futures::future::{Either, select};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
+/// SAKE handshake that keys CUPS records.
 type Handshake<S> = Upgrade<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
 
 /// Returns the records that pair with the SAKE `version`.
@@ -81,7 +82,10 @@ impl<'a> arbitrary::Arbitrary<'a> for Message {
     }
 }
 
+/// Sending half of a [Handshake] connection over mock channels.
 type Sender = <Handshake<PrivateKey> as StreamHandshake>::Sender<mocks::Stream, mocks::Sink>;
+
+/// Receiving half of a [Handshake] connection over mock channels.
 type Receiver = <Handshake<PrivateKey> as StreamHandshake>::Receiver<mocks::Stream, mocks::Sink>;
 
 #[derive(Debug)]

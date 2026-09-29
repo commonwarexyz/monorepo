@@ -12,6 +12,7 @@ use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
 
+/// SAKE handshake that keys CUPS records.
 type Handshake<S> = Upgrade<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
 
 /// Returns the records that pair with the SAKE `version`.
@@ -25,7 +26,10 @@ fn records(version: Version) -> Cups<ChaCha20Poly1305> {
 static NAMESPACE: &[u8] = b"lazy_fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 1023 * 1024; // ~1MB buffer
 
+/// Sending half of a [Handshake] connection over mock channels.
 type Sender = <Handshake<PrivateKey> as StreamHandshake>::Sender<mocks::Stream, mocks::Sink>;
+
+/// Receiving half of a [Handshake] connection over mock channels.
 type Receiver = <Handshake<PrivateKey> as StreamHandshake>::Receiver<mocks::Stream, mocks::Sink>;
 
 struct TransportPair {

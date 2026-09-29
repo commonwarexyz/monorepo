@@ -157,8 +157,8 @@ commonware_macros::stability_scope!(BETA {
 
     /// Record layer that protects messages with one cipher per direction.
     ///
-    /// A [Handshake] establishes the two ciphers and uses [Records::split] to build the returned
-    /// [Sender] and [Receiver].
+    /// [Records::split] builds a [Sender] and [Receiver] from the two ciphers an [Exchange] agrees
+    /// on.
     pub trait Records: Clone + Send + Sync + 'static {
         /// Cipher that seals and opens records.
         type Cipher: Cipher;
@@ -199,6 +199,9 @@ commonware_macros::stability_scope!(BETA {
     /// the same authenticated peer that is returned. Implementations should also bind `records`,
     /// the [namespace](Records::namespace) of the record format the ciphers will key, so that peers
     /// with different record formats fail the exchange.
+    ///
+    /// Implementations must not consume bytes from `stream` past the final exchange message because
+    /// the caller reuses `stream` and `sink` for records.
     ///
     /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping the exchange
     /// future cancels the attempt.
@@ -428,8 +431,9 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
-        /// Reuses one handshake for repeated dials and listens and forwards each call's namespace
-        /// and maximum message size to the inner handshake.
+        /// Checks that [Timeout] dial and listen futures remain Send when the handshake's identity
+        /// is not Send and its halves share one session, and that each call forwards its namespace
+        /// and maximum message size.
         #[test]
         fn handshake_supports_opaque_identity_and_shared_session() {
             fn assert_send<T: Send>(_: T) {}

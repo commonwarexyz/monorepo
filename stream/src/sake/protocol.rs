@@ -64,6 +64,8 @@ impl<S> Exchange<S> {
         records: &'static [u8],
         peer: P,
     ) -> Context<S, P> {
+        // Accept peer timestamps from `max_handshake_age` before now up to, but excluding,
+        // `synchrony_bound` after now.
         let current_time = clock.current().epoch().as_millis_u64();
         let ok_timestamps = current_time
             .saturating_sub(self.config.max_handshake_age.as_millis_u64())
@@ -138,6 +140,8 @@ impl<S: Signer> crate::Exchange for Exchange<S> {
         I: Stream,
         O: Sink,
     {
+        // Send the local identity as a cleartext prelude. The listener passes it to its bouncer and
+        // binds it into its SAKE context.
         send_handshake_frame(sink, self.config.signer.public_key()).await?;
 
         let sake = self.context(&context, namespace, records, peer);
@@ -168,6 +172,8 @@ impl<S: Signer> crate::Exchange for Exchange<S> {
         B: FnOnce(S::PublicKey) -> F + Send,
         F: Future<Output = bool> + Send,
     {
+        // Consult the bouncer on the unauthenticated claim before any handshake work. Only a
+        // successful `listen_end` authenticates it.
         let peer = recv_handshake_frame::<S::PublicKey, _>(stream).await?;
         if !bouncer(peer.clone()).await {
             return Err(Error::PeerRejected(peer.encode().to_vec()));
@@ -175,6 +181,8 @@ impl<S: Signer> crate::Exchange for Exchange<S> {
 
         let msg1 = recv_handshake_frame::<Syn<S::Signature>, _>(stream).await?;
 
+        // Read the clock only after the Syn arrives, so the acceptance window and the SynAck
+        // timestamp reflect when the Syn is checked.
         let sake = self.context(&context, namespace, records, peer.clone());
         let (state, syn_ack) = listen_start(context, sake, msg1)?;
         send_handshake_frame(sink, syn_ack).await?;
@@ -213,7 +221,8 @@ mod test {
     };
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
-    const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
+    /// Default `max_message_size` passed to dial and listen.
+    const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
     type Records = Cups<ChaCha20Poly1305>;
     type Transport = Upgrade<Exchange<PrivateKey>, Records>;
@@ -295,6 +304,9 @@ mod test {
                         }
                     };
                     let result = AssertUnwindSafe(attempt).catch_unwind().await;
+
+                    // Within the limit, the attempt reaches the dropped channel ends and fails
+                    // without panicking.
                     if max_message_size <= MAX_SIZE {
                         assert!(result.unwrap().is_err());
                     } else {
@@ -332,6 +344,7 @@ mod test {
         IoBuf::from(UInt(size + 1).encode())
     }
 
+    /// Wraps a sink to count `send` calls and record each call's chunk count.
     struct CountingSink<S> {
         inner: S,
         sends: Arc<AtomicUsize>,
@@ -392,7 +405,8 @@ mod test {
             for max_message_size in [0, 1, 100, MAX_MESSAGE_SIZE] {
                 let executor = deterministic::Runner::timed(Duration::from_secs(5));
                 executor.start(move |context| async move {
-                    // Authenticate independently of the returned streams' plaintext limit.
+                    // Handshake frames are bounded by their fixed sizes, so the handshake succeeds
+                    // even when `max_message_size` is 0.
                     let dialer_signer = PrivateKey::from_seed(42);
                     let listener_signer = PrivateKey::from_seed(24);
 
@@ -402,6 +416,7 @@ mod test {
                     let dialer_handshake = transport_handshake(dialer_signer.clone(), version);
                     let listener_handshake = transport_handshake(listener_signer.clone(), version);
 
+                    // Run both sides of the handshake.
                     let listener_handle =
                         context.child("listener").spawn(move |context| async move {
                             Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -442,6 +457,8 @@ mod test {
                         listener_sender.send(oversized).await,
                         Err(cups::Error::SendTooLarge(_))
                     ));
+
+                    // Exchange each message within the limit in both directions.
                     let messages: [&[u8]; 4] = [b"", b"A", b"B", b"C"];
                     for msg in messages
                         .iter()
@@ -543,6 +560,7 @@ mod test {
     /// that under SAKE V0 they complete the handshake and then fail to open the first record.
     #[test]
     fn test_record_versions() {
+        // SAKE V1 binds the record namespace, so the handshake fails.
         let result = connect_with(
             (Version::V1, cups::Version::V0),
             (Version::V1, cups::Version::V1),
@@ -552,6 +570,8 @@ mod test {
             Err(Error::HandshakeError(HandshakeError::HandshakeFailed))
         ));
 
+        // SAKE V0 binds no record namespace, so the handshake completes and the first record fails
+        // to open.
         let result = connect_with(
             (Version::V0, cups::Version::V0),
             (Version::V0, cups::Version::V1),
@@ -559,6 +579,8 @@ mod test {
         assert!(result.unwrap().is_err());
     }
 
+    /// Checks that the listener decrypts each record in place, inside the pooled buffer its stream
+    /// read returned.
     #[test]
     fn test_recv_decrypts_unique_frame_in_place() -> Result<(), Box<dyn std::error::Error>> {
         for version in [Version::V0, Version::V1] {
@@ -628,6 +650,7 @@ mod test {
         Ok(())
     }
 
+    /// Checks that `send_many` of small messages reaches the sink as one single-chunk send.
     #[test]
     fn test_send_many_uses_single_runtime_send() -> Result<(), Box<dyn std::error::Error>> {
         for version in [Version::V0, Version::V1] {
@@ -671,6 +694,8 @@ mod test {
 
                 let (_listener_peer, _listener_sender, mut listener_receiver) =
                     listener_handle.await.unwrap()?;
+
+                // Discard the counts from the handshake frames.
                 sends.store(0, Ordering::Relaxed);
                 chunk_counts.lock().clear();
 
@@ -704,9 +729,12 @@ mod test {
         Ok(())
     }
 
+    /// Checks that `send_many` starts a new chunk before one would exceed a network pool item, with
+    /// at most one sink call per batch.
     #[test]
     fn test_send_many_flushes_at_network_pool_item_max() -> Result<(), Box<dyn std::error::Error>> {
         for version in [Version::V0, Version::V1] {
+            // Cap network pool items at 256 bytes.
             let executor = deterministic::Runner::new(
                 deterministic::Config::new().with_network_buffer_pool_config(
                     BufferPoolConfig::for_network()
@@ -791,10 +819,13 @@ mod test {
         Ok(())
     }
 
+    /// Checks that `send_many` places a frame larger than one network pool item in its own chunk
+    /// instead of rejecting or merging it.
     #[test]
     fn test_send_many_sends_oversized_single_message_alone()
     -> Result<(), Box<dyn std::error::Error>> {
         for version in [Version::V0, Version::V1] {
+            // Cap network pool items at 128 bytes, below the frame of the 200-byte message.
             let executor = deterministic::Runner::new(
                 deterministic::Config::new().with_network_buffer_pool_config(
                     BufferPoolConfig::for_network()
@@ -841,6 +872,8 @@ mod test {
 
                 let (_listener_peer, _listener_sender, mut listener_receiver) =
                     listener_handle.await.unwrap()?;
+
+                // Discard the counts from the handshake frames.
                 sends.store(0, Ordering::Relaxed);
                 chunk_counts.lock().clear();
 
@@ -865,6 +898,8 @@ mod test {
         Ok(())
     }
 
+    /// Checks that `send_many` rejects a batch with an oversized message before sending or sealing
+    /// any of it, leaving the sender usable.
     #[test]
     fn test_send_many_too_large_preserves_sender_state() -> Result<(), Box<dyn std::error::Error>> {
         for version in [Version::V0, Version::V1] {
@@ -908,9 +943,12 @@ mod test {
 
                 let (_listener_peer, _listener_sender, mut listener_receiver) =
                     listener_handle.await.unwrap()?;
+
+                // Discard the counts from the handshake frames.
                 sends.store(0, Ordering::Relaxed);
                 chunk_counts.lock().clear();
 
+                // Reject a batch whose second message exceeds the limit.
                 let valid = vec![7u8; 32];
                 let oversized = vec![9u8; MAX_MESSAGE_SIZE as usize + 1];
                 assert!(matches!(
@@ -926,6 +964,7 @@ mod test {
                 assert_eq!(sends.load(Ordering::Relaxed), 0);
                 assert!(chunk_counts.lock().is_empty());
 
+                // The next record opens, so the rejected batch sealed nothing.
                 let recovered = b"recovered";
                 dialer_sender.send(&recovered[..]).await?;
                 assert_eq!(sends.load(Ordering::Relaxed), 1);
@@ -936,6 +975,8 @@ mod test {
         Ok(())
     }
 
+    /// Checks that the listener bounds the unauthenticated peer-key frame by the public key size
+    /// instead of `max_message_size`.
     #[test]
     fn test_listen_rejects_oversized_fixed_size_peer_key_frame() {
         let executor = deterministic::Runner::default();
@@ -981,6 +1022,8 @@ mod test {
         });
     }
 
+    /// Checks that the dialer bounds the SynAck frame by its fixed size instead of
+    /// `max_message_size`.
     #[test]
     fn test_dial_rejects_oversized_fixed_size_syn_ack_frame() {
         let executor = deterministic::Runner::default();

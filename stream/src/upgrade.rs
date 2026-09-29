@@ -60,6 +60,8 @@ where
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
+
+        // Agree on ciphers bound to this record format, then key the records on the same transport.
         let (send, recv) = self
             .exchange
             .dial(
@@ -97,6 +99,8 @@ where
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
+
+        // Agree on ciphers bound to this record format, then key the records on the same transport.
         let (peer, send, recv) = self
             .exchange
             .listen(

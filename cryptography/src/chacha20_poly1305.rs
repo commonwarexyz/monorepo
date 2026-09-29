@@ -108,13 +108,15 @@ pub struct ChaCha20Poly1305 {
 impl ChaCha20Poly1305 {
     /// Returns the current nonce and advances the counter, or `None` if no nonce remains.
     fn next_nonce(&mut self) -> Option<[u8; NONCE_SIZE_BYTES]> {
+        // Refuse at 2^96. Truncating a larger counter to 96 bits would repeat a nonce under this
+        // key.
         if self.nonce >= 1 << (8 * NONCE_SIZE_BYTES) {
             return None;
         }
         let out = self.nonce.to_le_bytes();
         self.nonce += 1;
 
-        // Extract only the lower 96 bits (12 bytes) for the nonce
+        // Keep the low 96 bits. The check above ensures the high bits are zero.
         let mut nonce = [0u8; NONCE_SIZE_BYTES];
         nonce.copy_from_slice(&out[..NONCE_SIZE_BYTES]);
         Some(nonce)

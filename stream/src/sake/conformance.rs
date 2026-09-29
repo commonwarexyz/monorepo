@@ -16,6 +16,7 @@ use rand::RngExt as _;
 use std::{ops::RangeInclusive, sync::Arc, time::Duration};
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_CUPS_CONFORMANCE_TESTS";
+/// Largest payload either peer accepts.
 const MAX_MESSAGE_SIZE: u32 = 1 << 17;
 
 /// Payload lengths covering one-, two-, and three-byte version 0 length prefixes, and records
@@ -130,6 +131,7 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
     })
 }
 
+/// Pins a SAKE V0 connection carrying CUPS V0 records.
 struct CupsV0;
 
 impl Conformance for CupsV0 {
@@ -138,6 +140,7 @@ impl Conformance for CupsV0 {
     }
 }
 
+/// Pins a SAKE V1 connection carrying CUPS V1 records.
 struct CupsV1;
 
 impl Conformance for CupsV1 {

@@ -99,9 +99,12 @@ pub enum Version {
 /// CUPS records of one [Version], sealed by `C`.
 pub struct Cups<C> {
     version: Version,
+
+    // `fn() -> C` keeps `Cups` `Send` and `Sync` for any `C`.
     _cipher: PhantomData<fn() -> C>,
 }
 
+// Manual impls avoid the `C: Clone` and `C: Copy` bounds a derive would add.
 impl<C> Clone for Cups<C> {
     fn clone(&self) -> Self {
         *self
@@ -154,6 +157,7 @@ impl<C: Cipher> crate::Records for Cups<C> {
     type Sender<O: Sink> = Sender<C, O>;
     type Receiver<I: Stream> = Receiver<C, I>;
 
+    // Version 0 length prefixes count the tag, so a payload and its tag must fit in a u32.
     const MAX_SIZE: u32 = u32::MAX - tag_size::<C>();
 
     fn namespace(&self) -> &'static [u8] {
@@ -200,6 +204,7 @@ fn append_header<C: Cipher>(
     len: u32,
 ) -> Result<(), Error> {
     match version {
+        // Callers bound `len` by `MAX_SIZE`, so adding the tag cannot overflow.
         Version::V0 => UInt(len + tag_size::<C>()).write(chunk),
         Version::V1 => {
             let offset = chunk.len();
@@ -683,6 +688,8 @@ mod test {
         for version in [Version::V0, Version::V1] {
             deterministic::Runner::default().start(|context| async move {
                 let (sink, mut stream) = mocks::Channel::init();
+
+                // A failed seal leaves the sender without a cipher.
                 let mut sender: Sender<RecordCipher, _> = Sender {
                     cipher: None,
                     sink,
