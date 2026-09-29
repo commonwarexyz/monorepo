@@ -1,55 +1,32 @@
-use crate::encrypted::Error;
 use commonware_codec::{
-    Encode, EncodeSize, Write,
+    Encode,
     varint::{Decoder, MAX_U32_VARINT_SIZE, UInt},
 };
-use commonware_runtime::{Buf, IoBuf, IoBufMut, IoBufs, Sink, Stream};
+use commonware_runtime::{Buf, Error as RuntimeError, IoBuf, IoBufs, Sink, Stream};
+use commonware_utils::Widen;
+use thiserror::Error;
 
-/// Validates the frame size and assembles the frame via the caller's closure.
-///
-/// The `assemble` closure receives the varint prefix and must combine it with
-/// the payload. This allows callers to choose between:
-/// - Chunked: prepend the prefix as a separate buffer
-/// - Contiguous: write the prefix directly into a pre-allocated buffer
-///
-/// Returns an error if the message is too large.
-pub(crate) fn build_frame<T>(
-    payload_len: usize,
-    max_message_size: u32,
-    assemble: impl FnOnce(UInt<u32>) -> Result<T, Error>,
-) -> Result<T, Error> {
-    if payload_len > max_message_size as usize {
-        return Err(Error::SendTooLarge(payload_len));
-    }
-    let prefix = UInt(payload_len as u32);
-    assemble(prefix)
+/// Errors that can occur when sending or receiving a length-prefixed frame.
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("recv failed")]
+    RecvFailed(RuntimeError),
+    #[error("recv too large: {0} bytes")]
+    RecvTooLarge(usize),
+    #[error("invalid varint length prefix")]
+    InvalidVarint,
+    #[error("send failed")]
+    SendFailed(RuntimeError),
+    #[error("send too large: {0} bytes")]
+    SendTooLarge(usize),
 }
 
-/// Returns the total size of a length-prefixed frame.
-pub(crate) fn framed_len(payload_len: usize, max_message_size: u32) -> Result<usize, Error> {
-    build_frame(payload_len, max_message_size, |prefix| {
-        Ok(prefix.encode_size() + payload_len)
-    })
-}
-
-/// Appends one length-prefixed frame to a contiguous output buffer.
-///
-/// The callback receives the offset of the frame payload, which is useful when
-/// callers need to operate on the payload bytes after copying them.
-pub(crate) fn append_frame(
-    frame: &mut IoBufMut,
-    payload_len: usize,
-    max_message_size: u32,
-    append_payload: impl FnOnce(&mut IoBufMut, usize) -> Result<(), Error>,
-) -> Result<usize, Error> {
-    build_frame(payload_len, max_message_size, |prefix| {
-        let start = frame.len();
-        prefix.write(frame);
-        let payload_offset = frame.len();
-        append_payload(frame, payload_offset)?;
-        assert_eq!(frame.len() - payload_offset, payload_len);
-        Ok(frame.len() - start)
-    })
+/// Returns `len` as a u32 if it does not exceed `max_message_size`.
+pub(crate) fn validate_frame_len(len: usize, max_message_size: u32) -> Result<u32, Error> {
+    u32::try_from(len)
+        .ok()
+        .filter(|len| *len <= max_message_size)
+        .ok_or(Error::SendTooLarge(len))
 }
 
 /// Sends data to the sink with a varint length prefix.
@@ -64,12 +41,9 @@ pub async fn send_frame<S: Sink>(
     max_message_size: u32,
 ) -> Result<(), Error> {
     let mut bufs = bufs.into();
-
-    let frame = build_frame(bufs.len(), max_message_size, |prefix| {
-        bufs.prepend(IoBuf::from(prefix.encode()));
-        Ok(bufs)
-    })?;
-    sink.send(frame).await.map_err(Error::SendFailed)
+    let len = validate_frame_len(bufs.len(), max_message_size)?;
+    bufs.prepend(IoBuf::from(UInt(len).encode()));
+    sink.send(bufs).await.map_err(Error::SendFailed)
 }
 
 /// Receives data from the stream with a varint length prefix.
@@ -77,10 +51,17 @@ pub async fn send_frame<S: Sink>(
 /// stream is closed.
 pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Result<IoBufs, Error> {
     let (len, skip) = recv_length(stream).await?;
-    if len > max_message_size as usize {
+    if len > Widen::<usize>::widen(max_message_size) {
         return Err(Error::RecvTooLarge(len));
     }
 
+    // Consume the prefix separately if the combined read length would overflow.
+    let skip = if skip.checked_add(len).is_some() {
+        skip
+    } else {
+        stream.recv(skip).await.map_err(Error::RecvFailed)?;
+        0
+    };
     stream
         .recv(skip + len)
         .await
@@ -92,36 +73,33 @@ pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Res
 }
 
 /// Receives and decodes the varint length prefix from the stream.
-/// Returns (payload_len, bytes_to_skip) where bytes_to_skip is:
-/// - varint_len if decoded from peek buffer (bytes not yet consumed)
-/// - 0 if decoded via recv (bytes already consumed)
+/// Returns the payload length and number of unconsumed prefix bytes.
 async fn recv_length<T: Stream>(stream: &mut T) -> Result<(usize, usize), Error> {
     let mut decoder = Decoder::<u32>::new();
 
-    // Fast path: decode from peek buffer without blocking
-    let peeked = {
-        let peeked = stream.peek(MAX_U32_VARINT_SIZE);
-        for (i, byte) in peeked.iter().enumerate() {
-            match decoder.feed(*byte) {
-                Ok(Some(len)) => return Ok((len as usize, i + 1)),
-                Ok(None) => continue,
-                Err(_) => return Err(Error::InvalidVarint),
-            }
-        }
-        peeked.len()
-    };
-
-    // Slow path: fetch bytes one at a time (skipping already-decoded peek bytes)
-    let mut buf = stream.recv(peeked + 1).await.map_err(Error::RecvFailed)?;
-    buf.advance(peeked);
-
     loop {
+        // Use buffered prefix bytes before requesting another byte from the stream.
+        let peeked = {
+            let peeked = stream.peek(MAX_U32_VARINT_SIZE);
+            for (i, byte) in peeked.iter().enumerate() {
+                match decoder.feed(*byte) {
+                    Ok(Some(len)) => return Ok((Widen::<usize>::widen(len), i + 1)),
+                    Ok(None) => continue,
+                    Err(_) => return Err(Error::InvalidVarint),
+                }
+            }
+            peeked.len()
+        };
+
+        // Consume the peeked bytes already fed to the decoder and request one more byte to make
+        // progress.
+        let mut buf = stream.recv(peeked + 1).await.map_err(Error::RecvFailed)?;
+        buf.advance(peeked);
         match decoder.feed(buf.get_u8()) {
-            Ok(Some(len)) => return Ok((len as usize, 0)),
+            Ok(Some(len)) => return Ok((Widen::<usize>::widen(len), 0)),
             Ok(None) => {}
             Err(_) => return Err(Error::InvalidVarint),
         }
-        buf = stream.recv(1).await.map_err(Error::RecvFailed)?;
     }
 }
 
@@ -129,11 +107,114 @@ async fn recv_length<T: Stream>(stream: &mut T) -> Result<(usize, usize), Error>
 mod tests {
     use super::*;
     use commonware_runtime::{
-        BufMut, IoBufMut, Runner, Spawner, Supervisor as _, deterministic, mocks,
+        BufMut, Error as RuntimeError, IoBufMut, Runner, Spawner, Supervisor as _, deterministic,
+        mocks,
     };
+    use futures::FutureExt as _;
     use rand::RngExt as _;
+    use std::time::Duration;
 
     const MAX_MESSAGE_SIZE: u32 = 1024;
+
+    /// Records receive request sizes while preserving the mock stream's buffering behavior.
+    struct RecordingStream {
+        inner: mocks::Stream,
+        /// Requested byte counts, including reads that remain pending.
+        recv_lengths: Vec<usize>,
+    }
+
+    impl Stream for RecordingStream {
+        async fn recv(&mut self, len: usize) -> Result<IoBufs, RuntimeError> {
+            self.recv_lengths.push(len);
+            self.inner.recv(len).await
+        }
+
+        fn peek(&self, max_len: usize) -> &[u8] {
+            self.inner.peek(max_len)
+        }
+    }
+
+    /// Reuses buffered prefix bytes after a refill and preserves the following frame.
+    #[test]
+    fn test_recv_frame_reuses_buffered_prefix() {
+        for len in [0u32, 127, 128, 300, 16_383, 16_384] {
+            deterministic::Runner::default().start(|_| async move {
+                // Queue both frames with enough receive capacity to buffer them in the first read.
+                let payload = vec![7; len as usize];
+                let prefix_len = UInt(len).encode().len();
+                let (mut sink, inner) =
+                    mocks::Channel::init_with_buffer_size(prefix_len + payload.len() + 5);
+                let mut stream = RecordingStream {
+                    inner,
+                    recv_lengths: Vec::new(),
+                };
+                send_frame(&mut sink, payload.clone(), u32::MAX)
+                    .await
+                    .unwrap();
+                send_frame(&mut sink, &b"next"[..], u32::MAX).await.unwrap();
+                assert!(stream.peek(MAX_U32_VARINT_SIZE).is_empty());
+
+                // Only the first prefix byte needs its own read. The rest accompanies the payload.
+                let received = recv_frame(&mut stream, u32::MAX).await.unwrap();
+                assert_eq!(received.coalesce(), payload.as_slice());
+                assert_eq!(stream.recv_lengths, [1, prefix_len - 1 + payload.len()]);
+
+                // The next frame is already buffered and must arrive intact in a single read.
+                stream.recv_lengths.clear();
+                let received = recv_frame(&mut stream, u32::MAX).await.unwrap();
+                assert_eq!(received.coalesce(), b"next");
+                assert_eq!(stream.recv_lengths, [5]);
+            });
+        }
+    }
+
+    /// Decodes one- through five-byte prefixes across varying refill boundaries.
+    #[test]
+    fn test_recv_length_across_refills() {
+        for len in [0u32, 127, 128, 300, 16_384, 1 << 21, 0x1234_5678, u32::MAX] {
+            for buffer_size in 0..=MAX_U32_VARINT_SIZE {
+                deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+                    // Send concurrently so prefixes larger than the channel capacity can progress.
+                    let (mut sink, mut stream) = mocks::Channel::init_with_buffer_size(buffer_size);
+                    let prefix = UInt(len).encode();
+                    let sender = context.child("sender").spawn(|_| async move {
+                        sink.send(prefix).await.unwrap();
+                    });
+
+                    // The decoded length must survive refills. Consume any prefix still buffered.
+                    let (decoded, skip) = recv_length(&mut stream).await.unwrap();
+                    assert_eq!(decoded, len as usize);
+                    stream.recv(skip).await.unwrap();
+                    sender.await.unwrap();
+                });
+            }
+        }
+    }
+
+    /// Accepts the largest u32 frame length without overflowing receive requests.
+    #[test]
+    fn test_recv_frame_max_length() {
+        for buffered in [true, false] {
+            deterministic::Runner::default().start(|_| async move {
+                let (mut sink, inner) = mocks::Channel::init();
+                let mut stream = RecordingStream {
+                    inner,
+                    recv_lengths: Vec::new(),
+                };
+
+                // Queue only the prefix, optionally making it visible to peek before the first read.
+                sink.send(UInt(u32::MAX).encode()).await.unwrap();
+                if buffered {
+                    stream.inner.recv(0).await.unwrap();
+                }
+
+                // Keep the sink open so the body stays pending without allocating its declared length.
+                assert!(recv_frame(&mut stream, u32::MAX).now_or_never().is_none());
+                let requested: u64 = stream.recv_lengths.iter().map(|&len| len as u64).sum();
+                assert_eq!(requested, u64::from(u32::MAX) + MAX_U32_VARINT_SIZE as u64);
+            });
+        }
+    }
 
     #[test]
     fn test_send_recv_at_max_message_size() {
@@ -199,28 +280,6 @@ mod tests {
             let read = stream.recv(MAX_MESSAGE_SIZE as usize).await.unwrap();
             assert_eq!(read.coalesce(), buf);
         });
-    }
-
-    #[test]
-    fn test_build_frame_closure_error() {
-        let result: Result<IoBufs, _> = build_frame(10, MAX_MESSAGE_SIZE, |_prefix| {
-            Err(Error::HandshakeError(
-                commonware_cryptography::handshake::Error::EncryptionFailed,
-            ))
-        });
-        assert!(matches!(&result, Err(Error::HandshakeError(_))));
-    }
-
-    #[test]
-    fn test_build_frame_too_large() {
-        let result: Result<IoBufs, _> = build_frame(
-            MAX_MESSAGE_SIZE as usize + 1,
-            MAX_MESSAGE_SIZE,
-            |_prefix| unreachable!(),
-        );
-        assert!(
-            matches!(&result, Err(Error::SendTooLarge(n)) if *n == MAX_MESSAGE_SIZE as usize + 1)
-        );
     }
 
     #[test]

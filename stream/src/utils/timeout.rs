@@ -1,4 +1,4 @@
-use crate::Handshake;
+use crate::Upgrader;
 use commonware_macros::select;
 use commonware_runtime::{BufferPooler, Clock, Sink, Stream};
 use rand_core::CryptoRng;
@@ -9,14 +9,14 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum TimeoutError<E> {
     #[error("handshake failed: {0}")]
-    Handshake(#[source] E),
+    Upgrade(#[source] E),
     #[error("handshake timed out")]
     Timeout,
 }
 
 /// Applies a timeout to each handshake attempt.
 ///
-/// The deadline starts when [`Handshake::dial`] or [`Handshake::listen`] is called.
+/// The deadline starts when [`Upgrader::dial`] or [`Upgrader::listen`] is called.
 /// It covers the entire attempt, including the listener's peer admission check.
 /// Expiration drops the handshake future and releases its connection.
 ///
@@ -24,31 +24,47 @@ pub enum TimeoutError<E> {
 ///
 /// ```
 /// use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-/// use commonware_stream::{encrypted::Handshake, utils::Timeout};
+/// use commonware_stream::{
+///     cups::{self, Cups},
+///     sake::{Sake, Version},
+///     sake_cups,
+///     utils::Timeout,
+/// };
 /// use std::time::Duration;
 ///
-/// let handshake = Timeout::new(Handshake::new(PrivateKey::from_seed(0)), Duration::from_secs(5));
+/// let upgrader = Timeout::new(
+///     sake_cups(
+///         Sake {
+///             signer: PrivateKey::from_seed(0),
+///             version: Version::V1,
+///             synchrony_bound: Duration::from_secs(5),
+///             max_handshake_age: Duration::from_secs(10),
+///         },
+///         Cups::new(cups::Version::V1),
+///     ),
+///     Duration::from_secs(5),
+/// );
 /// ```
 #[derive(Clone)]
-pub struct Timeout<H> {
-    handshake: H,
+pub struct Timeout<U> {
+    handshake: U,
     timeout: Duration,
 }
 
-impl<H> Timeout<H> {
+impl<U> Timeout<U> {
     /// Wraps a handshake with a deadline for each connection attempt.
-    pub const fn new(handshake: H, timeout: Duration) -> Self {
+    pub const fn new(handshake: U, timeout: Duration) -> Self {
         Self { handshake, timeout }
     }
 }
 
-impl<H: Handshake> Handshake for Timeout<H> {
-    const MAX_SIZE: u32 = H::MAX_SIZE;
+impl<U: Upgrader> Upgrader for Timeout<U> {
+    const MAX_SIZE: u32 = U::MAX_SIZE;
 
-    type PublicKey = H::PublicKey;
-    type Error = TimeoutError<H::Error>;
-    type Sender<I: Stream, O: Sink> = H::Sender<I, O>;
-    type Receiver<I: Stream, O: Sink> = H::Receiver<I, O>;
+    type PublicKey = U::PublicKey;
+    type Error = TimeoutError<U::Error>;
+    type Sender<I: Stream, O: Sink> = U::Sender<I, O>;
+    type Receiver<I: Stream, O: Sink> = U::Receiver<I, O>;
 
     fn public_key(&self) -> Self::PublicKey {
         self.handshake.public_key()
@@ -75,7 +91,7 @@ impl<H: Handshake> Handshake for Timeout<H> {
             .dial(context, namespace, max_message_size, peer, stream, sink);
         async move {
             select! {
-                result = attempt => result.map_err(TimeoutError::Handshake),
+                result = attempt => result.map_err(TimeoutError::Upgrade),
                 _ = timeout => Err(TimeoutError::Timeout),
             }
         }
@@ -105,7 +121,7 @@ impl<H: Handshake> Handshake for Timeout<H> {
                 .listen(context, namespace, max_message_size, bouncer, stream, sink);
         async move {
             select! {
-                result = attempt => result.map_err(TimeoutError::Handshake),
+                result = attempt => result.map_err(TimeoutError::Upgrade),
                 _ = timeout => Err(TimeoutError::Timeout),
             }
         }
