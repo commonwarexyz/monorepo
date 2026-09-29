@@ -1,3 +1,5 @@
+//! Verification jobs the actor loop polls alongside its own work.
+
 use crate::stateful::{
     Application,
     actor::{

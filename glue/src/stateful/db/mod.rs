@@ -502,7 +502,7 @@ where
     const CHEAP_SNAPSHOT: bool = T::CHEAP_SNAPSHOT;
 
     async fn init(context: E, config: Self::Config, expected: Option<Self::SyncTargets>) -> Self {
-        match T::init(context.child("db"), config, expected).await {
+        match T::init(context, config, expected).await {
             Ok(database) => Self::from(database),
             Err(err) => panic!(
                 "database init failed (type {}): {err:?}",
