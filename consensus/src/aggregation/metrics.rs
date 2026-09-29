@@ -13,6 +13,8 @@ pub struct Metrics {
     pub acks: status::Counter,
     /// Number of certificates produced
     pub certificates: Counter,
+    /// Number of items whose digest diverged from honest validators
+    pub divergences: Counter,
     /// Histogram of application digest durations
     pub digest_duration: histogram::Timed,
 }
@@ -27,6 +29,10 @@ impl Metrics {
         );
         let acks = context.family("acks", "Number of Ack messages processed by status");
         let certificates = context.counter("certificates", "Number of certificates produced");
+        let divergences = context.counter(
+            "divergences",
+            "Number of items whose digest diverged from honest validators",
+        );
         let digest_duration = context.histogram(
             "digest_duration",
             "Histogram of application digest durations",
@@ -38,6 +44,7 @@ impl Metrics {
             digest,
             acks,
             certificates,
+            divergences,
             digest_duration: histogram::Timed::new(digest_duration),
         }
     }
