@@ -568,8 +568,7 @@ impl<D: EngineDefinition> Plan<D> {
                 result = Err("simulation stopped".into());
             },
             Some(pk) = restart_rx.recv() else break => {
-                // Completion freezes the team. Validators stay as they were at the
-                // exit decision while the accepted backlog drains.
+                // Completion freezes the team while the accepted backlog drains.
                 if monitor_rx.is_closed() {
                     continue;
                 }
@@ -699,9 +698,8 @@ impl<D: EngineDefinition> Plan<D> {
                         continue;
                     }
 
-                    // Completion fixes the report boundary. Already accepted tips
-                    // still receive the normal checks, while live actors remain
-                    // available to post-run properties.
+                    // Stop accepting reports. Accepted reports still drain through the
+                    // normal checks.
                     monitor_rx.close();
                 }
                 if !monitor_rx.is_empty() {
@@ -945,8 +943,7 @@ mod tests {
             &self,
             ctx: super::super::engine::InitContext<'_, Self::PublicKey>,
         ) -> impl Future<Output = (Self::Engine, Self::State)> + Send {
-            // Only the first node receives the script, preserving its report
-            // order without interleaving from other scripted senders.
+            // Only the first node emits the script so its reports stay ordered.
             let finalize_after = self.finalize_after;
             let finalizations = self.finalizations;
             let period = self.period;
@@ -956,7 +953,6 @@ mod tests {
                 vec![]
             };
 
-            // Record delayed initialization order at the point each node starts.
             if ctx.delayed
                 && let Some(starts) = &self.starts
             {
@@ -1194,8 +1190,6 @@ mod tests {
             _states: &'a [&'a ()],
         ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
             Box::pin(async move {
-                // The check can overlap report production while intake is open.
-                // Post-run checks use the same finite delay after intake closes.
                 self.calls.fetch_add(1, Ordering::Relaxed);
                 self.context.sleep(Duration::from_millis(5)).await;
                 Ok(())
@@ -1294,8 +1288,7 @@ mod tests {
             (active, 3, 3),
         ];
 
-        // The drained tip reaches the delay round after completion. The plan must
-        // keep its team fixed and report that the delayed validator never started.
+        // The plan must keep its team fixed after completion.
         let _ = PlanBuilder::new(engine)
             .required_finalizations(1)
             .timeout(Duration::from_secs(2))
@@ -1313,7 +1306,6 @@ mod tests {
         let mut observed = HashSet::new();
         for _ in 0..24 {
             // Two participants start after the active nodes reach view one.
-            // Each run uses the same report timing and seed.
             let starts = Arc::new(Mutex::new(vec![]));
             let mut engine = FinalizingEngine::new(4, Duration::from_millis(100), 2);
             let delayed = engine.participants[..2].to_vec();
@@ -1329,8 +1321,7 @@ mod tests {
                 .run()
                 .unwrap();
 
-            // Both delayed nodes must start, and each run contributes the same
-            // start order and audit state to the result set.
+            // Both delayed nodes must start. Record the start order and audit state.
             assert!(result[0].delayed_started);
             let order = starts.lock().clone();
             assert_eq!(order.len(), 2);

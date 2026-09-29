@@ -208,7 +208,6 @@ where
 /// advanced beyond the synced height.
 #[derive(Clone)]
 pub(crate) struct CrashDuringStateSyncRecovery {
-    /// Validator whose delayed startup is interrupted by the recovery campaign.
     late_joiner: ed25519::PublicKey,
 }
 
@@ -234,7 +233,6 @@ where
         states: &'a [&'a MockValidatorState<V>],
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
-            // Recovery evidence must belong to the validator whose startup was delayed.
             let Some(state) = states
                 .iter()
                 .find(|state| state.public_key == self.late_joiner)
@@ -242,8 +240,7 @@ where
                 return Err("delayed validator is not active after restart".to_string());
             };
 
-            // A completed sync is durable and skips peer state sync on restart.
-            // Two entries for this validator imply its first sync was interrupted.
+            // A completed sync is durable, so a second entry implies the first was interrupted.
             let processed_height = state.processed_height().await;
             let sync_height = state.state_sync_height();
             if state.state_sync_entries() >= 2
