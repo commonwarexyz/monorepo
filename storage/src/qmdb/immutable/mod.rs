@@ -393,7 +393,8 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as the input keys. Like [`Self::get`], this may return
+    /// values written below the inactivity floor.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         self.get_many_from(keys, Location::new(0)).await
     }
@@ -3959,8 +3960,8 @@ pub(super) mod tests {
             .await
             .unwrap();
 
-        // b: 1 set + commit at loc 4, declaring floor=5 (one past its commit). A floor of 3 would
-        // be valid for a alone, so b's bound must include a's operations.
+        // b: 1 set + commit at loc 4, declaring floor=5 (one past its commit). The error names
+        // commit location 4, so the bound counts a's operations.
         let Err(err) = a
             .new_batch::<Sha256>()
             .set(Sha256::fill(3u8), Sha256::fill(4u8))

@@ -39,8 +39,8 @@ fn assert_bad_floor_error<F: Family>(err: &Error<F>, kind: BadFloorExpect) {
 }
 
 /// What floor value a fuzz-generated commit should carry. The `Bad*` variants intentionally
-/// produce floors that merkleize must reject; the handler asserts the expected error variant and
-/// that the DB state is untouched.
+/// produce floors that merkleize must reject; the handler asserts the expected error variant.
+/// Merkleize only borrows the database, so a rejection cannot change it.
 #[derive(Debug, Clone, Copy)]
 enum FloorKind {
     /// Keep the current floor (monotonicity trivially preserved).
