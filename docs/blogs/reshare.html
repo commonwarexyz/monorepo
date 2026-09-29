@@ -24,7 +24,7 @@
     <meta property="article:author" content="https://x.com/vex_0x" />
     <meta property="article:author" content="https://x.com/_patrickogrady" />
     <meta property="article:published_time" content="2025-10-31T00:00:00Z" />
-    <meta property="article:modified_time" content="2025-10-31T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-09-28T00:00:00Z" />
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
@@ -84,6 +84,7 @@
             <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a> and <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
             <div class="date">October 31, 2025</div>
         </div>
+        <p><i>Update (9/28/26): <code>commonware-reshare</code> is now <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/dkg"><code>commonware-dkg</code></a>. Repository example links and commands below use <a href="https://github.com/commonwarexyz/monorepo/tree/v0.0.63">v0.0.63</a>.</i></p>
         <p>
             Many consensus protocols, from <a href="https://arxiv.org/abs/1807.04938">Tendermint</a> and <a href="https://arxiv.org/abs/1803.05069">HotStuff</a> to our own
             <a href="https://arxiv.org/abs/2508.10862">Minimmit</a>, are defined under a "permissioned" model where the validator set is fixed and known ahead of time
@@ -111,7 +112,7 @@
         <p>
             To avoid reinventing the wheel each time a new consensus protocol is added to the Commonware Library, we opted to implement this reusable technique. This means you can now
             implement any permissioned consensus protocol, as described, and not worry about how to uniquely extend it for reconfiguration (including not having to implement mechanisms required to synchronize
-            missing blocks across epochs, update peer sets, etc.). Check out <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>commonware-reshare</code></a> for a concrete example
+            missing blocks across epochs, update peer sets, etc.). Check out <a href="https://github.com/commonwarexyz/monorepo/tree/v0.0.63/examples/reshare"><code>commonware-reshare</code></a> for a concrete example
             of how to incorporate reconfiguration into your application.
         </p>
         <h2>Resharing: Piggybacking on Consensus</h2>
@@ -125,7 +126,7 @@
             we get that out-of-the-box with a replicated log.
         </p>
         <p>
-            Our new <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>commonware-reshare</code></a> example
+            Our new <a href="https://github.com/commonwarexyz/monorepo/tree/v0.0.63/examples/reshare"><code>commonware-reshare</code></a> example
             marries the DKG implementation from <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/feldman_desmedt/index.html"><code>commonware-cryptography::bls12381::dkg::feldman_desmedt</code></a> with
             threshold <code>commonware-consensus::simplex</code>'s (implicit) replicated log.
             Validators proactively refresh their key material every epoch, a configurable interval of blocks, and derive new shares for incoming participants.
@@ -172,6 +173,7 @@
         </p>
         <pre><code>
 $ git clone git@github.com:commonwarexyz/monorepo.git && cd monorepo
+$ git checkout v0.0.63
 # Trusted Setup
 $ cargo run --bin commonware-reshare setup
 # DKG Setup

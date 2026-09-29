@@ -74,7 +74,7 @@ mod tests {
                 },
             },
             config::{Config, Start},
-            core,
+            core::{self, Processed},
             mocks::{
                 application::Application,
                 harness::{
@@ -778,7 +778,7 @@ mod tests {
 
             // The height-2 floor makes height 1 durable application progress. Heights 2 and 3
             // are re-dispatched, so their coding-buffer commitments remain live.
-            while setup.mailbox.get_processed_height().await != Some(Height::new(1)) {
+            while setup.mailbox.get_processed().await != Some(Processed::Block(Height::new(1))) {
                 context.sleep(Duration::from_millis(10)).await;
             }
             assert!(setup.extra.get(commitments[0]).await.is_none());
@@ -1284,6 +1284,11 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_prune_finalized_archives() {
         harness::prune_finalized_archives::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_floor_retains_processed_predecessor() {
+        harness::floor_retains_processed_predecessor::<CodingHarness>();
     }
 
     #[test_traced("WARN")]
@@ -2711,7 +2716,7 @@ mod tests {
                 QUORUM,
             ));
 
-            while marshal.get_processed_height().await != Some(Height::new(2)) {
+            while marshal.get_processed().await != Some(Processed::Block(Height::new(2))) {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
@@ -4067,7 +4072,7 @@ mod tests {
                 );
                 let mut subscription = mailbox
                     .subscribe_by_commitment(ancestor.commitment(), core::CommitmentFallback::Wait);
-                let _ = mailbox.get_processed_height().await;
+                let _ = mailbox.get_processed().await;
 
                 if index == 0 {
                     assert!(
@@ -4122,7 +4127,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             )));
-            while mailbox.get_processed_height().await != Some(candidate.height()) {
+            while mailbox.get_processed().await != Some(Processed::Block(candidate.height())) {
                 reschedule().await;
             }
             for block in &chain {
@@ -4264,7 +4269,7 @@ mod tests {
             };
             let mut subscriptions =
                 vec![mailbox.subscribe_by_commitment(parent.commitment(), fallback)];
-            let _ = mailbox.get_processed_height().await;
+            let _ = mailbox.get_processed().await;
             let fetch = resolver.fetches().pop().expect("parent fetch missing");
             assert_eq!(
                 fetch.subscriber,
@@ -4286,7 +4291,7 @@ mod tests {
             // A late certification must not restore evidence below the tip
             mailbox.report(Activity::Certification(notarization));
             subscriptions.push(mailbox.subscribe_by_commitment(parent.commitment(), fallback));
-            let _ = mailbox.get_processed_height().await;
+            let _ = mailbox.get_processed().await;
 
             // The original fetch can still arrive, but must not retain older ancestry evidence
             let (response, response_rx) = oneshot::channel();
@@ -4317,9 +4322,9 @@ mod tests {
             ));
             assert!(
                 mailbox
-                    .get_processed_height()
+                    .get_processed()
                     .await
-                    .unwrap_or(Height::zero())
+                    .map_or(Height::zero(), Processed::height)
                     < grandparent.height()
             );
             let annotations: Vec<_> = resolver

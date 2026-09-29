@@ -532,7 +532,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                 StoreOp::ObserveApplication => {
                     let _ = application.tip();
                     let _ = application.blocks();
-                    let _ = mailbox.get_processed_height().await;
+                    let _ = mailbox.get_processed().await;
                 }
                 StoreOp::DirectPutBlock { block_idx } => {
                     let block = canonical[block_index(block_idx)].clone();

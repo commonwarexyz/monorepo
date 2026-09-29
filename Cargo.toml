@@ -29,10 +29,10 @@ members = [
     "utils",
     "examples/bridge",
     "examples/chat",
+    "examples/dkg",
     "examples/estimator",
     "examples/flood",
     "examples/log",
-    "examples/reshare",
 
     # Fuzz builds
     "actor/fuzz",

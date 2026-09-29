@@ -308,7 +308,8 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
     // sync. A node that syncs discovers its floor through its probe first.
     let mut plan =
         SyncPlan::init(context.child("stateful_startup"), partition_prefix.clone()).await;
-    let should_state_sync = plan.should_state_sync(state_sync);
+    let resumed = plan.floor().is_some();
+    let should_state_sync = plan.should_sync(state_sync);
     assert!(
         !should_state_sync || channels.probe.is_some(),
         "an engine requesting state sync must own a probe channel"
@@ -318,7 +319,7 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
             context: context.child("probe"),
             provider: provider.clone(),
             strategy: Sequential,
-            capacity: MAILBOX_SIZE,
+            mailbox_size: MAILBOX_SIZE,
             blocker: oracle.control(identity.clone()),
             minimum_epoch: Epoch::zero(),
             retry_timeout: NZDuration!(PROBE_RETRY),
@@ -335,13 +336,13 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
             .await
             .expect("probe stopped before a floor was discovered");
         floor_round = Some(floor.round());
-        plan = plan.with_floor(floor);
+        plan = plan.set_floor(floor).await;
     }
     observations.note_startup(Startup {
         requested: state_sync,
         should_sync: should_state_sync,
-        resumed: plan.requires_state_sync_floor(),
-        sync_height: plan.sync_height(),
+        resumed,
+        sync_height: plan.completed(),
         floor_round: plan.floor().map(|floor| floor.round()).or(floor_round),
     });
 
@@ -390,7 +391,7 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
         );
     database_resolver.start(channels.database);
 
-    let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+    let (stateful_actor, stateful_mailbox) = StatefulActor::new(
         context.child("stateful"),
         StatefulConfig {
             application,
