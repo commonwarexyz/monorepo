@@ -913,11 +913,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Capture an owned immutable [Snapshot] of the structure, sharing its in-memory nodes and
     /// freezing its flushed journal.
     ///
-    /// The snapshot keeps the structure's journal blobs open. While it is alive, an initialization that
-    /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
-    /// capture (for example by a prune) can be recreated. On filesystem-backed storage the
-    /// snapshot also holds the storage directory, so a second storage instance on that directory
-    /// waits for it to drop.
+    /// Capture writes buffered data and keeps the structure's journal blobs open while the
+    /// snapshot is alive, as [`Snapshottable`](crate::journal::contiguous::Snapshottable)
+    /// describes.
     ///
     /// # Errors
     ///
@@ -5795,6 +5793,74 @@ mod tests {
         executor.start(full_update_leaf_after_sync_returns_pruned_inner::<mmb::Family>);
     }
 
+    /// Every position of a structure with `size` nodes, in order.
+    fn all_positions<F: Family>(size: Position<F>) -> Vec<Position<F>> {
+        (0..*size).map(Position::new).collect()
+    }
+
+    /// A [Snapshot] keeps serving the nodes captured from both memory and the flushed journal
+    /// after the live structure appends, flushes, and prunes past them.
+    async fn full_snapshot_frozen_across_flush_and_prune_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("storage"),
+            &hasher,
+            test_config(&context),
+        )
+        .await
+        .unwrap();
+        let add = |mmr: Merkle<F, _, Digest, Sequential>, leaves: std::ops::Range<usize>| {
+            let mut batch = mmr.new_batch();
+            for i in leaves {
+                batch = batch.add(&hasher, &test_digest(i));
+            }
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            mmr.apply_batch(&batch).unwrap()
+        };
+
+        // Flush 40 leaves, then keep 10 more only in memory, so the capture spans both.
+        mmr = add(mmr, 0..40);
+        mmr = mmr.sync().await.unwrap();
+        mmr = add(mmr, 40..50);
+        let size = mmr.size();
+        let positions = all_positions(size);
+        let nodes = mmr.get_nodes(&positions).await.unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
+
+        let snapshot;
+        (mmr, snapshot) = mmr.snapshot().await.unwrap();
+
+        // Grow, flush, and prune the live structure past every captured leaf.
+        mmr = add(mmr, 50..80);
+        mmr = mmr.sync().await.unwrap();
+        mmr = mmr.prune(Location::new(60)).await.unwrap();
+        assert!(mmr.bounds().start > Location::new(50));
+        assert_ne!(mmr.root(&hasher, 0).unwrap(), root);
+
+        assert_eq!(snapshot.size(), size);
+        assert_eq!(snapshot.get_nodes(&positions).await.unwrap(), nodes);
+        for (&position, node) in positions.iter().zip(&nodes) {
+            assert_eq!(snapshot.get_node(position).await.unwrap(), Some(*node));
+        }
+
+        drop(snapshot);
+        mmr.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_snapshot_frozen_across_flush_and_prune_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_snapshot_frozen_across_flush_and_prune_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_snapshot_frozen_across_flush_and_prune_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_snapshot_frozen_across_flush_and_prune_inner::<mmb::Family>);
+    }
+
     /// Nodes still resident in memory, which a held [Snapshot] forces mutators to clone.
     fn retained_nodes<F: Family>(
         mmr: &Merkle<F, deterministic::Context, Digest, Sequential>,
@@ -5838,15 +5904,23 @@ mod tests {
 
         for _ in 0..commits {
             mmr = commit(mmr, &mut leaf);
+            let positions = all_positions(mmr.size());
+            let nodes = mmr.get_nodes(&positions).await.unwrap();
             let snapshot;
             (mmr, snapshot) = mmr.snapshot().await.unwrap();
-            snapshots.push(snapshot);
+            snapshots.push((snapshot, positions, nodes));
             mmr = mmr.sync().await.unwrap();
         }
 
         // A final un-synced batch, the state a mid-block snapshot sees, and what keeps the
         // measurement from reading zero either way.
         mmr = commit(mmr, &mut leaf);
+
+        // Each snapshot still serves exactly the nodes the structure held at its capture.
+        for (snapshot, positions, nodes) in &snapshots {
+            assert_eq!(snapshot.size(), Position::new(positions.len() as u64));
+            assert_eq!(&snapshot.get_nodes(positions).await.unwrap(), nodes);
+        }
 
         let measured = (retained_nodes(&mmr), *mmr.leaves());
         drop(snapshots);

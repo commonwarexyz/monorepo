@@ -323,6 +323,15 @@ where
 
 /// Generate a proof of the operations starting at `start_loc` when the database had `op_count`
 /// operations.
+///
+/// # Errors
+///
+/// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `op_count`
+///   exceeds the operations `log` holds or `start_loc >= op_count`.
+/// - Returns [`Error::HistoricalFloorPruned`] if `op_count` is zero or the operation at
+///   `op_count - 1` is not a commit.
+/// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+///   with [`crate::merkle::Error::ElementPruned`] if a required operation or node was pruned.
 pub(crate) async fn historical_proof<F, C, M, H>(
     log: &Authenticated<C, M, H>,
     op_count: Location<F>,

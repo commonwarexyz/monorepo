@@ -2419,11 +2419,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
     /// creation, and the snapshot stays readable across concurrent appends and prunes.
     ///
-    /// The snapshot keeps the journal's blobs open. While it is alive, an initialization that
-    /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
-    /// capture (for example by a prune) can be recreated. On filesystem-backed storage the
-    /// snapshot also holds the storage directory, so a second storage instance on that directory
-    /// waits for it to drop.
+    /// Capture writes buffered data and keeps the journal's blobs open while the snapshot is
+    /// alive, as [`Snapshottable::snapshot`](super::Snapshottable::snapshot) describes.
     ///
     /// # Errors
     ///

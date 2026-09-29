@@ -717,11 +717,8 @@ where
     /// ops-tree proofs state sync needs. Grafted proofs require the live bitmap, which
     /// keeps no history, so those remain live-only.
     ///
-    /// The snapshot keeps the log's blobs open. While it is alive, an initialization that
-    /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
-    /// capture (for example by a prune) can be recreated. On filesystem-backed storage the
-    /// snapshot also holds the storage directory, so a second storage instance on that directory
-    /// waits for it to drop.
+    /// Capture writes buffered data and keeps the log's blobs open while the snapshot is alive, as
+    /// [`Snapshottable::snapshot`] describes.
     ///
     /// Serving from the snapshot returns [`crate::merkle::Error::ElementPruned`] for a boundary
     /// below the Merkle structure's pruning boundary, which a sync can leave above the log's
@@ -1646,11 +1643,20 @@ mod tests {
             ));
 
             // Update the same keys so the live bitmap retroactively flips the captured
-            // operations' activity bits, the floor rises, and pruning discards captured
-            // operations. The snapshot must not observe any of it.
-            db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            // operations' activity bits, the floor rises past a bitmap chunk, and pruning
+            // discards every captured operation. The snapshot must not observe any of it.
+            let mut rounds = 0;
+            while db.sync_boundary() <= op_count {
+                rounds += 1;
+                assert!(
+                    rounds <= 64,
+                    "floor never rose past the captured operations"
+                );
+                db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            }
             let boundary = db.sync_boundary();
             db = db.prune(boundary).await.unwrap();
+            assert!(db.bounds().start >= op_count);
             assert_ne!(db.root(), canonical_root);
             assert_ne!(db.ops_root(), ops_root);
 

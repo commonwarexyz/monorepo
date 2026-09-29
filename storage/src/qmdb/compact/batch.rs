@@ -12,9 +12,9 @@ use std::sync::Arc;
 /// Encode operations, append them to a compact Merkle batch, merkleize, and compute the post-apply
 /// root, all as one CPU-bound job submitted through [`Strategy::spawn`].
 ///
-/// The job hashes against an immutable snapshot of the committed Merkle state, so a parallel
+/// The job hashes against an immutable view of the committed Merkle state, so a parallel
 /// strategy can offload the dominant CPU phase onto its own pool instead of occupying the calling
-/// task. If the caller is cancelled mid-job, the job still runs to completion against its snapshot
+/// task. If the caller is cancelled mid-job, the job still runs to completion against its view
 /// and the result is discarded.
 #[allow(clippy::type_complexity)]
 pub(crate) async fn merkleize_ops<F, H, S, Op>(

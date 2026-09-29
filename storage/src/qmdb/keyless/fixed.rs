@@ -196,6 +196,7 @@ mod tests {
     fn standard_mmb_proof_refused_after_off_chain_reopen() {
         deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmb::Family>);
     }
+
     /// A live snapshot keeps the log's blobs open: reopening the partitions fails until the
     /// snapshot drops, even after the database itself is gone.
     async fn snapshot_blocks_reopen<F: Family>(context: deterministic::Context) {

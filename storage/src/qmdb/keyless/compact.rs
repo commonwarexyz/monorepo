@@ -9,7 +9,7 @@
 //!
 //! # Witness journal
 //!
-//! The witness journal holds a complete snapshot of every applied batch. [`Db::init`]
+//! The witness journal holds a complete record of every applied batch. [`Db::init`]
 //! restores a retained applied state within its operation cap. [`Db::prune`] bounds the retained
 //! history. Initialization restores the db's in-memory state from an entry. The Merkle is rebuilt
 //! from the stored pinned nodes and operation, and the commit fields are decoded from the
@@ -983,7 +983,7 @@ mod tests {
         let floor = db.size();
         assert_eq!(floor, Location::new(8));
 
-        // A snapshot batch has no operations to prove.
+        // A `to_batch` view has no operations to prove.
         assert!(matches!(
             db.to_batch().proof(&db),
             Err(Error::Merkle(crate::merkle::Error::Empty))
