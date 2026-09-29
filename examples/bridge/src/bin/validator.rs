@@ -12,7 +12,7 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
-    Sha256, Signer as _,
+    ChaCha20Poly1305, Sha256, Signer as _,
     bls12381::primitives::{
         group,
         sharing::{ModeVersion, Sharing},
@@ -27,7 +27,8 @@ use commonware_runtime::{
 };
 use commonware_stream::{
     Handshake as _,
-    cups::{self, Handshake, Version},
+    cups::{self, Cups},
+    sake::{self, Version},
     utils::Timeout,
 };
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
@@ -166,18 +167,24 @@ fn main() {
 
     // Configure indexer
     let indexer_handshake = Timeout::new(
-        Handshake::new(cups::Config {
-            signer: signer.clone(),
-            version: Version::V1,
-            synchrony_bound: Duration::from_secs(1),
-            max_handshake_age: Duration::from_secs(60),
-        }),
+        sake::Handshake::new(
+            sake::Config {
+                signer: signer.clone(),
+                version: Version::V1,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(60),
+            },
+            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+        ),
         Duration::from_secs(5),
     );
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        Handshake::new(cups::Config::new(signer, Version::V1)),
+        sake::Handshake::new(
+            sake::Config::new(signer, Version::V1),
+            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+        ),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

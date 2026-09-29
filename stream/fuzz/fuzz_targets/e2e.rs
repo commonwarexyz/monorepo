@@ -6,8 +6,9 @@ use commonware_runtime::{
     Handle, Runner as _, Sink as _, Spawner, Stream as _, Supervisor as _, deterministic, mocks,
 };
 use commonware_stream::{
-    Handshake as _,
-    cups::{Config, Handshake, Receiver, Sender, Version},
+    Handshake as StreamHandshake,
+    cups::{self, Cups},
+    sake::{self, Config, Version},
     utils::{
         Timeout,
         codec::{Error, recv_frame, send_frame},
@@ -16,6 +17,16 @@ use commonware_stream::{
 use futures::future::{Either, select};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
+
+type Handshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
+
+/// Returns the records that pair with the SAKE `version`.
+fn records(version: Version) -> Cups<ChaCha20Poly1305> {
+    Cups::new(match version {
+        Version::V0 => cups::Version::V0,
+        Version::V1 => cups::Version::V1,
+    })
+}
 
 const NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 2048;
@@ -50,6 +61,8 @@ impl<'a> arbitrary::Arbitrary<'a> for Message {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let direction = Direction::arbitrary(u)?;
         let kind = u.int_in_range(0..=2)?;
+
+        // Forged records may be as long as a ciphertext. The other kinds carry plaintext.
         let max_len = if kind == 1 {
             MAX_CIPHERTEXT_SIZE as usize
         } else {
@@ -60,11 +73,16 @@ impl<'a> arbitrary::Arbitrary<'a> for Message {
         let out = match kind {
             0 => Self::Authenticated(direction, msg),
             1 => Self::Unauthenticated(direction, msg),
+
+            // A zero mask would leave the record unchanged.
             _ => Self::Tampered(direction, msg, u.arbitrary()?, u.arbitrary::<u8>()?.max(1)),
         };
         Ok(out)
     }
 }
+
+type Sender = <Handshake<PrivateKey> as StreamHandshake>::Sender<mocks::Stream, mocks::Sink>;
+type Receiver = <Handshake<PrivateKey> as StreamHandshake>::Receiver<mocks::Stream, mocks::Sink>;
 
 #[derive(Debug)]
 pub struct FuzzInput {
@@ -117,20 +135,26 @@ fn fuzz(input: FuzzInput) {
         let (listener_sink, mut adversary_l_stream) = mocks::Channel::init();
         let (mut adversary_l_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Handshake::new(Config {
-            signer: dialer_signer.clone(),
-            version,
-            synchrony_bound: Duration::from_secs(1),
-            max_handshake_age: Duration::from_secs(1),
-        });
+        let dialer_handshake = Handshake::new(
+            Config {
+                signer: dialer_signer.clone(),
+                version,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+            },
+            records(version),
+        );
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
-        let listener_handshake = Handshake::new(Config {
-            signer: listener_signer.clone(),
-            version,
-            synchrony_bound: Duration::from_secs(1),
-            max_handshake_age: Duration::from_secs(1),
-        });
+        let listener_handshake = Handshake::new(
+            Config {
+                signer: listener_signer.clone(),
+                version,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+            },
+            records(version),
+        );
         let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(1));
 
         let dialer_handle = context.child("dialer").spawn(move |context| async move {
@@ -258,10 +282,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     let (sender, a_in, a_out, receiver): (
-                        &mut Sender<mocks::Sink>,
+                        &mut Sender,
                         &mut mocks::Stream,
                         &mut mocks::Sink,
-                        &mut Receiver<mocks::Stream>,
+                        &mut Receiver,
                     ) = match direction {
                         Direction::D2L => (
                             &mut d_sender,
@@ -279,10 +303,16 @@ fn fuzz(input: FuzzInput) {
 
                     // Send a legitimate plaintext message through the encrypted channel.
                     sender.send(data.clone()).await.unwrap();
+
                     // Intercept the resulting record from the wire.
-                    let record = a_in.recv(version.record_len(data.len())).await.unwrap();
+                    let record = a_in
+                        .recv(records(version).record_len(data.len()))
+                        .await
+                        .unwrap();
+
                     // Forward the exact record unchanged.
                     a_out.send(record).await.unwrap();
+
                     // Receiver should decrypt and deliver the original plaintext.
                     let data2 = receiver.recv().await.unwrap();
                     assert_eq!(data2.coalesce(), data.as_slice(), "expected data to match");
@@ -295,10 +325,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     let (sender, a_in, a_out, receiver): (
-                        &mut Sender<mocks::Sink>,
+                        &mut Sender,
                         &mut mocks::Stream,
                         &mut mocks::Sink,
-                        &mut Receiver<mocks::Stream>,
+                        &mut Receiver,
                     ) = match direction {
                         Direction::D2L => (
                             &mut d_sender,
@@ -316,18 +346,21 @@ fn fuzz(input: FuzzInput) {
 
                     // Trigger one legitimate record so nonce/state advance as normal.
                     sender.send(vec![0u8]).await.unwrap();
+
                     // Adversary intercepts and drops that record.
-                    let _ = a_in.recv(version.record_len(1)).await.unwrap();
+                    let _ = a_in.recv(records(version).record_len(1)).await.unwrap();
+
                     // Adversary injects forged unauthenticated bytes instead. A forged version 1
                     // header is padded to full size so the receiver has a header to reject.
                     match version {
                         Version::V0 => send_frame(a_out, data, MAX_CIPHERTEXT_SIZE).await.unwrap(),
                         Version::V1 => {
                             let mut forged = data;
-                            forged.resize(forged.len().max(Version::V1.header_len(0)), 0);
+                            forged.resize(forged.len().max(records(Version::V1).header_len(0)), 0);
                             a_out.send(forged).await.unwrap();
                         }
                     }
+
                     // Receiver must reject the forged record.
                     let res = receiver.recv().await;
                     assert!(res.is_err());
@@ -347,10 +380,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     let (sender, a_in, a_out, receiver): (
-                        &mut Sender<mocks::Sink>,
+                        &mut Sender,
                         &mut mocks::Stream,
                         &mut mocks::Sink,
-                        &mut Receiver<mocks::Stream>,
+                        &mut Receiver,
                     ) = match direction {
                         Direction::D2L => (
                             &mut d_sender,
@@ -369,7 +402,7 @@ fn fuzz(input: FuzzInput) {
                     // Send a legitimate record and intercept it.
                     sender.send(data.clone()).await.unwrap();
                     let mut record: Vec<u8> = a_in
-                        .recv(version.record_len(data.len()))
+                        .recv(records(version).record_len(data.len()))
                         .await
                         .unwrap()
                         .coalesce()
@@ -379,7 +412,7 @@ fn fuzz(input: FuzzInput) {
                     // same span, and any version 1 byte may change because its header is
                     // authenticated before the payload is requested.
                     let start = match version {
-                        Version::V0 => version.header_len(data.len()),
+                        Version::V0 => records(version).header_len(data.len()),
                         Version::V1 => 0,
                     };
                     let target = start + index % (record.len() - start);

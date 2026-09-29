@@ -89,22 +89,28 @@ impl<H: Handshake> Config<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
-    use commonware_stream::cups::{self, Version};
+    use commonware_stream::{
+        cups::{self, Cups},
+        sake::{self, Version},
+    };
 
-    type CupsHandshake = cups::Handshake<PrivateKey>;
+    type SakeHandshake = sake::Handshake<PrivateKey, cups::Cups<ChaCha20Poly1305>>;
 
     const NAMESPACE: &[u8] = b"test_namespace";
     const LIMIT: u32 = 1024;
 
-    fn handshake(seed: u64) -> CupsHandshake {
-        CupsHandshake::new(cups::Config::new(PrivateKey::from_seed(seed), Version::V1))
+    fn handshake(seed: u64) -> SakeHandshake {
+        SakeHandshake::new(
+            sake::Config::new(PrivateKey::from_seed(seed), Version::V1),
+            Cups::new(cups::Version::V1),
+        )
     }
 
     #[test]
     fn test_max_message_size_within_limit() {
-        for max_message_size in [0, CupsHandshake::MAX_SIZE] {
+        for max_message_size in [0, SakeHandshake::MAX_SIZE] {
             Config::new(handshake(0), NAMESPACE, max_message_size);
         }
     }
@@ -112,11 +118,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "maximum message size exceeds stream limit")]
     fn test_max_message_size_above_limit() {
-        Config::new(handshake(0), NAMESPACE, CupsHandshake::MAX_SIZE + 1);
+        Config::new(handshake(0), NAMESPACE, SakeHandshake::MAX_SIZE + 1);
     }
 
     /// Dials through the config against a listener given the namespace and limit directly, so the
-    /// connection completes and carries a limit-sized message only if the config forwards both.
+    /// connection completes and bounds messages at the limit only if the config forwards both.
     #[test]
     fn test_dial_forwards_namespace_and_limit() {
         deterministic::Runner::default()
@@ -151,6 +157,12 @@ mod tests {
                 // A message at the forwarded limit reaches the listener.
                 sender.send(vec![0; LIMIT as usize]).await?;
                 assert_eq!(receiver.recv().await?.len(), LIMIT as usize);
+
+                // A message above it is refused before sending.
+                assert!(matches!(
+                    sender.send(vec![0; LIMIT as usize + 1]).await,
+                    Err(cups::Error::SendTooLarge(_))
+                ));
                 Ok::<_, Box<dyn std::error::Error>>(())
             })
             .unwrap();

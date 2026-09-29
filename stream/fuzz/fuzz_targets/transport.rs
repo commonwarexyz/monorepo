@@ -1,14 +1,25 @@
 #![no_main]
 
-use commonware_cryptography::{Signer, ed25519::PrivateKey};
+use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
     Handshake as _,
-    cups::{Config, Handshake, Version},
+    cups::{self, Cups},
+    sake::{self, Config, Version},
     utils::Timeout,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
+
+type Handshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
+
+/// Returns the records that pair with the SAKE `version`.
+fn records(version: Version) -> Cups<ChaCha20Poly1305> {
+    Cups::new(match version {
+        Version::V0 => cups::Version::V0,
+        Version::V1 => cups::Version::V1,
+    })
+}
 
 static NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
@@ -28,20 +39,26 @@ fn fuzz(data: &[u8]) {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Handshake::new(Config {
-            signer: dialer_signer.clone(),
-            version,
-            synchrony_bound: Duration::from_secs(1),
-            max_handshake_age: Duration::from_secs(1),
-        });
+        let dialer_handshake = Handshake::new(
+            Config {
+                signer: dialer_signer.clone(),
+                version,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+            },
+            records(version),
+        );
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
-        let listener_handshake = Handshake::new(Config {
-            signer: listener_signer.clone(),
-            version,
-            synchrony_bound: Duration::from_secs(1),
-            max_handshake_age: Duration::from_secs(1),
-        });
+        let listener_handshake = Handshake::new(
+            Config {
+                signer: listener_signer.clone(),
+                version,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+            },
+            records(version),
+        );
         let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(1));
 
         let listener_handle = context.child("listener").spawn(move |context| async move {

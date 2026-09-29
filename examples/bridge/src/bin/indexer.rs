@@ -14,7 +14,7 @@ use commonware_consensus::{
     types::View,
 };
 use commonware_cryptography::{
-    Digest, Hasher, Sha256, Signer as _,
+    ChaCha20Poly1305, Digest, Hasher, Sha256, Signer as _,
     bls12381::primitives::{
         group::G2,
         variant::{MinSig, Variant},
@@ -27,7 +27,8 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
 use commonware_stream::{
     Handshake as _,
-    cups::{self, Handshake, Version},
+    cups::{self, Cups},
+    sake::{self, Version},
     utils::Timeout,
 };
 use commonware_utils::{
@@ -242,12 +243,15 @@ fn main() {
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
         let handshake = Timeout::new(
-            Handshake::new(cups::Config {
-                signer,
-                version: Version::V1,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(60),
-            }),
+            sake::Handshake::new(
+                sake::Config {
+                    signer,
+                    version: Version::V1,
+                    synchrony_bound: Duration::from_secs(1),
+                    max_handshake_age: Duration::from_secs(60),
+                },
+                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+            ),
             Duration::from_secs(5),
         );
         loop {

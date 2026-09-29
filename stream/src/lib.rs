@@ -10,11 +10,13 @@
 )]
 
 commonware_macros::stability_scope!(BETA {
-    use commonware_runtime::{BufferPooler, Clock, IoBufs, Sink, Stream};
+    use commonware_cryptography::Cipher;
+    use commonware_runtime::{BufferPool, BufferPooler, Clock, IoBufs, Sink, Stream};
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
 
     pub mod cups;
+    pub mod sake;
     pub mod utils;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
@@ -151,11 +153,47 @@ commonware_macros::stability_scope!(BETA {
         fn recv(&mut self) -> impl Future<Output = Result<IoBufs, Self::Error>> + Send;
     }
 
+    /// Record layer that protects messages with one cipher per direction.
+    ///
+    /// A [Handshake] establishes the two ciphers and uses [Records::split] to build the returned
+    /// [Sender] and [Receiver].
+    pub trait Records: Clone + Send + Sync + 'static {
+        /// Cipher that seals and opens records.
+        type Cipher: Cipher;
+
+        /// Sender that writes records to sink `O`.
+        type Sender<O: Sink>: Sender;
+
+        /// Receiver that reads records from stream `I`.
+        type Receiver<I: Stream>: Receiver;
+
+        /// Largest plaintext message supported, in bytes.
+        const MAX_SIZE: u32;
+
+        /// Returns the namespace that identifies this record format.
+        ///
+        /// Record formats that differ must return different namespaces.
+        fn namespace(&self) -> &'static [u8];
+
+        /// Returns halves that protect records with `send` and `recv`.
+        ///
+        /// Callers must supply a `max_message_size` no greater than [Self::MAX_SIZE].
+        fn split<I: Stream, O: Sink>(
+            &self,
+            send: Self::Cipher,
+            recv: Self::Cipher,
+            stream: I,
+            sink: O,
+            max_message_size: u32,
+            pool: BufferPool,
+        ) -> (Self::Sender<O>, Self::Receiver<I>);
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
         use crate::utils::{Timeout, TimeoutError};
-        use commonware_cryptography::{ed25519::PrivateKey};
+        use commonware_cryptography::ChaCha20Poly1305;
         use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
         use commonware_utils::sync::Mutex;
         use futures::{FutureExt as _, future::Either};
@@ -257,8 +295,7 @@ commonware_macros::stability_scope!(BETA {
         }
 
         impl Handshake for OpaqueHandshake {
-            const MAX_SIZE: u32 =
-                <cups::Handshake<PrivateKey> as Handshake>::MAX_SIZE;
+            const MAX_SIZE: u32 = <cups::Cups<ChaCha20Poly1305> as Records>::MAX_SIZE;
 
             type PublicKey = OpaqueIdentity;
             type Error = Rejected;
@@ -326,6 +363,8 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
+        /// Reuses one handshake for repeated dials and listens and forwards each call's namespace
+        /// and maximum message size to the inner handshake.
         #[test]
         fn handshake_supports_opaque_identity_and_shared_session() {
             fn assert_send<T: Send>(_: T) {}
@@ -373,6 +412,8 @@ commonware_macros::stability_scope!(BETA {
             });
         }
 
+        /// Measures the handshake deadline from the dial or listen call, not the first poll, and
+        /// releases the transport once the attempt expires.
         #[test]
         fn handshake_starts_timeout_when_called() {
             for dialer in [false, true] {

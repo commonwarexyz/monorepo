@@ -112,9 +112,11 @@ impl arbitrary::Arbitrary<'_> for Data {
 mod tests {
     use super::*;
     use commonware_codec::{Decode as _, Encode as _, Error};
-    use commonware_cryptography::ed25519;
+    use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
-    use commonware_stream::cups::Handshake as StreamHandshake;
+    use commonware_stream::{cups::Cups, sake};
+
+    type StreamHandshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
 
     #[test]
     fn test_max_size_bounds() {

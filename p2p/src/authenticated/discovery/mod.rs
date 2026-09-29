@@ -168,9 +168,9 @@
 //!
 //! ```rust
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
-//! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
+//! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::cups::{self, Handshake, Version};
+//! use commonware_stream::{cups::{self, Cups}, sake::{self, Version}};
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -208,7 +208,10 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
-//!     Handshake::new(cups::Config::new(signer.clone(), Version::V1)),
+//!     sake::Handshake::new(
+//!         sake::Config::new(signer.clone(), Version::V1),
+//!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+//!     ),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr
@@ -246,7 +249,7 @@
 //! ```
 
 use commonware_cryptography::{PublicKey, Signer, Verifier};
-use commonware_stream::cups::Handshake as StreamHandshake;
+use commonware_stream::{Records, sake};
 
 mod actors;
 mod config;
@@ -269,9 +272,10 @@ pub trait Handshake: commonware_stream::Handshake<PublicKey: PublicKey> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
 }
 
-impl<S: Signer> Handshake for StreamHandshake<S> {
+impl<S: Signer, R: Records> Handshake for sake::Handshake<S, R> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
-        self.config().signer.sign(namespace, message)
+        // Calls the inherent [sake::Handshake::sign], not this trait method.
+        Self::sign(self, namespace, message)
     }
 }
 
@@ -288,7 +292,7 @@ mod tests {
         },
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_cryptography::ed25519;
+    use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
         BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,
@@ -296,7 +300,9 @@ mod tests {
         telemetry::metrics::{count_running_tasks, metric_samples},
         tokio,
     };
-    use commonware_stream::cups::Handshake as StreamHandshake;
+    use commonware_stream::{cups::Cups, sake};
+
+    type StreamHandshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
     use commonware_utils::{NZU32, NZUsize, TryCollect, channel::mpsc, hostname, ordered::Set};
     use rand_core::{CryptoRng, Rng};
     use std::{

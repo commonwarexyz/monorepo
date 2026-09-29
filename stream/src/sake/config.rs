@@ -1,4 +1,4 @@
-use super::Version;
+use commonware_cryptography::handshake::sake::Version;
 use std::time::Duration;
 
 /// Configuration for a [Handshake](super::Handshake).
@@ -6,18 +6,20 @@ use std::time::Duration;
 /// # Examples
 ///
 /// ```
-/// use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-/// use commonware_stream::cups::{Config, Handshake, Version};
+/// use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
+/// use commonware_stream::{cups::{self, Cups}, sake::{Config, Handshake, Version}};
 ///
-/// let handshake = Handshake::new(Config::new(PrivateKey::from_seed(0), Version::V1));
+/// let handshake = Handshake::new(
+///     Config::new(PrivateKey::from_seed(0), Version::V1),
+///     Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+/// );
 /// ```
 #[derive(Clone)]
 pub struct Config<S> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
 
-    /// Protocol version, selecting the SAKE version, the transcript scope, the record cipher, and
-    /// the record format.
+    /// SAKE version.
     pub version: Version,
 
     /// Maximum time drift allowed for future timestamps.

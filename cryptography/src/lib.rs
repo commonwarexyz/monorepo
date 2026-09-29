@@ -333,14 +333,14 @@ commonware_macros::stability_scope!(BETA {
         /// the cipher with the tag.
         ///
         /// Returns `None` if sealing fails, in which case the contents of `data` are unspecified.
-        #[must_use = "data is undefined if sealing fails"]
+        #[must_use = "the cipher is returned only if sealing succeeds"]
         fn seal(self, aad: &[u8], data: &mut [u8]) -> Option<(Self, Self::Tag)>;
 
         /// Decrypts the next message in place if `tag` authenticates it together with `aad`, and
         /// returns the cipher.
         ///
         /// Returns `None` if opening fails, in which case the contents of `data` are unspecified.
-        #[must_use = "data is undefined if opening fails"]
+        #[must_use = "data is authentic only if opening succeeds"]
         fn open(self, aad: &[u8], data: &mut [u8], tag: &Self::Tag) -> Option<Self>;
     }
 });

@@ -24,9 +24,9 @@
 //! The BLAKE3 transcript first commits the caller-provided application namespace as one packet. A
 //! protocol built on SAKE may then fork it with its own label ([Context::fork]). SAKE then forks it
 //! with the protocol namespace of the [Version]: `_COMMONWARE_CRYPTOGRAPHY_SAKE` for [Version::V1]
-//! and the original `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` for [Version::V0]. Distinct
-//! labels derive the listener-to-dialer and dialer-to-listener traffic keys and confirmations.
-//! These namespace bytes, transcript order, and labels are protocol constants.
+//! and `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` for [Version::V0]. Distinct labels derive the
+//! listener-to-dialer and dialer-to-listener traffic keys and confirmations. These namespace bytes,
+//! transcript order, and labels are protocol constants.
 //!
 //! # Versions
 //!
@@ -38,13 +38,12 @@
 //!   exclusive ownership (it admits key substitution), a dialer can complete a handshake under a
 //!   public key other than its own under which its [Syn] signature also verifies. Whether such a
 //!   key can match one a listener admits depends on the signature scheme. V0 uses
-//!   [transcript::Version::V0](crate::transcript::Version::V0), which is sound here because SAKE commits a fixed sequence of
-//!   canonical encodings at fixed positions.
+//!   [transcript::Version::V0](crate::transcript::Version::V0), which is sound here because SAKE
+//!   commits a fixed sequence of canonical encodings at fixed positions.
 //! - [Version::V1] commits both identities before every signature, so each signature covers the
 //!   signer's own identity, and uses [transcript::Version::V1](crate::transcript::Version::V1).
 //!
-//! [dial_end] and [listen_end] return a send and a receive [Cipher](crate::Cipher), each keyed
-//! from the transcript with a distinct label.
+//! [dial_end] and [listen_end] return a send and a receive [Cipher](crate::Cipher).
 //!
 //! # Timing
 //!

@@ -121,9 +121,9 @@
 //!
 //! ```rust
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
-//! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
+//! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::cups::{self, Handshake, Version};
+//! use commonware_stream::{cups::{self, Cups}, sake::{self, Version}};
 //! use commonware_utils::{NZU32, NZUsize, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -159,7 +159,10 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = lookup::Config::local(
-//!     Handshake::new(cups::Config::new(signer.clone(), Version::V1)),
+//!     sake::Handshake::new(
+//!         sake::Config::new(signer.clone(), Version::V1),
+//!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+//!     ),
 //!     application_namespace,
 //!     my_addr,
 //!     max_peers_per_set,
@@ -224,7 +227,7 @@ mod tests {
         },
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_cryptography::{Signer, ed25519};
+    use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
         BufferPooler, Clock, IoBuf, IoBufs, Metrics, Network as RNetwork, Quota, Resolver, Runner,
@@ -234,8 +237,10 @@ mod tests {
     };
     use commonware_stream::{
         Handshake, Receiver as StreamReceiver, Sender as StreamSender,
-        cups::{self, Handshake as StreamHandshake, Version},
+        cups::{self, Cups},
+        sake::{self, Version},
     };
+    type StreamHandshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
     use commonware_utils::{
         Hostname, NZU32, NZUsize, TryCollect,
         channel::mpsc,
@@ -2273,12 +2278,12 @@ mod tests {
         failures: AtomicUsize,
     }
 
-    struct TestSender<O: Sink> {
-        inner: cups::Sender<O>,
+    struct TestSender<T> {
+        inner: T,
     }
 
-    impl<O: Sink> StreamSender for TestSender<O> {
-        type Error = cups::Error;
+    impl<T: StreamSender> StreamSender for TestSender<T> {
+        type Error = T::Error;
 
         fn send(
             &mut self,
@@ -2297,12 +2302,12 @@ mod tests {
         }
     }
 
-    struct TestReceiver<I: Stream> {
-        inner: cups::Receiver<I>,
+    struct TestReceiver<T> {
+        inner: T,
     }
 
-    impl<I: Stream> StreamReceiver for TestReceiver<I> {
-        type Error = cups::Error;
+    impl<T: StreamReceiver> StreamReceiver for TestReceiver<T> {
+        type Error = T::Error;
 
         fn recv(&mut self) -> impl Future<Output = Result<IoBufs, Self::Error>> + Send {
             self.inner.recv()
@@ -2319,8 +2324,8 @@ mod tests {
 
     #[derive(Debug, Error)]
     enum TestHandshakeError {
-        #[error("encrypted handshake failed: {0}")]
-        Encrypted(#[from] cups::Error),
+        #[error("sake handshake failed: {0}")]
+        Sake(#[from] sake::Error),
         #[error("unknown application identity")]
         UnknownApplicationIdentity,
         #[error("authentication failed")]
@@ -2347,8 +2352,10 @@ mod tests {
 
         type PublicKey = ed25519::PublicKey;
         type Error = TestHandshakeError;
-        type Sender<I: Stream, O: Sink> = TestSender<O>;
-        type Receiver<I: Stream, O: Sink> = TestReceiver<I>;
+        type Sender<I: Stream, O: Sink> =
+            TestSender<<StreamHandshake<ed25519::PrivateKey> as Handshake>::Sender<I, O>>;
+        type Receiver<I: Stream, O: Sink> =
+            TestReceiver<<StreamHandshake<ed25519::PrivateKey> as Handshake>::Receiver<I, O>>;
 
         fn public_key(&self) -> Self::PublicKey {
             self.application_key.clone()
@@ -2381,17 +2388,19 @@ mod tests {
                 .map(|(transport, _)| transport.clone())
                 .ok_or(TestHandshakeError::UnknownApplicationIdentity)?;
             self.authenticate().await?;
-            let (sender, receiver) =
-                StreamHandshake::new(cups::Config::new(self.transport_signer, Version::V1))
-                    .dial(
-                        context,
-                        namespace,
-                        max_message_size,
-                        transport_peer,
-                        stream,
-                        sink,
-                    )
-                    .await?;
+            let (sender, receiver) = StreamHandshake::new(
+                sake::Config::new(self.transport_signer, Version::V1),
+                Cups::new(cups::Version::V1),
+            )
+            .dial(
+                context,
+                namespace,
+                max_message_size,
+                transport_peer,
+                stream,
+                sink,
+            )
+            .await?;
 
             Ok((
                 TestSender { inner: sender },
@@ -2421,10 +2430,10 @@ mod tests {
             );
             self.observations.listens.fetch_add(1, Ordering::Relaxed);
             let handshake = &self;
-            let (transport_peer, sender, receiver) = StreamHandshake::new(cups::Config::new(
-                self.transport_signer.clone(),
-                Version::V1,
-            ))
+            let (transport_peer, sender, receiver) = StreamHandshake::new(
+                sake::Config::new(self.transport_signer.clone(), Version::V1),
+                Cups::new(cups::Version::V1),
+            )
             .listen(
                 context,
                 namespace,

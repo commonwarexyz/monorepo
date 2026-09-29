@@ -166,6 +166,7 @@ mod tests {
     use super::*;
     use commonware_utils::{TestRng, test_rng};
 
+    /// Seals a copy of `msg`, returning the advanced cipher, the ciphertext, and the tag.
     fn seal(
         cipher: ChaCha20Poly1305,
         aad: &[u8],
@@ -178,6 +179,7 @@ mod tests {
 
     #[test]
     fn test_seal_open_roundtrip() {
+        // test_rng() has a fixed seed, so both ciphers get the same key.
         let mut send = ChaCha20Poly1305::random(test_rng());
         let mut recv = ChaCha20Poly1305::random(test_rng());
         for msg in [&b""[..], b"hello", b"world"] {
@@ -209,6 +211,8 @@ mod tests {
     fn test_open_out_of_order_fails() {
         let (send, _, _) = seal(ChaCha20Poly1305::random(test_rng()), b"", b"first");
         let (_, mut second, tag) = seal(send, b"", b"second");
+
+        // The receiver expects the first message, so the second fails to open.
         let recv = ChaCha20Poly1305::random(test_rng());
         assert!(recv.open(b"", &mut second, &tag).is_none());
     }
@@ -232,6 +236,7 @@ mod tests {
 
     #[test]
     fn test_exhausted_counter_fails() {
+        // Set the counter to its limit so no nonce remains.
         let exhausted = |mut cipher: ChaCha20Poly1305| {
             cipher.nonce.inner = 1 << (8 * NONCE_SIZE_BYTES);
             cipher

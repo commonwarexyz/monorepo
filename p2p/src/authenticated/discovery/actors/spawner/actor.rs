@@ -165,19 +165,18 @@ mod tests {
     use crate::authenticated::discovery::types;
     use commonware_actor::{Feedback, Unreliable, mailbox};
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
-        Handshake as _,
-        cups::{
-            self, Handshake as StreamHandshake, Receiver as CupsReceiver, Sender as CupsSender,
-            Version,
-        },
+        Handshake,
+        cups::{self, Cups},
+        sake::{self, Version},
         utils::Timeout,
     };
+    type StreamHandshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
     use commonware_utils::{NZUsize, SystemTimeExt};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -188,15 +187,21 @@ mod tests {
     const IP_NAMESPACE: &[u8] = b"test_discovery_spawner_actor_IP";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>);
+    type Sender = <StreamHandshake<PrivateKey> as Handshake>::Sender<mocks::Stream, mocks::Sink>;
+    type Receiver =
+        <StreamHandshake<PrivateKey> as Handshake>::Receiver<mocks::Stream, mocks::Sink>;
+    type Connection = (Sender, Receiver);
 
     fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
-        let handshake = StreamHandshake::new(cups::Config {
-            signer,
-            version: Version::V1,
-            synchrony_bound: Duration::from_secs(10),
-            max_handshake_age: Duration::from_secs(10),
-        });
+        let handshake = StreamHandshake::new(
+            sake::Config {
+                signer,
+                version: Version::V1,
+                synchrony_bound: Duration::from_secs(10),
+                max_handshake_age: Duration::from_secs(10),
+            },
+            Cups::new(cups::Version::V1),
+        );
         Timeout::new(handshake, Duration::from_secs(10))
     }
 
@@ -271,7 +276,7 @@ mod tests {
         context: deterministic::Context,
         local: PublicKey,
     ) -> (
-        Mailbox<Message<CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>, PublicKey>>,
+        Mailbox<Message<Sender, Receiver, PublicKey>>,
         mailbox::Receiver<tracker::Message<PublicKey>>,
         mailbox::UnreliableReceiver<router::Message<PublicKey>>,
         tracker::ingress::Releaser<PublicKey>,
@@ -291,12 +296,10 @@ mod tests {
         let router_mailbox = router::Mailbox::new(router_sender);
 
         let (spawner, spawner_mailbox) =
-            Actor::<
-                deterministic::Context,
-                CupsSender<mocks::Sink>,
-                CupsReceiver<mocks::Stream>,
-                PublicKey,
-            >::new(context.child("spawner"), spawner_config(local));
+            Actor::<deterministic::Context, Sender, Receiver, PublicKey>::new(
+                context.child("spawner"),
+                spawner_config(local),
+            );
         let handle = spawner.start(tracker_mailbox, router_mailbox);
 
         (

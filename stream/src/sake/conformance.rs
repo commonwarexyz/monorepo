@@ -1,11 +1,12 @@
-//! CUPS conformance tests.
+//! SAKE stream conformance tests.
 
 use crate::{
     Handshake as _,
-    cups::{Config, Handshake, Version},
+    cups::{self, Cups},
+    sake::{Config, Handshake, Version},
 };
 use commonware_conformance::{Conformance, conformance_tests};
-use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
 use commonware_runtime::{
     Clock as _, Error, IoBufs, Runner as _, Sink, Spawner as _, Supervisor as _, deterministic,
     mocks,
@@ -35,20 +36,19 @@ struct Tap {
 impl Sink for Tap {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let bufs = bufs.into();
-        self.log
-            .lock()
-            .extend_from_slice(bufs.clone().coalesce().as_ref());
+        bufs.for_each_chunk(|chunk| self.log.lock().extend_from_slice(chunk));
         self.sink.send(bufs).await
     }
 }
 
-/// Runs a full CUPS connection for `version` and returns every byte each peer wrote.
+/// Runs a full connection at the SAKE `version` with `records` and returns every byte each peer
+/// wrote.
 ///
 /// The log covers the identity prelude, the handshake messages, and records of every length class
-/// in both directions, so it pins the record format, the SAKE version, and the transcript scope for
-/// each CUPS version. Ephemeral keys and timestamps come from the deterministic runtime, so a change to its
-/// scheduling can also move the log.
-fn exchange(seed: u64, version: Version) -> Vec<u8> {
+/// in both directions, so it pins the handshake and the record format of each version.
+/// Ephemeral keys and timestamps come from the deterministic runtime, so a change to its scheduling
+/// can also move the log.
+fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
     let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(seed));
     runner.start(|mut context| async move {
         // Start at a seeded time so handshake timestamps have nonzero upper bytes.
@@ -72,7 +72,10 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
         };
 
         // Complete the handshake.
-        let listener_handshake = Handshake::new(Config::new(listener.clone(), version));
+        let listener_handshake = Handshake::new(
+            Config::new(listener.clone(), version),
+            Cups::<ChaCha20Poly1305>::new(records),
+        );
         let handle = context.child("listener").spawn(move |context| async move {
             listener_handshake
                 .listen(
@@ -85,17 +88,20 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
                 )
                 .await
         });
-        let (mut dialer_tx, mut dialer_rx) = Handshake::new(Config::new(dialer, version))
-            .dial(
-                context.child("dialer"),
-                NAMESPACE,
-                MAX_MESSAGE_SIZE,
-                listener.public_key(),
-                dialer_stream,
-                dialer_sink,
-            )
-            .await
-            .unwrap();
+        let (mut dialer_tx, mut dialer_rx) = Handshake::new(
+            Config::new(dialer, version),
+            Cups::<ChaCha20Poly1305>::new(records),
+        )
+        .dial(
+            context.child("dialer"),
+            NAMESPACE,
+            MAX_MESSAGE_SIZE,
+            listener.public_key(),
+            dialer_stream,
+            dialer_sink,
+        )
+        .await
+        .unwrap();
         let (_, mut listener_tx, mut listener_rx) = handle.await.unwrap().unwrap();
 
         // Send one record of each length class in each direction.
@@ -128,7 +134,7 @@ struct CupsV0;
 
 impl Conformance for CupsV0 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, Version::V0)
+        exchange(seed, Version::V0, cups::Version::V0)
     }
 }
 
@@ -136,7 +142,7 @@ struct CupsV1;
 
 impl Conformance for CupsV1 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, Version::V1)
+        exchange(seed, Version::V1, cups::Version::V1)
     }
 }
 

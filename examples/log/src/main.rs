@@ -52,14 +52,17 @@ use commonware_consensus::{
     simplex::{self, ForwardPolicy, SkipPolicy, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{Sha256, Signer as _, ed25519};
+use commonware_cryptography::{ChaCha20Poly1305, Sha256, Signer as _, ed25519};
 use commonware_p2p::{
     Manager as _,
     authenticated::{self, discovery},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef, tokio};
-use commonware_stream::cups::{self, Handshake, Version};
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Version},
+};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -156,7 +159,10 @@ fn main() {
 
     // Configure network
     let p2p_cfg = discovery::Config::local(
-        Handshake::new(cups::Config::new(signer.clone(), Version::V1)),
+        sake::Handshake::new(
+            sake::Config::new(signer.clone(), Version::V1),
+            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+        ),
         &union(APPLICATION_NAMESPACE, b"_P2P"),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

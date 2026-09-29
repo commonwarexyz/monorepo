@@ -229,15 +229,17 @@ mod tests {
     };
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_stream::{
-        cups::{self, Handshake as StreamHandshake, Version},
+        cups::{self, Cups},
+        sake::{self, Version},
         utils::Timeout,
     };
+    type StreamHandshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
     use commonware_utils::NZUsize;
     use std::{
         net::{Ipv4Addr, SocketAddr},
@@ -264,7 +266,10 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            StreamHandshake::new(cups::Config::new(signer, Version::V1)),
+                            StreamHandshake::new(
+                                sake::Config::new(signer, Version::V1),
+                                Cups::new(cups::Version::V1),
+                            ),
                             Duration::from_secs(5),
                         ),
                         b"test",
@@ -322,7 +327,10 @@ mod tests {
             let dialer_cfg = Config {
                 stream: Arc::new(StreamConfig::new(
                     Timeout::new(
-                        StreamHandshake::new(cups::Config::new(signer, Version::V1)),
+                        StreamHandshake::new(
+                            sake::Config::new(signer, Version::V1),
+                            Cups::new(cups::Version::V1),
+                        ),
                         Duration::from_secs(5),
                     ),
                     b"test",
@@ -415,7 +423,10 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            StreamHandshake::new(cups::Config::new(signer, Version::V1)),
+                            StreamHandshake::new(
+                                sake::Config::new(signer, Version::V1),
+                                Cups::new(cups::Version::V1),
+                            ),
                             Duration::from_secs(5),
                         ),
                         b"test",
@@ -482,7 +493,10 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            StreamHandshake::new(cups::Config::new(signer, Version::V1)),
+                            StreamHandshake::new(
+                                sake::Config::new(signer, Version::V1),
+                                Cups::new(cups::Version::V1),
+                            ),
                             Duration::from_secs(5),
                         ),
                         b"test",
@@ -568,7 +582,10 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            StreamHandshake::new(cups::Config::new(signer, Version::V1)),
+                            StreamHandshake::new(
+                                sake::Config::new(signer, Version::V1),
+                                Cups::new(cups::Version::V1),
+                            ),
                             Duration::from_secs(5),
                         ),
                         b"test",

@@ -91,7 +91,8 @@ async fn recv_length<T: Stream>(stream: &mut T) -> Result<(usize, usize), Error>
             peeked.len()
         };
 
-        // Consume the decoded prefix and request one more byte to make progress.
+        // Consume the peeked bytes already fed to the decoder and request one more byte to make
+        // progress.
         let mut buf = stream.recv(peeked + 1).await.map_err(Error::RecvFailed)?;
         buf.advance(peeked);
         match decoder.feed(buf.get_u8()) {

@@ -268,8 +268,11 @@ pub fn dial_start<S: Signer, P: PublicKey>(
     transcript
         .commit(current_time.encode())
         .commit(peer_identity.encode());
+
+    // V1 commits the dialer identity before signing so the [Syn] signature covers it. V0 commits it
+    // after.
     if version.binds_identity_before_syn() {
-        transcript.commit(dialer_identity.clone());
+        transcript.commit(&dialer_identity[..]);
     }
     let sig = transcript.commit(epk.encode()).sign(&my_identity);
     if !version.binds_identity_before_syn() {
@@ -358,8 +361,11 @@ pub fn listen_start<S: Signer, P: PublicKey>(
     transcript
         .commit(msg.time_ms.encode())
         .commit(my_identity.public_key().encode());
+
+    // Commit the dialer identity where the dialer did: before verifying the [Syn] signature under
+    // V1 and after under V0.
     if version.binds_identity_before_syn() {
-        transcript.commit(dialer_identity.clone());
+        transcript.commit(&dialer_identity[..]);
     }
     if !transcript
         .commit(msg.epk.encode())
@@ -405,6 +411,8 @@ pub fn listen_end<C: Cipher>(state: ListenState, msg: Ack) -> Result<(C, C), Err
     if msg.confirmation != state.confirmation {
         return Err(Error::HandshakeFailed);
     }
+
+    // Derive the ciphers only after the dialer proves it holds the same transcript.
     let send = C::random(state.transcript.noise(LABEL_CIPHER_L2D));
     let recv = C::random(state.transcript.noise(LABEL_CIPHER_D2L));
     Ok((send, recv))
@@ -437,6 +445,7 @@ mod test {
         assert_eq!(data, msg);
     }
 
+    /// Completes a handshake under each [Version] and exchanges a message in each direction.
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
         for version in VERSIONS {
@@ -444,6 +453,7 @@ mod test {
             let dialer_crypto = PrivateKey::random(&mut rng);
             let listener_crypto = PrivateKey::random(&mut rng);
 
+            // Run the three-message handshake and check each message round-trips through its codec.
             let (d_state, msg1) = dial_start(
                 &mut rng,
                 Context::new(
@@ -473,6 +483,7 @@ mod test {
             test_encode_roundtrip(&msg3);
             let (l_send, l_recv) = listen_end::<ChaCha20Poly1305>(l_state, msg3)?;
 
+            // Each send cipher pairs with the peer's receive cipher.
             exchange(d_send, l_recv, b"message 1");
             exchange(l_send, d_recv, b"message 2");
         }
@@ -480,6 +491,7 @@ mod test {
         Ok(())
     }
 
+    /// Rejects a [Syn] signed under a different application namespace.
     #[test]
     fn test_mismatched_namespace_fails() {
         for version in VERSIONS {
@@ -516,6 +528,66 @@ mod test {
         }
     }
 
+    /// Accepts a [Syn] only when the dialer and listener fork the transcript with the same labels.
+    #[test]
+    fn test_mismatched_fork_fails() {
+        let fork = |context: Context<_, _>, label: Option<&'static [u8]>| match label {
+            Some(label) => context.fork(label),
+            None => context,
+        };
+        for version in VERSIONS {
+            for (dialer_label, listener_label) in [
+                (Some(&b"a"[..]), Some(&b"a"[..])),
+                (Some(b"a"), Some(b"b")),
+                (Some(b"a"), None),
+                (None, Some(b"a")),
+            ] {
+                let mut rng = test_rng();
+                let dialer_crypto = PrivateKey::random(&mut rng);
+                let listener_crypto = PrivateKey::random(&mut rng);
+
+                let (_, msg1) = dial_start(
+                    &mut rng,
+                    fork(
+                        Context::new(
+                            b"namespace",
+                            version,
+                            0,
+                            0..1,
+                            dialer_crypto.clone(),
+                            listener_crypto.public_key(),
+                        ),
+                        dialer_label,
+                    ),
+                );
+
+                let result = listen_start(
+                    &mut rng,
+                    fork(
+                        Context::new(
+                            b"namespace",
+                            version,
+                            0,
+                            0..1,
+                            listener_crypto,
+                            dialer_crypto.public_key(),
+                        ),
+                        listener_label,
+                    ),
+                    msg1,
+                );
+
+                // Only matching labels produce the transcript the dialer signed.
+                if dialer_label == listener_label {
+                    assert!(result.is_ok());
+                } else {
+                    assert!(matches!(result, Err(Error::HandshakeFailed)));
+                }
+            }
+        }
+    }
+
+    /// Rejects a [Syn] from a dialer running a different [Version].
     #[test]
     fn test_mismatched_version_fails() {
         for (dialer_version, listener_version) in
@@ -554,6 +626,7 @@ mod test {
         }
     }
 
+    /// Rejects a [Syn] when the listener expects a different dialer identity.
     #[test]
     fn test_mismatched_dialer_identity_fails() {
         for version in VERSIONS {
@@ -611,6 +684,7 @@ mod test {
         transcript
     }
 
+    /// Checks that a V1 [Syn] signature covers the dialer identity.
     #[test]
     fn test_v1_syn_signature_covers_dialer_identity() {
         let mut rng = test_rng();
@@ -638,6 +712,7 @@ mod test {
         assert!(!syn_transcript(Version::V1, &syn, &listener, None).verify(&dialer, &syn.sig));
     }
 
+    /// Checks that a V0 [Syn] signature omits the dialer identity.
     #[test]
     fn test_v0_syn_signature_omits_dialer_identity() {
         let mut rng = test_rng();
@@ -658,6 +733,7 @@ mod test {
             ),
         );
 
+        // The signature is only valid over a transcript that omits the dialer identity.
         assert!(syn_transcript(Version::V0, &syn, &listener, None).verify(&dialer, &syn.sig));
         assert!(
             !syn_transcript(Version::V0, &syn, &listener, Some(&dialer)).verify(&dialer, &syn.sig)
@@ -725,20 +801,18 @@ mod test {
             let derived = substitute(&dialer_key, &signed, &syn.sig);
             assert_ne!(derived, dialer_key);
             assert!(signed.verify(&derived, &syn.sig));
+
+            // Rebuild the dialer transcript with the derived identity in its V0 position.
             let mut claimed = syn_transcript(version, &syn, &listener_key, None);
             claimed.commit(derived.encode());
             let result = listen_start(
                 &mut rng,
-                Context::new(
-                    b"test_namespace",
-                    version,
-                    0,
-                    0..1,
-                    listener.clone(),
-                    derived.clone(),
-                ),
+                Context::new(b"test_namespace", version, 0, 0..1, listener, derived),
                 syn,
             );
+
+            // V1 fails the [Syn] signature check because the signature covers the real dialer
+            // identity.
             if version == Version::V1 {
                 assert!(matches!(result, Err(Error::HandshakeFailed)));
                 continue;
