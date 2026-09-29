@@ -495,7 +495,7 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
         None
     );
     let accepted = accepted.unwrap();
-    while fixture.marshal.get_processed_height().await != Some(accepted.height) {
+    while fixture.marshal.get_processed().await.map(Processed::height) != Some(accepted.height) {
         reschedule().await;
     }
 

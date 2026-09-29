@@ -127,7 +127,7 @@ pub(crate) async fn open_state(
         state: config(&context, prefix),
         logs: logs_config(&context, prefix),
     };
-    Replica::open(context, cfg).await
+    Replica::open(context, cfg, None).await
 }
 
 pub(crate) async fn new_state(
@@ -150,7 +150,9 @@ pub(crate) async fn new_state(
     let state = State::init(context.child("state"), config, genesis)
         .await
         .unwrap();
-    let logs = Logs::open(context.child("logs"), log_config).await.unwrap();
+    let logs = Logs::open(context.child("logs"), log_config, None)
+        .await
+        .unwrap();
     Replica::from_parts(state, logs)
 }
 

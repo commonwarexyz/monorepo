@@ -357,21 +357,11 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Pin extra nodes. It's up to the caller to ensure this set is valid.
-    #[cfg(any(feature = "std", test))]
+    #[cfg(feature = "std")]
     pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position<F>, D>) {
         for (pos, node) in pinned_nodes {
             self.pinned_nodes.insert(pos, node);
         }
-    }
-
-    /// Truncate the structure to a smaller valid size, discarding all nodes beyond that size.
-    #[cfg(feature = "std")]
-    #[allow(dead_code)]
-    pub(crate) fn truncate(&mut self, new_size: Position<F>) {
-        assert!(new_size.is_valid_size());
-        assert!(new_size >= self.pruning_boundary);
-        let keep = (*new_size - *self.pruning_boundary) as usize;
-        self.nodes.truncate(keep);
     }
 
     /// Return the nodes this structure currently has pinned.

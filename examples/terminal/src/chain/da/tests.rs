@@ -29,7 +29,7 @@ pub(crate) async fn init_config<E: StorageContext + Spawner>(
     config: commonware_clearing::bajillion::replica::Config<Rayon>,
     genesis: Vec<(commonware_clearing::bajillion::qmdb::AccountKey, NonZeroU64)>,
 ) -> Result<NativeReplica<E>> {
-    let replica = NativeReplica::open(context, config).await?;
+    let replica = NativeReplica::open(context, config, None).await?;
     let (state, logs) = replica.into_parts();
     let prepared = state
         .prepare(
@@ -504,7 +504,15 @@ fn discarded_vote_survives_private_pruning_and_crash_before_another_valid_propos
             // Isolate disposal's signer-memory contract while the registration remains valid.
             // Expiry would independently reject the alternative and hide a lost decision.
             let parent = lane.manifest().canonical.checkpoint.head;
-            Box::pin(discard(&mut lane)).await.unwrap();
+            let generation = lane.manifest().canonical.checkpoint.generation;
+            let config = replica_config(
+                &format!("discarded-vote-replica-{}-{generation}", deployment.digest()),
+                fixture_page_cache(&context),
+                context.strategy(NZUsize!(1)),
+            );
+            let replica = context.child("replica");
+            let reopen = |target| async move { Ok(NativeReplica::open(replica, config, Some(target)).await?) };
+            Box::pin(discard(&mut lane, reopen)).await.unwrap();
             assert_eq!(lane.state.as_ref().unwrap().head(), parent);
             assert!(lane.manifest().candidate.is_none());
             let mut control = lane.checkpoint.take().unwrap();
@@ -645,6 +653,7 @@ pub(super) async fn sealer(
     let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
         context.child("settlement"),
         db_config(&format!("{prefix}-settlement"), page_cache.clone()),
+        None,
     )
     .await;
     Sealer::new(

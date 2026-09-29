@@ -8,7 +8,7 @@ use commonware_runtime::{
 use commonware_storage::journal::{
     Error,
     contiguous::{
-        Contiguous, Many, Mutable as _,
+        Contiguous, Many,
         fixed::{Config as JournalConfig, Journal},
     },
 };
@@ -55,7 +55,7 @@ enum JournalOperation {
     },
     Size,
     Sync,
-    Rewind {
+    ReopenAtMost {
         size: u64,
     },
     Bounds,
@@ -83,7 +83,7 @@ enum JournalOperation {
         #[arbitrary(with = bounded_append_count)]
         count_b: u8,
     },
-    RewindTo {
+    ReopenMatching {
         keep_value: u64,
     },
     MultipleSync,
@@ -224,9 +224,17 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::Sync => journal.sync().await.unwrap(),
 
-                JournalOperation::Rewind { size } => {
+                JournalOperation::ReopenAtMost { size } => {
                     if *size <= journal_size && *size >= oldest_retained_pos {
-                        let journal = journal.rewind(*size).await.unwrap().sync().await.unwrap();
+                        _ = journal.sync().await.unwrap();
+                        let journal = Journal::init_at_most(
+                            context.child("capped").with_attribute("instance", restarts),
+                            cfg.clone(),
+                            *size,
+                        )
+                        .await
+                        .unwrap();
+                        restarts += 1;
                         journal_size = *size;
                         oldest_retained_pos = journal.bounds().start;
                         journal
@@ -368,12 +376,27 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                JournalOperation::RewindTo { keep_value } => {
+                JournalOperation::ReopenMatching { keep_value } => {
                     if journal_size > oldest_retained_pos {
                         let target = Sha256::hash(&[&keep_value.to_be_bytes()]);
-                        let (journal, new_size) =
-                            journal.rewind_to(|item| *item == target).await.unwrap();
-                        let journal = journal.sync().await.unwrap();
+                        let mut new_size = oldest_retained_pos;
+                        for position in (oldest_retained_pos..journal_size).rev() {
+                            if journal.read(position).await.unwrap() == target {
+                                new_size = position + 1;
+                                break;
+                            }
+                        }
+                        _ = journal.sync().await.unwrap();
+                        let journal = Journal::init_at_most(
+                            context
+                                .child("matching")
+                                .with_attribute("instance", restarts),
+                            cfg.clone(),
+                            new_size,
+                        )
+                        .await
+                        .unwrap();
+                        restarts += 1;
                         journal_size = new_size;
                         oldest_retained_pos = journal.bounds().start;
                         journal

@@ -50,6 +50,7 @@ pub(crate) fn benches() {
         let mut state = BenchState::open(
             runtime.child("state"),
             state_config(&runtime, "state-boundary"),
+            None,
         )
         .await
         .expect("native open");
@@ -78,6 +79,7 @@ pub(crate) fn benches() {
         let state = BenchState::open(
             runtime.child("state"),
             state_config(&runtime, "state-boundary"),
+            None,
         )
         .await
         .expect("native suffix recovery");

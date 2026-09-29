@@ -13,27 +13,32 @@ use crate::{
         },
     },
 };
-use commonware_cryptography::Signer;
+use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
     StreamOf, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
-use commonware_stream::encrypted::{Config as StreamConfig, dial};
+use commonware_stream::{Config as StreamConfig, Handshake};
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand_core::CryptoRng;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tracing::debug;
 
 // Mailbox for the spawner actor.
-type SupervisorMailbox<E, C> =
-    Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, <C as Signer>::PublicKey>>;
+type SupervisorMailbox<E, H> = Mailbox<
+    spawner::Message<
+        <H as Handshake>::Sender<StreamOf<E>, SinkOf<E>>,
+        <H as Handshake>::Receiver<StreamOf<E>, SinkOf<E>>,
+        <H as Handshake>::PublicKey,
+    >,
+>;
 
 /// Configuration for the dialer actor.
-pub struct Config<C: Signer> {
-    /// Configuration for the stream.
-    pub stream_cfg: StreamConfig<C>,
+pub struct Config<H: Handshake> {
+    /// Settings for authenticating and wrapping connections.
+    pub stream: Arc<StreamConfig<H>>,
 
     /// Maximum duration of an outbound dial attempt.
     pub dial_timeout: Duration,
@@ -52,15 +57,18 @@ pub struct Config<C: Signer> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metrics, C: Signer> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metrics, H: Handshake>
+where
+    H::PublicKey: PublicKey,
+{
     context: ContextCell<E>,
 
     // ---------- State ----------
     /// The list of peers to dial.
-    queue: Vec<C::PublicKey>,
+    queue: Vec<H::PublicKey>,
 
     // ---------- Configuration ----------
-    stream_cfg: StreamConfig<C>,
+    stream: Arc<StreamConfig<H>>,
     dial_timeout: Duration,
     dial_frequency: Duration,
     peer_connection_cooldown: Duration,
@@ -68,18 +76,20 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metric
 
     // ---------- Metrics ----------
     /// The number of dial attempts made to each peer.
-    attempts: CounterFamily<metrics::Peer<C::PublicKey>>,
+    attempts: CounterFamily<metrics::Peer<H::PublicKey>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metrics, C: Signer>
-    Actor<E, C>
+impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metrics, H: Handshake>
+    Actor<E, H>
+where
+    H::PublicKey: PublicKey,
 {
-    pub fn new(context: E, cfg: Config<C>) -> Self {
+    pub fn new(context: E, cfg: Config<H>) -> Self {
         let attempts = context.family("attempts", "The number of dial attempts made to each peer");
         Self {
             context: ContextCell::new(context),
             queue: Vec::new(),
-            stream_cfg: cfg.stream_cfg,
+            stream: cfg.stream,
             dial_timeout: cfg.dial_timeout,
             dial_frequency: cfg.dial_frequency,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
@@ -91,9 +101,9 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
     /// Dial a peer for which we have a reservation.
     fn dial_peer(
         &mut self,
-        reservation: Reservation<C::PublicKey>,
+        reservation: Reservation<H::PublicKey>,
         ingress: Ingress,
-        supervisor: &mut SupervisorMailbox<E, C>,
+        supervisor: &mut SupervisorMailbox<E, H>,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer) = reservation.metadata().clone() else {
@@ -105,7 +115,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
 
         // Spawn dialer to connect to peer
         self.context.child("dialer").spawn({
-            let config = self.stream_cfg.clone();
+            let stream = self.stream.clone();
             let mut supervisor = supervisor.clone();
             let allow_private_ips = self.allow_private_ips;
             let dial_timeout = self.dial_timeout;
@@ -124,8 +134,8 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
                     };
 
                     // Attempt to dial peer
-                    let (sink, stream) = match context.dial(address).await {
-                        Ok(stream) => stream,
+                    let (sink, raw_stream) = match context.dial(address).await {
+                        Ok(connection) => connection,
                         Err(err) => {
                             debug!(?err, "failed to dial peer");
                             return;
@@ -134,7 +144,8 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
                     debug!(?peer, ?address, "dialed peer");
 
                     // Upgrade connection
-                    let connection = match dial(context, config, peer.clone(), stream, sink).await {
+                    let connection = stream.dial(context, peer.clone(), raw_stream, sink).await;
+                    let connection = match connection {
                         Ok(instance) => instance,
                         Err(err) => {
                             debug!(?err, "failed to upgrade connection");
@@ -160,16 +171,16 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
     /// Start the dialer actor.
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<C::PublicKey>,
-        supervisor: SupervisorMailbox<E, C>,
+        tracker: tracker::Mailbox<H::PublicKey>,
+        supervisor: SupervisorMailbox<E, H>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
     }
 
     async fn run(
         mut self,
-        tracker: tracker::Mailbox<C::PublicKey>,
-        mut supervisor: SupervisorMailbox<E, C>,
+        tracker: tracker::Mailbox<H::PublicKey>,
+        mut supervisor: SupervisorMailbox<E, H>,
     ) {
         let mut dial_deadline = self.context.current();
         select_loop! {
@@ -217,26 +228,18 @@ mod tests {
         lookup::actors::tracker::{Metadata, ingress::Releaser},
     };
     use commonware_actor::mailbox;
-    use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
+    use commonware_cryptography::{
+        Signer as _,
+        ed25519::{PrivateKey, PublicKey},
+    };
     use commonware_macros::select;
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-    use commonware_stream::encrypted::Config as StreamConfig;
+    use commonware_stream::{encrypted::Handshake as StreamHandshake, utils::Timeout};
     use commonware_utils::NZUsize;
     use std::{
         net::{Ipv4Addr, SocketAddr},
         time::Duration,
     };
-
-    fn test_stream_config(signing_key: PrivateKey) -> StreamConfig<PrivateKey> {
-        StreamConfig {
-            signing_key,
-            namespace: b"test".to_vec(),
-            max_message_size: 1024,
-            handshake_timeout: Duration::from_secs(5),
-            synchrony_bound: Duration::from_secs(5),
-            max_handshake_age: Duration::from_secs(10),
-        }
-    }
 
     #[test]
     fn test_dial_timeout_releases_reservation() {
@@ -256,7 +259,11 @@ mod tests {
             let mut dialer = Actor::new(
                 context.child("dialer"),
                 Config {
-                    stream_cfg: test_stream_config(signer),
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        b"test",
+                        1024,
+                    )),
                     dial_timeout,
                     dial_frequency: Duration::from_secs(1),
                     peer_connection_cooldown: Duration::from_secs(60),
@@ -305,7 +312,11 @@ mod tests {
             let dial_frequency = Duration::from_millis(100);
 
             let dialer_cfg = Config {
-                stream_cfg: test_stream_config(signer),
+                stream: Arc::new(StreamConfig::new(
+                    Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                    b"test",
+                    1024,
+                )),
                 dial_timeout: Duration::from_secs(15),
                 dial_frequency,
                 peer_connection_cooldown: Duration::from_secs(60),
@@ -392,7 +403,11 @@ mod tests {
             let dialer = Actor::new(
                 context.child("dialer"),
                 Config {
-                    stream_cfg: test_stream_config(signer),
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        b"test",
+                        1024,
+                    )),
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,
                     peer_connection_cooldown: dial_frequency,
@@ -452,7 +467,11 @@ mod tests {
             let dialer = Actor::new(
                 context.child("dialer"),
                 Config {
-                    stream_cfg: test_stream_config(signer),
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        b"test",
+                        1024,
+                    )),
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,
                     peer_connection_cooldown: Duration::from_secs(60),
@@ -531,7 +550,11 @@ mod tests {
             let dialer = Actor::new(
                 context.child("dialer"),
                 Config {
-                    stream_cfg: test_stream_config(signer),
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        b"test",
+                        1024,
+                    )),
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,
                     peer_connection_cooldown: Duration::from_millis(50),

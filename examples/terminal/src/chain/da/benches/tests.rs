@@ -64,7 +64,7 @@ fn sparse_activity_batch_commits_without_serial_rollover_waits() {
             let activity = &gates[1];
             let replica = drive_pending_syncs(
                 activity,
-                controlled(&context, PREFIX, &deployment, &gates, page_cache),
+                controlled(&context, PREFIX, &deployment, &gates, page_cache, None),
             )
             .await;
             let (_, prepared) = seal::<Sha256, _, _, _, _, BatchVerifier, _>(
@@ -125,6 +125,7 @@ fn sparse_activity_batch_commits_without_serial_rollover_waits() {
                 crate::protocol::fixture_page_cache(&context),
                 context.strategy(options.workers),
             ),
+            None,
         )
         .await
         .unwrap();
@@ -226,6 +227,7 @@ fn measured_ack_waits_for_private_durability() {
             let state = NativeReplica::open(
                 controlled.child("replica"),
                 config(deployment.digest(), page_cache.clone(), strategy.clone()),
+                None,
             )
             .await
             .unwrap();

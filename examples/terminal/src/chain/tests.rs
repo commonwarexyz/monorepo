@@ -77,7 +77,7 @@ use commonware_consensus::{
     Reporters,
     marshal::{
         self,
-        core::Actor as MarshalActor,
+        core::{Actor as MarshalActor, Processed},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
     },
@@ -185,7 +185,7 @@ pub(super) async fn open(
     prefix: &str,
 ) -> Database<deterministic::Context> {
     let config = config(prefix, &context);
-    <Database<deterministic::Context> as DatabaseSet<_>>::init(context, config).await
+    <Database<deterministic::Context> as DatabaseSet<_>>::init(context, config, None).await
 }
 
 /// Executes one block against `db` under `timing` and applies it, returning
@@ -381,10 +381,10 @@ async fn replay_state<S: Strategy>(
         config.merkle_config.strategy.clone(),
     )
     .logs;
-    let logs = Logs::open(context.child("logs"), logs_config)
+    let logs = Logs::open(context.child("logs"), logs_config, None)
         .await
         .unwrap();
-    let mut state = BalanceState::open(context.child("balances"), config)
+    let mut state = BalanceState::open(context.child("balances"), config, None)
         .await
         .unwrap();
     let (root, mutations, genesis) = &history[0];
@@ -3756,9 +3756,9 @@ struct State<S: CertScheme<Digest> = Scheme> {
 impl<S: CertScheme<Digest>> ProcessedHeight for State<S> {
     async fn processed_height(&self) -> u64 {
         self.marshal
-            .get_processed_height()
+            .get_processed()
             .await
-            .map_or(0, |height| height.get())
+            .map_or(0, |processed| processed.height().get())
     }
 }
 
@@ -4334,8 +4334,8 @@ impl EngineDefinition for Distributed {
             initial_sync_target::<deterministic::Context>(),
         );
 
-        let startup = context.child("stateful_startup");
-        let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
+        let plan =
+            SyncPlan::init(context.child("stateful_startup"), partition_prefix.clone()).await;
         let scheme = self.schemes[index.min(self.schemes.len() - 1)].clone();
         let provider = ConstantProvider::new(scheme.clone());
 
@@ -4375,7 +4375,7 @@ impl EngineDefinition for Distributed {
                 native(),
                 finalized.clone(),
             );
-            let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+            let (stateful_actor, stateful_mailbox) = StatefulActor::new(
                 context.child("stateful"),
                 StatefulConfig {
                     application,
@@ -4488,7 +4488,7 @@ impl EngineDefinition for Distributed {
             native(),
             finalized.clone(),
         );
-        let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+        let (stateful_actor, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application,
@@ -6196,8 +6196,8 @@ impl EngineDefinition for Walkthrough {
             initial_sync_target::<deterministic::Context>(),
         );
 
-        let startup = context.child("stateful_startup");
-        let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
+        let plan =
+            SyncPlan::init(context.child("stateful_startup"), partition_prefix.clone()).await;
 
         // Marshal actor.
         let (marshal_actor, marshal_mailbox, floor) =
@@ -6237,7 +6237,7 @@ impl EngineDefinition for Walkthrough {
                 self.genesis.native.clone(),
                 finalized.clone(),
             );
-            let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+            let (stateful_actor, stateful_mailbox) = StatefulActor::new(
                 context.child("stateful"),
                 StatefulConfig {
                     application,
@@ -6445,7 +6445,7 @@ impl EngineDefinition for Walkthrough {
                 self.genesis.native.clone(),
                 finalized.clone(),
             );
-        let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+        let (stateful_actor, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application,

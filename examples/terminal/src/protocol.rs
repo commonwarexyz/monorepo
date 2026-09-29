@@ -794,7 +794,7 @@ impl Deployment {
             page_cache,
             commonware_parallel::Sequential,
         );
-        let state = State::<_, Sha256>::open(context, config).await?;
+        let state = State::<_, Sha256>::open(context, config, None).await?;
         ensure!(
             state.is_bootstrap(),
             "genesis generation requires fresh storage"
@@ -943,7 +943,7 @@ where
     );
     let config = crate::chain::da::replica_config(prefix, page_cache, strategy);
     let state = State::init(context.child("state"), config.state, balances).await?;
-    let logs = Logs::open(context.child("logs"), config.logs).await?;
+    let logs = Logs::open(context.child("logs"), config.logs, None).await?;
     Ok(Replica::from_parts(state, logs))
 }
 
@@ -1024,7 +1024,7 @@ where
         page_cache,
         commonware_parallel::Sequential,
     );
-    let state = State::<_, Sha256>::open(context, config).await?;
+    let state = State::<_, Sha256>::open(context, config, None).await?;
     ensure!(
         state.is_bootstrap(),
         "empty genesis generation requires fresh storage"
@@ -1632,8 +1632,8 @@ where
 {
     let page_cache = fixture_page_cache(&context);
     let config = crate::chain::da::replica_config("fixture-validator", page_cache, Sequential);
-    let logs = Logs::open(context.child("logs"), config.logs).await?;
-    let mut state = State::<_, Sha256>::open(context.child("state"), config.state).await?;
+    let logs = Logs::open(context.child("logs"), config.logs, None).await?;
+    let mut state = State::<_, Sha256>::open(context.child("state"), config.state, None).await?;
     ensure!(
         state.is_bootstrap(),
         "fixture validator storage is not fresh"

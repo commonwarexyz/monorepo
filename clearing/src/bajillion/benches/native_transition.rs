@@ -25,7 +25,7 @@ use commonware_cryptography_curve25519::signing::{
     BatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
 use commonware_parallel::Rayon;
-use commonware_runtime::{Runner as _, deterministic};
+use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 use commonware_utils::TestRng;
 use criterion::{Criterion, criterion_group};
 use std::{
@@ -256,7 +256,7 @@ async fn measure(
         withdrawals,
         operator,
         expected,
-    } = input(runtime, workload).await;
+    } = input(runtime.child("input"), workload).await;
     let baseline = state.head();
     let expected_head = expected.replica().head();
     let encoded = expected.encoded().clone();
@@ -267,7 +267,8 @@ async fn measure(
     let mut rng = TestRng::new(0);
     for iteration in 0..iterations {
         if iteration > 0 {
-            state = Box::pin(state.rewind(&baseline)).await.unwrap();
+            drop(state);
+            state = Box::pin(fixtures::reopen_state(runtime.child("reopen"), baseline)).await;
             assert_eq!(state.head(), baseline);
         }
         if matches!(phase, Phase::NativePrepare) {

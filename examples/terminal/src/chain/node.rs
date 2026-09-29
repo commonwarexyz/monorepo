@@ -86,6 +86,7 @@ use commonware_runtime::{
     tokio,
 };
 use commonware_storage::{Context as StorageContext, archive::prunable, translator::TwoCap};
+use commonware_stream::encrypted::Handshake;
 use commonware_utils::{
     Acknowledgement as _, Faults as _, N3f1, NZU64, NZUsize, Participant,
     acknowledgement::Exact,
@@ -869,7 +870,7 @@ pub(crate) async fn start(
         .collect();
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
     let mut p2p_config = discovery::Config::local(
-        operator.signing_key.clone(),
+        Handshake::new(operator.signing_key.clone()),
         &[NAMESPACE, b"_P2P"].concat(),
         operator.listen,
         operator.dial,
@@ -955,8 +956,7 @@ pub(crate) async fn start(
         genesis.timestamp,
         initial_sync_target::<tokio::Context>(),
     );
-    let startup = context.child("stateful_startup");
-    let plan = SyncPlan::init(&startup, partition_prefix).await;
+    let plan = SyncPlan::init(context.child("stateful_startup"), partition_prefix).await;
 
     // Marshal actor.
     let (marshal_actor, marshal, floor) = MarshalActor::init(
@@ -992,7 +992,7 @@ pub(crate) async fn start(
         genesis.native.clone(),
         finalized.clone(),
     );
-    let (stateful_actor, stateful_mailbox) = Stateful::init(
+    let (stateful_actor, stateful_mailbox) = Stateful::new(
         context.child("stateful"),
         StatefulConfig {
             application,

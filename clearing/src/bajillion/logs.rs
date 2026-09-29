@@ -470,15 +470,44 @@ pub struct Logs<E: Context, H: Hasher, P: PublicKey, S: Strategy = Sequential> {
 
 impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
     /// Open both native logs and derive their recovered heads.
-    pub async fn open(context: E, config: Config<S>) -> Result<Self, Error> {
+    ///
+    /// With a `target`, each log selects its latest commit with at most the operations of its head
+    /// in `target` and durably discards every operation after it before this returns. A selected
+    /// commit with fewer operations than its target head returns [`Error::Target`]. This covers
+    /// both a log behind `target` and a target head that is not a commit boundary. Any other
+    /// mismatch returns [`Error::Head`].
+    pub async fn open(
+        context: E,
+        config: Config<S>,
+        target: Option<Heads<H::Digest>>,
+    ) -> Result<Self, Error> {
         validate_partitions(&config)?;
+        if let Some(target) = &target {
+            for log in [&target.activity, &target.payouts] {
+                LogHead::try_new(log.root, log.operations, log.floor)?;
+            }
+        }
         let payout_cfg = config.payouts.log.codec_config;
-        let activity = ActivityDb::init(context.child("activity"), config.activity).await?;
-        let payouts = PayoutDb::init(context.child("payouts"), config.payouts).await?;
+        let activity = ActivityDb::init(
+            context.child("activity"),
+            config.activity,
+            target.map(|target| Location::new(target.activity.operations)),
+        )
+        .await?;
+        let payouts = PayoutDb::init(
+            context.child("payouts"),
+            config.payouts,
+            target.map(|target| Location::new(target.payouts.operations)),
+        )
+        .await?;
         let head = Heads {
             activity: head(&activity),
             payouts: head(&payouts),
         };
+        if let Some(target) = target {
+            validate_open(&head.activity, &target.activity)?;
+            validate_open(&head.payouts, &target.payouts)?;
+        }
         Ok(Self {
             activity,
             payouts,
@@ -624,6 +653,7 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
         }
         let payouts = payouts.merkleize(&self.payouts, None, Location::new(floors.payouts));
         let (activity, payouts) = join(activity, payouts).await;
+        let (activity, payouts) = (activity?, payouts?);
 
         let head = Heads {
             activity: batch_head(&activity),
@@ -695,28 +725,6 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
             payout_cfg,
             head,
         })
-    }
-
-    /// Rewind both logs to an authenticated shared checkpoint.
-    pub async fn rewind(mut self, target: &Heads<H::Digest>) -> Result<Self, Error> {
-        validate_rewind(&self.head.activity, &target.activity)?;
-        validate_rewind(&self.head.payouts, &target.payouts)?;
-        self.activity = self
-            .activity
-            .rewind(Location::new(target.activity.operations))
-            .await?;
-        if head(&self.activity) != target.activity {
-            return Err(Error::Head);
-        }
-        self.payouts = self
-            .payouts
-            .rewind(Location::new(target.payouts.operations))
-            .await?;
-        if head(&self.payouts) != target.payouts {
-            return Err(Error::Head);
-        }
-        self.head = *target;
-        Ok(self)
     }
 
     /// Prune each log to a caller-authenticated retained boundary.
@@ -910,10 +918,13 @@ fn validate_floor<D: Digest>(head: LogHead<D>, floor: u64, rows: usize) -> Resul
     Ok(())
 }
 
-fn validate_rewind<D: Digest>(live: &LogHead<D>, target: &LogHead<D>) -> Result<(), Error> {
-    LogHead::try_new(target.root, target.operations, target.floor)?;
-    if target.operations > live.operations {
+/// Checks that a log opened at `target` recovered exactly that head.
+fn validate_open<D: Digest>(recovered: &LogHead<D>, target: &LogHead<D>) -> Result<(), Error> {
+    if recovered.operations < target.operations {
         return Err(Error::Target);
+    }
+    if recovered != target {
+        return Err(Error::Head);
     }
     Ok(())
 }
@@ -1253,10 +1264,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_close_keeps_commit_gap_and_rewinds() {
+    fn empty_close_keeps_commit_gap_and_reopens_at_bootstrap() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = config(&context, "empty");
-            let logs = TestLogs::open(context.child("open"), cfg.clone())
+            let logs = TestLogs::open(context.child("open"), cfg.clone(), None)
                 .await
                 .unwrap();
             let bootstrap = *logs.head();
@@ -1295,11 +1306,21 @@ mod tests {
 
             let logs = logs.apply(prepared).await.unwrap().commit().await.unwrap();
             assert!(matches!(logs.activity_row_at(1).await, Err(Error::Row)));
-            let logs = logs.rewind(&bootstrap).await.unwrap().sync().await.unwrap();
+            drop(logs);
+            let logs = TestLogs::open(context.child("target"), cfg.clone(), Some(bootstrap))
+                .await
+                .unwrap();
             assert_eq!(*logs.head(), bootstrap);
             drop(logs);
 
-            let reopened = TestLogs::open(context.child("reopen"), cfg).await.unwrap();
+            // The discarded candidate stays discarded, and its head is no longer reachable.
+            assert!(matches!(
+                TestLogs::open(context.child("ahead"), cfg.clone(), Some(candidate)).await,
+                Err(Error::Target)
+            ));
+            let reopened = TestLogs::open(context.child("reopen"), cfg, None)
+                .await
+                .unwrap();
             assert_eq!(*reopened.head(), bootstrap);
             reopened.destroy().await.unwrap();
         });
@@ -1308,7 +1329,7 @@ mod tests {
     #[test]
     fn activity_originals_are_appends_and_commit_is_metadata_free() {
         deterministic::Runner::default().start(|context| async move {
-            let logs = TestLogs::open(context.child("open"), config(&context, "originals"))
+            let logs = TestLogs::open(context.child("open"), config(&context, "originals"), None)
                 .await
                 .unwrap();
             let payer = SigningKey::from_seed(7).public_key();
@@ -1406,7 +1427,7 @@ mod tests {
             source_cfg.activity.merkle.items_per_blob = NZU64!(128);
             source_cfg.activity.log.items_per_section = NZU64!(128);
             let source_reopen_cfg = source_cfg.clone();
-            let logs = TestLogs::open(context.child("source_open"), source_cfg)
+            let logs = TestLogs::open(context.child("source_open"), source_cfg, None)
                 .await
                 .unwrap();
             let predecessor = *logs.head();
@@ -1457,7 +1478,7 @@ mod tests {
             let logs = logs.apply(prepared).await.unwrap().commit().await.unwrap();
             drop(logs);
 
-            let source = TestLogs::open(context.child("source_reopen"), source_reopen_cfg)
+            let source = TestLogs::open(context.child("source_reopen"), source_reopen_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(*source.head(), candidate);
@@ -1505,10 +1526,13 @@ mod tests {
             ));
             drop(imported);
 
-            let imported =
-                TestActivityDb::init(context.child("destination_reopen"), destination_reopen_cfg)
-                    .await
-                    .unwrap();
+            let imported = TestActivityDb::init(
+                context.child("destination_reopen"),
+                destination_reopen_cfg,
+                None,
+            )
+            .await
+            .unwrap();
             assert_eq!(head(&imported), candidate.activity);
             assert_eq!(imported.get_metadata().await.unwrap(), None);
             assert!(matches!(
@@ -1528,7 +1552,7 @@ mod tests {
     #[test]
     fn row_openings_exclude_commit_and_bind_roles() {
         deterministic::Runner::default().start(|context| async move {
-            let logs = TestLogs::open(context.child("open"), config(&context, "rows"))
+            let logs = TestLogs::open(context.child("open"), config(&context, "rows"), None)
                 .await
                 .unwrap();
             let account = SigningKey::from_seed(7).public_key();
@@ -1663,9 +1687,13 @@ mod tests {
     #[test]
     fn preparation_enforces_row_delimited_entry_grammar_before_mutation() {
         deterministic::Runner::default().start(|context| async move {
-            let logs = TestLogs::open(context.child("open"), config(&context, "original-order"))
-                .await
-                .unwrap();
+            let logs = TestLogs::open(
+                context.child("open"),
+                config(&context, "original-order"),
+                None,
+            )
+            .await
+            .unwrap();
             let predecessor = *logs.head();
             let mut accounts = [
                 SigningKey::from_seed(1).public_key(),
@@ -1800,7 +1828,9 @@ mod tests {
             let mut cfg = config(&context, "payout-bound");
             cfg.payouts.log.codec_config = (0..=0).into();
             let reopen_cfg = cfg.clone();
-            let logs = TestLogs::open(context.child("open"), cfg).await.unwrap();
+            let logs = TestLogs::open(context.child("open"), cfg, None)
+                .await
+                .unwrap();
             let predecessor = *logs.head();
 
             let mut output_bytes = Vec::new();
@@ -1851,7 +1881,7 @@ mod tests {
             assert_eq!(*logs.head(), candidate);
             drop(logs);
 
-            let reopened = TestLogs::open(context.child("reopen"), reopen_cfg)
+            let reopened = TestLogs::open(context.child("reopen"), reopen_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(*reopened.head(), candidate);
@@ -1868,9 +1898,13 @@ mod tests {
     #[test]
     fn row_lookups_reject_value_bearing_commits() {
         deterministic::Runner::default().start(|context| async move {
-            let logs = TestLogs::open(context.child("open"), config(&context, "commit-value"))
-                .await
-                .unwrap();
+            let logs = TestLogs::open(
+                context.child("open"),
+                config(&context, "commit-value"),
+                None,
+            )
+            .await
+            .unwrap();
             let account = SigningKey::from_seed(9).public_key();
             let row = activity_row(
                 account.clone(),
@@ -1890,23 +1924,27 @@ mod tests {
             let activity_batch = activity
                 .new_batch()
                 .merkleize(&activity, Some(ActivityRecord::Row(row)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (activity, _) = activity.apply_batch(activity_batch).await.unwrap();
             let activity_batch = activity
                 .new_batch()
                 .merkleize(&activity, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (activity, _) = activity.apply_batch(activity_batch).await.unwrap();
 
             let payout_batch = payouts
                 .new_batch()
                 .merkleize(&payouts, Some(output), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (payouts, _) = payouts.apply_batch(payout_batch).await.unwrap();
             let payout_batch = payouts
                 .new_batch()
                 .merkleize(&payouts, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (payouts, _) = payouts.apply_batch(payout_batch).await.unwrap();
 
             let logs = TestLogs::from_parts(activity, payouts, (0..=4096).into());

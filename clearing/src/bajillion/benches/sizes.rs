@@ -390,7 +390,7 @@ fn payout_material(
 ) -> (LogHead<Digest>, LogOpening<Digest>) {
     runner().start(|runtime| async move {
         let cfg = super::fixtures::logs_config(&runtime, "withdrawal-size");
-        let mut logs = Logs::<_, Sha256, VerifyingKey, _>::open(runtime, cfg)
+        let mut logs = Logs::<_, Sha256, VerifyingKey, _>::open(runtime, cfg, None)
             .await
             .expect("native logs open");
         let floors = Floors {

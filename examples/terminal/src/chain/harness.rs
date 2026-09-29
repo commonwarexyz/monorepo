@@ -750,6 +750,7 @@ pub(crate) async fn start_with_native(
     let db = <Database<deterministic::Context> as DatabaseSet<deterministic::Context>>::init(
         context.child("harness_db"),
         db_config(prefix, page_cache),
+        None,
     )
     .await;
     let mut node = Node {

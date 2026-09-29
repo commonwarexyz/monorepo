@@ -535,16 +535,7 @@ macro_rules! source {
             type Digest = Digest;
             type Op = $op;
             type Error = SourceError;
-            async fn serve(
-                &self,
-                request: Request<Self::Family>,
-            ) -> Result<
-                (
-                    sync::Response<Self::Family, Self::Op, Digest>,
-                    sync::FeedbackTx,
-                ),
-                SourceError,
-            > {
+            async fn serve(&self, request: Request<Self::Family>) -> sync::source::Result<Self> {
                 let result = async {
                     let response = call(
                         &self.context,

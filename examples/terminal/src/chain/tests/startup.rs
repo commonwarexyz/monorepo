@@ -166,7 +166,7 @@ fn dynamic_startup_skips_rejected_preregistration_deposit() {
         fixture.publish(registered.clone()).await;
         fixture.wait_applied(&context, &first).await;
         assert_eq!(
-            fixture.marshal.get_processed_height().await,
+            fixture.marshal.get_processed().await.map(Processed::height),
             Some(Height::zero())
         );
         assert_eq!(
@@ -199,7 +199,7 @@ fn dynamic_startup_skips_rejected_preregistration_deposit() {
             eprintln!(
                 "startup error={error:#}; applied={:?}; processed={:?}; registration_available={}",
                 fixture.finalized.latest().map(|tip| tip.height),
-                fixture.marshal.get_processed_height().await,
+                fixture.marshal.get_processed().await.map(Processed::height),
                 fixture.marshal.get_block(registered.height).await.is_some()
             );
         }
@@ -260,7 +260,7 @@ fn dynamic_startup_without_registration_releases_rejected_history_and_stops() {
                 .contains("operator registration did not appear")
         );
         assert_eq!(
-            fixture.marshal.get_processed_height().await,
+            fixture.marshal.get_processed().await.map(Processed::height),
             Some(first.height)
         );
         assert_eq!(
@@ -297,7 +297,7 @@ fn dynamic_startup_stages_applied_deposit_before_acknowledging() {
         fixture.publish(deposited.clone()).await;
         fixture.wait_applied(&context, &deposited).await;
         assert_eq!(
-            fixture.marshal.get_processed_height().await,
+            fixture.marshal.get_processed().await.map(Processed::height),
             Some(registered.height)
         );
         let (entry, held) = registered_operator(
@@ -314,13 +314,14 @@ fn dynamic_startup_stages_applied_deposit_before_acknowledging() {
             "startup retains the applied deposit for durable staging"
         );
         assert_eq!(
-            fixture.marshal.get_processed_height().await,
+            fixture.marshal.get_processed().await.map(Processed::height),
             Some(registered.height)
         );
         let operator =
             ready_operator(&context, &source, &mut backend, entry, held, observations).await;
         assert_eq!(operator.lock().snapshot().unwrap().accounts[0].balance, 7);
-        while fixture.marshal.get_processed_height().await != Some(deposited.height) {
+        while fixture.marshal.get_processed().await.map(Processed::height) != Some(deposited.height)
+        {
             context.sleep(Duration::from_millis(1)).await;
         }
         assert_eq!(operator.lock().snapshot().unwrap().accounts[0].balance, 7);

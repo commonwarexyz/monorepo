@@ -288,6 +288,7 @@ mod tests {
             let mut db = TestDb::<F>::init(
                 context.child("db"),
                 fixed_config::<OneCap>("history", &context),
+                None,
             )
             .await
             .unwrap();
@@ -414,6 +415,7 @@ mod tests {
             let mut db = VariableDb::init(
                 context.child("db"),
                 variable_config::<OneCap>("variable-history", &context),
+                None,
             )
             .await
             .unwrap();
@@ -460,6 +462,7 @@ mod tests {
             let mut db = TestDb::<mmb::Family>::init(
                 context.child("db"),
                 fixed_config::<OneCap>("active-chunks", &context),
+                None,
             )
             .await
             .unwrap();
@@ -517,6 +520,7 @@ mod tests {
             let mut db = TestDb::<mmb::Family>::init(
                 context.child("db"),
                 fixed_config::<OneCap>("pruned-floor", &context),
+                None,
             )
             .await
             .unwrap();
@@ -559,6 +563,7 @@ mod tests {
             let mut db = TestDb::<mmb::Family>::init(
                 context.child("db"),
                 fixed_config::<OneCap>("boundaries", &context),
+                None,
             )
             .await
             .unwrap();

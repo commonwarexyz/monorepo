@@ -67,8 +67,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 type QmdbA<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-/// The compact (witness-only) QMDB used as DB-B, so the suite drives deep rewind,
-/// pruning, and state sync through the compact path as well.
+/// The compact (witness-only) QMDB used as DB-B for bounded recovery, pruning, and state sync.
 pub(super) type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
@@ -555,15 +554,19 @@ impl EngineDefinition for MultiDbEngine {
         );
 
         let stateful_startup_context = context.child("stateful_startup");
-        let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
-        let should_state_sync = plan.should_state_sync(self.enable_state_sync && delayed);
+        let mut plan = SyncPlan::init(
+            stateful_startup_context.child("plan"),
+            partition_prefix.clone(),
+        )
+        .await;
+        let should_state_sync = plan.should_sync(self.enable_state_sync && delayed);
         let provider = ConstantProvider::new(scheme.clone());
 
         let (probe, probe_mailbox) = Probe::new(ProbeConfig {
             context: context.child("probe"),
             provider: provider.clone(),
             strategy: Sequential,
-            capacity: NZUsize!(100),
+            mailbox_size: NZUsize!(100),
             blocker: oracle.control(public_key.clone()),
             minimum_epoch: Epoch::zero(),
             retry_timeout: NZDuration!(Duration::from_millis(100)),
@@ -571,7 +574,7 @@ impl EngineDefinition for MultiDbEngine {
         probe.start(probe_network);
         let mut state_sync_height = if should_state_sync {
             let finalization = probe_mailbox.subscribe().await.expect("probe stopped");
-            plan = plan.with_floor(finalization);
+            plan = plan.set_floor(finalization).await;
             None
         } else {
             self.sync_heights.lock().get(public_key).copied()
@@ -645,7 +648,7 @@ impl EngineDefinition for MultiDbEngine {
 
         // Stateful actor
         let application = App::new(genesis_block.clone());
-        let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+        let (stateful_actor, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application,

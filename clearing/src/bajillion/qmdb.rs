@@ -319,10 +319,10 @@ impl<D: Digest, S: Strategy> PreparedState<D, S> {
 /// The replica stores positive individual balances but neither derives nor retains their aggregate.
 /// The settlement protocol owns and validates balance liability.
 ///
-/// Mutable operations consume the owner. After failure or cancellation, reopen and rewind every
-/// native store to the application's authenticated shared checkpoint before catching up the
-/// canonical suffix. Historical proofs use retained native operations. Pruning is explicitly gated
-/// by the shared checkpoint and the application's protection policy.
+/// Mutable operations consume the owner. After failure or cancellation, reopen every native store
+/// at the application's authenticated shared checkpoint before catching up the canonical suffix.
+/// Historical proofs use retained native operations. Pruning is explicitly gated by the shared
+/// checkpoint and the application's protection policy.
 pub struct State<E: Context + Spawner, H: Hasher, S: Strategy = Sequential> {
     db: StateDb<E, H, S>,
     #[cfg(test)]
@@ -340,7 +340,7 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
         config: Config<S>,
         genesis: Vec<(AccountKey, Balance)>,
     ) -> Result<Self, Error> {
-        let state = Self::open(context, config).await?;
+        let state = Self::open(context, config, None).await?;
         if !state.is_bootstrap() {
             return Err(Error::Initialized);
         }
@@ -355,17 +355,34 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
     /// Open the native database and recover its structural head and active account count.
     ///
     /// Partitions belong exclusively to this owner. The application authenticates its shared
-    /// checkpoint, rewinds an ahead owner to that boundary, and catches up a behind owner from the
-    /// canonical source. A fresh database exposes the empty bootstrap head until its genesis batch
-    /// is applied.
-    pub async fn open(context: E, config: Config<S>) -> Result<Self, Error> {
+    /// checkpoint, opens an ahead owner at that `target`, and catches up a behind owner from the
+    /// canonical source. Storage selects the latest commit with at most `target` operations and
+    /// durably discards every operation after it before this returns. A selected commit with fewer
+    /// operations than `target` returns [`Error::Target`]. This covers both a store behind `target`
+    /// and a `target` that is not a commit boundary. Any other mismatch returns
+    /// [`Error::History`]. A fresh database exposes the empty bootstrap head until its genesis
+    /// batch is applied.
+    pub async fn open(
+        context: E,
+        config: Config<S>,
+        target: Option<StateHead<H::Digest>>,
+    ) -> Result<Self, Error> {
         let mut partitions = physical_partitions(&config);
         partitions.sort_unstable();
         if partitions.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(Error::Partition);
         }
-        let db = StateDb::init(context.child("balances"), config).await?;
+        let max_size = target.map(|target| Location::new(target.operations()));
+        let db = StateDb::init(context.child("balances"), config, max_size).await?;
         let head = Self::derive_head(&db)?;
+        if let Some(target) = target {
+            if head.operations() < target.operations() {
+                return Err(Error::Target);
+            }
+            if head != target {
+                return Err(Error::History);
+            }
+        }
         Ok(Self {
             db,
             #[cfg(test)]
@@ -504,20 +521,6 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
     /// Fully synchronize native balance state.
     pub async fn sync(mut self) -> Result<Self, Error> {
         self.db = self.db.sync().await?;
-        Ok(self)
-    }
-
-    /// Rewind to an authenticated shared checkpoint. Any error consumes this owner.
-    pub async fn rewind(mut self, target: &StateHead<H::Digest>) -> Result<Self, Error> {
-        if target.operations() > self.head.operations() {
-            return Err(Error::Target);
-        }
-        self.db = self.db.rewind(Location::new(target.operations())).await?;
-        let recovered = Self::derive_head(&self.db)?;
-        if recovered != *target {
-            return Err(Error::History);
-        }
-        self.head = recovered;
         Ok(self)
     }
 
@@ -851,7 +854,7 @@ pub enum Error {
     /// A proof does not authenticate the request key and root.
     #[error("invalid balance proof")]
     Proof,
-    /// A rewind, prune, or sync target is outside the validated native domain.
+    /// An open, prune, or sync target is outside the validated native domain.
     #[error("invalid balance storage target")]
     Target,
 }
@@ -939,8 +942,10 @@ mod tests {
         });
     }
 
+    /// Opening at a shared head durably discards later operations, and its sync target stays
+    /// bound to the head's witness.
     #[test]
-    fn rewind_to_shared_head_is_durable_and_witness_bound() {
+    fn open_at_shared_head_is_durable_and_witness_bound() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = config(&context, "rewind-head");
             let state = TestState::init(
@@ -962,19 +967,29 @@ mod tests {
             malformed.start = checkpoint.operations();
             assert!(matches!(malformed.native::<Sha256>(), Err(Error::Target)));
 
-            let state = apply(state, vec![(key(1), Some(balance(90)))]).await;
-            assert_ne!(*state.head(), checkpoint);
-            let state = state
-                .rewind(&checkpoint)
+            // Durably advance past the checkpoint, then open at the checkpoint.
+            let state = apply(state, vec![(key(1), Some(balance(90)))])
                 .await
-                .unwrap()
-                .sync()
+                .commit()
+                .await
+                .unwrap();
+            let ahead = *state.head();
+            assert_ne!(ahead, checkpoint);
+            drop(state);
+            let state = TestState::open(context.child("aligned"), cfg.clone(), Some(checkpoint))
                 .await
                 .unwrap();
             assert_eq!(*state.head(), checkpoint);
             drop(state);
 
-            let reopened = TestState::open(context.child("reopen"), cfg).await.unwrap();
+            // The discarded suffix stays discarded, and its head is no longer reachable.
+            assert!(matches!(
+                TestState::open(context.child("ahead"), cfg.clone(), Some(ahead)).await,
+                Err(Error::Target)
+            ));
+            let reopened = TestState::open(context.child("reopen"), cfg, None)
+                .await
+                .unwrap();
             assert_eq!(*reopened.head(), checkpoint);
             assert_eq!(reopened.get(&key(1)).await.unwrap(), Some(balance(100)));
             reopened.destroy().await.unwrap();
@@ -1126,15 +1141,18 @@ mod tests {
             assert_eq!(state.db.get_metadata().await.unwrap(), None);
             drop(state);
 
-            let state = TestState::open(context.child("reopened"), cfg)
+            let state = TestState::open(context.child("reopened"), cfg.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(*state.head(), empty);
             assert_eq!(state.get(&first).await.unwrap(), None);
             assert_eq!(state.get(&second).await.unwrap(), None);
             assert_eq!(state.live_accounts(), 0);
+            drop(state);
 
-            let state = state.rewind(&populated).await.unwrap();
+            let state = TestState::open(context.child("populated"), cfg, Some(populated))
+                .await
+                .unwrap();
             assert_eq!(*state.head(), populated);
             assert_eq!(state.get(&first).await.unwrap(), Some(balance(u64::MAX)));
             assert_eq!(state.get(&second).await.unwrap(), Some(balance(1)));
@@ -1305,7 +1323,7 @@ mod tests {
                 deterministic::FaultConfig::default().sync(probability!(1.0));
             assert!(matches!(state.commit().await, Err(Error::Storage(_))));
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let state = TestState::open(context.child("reopened"), cfg)
+            let state = TestState::open(context.child("reopened"), cfg, None)
                 .await
                 .unwrap();
             let state = if state.head() == &old {
@@ -1461,9 +1479,10 @@ mod tests {
                 (*state.head(), frozen)
             });
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let state = TestState::open(context.child("reopened"), config(&context, "restart"))
-                .await
-                .unwrap();
+            let state =
+                TestState::open(context.child("reopened"), config(&context, "restart"), None)
+                    .await
+                    .unwrap();
             assert_eq!(*state.head(), expected);
             let proof = state
                 .lookup_at(frozen.root(), frozen.operations(), &key(1))
@@ -1496,7 +1515,7 @@ mod tests {
                 let state = apply(state, vec![]).await.commit().await.unwrap();
                 let expected = *state.head();
                 drop(state);
-                let state = TestState::open(context.child("reopened"), cfg)
+                let state = TestState::open(context.child("reopened"), cfg, None)
                     .await
                     .unwrap();
                 assert_eq!(*state.head(), expected);
@@ -1562,7 +1581,7 @@ mod tests {
             let mutations = candidate.mutations().to_vec();
             drop(candidate);
             drop(state);
-            let state = TestState::open(context.child("reopened"), cfg)
+            let state = TestState::open(context.child("reopened"), cfg, None)
                 .await
                 .unwrap();
             assert_eq!(*state.head(), predecessor);
@@ -1637,7 +1656,7 @@ mod tests {
             ));
             assert_ne!(context.storage_audit(), intact_storage);
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let state = TestState::open(context.child("reopened"), cfg)
+            let state = TestState::open(context.child("reopened"), cfg, None)
                 .await
                 .unwrap();
             assert_eq!(*state.head(), predecessor);
@@ -1681,7 +1700,9 @@ mod tests {
                 TestState::init(context.child("nonempty"), cfg.clone(), vec![]).await,
                 Err(Error::Initialized)
             ));
-            let state = TestState::open(context.child("valid"), cfg).await.unwrap();
+            let state = TestState::open(context.child("valid"), cfg, None)
+                .await
+                .unwrap();
             assert_eq!(*state.head(), expected);
             assert_eq!(state.get(&key(1)).await.unwrap(), Some(balance(100)));
         });

@@ -309,6 +309,7 @@ async fn open<E: StorageContext + Spawner>(
     let state = NativeReplica::open(
         context.child("replica"),
         config(deployment.digest(), page_cache.clone(), strategy),
+        None,
     )
     .await?;
     let checkpoint = checkpoint::Store::open(
@@ -353,6 +354,7 @@ async fn setup<E: StorageContext + Spawner + CryptoRng>(
     let replica = NativeReplica::open(
         context.child("bootstrap"),
         config(&digest, page_cache.clone(), strategy.clone()),
+        None,
     )
     .await?;
     let (state, logs) = replica.into_parts();

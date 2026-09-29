@@ -1,21 +1,15 @@
-//! Transport-neutral peer management for DKG.
+//! Transport-neutral peer activation for DKG.
 //!
 //! DKG peer identities are key-only in every ceremony artifact and wire
 //! message. Transports that need more than a public key to dial a peer (like
-//! [`commonware_p2p::authenticated::lookup`]) require an epoch-scoped
-//! [`Directory`] carried in-band by [`EpochInfo`]: the final block of each
-//! epoch embeds the next epoch's directory, so the same certificate-backed
-//! artifact that names the committee also says how to reach it.
+//! [`commonware_p2p::authenticated::lookup`]) use an epoch-scoped [`Directory`]
+//! carried in-band by [`EpochInfo`]: the final block of each epoch embeds the
+//! next epoch's directory.
 //!
-//! Activation never consults application state. A node beginning state sync
-//! initially holds only a certified [`EpochInfo`] (from
-//! [`probe`](crate::dkg::probe) or the persisted
-//! [`state_sync::Plan`](crate::dkg::state_sync::Plan)) and no synced state to
-//! resolve addresses from, so [`Manager::track`] consumes only the peer set
-//! and the directory embedded in that artifact. State-backed hooks
-//! ([`ParticipantsProvider`](crate::dkg::ParticipantsProvider)) are consulted
-//! only while building or verifying an epoch's final block, when the node is
-//! fully synced.
+//! Activation never consults application state: [`Manager::track`] receives
+//! only an epoch's peer set and the directory embedded in its [`EpochInfo`].
+//! See [Peer Activation](crate::dkg#peer-activation) for when each component
+//! activates an epoch.
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 
@@ -36,15 +30,11 @@ use thiserror::Error;
 /// Epoch-scoped reachability data for DKG participants, carried in-band by
 /// [`EpochInfo`](crate::dkg::types::EpochInfo).
 ///
-/// A directory is consensus data: the proposer of an epoch's final block embeds
-/// the next epoch's directory in the epoch artifact and every verifier rebuilds
-/// and compares it, so all honest nodes agree on one directory per epoch. It is
-/// also the only reachability source used during recovery: restart and
-/// state-sync entry activate peers from the artifact alone, without consulting
-/// application state.
-///
-/// A directory MUST contain exactly the peers of its epoch (dealers, players,
-/// and next players).
+/// A directory is part of the agreed epoch artifact, so all honest nodes use the
+/// same directory for an epoch. It MUST contain exactly the epoch's dealers,
+/// players, and next players. Decoding an
+/// [`EpochInfo`](crate::dkg::types::EpochInfo) rejects a directory for which
+/// [`matches`](Self::matches) returns `false`.
 pub trait Directory<P: PublicKey>:
     Clone + Debug + PartialEq + Eq + Send + Sync + 'static + Read + Write + EncodeSize
 {
@@ -136,14 +126,12 @@ where
     }
 }
 
-/// Interface for activating the peers used by a DKG epoch.
+/// Activates the peers of a DKG epoch.
 pub trait Manager: Provider {
     /// In-band reachability data consumed when activating an epoch.
     type Directory: Directory<Self::PublicKey>;
 
     /// Error returned when a peer set cannot be activated.
-    ///
-    /// DKG actors stop when this error is returned.
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Activates `peers` for `epoch` using the epoch's `directory`.
@@ -155,6 +143,7 @@ pub trait Manager: Provider {
     ) -> Result<(), Self::Error>;
 }
 
+/// Key-only peer managers ignore the directory and never fail.
 impl<M: P2pManager> Manager for M {
     type Directory = Unit;
     type Error = Infallible;
@@ -172,18 +161,17 @@ impl<M: P2pManager> Manager for M {
 
 /// Adapts an addressable peer manager to DKG's key-only peer sets.
 ///
-/// Activation resolves each tracked peer through the epoch's in-band
-/// [`Addresses`] directory, preserving primary and secondary roles. Because the
-/// directory arrives with the epoch artifact, restart and state-sync entry use
-/// the same epoch-scoped addresses as an uninterrupted node, with no
-/// out-of-band registry access.
+/// [`Manager::track`] resolves each tracked peer through the epoch's
+/// [`Addresses`], preserving primary and secondary roles. It returns
+/// [`MissingAddress`] without activating any peer if the directory omits a
+/// tracked peer.
 #[derive(Clone)]
 pub struct AddressableManager<M> {
     manager: M,
 }
 
 impl<M> AddressableManager<M> {
-    /// Creates an addressable DKG peer manager.
+    /// Wraps an addressable peer manager.
     pub const fn new(manager: M) -> Self {
         Self { manager }
     }
@@ -266,6 +254,7 @@ mod tests {
     use commonware_runtime::{
         Clock as _, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
+    use commonware_stream::encrypted::Handshake;
     use commonware_utils::{NZU32, NZUsize, channel::mpsc, sync::Mutex};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -466,10 +455,10 @@ mod tests {
     fn lookup_secondary_dials_primary_and_receives_response() {
         let executor = deterministic::Runner::timed(std::time::Duration::from_secs(10));
         executor.start(|context| async move {
-            let dealer = ed25519::PrivateKey::from_seed(10);
-            let participant = ed25519::PrivateKey::from_seed(11);
-            let dealer_key = dealer.public_key();
-            let participant_key = participant.public_key();
+            let dealer_signer = ed25519::PrivateKey::from_seed(10);
+            let participant_signer = ed25519::PrivateKey::from_seed(11);
+            let dealer_key = dealer_signer.public_key();
+            let participant_key = participant_signer.public_key();
             let dealer_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6100);
             let participant_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6101);
             let directory = Addresses::from_iter([
@@ -490,7 +479,7 @@ mod tests {
             let (mut dealer_network, dealer_oracle) = lookup::Network::new(
                 context.child("dealer"),
                 lookup::Config::local(
-                    dealer,
+                    Handshake::new(dealer_signer),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     dealer_socket,
                     NZUsize!(2),
@@ -500,7 +489,7 @@ mod tests {
             let (mut participant_network, participant_oracle) = lookup::Network::new(
                 context.child("participant"),
                 lookup::Config::local(
-                    participant,
+                    Handshake::new(participant_signer),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     participant_socket,
                     NZUsize!(2),

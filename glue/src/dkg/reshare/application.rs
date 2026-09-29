@@ -18,39 +18,37 @@ use tracing::{debug, field};
 
 /// Per-proposal input handed to an application wrapped by [`Application`].
 ///
-/// Carries the wrapper's upstream input alongside the reshare `payload` selected
-/// and fetched for the block being proposed. The wrapped application attaches
-/// `payload` to the block it builds and uses `upstream` for its own purposes.
+/// Carries the upstream input and the reshare `payload` selected for the block
+/// being proposed. The wrapped application must include `payload` in the block
+/// it builds.
 pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
-    /// Input forwarded from the application wrapping the reshare wrapper.
+    /// Input passed to [`Application`], forwarded unchanged.
     pub upstream: Upstream,
 
     /// The reshare payload selected for this proposal, if any.
     pub payload: Option<Payload<V, C, D>>,
 }
 
-/// An [`Application`](commonware_consensus::Application) wrapper that enforces the
-/// reshare block-validity contract and drives the reshare payload for proposals.
+/// An [`Application`](commonware_consensus::Application) wrapper that implements
+/// the reshare [application contract](crate::dkg::reshare#application-contract).
 ///
-/// When the reshare actor tracks an epoch's ceremony, the wrapper rejects a
-/// final block whose payload differs from the independently reconstructed
-/// [`EpochInfo`](crate::dkg::types::EpochInfo). An actor that starts following
-/// mid-epoch lacks the protocol history required for that comparison, so its
-/// final-block verification remains pending. The wrapper always rejects stray
-/// payloads carried by non-final blocks in the early dealing window.
+/// At the final block, verification compares the block's payload with the
+/// independently derived one from [`Mailbox::epoch_info`]. It rejects a
+/// mismatch or [`EpochInfoResponse::Unavailable`]. On
+/// [`EpochInfoResponse::Pending`] or [`EpochInfoResponse::Following`] (for
+/// example, while the actor follows an epoch), it stays unresolved until
+/// consensus cancels it. Before the final block, verification rejects a block
+/// that carries any payload except a dealer log from the midpoint onward.
 ///
-/// For proposals, the wrapper selects and fetches the payload for the block being
-/// built (a dealer log from the midpoint onward, the epoch info on the final
-/// block) and hands it to the inner application through [`Input`], so the
-/// inner application neither talks to the reshare mailbox nor tracks epoch
-/// boundaries. It only attaches the handed-over payload to the block it builds,
-/// because the wrapper cannot build the application's block type itself.
+/// Proposals from the midpoint onward carry this node's dealer log when one is
+/// available, and the final block carries the payload returned by
+/// [`Mailbox::epoch_info`]. No block is proposed at the final height when the
+/// actor cannot supply that payload. The inner application does not need to
+/// call the reshare [`Mailbox`] or track epoch boundaries.
 ///
-/// The wrapper is a plain [`Application`](commonware_consensus::Application), so
-/// it composes with any consensus application, including one adapted through
-/// [`stateful`](crate::stateful). It forwards its own upstream input to the inner
-/// application as [`Input::upstream`], so nesting under another
-/// input-providing application still works.
+/// The inner application may be one adapted through
+/// [`stateful`](crate::stateful). [`Application`] forwards its own input to the
+/// inner application as [`Input::upstream`].
 pub struct Application<A, B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -68,8 +66,10 @@ where
     V: Variant,
     C: Signer,
 {
-    /// Wraps `inner`, using `reshare` to select final-block epoch info and dealer
-    /// logs and `blocks_per_epoch` to locate epoch boundaries and phases.
+    /// Wraps `inner`, using `reshare` to fetch reshare payloads.
+    ///
+    /// `blocks_per_epoch` must equal the actor's
+    /// [`Config::blocks_per_epoch`](crate::dkg::reshare::Config::blocks_per_epoch).
     pub const fn new(inner: A, reshare: Mailbox<B, V, C>, blocks_per_epoch: NonZeroU64) -> Self {
         Self {
             inner,
@@ -136,8 +136,6 @@ where
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Option<Self::Block> {
-        // Select and fetch the payload for the block being built, then hand it to
-        // the inner application alongside its own input.
         let Some(parent) = ancestry.peek() else {
             debug!("proposal rejected: missing parent ancestry");
             return None;
@@ -228,9 +226,8 @@ where
                     }
                 }
                 response @ (EpochInfoResponse::Pending | EpochInfoResponse::Following) => {
-                    // Pending or follower state provides no stable validity
-                    // verdict. Keep the request unresolved so consensus
-                    // cancellation owns termination.
+                    // Neither response is a verdict, so verification stays
+                    // unresolved until consensus cancels it.
                     debug!(
                         following = matches!(response, EpochInfoResponse::Following),
                         "verification pending: final block epoch info cannot be derived locally"
@@ -243,11 +240,21 @@ where
                     return false;
                 }
             }
-        } else if matches!(phase, Some(EpochPhase::Early)) && tip_payload.is_some() {
-            // Dealer logs are only posted from the midpoint onward, so an early
-            // block must not carry a reshare payload.
-            debug!("verification rejected: early block carried reshare payload");
-            return false;
+        } else {
+            // Before the final block, only a dealer log may be carried, and only
+            // from the midpoint onward. A height outside every supported epoch
+            // has no midpoint, so no payload is allowed there.
+            let allowed = match tip_payload {
+                None => true,
+                Some(Payload::DealerLog(_)) => {
+                    matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late))
+                }
+                Some(Payload::EpochInfo(_)) => false,
+            };
+            if !allowed {
+                debug!("verification rejected: non-final block carried misplaced reshare payload");
+                return false;
+            }
         }
         self.inner.verify(context, ancestry).await
     }
@@ -270,7 +277,7 @@ mod tests {
     use commonware_cryptography::{
         Digestible, Signer,
         bls12381::{
-            dkg::feldman_desmedt::deal,
+            dkg::feldman_desmedt::{Dealer, Info, Reveal, deal},
             primitives::{sharing::Mode, variant::MinPk},
         },
         ed25519::{PrivateKey, PublicKey},
@@ -874,6 +881,106 @@ mod tests {
 
             assert!(!verified);
             assert_eq!(inner.verify_count(), 0);
+        });
+    }
+
+    /// Verification rejects epoch info carried by an early, midpoint, or late
+    /// block before the final block, without consulting the inner application.
+    #[test]
+    fn verification_rejects_non_final_epoch_info() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // In a six-block epoch, heights 0 through 2 are early, height 3 is
+            // the midpoint, height 4 is late, and height 5 is the final block.
+            let inner = RecordingApp::accepting();
+            let (sender, _receiver) = mailbox::new::<
+                Message<TestBlock, TestBlsVariant, PrivateKey>,
+            >(context.child("mailbox"), NZUsize!(1));
+            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(6));
+            let mut parent = mocks::child(&mocks::genesis_block(leader().public_key()));
+
+            // Each candidate extends the previous one and carries epoch info.
+            let payload = epoch_payload(5);
+            for phase in [EpochPhase::Early, EpochPhase::Midpoint, EpochPhase::Late] {
+                let tip = mocks::child(&parent).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                    NZU32!(16),
+                    payload.clone(),
+                );
+                assert_eq!(app.phase(tip.height()), Some(phase));
+                assert!(!app.final_block(tip.height()));
+
+                let verified = app
+                    .verify(
+                        (context.child("app"), block_context(&parent, tip.height().get())),
+                        ancestry::from_iter([Arc::new(tip.clone()), Arc::new(parent)]),
+                    )
+                    .await;
+                assert!(!verified, "{phase:?} block carried epoch info");
+                parent = tip;
+            }
+
+            // No rejected candidate reached the inner application.
+            assert_eq!(inner.verify_count(), 0);
+        });
+    }
+
+    /// Verification rejects a dealer log carried by an early block without
+    /// consulting the inner application, and passes one carried by a midpoint
+    /// or late block to the inner application.
+    #[test]
+    fn verification_gates_dealer_log_by_phase() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // In a six-block epoch, heights 0 through 2 are early, height 3 is
+            // the midpoint, height 4 is late, and height 5 is the final block.
+            let inner = RecordingApp::accepting();
+            let (sender, _receiver) = mailbox::new::<
+                Message<TestBlock, TestBlsVariant, PrivateKey>,
+            >(context.child("mailbox"), NZUsize!(1));
+            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(6));
+            let mut parent = mocks::child(&mocks::genesis_block(leader().public_key()));
+
+            // Build one signed dealer log for the epoch.
+            let info = Info::<TestBlsVariant, PublicKey>::new::<N3f1>(
+                b"_COMMONWARE_GLUE_DKG_RESHARE_APPLICATION_TEST",
+                0,
+                None,
+                Mode::NonZeroCounter,
+                Reveal::V1,
+                players(),
+                players(),
+            )
+            .expect("valid info");
+            let (dealer, _, _) =
+                Dealer::start::<N3f1>(TestRng::new(0), info, signers()[0].clone(), None)
+                    .expect("dealer should start");
+            let payload: TestPayload = Payload::DealerLog(dealer.finalize::<N3f1>());
+
+            // Each candidate extends the previous one and carries the log. Only
+            // the early candidate is rejected before the inner application.
+            for (phase, accepted) in [
+                (EpochPhase::Early, false),
+                (EpochPhase::Midpoint, true),
+                (EpochPhase::Late, true),
+            ] {
+                let tip = mocks::child(&parent).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                    NZU32!(16),
+                    payload.clone(),
+                );
+                assert_eq!(app.phase(tip.height()), Some(phase));
+                assert!(!app.final_block(tip.height()));
+
+                let consulted = inner.verify_count();
+                let verified = app
+                    .verify(
+                        (context.child("app"), block_context(&parent, tip.height().get())),
+                        ancestry::from_iter([Arc::new(tip.clone()), Arc::new(parent)]),
+                    )
+                    .await;
+                assert_eq!(verified, accepted, "{phase:?} block carried a dealer log");
+                assert_eq!(inner.verify_count(), consulted + usize::from(accepted));
+                parent = tip;
+            }
         });
     }
 }

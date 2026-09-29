@@ -503,13 +503,13 @@ async fn recover<E: Context + Spawner>(
             );
         }
     }
-    let mut replica = Replica::open(context, config).await?;
+    let aligned = context.child("aligned");
+    let mut replica = Replica::open(context, config.clone(), None).await?;
 
     // The latest completed SQL head is the only mutable recovery anchor. Components may be at
     // different later accepted heads when a prior native commit was interrupted.
     if let Some((sequence, complete)) = latest_complete(connection)? {
-        replica = align(connection, replica, sequence, &complete).await?;
-        return Ok(replica);
+        return align(aligned, config, connection, replica, sequence, &complete).await;
     }
 
     // Genesis has no earlier application checkpoint. An exact durable candidate can be completed;
@@ -725,6 +725,8 @@ fn accepted_heads(connection: &Connection, sequence: u64) -> Result<Vec<ReplicaH
 }
 
 async fn align<E: Context + Spawner>(
+    context: E,
+    config: Config<Rayon>,
     connection: &Connection,
     replica: OperatorReplica<E>,
     sequence: u64,
@@ -751,12 +753,10 @@ async fn align<E: Context + Spawner>(
                 .any(|head| head.logs.payouts == recovered.logs.payouts),
         "native replica contains an unauthorized checkpoint component"
     );
-    let replica = replica.rewind(target).await?;
-    ensure!(
-        replica.head() == *target,
-        "native rewind did not restore the completed checkpoint"
-    );
-    Ok(replica)
+
+    // Release every store before reopening it at the completed checkpoint.
+    drop(replica);
+    Ok(Replica::open(context, config, Some(*target)).await?)
 }
 
 fn complete(connection: &Connection, sequence: u64, head: &ReplicaHead<Digest>) -> Result<()> {
@@ -890,7 +890,7 @@ mod tests {
                 assert!(format!("{error:#}").contains("injected recovery cut"));
                 assert_eq!(trace.prepared, [0]);
                 let expected = checkpoint(&connection, 0).unwrap();
-                let native = OperatorReplica::open(context.child("inspect"), config.clone())
+                let native = OperatorReplica::open(context.child("inspect"), config.clone(), None)
                     .await
                     .unwrap();
                 let missing = native.state().is_bootstrap();
@@ -1083,7 +1083,7 @@ mod tests {
                     .unwrap();
                 assert!(format!("{error:#}").contains("injected recovery cut"));
                 assert_eq!(trace.prepared, [1]);
-                let native = OperatorReplica::open(context.child("inspect"), config.clone())
+                let native = OperatorReplica::open(context.child("inspect"), config.clone(), None)
                     .await
                     .unwrap();
                 let genesis_head = checkpoint(&connection, 0).unwrap();
@@ -1202,7 +1202,7 @@ mod tests {
                     crate::protocol::fixture_page_cache(&context),
                     Rayon::new(NonZeroUsize::MIN).unwrap(),
                 );
-                let state = OperatorReplica::open(context.child("derive"), config.clone())
+                let state = OperatorReplica::open(context.child("derive"), config.clone(), None)
                     .await
                     .unwrap();
                 let candidate = state
@@ -1347,7 +1347,7 @@ mod tests {
                 crate::protocol::fixture_page_cache(&context),
                 Rayon::new(NonZeroUsize::MIN).unwrap(),
             );
-            let mut replica = OperatorReplica::open(context.child("replica"), config)
+            let mut replica = OperatorReplica::open(context.child("replica"), config, None)
                 .await
                 .unwrap();
             let destination = Bytes::from_static(b"destination");

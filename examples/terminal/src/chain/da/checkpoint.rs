@@ -239,19 +239,27 @@ impl<E: Context> Store<E> {
             },
             commit_codec_config: (),
         };
-        let db = Native::init(context, cfg).await?;
+        let db = Native::init(context, cfg, None).await?;
         let size = db.size();
         Ok(Self(db.prune(size).await?))
     }
     pub(super) fn get(&self) -> Option<Arc<Manifest>> {
         self.0.get_metadata()
     }
+    /// The replica head recovery opens at: the complete checkpoint of a checked manifest.
+    pub(super) fn target(&self, deployment: &Deployment) -> Result<Option<ReplicaHead<Digest>>> {
+        let Some(manifest) = self.get() else {
+            return Ok(None);
+        };
+        manifest.check(deployment)?;
+        Ok(Some(manifest.complete().checkpoint.head))
+    }
     pub(super) async fn put(self, manifest: Manifest) -> Result<Self> {
         let batch = self
             .0
             .new_batch()
             .merkleize(&self.0, Some(Arc::new(manifest)), self.0.size())
-            .await;
+            .await?;
         let (db, _) = self.0.apply_batch(batch).await?;
 
         // Native pruning makes the surviving Commit durable before deleting older sections.

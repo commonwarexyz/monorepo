@@ -30,6 +30,7 @@ async fn delayed_sealer(
     let db = <Database<DelayedContext> as DatabaseSet<_>>::init(
         context.child("settlement"),
         db_config(&format!("{prefix}-settlement"), page_cache.clone()),
+        None,
     )
     .await;
     Sealer::new(
@@ -90,11 +91,12 @@ async fn replacement(
 
 #[test]
 fn imported_retirement_waits_for_commit_optional_merkle_rollover_io() {
-    for fail in [false, true] {
-        let prefix = if fail {
-            "retirement_error"
-        } else {
-            "retirement_success"
+    // `None` crashes while retirement waits. `Some(fail)` releases the optional sync.
+    for fail in [None, Some(false), Some(true)] {
+        let prefix = match fail {
+            None => "retirement_crash",
+            Some(false) => "retirement_success",
+            Some(true) => "retirement_error",
         };
         let ((deployment, merkle_partition), crash) = deterministic::Runner::default()
             .start_and_recover(move |context| async move {
@@ -246,7 +248,7 @@ fn imported_retirement_waits_for_commit_optional_merkle_rollover_io() {
                 assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
 
                 let mut sealer =
-                    delayed_sealer(&context, prefix, &deployment, page_cache.clone()).await;
+                    delayed_sealer(&context, prefix, &deployment, page_cache).await;
                 let operator = ed25519::PrivateKey::from_seed(88).public_key();
                 let validator = ed25519::PrivateKey::from_seed(100).public_key();
                 let (_, (mut sender, _)) =
@@ -271,23 +273,13 @@ fn imported_retirement_waits_for_commit_optional_merkle_rollover_io() {
                     _ = &mut optional_blocked => {},
                     result = &mut retirement => panic!("retirement bypassed pending Merkle sync: {result:?}"),
                 }
-
-                let checkpoint = checkpoint::Store::open(
-                    context.child("pending_marker"),
-                    prefix,
-                    deployment.digest(),
-                    page_cache,
-                )
-                .await
-                .unwrap();
-                assert_eq!(checkpoint.get().unwrap().garbage, Some(0));
-                assert_eq!(
-                    checkpoint.get().unwrap().canonical.checkpoint.generation,
-                    1
-                );
-                assert!(checkpoint.stage(2).await.is_err());
                 assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
 
+                // The live control store holds its blobs open, so the pending marker is
+                // inspected after a crash.
+                let Some(fail) = fail else {
+                    return (deployment, merkle_partition);
+                };
                 release.send_lossy(if fail {
                     Err(commonware_runtime::Error::Closed)
                 } else {
@@ -314,16 +306,35 @@ fn imported_retirement_waits_for_commit_optional_merkle_rollover_io() {
             });
 
         deterministic::Runner::from(crash).start(|context| async move {
-            if fail {
-                let (sealer, _) = tests::sealer(&context, prefix, &deployment).await;
-                let mut lanes = Vec::new();
-                sealer.lane(&mut lanes, &deployment).await.unwrap();
-                assert!(lanes[0].manifest().garbage.is_none());
-                assert_eq!(lanes[0].manifest().canonical.checkpoint.generation, 1);
-            } else {
-                let lane = reopen(&context, prefix, &deployment).await;
-                assert!(lane.manifest().garbage.is_none());
-                assert_eq!(lane.manifest().canonical.checkpoint.generation, 1);
+            match fail {
+                None => {
+                    // The retirement marker was durable while retirement waited.
+                    let checkpoint = checkpoint::Store::open(
+                        context.child("pending_marker"),
+                        prefix,
+                        deployment.digest(),
+                        crate::protocol::fixture_page_cache(&context),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(checkpoint.get().unwrap().garbage, Some(0));
+                    assert_eq!(checkpoint.get().unwrap().canonical.checkpoint.generation, 1);
+                    assert!(checkpoint.stage(2).await.is_err());
+                    assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
+                    return;
+                }
+                Some(true) => {
+                    let (sealer, _) = tests::sealer(&context, prefix, &deployment).await;
+                    let mut lanes = Vec::new();
+                    sealer.lane(&mut lanes, &deployment).await.unwrap();
+                    assert!(lanes[0].manifest().garbage.is_none());
+                    assert_eq!(lanes[0].manifest().canonical.checkpoint.generation, 1);
+                }
+                Some(false) => {
+                    let lane = reopen(&context, prefix, &deployment).await;
+                    assert!(lane.manifest().garbage.is_none());
+                    assert_eq!(lane.manifest().canonical.checkpoint.generation, 1);
+                }
             }
             assert!(matches!(
                 context.scan(&merkle_partition).await,

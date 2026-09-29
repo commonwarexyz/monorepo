@@ -125,7 +125,7 @@ duplicate Criterion IDs across orthogonal activity/payout slices:
 | `native-proofs` | Criterion verification latency on those decoded, already constructed artifacts. |
 | `native-activity-sizes` / `native-activity-proofs` | Activity half of the combined selectors. |
 | `native-payout-sizes` / `native-payout-proofs` | Payout half of the combined selectors. |
-| `native-transition-check` | Encoded dealing/descriptor sizes and native operation counts; checks two transitions with rewind between them. |
+| `native-transition-check` | Encoded dealing/descriptor sizes and native operation counts; checks two transitions with a reopen at the predecessor between them. |
 | `native-transition` | Criterion native prepare, decode, validate+prepare, apply, memory commit, and complete encoded-dealing pipeline phases. |
 
 Dimensions are comma-separated integer lists, independent of the original
@@ -160,9 +160,9 @@ Context bytes, bounded activity-Append counts/bytes, payout-output counts/bytes,
 and metadata-free Commit sizes report their actual encodings separately from
 operator dealing bytes and the roots/withdrawal-total descriptor.
 
-`native-transition` restores a fixed predecessor through native rewind between
-iterations; fixture construction, signing, cloning native prepare inputs, and
-rewind are outside timers. `native_prepare_state_logs` starts with already
+`native-transition` restores a fixed predecessor by reopening the native stores at
+it between iterations. Fixture construction, signing, cloning native prepare
+inputs, and reopening are outside timers. `native_prepare_state_logs` starts with already
 derived mutations, exact activity Row/Entry records,
 and payout outputs. `validate_prepare_state_logs` starts with a
 decoded dealing and includes cryptographic validation and all native batches.

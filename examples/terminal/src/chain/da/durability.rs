@@ -7,6 +7,7 @@ use commonware_runtime::{
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, next_pending_sync},
 };
+use commonware_storage::merkle::Location;
 use commonware_utils::NZUsize;
 use std::{future::Future, net::SocketAddr};
 
@@ -28,6 +29,7 @@ pub(super) async fn controlled(
     deployment: &Deployment,
     gates: &[PendingSyncs; 3],
     page_cache: CacheRef,
+    target: Option<ReplicaHead<Digest>>,
 ) -> NativeReplica<DelayedSyncContext<deterministic::Context>> {
     let config = replica_config(
         &format!("{prefix}-replica-{}-0", deployment.digest()),
@@ -40,6 +42,7 @@ pub(super) async fn controlled(
             pending: gates[0].clone(),
         },
         config.state,
+        target.map(|target| target.state),
     )
     .await
     .unwrap();
@@ -50,6 +53,7 @@ pub(super) async fn controlled(
             pending: gates[1].clone(),
         },
         config.logs.activity,
+        target.map(|target| Location::new(target.logs.activity.operations)),
     )
     .await
     .unwrap();
@@ -59,6 +63,7 @@ pub(super) async fn controlled(
             pending: gates[2].clone(),
         },
         config.logs.payouts,
+        target.map(|target| Location::new(target.logs.payouts.operations)),
     )
     .await
     .unwrap();
@@ -86,6 +91,7 @@ pub(super) async fn reopen(
             page_cache,
             context.strategy(NZUsize!(1)),
         ),
+        checkpoints.target(deployment).unwrap(),
     )
     .await
     .unwrap();
@@ -107,7 +113,7 @@ async fn controlled_lane(
 ) -> Lane<DelayedSyncContext<deterministic::Context>> {
     let state = drive(
         gates,
-        controlled(context, prefix, deployment, gates, page_cache.clone()),
+        controlled(context, prefix, deployment, gates, page_cache.clone(), None),
     )
     .await;
     let checkpoints = checkpoint::Store::open(
@@ -184,6 +190,7 @@ fn candidate_publication_waits_for_the_private_ack_commit() {
                     crate::protocol::fixture_page_cache(&context),
                     context.strategy(NZUsize!(1)),
                 ),
+                None,
             )
             .await
             .unwrap();
@@ -253,7 +260,7 @@ fn incomplete_candidate_rewinds_all_three_without_a_body_journal() {
 }
 
 #[test]
-fn durable_components_ahead_of_the_manifest_rewind_without_replay() {
+fn durable_components_ahead_of_the_manifest_reopen_without_replay() {
     for durable in 1..8 {
         let ((deployment, parent, candidate), crash) = deterministic::Runner::default()
             .start_and_recover(move |context| async move {
@@ -312,16 +319,14 @@ fn durable_components_ahead_of_the_manifest_rewind_without_replay() {
         let ((deployment, parent), crash) =
             deterministic::Runner::from(crash).start_and_recover(move |context| async move {
                 let page_cache = crate::protocol::fixture_page_cache(&context);
-                let replica = NativeReplica::open(
-                    context.child("raw_ahead"),
-                    replica_config(
-                        &format!("ahead-replica-{}-0", deployment.digest()),
-                        page_cache.clone(),
-                        context.strategy(NZUsize!(1)),
-                    ),
-                )
-                .await
-                .unwrap();
+                let config = replica_config(
+                    &format!("ahead-replica-{}-0", deployment.digest()),
+                    page_cache.clone(),
+                    context.strategy(NZUsize!(1)),
+                );
+                let replica = NativeReplica::open(context.child("raw_ahead"), config.clone(), None)
+                    .await
+                    .unwrap();
                 let observed = replica.head();
                 if durable & 1 != 0 {
                     assert_eq!(observed.state, candidate.state);
@@ -347,12 +352,22 @@ fn durable_components_ahead_of_the_manifest_rewind_without_replay() {
                     checkpoints.get().unwrap().complete().checkpoint.head,
                     parent
                 );
+
+                // Recovery reopens the raw stores at the manifest's complete checkpoint.
+                drop(replica);
+                let replica = NativeReplica::open(
+                    context.child("aligned"),
+                    config,
+                    checkpoints.target(&deployment).unwrap(),
+                )
+                .await
+                .unwrap();
                 let (replica, checkpoints) =
                     recover(replica, &deployment, checkpoints).await.unwrap();
                 assert_eq!(replica.head(), parent);
                 assert!(checkpoints.get().unwrap().decision.is_none());
                 assert_eq!(
-                    tests::metric(&context, "raw_ahead_state_balances_apply_batch_calls_total"),
+                    tests::metric(&context, "aligned_state_balances_apply_batch_calls_total"),
                     0
                 );
                 (deployment, parent)
@@ -421,7 +436,7 @@ fn completed_candidate_survives_restart_and_promotion_without_reapplication() {
 }
 
 #[test]
-fn candidate_disposal_selects_parent_before_each_native_rewind() {
+fn candidate_disposal_selects_parent_before_each_native_reopen() {
     for role in 0..3 {
         let ((deployment, parent, decision), crash) = deterministic::Runner::default().start_and_recover(move |context| async move {
             let mut fixture = Fixture::new(&context, "discard", 8).await;
@@ -439,13 +454,14 @@ fn candidate_disposal_selects_parent_before_each_native_rewind() {
                 &deployment,
                 &gates,
                 metadata,
-                page_cache,
+                page_cache.clone(),
             )
             .await;
             for (index, gate) in gates.iter().enumerate() { if index == role { gate.arm(); } else { gate.unblock(); } }
             let gate = next_pending_sync(&gates[role]);
-            let mut rollback = Box::pin(discard(&mut lane));
-            select! { _ = gate.blocked => {}, _ = &mut rollback => panic!("disposal returned before rewind durability"), }
+            let reopen = |target| controlled(&context, "discard", &deployment, &gates, page_cache, Some(target)).map(Ok);
+            let mut rollback = Box::pin(discard(&mut lane, reopen));
+            select! { _ = gate.blocked => {}, _ = &mut rollback => panic!("disposal returned before reopen durability"), }
             drop(rollback);
             assert_eq!(lane.manifest().complete().checkpoint.head, parent);
             assert!(lane.manifest().candidate.is_none());
@@ -465,52 +481,46 @@ fn candidate_disposal_selects_parent_before_each_native_rewind() {
     }
 }
 
+/// Opening every ahead store at a checkpoint returns only after each store's truncation is durable.
 #[test]
-fn rewind_cannot_publish_volatile_alignment_before_all_native_syncs() {
+fn open_at_checkpoint_waits_for_each_native_durability_barrier() {
     for role in 0..3 {
         let ((deployment, target), crash) = deterministic::Runner::default().start_and_recover(move |context| async move {
-            let fixture = Fixture::new(&context, "rewind_barrier", 8).await;
+            let fixture = Fixture::new(&context, "open_barrier", 8).await;
             let deployment = fixture.lane.deployment.clone();
             let target = fixture.lane.state.as_ref().unwrap().head();
             let (_, _, prepared) = fixture.prepare(3, 3, Floors { activity: 0, payouts: 0 }).await;
             drop(fixture.lane.state.unwrap().apply(prepared.into_parts().1).await.unwrap().sync().await.unwrap());
+
+            // Every store is durably ahead of the target, so opening at it truncates each one.
             let gates = std::array::from_fn(|_| PendingSyncs::default());
-            let replica = drive(
-                &gates,
-                controlled(
-                    &context,
-                    "rewind_barrier",
-                    &deployment,
-                    &gates,
-                    fixture.page_cache.clone(),
-                ),
-            )
-            .await;
-            let (state, logs) = replica.into_parts();
-            // Every native head can match while its rewind is still volatile. The aggregate
-            // call must complete all durability barriers even on these native no-op paths.
-            let state = drive(&gates, state.rewind(&target.state)).await.unwrap();
-            let logs = drive(&gates, logs.rewind(&target.logs)).await.unwrap();
-            let replica = Replica::from_parts(state, logs);
-            assert_eq!(replica.head(), target);
             for (index, gate) in gates.iter().enumerate() { if index == role { gate.arm(); } else { gate.unblock(); } }
             let gate = next_pending_sync(&gates[role]);
-            let mut rewind = Box::pin(replica.rewind(&target));
-            select! { _ = gate.blocked => {}, _ = &mut rewind => panic!("volatile alignment returned before its durability barrier"), }
+            let mut open = Box::pin(controlled(
+                &context,
+                "open_barrier",
+                &deployment,
+                &gates,
+                fixture.page_cache.clone(),
+                Some(target),
+            ));
+            select! { _ = gate.blocked => {}, _ = &mut open => panic!("aligned replica opened before its durability barrier"), }
             assert!(gates[role].calls() > 0);
-            assert_eq!(tests::metric(&context, "controlled_state_balances_apply_batch_calls_total"), 0);
             gate.release.send_lossy(Ok(())); gates[role].unblock();
-            assert_eq!(rewind.await.unwrap().head(), target);
+            let replica = open.await;
+            assert_eq!(replica.head(), target);
+            assert_eq!(tests::metric(&context, "controlled_state_balances_apply_batch_calls_total"), 0);
             (deployment, target)
         });
         deterministic::Runner::from(crash).start(|context| async move {
             let replica = NativeReplica::open(
                 context.child("raw_reopen"),
                 replica_config(
-                    &format!("rewind_barrier-replica-{}-0", deployment.digest()),
+                    &format!("open_barrier-replica-{}-0", deployment.digest()),
                     crate::protocol::fixture_page_cache(&context),
                     context.strategy(NZUsize!(1)),
                 ),
+                None,
             )
             .await
             .unwrap();
@@ -1019,6 +1029,7 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
                     crate::protocol::fixture_page_cache(&context),
                     context.strategy(NZUsize!(1)),
                 ),
+                None,
             )
             .await
             .unwrap();

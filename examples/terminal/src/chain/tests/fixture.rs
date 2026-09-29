@@ -136,8 +136,7 @@ impl ReadFixture {
             0,
             initial_sync_target::<deterministic::Context>(),
         );
-        let startup = context.child("startup");
-        let plan = SyncPlan::init(&startup, prefix).await;
+        let plan = SyncPlan::init(context.child("startup"), prefix).await;
         let (actor, marshal, floor) = MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
             context.child("marshal"),
             finalizations,
@@ -175,7 +174,7 @@ impl ReadFixture {
         );
         let finalized = Finalized::default();
         let app = App::new(parent.clone(), timing, native.clone(), finalized.clone());
-        let (stateful_actor, stateful) = StatefulActor::init(
+        let (stateful_actor, stateful) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application: app.clone(),

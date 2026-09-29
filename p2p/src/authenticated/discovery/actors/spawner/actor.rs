@@ -15,17 +15,18 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream, spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
+use commonware_stream::{Receiver, Sender};
 use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
 
 pub struct Actor<
     E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
-    O: Sink,
-    I: Stream,
+    O: Sender,
+    I: Receiver,
     C: PublicKey,
 > {
     context: ContextCell<E>,
@@ -44,7 +45,7 @@ pub struct Actor<
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sink, I: Stream, C: PublicKey>
+impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: PublicKey>
     Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
@@ -169,9 +170,12 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
-    use commonware_stream::encrypted::{
-        Config as StreamConfig, Receiver as EncryptedReceiver, Sender as EncryptedSender, dial,
-        listen,
+    use commonware_stream::{
+        Handshake as _,
+        encrypted::{
+            Handshake as StreamHandshake, Receiver as EncryptedReceiver, Sender as EncryptedSender,
+        },
+        utils::Timeout,
     };
     use commonware_utils::{NZUsize, SystemTimeExt};
     use std::{
@@ -188,15 +192,15 @@ mod tests {
         EncryptedReceiver<mocks::Stream>,
     );
 
-    fn stream_config(key: PrivateKey) -> StreamConfig<PrivateKey> {
-        StreamConfig {
-            signing_key: key,
-            namespace: STREAM_NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
-            synchrony_bound: Duration::from_secs(10),
-            max_handshake_age: Duration::from_secs(10),
-            handshake_timeout: Duration::from_secs(10),
-        }
+    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
+        Timeout::new(
+            StreamHandshake {
+                signer,
+                synchrony_bound: Duration::from_secs(10),
+                max_handshake_age: Duration::from_secs(10),
+            },
+            Duration::from_secs(10),
+        )
     }
 
     fn spawner_config(me: PublicKey) -> Config<PublicKey> {
@@ -217,41 +221,45 @@ mod tests {
 
     async fn connections(
         context: &deterministic::Context,
-        peer_key: PrivateKey,
-        local_key: PrivateKey,
+        peer_signer: PrivateKey,
+        signer: PrivateKey,
     ) -> (Connection, Connection) {
-        let peer = peer_key.public_key();
-        let local = local_key.public_key();
+        let peer = peer_signer.public_key();
+        let local = signer.public_key();
         let (peer_sink, local_stream) = mocks::Channel::init();
         let (local_sink, peer_stream) = mocks::Channel::init();
 
         let listener = context.child("listener").spawn({
             let expected = peer.clone();
             move |context| async move {
-                listen(
-                    context,
-                    |_| async { true },
-                    stream_config(local_key),
-                    local_stream,
-                    local_sink,
-                )
-                .await
-                .map(|(connected_peer, sender, receiver)| {
-                    assert_eq!(connected_peer, expected);
-                    (sender, receiver)
-                })
+                handshake(signer)
+                    .listen(
+                        context,
+                        STREAM_NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        local_stream,
+                        local_sink,
+                    )
+                    .await
+                    .map(|(connected_peer, sender, receiver)| {
+                        assert_eq!(connected_peer, expected);
+                        (sender, receiver)
+                    })
             }
         });
 
-        let dialer = dial(
-            context.child("dialer"),
-            stream_config(peer_key),
-            local,
-            peer_stream,
-            peer_sink,
-        )
-        .await
-        .expect("dial failed");
+        let dialer = handshake(peer_signer)
+            .dial(
+                context.child("dialer"),
+                STREAM_NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                local,
+                peer_stream,
+                peer_sink,
+            )
+            .await
+            .expect("dial failed");
 
         let listener = listener
             .await
@@ -266,7 +274,7 @@ mod tests {
         context: deterministic::Context,
         local: PublicKey,
     ) -> (
-        Mailbox<Message<mocks::Sink, mocks::Stream, PublicKey>>,
+        Mailbox<Message<EncryptedSender<mocks::Sink>, EncryptedReceiver<mocks::Stream>, PublicKey>>,
         mailbox::Receiver<tracker::Message<PublicKey>>,
         mailbox::UnreliableReceiver<router::Message<PublicKey>>,
         tracker::ingress::Releaser<PublicKey>,
@@ -286,10 +294,12 @@ mod tests {
         let router_mailbox = router::Mailbox::new(router_sender);
 
         let (spawner, spawner_mailbox) =
-            Actor::<deterministic::Context, mocks::Sink, mocks::Stream, PublicKey>::new(
-                context.child("spawner"),
-                spawner_config(local),
-            );
+            Actor::<
+                deterministic::Context,
+                EncryptedSender<mocks::Sink>,
+                EncryptedReceiver<mocks::Stream>,
+                PublicKey,
+            >::new(context.child("spawner"), spawner_config(local));
         let handle = spawner.start(tracker_mailbox, router_mailbox);
 
         (
@@ -304,12 +314,12 @@ mod tests {
     #[test]
     fn tracker_rejection_sends_no_greeting() {
         deterministic::Runner::default().start(|context| async move {
-            let peer_key = PrivateKey::from_seed(1);
-            let local_key = PrivateKey::from_seed(2);
-            let peer = peer_key.public_key();
-            let local = local_key.public_key();
+            let peer_signer = PrivateKey::from_seed(1);
+            let signer = PrivateKey::from_seed(2);
+            let peer = peer_signer.public_key();
+            let local = signer.public_key();
             let ((_, mut peer_receiver), spawner_connection) =
-                connections(&context, peer_key, local_key).await;
+                connections(&context, peer_signer, signer).await;
             let (mut spawner, mut tracker_receiver, _router_receiver, releaser, _handle) =
                 setup(context.child("setup"), local);
             let reservation = tracker::Reservation::new(Metadata::Listener(peer.clone()), releaser);
@@ -347,12 +357,12 @@ mod tests {
     #[test]
     fn router_rejection_sends_no_greeting() {
         deterministic::Runner::default().start(|context| async move {
-            let peer_key = PrivateKey::from_seed(1);
-            let local_key = PrivateKey::from_seed(2);
-            let peer = peer_key.public_key();
-            let local = local_key.public_key();
+            let peer_signer = PrivateKey::from_seed(1);
+            let signer = PrivateKey::from_seed(2);
+            let peer = peer_signer.public_key();
+            let local = signer.public_key();
             let ((_, mut peer_receiver), spawner_connection) =
-                connections(&context, peer_key, local_key.clone()).await;
+                connections(&context, peer_signer, signer.clone()).await;
             let (mut spawner, mut tracker_receiver, mut router_receiver, releaser, _handle) =
                 setup(context.child("setup"), local);
             let reservation = tracker::Reservation::new(Metadata::Listener(peer.clone()), releaser);
@@ -375,10 +385,11 @@ mod tests {
             };
             assert_eq!(public_key, peer);
             let greeting = types::Info::sign(
-                &local_key,
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch_millis(),
+                |namespace, message| signer.sign(namespace, message),
             );
             assert!(responder.send(greeting).is_ok());
 

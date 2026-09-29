@@ -120,7 +120,7 @@ fn activity_absence_uses_canonical_bytes_even_when_key_ord_is_reversed() {
     });
     deterministic::Runner::default().start(|runtime| async move {
         let cfg = logs_config(&runtime, "reverse-absence");
-        let logs = Logs::<_, Sha256, ReverseKey>::open(runtime, cfg)
+        let logs = Logs::<_, Sha256, ReverseKey>::open(runtime, cfg, None)
             .await
             .unwrap();
         let start = logs.head().activity.operations;
@@ -270,7 +270,7 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         )
         .await
         .unwrap();
-        let logs = Logs::<_, Sha256, ReverseKey>::open(runtime.child("logs"), log_cfg)
+        let logs = Logs::<_, Sha256, ReverseKey>::open(runtime.child("logs"), log_cfg, None)
             .await
             .unwrap();
         let state = Replica::from_parts(state, logs);
@@ -496,7 +496,7 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
         )
         .await
         .unwrap();
-        let logs = Logs::<_, Sha256, ReverseKey>::open(runtime.child("logs"), log_cfg)
+        let logs = Logs::<_, Sha256, ReverseKey>::open(runtime.child("logs"), log_cfg, None)
             .await
             .unwrap();
         let state = Replica::from_parts(state, logs);

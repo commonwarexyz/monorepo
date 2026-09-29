@@ -237,6 +237,7 @@ fn current_payout_proof_survives_old_activity_retirement() {
         let logs = Logs::<_, Sha256, VerifyingKey, Sequential>::open(
             runtime.child("small_activity_sections"),
             log_cfg,
+            None,
         )
         .await
         .unwrap();
@@ -358,6 +359,7 @@ fn current_payout_proof_survives_old_activity_retirement() {
                 state: config(&runtime, "fixture"),
                 logs: reopen_log_cfg,
             },
+            None,
         )
         .await
         .unwrap();

@@ -6,7 +6,7 @@ mod conformance;
 use crate::{Hasher, sha256::Sha256};
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, FixedSize,
+    Buf, EncodeSize, FixedSize, RangeCfg,
     codec::{Read, Write},
     error::Error as CodecError,
 };
@@ -291,13 +291,7 @@ impl<H: Hasher> Read for BloomFilter<H> {
                 "hashers doesn't match config",
             ));
         }
-        let bits = BitMap::read_cfg(buf, &bits_cfg.get())?;
-        if bits.len() != bits_cfg.get() {
-            return Err(CodecError::Invalid(
-                "BloomFilter",
-                "bitmap length doesn't match config",
-            ));
-        }
+        let bits = BitMap::read_cfg(buf, &RangeCfg::exact(bits_cfg.get()))?;
         Ok(Self {
             hashers: *hashers_cfg,
             bits,
@@ -449,13 +443,7 @@ mod tests {
 
         let cfg = (NZU8!(5), NZU64!(256));
         let result = BloomFilter::<Sha256>::decode_cfg(encoded.clone(), &cfg);
-        assert!(matches!(
-            result,
-            Err(CodecError::Invalid(
-                "BloomFilter",
-                "bitmap length doesn't match config"
-            ))
-        ));
+        assert!(matches!(result, Err(CodecError::InvalidLength(128))));
 
         // Non-power-of-2 bits
         let cfg = (NZU8!(5), NZU64!(100));
@@ -469,6 +457,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_statistics() {
         let mut bf = BloomFilter::<Sha256>::new(NZU8!(7), NZUsize!(1024));
@@ -493,6 +482,7 @@ mod tests {
         assert!(bf.estimated_false_positive_rate() < BigRational::one());
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_with_rate() {
         // Create a filter for 1000 items with 1% false positive rate
@@ -528,6 +518,7 @@ mod tests {
         assert!(false_positives < 20);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_optimal_hashers() {
         // For 1000 items in 10000 bits, optimal k = (10000/1000) * ln(2) = 6.93
@@ -560,6 +551,7 @@ mod tests {
         assert!((1..=16).contains(&k.get()));
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_optimal_bits() {
         // For 1000 items with 1% FP rate
@@ -579,6 +571,7 @@ mod tests {
         assert!(bits_lower_fp.is_power_of_two());
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_bits_extreme_values() {
         let fp_001pct = BigRational::from_frac_u64(1, 10_000);
@@ -599,6 +592,7 @@ mod tests {
         assert_eq!(bits, 1); // 0 * bpe rounds up to 1
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_with_rate_deterministic() {
         let fp_rate = BigRational::from_frac_u64(1, 100);
@@ -608,6 +602,7 @@ mod tests {
         assert_eq!(bf1.hashers(), bf2.hashers());
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_optimal_bits_matches_formula() {
         // For 1000 items at 1% FP rate

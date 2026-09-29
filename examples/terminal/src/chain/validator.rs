@@ -58,6 +58,7 @@ use commonware_storage::{
     archive::prunable, journal::contiguous::variable::Config as VariableJournalConfig,
     merkle::full::Config as MerkleConfig, translator::TwoCap,
 };
+use commonware_stream::encrypted::Handshake;
 use commonware_utils::{NZU32, NZU64, NZUsize, ordered::Set};
 use std::{
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -205,19 +206,11 @@ impl commonware_storage::qmdb::sync::Source for NoopResolver {
     >;
     type Error = std::convert::Infallible;
 
-    fn serve<'a>(
-        &'a self,
+    fn serve(
+        &self,
         _: commonware_storage::qmdb::sync::Request<Self::Family>,
-    ) -> impl std::future::Future<
-        Output = Result<
-            (
-                commonware_storage::qmdb::sync::Response<Self::Family, Self::Op, Self::Digest>,
-                commonware_storage::qmdb::sync::FeedbackTx,
-            ),
-            Self::Error,
-        >,
-    > + Send
-    + 'a {
+    ) -> impl std::future::Future<Output = commonware_storage::qmdb::sync::source::Result<Self>> + Send
+    {
         std::future::pending()
     }
 }
@@ -282,7 +275,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let provider = ConstantProvider::new(scheme.clone());
 
     let mut p2p_config = discovery::Config::local(
-        node.signing_key.clone(),
+        Handshake::new(node.signing_key.clone()),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,
@@ -377,8 +370,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         initial_sync_target::<tokio::Context>(),
     );
 
-    let startup = context.child("stateful_startup");
-    let plan = SyncPlan::init(&startup, partition_prefix).await;
+    let plan = SyncPlan::init(context.child("stateful_startup"), partition_prefix).await;
 
     // Marshal actor.
     let (marshal_actor, marshal, floor) = MarshalActor::init(
@@ -428,7 +420,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         genesis_output.native.clone(),
         finalized.clone(),
     );
-    let (stateful_actor, stateful_mailbox) = Stateful::init(
+    let (stateful_actor, stateful_mailbox) = Stateful::new(
         context.child("stateful"),
         StatefulConfig {
             application,

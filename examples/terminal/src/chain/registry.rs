@@ -215,6 +215,7 @@ mod tests {
             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
                 context.child("db"),
                 db_config("registry-polls", protocol::fixture_page_cache(&context)),
+                None,
             )
             .await;
             let known = native.deployments.len();
@@ -301,7 +302,7 @@ mod tests {
             native.deployments[0].network_key = old_peer.clone();
             let view = RegistryView::new(native.deployments.clone());
             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
-                context.child("db"), db_config("registry-test", protocol::fixture_page_cache(&context)),
+                context.child("db"), db_config("registry-test", protocol::fixture_page_cache(&context)), None,
             ).await;
             let committee = Set::from_iter_dedup([ed25519::PrivateKey::from_seed(3).public_key()]);
             let recorder = Recorder::default();
@@ -367,7 +368,7 @@ mod tests {
             let root = db.read().await.root();
             drop(db);
             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
-                context.child("reopened"), db_config("registry-test", protocol::fixture_page_cache(&context)),
+                context.child("reopened"), db_config("registry-test", protocol::fixture_page_cache(&context)), None,
             ).await;
             assert_eq!(db.read().await.root(), root);
             assert_eq!(state::registry(&db, &native).await.unwrap().len(), 4);

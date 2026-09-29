@@ -213,10 +213,11 @@ async fn state_fixture(
     let logs = commonware_clearing::bajillion::logs::Logs::open(
         runtime.child("logs"),
         super::fixtures::logs_config(&runtime, "settlement"),
+        None,
     )
     .await
     .unwrap();
-    let state = State::open(runtime, config)
+    let state = State::open(runtime, config, None)
         .await
         .expect("open native state");
     assert!(state.is_bootstrap());

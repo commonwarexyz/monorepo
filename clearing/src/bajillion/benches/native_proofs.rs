@@ -67,7 +67,7 @@ async fn activity_cases(
         })
         .collect::<Vec<_>>();
     let cfg = fixtures::logs_config(&runtime, "activity-measurement");
-    let mut logs = NativeLogs::open(runtime, cfg).await.unwrap();
+    let mut logs = NativeLogs::open(runtime, cfg, None).await.unwrap();
     if history > 0 {
         let batch = logs
             .prepare(
@@ -261,7 +261,7 @@ async fn payout_cases(
     accounts: usize,
 ) -> Vec<PayoutCase> {
     let cfg = fixtures::logs_config(&runtime, "payout-measurement");
-    let mut logs = NativeLogs::open(runtime, cfg).await.unwrap();
+    let mut logs = NativeLogs::open(runtime, cfg, None).await.unwrap();
     if history > 0 {
         let batch = logs
             .prepare(

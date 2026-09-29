@@ -6,7 +6,7 @@ use commonware_clearing::bajillion::{
     logs::{self, Floors, Logs},
     payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
     qmdb::{self, State, account_key},
-    replica::Replica,
+    replica::{self, Replica, ReplicaHead},
     transition::{
         Close, CloseContext, CloseLimits, EpochContext, Header, OperatorKey, OperatorVariant,
         PreparedClose, RootBundle, Terminal, prepare_close_with_strategy,
@@ -337,10 +337,10 @@ pub(crate) async fn new_state(
         .collect();
     let config = state_config(&runtime, "benchmark");
     let log_cfg = logs_config(&runtime, "benchmark");
-    let logs = Logs::open(runtime.child("logs"), log_cfg)
+    let logs = Logs::open(runtime.child("logs"), log_cfg, None)
         .await
         .expect("open native logs");
-    let state = State::open(runtime, config)
+    let state = State::open(runtime, config, None)
         .await
         .expect("open native state");
     assert!(state.is_bootstrap());
@@ -350,6 +350,20 @@ pub(crate) async fn new_state(
         .expect("prepare canonical genesis");
     let state = state.apply(genesis).await.expect("apply canonical genesis");
     Replica::from_parts(state, logs)
+}
+
+/// Reopen the [`new_state`] stores at `target`, durably discarding later native operations.
+pub(crate) async fn reopen_state(
+    runtime: deterministic::Context,
+    target: ReplicaHead<Digest>,
+) -> BenchState {
+    let config = replica::Config {
+        state: state_config(&runtime, "benchmark"),
+        logs: logs_config(&runtime, "benchmark"),
+    };
+    Replica::open(runtime, config, Some(target))
+        .await
+        .expect("reopen native state")
 }
 
 pub(crate) fn epoch_context(

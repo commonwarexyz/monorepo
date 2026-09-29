@@ -11,17 +11,18 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream, spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
+use commonware_stream::{Receiver, Sender};
 use rand_core::CryptoRng;
 use std::num::NonZeroUsize;
 use tracing::debug;
 
 pub struct Actor<
     E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
-    Si: Sink,
-    St: Stream,
+    Si: Sender,
+    St: Receiver,
     C: PublicKey,
 > {
     context: ContextCell<E>,
@@ -37,8 +38,12 @@ pub struct Actor<
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, Si: Sink, St: Stream, C: PublicKey>
-    Actor<E, Si, St, C>
+impl<
+    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
+    Si: Sender,
+    St: Receiver,
+    C: PublicKey,
+> Actor<E, Si, St, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
         let sent_messages = context.family("messages_sent", "messages sent");

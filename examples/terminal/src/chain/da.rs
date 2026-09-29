@@ -1,7 +1,7 @@
 //! Native close certification, checkpoint recovery, and proof serving.
 //!
 //! A vote becomes visible only after all three public stores and the private candidate
-//! checkpoint are durable. Recovery rewinds the public stores to the selected common checkpoint.
+//! checkpoint are durable. Recovery reopens the public stores at the selected common checkpoint.
 //! Independent replicas may retain older native history for proof availability.
 
 #[cfg(feature = "bench")]
@@ -33,7 +33,7 @@ use commonware_actor::mailbox::{self, UnreliablePolicy, UnreliableReceiver, Unre
 use commonware_clearing::bajillion::{
     admission::{Vote, bls12381, seal},
     logs::{Floors, Heads},
-    replica::{PreparedReplica, Replica},
+    replica::{PreparedReplica, Replica, ReplicaHead},
     transition::{CloseContext, EpochContext, Header, RootBundle},
 };
 use commonware_codec::{
@@ -204,6 +204,8 @@ impl Ballot {
 }
 
 /// Every backwards transition selects its durable target before truncating native stores.
+///
+/// A replica with a checkpoint must already be open at [`checkpoint::Store::target`].
 #[commonware_macros::boxed]
 async fn recover<E: StorageContext + Spawner>(
     mut replica: NativeReplica<E>,
@@ -259,7 +261,10 @@ async fn recover<E: StorageContext + Spawner>(
     let manifest = checkpoints.get().unwrap();
     manifest.check(deployment)?;
     let complete = &manifest.complete().checkpoint;
-    replica = replica.rewind(&complete.head).await?;
+    ensure!(
+        replica.head() == complete.head,
+        "native replica is not open at its complete checkpoint"
+    );
     if manifest.candidate.is_none() {
         let retained = complete.retained;
         replica = replica
@@ -309,14 +314,26 @@ async fn persist_candidate<E: StorageContext + Spawner>(
 }
 
 /// Select the durable parent before any native candidate data is truncated.
-async fn discard<E: StorageContext + Spawner>(lane: &mut Lane<E>) -> Result<()> {
+///
+/// `reopen` opens the lane's stores at the selected parent after the candidate stores close.
+async fn discard<E, F>(
+    lane: &mut Lane<E>,
+    reopen: impl FnOnce(ReplicaHead<Digest>) -> F,
+) -> Result<()>
+where
+    E: StorageContext + Spawner,
+    F: Future<Output = Result<NativeReplica<E>>>,
+{
     let mut manifest = lane.manifest().as_ref().clone();
     if manifest.candidate.take().is_none() {
         return Ok(());
     }
     let target = manifest.canonical.checkpoint.head;
     lane.checkpoint = Some(lane.checkpoint.take().unwrap().put(manifest).await?);
-    lane.state = Some(lane.state.take().unwrap().rewind(&target).await?);
+
+    // Release every candidate store before reopening it at the parent.
+    drop(lane.state.take());
+    lane.state = Some(reopen(target).await?);
     Ok(())
 }
 
@@ -525,6 +542,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         let replica = NativeReplica::open(
             self.context.child("replica"),
             self.config(deployment.digest(), generation),
+            checkpoints.target(deployment)?,
         )
         .await?;
         let (replica, checkpoints) = recover(replica, deployment, checkpoints).await?;
@@ -754,7 +772,14 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                     }
                 };
                 if expired && authority.get(epoch).is_none() {
-                    discard(lane).await?;
+                    let digest = *lane.deployment.digest();
+                    let generation = lane.manifest().canonical.checkpoint.generation;
+                    discard(lane, |target| async move {
+                        let context = self.context.child("replica");
+                        let config = self.config(&digest, generation);
+                        Ok(NativeReplica::open(context, config, Some(target)).await?)
+                    })
+                    .await?;
                 }
             }
         }

@@ -83,15 +83,34 @@ where
     S: Strategy,
 {
     /// Open all native stores and report their independently recovered heads.
-    pub async fn open(context: E, config: Config<S>) -> Result<Self, Error> {
+    ///
+    /// With a `target`, every store selects its latest commit with at most the operations of its
+    /// head in `target` and durably discards every operation after it before this returns. See
+    /// [`State::open`] and [`Logs::open`] for how a selected commit that differs from `target` is
+    /// reported.
+    pub async fn open(
+        context: E,
+        config: Config<S>,
+        target: Option<ReplicaHead<H::Digest>>,
+    ) -> Result<Self, Error> {
         let mut partitions = qmdb::physical_partitions(&config.state);
         partitions.extend(logs::physical_partitions(&config.logs));
         partitions.sort_unstable();
         if partitions.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(Error::Partition);
         }
-        let state = State::open(context.child("state"), config.state).await?;
-        let logs = Logs::open(context.child("logs"), config.logs).await?;
+        let state = State::open(
+            context.child("state"),
+            config.state,
+            target.map(|target| target.state),
+        )
+        .await?;
+        let logs = Logs::open(
+            context.child("logs"),
+            config.logs,
+            target.map(|target| target.logs),
+        )
+        .await?;
         Ok(Self { state, logs })
     }
 
@@ -182,19 +201,6 @@ where
         })
     }
 
-    /// Rewind every ahead store to a shared checkpoint and make the alignment durable.
-    ///
-    /// A store already at the target takes its native no-op path. Any error consumes the entire
-    /// replica; reopen before retrying.
-    pub async fn rewind(mut self, target: &ReplicaHead<H::Digest>) -> Result<Self, Error> {
-        self.state = self.state.rewind(&target.state).await?;
-        self.logs = self.logs.rewind(&target.logs).await?;
-        if self.head() != *target {
-            return Err(Error::Predecessor);
-        }
-        self.sync().await
-    }
-
     /// Prune all stores only after the application has published this live shared checkpoint.
     pub async fn prune(
         mut self,
@@ -277,7 +283,7 @@ pub enum Error {
     /// A flat log failed.
     #[error("replica logs: {0}")]
     Logs(#[from] logs::Error),
-    /// The candidate or recovery target does not identify this exact replica prefix.
+    /// The candidate or checkpoint does not identify this exact replica prefix.
     #[error("replica predecessor does not match")]
     Predecessor,
 }
