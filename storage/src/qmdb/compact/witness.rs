@@ -221,6 +221,7 @@ pub(crate) struct Store<E: Context, F: Family, Op, D: Digest> {
 }
 
 impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
+    /// Wrap `journal`, whose latest entry is `tip`'s witness.
     pub(crate) fn new(journal: Journal<E, F, D>, tip: Tip<F, Op, D>) -> Self {
         Self {
             journal,

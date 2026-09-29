@@ -590,6 +590,11 @@ where
     }
 
     /// Return the pinned Merkle nodes at the given location.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::RangeOutOfBounds`] if `loc` exceeds the operation count, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
         self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }

@@ -4168,6 +4168,18 @@ mod tests {
             live_ops[..3].iter().map(Encode::encode).collect::<Vec<_>>()
         );
 
+        // The operations buffered at capture read back from the snapshot.
+        let buffered_reads = snapshot.read_many(&[50, 51, 52, 53, 54]).await.unwrap();
+        assert_eq!(
+            buffered_reads
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>(),
+            (0..5u8)
+                .map(|i| create_operation::<F>(i.wrapping_add(200)).encode())
+                .collect::<Vec<_>>()
+        );
+
         // Historical proofs at or below the frozen size match the capture-time proof, while
         // anything above is rejected.
         let (historical, historical_ops) = snapshot
