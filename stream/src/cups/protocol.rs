@@ -646,7 +646,7 @@ mod test {
             for version in [Version::V0, Version::V1] {
                 let cups = Cups::<_, RecordCipher>::new(RejectingHandshake, version);
 
-                // Dial.
+                // Dialing runs the handshake with the application namespace and returns its error.
                 let (sink, stream) = mocks::Channel::init();
                 assert!(
                     cups.clone()
@@ -655,7 +655,7 @@ mod test {
                         .is_err()
                 );
 
-                // Listen.
+                // Listening does the same.
                 let (sink, stream) = mocks::Channel::init();
                 assert!(
                     cups.listen(
