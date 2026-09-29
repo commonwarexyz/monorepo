@@ -120,8 +120,8 @@ impl<D: Digest> HistoryState<D> {
 
     /// Validates the next oldest-first history opening against resolved ancestry.
     ///
-    /// `common` contains, on every chain, the resolved lower of the opening tip and the emitted tip.
-    /// It proves exact ancestry compatibility before height-based duplicate suppression is used.
+    /// `common` contains, on every chain, the ancestor of the higher of the opening tip and the
+    /// emitted tip at the lower one's height, as [`Self::validate_reconciliation`] describes.
     pub(crate) fn validate_opening<H: Hasher<Digest = D>>(
         &self,
         commitment: D,
@@ -208,7 +208,14 @@ impl<D: Digest> HistoryState<D> {
         Ok(Reconciliation::Emit)
     }
 
-    /// Validates that `common` holds, on every chain, the lower of `target` and the emitted tip.
+    /// Validates `common`, which holds on every chain the ancestor of the higher of `target` and
+    /// the emitted tip at the lower one's height.
+    ///
+    /// Slots at or below the emitted height are suppressed as duplicates, so the ancestor must be
+    /// the lower reference. The exception is a target above an ordered tip that nothing was
+    /// emitted past: an anchor may jump to a certified block on another branch (only an
+    /// equivocating producer makes one), and the order then reads every new block off the
+    /// target's own path.
     pub(crate) fn validate_reconciliation(
         &self,
         target: &[BlockRef<D>],
@@ -216,17 +223,23 @@ impl<D: Digest> HistoryState<D> {
     ) -> Result<(), Error> {
         same_chains(&self.emitted, target)?;
         same_chains(&self.emitted, common)?;
-        for ((emitted, target), common) in self.emitted.references().iter().zip(target).zip(common)
+        for (((emitted, ordered), target), common) in self
+            .emitted
+            .references()
+            .iter()
+            .zip(self.ordered.references())
+            .zip(target)
+            .zip(common)
         {
             if emitted.height() == target.height() && emitted != target {
                 return Err(Error::Conflict);
             }
-            let expected = if target.height() <= emitted.height() {
-                target
+            let valid = if target.height() <= emitted.height() {
+                common == target
             } else {
-                emitted
+                common == emitted || (emitted == ordered && common.height() == emitted.height())
             };
-            if common != expected {
+            if !valid {
                 return Err(Error::Conflict);
             }
         }
@@ -1047,6 +1060,51 @@ mod tests {
             height: conflict.height(),
         };
         assert_eq!(state.reconcile(slot, conflict), Err(Error::Conflict));
+    }
+
+    #[test]
+    fn reconciliation_accepts_an_anchor_jump_only_from_an_unextended_ordered_tip() {
+        let history = Sha256::hash(&[b"jump history"]);
+        let rival = |height: u64| {
+            BlockRef::new(
+                ChainId::new(0),
+                Height::new(height),
+                Sha256::hash(&[b"rival", &height.to_be_bytes()]),
+            )
+        };
+        // Chain 0's target sits on a rival branch whose block at height 2 is not the emitted tip.
+        let target = vec![rival(3), reference(1, 1)];
+        let common = vec![rival(2), reference(1, 1)];
+
+        // Nothing was emitted past the ordered tip, so the rival path supplies every new block.
+        let ordered = frontier(&[2, 1]);
+        HistoryState::new(history, ordered.clone(), ordered)
+            .unwrap()
+            .validate_reconciliation(&target, &common)
+            .unwrap();
+
+        // A final sweep emitted height 2 past the ordered tip, and a target must keep it.
+        let swept = HistoryState::new(history, frontier(&[1, 1]), frontier(&[2, 1])).unwrap();
+        assert_eq!(
+            swept.validate_reconciliation(&target, &common),
+            Err(Error::Conflict)
+        );
+
+        // A resolved ancestor must sit at the emitted height.
+        let state = HistoryState::new(history, frontier(&[2, 1]), frontier(&[2, 1])).unwrap();
+        assert_eq!(
+            state.validate_reconciliation(&target, &[rival(1), reference(1, 1)]),
+            Err(Error::Conflict)
+        );
+        // A target below the emitted tip must be the emitted tip's ancestor.
+        let ahead = HistoryState::new(history, frontier(&[1, 1]), frontier(&[3, 1])).unwrap();
+        assert_eq!(
+            ahead.validate_reconciliation(
+                &[rival(2), reference(1, 1)],
+                &[reference(0, 2), reference(1, 1)]
+            ),
+            Err(Error::Conflict)
+        );
     }
 
     #[test]

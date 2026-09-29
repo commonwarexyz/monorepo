@@ -355,7 +355,8 @@ where
         self.record_opening(link, batch).await
     }
 
-    /// Opens a run of tip-history records with one ancestry walk and one custody window.
+    /// Opens a run of tip-history records with one ancestry walk and one custody window, or one
+    /// record at a time when their tips do not share one path.
     #[tracing::instrument(
         name = "multimmit.marshal.synchronizer.open_history_window",
         level = "info",
@@ -368,8 +369,15 @@ where
         batch: &mut PublicationBatch<H, V, B>,
     ) -> Result<(), Error> {
         let emitted = self.state.emitted().to_vec();
+        let Some(staged) = self.stage_window(&links, &emitted).await? else {
+            // An anchor jumped branches inside the window. Each opening then reads its blocks off
+            // its own tip, and is recorded before the next one emits.
+            for link in links {
+                self.open(link, batch).await?;
+            }
+            return Ok(());
+        };
         let mut stream = history_order(self.state.ordered(), &links)?.into_iter();
-        let staged = self.stage_window(&links, &emitted).await?;
 
         // Validate every opening before the first output mutates ordering state. The single
         // ancestry walk proves each opening tip lies on the future emitted frontier.
@@ -392,18 +400,22 @@ where
     }
 
     /// Authenticates every producer frontier of a history window with one ancestry walk.
+    ///
+    /// Returns `None` when the window's tips do not share one path on some chain. Mid-window
+    /// commits checkpoint the window's starting ordered frontier, and custody runs span openings,
+    /// so every staged block must lie on the newest tip's path.
     async fn stage_window(
         &mut self,
         links: &[HistoryLink<H>],
         emitted: &[BlockRef<H::Digest>],
-    ) -> Result<StagedWindow<H::Digest>, Error> {
-        let ordered = self.state.ordered();
+    ) -> Result<Option<StagedWindow<H::Digest>>, Error> {
+        let ordered = self.state.ordered().to_vec();
         if ordered.len() != emitted.len() {
             return Err(Error::Invalid("frontier lengths differ"));
         }
         let walks = emitted
             .iter()
-            .zip(ordered)
+            .zip(&ordered)
             .enumerate()
             .map(|(chain, (emitted, ordered))| {
                 let tips = links
@@ -416,20 +428,24 @@ where
             .collect::<Result<Vec<_>, _>>()?;
         let bounds = walks.iter().map(ProducerWalk::bounds).collect::<Vec<_>>();
         let plan = self.walk(walks, FetchReason::Finality).await?;
-        if plan
-            .common
-            .iter()
-            .zip(&bounds)
-            .any(|(common, bounds)| *common != bounds.low)
+        // As in `HistoryState::validate_reconciliation`, the walk may end off its lower bound only
+        // where the first opening's anchor jumped from an ordered tip nothing was emitted past.
+        if plan.diverged
+            || plan
+                .common
+                .iter()
+                .zip(&bounds)
+                .zip(emitted.iter().zip(&ordered))
+                .any(|((common, bounds), (emitted, ordered))| {
+                    *common != bounds.low && (bounds.low != *emitted || emitted != ordered)
+                })
         {
-            return Err(Error::Invalid(
-                "history window does not descend to its recovery frontier",
-            ));
+            return Ok(None);
         }
-        Ok(StagedWindow {
+        Ok(Some(StagedWindow {
             emitted: bounds.into_iter().map(|bounds| bounds.high).collect(),
             forward: plan.forward,
-        })
+        }))
     }
 
     /// Advances the authenticated history frontier past `link` and queues its durable row.
