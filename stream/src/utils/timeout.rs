@@ -36,9 +36,9 @@ pub enum TimeoutError<E> {
 ///     sake_cups(
 ///         Sake {
 ///             signer: PrivateKey::from_seed(0),
-///             version: Version::V1,
 ///             synchrony_bound: Duration::from_secs(5),
 ///             max_handshake_age: Duration::from_secs(10),
+///             version: Version::V1,
 ///         },
 ///         Cups::new(cups::Version::V1),
 ///     ),

@@ -334,9 +334,9 @@ mod tests {
         let handshake = (
             Sake {
                 signer,
-                version: Version::V1,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
+                version: Version::V1,
             },
             Cups::new(cups::Version::V1),
         );

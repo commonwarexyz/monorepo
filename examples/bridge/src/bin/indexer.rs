@@ -246,9 +246,9 @@ fn main() {
             (
                 Sake {
                     signer,
-                    version: Version::V1,
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(60),
+                    version: Version::V1,
                 },
                 Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),

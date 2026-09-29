@@ -76,9 +76,9 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
         let listener_handshake = (
             Sake {
                 signer: listener.clone(),
-                version,
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),
+                version,
             },
             Cups::<ChaCha20Poly1305>::new(records),
         );
@@ -97,9 +97,9 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
         let (mut dialer_tx, mut dialer_rx) = (
             Sake {
                 signer: dialer,
-                version,
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),
+                version,
             },
             Cups::<ChaCha20Poly1305>::new(records),
         )

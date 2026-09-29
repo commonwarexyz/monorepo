@@ -162,9 +162,9 @@
 //!     sake_cups(
 //!         Sake {
 //!             signer: signer.clone(),
-//!             version: Version::V1,
 //!             synchrony_bound: Duration::from_secs(5),
 //!             max_handshake_age: Duration::from_secs(10),
+//!             version: Version::V1,
 //!         },
 //!         Cups::new(cups::Version::V1),
 //!     ),
@@ -2396,9 +2396,9 @@ mod tests {
             let (sender, receiver) = sake_cups(
                 Sake {
                     signer: self.transport_signer,
-                    version: sake::Version::V1,
                     synchrony_bound: Duration::from_secs(5),
                     max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
                 },
                 Cups::new(cups::Version::V1),
             )
@@ -2443,9 +2443,9 @@ mod tests {
             let (transport_peer, sender, receiver) = sake_cups(
                 Sake {
                     signer: self.transport_signer.clone(),
-                    version: sake::Version::V1,
                     synchrony_bound: Duration::from_secs(5),
                     max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
                 },
                 Cups::new(cups::Version::V1),
             )

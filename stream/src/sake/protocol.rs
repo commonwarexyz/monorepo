@@ -51,9 +51,9 @@ impl From<HandshakeError> for Error {
 /// let upgrader = (
 ///     Sake {
 ///         signer: PrivateKey::from_seed(0),
-///         version: Version::V1,
 ///         synchrony_bound: Duration::from_secs(5),
 ///         max_handshake_age: Duration::from_secs(10),
+///         version: Version::V1,
 ///     },
 ///     Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 /// );
@@ -63,14 +63,14 @@ pub struct Sake<S> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
 
-    /// SAKE version.
-    pub version: Version,
-
     /// Maximum time drift allowed for future timestamps.
     pub synchrony_bound: Duration,
 
     /// Maximum age of handshake messages before rejection.
     pub max_handshake_age: Duration,
+
+    /// SAKE version.
+    pub version: Version,
 }
 
 impl<S> Sake<S> {
@@ -339,9 +339,9 @@ mod test {
         (
             Sake {
                 signer,
-                version,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
+                version,
             },
             Cups::new(records),
         )

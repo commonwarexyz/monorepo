@@ -171,9 +171,9 @@ fn main() {
         (
             Sake {
                 signer: signer.clone(),
-                version: Version::V1,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(60),
+                version: Version::V1,
             },
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
@@ -185,9 +185,9 @@ fn main() {
         sake_cups(
             Sake {
                 signer,
-                version: sake::Version::V1,
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
             },
             Cups::new(cups::Version::V1),
         ),

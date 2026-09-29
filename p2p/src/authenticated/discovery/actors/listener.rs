@@ -294,9 +294,9 @@ mod tests {
             let handshake = sake_cups(
                 Sake {
                     signer: PrivateKey::from_seed(1),
-                    version: Version::V1,
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),
+                    version: Version::V1,
                 },
                 Cups::new(cups::Version::V1),
             );
@@ -445,9 +445,9 @@ mod tests {
             let handshake = sake_cups(
                 Sake {
                     signer: PrivateKey::from_seed(1),
-                    version: Version::V1,
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),
+                    version: Version::V1,
                 },
                 Cups::new(cups::Version::V1),
             );

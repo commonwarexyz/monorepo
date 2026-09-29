@@ -40,9 +40,9 @@ fn fuzz(data: &[u8]) {
         let dialer_handshake = (
             Sake {
                 signer: dialer_signer.clone(),
-                version,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
+                version,
             },
             records(version),
         );
@@ -51,9 +51,9 @@ fn fuzz(data: &[u8]) {
         let listener_handshake = (
             Sake {
                 signer: listener_signer.clone(),
-                version,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
+                version,
             },
             records(version),
         );
