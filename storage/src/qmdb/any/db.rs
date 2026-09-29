@@ -148,6 +148,11 @@ where
         self.inactivity_floor_loc
     }
 
+    /// Return the number of active keys in the snapshot.
+    pub const fn active_keys(&self) -> usize {
+        self.active_keys
+    }
+
     /// Whether the snapshot currently has no active keys.
     pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
