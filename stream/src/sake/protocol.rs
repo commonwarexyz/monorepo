@@ -39,7 +39,7 @@ impl From<HandshakeError> for Error {
     }
 }
 
-/// Implements [crate::Exchange] with SAKE.
+/// Implements [crate::Handshake] with SAKE.
 ///
 /// # Examples
 ///
@@ -68,7 +68,7 @@ pub struct Sake<S> {
 }
 
 impl<S> Sake<S> {
-    /// Creates an exchange that accepts timestamps up to five seconds ahead or ten seconds old.
+    /// Creates a handshake that accepts timestamps up to five seconds ahead or ten seconds old.
     pub const fn new(signer: S, version: Version) -> Self {
         Self {
             signer,
@@ -136,13 +136,13 @@ where
 }
 
 impl<S: Signer> Sake<S> {
-    /// Signs `message` in `namespace` with the identity this exchange authenticates.
+    /// Signs `message` in `namespace` with the identity this handshake authenticates.
     pub fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
         self.signer.sign(namespace, message)
     }
 }
 
-impl<S: Signer> crate::Exchange for Sake<S> {
+impl<S: Signer> crate::Handshake for Sake<S> {
     type PublicKey = S::PublicKey;
     type Error = Error;
 
@@ -1041,7 +1041,7 @@ mod test {
             // application limit.
             assert!(matches!(
                 result,
-                Err(TimeoutError::Handshake(Error::Frame(FrameError::RecvTooLarge(n))))
+                Err(TimeoutError::Upgrade(Error::Frame(FrameError::RecvTooLarge(n))))
                     if n == peer.encode().len() + 1
             ));
         });
@@ -1107,7 +1107,7 @@ mod test {
             // larger application-sized receive path is considered.
             assert!(matches!(
                 result,
-                Err(TimeoutError::Handshake(Error::Frame(FrameError::RecvTooLarge(n))))
+                Err(TimeoutError::Upgrade(Error::Frame(FrameError::RecvTooLarge(n))))
                     if n == syn_ack.encode().len() + 1
             ));
         });

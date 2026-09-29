@@ -1,7 +1,7 @@
 //! Run [Simple Authenticated Key Exchange (SAKE)](commonware_cryptography::handshake::sake) over
 //! a connection.
 //!
-//! [Sake] implements [crate::Exchange], deriving one
+//! [Sake] implements [crate::Handshake], deriving one
 //! [Cipher](commonware_cryptography::Cipher) per direction. Pair it with a [crate::Transport] (for
 //! example [Cups](crate::cups::Cups)) as an [crate::Upgrader] to establish streams.
 //!

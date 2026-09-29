@@ -316,7 +316,7 @@ mod tests {
     use super::*;
     use crate::{
         Ingress, Manager,
-        authenticated::{discovery::actors::peer, stream::sake_handshake},
+        authenticated::{discovery::actors::peer, stream::sake_upgrader},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{Signer, ed25519::PrivateKey};
@@ -334,7 +334,7 @@ mod tests {
             let peer = peer_signer.public_key();
             let address = SocketAddr::from(([127, 0, 0, 1], 7000));
             let cfg = Config::local(
-                sake_handshake(signer.clone()),
+                sake_upgrader(signer.clone()),
                 b"discovery-test",
                 address,
                 address,

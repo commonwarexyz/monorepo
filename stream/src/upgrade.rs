@@ -1,20 +1,20 @@
-//! Pair an [Exchange] with a [Transport].
+//! Pair a [Handshake] with a [Transport].
 
-use crate::{Exchange, Transport, Upgrader};
+use crate::{Handshake, Transport, Upgrader};
 use commonware_runtime::{BufferPooler, Clock, Sink, Stream};
 use rand_core::CryptoRng;
 use std::future::Future;
 
-/// Runs the key exchange `K`, then keys the transport `T` with the agreed ciphers.
-impl<K, T> Upgrader for (K, T)
+/// Runs the handshake `H`, then keys the transport `T` with the agreed ciphers.
+impl<H, T> Upgrader for (H, T)
 where
-    K: Exchange,
+    H: Handshake,
     T: Transport,
 {
     const MAX_SIZE: u32 = T::MAX_SIZE;
 
-    type PublicKey = K::PublicKey;
-    type Error = K::Error;
+    type PublicKey = H::PublicKey;
+    type Error = H::Error;
     type Sender<I: Stream, O: Sink> = T::Sender<O>;
     type Receiver<I: Stream, O: Sink> = T::Receiver<I>;
 
@@ -41,10 +41,10 @@ where
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
-        let (exchange, transport) = self;
+        let (handshake, transport) = self;
 
         // Agree on ciphers bound to this transport, then key it on the same connection.
-        let (send, recv) = exchange
+        let (send, recv) = handshake
             .dial(
                 context,
                 namespace,
@@ -78,10 +78,10 @@ where
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
-        let (exchange, transport) = self;
+        let (handshake, transport) = self;
 
         // Agree on ciphers bound to this transport, then key it on the same connection.
-        let (peer, send, recv) = exchange
+        let (peer, send, recv) = handshake
             .listen(
                 context,
                 namespace,

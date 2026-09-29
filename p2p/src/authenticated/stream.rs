@@ -14,11 +14,11 @@ use std::future::Future;
 
 /// SAKE handshake that keys CUPS records, shared by tests.
 #[cfg(test)]
-pub(crate) type StreamHandshake<S> = (Sake<S>, Cups<ChaCha20Poly1305>);
+pub(crate) type StreamUpgrader<S> = (Sake<S>, Cups<ChaCha20Poly1305>);
 
-/// Returns a version 1 [StreamHandshake] that signs with `signer`.
+/// Returns a version 1 [StreamUpgrader] that signs with `signer`.
 #[cfg(test)]
-pub(crate) const fn sake_handshake<S: Signer>(signer: S) -> StreamHandshake<S> {
+pub(crate) const fn sake_upgrader<S: Signer>(signer: S) -> StreamUpgrader<S> {
     (Sake::new(signer, Version::V1), Cups::new(cups::Version::V1))
 }
 
@@ -110,13 +110,13 @@ mod tests {
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::cups;
 
-    type SakeHandshake = StreamHandshake<PrivateKey>;
+    type SakeHandshake = StreamUpgrader<PrivateKey>;
 
     const NAMESPACE: &[u8] = b"test_namespace";
     const LIMIT: u32 = 1024;
 
     fn handshake(seed: u64) -> SakeHandshake {
-        sake_handshake(PrivateKey::from_seed(seed))
+        sake_upgrader(PrivateKey::from_seed(seed))
     }
 
     #[test]

@@ -199,10 +199,10 @@ impl<U: Upgrader> Config<U> {
 }
 
 #[cfg(test)]
-impl<C: Signer> Config<crate::authenticated::stream::StreamHandshake<C>> {
+impl<C: Signer> Config<crate::authenticated::stream::StreamUpgrader<C>> {
     pub fn test(signer: C, listen: SocketAddr, max_message_size: u32) -> Self {
         let mut config = Self::local(
-            crate::authenticated::stream::sake_handshake(signer),
+            crate::authenticated::stream::sake_upgrader(signer),
             b"test_namespace",
             listen,
             NZUsize!(32),

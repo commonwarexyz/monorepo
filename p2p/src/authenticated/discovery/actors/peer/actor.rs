@@ -284,7 +284,7 @@ mod tests {
     use super::*;
     use crate::{
         Receiver as _,
-        authenticated::{discovery::actors::tracker, router, stream::StreamHandshake},
+        authenticated::{discovery::actors::tracker, router, stream::StreamUpgrader},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
@@ -330,7 +330,7 @@ mod tests {
         }
     }
 
-    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
+    fn handshake<S: Signer>(signer: S) -> Timeout<StreamUpgrader<S>> {
         let handshake = (
             Sake {
                 version: Version::V1,

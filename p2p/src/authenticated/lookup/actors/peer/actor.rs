@@ -188,7 +188,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{router, stream::StreamHandshake};
+    use crate::authenticated::{router, stream::StreamUpgrader};
     use commonware_codec::Encode;
     use commonware_cryptography::{
         Signer,
@@ -246,7 +246,7 @@ mod tests {
         }
     }
 
-    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
+    fn handshake<S: Signer>(signer: S) -> Timeout<StreamUpgrader<S>> {
         let handshake = (
             Sake {
                 version: Version::V1,

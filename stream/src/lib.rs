@@ -156,7 +156,7 @@ commonware_macros::stability_scope!(BETA {
 
     /// Protects messages on a connection with one cipher per direction.
     ///
-    /// [Transport::split] builds a [Sender] and [Receiver] from the two ciphers an [Exchange] agrees
+    /// [Transport::split] builds a [Sender] and [Receiver] from the two ciphers a [Handshake] agrees
     /// on.
     pub trait Transport: Clone + Send + Sync + 'static {
         /// Cipher that seals and opens records.
@@ -197,14 +197,14 @@ commonware_macros::stability_scope!(BETA {
     /// authenticate the expected peer. A listen may succeed only if the bouncer returns `true` for
     /// the same authenticated peer that is returned. Implementations should also bind `transport`,
     /// the [namespace](Transport::namespace) of the transport the ciphers will key, so that peers
-    /// with different transports fail the exchange.
+    /// with different transports fail the handshake.
     ///
-    /// Implementations must not consume bytes from `stream` past the final exchange message because
+    /// Implementations must not consume bytes from `stream` past the final handshake message because
     /// the caller reuses `stream` and `sink` for the transport.
     ///
-    /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping the exchange
+    /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping the handshake
     /// future cancels the attempt.
-    pub trait Exchange: Clone + Send + Sync + 'static {
+    pub trait Handshake: Clone + Send + Sync + 'static {
         /// Public key identifying an authenticated peer.
         type PublicKey: Send;
 
@@ -213,7 +213,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Returns the local authenticated identity.
         ///
-        /// The identity must remain stable across attempts and clones of this exchange.
+        /// The identity must remain stable across attempts and clones of this handshake.
         fn public_key(&self) -> Self::PublicKey;
 
         /// Authenticates an outbound connection to `peer` and returns the send and receive
@@ -237,7 +237,7 @@ commonware_macros::stability_scope!(BETA {
         /// send and receive ciphers.
         ///
         /// The bouncer may receive an unverified identity claim before authentication completes.
-        /// Accepting this claim permits authentication to continue. Only a successful exchange
+        /// Accepting this claim permits authentication to continue. Only a successful handshake
         /// proves the returned peer's identity.
         fn listen<C, E, I, O, B, F>(
             self,
@@ -567,7 +567,7 @@ commonware_macros::stability_scope!(BETA {
                                     Outcome::Success => assert!(result.is_ok()),
                                     Outcome::Error => assert!(matches!(
                                         result,
-                                        Err(TimeoutError::Handshake(Rejected))
+                                        Err(TimeoutError::Upgrade(Rejected))
                                     )),
                                     Outcome::Pending => {
                                         assert!(matches!(result, Err(TimeoutError::Timeout)));

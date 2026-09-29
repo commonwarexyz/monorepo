@@ -224,7 +224,7 @@ mod tests {
             MAX_PAYLOAD_OVERHEAD, channels,
             relay::Relay,
             router::{Actor as RouterActor, Config as RouterConfig, Messenger as RouterMessenger},
-            stream::{StreamHandshake, sake_handshake},
+            stream::{StreamUpgrader, sake_upgrader},
         },
     };
     use commonware_actor::{Feedback, Unreliable};
@@ -654,7 +654,7 @@ mod tests {
 
     #[test]
     fn test_max_message_size_stream_boundary() {
-        let limit = max_size::<StreamHandshake<ed25519::PrivateKey>>();
+        let limit = max_size::<StreamUpgrader<ed25519::PrivateKey>>();
         for size in [0, limit] {
             deterministic::Runner::default().start(|context| async move {
                 let config = Config::test(
@@ -671,7 +671,7 @@ mod tests {
     #[should_panic(expected = "maximum message size exceeds stream limit")]
     fn test_max_message_size_above_stream_boundary() {
         deterministic::Runner::default().start(|context| async move {
-            let limit = max_size::<StreamHandshake<ed25519::PrivateKey>>();
+            let limit = max_size::<StreamUpgrader<ed25519::PrivateKey>>();
             let config = Config::test(
                 ed25519::PrivateKey::from_seed(0),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -2349,9 +2349,9 @@ mod tests {
         type PublicKey = ed25519::PublicKey;
         type Error = TestHandshakeError;
         type Sender<I: Stream, O: Sink> =
-            TestSender<<StreamHandshake<ed25519::PrivateKey> as Upgrader>::Sender<I, O>>;
+            TestSender<<StreamUpgrader<ed25519::PrivateKey> as Upgrader>::Sender<I, O>>;
         type Receiver<I: Stream, O: Sink> =
-            TestReceiver<<StreamHandshake<ed25519::PrivateKey> as Upgrader>::Receiver<I, O>>;
+            TestReceiver<<StreamUpgrader<ed25519::PrivateKey> as Upgrader>::Receiver<I, O>>;
 
         fn public_key(&self) -> Self::PublicKey {
             self.application_key.clone()
@@ -2384,7 +2384,7 @@ mod tests {
                 .map(|(transport, _)| transport.clone())
                 .ok_or(TestHandshakeError::UnknownApplicationIdentity)?;
             self.authenticate().await?;
-            let (sender, receiver) = sake_handshake(self.transport_signer)
+            let (sender, receiver) = sake_upgrader(self.transport_signer)
                 .dial(
                     context,
                     namespace,
@@ -2423,7 +2423,7 @@ mod tests {
             );
             self.observations.listens.fetch_add(1, Ordering::Relaxed);
             let handshake = self.clone();
-            let (transport_peer, sender, receiver) = sake_handshake(self.transport_signer.clone())
+            let (transport_peer, sender, receiver) = sake_upgrader(self.transport_signer.clone())
                 .listen(
                     context,
                     namespace,

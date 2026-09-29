@@ -9,7 +9,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum TimeoutError<E> {
     #[error("handshake failed: {0}")]
-    Handshake(#[source] E),
+    Upgrade(#[source] E),
     #[error("handshake timed out")]
     Timeout,
 }
@@ -85,7 +85,7 @@ impl<U: Upgrader> Upgrader for Timeout<U> {
             .dial(context, namespace, max_message_size, peer, stream, sink);
         async move {
             select! {
-                result = attempt => result.map_err(TimeoutError::Handshake),
+                result = attempt => result.map_err(TimeoutError::Upgrade),
                 _ = timeout => Err(TimeoutError::Timeout),
             }
         }
@@ -115,7 +115,7 @@ impl<U: Upgrader> Upgrader for Timeout<U> {
                 .listen(context, namespace, max_message_size, bouncer, stream, sink);
         async move {
             select! {
-                result = attempt => result.map_err(TimeoutError::Handshake),
+                result = attempt => result.map_err(TimeoutError::Upgrade),
                 _ = timeout => Err(TimeoutError::Timeout),
             }
         }
