@@ -890,6 +890,7 @@ impl SecretStore for MemorySecretStore {
     }
 }
 
+/// Conflicting tips at the same height must fail the tracker across validators and rounds.
 #[rstest::rstest]
 #[case::across_validators(2, 10, 11)]
 #[case::stale_round(1, 11, 10)]
@@ -920,6 +921,7 @@ fn simulator_rejects_conflicting_tips_at_same_height_across_rounds(
     }
 }
 
+/// A conflicting tip queued behind a burst of reports must still reach the tracker.
 #[test]
 fn simulator_monitor_retains_conflict_after_burst() {
     // Keep both reporters connected to one queue while the tracker waits to

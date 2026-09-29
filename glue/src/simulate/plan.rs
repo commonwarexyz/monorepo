@@ -568,6 +568,11 @@ impl<D: EngineDefinition> Plan<D> {
                 result = Err("simulation stopped".into());
             },
             Some(pk) = restart_rx.recv() else break => {
+                // Completion freezes the team. Validators stay as they were at the
+                // exit decision while the accepted backlog drains.
+                if monitor_rx.is_closed() {
+                    continue;
+                }
                 let was_delayed = delayed.contains(&pk);
                 team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
                     .await;
@@ -578,14 +583,16 @@ impl<D: EngineDefinition> Plan<D> {
                 break;
             } => {
                 tracker.observe(update)?;
-                crashes += self
-                    .trigger_processed_height_crashes(
-                        &ctx,
-                        &mut team,
-                        &mut processed_height_crashes,
-                        &restart_tx,
-                    )
-                    .await;
+                if !monitor_rx.is_closed() {
+                    crashes += self
+                        .trigger_processed_height_crashes(
+                            &ctx,
+                            &mut team,
+                            &mut processed_height_crashes,
+                            &restart_tx,
+                        )
+                        .await;
+                }
 
                 // Check finalization properties
                 let states = team.active_states();
@@ -614,7 +621,11 @@ impl<D: EngineDefinition> Plan<D> {
                 }
 
                 // Start delayed validators after enough progress
-                if !delayed_started && !delayed.is_empty() && self.delay_reached(&tracker) {
+                if !delayed_started
+                    && !delayed.is_empty()
+                    && !monitor_rx.is_closed()
+                    && self.delay_reached(&tracker)
+                {
                     info!(target: "simulator", "starting delayed participants");
                     let mut delayed_order: Vec<_> = delayed.iter().collect();
                     delayed_order.sort_unstable();
@@ -631,6 +642,9 @@ impl<D: EngineDefinition> Plan<D> {
                 }
             },
             Some(cmd) = schedule_rx.recv() else break => {
+                if monitor_rx.is_closed() {
+                    continue;
+                }
                 match cmd {
                     ScheduleCmd::Crash(pk) => {
                         if team.crash(&pk) {
@@ -646,6 +660,9 @@ impl<D: EngineDefinition> Plan<D> {
                 continue;
             },
             _ = crash_rx.recv() => {
+                if monitor_rx.is_closed() {
+                    continue;
+                }
                 let Some((_, downtime, count)) = self.random_crash() else {
                     continue;
                 };
@@ -1260,6 +1277,33 @@ mod tests {
             .err()
             .expect("queued conflict must fail");
         assert!(error.contains("fork detected"), "{error}");
+    }
+
+    /// Draining the accepted backlog after completion must not start delayed validators.
+    #[test]
+    #[should_panic(expected = "delayed validators were never started")]
+    fn delayed_start_does_not_follow_completion() {
+        // The active node queues three tips at once. Completion commits after the
+        // first tip, while the delay round is only reached by the queued third tip.
+        let mut engine = FinalizingEngine::new(2, Duration::ZERO, 0);
+        let active = engine.participants[0].clone();
+        let delayed = engine.participants[1].clone();
+        engine.script = vec![
+            (active.clone(), 1, 1),
+            (active.clone(), 2, 2),
+            (active, 3, 3),
+        ];
+
+        // The drained tip reaches the delay round after completion. The plan must
+        // keep its team fixed and report that the delayed validator never started.
+        let _ = PlanBuilder::new(engine)
+            .required_finalizations(1)
+            .timeout(Duration::from_secs(2))
+            .crash(Crash::DelayRound {
+                participants: vec![delayed],
+                round: Round::new(Epoch::zero(), View::new(3)),
+            })
+            .run();
     }
 
     #[test]

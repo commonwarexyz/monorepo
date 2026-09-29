@@ -447,6 +447,7 @@ mod tests {
         }
     }
 
+    /// Test that an admitted validator certifies heights it verified before joining.
     #[test_traced("INFO")]
     fn test_admitted_signer_certifies_pending_heights() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
@@ -473,6 +474,9 @@ mod tests {
 
             for index in [4, 1, 2] {
                 let participant = &fixture.participants[index];
+                let context = context
+                    .child("participant")
+                    .with_attribute("public_key", participant);
                 let provider = mocks::Provider::new();
                 if index == 4 {
                     provider.register(
@@ -505,6 +509,13 @@ mod tests {
 
                 // Fill a two-height window before admission so progress requires
                 // signing both existing digests under the new committee.
+                let verified_sender = if index == 4 {
+                    verified_sender.take()
+                } else {
+                    None
+                };
+                let journal_page_cache =
+                    CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
                 let engine = Engine::new(
                     context.child("engine"),
                     Config {
@@ -512,7 +523,7 @@ mod tests {
                         provider: ObservedProvider {
                             inner: provider,
                             lookups: Arc::new(AtomicUsize::new(0)),
-                            verified: Arc::new(Mutex::new(if index == 4 { verified_sender.take() } else { None })),
+                            verified: Arc::new(Mutex::new(verified_sender)),
                         },
                         automaton: mocks::Application::new(mocks::Strategy::Correct),
                         reporter: mailbox,
@@ -527,7 +538,7 @@ mod tests {
                         journal_replay_buffer: NZUsize!(4096),
                         journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        journal_page_cache,
                         strategy: Sequential,
                     },
                 );
@@ -537,8 +548,12 @@ mod tests {
                 // before changing epochs or starting peers that could send acks.
                 if index == 4 {
                     select! {
-                        result = verified.take().unwrap() => assert!(result.is_ok(), "digests were not verified"),
-                        _ = context.sleep(Duration::from_secs(1)) => panic!("digests were not verified"),
+                        result = verified.take().unwrap() => {
+                            assert!(result.is_ok(), "digests were not verified");
+                        },
+                        _ = context.sleep(Duration::from_secs(1)) => {
+                            panic!("digests were not verified");
+                        },
                     }
                     admitted.update(next_epoch);
                 }
@@ -554,7 +569,9 @@ mod tests {
                             context.sleep(Duration::from_millis(10)).await;
                         }
                     } => {},
-                    _ = context.sleep(Duration::from_secs(2)) => panic!("admitted signer did not certify height {height}"),
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("admitted signer did not certify height {height}");
+                    },
                 }
             }
         });

@@ -16,7 +16,7 @@ use tracing::info;
 ///
 /// Handles starting, crashing, and restarting individual nodes.
 pub struct Team<D: EngineDefinition> {
-    /// Engine definition (cloned per validator init).
+    /// Engine definition shared by every validator init and restart.
     definition: D,
 
     /// All participant public keys in order.

@@ -205,8 +205,7 @@ where
 }
 
 /// Post-run property: the delayed validator entered state sync twice and
-/// advanced beyond the synced height. The recovery campaign checks that its
-/// scheduled crash and restart occurred between the two entries.
+/// advanced beyond the synced height.
 #[derive(Clone)]
 pub(crate) struct CrashDuringStateSyncRecovery {
     /// Validator whose delayed startup is interrupted by the recovery campaign.

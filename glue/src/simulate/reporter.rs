@@ -16,7 +16,7 @@ use commonware_utils::channel::mpsc;
 ///
 /// Place this in the marshal reporter chain so it intercepts
 /// [`Update::Tip`] events before delegation. Monitoring ends when the
-/// simulation exit condition first succeeds; later events still reach the
+/// simulation exit condition first succeeds. Later events still reach the
 /// wrapped reporter.
 #[derive(Clone)]
 pub struct MonitorReporter<P: PublicKey, R> {
