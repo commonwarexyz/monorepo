@@ -143,28 +143,38 @@ where
 {
     /// Return the open journal, first replacing the partition's contents with `tip` if a
     /// compact-sync import is pending.
-    ///
-    /// The replacement never decodes the previous contents. It stages a durable reset to position 1
-    /// before removing anything, so a crash before that point reopens the previous contents. After
-    /// it, a reopen recovers `tip` if its witness survived the crash in full, and otherwise fails
-    /// with [`Error::DataCorrupted`] rather than opening a fresh db.
     async fn open<O: Operation<F>>(
         self,
         tip: &Witness<F, D, O>,
     ) -> Result<OpenJournal<E, F, D>, Error<F>> {
         match self {
             Self::Open(open) => Ok(open),
-            Self::Replacing(destination) => {
-                let Destination { context, cfg } = *destination;
-                let journal = witness::Journal::init_at_size(context, cfg, 1).await?;
-                let open = OpenJournal {
-                    journal,
-                    tip_state: TipState::Uncommitted,
-                    pending_sync: None,
-                };
-                open.append(tip).await
-            }
+            Self::Replacing(destination) => Self::replace(destination, tip).await,
         }
+    }
+
+    /// Replace the partition's contents with `tip`, never decoding the previous witnesses.
+    ///
+    /// Stages a durable reset to position 1 before removing anything, so a crash before that
+    /// point reopens the previous contents. After it, a reopen recovers the longest prefix of
+    /// complete witnesses that survived, which may include witnesses applied after `tip`, and
+    /// otherwise fails with [`Error::DataCorrupted`] rather than opening a fresh db.
+    ///
+    /// Boxed so this cold path does not enlarge the future of every operation that opens the
+    /// journal.
+    #[boxed]
+    async fn replace<O: Operation<F>>(
+        destination: Box<Destination<E>>,
+        tip: &Witness<F, D, O>,
+    ) -> Result<OpenJournal<E, F, D>, Error<F>> {
+        let Destination { context, cfg } = *destination;
+        let journal = witness::Journal::init_at_size(context, cfg, 1).await?;
+        let open = OpenJournal {
+            journal,
+            tip_state: TipState::Uncommitted,
+            pending_sync: None,
+        };
+        open.append(tip).await
     }
 }
 
@@ -212,7 +222,8 @@ where
 {
     /// Initialize from the latest retained witness at or below `max_size` operations.
     /// `None` selects the latest retained state. Fresh storage receives a durable bootstrap
-    /// witness.
+    /// witness. A bounded initialization durably discards every witness newer than the selected
+    /// one before returning.
     ///
     /// # Errors
     ///
@@ -235,7 +246,7 @@ where
                 .await?;
         let bounds = pending.bounds();
         let fresh = bounds.is_empty();
-        let (entry, end) = if fresh {
+        let (Rebuilt { merkle, tip }, end) = if fresh {
             if bounds.start != 0 {
                 return Err(Error::DataCorrupted("witness journal has no tip"));
             }
@@ -244,7 +255,7 @@ where
                 size: Location::new(1),
                 pinned_nodes: Vec::new(),
             };
-            (genesis.stored(), 0)
+            (witness::restore::<F, O, H, S>(cfg.strategy, genesis)?, 0)
         } else {
             // Journal positions count witnesses; the cap counts database operations.
             let mut end = bounds.end;
@@ -262,12 +273,14 @@ where
                     return Err(Error::HistoricalFloorPruned(cap));
                 }
             }
-            (pending.read(end - 1).await?, end)
+            // Decode and validate only the selected witness, before discarding newer history or
+            // publishing a writer.
+            let entry = pending.read(end - 1).await?;
+            (
+                witness::rebuild::<F, O, H, S>(cfg.strategy, entry, &codec_cfg)?,
+                end,
+            )
         };
-        // Decode and validate only the selected witness, before discarding newer history or
-        // publishing a writer.
-        let Rebuilt { merkle, tip } =
-            witness::rebuild::<F, O, H, S>(cfg.strategy, entry, &codec_cfg)?;
         let mut journal = pending.finish(end).await?;
         if fresh {
             (journal, _) = journal.append(&tip.witness.stored()).await?;
@@ -285,27 +298,27 @@ where
     }
 
     /// Build a compact db from state fetched by the sync engine: `last_commit_op` must be a
-    /// commit whose floor is at or below `last_commit_loc`, and must decode under `cfg`'s codec
-    /// config (otherwise [`Error::Journal`]).
+    /// commit whose floor is at or below `last_commit_loc` (otherwise
+    /// [`Error::FloorBeyondSize`]), and must decode under `cfg`'s codec config (otherwise
+    /// [`Error::Journal`]).
     ///
     /// The imported witness lives only in memory, and the partition `cfg` names is not opened,
     /// until the first [`Self::apply_batch`], [`Self::commit`], [`Self::sync`],
     /// [`Self::start_sync`], or [`Self::prune`] replaces the partition's contents with it. The
     /// replacement stages a durable reset before removing anything, so a crash before that point
-    /// reopens the previous contents. After it, a reopen recovers any complete witness that
-    /// survived the crash, and otherwise fails with [`Error::DataCorrupted`] until a re-sync
-    /// replaces the partition.
+    /// reopens the previous contents. After it, a reopen recovers the longest prefix of complete
+    /// witnesses that survived the crash, and fails with [`Error::DataCorrupted`] if none did,
+    /// until a re-sync replaces the partition.
     pub(crate) fn init_from_sync(
-        strategy: S,
         context: E,
-        cfg: variable::Config<O::Cfg>,
+        cfg: Config<O::Cfg, S>,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: O,
     ) -> Result<Self, Error<F>> {
         // Reject a commit this db could not decode on reopen, before anything replaces the
         // destination's contents.
-        let (cfg, codec_cfg) = witness::split_config(cfg);
+        let (journal_cfg, codec_cfg) = witness::split_config(cfg.witness);
         O::decode_cfg(last_commit_op.encode(), &codec_cfg)
             .map_err(|err| Error::Journal(crate::journal::Error::Codec(err)))?;
         let imported = Witness {
@@ -313,10 +326,13 @@ where
             size: last_commit_loc + 1,
             pinned_nodes,
         };
-        let Rebuilt { merkle, tip } = witness::restore::<F, O, H, S>(strategy, imported)?;
+        let Rebuilt { merkle, tip } = witness::restore::<F, O, H, S>(cfg.strategy, imported)?;
         Ok(Self {
             merkle,
-            storage: Storage::Replacing(Box::new(Destination { context, cfg })),
+            storage: Storage::Replacing(Box::new(Destination {
+                context: context.child("witness"),
+                cfg: journal_cfg,
+            })),
             tip,
         })
     }
@@ -344,7 +360,8 @@ where
     /// Return the compact-sync target described by the current witness.
     ///
     /// This reflects the most recently applied batch. The target remains non-durable until a
-    /// covering [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] completes.
+    /// covering [`Self::commit`], [`Self::sync`], or [`Self::prune`] returns, or the handle
+    /// returned by a covering [`Self::start_sync`] completes.
     pub const fn target(&self) -> CompactTarget<F, H::Digest> {
         self.tip.target()
     }
@@ -528,10 +545,7 @@ where
         let mut open = self.storage.open(&self.tip.witness).await?;
 
         let bounds = open.journal.bounds();
-        if bounds.is_empty() {
-            self.storage = Storage::Open(open);
-            return Ok(self);
-        }
+        debug_assert!(!bounds.is_empty(), "an open journal holds the tip");
         // Clamp below the tip so the journal never empties: the tip is the current state.
         let pos = open
             .first_at_or_above(pruning_boundary)
@@ -547,7 +561,7 @@ where
     pub async fn destroy(self) -> Result<(), Error<F>> {
         let journal = match self.storage {
             Storage::Open(open) => open.journal,
-            // Reset rather than open, so the previous contents are never decoded.
+            // Reset rather than open, so the previous witnesses are never decoded.
             Storage::Replacing(destination) => {
                 let Destination { context, cfg } = *destination;
                 witness::Journal::init_at_size(context, cfg, 0).await?
@@ -2076,9 +2090,11 @@ pub(crate) mod tests {
 
         /// Import this state over partition `dst` without journaling it.
         fn into_db(self, context: deterministic::Context, dst: &str) -> TestDb<O> {
-            let cfg = witness_config::<O>(dst, &context);
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config::<O>(dst, &context),
+            };
             let db = TestDb::<O>::init_from_sync(
-                Sequential,
                 context,
                 cfg,
                 self.target.size - 1,
@@ -3015,9 +3031,11 @@ pub(crate) mod tests {
 
             // Import the genesis state: one commit operation and no pinned nodes.
             let imported = TestDb::<O>::init_from_sync(
-                Sequential,
                 context.child("import"),
-                dst_cfg.clone(),
+                Config {
+                    strategy: Sequential,
+                    witness: dst_cfg.clone(),
+                },
                 Location::new(0),
                 Vec::new(),
                 O::commit(None, Location::new(0)),

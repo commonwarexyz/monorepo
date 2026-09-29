@@ -51,12 +51,11 @@ where
         }
 
         // Nothing touches the destination partition until the import is journaled, after the
-        // engine has verified the root. Journaling resets the partition, so its previous contents
-        // are never decoded.
+        // engine has verified the root. Journaling resets the partition, so its previous
+        // witnesses are never decoded.
         Self::init_from_sync(
-            config.strategy,
-            context.child("witness"),
-            config.witness,
+            context,
+            config,
             last_commit_loc,
             // None only happens at genesis, where nothing is pinned.
             pinned_nodes.unwrap_or_default(),

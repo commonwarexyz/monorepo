@@ -25,19 +25,19 @@ use commonware_parallel::Strategy;
 
 /// An applied state: the last commit operation, the committed size, and the pinned nodes.
 #[derive(Clone)]
-pub(crate) struct Witness<F: Family, D: Digest, O: Operation<F>> {
+pub(super) struct Witness<F: Family, D: Digest, O: Operation<F>> {
     /// The last commit operation, at `size - 1`.
-    pub(crate) commit: O,
+    pub(super) commit: O,
     /// The committed database size.
-    pub(crate) size: Location<F>,
+    pub(super) size: Location<F>,
     /// Pinned nodes one operation below the commit, in the order returned by
     /// [`Family::nodes_to_pin`].
-    pub(crate) pinned_nodes: Vec<D>,
+    pub(super) pinned_nodes: Vec<D>,
 }
 
 impl<F: Family, D: Digest, O: Operation<F>> Witness<F, D, O> {
     /// The journal form of this witness.
-    pub(crate) fn stored(&self) -> StoredWitness<F, D> {
+    pub(super) fn stored(&self) -> StoredWitness<F, D> {
         StoredWitness {
             commit: self.commit.encode(),
             size: self.size,
@@ -48,19 +48,19 @@ impl<F: Family, D: Digest, O: Operation<F>> Witness<F, D, O> {
 
 /// A [`Witness`] as the witness journal stores it, with its commit still encoded.
 #[derive(Clone)]
-pub(crate) struct StoredWitness<F: Family, D: Digest> {
+pub(super) struct StoredWitness<F: Family, D: Digest> {
     /// The encoded last commit operation, at `size - 1`.
-    pub(crate) commit: Bytes,
+    pub(super) commit: Bytes,
     /// The committed database size.
-    pub(crate) size: Location<F>,
+    pub(super) size: Location<F>,
     /// Pinned nodes one operation below the commit, in the order returned by
     /// [`Family::nodes_to_pin`].
-    pub(crate) pinned_nodes: Vec<D>,
+    pub(super) pinned_nodes: Vec<D>,
 }
 
 impl<F: Family, D: Digest> StoredWitness<F, D> {
     /// Decode the commit with `cfg`.
-    pub(crate) fn decode<O: Operation<F>>(
+    pub(super) fn decode<O: Operation<F>>(
         self,
         cfg: &O::Cfg,
     ) -> Result<Witness<F, D, O>, commonware_codec::Error> {
@@ -149,7 +149,7 @@ impl<F: Family, D: Digest, O: Operation<F>> VerifiedWitness<F, D, O> {
 }
 
 /// The contiguous variable journal of a compact db's witnesses.
-pub(crate) type Journal<E, F, D> = variable::Journal<E, StoredWitness<F, D>>;
+pub(super) type Journal<E, F, D> = variable::Journal<E, StoredWitness<F, D>>;
 
 /// Split a witness journal config into the journal's own config and the codec config that
 /// decodes its commits.
@@ -260,9 +260,9 @@ where
 /// Validate `witness`, materialize its Merkle, and derive its root and commit proof.
 ///
 /// The Merkle is built from the pinned nodes one operation below the commit plus the commit
-/// itself, then pruned back to its frontier. A zero size or a floor beyond the commit returns
-/// [`Error::DataCorrupted`], and a non-commit operation returns [`Error::UnexpectedData`].
-/// Merkle errors propagate unchanged.
+/// itself, then pruned back to its frontier. A zero size returns [`Error::DataCorrupted`], a
+/// non-commit operation returns [`Error::UnexpectedData`], and a floor beyond the commit returns
+/// [`Error::FloorBeyondSize`]. Merkle errors propagate unchanged.
 pub(super) fn restore<F, O, H, S>(
     strategy: S,
     witness: Witness<F, H::Digest, O>,
@@ -285,7 +285,10 @@ where
         return Err(Error::UnexpectedData(last_commit_loc));
     };
     if inactivity_floor_loc > last_commit_loc {
-        return Err(Error::DataCorrupted("invalid compact witness"));
+        return Err(Error::FloorBeyondSize(
+            inactivity_floor_loc,
+            last_commit_loc,
+        ));
     }
     let mut merkle = compact::Merkle::from_compact_state(strategy, last_commit_loc, pinned_nodes)?;
     merkle.append_leaf(&qmdb::hasher::<H>(), &commit.encode())?;
@@ -421,9 +424,8 @@ pub(crate) mod tests {
             // the partition's contents.
             assert!(matches!(
                 Db::<F, _, O, Sha256, _>::init_from_sync(
-                    Sequential,
                     context.child("reject_import"),
-                    restrictive.witness.clone(),
+                    restrictive.clone(),
                     Location::new(0),
                     Vec::new(),
                     O::commit(Some(vec![1, 2, 3]), Location::new(0)),
@@ -533,9 +535,8 @@ pub(crate) mod tests {
                     let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
                     drop(seeded.sync().await.unwrap());
                     let db = Db::<F, _, O, Sha256, _>::init_from_sync(
-                        Sequential,
                         context.child("import"),
-                        cfg.witness.clone(),
+                        cfg.clone(),
                         Location::new(0),
                         Vec::new(),
                         O::commit(None, Location::new(0)),
@@ -641,7 +642,7 @@ pub(crate) mod tests {
         invalid_floor.commit = TestOp::Commit(None, Location::new(1));
         assert!(matches!(
             restore::<F, _, Sha256, _>(Sequential, invalid_floor),
-            Err(Error::DataCorrupted("invalid compact witness"))
+            Err(Error::FloorBeyondSize(floor, loc)) if floor == 1 && loc == 0
         ));
 
         let mut invalid_pins = genesis;

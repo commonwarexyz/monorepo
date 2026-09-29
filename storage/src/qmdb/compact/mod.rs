@@ -25,25 +25,25 @@
 //! [`Error::DataCorrupted`](crate::qmdb::Error::DataCorrupted). The witness is also what lets
 //! compact nodes serve compact sync without retaining historical operations. A compact-sync
 //! import is journaled by its first apply or durability operation, which replaces the
-//! partition's previous contents without decoding them.
+//! partition's previous witnesses without decoding them.
 //!
 //! Entries are strictly increasing in committed size, so a size uniquely identifies an
-//! initialization or prune target. An appended entry becomes durable when [`Db::commit`] or
-//! [`Db::sync`] completes, or, for [`Db::start_sync`], when the returned handle completes.
-//! Before that point recovery may fall back to the previous entry. The first entry of a
-//! compact-sync import has none: a crash that loses it leaves an interrupted import, which fails
-//! to open until a re-sync replaces it. The tip entry is never pruned.
+//! initialization or prune target. An appended entry becomes durable when [`Db::commit`],
+//! [`Db::sync`], or [`Db::prune`] returns, or, for [`Db::start_sync`], when the returned handle
+//! completes. Before that point recovery may fall back to the previous entry. The first entry of
+//! a compact-sync import has none: a crash that loses it leaves an interrupted import, which
+//! fails to open until a re-sync replaces it. The tip entry is never pruned.
 //!
 //! # Inactivity floor
 //!
 //! Commits carry the inactivity floor so the compact db's commit leaves and root match the full
 //! db's: the root is computed over the peaks the floor leaves active.
 
-pub(crate) mod batch;
+mod batch;
 pub(crate) mod db;
 mod operation;
 mod sync;
-pub(crate) mod witness;
+mod witness;
 
 use crate::journal::contiguous::variable;
 use commonware_parallel::Strategy;

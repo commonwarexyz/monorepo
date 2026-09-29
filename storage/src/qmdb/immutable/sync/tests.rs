@@ -1944,9 +1944,8 @@ mod compact_variable_mmr {
                 unreachable!("boundary fetch returns a boundary response");
             };
             let imported = ClientDb::init_from_sync(
-                client_cfg.strategy.clone(),
                 context.child("import"),
-                client_cfg.witness.clone(),
+                client_cfg.clone(),
                 target_b.size - 1,
                 pinned_nodes,
                 op,
