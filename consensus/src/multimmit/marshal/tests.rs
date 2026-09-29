@@ -746,7 +746,7 @@ impl Certified {
         }
     }
 
-    fn finalize(&self, mailbox: &TestMailbox) {
+    fn accept_history(&self, mailbox: &TestMailbox) {
         let mut reporter = mailbox.clone();
         assert_eq!(
             reporter.report(Activity::HistoryAccepted {
@@ -756,6 +756,11 @@ impl Certified {
             }),
             Feedback::Ok
         );
+    }
+
+    fn finalize(&self, mailbox: &TestMailbox) {
+        self.accept_history(mailbox);
+        let mut reporter = mailbox.clone();
         let artifact = Arc::new(Artifact::Lqc(self.proof.as_ref().clone()));
         assert_eq!(
             reporter.report(Activity::ProtocolAccepted {
@@ -3087,6 +3092,142 @@ async fn run_floor_case(
         "current floor survives pruning and reopen"
     );
     harness.shutdown().await;
+}
+
+/// Finalizes three views in which view two's chain-0 anchor jumps to a certified rival of the
+/// ordered tip, which an equivocating producer allows. The order reads the new blocks off the
+/// rival path, later views extend it, and a reopened node continues from it.
+///
+/// Without view two's L-QC, view three's opens both history records in one pass.
+async fn run_anchor_jump_case(
+    context: deterministic::Context,
+    seed: u64,
+    archive_modes: [ArchiveMode; 3],
+    finalize_jump: bool,
+) {
+    let mut harness = Harness::new_with_archives(context, seed, [true, true], archive_modes).await;
+    harness.start(0).await;
+    let mailbox = harness.mailbox(0);
+    let genesis = harness.committee.config.genesis().tips().to_vec();
+    let first = certify(
+        &harness.committee,
+        1,
+        initial_history(&harness.committee),
+        &genesis,
+        vec![vec![body(90)], vec![body(91)]],
+    );
+    first.submit(&mailbox).await;
+    first.finalize(&mailbox);
+    harness.wait_updates(0, 2).await;
+
+    // The equivocator's rival branch, certified up to height 2. Only the anchored block is
+    // ordered, so only it is submitted.
+    let rival = certify(
+        &harness.committee,
+        1,
+        initial_history(&harness.committee),
+        &genesis,
+        vec![vec![body(92), body(93)], vec![body(91)]],
+    );
+    let anchor = &rival.blocks[0][1];
+    mailbox.put_block(Arc::clone(anchor)).await.unwrap();
+
+    // The tip anchor stands in for the rival's DA certificate: marshal reads only final tips.
+    let second_history =
+        Arc::new(TipRecord::at_tips(first.history.commitment::<Sha256>(), first.tips()).unwrap());
+    let second = certify(
+        &harness.committee,
+        2,
+        second_history,
+        &[anchor.reference(), first.tips()[1]],
+        vec![vec![body(94)], vec![body(95)]],
+    );
+    second.submit(&mailbox).await;
+    if finalize_jump {
+        second.finalize(&mailbox);
+    } else {
+        second.accept_history(&mailbox);
+    }
+
+    let third_history =
+        Arc::new(TipRecord::at_tips(second.history.commitment::<Sha256>(), second.tips()).unwrap());
+    let third = certify(
+        &harness.committee,
+        3,
+        third_history,
+        &second.tips(),
+        vec![vec![body(96)], vec![body(97)]],
+    );
+    third.submit(&mailbox).await;
+    third.finalize(&mailbox);
+
+    let expected = [
+        &first.blocks[0][0],
+        &first.blocks[1][0],
+        anchor,
+        &second.blocks[1][0],
+        &second.blocks[0][0],
+        &third.blocks[0][0],
+        &third.blocks[1][0],
+    ];
+    let delivered = harness.wait_updates(0, expected.len()).await;
+    for (offset, (actual, block)) in delivered.iter().zip(expected).enumerate() {
+        assert_eq!(actual.index, OutputIndex::new(offset as u64));
+        assert_eq!(actual.block.as_ref(), block.as_ref());
+    }
+    assert_ne!(
+        anchor.header().parent(),
+        first.blocks[0][0].reference().digest()
+    );
+    harness
+        .wait_progress(0, |progress| {
+            progress.acknowledged == Some(OutputIndex::new(6))
+        })
+        .await;
+
+    harness.crash(0).await;
+    harness.start(0).await;
+    let mailbox = harness.mailbox(0);
+    let fourth_history =
+        Arc::new(TipRecord::at_tips(third.history.commitment::<Sha256>(), third.tips()).unwrap());
+    let fourth = certify(
+        &harness.committee,
+        4,
+        fourth_history,
+        &third.tips(),
+        vec![vec![body(98)], vec![body(99)]],
+    );
+    fourth.submit(&mailbox).await;
+    fourth.finalize(&mailbox);
+    harness
+        .wait_progress(0, |progress| {
+            progress.acknowledged == Some(OutputIndex::new(8))
+        })
+        .await;
+    assert_eq!(
+        harness
+            .mailbox(0)
+            .get_block(anchor.reference())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(anchor.as_ref())
+    );
+    harness.shutdown().await;
+}
+
+#[test]
+fn anchor_jump_to_a_rival_branch_extends_the_order() {
+    for (seed, archive_modes, finalize_jump) in [
+        (112, [ArchiveMode::Prunable; 3], true),
+        (113, [ArchiveMode::Immutable; 3], true),
+        (114, [ArchiveMode::Prunable; 3], false),
+        (115, [ArchiveMode::Immutable; 3], false),
+    ] {
+        runner(seed).start(move |context| {
+            run_anchor_jump_case(context, seed, archive_modes, finalize_jump)
+        });
+    }
 }
 
 #[test]

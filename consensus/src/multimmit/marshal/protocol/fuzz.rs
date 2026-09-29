@@ -206,16 +206,19 @@ pub(crate) fn exercise(input: &[u8]) {
             .validate_opening::<Sha256>(commitment, &record, &frontier(&common))
             .unwrap();
         // A contradictory resolved common ancestor must never authorize duplicate suppression.
+        // With nothing emitted past the ordered tip it is an anchor jump, which suppresses none.
         let mut wrong_common = frontier(&common);
         wrong_common[0] = BlockRef::new(
             wrong_common[0].chain(),
             wrong_common[0].height(),
             Sha256::hash(&[b"fork"]),
         );
-        assert!(
+        let jump = acknowledged[0] == base[0] && target[0] > acknowledged[0];
+        assert_eq!(
             state
                 .validate_opening::<Sha256>(commitment, &record, &wrong_common)
-                .is_err()
+                .is_ok(),
+            jump
         );
         let make_horizontal =
             || SlotStream::new(&frontier(&base), &frontier(&target), &proposed_heights).unwrap();

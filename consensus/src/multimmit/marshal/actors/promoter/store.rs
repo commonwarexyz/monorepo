@@ -121,14 +121,17 @@ impl<D: Digest> PromotionState<D> {
     }
 
     /// Applies one dense output. A newer generation authenticates a state-sync jump.
-    fn extend(&mut self, reference: BlockRef<D>, parent: D, generation: u64) -> Result<(), Error> {
+    ///
+    /// A direct output need not name the frontier as its parent, since an anchor may jump to a
+    /// certified block on another branch.
+    fn extend(&mut self, reference: BlockRef<D>, generation: u64) -> Result<(), Error> {
         let Some(cursor) = self.cursors.get_mut(reference.chain().get() as usize) else {
             return Err(Error::Inconsistent(
                 "immutable promotion block has an unknown producer chain",
             ));
         };
         let current = cursor.frontier;
-        let direct = current.height().next() == reference.height() && parent == current.digest();
+        let direct = current.height().next() == reference.height();
         let installed_jump =
             generation > cursor.generation && reference.height() > current.height();
         if !direct && !installed_jump {
@@ -236,11 +239,7 @@ where
         let mut bodies = self.bodies.take().ok_or(Error::Poisoned)?;
         let mut state = self.state.clone();
         for output in outputs {
-            state.extend(
-                output.reference,
-                output.block.header().parent(),
-                output.floor_generation,
-            )?;
+            state.extend(output.reference, output.floor_generation)?;
             bodies = bodies
                 .put(output.index.get(), output.reference.digest(), output.block)
                 .await?;
@@ -398,34 +397,27 @@ mod tests {
         let mut state = state(genesis, 0);
 
         let first = reference(0, 1, b"first");
-        state.extend(first, genesis.digest(), 0).unwrap();
+        state.extend(first, 0).unwrap();
 
         let jumped = reference(0, 5, b"jumped");
-        state
-            .extend(jumped, Sha256::hash(&[b"installed parent"]), 1)
-            .unwrap();
+        state.extend(jumped, 1).unwrap();
         let continued = reference(0, 6, b"continued");
-        state.extend(continued, jumped.digest(), 1).unwrap();
+        state.extend(continued, 1).unwrap();
 
         let stale = reference(0, 7, b"stale direct");
-        state.extend(stale, continued.digest(), 0).unwrap();
+        state.extend(stale, 0).unwrap();
         assert_eq!(generations(&state), vec![1]);
 
-        let invalid = reference(0, 8, b"invalid jump");
-        assert!(
-            state
-                .extend(invalid, Sha256::hash(&[b"wrong parent"]), 0)
-                .is_err()
-        );
-        assert!(
-            state
-                .extend(invalid, Sha256::hash(&[b"wrong parent"]), 1)
-                .is_err()
-        );
+        // A direct output on another branch still advances the chain by exactly one height.
+        let rival = reference(0, 8, b"rival branch");
+        state.extend(rival, 0).unwrap();
+        let skipped = reference(0, 10, b"skipped");
+        assert!(state.extend(skipped, 0).is_err());
+        assert!(state.extend(skipped, 1).is_err());
 
         let floor = Frontier::new(vec![jumped]).unwrap();
         assert!(!state.install(1, &floor).unwrap());
-        assert_eq!(state.frontiers(), vec![stale]);
+        assert_eq!(state.frontiers(), vec![rival]);
         assert_eq!(generations(&state), vec![1]);
     }
 
@@ -440,7 +432,7 @@ mod tests {
         );
 
         let child = reference(0, 1, b"child");
-        state.extend(child, genesis.digest(), 0).unwrap();
+        state.extend(child, 0).unwrap();
 
         assert_eq!(state.frontiers(), vec![child]);
         assert_eq!(generations(&state), vec![1]);
