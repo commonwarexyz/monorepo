@@ -48,14 +48,14 @@ impl From<HandshakeError> for Error {
 /// use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}};
 /// use std::time::Duration;
 ///
-/// let upgrader = (
+/// let upgrader = Cups::<_, ChaCha20Poly1305>::new(
 ///     Sake {
 ///         signer: PrivateKey::from_seed(0),
 ///         synchrony_bound: Duration::from_secs(5),
 ///         max_handshake_age: Duration::from_secs(10),
 ///         version: Version::V1,
 ///     },
-///     Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+///     cups::Version::V1,
 /// );
 /// ```
 #[derive(Clone)]
@@ -212,7 +212,7 @@ impl<S: Signer> crate::Handshake for Sake<S> {
 mod test {
     use super::*;
     use crate::{
-        Transport as _, Upgrader as _,
+        Upgrader as _,
         cups::{self, Cups},
         utils::{Timeout, TimeoutError},
     };
@@ -238,8 +238,8 @@ mod test {
     /// Default `max_message_size` passed to dial and listen.
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type TestCups = Cups<ChaCha20Poly1305>;
-    type TestUpgrade = (Sake<PrivateKey>, TestCups);
+    type TestCups = Cups<(), ChaCha20Poly1305>;
+    type TestUpgrade = Cups<Sake<PrivateKey>, ChaCha20Poly1305>;
 
     /// Returns the record version that pairs with the SAKE `version`.
     const fn record_version(version: Version) -> cups::Version {
@@ -251,7 +251,7 @@ mod test {
 
     /// Returns the records that pair with the SAKE `version`.
     const fn records(version: Version) -> TestCups {
-        Cups::new(record_version(version))
+        Cups::new((), record_version(version))
     }
 
     /// Checks that a closed peer fails the first handshake frame with a send error.
@@ -283,7 +283,7 @@ mod test {
     #[test]
     fn test_max_message_size_bounds() {
         const MAX_SIZE: u32 = <TestUpgrade as crate::Upgrader>::MAX_SIZE;
-        assert_eq!(MAX_SIZE, <TestCups as crate::Transport>::MAX_SIZE);
+        assert_eq!(MAX_SIZE, TestCups::MAX_SIZE);
         deterministic::Runner::default().start(|context| async move {
             for max_message_size in [0, MAX_SIZE, MAX_SIZE + 1] {
                 for dialer in [true, false] {
@@ -336,14 +336,14 @@ mod test {
 
     /// Returns an upgrader that runs SAKE `version` with `signer` and CUPS `records`.
     fn transport(signer: PrivateKey, version: Version, records: cups::Version) -> TestUpgrade {
-        (
+        Cups::new(
             Sake {
                 signer,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
                 version,
             },
-            Cups::new(records),
+            records,
         )
     }
 
@@ -1058,13 +1058,13 @@ mod test {
             let listener_public_key = listener_signer.public_key();
             let listener_handshake = transport_handshake(listener_signer, Version::V1);
             let scope = records(Version::V1).namespace();
-            let dialer_context = dialer_handshake.0.clone().context(
+            let dialer_context = dialer_handshake.handshake.clone().context(
                 &context,
                 NAMESPACE,
                 scope,
                 listener_public_key.clone(),
             );
-            let listener_context = listener_handshake.0.clone().context(
+            let listener_context = listener_handshake.handshake.clone().context(
                 &context,
                 NAMESPACE,
                 scope,

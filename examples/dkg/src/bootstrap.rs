@@ -24,7 +24,6 @@ use commonware_runtime::{Handle, Strategizer, Supervisor as _, buffer::paged::Ca
 use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
-    sake_cups,
 };
 use commonware_utils::{NZUsize, sequence::Unit};
 use std::{
@@ -60,14 +59,14 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        sake_cups(
+        Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer: node.signer.clone(),
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),
                 version: sake::Version::V1,
             },
-            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+            cups::Version::V1,
         ),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,

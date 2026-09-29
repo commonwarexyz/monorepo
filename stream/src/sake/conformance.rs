@@ -73,14 +73,14 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
         };
 
         // Complete the handshake.
-        let listener_handshake = (
+        let listener_handshake = Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer: listener.clone(),
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),
                 version,
             },
-            Cups::<ChaCha20Poly1305>::new(records),
+            records,
         );
         let handle = context.child("listener").spawn(move |context| async move {
             listener_handshake
@@ -94,25 +94,25 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
                 )
                 .await
         });
-        let (mut dialer_tx, mut dialer_rx) = (
+        let (mut dialer_tx, mut dialer_rx) = Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer: dialer,
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),
                 version,
             },
-            Cups::<ChaCha20Poly1305>::new(records),
+            records,
         )
-            .dial(
-                context.child("dialer"),
-                NAMESPACE,
-                MAX_MESSAGE_SIZE,
-                listener.public_key(),
-                dialer_stream,
-                dialer_sink,
-            )
-            .await
-            .unwrap();
+        .dial(
+            context.child("dialer"),
+            NAMESPACE,
+            MAX_MESSAGE_SIZE,
+            listener.public_key(),
+            dialer_stream,
+            dialer_sink,
+        )
+        .await
+        .unwrap();
         let (_, mut listener_tx, mut listener_rx) = handle.await.unwrap().unwrap();
 
         // Send one record of each length class in each direction.

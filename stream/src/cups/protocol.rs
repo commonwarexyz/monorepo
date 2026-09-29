@@ -1,11 +1,16 @@
-use crate::utils::codec::{Error as FrameError, recv_frame, validate_frame_len};
+use crate::{
+    Handshake, Upgrader,
+    utils::codec::{Error as FrameError, recv_frame, validate_frame_len},
+};
 use commonware_codec::{Copying, DecodeExt, EncodeSize, FixedSize, Write, varint::UInt};
 use commonware_cryptography::Cipher;
 use commonware_runtime::{
-    BufMut, BufferPool, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink, Stream,
+    BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink,
+    Stream,
 };
 use commonware_utils::Widen;
-use std::marker::PhantomData;
+use rand_core::CryptoRng;
+use std::{future::Future, marker::PhantomData};
 use thiserror::Error;
 
 /// Size of the length field in a version 1 header, excluding its tag.
@@ -22,6 +27,11 @@ const fn tag_size<C: Cipher>() -> u32 {
     let size = <C::Tag as FixedSize>::SIZE;
     assert!(size <= u32::MAX as usize);
     size as u32
+}
+
+/// Largest record payload that fits alongside its tag in a version 0 length prefix.
+const fn max_size<C: Cipher>() -> u32 {
+    u32::MAX - tag_size::<C>()
 }
 
 /// Returns the size of a version 1 header sealed by `C`.
@@ -96,29 +106,49 @@ pub enum Version {
     V1,
 }
 
-/// CUPS records of one [Version], sealed by `C`.
-pub struct Cups<C> {
+/// A handshake `H` and CUPS records of one [Version], sealed by `C`.
+pub struct Cups<H, C> {
+    /// Handshake used to authenticate peers and derive directional record keys.
+    pub handshake: H,
     version: Version,
 
     // `fn() -> C` keeps `Cups` `Send` and `Sync` for any `C`.
     _cipher: PhantomData<fn() -> C>,
 }
 
-// Manual impls avoid the `C: Clone` and `C: Copy` bounds a derive would add.
-impl<C> Clone for Cups<C> {
+// Manual implementation avoids the `C: Clone` bound a derive would add.
+impl<H: Clone, C> Clone for Cups<H, C> {
     fn clone(&self) -> Self {
-        *self
+        Self {
+            handshake: self.handshake.clone(),
+            version: self.version,
+            _cipher: PhantomData,
+        }
     }
 }
 
-impl<C> Copy for Cups<C> {}
-
-impl<C: Cipher> Cups<C> {
-    /// Creates `version` records sealed by `C`.
-    pub const fn new(version: Version) -> Self {
+impl<H, C> Cups<H, C> {
+    /// Pairs `handshake` with `version` records sealed by `C`.
+    pub const fn new(handshake: H, version: Version) -> Self {
         Self {
+            handshake,
             version,
             _cipher: PhantomData,
+        }
+    }
+}
+
+impl<H, C: Cipher> Cups<H, C> {
+    /// Largest supported plaintext message, in bytes.
+    ///
+    /// Version 0 prefixes count the tag, so the payload and tag must fit in a `u32`.
+    pub const MAX_SIZE: u32 = max_size::<C>();
+
+    /// Returns the namespace identifying the record format of this version.
+    pub const fn namespace(&self) -> &'static [u8] {
+        match self.version {
+            Version::V0 => NAMESPACE_V0,
+            Version::V1 => NAMESPACE_V1,
         }
     }
 
@@ -130,7 +160,7 @@ impl<C: Cipher> Cups<C> {
     pub fn header_len(&self, len: usize) -> usize {
         let len = u32::try_from(len)
             .ok()
-            .filter(|len| *len <= <Self as crate::Transport>::MAX_SIZE)
+            .filter(|len| *len <= Self::MAX_SIZE)
             .expect("payload exceeds stream limit");
         match self.version {
             Version::V0 => UInt(len + tag_size::<C>()).encode_size(),
@@ -150,48 +180,126 @@ impl<C: Cipher> Cups<C> {
             .and_then(|size| size.checked_add(<C::Tag as FixedSize>::SIZE))
             .expect("record size exceeds usize")
     }
-}
-
-impl<C: Cipher> crate::Transport for Cups<C> {
-    type Cipher = C;
-    type Sender<O: Sink> = Sender<C, O>;
-    type Receiver<I: Stream> = Receiver<C, I>;
-
-    // Version 0 length prefixes count the tag, so a payload and its tag must fit in a u32.
-    const MAX_SIZE: u32 = u32::MAX - tag_size::<C>();
-
-    fn namespace(&self) -> &'static [u8] {
-        match self.version {
-            Version::V0 => NAMESPACE_V0,
-            Version::V1 => NAMESPACE_V1,
-        }
-    }
-
     fn split<I: Stream, O: Sink>(
-        &self,
+        version: Version,
         send: C,
         recv: C,
         stream: I,
         sink: O,
         max_message_size: u32,
         pool: BufferPool,
-    ) -> (Self::Sender<O>, Self::Receiver<I>) {
+    ) -> (Sender<C, O>, Receiver<C, I>) {
         (
             Sender {
                 cipher: Some(send),
                 sink,
                 max_message_size,
                 pool: pool.clone(),
-                version: self.version,
+                version,
             },
             Receiver {
                 cipher: Some(recv),
                 stream,
                 max_message_size,
                 pool,
-                version: self.version,
+                version,
             },
         )
+    }
+}
+
+impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
+    const MAX_SIZE: u32 = max_size::<C>();
+
+    type PublicKey = H::PublicKey;
+    type Error = H::Error;
+    type Sender<I: Stream, O: Sink> = Sender<C, O>;
+    type Receiver<I: Stream, O: Sink> = Receiver<C, I>;
+
+    fn public_key(&self) -> Self::PublicKey {
+        self.handshake.public_key()
+    }
+
+    async fn dial<E, I, O>(
+        self,
+        context: E,
+        namespace: &[u8],
+        max_message_size: u32,
+        peer: Self::PublicKey,
+        mut stream: I,
+        mut sink: O,
+    ) -> Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
+    where
+        E: BufferPooler + Clock + CryptoRng,
+        I: Stream,
+        O: Sink,
+    {
+        assert!(
+            max_message_size <= Self::MAX_SIZE,
+            "maximum message size exceeds stream limit"
+        );
+        let pool = context.network_buffer_pool().clone();
+        let record_namespace = self.namespace();
+        let version = self.version;
+        let (send, recv) = self
+            .handshake
+            .dial(
+                context,
+                namespace,
+                record_namespace,
+                peer,
+                &mut stream,
+                &mut sink,
+            )
+            .await?;
+        Ok(Self::split(
+            version,
+            send,
+            recv,
+            stream,
+            sink,
+            max_message_size,
+            pool,
+        ))
+    }
+
+    async fn listen<E, I, O, B, F>(
+        self,
+        context: E,
+        namespace: &[u8],
+        max_message_size: u32,
+        bouncer: B,
+        mut stream: I,
+        mut sink: O,
+    ) -> Result<(Self::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
+    where
+        E: BufferPooler + Clock + CryptoRng,
+        I: Stream,
+        O: Sink,
+        B: FnOnce(Self::PublicKey) -> F + Send,
+        F: Future<Output = bool> + Send,
+    {
+        assert!(
+            max_message_size <= Self::MAX_SIZE,
+            "maximum message size exceeds stream limit"
+        );
+        let pool = context.network_buffer_pool().clone();
+        let record_namespace = self.namespace();
+        let version = self.version;
+        let (peer, send, recv) = self
+            .handshake
+            .listen(
+                context,
+                namespace,
+                record_namespace,
+                bouncer,
+                &mut stream,
+                &mut sink,
+            )
+            .await?;
+        let (sender, receiver) =
+            Self::split(version, send, recv, stream, sink, max_message_size, pool);
+        Ok((peer, sender, receiver))
     }
 }
 
@@ -278,7 +386,7 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
     /// The returned size includes the header, ciphertext, and AEAD tags.
     fn encrypted_frame_len(&self, len: usize) -> Result<usize, Error> {
         validate_frame_len(len, self.max_message_size)?;
-        Ok(Cups::<C>::new(self.version).record_len(len))
+        Ok(Cups::<(), C>::new((), self.version).record_len(len))
     }
 
     /// Appends one encrypted frame directly into caller-provided storage.
@@ -496,7 +604,7 @@ mod test {
     use commonware_codec::Encode;
     use commonware_cryptography::ChaCha20Poly1305;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{BufferPooler as _, Runner as _, deterministic, mocks};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_utils::TestRng;
     use futures::FutureExt as _;
 
@@ -504,9 +612,90 @@ mod test {
 
     type RecordCipher = ChaCha20Poly1305;
     type Tag = <RecordCipher as Cipher>::Tag;
-    type TestCups = Cups<RecordCipher>;
+    type TestCups = Cups<(), RecordCipher>;
     const TAG_SIZE: u32 = tag_size::<RecordCipher>();
-    const MAX_SIZE: u32 = <TestCups as crate::Transport>::MAX_SIZE;
+    const MAX_SIZE: u32 = TestCups::MAX_SIZE;
+
+    /// A handshake independent of SAKE that checks the namespace CUPS binds to its keys.
+    #[derive(Clone)]
+    struct RejectingHandshake;
+
+    impl Handshake for RejectingHandshake {
+        type PublicKey = ();
+        type Error = std::io::Error;
+
+        fn public_key(&self) -> Self::PublicKey {}
+
+        async fn dial<C, E, I, O>(
+            self,
+            _context: E,
+            namespace: &[u8],
+            transport: &'static [u8],
+            _peer: (),
+            _stream: &mut I,
+            _sink: &mut O,
+        ) -> Result<(C, C), Self::Error>
+        where
+            C: Cipher,
+            E: Clock + CryptoRng,
+            I: Stream,
+            O: Sink,
+        {
+            assert_eq!(namespace, b"application");
+            assert_eq!(transport, NAMESPACE_V1);
+            Err(std::io::Error::other("rejected"))
+        }
+
+        async fn listen<C, E, I, O, B, F>(
+            self,
+            _context: E,
+            namespace: &[u8],
+            transport: &'static [u8],
+            _bouncer: B,
+            _stream: &mut I,
+            _sink: &mut O,
+        ) -> Result<(Self::PublicKey, C, C), Self::Error>
+        where
+            C: Cipher,
+            E: Clock + CryptoRng,
+            I: Stream,
+            O: Sink,
+            B: FnOnce(Self::PublicKey) -> F + Send,
+            F: Future<Output = bool> + Send,
+        {
+            assert_eq!(namespace, b"application");
+            assert_eq!(transport, NAMESPACE_V1);
+            Err(std::io::Error::other("rejected"))
+        }
+    }
+
+    #[test]
+    fn test_custom_handshake() {
+        deterministic::Runner::default().start(|context| async move {
+            let cups = Cups::<_, RecordCipher>::new(RejectingHandshake, Version::V1);
+            let _: &RejectingHandshake = &cups.handshake;
+            let (sink, stream) = mocks::Channel::init();
+            assert!(
+                cups.clone()
+                    .dial(context.child("dial"), b"application", 1, (), stream, sink)
+                    .await
+                    .is_err()
+            );
+            let (sink, stream) = mocks::Channel::init();
+            assert!(
+                cups.listen(
+                    context.child("listen"),
+                    b"application",
+                    1,
+                    |_| async { true },
+                    stream,
+                    sink
+                )
+                .await
+                .is_err()
+            );
+        });
+    }
 
     /// Returns the cipher every test peer derives, so each side replays the other's positions.
     fn cipher() -> Option<RecordCipher> {
@@ -577,7 +766,7 @@ mod test {
                     };
                     expected.extend(sealed(&mut cipher, message));
                     assert_eq!(
-                        TestCups::new(version).record_len(message.len()),
+                        TestCups::new((), version).record_len(message.len()),
                         expected.len()
                     );
                     assert_eq!(
@@ -599,7 +788,7 @@ mod test {
     #[test]
     #[should_panic(expected = "payload exceeds stream limit")]
     fn test_header_len_rejects_oversized_payload() {
-        TestCups::new(Version::V1).header_len(Widen::<usize>::widen(u32::MAX));
+        TestCups::new((), Version::V1).header_len(Widen::<usize>::widen(u32::MAX));
     }
 
     /// Checks that a version 0 receiver reports the payload length of an oversized record, which

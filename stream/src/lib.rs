@@ -11,25 +11,16 @@
 
 commonware_macros::stability_scope!(BETA {
     use commonware_cryptography::Cipher;
-    use commonware_runtime::{BufferPool, BufferPooler, Clock, IoBufs, Sink, Stream};
+    use commonware_runtime::{BufferPooler, Clock, IoBufs, Sink, Stream};
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
 
     pub mod cups;
     pub mod sake;
-    mod upgrade;
     pub mod utils;
 
     /// [SAKE](sake::Sake) paired with [CUPS](cups::Cups) records sealed by `C`.
-    pub type SakeCups<S, C> = (sake::Sake<S>, cups::Cups<C>);
-
-    /// Pairs `sake` with `cups`.
-    pub const fn sake_cups<S, C: Cipher>(
-        sake: sake::Sake<S>,
-        cups: cups::Cups<C>,
-    ) -> SakeCups<S, C> {
-        (sake, cups)
-    }
+    pub type SakeCups<S, C> = cups::Cups<sake::Sake<S>, C>;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
     ///
@@ -166,50 +157,14 @@ commonware_macros::stability_scope!(BETA {
         fn recv(&mut self) -> impl Future<Output = Result<IoBufs, Self::Error>> + Send;
     }
 
-    /// Protects messages on a connection with one cipher per direction.
-    ///
-    /// [Transport::split] builds a [Sender] and [Receiver] from the two ciphers a [Handshake] agrees
-    /// on.
-    pub trait Transport: Clone + Send + Sync + 'static {
-        /// Cipher that seals and opens records.
-        type Cipher: Cipher;
-
-        /// Sender that writes records to sink `O`.
-        type Sender<O: Sink>: Sender;
-
-        /// Receiver that reads records from stream `I`.
-        type Receiver<I: Stream>: Receiver;
-
-        /// Largest plaintext message supported, in bytes.
-        const MAX_SIZE: u32;
-
-        /// Returns the namespace that identifies this transport.
-        ///
-        /// Transports that differ on the wire must return different namespaces.
-        fn namespace(&self) -> &'static [u8];
-
-        /// Returns halves that protect records with `send` and `recv`.
-        ///
-        /// Callers must supply a `max_message_size` no greater than [Self::MAX_SIZE].
-        fn split<I: Stream, O: Sink>(
-            &self,
-            send: Self::Cipher,
-            recv: Self::Cipher,
-            stream: I,
-            sink: O,
-            max_message_size: u32,
-            pool: BufferPool,
-        ) -> (Self::Sender<O>, Self::Receiver<I>);
-    }
-
     /// Authenticates a raw connection and agrees on one [Cipher] per direction.
     ///
     /// Implementations must authenticate each peer's declared identity and bind the supplied
     /// application namespace and both peer identities to the agreed ciphers. A successful dial must
     /// authenticate the expected peer. A listen may succeed only if the bouncer returns `true` for
     /// the same authenticated peer that is returned. Implementations should also bind `transport`,
-    /// the [namespace](Transport::namespace) of the transport the ciphers will key, so that peers
-    /// with different transports fail the handshake.
+    /// the record namespace supplied by the upgrader, so that peers with different record
+    /// formats fail the handshake.
     ///
     /// Implementations must not consume bytes from `stream` past the final handshake message because
     /// the caller reuses `stream` and `sink` for the transport.

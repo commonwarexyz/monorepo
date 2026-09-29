@@ -27,20 +27,19 @@ pub enum TimeoutError<E> {
 /// use commonware_stream::{
 ///     cups::{self, Cups},
 ///     sake::{Sake, Version},
-///     sake_cups,
 ///     utils::Timeout,
 /// };
 /// use std::time::Duration;
 ///
 /// let upgrader = Timeout::new(
-///     sake_cups(
+///     Cups::<_, ChaCha20Poly1305>::new(
 ///         Sake {
 ///             signer: PrivateKey::from_seed(0),
 ///             synchrony_bound: Duration::from_secs(5),
 ///             max_handshake_age: Duration::from_secs(10),
 ///             version: Version::V1,
 ///         },
-///         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+///         cups::Version::V1,
 ///     ),
 ///     Duration::from_secs(5),
 /// );

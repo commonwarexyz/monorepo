@@ -76,14 +76,14 @@ mod tests {
     type Connection = (Sender, Receiver);
 
     fn handshake(signer: PrivateKey) -> Timeout<SakeCups<PrivateKey, ChaCha20Poly1305>> {
-        let handshake = (
+        let handshake = Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
                 version: Version::V1,
             },
-            Cups::new(cups::Version::V1),
+            cups::Version::V1,
         );
         Timeout::new(handshake, Duration::from_secs(10))
     }

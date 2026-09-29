@@ -318,7 +318,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_stream::{cups, cups::Cups, sake, sake::Sake, sake_cups};
+    use commonware_stream::{cups, cups::Cups, sake, sake::Sake};
     use commonware_utils::NZUsize;
     use std::{net::SocketAddr, time::Duration};
 
@@ -332,14 +332,14 @@ mod tests {
             let peer = peer_signer.public_key();
             let address = SocketAddr::from(([127, 0, 0, 1], 7000));
             let cfg = Config::local(
-                sake_cups(
+                Cups::<_, ChaCha20Poly1305>::new(
                     Sake {
                         signer: signer.clone(),
                         synchrony_bound: Duration::from_secs(5),
                         max_handshake_age: Duration::from_secs(10),
                         version: sake::Version::V1,
                     },
-                    Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                    cups::Version::V1,
                 ),
                 b"discovery-test",
                 address,

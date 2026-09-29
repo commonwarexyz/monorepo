@@ -123,7 +123,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}, sake_cups};
+//! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}};
 //! use commonware_utils::{NZU32, NZUsize, ordered::Map};
 //! use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, time::Duration};
 //!
@@ -159,14 +159,14 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = lookup::Config::local(
-//!     sake_cups(
+//!     Cups::<_, ChaCha20Poly1305>::new(
 //!         Sake {
 //!             signer: signer.clone(),
 //!             synchrony_bound: Duration::from_secs(5),
 //!             max_handshake_age: Duration::from_secs(10),
 //!             version: Version::V1,
 //!         },
-//!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+//!         cups::Version::V1,
 //!     ),
 //!     application_namespace,
 //!     my_addr,
@@ -244,7 +244,6 @@ mod tests {
         Receiver as StreamReceiver, SakeCups, Sender as StreamSender, Upgrader,
         cups::{self, Cups},
         sake::{self, Sake},
-        sake_cups,
     };
     use commonware_utils::{
         Hostname, NZU32, NZUsize, TryCollect,
@@ -2394,14 +2393,14 @@ mod tests {
                 .map(|(transport, _)| transport.clone())
                 .ok_or(TestHandshakeError::UnknownApplicationIdentity)?;
             self.authenticate().await?;
-            let (sender, receiver) = sake_cups(
+            let (sender, receiver) = Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
                     signer: self.transport_signer,
                     synchrony_bound: Duration::from_secs(5),
                     max_handshake_age: Duration::from_secs(10),
                     version: sake::Version::V1,
                 },
-                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                cups::Version::V1,
             )
             .dial(
                 context,
@@ -2441,14 +2440,14 @@ mod tests {
             );
             self.observations.listens.fetch_add(1, Ordering::Relaxed);
             let handshake = self.clone();
-            let (transport_peer, sender, receiver) = sake_cups(
+            let (transport_peer, sender, receiver) = Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
                     signer: self.transport_signer.clone(),
                     synchrony_bound: Duration::from_secs(5),
                     max_handshake_age: Duration::from_secs(10),
                     version: sake::Version::V1,
                 },
-                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                cups::Version::V1,
             )
             .listen(
                 context,

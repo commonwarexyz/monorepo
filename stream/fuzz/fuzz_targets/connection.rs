@@ -13,11 +13,11 @@ use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
 /// Returns the records that pair with the SAKE `version`.
-fn records(version: Version) -> Cups<ChaCha20Poly1305> {
-    Cups::new(match version {
+fn record_version(version: Version) -> cups::Version {
+    match version {
         Version::V0 => cups::Version::V0,
         Version::V1 => cups::Version::V1,
-    })
+    }
 }
 
 #[derive(Debug)]
@@ -117,25 +117,25 @@ fn fuzz(input: FuzzInput) {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = (
+        let dialer_handshake = Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer: dialer_signer.clone(),
                 synchrony_bound,
                 max_handshake_age,
                 version: input.version,
             },
-            records(input.version),
+            record_version(input.version),
         );
         let dialer_handshake = Timeout::new(dialer_handshake, handshake_timeout);
 
-        let listener_handshake = (
+        let listener_handshake = Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer: listener_signer.clone(),
                 synchrony_bound,
                 max_handshake_age,
                 version: input.version,
             },
-            records(input.version),
+            record_version(input.version),
         );
         let listener_handshake = Timeout::new(listener_handshake, handshake_timeout);
 
