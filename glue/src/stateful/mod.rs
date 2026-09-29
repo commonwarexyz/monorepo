@@ -61,7 +61,7 @@
 //! * Publish a snapshot of the converged state for serving peers.
 //! * Acknowledge retained blocks at or below `a` without running application hooks.
 //! * Apply retained blocks above `a` in height order and acknowledge them once durable.
-//! * Record completion after all applied state is durable, then start serving requests.
+//! * Record completion once all applied state is durable, then start processing.
 //!
 //! The persisted floor lets an interrupted sync resume after a crash, even when state sync is
 //! not requested on restart. A newer selection may advance the floor but cannot move it backward.

@@ -59,12 +59,14 @@ where
     /// Retry cadence for pending fetches.
     pub fetch_retry_timeout: Duration,
 
-    /// Largest `max_ops` served in a peer's operations request. Larger requests go unanswered.
+    /// Largest `max_ops` served in a peer's operations request. Larger requests get an error
+    /// response.
     pub max_serve_ops: NonZeroU64,
 
     /// Longest a peer's request may be served for. A serve holds a published snapshot, and so
     /// the storage it pins, until it finishes, so this bounds how long a slow serve can pin it.
-    /// A request not served in time goes unanswered.
+    /// A request not served in time gets an error response. Keep it at or below the requesters'
+    /// [`Self::timeout`], since a longer serve pins the snapshot for an answer nobody awaits.
     pub serve_timeout: Duration,
 
     /// Whether fetch requests are sent with network priority.
@@ -336,7 +338,7 @@ where
 
         self.serves.push(async move {
             // The deadline bounds how long the serve pins its snapshot: the resolver drops a
-            // response receiver only at shutdown. A closed receiver means the requester is gone.
+            // response receiver only at shutdown, so a closed receiver means it stopped.
             let result = select! {
                 _ = deadline => {
                     serve_requests.inc(status::Status::Timeout);

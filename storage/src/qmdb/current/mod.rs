@@ -11,14 +11,15 @@
 //! Current batches are branch-scoped views, not immutable snapshots.
 //!
 //! A batch remains usable only while its ancestor chain is still the committed prefix of the
-//! DB. Once a non-ancestor batch is applied, that batch and all of its descendants are stale.
+//! DB. Once a non-ancestor batch is applied (including one of its own descendants), that batch is
+//! stale, as is every descendant the applied batch is not an ancestor of.
 //! Reads refuse with `StaleRead`, and merkleization and application are rejected with
 //! `StaleBatch` (see [`crate::qmdb::chain`]).
 //!
 //! Concretely
 //! - Build `A`, apply `A`, then build `B` from `A` -- `B` reads and merkleizes normally.
 //! - Build siblings `B1` and `B2`, apply `B1` -- `B2.get()` returns `StaleRead`, while
-//!   `B2.merkleize()` and `apply_batch(B2)` return `StaleBatch`.
+//!   `apply_batch(B2)` and merkleizing a child of `B2` return `StaleBatch`.
 //! - Hold `view = db.to_batch()`, mutate the DB through another branch -- `view`'s reads
 //!   refuse from then on.
 //!
@@ -4014,19 +4015,19 @@ pub mod tests {
             let (db, _) = db.apply_batch(m).await.unwrap();
 
             // Get an owned batch from the committed state.
-            let snapshot = db.to_batch();
-            assert_eq!(snapshot.root(), db.root());
+            let view = db.to_batch();
+            assert_eq!(view.root(), db.root());
 
-            // Chain a child batch from the snapshot.
-            let child = snapshot
+            // Chain a child batch from the view.
+            let child = view
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1)))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
 
-            // The child's root should differ from the snapshot.
-            assert_ne!(child.root(), snapshot.root());
+            // The child's root should differ from the view.
+            assert_ne!(child.root(), view.root());
 
             // Apply child.
             let (db, _) = db.apply_batch(child).await.unwrap();

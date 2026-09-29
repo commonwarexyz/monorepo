@@ -79,8 +79,8 @@ type JournalBatch<F, D, K, V, S> = Arc<authenticated::MerkleizedBatch<F, D, Oper
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`]. Reads through it refuse with
-/// [`crate::qmdb::Error::StaleRead`] once a batch from a different fork is applied
-/// (see [`crate::qmdb::chain`]).
+/// [`crate::qmdb::Error::StaleRead`] once a batch that is not its ancestor is applied, whether
+/// from a different fork or one of its own descendants (see [`crate::qmdb::chain`]).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> {
     /// Authenticated journal batch (Merkle state + local items).
@@ -184,7 +184,8 @@ where
     /// Read through: mutations -> ancestor diffs -> committed DB.
     ///
     /// Only operations at or above the inactivity floor this batch builds on are read, so every
-    /// node answers alike however far it has pruned.
+    /// node answers alike for a key written once, however far it has pruned. A repeated key may
+    /// return any of its written values.
     ///
     /// # Errors
     ///
@@ -222,7 +223,8 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys, each as [`Self::get`] would.
+    /// Returns results in the same order as the input keys. A key written once reads as
+    /// [`Self::get`] would, and a repeated key may return any of its written values.
     ///
     /// # Errors
     ///
@@ -345,6 +347,7 @@ where
             boundary,
             ancestors.iter().map(|ancestor| ancestor.state),
         )?;
+        let start_floor = self.floor(&*db);
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
         // iteration yields keys in sorted order, which `diff` relies on for binary search.
@@ -362,10 +365,7 @@ where
 
         let total_size = base + ops.len() as u64;
         chain::validate_merkleize_floor::<F, H::Digest>(
-            self.parent.as_ref().map_or_else(
-                || db.inactivity_floor_loc(),
-                |parent| parent.bounds.inactivity_floor,
-            ),
+            start_floor,
             inactivity_floor,
             total_size - 1,
         )?;
@@ -432,9 +432,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
+    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
-    /// dropped unapplied ancestor.
+    /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
+    /// operations (an [`Immutable::to_batch`] view).
     pub fn proof<E, C, H, T>(
         &self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
@@ -496,7 +497,8 @@ where
     /// Read through: local diff -> ancestor diffs -> committed DB.
     ///
     /// Only operations at or above this batch's inactivity floor are read, so every node answers
-    /// alike however far it has pruned.
+    /// alike for a key written once, however far it has pruned. A repeated key may return any of
+    /// its written values.
     ///
     /// # Errors
     ///
@@ -528,7 +530,8 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys, each as [`Self::get`] would.
+    /// Returns results in the same order as the input keys. A key written once reads as
+    /// [`Self::get`] would, and a repeated key may return any of its written values.
     ///
     /// # Errors
     ///

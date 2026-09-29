@@ -321,7 +321,7 @@ where
     }
 
     /// Snapshot of the grafted tree for use in batch chains.
-    pub(super) fn grafted_snapshot(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>> {
+    pub(super) fn grafted_batch(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>> {
         merkle::batch::MerkleizedBatch::from_mem_with_strategy(
             &self.grafted_tree,
             self.strategy.clone(),
@@ -332,7 +332,7 @@ where
     pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<F, H, U, N, S> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
-            self.grafted_snapshot(),
+            self.grafted_batch(),
             BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
         )
     }
@@ -717,11 +717,8 @@ where
     /// ops-tree proofs state sync needs. Grafted proofs require the live bitmap, which
     /// keeps no history, so those remain live-only.
     ///
-    /// The snapshot keeps the log's blobs open. While it is alive, an initialization that
-    /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
-    /// capture (for example by a prune) can be recreated. On filesystem-backed storage the
-    /// snapshot also holds the storage directory, so a second storage instance on that directory
-    /// waits for it to drop.
+    /// Capture writes buffered data and keeps the log's blobs open while the snapshot is alive, as
+    /// [`Snapshottable::snapshot`] describes.
     ///
     /// Serving from the snapshot returns [`crate::merkle::Error::ElementPruned`] for a boundary
     /// below the Merkle structure's pruning boundary, which a sync can leave above the log's
@@ -1484,6 +1481,8 @@ mod tests {
             // Path A. Merkleize while the parent is still pending.
             let child_pre = build(&parent);
             let read_pre = child_pre.get(&untouched, &db).await.unwrap();
+            // Key 2 falls through to its committed value.
+            assert_eq!(read_pre, Some(Sha256::hash(&[&42u64.to_be_bytes()])));
             let root_pre = child_pre.merkleize(&db, None).await.unwrap().root();
 
             // Apply the parent.
@@ -1646,11 +1645,20 @@ mod tests {
             ));
 
             // Update the same keys so the live bitmap retroactively flips the captured
-            // operations' activity bits, the floor rises, and pruning discards captured
-            // operations. The snapshot must not observe any of it.
-            db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            // operations' activity bits, the floor rises past a bitmap chunk, and pruning
+            // discards every captured operation. The snapshot must not observe any of it.
+            let mut rounds = 0;
+            while db.sync_boundary() <= op_count {
+                rounds += 1;
+                assert!(
+                    rounds <= 64,
+                    "floor never rose past the captured operations"
+                );
+                db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            }
             let boundary = db.sync_boundary();
             db = db.prune(boundary).await.unwrap();
+            assert!(db.bounds().start >= op_count);
             assert_ne!(db.root(), canonical_root);
             assert_ne!(db.ops_root(), ops_root);
 
@@ -1667,11 +1675,13 @@ mod tests {
             ));
 
             // Anything above the frozen size is rejected.
-            assert!(
+            assert!(matches!(
                 crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
-                    .await
-                    .is_err()
-            );
+                    .await,
+                Err(crate::qmdb::Error::Merkle(
+                    crate::merkle::Error::RangeOutOfBounds(_)
+                ))
+            ));
 
             db.destroy().await.unwrap();
         });

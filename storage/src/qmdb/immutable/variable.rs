@@ -271,6 +271,8 @@ mod tests {
         test_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
         test_variable_merkleize_across_prune => run_merkleize_across_prune, open;
         test_variable_stale_fork_refuses => run_stale_fork_refuses, open;
+        test_variable_descendant_apply_makes_parent_reads_stale =>
+            run_descendant_apply_makes_parent_reads_stale, open;
         test_variable_reads_ignore_inactive_operations => run_reads_ignore_inactive_operations, open;
         test_variable_proof_refused_after_sibling_apply => run_proof_refused_after_sibling_apply, open;
         test_variable_bounded_initialization_preserves_collision_bucket =>

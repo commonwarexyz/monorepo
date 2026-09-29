@@ -53,8 +53,8 @@ where
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`]. Reads through it refuse with
-/// [`crate::qmdb::Error::StaleRead`] once a batch from a different fork is applied
-/// (see [`crate::qmdb::chain`]).
+/// [`crate::qmdb::Error::StaleRead`] once a batch that is not its ancestor is applied, whether
+/// from a different fork or one of its own descendants (see [`crate::qmdb::chain`]).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy>
 where
@@ -255,9 +255,7 @@ where
             locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
-        if locs[0] < self.base.size {
-            check_floor(locs[0], self.floor(&*db))?;
-        }
+        check_floor(locs[0], self.floor(&*db))?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();
@@ -345,6 +343,7 @@ where
             boundary,
             ancestors.iter().map(|ancestor| ancestor.state),
         )?;
+        let start_floor = self.floor(&*db);
 
         // Build operations: one Append per value, then Commit.
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
@@ -355,10 +354,7 @@ where
 
         let total_size = self.base.size + ops.len() as u64;
         chain::validate_merkleize_floor::<F, H::Digest>(
-            self.parent.as_ref().map_or_else(
-                || db.inactivity_floor_loc(),
-                |parent| parent.bounds.inactivity_floor,
-            ),
+            start_floor,
             inactivity_floor,
             total_size - 1,
         )?;
@@ -435,7 +431,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is off this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (a [`Keyless::to_batch`] snapshot).
+    /// operations (a [`Keyless::to_batch`] view).
     pub fn proof<E, C, H>(&self, db: &Keyless<F, E, V, C, H, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
@@ -541,9 +537,7 @@ where
             locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
-        if locs[0] < self.bounds.tip.size {
-            check_floor(locs[0], self.bounds.inactivity_floor)?;
-        }
+        check_floor(locs[0], self.bounds.inactivity_floor)?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();

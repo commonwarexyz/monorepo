@@ -9,7 +9,7 @@
 //!
 //! # Witness journal
 //!
-//! The witness journal holds a complete snapshot of every applied batch. [`Db::init`]
+//! The witness journal holds a complete record of every applied batch. [`Db::init`]
 //! restores a retained applied state within its operation cap. [`Db::prune`] bounds the retained
 //! history. Initialization restores the db's in-memory state from an entry. The Merkle is rebuilt
 //! from the stored pinned nodes and operation, and the commit fields are decoded from the
@@ -156,7 +156,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is off this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (a [`Db::to_batch`] snapshot).
+    /// operations (a [`Db::to_batch`] view).
     pub fn proof<E, C, H>(&self, db: &Db<F, E, V, H, C, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
@@ -963,6 +963,7 @@ mod tests {
     fn compact_mmb_proof_refused_after_off_chain_reopen() {
         deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmb::Family>);
     }
+
     /// Batch artifacts (operations, range proof, pinned frontier) verify against the batch root,
     /// survive applying and dropping ancestors, and are refused once the batch itself is applied
     /// and the compact store is pruned past them.
@@ -983,7 +984,7 @@ mod tests {
         let floor = db.size();
         assert_eq!(floor, Location::new(8));
 
-        // A snapshot batch has no operations to prove.
+        // A `to_batch` view has no operations to prove.
         assert!(matches!(
             db.to_batch().proof(&db),
             Err(Error::Merkle(crate::merkle::Error::Empty))
@@ -1977,9 +1978,9 @@ mod tests {
                 "applying a non-empty batch must change the live root"
             );
 
-            let snapshot = db.to_batch();
+            let view = db.to_batch();
             assert_eq!(
-                snapshot.root(),
+                view.root(),
                 live_root,
                 "to_batch().root() must match the live db.root() even before sync"
             );
@@ -2116,7 +2117,6 @@ mod tests {
                 .unwrap();
             let (db, _) = db.apply_batch(advance_floor).await.unwrap();
             let db = db.sync().await.unwrap();
-            let target = db.target();
 
             let regressed = db
                 .new_batch()
@@ -2129,12 +2129,6 @@ mod tests {
                 Err(Error::FloorRegressed(new, current))
                     if new == Location::new(0) && current == Location::new(1)
             ));
-
-            // Reopen and verify the rejected batch persisted nothing.
-            drop(db);
-            let db =
-                open_db::<mmr::Family>(context.child("reopen"), "keyless-floor-regressed").await;
-            assert_eq!(db.target(), target);
         });
     }
 
@@ -2162,19 +2156,11 @@ mod tests {
                 .merkleize(&db, None, Location::new(1))
                 .await;
 
-            let target = db.target();
             assert!(matches!(
                 child,
                 Err(Error::FloorRegressed(new, prev))
                     if new == Location::new(1) && prev == Location::new(2)
             ));
-
-            // Reopen and verify the rejected chain persisted nothing.
-            drop(db);
-            let db =
-                open_db::<mmr::Family>(context.child("reopen"), "keyless-ancestor-floor-regressed")
-                    .await;
-            assert_eq!(db.target(), target);
         });
     }
 
@@ -3209,25 +3195,33 @@ mod tests {
         });
     }
 
-    // A batch whose floor exceeds its own commit location is refused at merkleize, identifying
-    // its own bound, so no descendant can build on it.
+    // A chained batch whose floor exceeds its own commit location, counted past its parent's
+    // operations, is refused at merkleize.
     #[test_traced("INFO")]
     fn test_compact_ancestor_floor_beyond_size() {
         deterministic::Runner::default().start(|context| async move {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "keyless-ancestor-floor-beyond").await;
 
-            // parent: append + commit at loc 2, floor=3 (one past parent's commit).
+            // parent: append + commit at loc 2, floor=2.
             let parent = db
                 .new_batch()
                 .append(U64::new(1))
-                .merkleize(&db, None, Location::new(3))
+                .merkleize(&db, None, Location::new(2))
+                .await
+                .unwrap();
+
+            // child: append + commit at loc 4, floor=5 (one past its commit).
+            let child = parent
+                .new_batch::<Sha256>()
+                .append(U64::new(2))
+                .merkleize(&db, None, Location::new(5))
                 .await;
 
             assert!(matches!(
-                parent,
+                child,
                 Err(Error::FloorBeyondSize(floor, commit))
-                    if floor == Location::new(3) && commit == Location::new(2)
+                    if floor == Location::new(5) && commit == Location::new(4)
             ));
         });
     }

@@ -459,10 +459,10 @@ where
     /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound job
     /// submitted through [`Strategy::spawn`].
     ///
-    /// The job hashes against an immutable snapshot of the committed Merkle state, so a parallel
+    /// The job hashes against an immutable view of the committed Merkle state, so a parallel
     /// strategy can host the batch's dominant CPU phase on its own pool instead of occupying the
     /// calling task. If the job's caller is cancelled, the job still runs to completion
-    /// against its snapshot and the result is discarded.
+    /// against its view and the result is discarded.
     pub(crate) async fn merkleize(
         &self,
         batch: UnmerkleizedBatch<F, H, C::Item, S>,
@@ -869,11 +869,9 @@ where
 {
     /// Capture an owned immutable [Snapshot] of the journal and its Merkle structure.
     ///
-    /// The snapshot keeps the journal's and Merkle structure's blobs open. While it is alive, an initialization that
-    /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
-    /// capture (for example by a prune) can be recreated. On filesystem-backed storage the
-    /// snapshot also holds the storage directory, so a second storage instance on that directory
-    /// waits for it to drop.
+    /// Capture writes buffered data and keeps the journal's and Merkle structure's blobs open
+    /// while the snapshot is alive, as [`Snapshottable`](super::contiguous::Snapshottable)
+    /// describes.
     ///
     /// # Errors
     ///
@@ -4118,6 +4116,10 @@ mod tests {
             .proof(Location::new(0), NZU64!(10), 0)
             .await
             .unwrap();
+        let (live_historical, live_historical_ops) = journal
+            .historical_proof(size, Location::new(5), NZU64!(5), 0)
+            .await
+            .unwrap();
 
         let snapshot;
         (journal, snapshot) = journal.snapshot().await.unwrap();
@@ -4157,14 +4159,28 @@ mod tests {
             snapshot_ops2.iter().map(Encode::encode).collect::<Vec<_>>()
         );
         let pruned_reads = snapshot.read_many(&[0, 1, 2]).await.unwrap();
-        assert_eq!(pruned_reads.len(), 3);
+        assert_eq!(
+            pruned_reads.iter().map(Encode::encode).collect::<Vec<_>>(),
+            live_ops[..3].iter().map(Encode::encode).collect::<Vec<_>>()
+        );
 
-        // Historical proofs at or below the frozen size work while anything above is rejected.
-        let (historical, _) = snapshot
+        // Historical proofs at or below the frozen size match the capture-time proof, while
+        // anything above is rejected.
+        let (historical, historical_ops) = snapshot
             .historical_proof(size, Location::new(5), NZU64!(5), 0)
             .await
             .unwrap();
-        assert!(!historical.encode().is_empty());
+        assert_eq!(historical.encode(), live_historical.encode());
+        assert_eq!(
+            historical_ops
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>(),
+            live_historical_ops
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>()
+        );
         assert!(matches!(
             snapshot.proof(size, NZU64!(1), 0).await,
             Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
@@ -4217,13 +4233,16 @@ mod tests {
         .unwrap();
         let (mut journal, snapshot) = journal.snapshot().await.unwrap();
         assert_eq!(snapshot.bounds(), 0..*size);
-        assert!(snapshot.read(*size).await.is_err());
-        assert!(
+        assert!(matches!(
+            snapshot.read(*size).await,
+            Err(crate::journal::Error::ItemOutOfRange(_))
+        ));
+        assert!(matches!(
             snapshot
                 .historical_proof(size + 1, Location::new(0), NZU64!(1), 0)
-                .await
-                .is_err()
-        );
+                .await,
+            Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
+        ));
 
         for i in 100..130u8 {
             (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();

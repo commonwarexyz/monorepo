@@ -323,6 +323,15 @@ where
 
 /// Generate a proof of the operations starting at `start_loc` when the database had `op_count`
 /// operations.
+///
+/// # Errors
+///
+/// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `op_count`
+///   exceeds the operations `log` holds or `start_loc >= op_count`.
+/// - Returns [`Error::HistoricalFloorPruned`] if `op_count` is zero or the operation at
+///   `op_count - 1` is not a commit.
+/// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+///   with [`crate::merkle::Error::ElementPruned`] if a required operation or node was pruned.
 pub(crate) async fn historical_proof<F, C, M, H>(
     log: &Authenticated<C, M, H>,
     op_count: Location<F>,
@@ -405,8 +414,9 @@ pub enum Error<F: Family> {
     #[error("location below inactivity floor: {0}")]
     BelowInactivityFloor(Location<F>),
 
-    /// The batch's inactivity floor is lower than the database's current floor.
-    #[error("floor regressed: batch floor {0} < current floor {1}")]
+    /// The batch's inactivity floor is lower than the floor it builds on: its parent's, or the
+    /// database's for a batch with no parent.
+    #[error("floor regressed: batch floor {0} < prior floor {1}")]
     FloorRegressed(Location<F>, Location<F>),
 
     /// The batch's inactivity floor exceeds its own commit operation's location. The floor

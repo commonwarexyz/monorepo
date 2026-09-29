@@ -69,10 +69,10 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
 /// A Merkle structure that retains only the state required to continue appending.
 ///
-/// The [`Mem`] is held as an [`Arc`] behind the lock so `snapshot` can hand a zero-copy,
+/// The [`Mem`] is held as an [`Arc`] behind the lock so `mem` can hand a zero-copy,
 /// immutable view to jobs running off the calling task. Mutations go through
-/// [`Arc::make_mut`]: they are in-place while no snapshot is alive and copy-on-write
-/// otherwise, so a snapshot never observes later mutations.
+/// [`Arc::make_mut`]: they are in-place while no view is alive and copy-on-write
+/// otherwise, so a view never observes later mutations.
 pub struct Merkle<F: Family, D: Digest, S: Strategy> {
     inner: RwLock<Arc<Mem<F, D>>>,
     strategy: S,
@@ -185,9 +185,9 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         f(&inner)
     }
 
-    /// Return a zero-copy, immutable snapshot of the in-memory [`Mem`].
+    /// Return a zero-copy, immutable view of the in-memory [`Mem`].
     ///
-    /// The snapshot never observes later mutations: mutators copy-on-write while a snapshot is
+    /// The view never observes later mutations: mutators copy-on-write while a view is
     /// alive. Use this to move committed node fallback into a job running off the calling task;
     /// prefer [`Merkle::with_mem`] when a borrow suffices.
     pub(crate) fn mem(&self) -> Arc<Mem<F, D>> {
