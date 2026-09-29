@@ -2601,12 +2601,29 @@ pub(crate) mod test {
                 .unwrap();
             let (db, _) = db.apply_batch(deleted).await.unwrap();
 
+            let read_calls = || {
+                context
+                    .encode()
+                    .lines()
+                    .filter_map(|line| {
+                        let (name, value) = line.split_once(' ')?;
+                        name.ends_with("_read_calls_total")
+                            .then(|| value.parse::<u64>().unwrap())
+                    })
+                    .sum::<u64>()
+            };
+            let before = read_calls();
             let quota =
                 NonZeroUsize::new((*seed_range.start - *db.inactivity_floor_loc() + 1) as usize);
             let (batch, popped) = db.new_batch().pop_active(&db, quota).await.unwrap();
             assert!(
                 popped.is_none(),
                 "quota stops immediately before the live update"
+            );
+            assert_eq!(
+                read_calls(),
+                before,
+                "inactive skips must not read the journal"
             );
             let expected_floor = seed_range.start + 1;
             // A fresh call can resume at the active operation without spending its skip quota.
@@ -2616,6 +2633,14 @@ pub(crate) mod test {
             let popped = popped.expect("quota resets for each call");
             assert_eq!(popped.location, expected_floor);
             assert_eq!(*operation::Update::key(&popped.update), keys[1]);
+            let before = read_calls();
+            let (resumed, exhausted) = resumed.pop_active(&db, None).await.unwrap();
+            assert!(exhausted.is_none());
+            assert_eq!(
+                read_calls(),
+                before,
+                "inactive suffix and final commit require no reads"
+            );
             drop(resumed);
             let merkleized = batch.merkleize(&db, None).await.unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();

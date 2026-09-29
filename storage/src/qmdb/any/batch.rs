@@ -1820,12 +1820,17 @@ where
         let mut remaining = quota.map(NonZeroUsize::get);
         while location < tip {
             let operation = if location < db_size {
-                db.log.read(*location).await?
+                // The final commit has a set bit but is not a live update.
+                if location + 1 < db_size && db.bitmap.get_bit(*location) {
+                    Some(db.log.read(*location).await?)
+                } else {
+                    None
+                }
             } else {
-                read_op_from_ancestors(&ancestors, *location, *db_size).clone()
+                Some(read_op_from_ancestors(&ancestors, *location, *db_size).clone())
             };
             batch.manual_floor = Some(location + 1);
-            if let Operation::Update(update) = operation {
+            if let Some(Operation::Update(update)) = operation {
                 let key = update::Update::key(&update);
                 let active = !batch.mutations.contains_key(key)
                     && resolve_in_ancestors(&ancestors, key).map_or_else(

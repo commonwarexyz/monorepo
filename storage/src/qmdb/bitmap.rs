@@ -67,7 +67,6 @@ impl<const N: usize> Shared<N> {
     }
 
     /// Return the value of the bit at `loc`. Acquires the read lock briefly.
-    #[cfg(any(test, feature = "test-traits"))]
     pub(crate) fn get_bit(&self, loc: u64) -> bool {
         self.read().get_bit(loc)
     }
