@@ -584,6 +584,9 @@ mod tests {
             let pairs: Vec<[&[u8]; 2]> = (0..count)
                 .map(|i| [&data[i..i + 32], &data[i + 32..i + 64]])
                 .collect();
+            let leaves: Vec<[&[u8]; 2]> = (0..count)
+                .map(|i| [&data[i..i + 8], &data[i + 8..i + 40]])
+                .collect();
             let mixed: Vec<[&[u8]; 2]> = (0..count)
                 .map(|i| [&data[..i], &data[i..2 * i + 1000]])
                 .collect();
@@ -599,10 +602,35 @@ mod tests {
                 pairs.iter().map(|parts| reference(parts)).collect(),
             );
             check(
+                Blake3::hash_many_parts(&leaves),
+                leaves.iter().map(|parts| reference(parts)).collect(),
+            );
+            check(
                 Blake3::hash_many_parts(&mixed),
                 mixed.iter().map(|parts| reference(parts)).collect(),
             );
         }
+    }
+
+    #[test]
+    fn test_hash_many_parts_pair_boundaries() {
+        let data = random(8192, 0);
+        for len in [0, 1, 40, 64, 72, 127, 128, 129, 1024, 1025, 2048, 4096] {
+            let split = len.min(1);
+            let messages = [
+                [&data[..len / 2], &data[len / 2..len]],
+                [&data[1..1 + split], &data[1 + split..1 + len]],
+            ];
+            assert_eq!(
+                Blake3::hash_many_parts(&messages),
+                messages
+                    .iter()
+                    .map(|parts| reference(parts))
+                    .collect::<Vec<_>>(),
+                "len={len}"
+            );
+        }
+        assert_eq!(Blake3::hash_many_parts(&[[]; 2]), vec![reference(&[]); 2]);
     }
 
     #[test]

@@ -6,8 +6,13 @@ use blake3::{BLOCK_LEN, OUT_LEN};
 
 mod avx2;
 mod avx512;
+mod input;
 mod pair;
+mod row;
+mod row4;
 mod scalar;
+#[cfg(test)]
+mod small_tests;
 
 pub(super) use scalar::Scalar;
 
@@ -59,6 +64,20 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<[[u8; OUT_LEN
     if !supports_avx2() {
         return None;
     }
+    if let Some(left) = input::Input::new(left)
+        && let Some(right) = input::Input::new(right)
+    {
+        if left.len() != right.len() {
+            return None;
+        }
+        if supports_avx512vl() {
+            // SAFETY: AVX2, AVX-512F, AVX-512VL, and equal input lengths were
+            // established above.
+            return Some(unsafe { pair::hash_direct_vl(&left, &right) });
+        }
+        // SAFETY: AVX2 and equal input lengths were established above.
+        return Some(unsafe { pair::hash_direct(&left, &right) });
+    }
     let (mut left_buffer, mut right_buffer) = ([0u8; PAIR_LEN], [0u8; PAIR_LEN]);
     let len = gather(left, &mut left_buffer)?;
     if gather(right, &mut right_buffer)? != len {
@@ -106,6 +125,24 @@ fn gather(parts: &[&[u8]], buffer: &mut [u8; PAIR_LEN]) -> Option<usize> {
 struct Avx512(());
 
 impl Avx512 {
+    /// Hash equal-length messages, using the row kernel for three or four
+    /// short inputs.
+    #[inline]
+    fn hash(&self, inputs: [&[u8]; 16], active: usize) -> [[u8; OUT_LEN]; 16] {
+        if matches!(active, 3 | 4) && input::Input::supports_len(inputs[0].len()) {
+            // SAFETY: Construction establishes AVX-512F and the first input
+            // has a supported length. The kernel checks that all lanes agree.
+            let rows = unsafe { row4::hash([inputs[0], inputs[1], inputs[2], inputs[3]]) };
+            let mut outputs = [[0; OUT_LEN]; 16];
+            outputs[..active].copy_from_slice(&rows[..active]);
+            return outputs;
+        }
+        pair_batch(inputs, active).unwrap_or_else(|| {
+            // SAFETY: Construction establishes AVX-512F and AVX-512BW.
+            unsafe { avx512::hash_x16(inputs) }
+        })
+    }
+
     /// Hash equal-length `messages` with their nodes packed into lanes (see
     /// [`super::pack`]), compiled once here rather than in each caller.
     fn pack(&self, messages: &[&[u8]], digests: &mut Vec<Digest>) {
@@ -166,14 +203,16 @@ impl Nodes<8> for Avx2 {
 
 /// Hash independent messages in batches of 16 (AVX-512) or 8 (AVX2).
 pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
+    if let [left, right] = messages
+        && supports_avx2()
+        && let Some(digests) = hash_two(left.as_ref(), right.as_ref())
+    {
+        return Some(digests);
+    }
     if supports_avx512() {
         let pack = |messages: &[&[u8]], digests: &mut _| Avx512(()).pack(messages, digests);
         return Some(batch(messages, avx512::MINIMUM, pack, |inputs, active| {
-            pair_batch(inputs, active).unwrap_or_else(|| {
-                // SAFETY: AVX-512F and AVX-512BW availability was established
-                // above.
-                unsafe { avx512::hash_x16(inputs) }
-            })
+            Avx512(()).hash(inputs, active)
         }));
     }
     if supports_avx2() {
@@ -186,6 +225,14 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
         }));
     }
     None
+}
+
+/// Keep the pair kernel's temporaries in a separate stack frame from the
+/// general batch dispatcher.
+#[inline(never)]
+fn hash_two(left: &[u8], right: &[u8]) -> Option<Vec<Digest>> {
+    let [left, right] = hash_pair(&[left], &[right])?;
+    Some(Vec::from([Digest(left), Digest(right)]))
 }
 
 /// Hash a batch whose only active lanes are the first two with the two-message
@@ -256,11 +303,7 @@ mod tests {
         let pack = |messages: &[&[u8]], digests: &mut _| Avx512(()).pack(messages, digests);
         check_batch(|messages| {
             batch(messages, avx512::MINIMUM, pack, |inputs, active| {
-                pair_batch(inputs, active).unwrap_or_else(|| {
-                    // SAFETY: AVX-512F and AVX-512BW availability was checked
-                    // above.
-                    unsafe { avx512::hash_x16(inputs) }
-                })
+                Avx512(()).hash(inputs, active)
             })
         });
     }

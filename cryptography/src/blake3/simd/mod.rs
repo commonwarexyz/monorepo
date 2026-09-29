@@ -485,6 +485,10 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
         if #[cfg(target_arch = "x86_64")] {
             let [left, right] = x86_64::hash_pair(left, right)?;
         } else {
+            #[cfg(any(target_feature = "neon", feature = "std"))]
+            if let Some([left, right]) = aarch64::hash_pair_parts(left, right) {
+                return Some((Digest(left), Digest(right)));
+            }
             let (left, len) = gather(left)?;
             let (right, right_len) = gather(right)?;
             if len != right_len {
@@ -545,8 +549,8 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     }
 }
 
-/// Hash messages of `P` parts each with the widest batch kernel for the
-/// current CPU, first concatenating every message into one shared buffer.
+/// Hash messages of `P` parts each, using the pair kernel for two short
+/// messages and otherwise concatenating them for the batch kernel.
 ///
 /// Returns `None` when no kernel is available or there are fewer than two
 /// messages.
@@ -554,6 +558,11 @@ pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option
     // Every batch kernel needs at least two messages.
     if messages.len() < 2 {
         return None;
+    }
+    if let [left, right] = messages
+        && let Some((left, right)) = hash_pair(left, right)
+    {
+        return Some(vec![left, right]);
     }
     let len = messages.iter().flatten().map(|part| part.len()).sum();
     let mut buffer = Vec::with_capacity(len);

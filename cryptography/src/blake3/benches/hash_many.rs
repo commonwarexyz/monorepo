@@ -5,7 +5,9 @@ use rand::Rng;
 
 fn bench_hash_many(c: &mut Criterion) {
     let mut sampler = test_rng();
-    for len in [40, 64, 72, 256, 1024, 3012, 4096, 16_384, 65_536, 262_144] {
+    for len in [
+        36, 40, 64, 72, 256, 1024, 3012, 4096, 16_384, 65_536, 262_144,
+    ] {
         let mut messages: [Vec<u8>; 32] = core::array::from_fn(|_| vec![0; len]);
         for message in &mut messages {
             sampler.fill_bytes(message);

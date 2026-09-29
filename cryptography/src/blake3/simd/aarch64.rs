@@ -20,6 +20,9 @@ use blake3::{
 };
 use core::arch::{aarch64::*, asm};
 
+mod pair_parts;
+pub(super) use pair_parts::hash_pair_parts;
+
 /// Messages per NEON vector.
 const LANES: usize = 4;
 

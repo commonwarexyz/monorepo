@@ -12,6 +12,12 @@ fn bench_hash_pair(c: &mut Criterion) {
     }
     for (shape, parts) in [
         (
+            "bmt_leaf",
+            messages
+                .each_ref()
+                .map(|message| vec![&message[..4], &message[4..36]]),
+        ),
+        (
             "bmt",
             messages
                 .each_ref()
@@ -36,4 +42,8 @@ fn bench_hash_pair(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_hash_pair);
+fn bench_dependent_hash_pair(c: &mut Criterion) {
+    crate::hash_workloads::bench_dependent_hash_pair::<Blake3>(c, module_path!());
+}
+
+criterion_group!(benches, bench_hash_pair, bench_dependent_hash_pair);
