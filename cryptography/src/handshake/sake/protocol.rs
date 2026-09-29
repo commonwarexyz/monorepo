@@ -199,9 +199,8 @@ pub struct DialState<P> {
 }
 
 /// State maintained by the listener during handshake.
-/// Tracks expected confirmation and the transcript that derives the ciphers.
+/// Tracks the transcript that derives the expected confirmation and the ciphers.
 pub struct ListenState {
-    confirmation: Summary,
     transcript: Transcript,
 }
 
@@ -389,13 +388,9 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         .secret
         .expose(|secret| transcript.commit(secret.as_ref()));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
-    let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
 
     Ok((
-        ListenState {
-            confirmation: confirmation_d2l,
-            transcript,
-        },
+        ListenState { transcript },
         SynAck {
             time_ms: current_time,
             epk,
@@ -408,7 +403,8 @@ pub fn listen_start<S: Signer, P: PublicKey>(
 /// Completes the handshake as the listener.
 /// Verifies the dialer's confirmation and returns the send and receive ciphers.
 pub fn listen_end<C: Cipher>(state: ListenState, msg: Ack) -> Result<(C, C), Error> {
-    if msg.confirmation != state.confirmation {
+    let confirmation_d2l = state.transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
+    if msg.confirmation != confirmation_d2l {
         return Err(Error::HandshakeFailed);
     }
 

@@ -155,11 +155,11 @@ commonware_macros::stability_scope!(BETA {
         fn recv(&mut self) -> impl Future<Output = Result<IoBufs, Self::Error>> + Send;
     }
 
-    /// Record layer that protects messages with one cipher per direction.
+    /// Protects messages on a connection with one cipher per direction.
     ///
-    /// [Records::split] builds a [Sender] and [Receiver] from the two ciphers an [Exchange] agrees
+    /// [Transport::split] builds a [Sender] and [Receiver] from the two ciphers an [Exchange] agrees
     /// on.
-    pub trait Records: Clone + Send + Sync + 'static {
+    pub trait Transport: Clone + Send + Sync + 'static {
         /// Cipher that seals and opens records.
         type Cipher: Cipher;
 
@@ -172,9 +172,9 @@ commonware_macros::stability_scope!(BETA {
         /// Largest plaintext message supported, in bytes.
         const MAX_SIZE: u32;
 
-        /// Returns the namespace that identifies this record format.
+        /// Returns the namespace that identifies this transport.
         ///
-        /// Record formats that differ must return different namespaces.
+        /// Transports that differ on the wire must return different namespaces.
         fn namespace(&self) -> &'static [u8];
 
         /// Returns halves that protect records with `send` and `recv`.
@@ -196,12 +196,12 @@ commonware_macros::stability_scope!(BETA {
     /// Implementations must authenticate each peer's declared identity and bind the supplied
     /// application namespace and both peer identities to the agreed ciphers. A successful dial must
     /// authenticate the expected peer. A listen may succeed only if the bouncer returns `true` for
-    /// the same authenticated peer that is returned. Implementations should also bind `records`,
-    /// the [namespace](Records::namespace) of the record format the ciphers will key, so that peers
-    /// with different record formats fail the exchange.
+    /// the same authenticated peer that is returned. Implementations should also bind `transport`,
+    /// the [namespace](Transport::namespace) of the transport the ciphers will key, so that peers
+    /// with different transports fail the exchange.
     ///
     /// Implementations must not consume bytes from `stream` past the final exchange message because
-    /// the caller reuses `stream` and `sink` for records.
+    /// the caller reuses `stream` and `sink` for the transport.
     ///
     /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping the exchange
     /// future cancels the attempt.
@@ -223,7 +223,7 @@ commonware_macros::stability_scope!(BETA {
             self,
             context: E,
             namespace: &[u8],
-            records: &'static [u8],
+            transport: &'static [u8],
             peer: Self::PublicKey,
             stream: &mut I,
             sink: &mut O,
@@ -244,7 +244,7 @@ commonware_macros::stability_scope!(BETA {
             self,
             context: E,
             namespace: &[u8],
-            records: &'static [u8],
+            transport: &'static [u8],
             bouncer: B,
             stream: &mut I,
             sink: &mut O,

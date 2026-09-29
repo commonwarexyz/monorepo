@@ -249,7 +249,7 @@
 //! ```
 
 use commonware_cryptography::{PublicKey, Signer, Verifier};
-use commonware_stream::{Records, Upgrade, sake};
+use commonware_stream::{Transport, Upgrade, sake};
 
 mod actors;
 mod config;
@@ -272,7 +272,7 @@ pub trait Handshake: commonware_stream::Handshake<PublicKey: PublicKey> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
 }
 
-impl<S: Signer, R: Records> Handshake for Upgrade<sake::Exchange<S>, R> {
+impl<S: Signer, T: Transport> Handshake for Upgrade<sake::Exchange<S>, T> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
         self.exchange().sign(namespace, message)
     }

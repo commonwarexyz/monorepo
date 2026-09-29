@@ -55,13 +55,13 @@ impl<S> Exchange<S> {
     /// Returns the SAKE context for a handshake with `peer` in `namespace`.
     ///
     /// Each version must produce transcripts that no other version produces, so peers on different
-    /// versions fail the handshake. Version 1 also binds the `records` namespace, so peers with
-    /// different record formats fail the handshake too.
+    /// versions fail the handshake. Version 1 also binds the `transport` namespace, so peers with
+    /// different transports fail the handshake too.
     fn context<P>(
         self,
         clock: &impl Clock,
         namespace: &[u8],
-        records: &'static [u8],
+        transport: &'static [u8],
         peer: P,
     ) -> Context<S, P> {
         // Accept peer timestamps from `max_handshake_age` before now up to, but excluding,
@@ -81,7 +81,7 @@ impl<S> Exchange<S> {
         );
         match version {
             Version::V0 => context,
-            Version::V1 => context.fork(records),
+            Version::V1 => context.fork(transport),
         }
     }
 }
@@ -129,7 +129,7 @@ impl<S: Signer> crate::Exchange for Exchange<S> {
         self,
         context: E,
         namespace: &[u8],
-        records: &'static [u8],
+        transport: &'static [u8],
         peer: S::PublicKey,
         stream: &mut I,
         sink: &mut O,
@@ -144,7 +144,7 @@ impl<S: Signer> crate::Exchange for Exchange<S> {
         // binds it into its SAKE context.
         send_handshake_frame(sink, self.config.signer.public_key()).await?;
 
-        let sake = self.context(&context, namespace, records, peer);
+        let sake = self.context(&context, namespace, transport, peer);
         let (state, syn) = dial_start(context, sake);
         send_handshake_frame(sink, syn).await?;
 
@@ -159,7 +159,7 @@ impl<S: Signer> crate::Exchange for Exchange<S> {
         self,
         context: E,
         namespace: &[u8],
-        records: &'static [u8],
+        transport: &'static [u8],
         bouncer: B,
         stream: &mut I,
         sink: &mut O,
@@ -183,7 +183,7 @@ impl<S: Signer> crate::Exchange for Exchange<S> {
 
         // Read the clock only after the Syn arrives, so the acceptance window and the SynAck
         // timestamp reflect when the Syn is checked.
-        let sake = self.context(&context, namespace, records, peer.clone());
+        let sake = self.context(&context, namespace, transport, peer.clone());
         let (state, syn_ack) = listen_start(context, sake, msg1)?;
         send_handshake_frame(sink, syn_ack).await?;
 
@@ -198,7 +198,7 @@ impl<S: Signer> crate::Exchange for Exchange<S> {
 mod test {
     use super::*;
     use crate::{
-        Handshake as _, Records as _, Upgrade,
+        Handshake as _, Transport as _, Upgrade,
         cups::{self, Cups},
         utils::{Timeout, TimeoutError},
     };
@@ -224,8 +224,8 @@ mod test {
     /// Default `max_message_size` passed to dial and listen.
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Records = Cups<ChaCha20Poly1305>;
-    type Transport = Upgrade<Exchange<PrivateKey>, Records>;
+    type TestCups = Cups<ChaCha20Poly1305>;
+    type TestUpgrade = Upgrade<Exchange<PrivateKey>, TestCups>;
 
     /// Returns the record version that pairs with the SAKE `version`.
     const fn record_version(version: Version) -> cups::Version {
@@ -236,7 +236,7 @@ mod test {
     }
 
     /// Returns the records that pair with the SAKE `version`.
-    const fn records(version: Version) -> Records {
+    const fn records(version: Version) -> TestCups {
         Cups::new(record_version(version))
     }
 
@@ -268,8 +268,8 @@ mod test {
     /// only when `max_message_size` exceeds it.
     #[test]
     fn test_max_message_size_bounds() {
-        const MAX_SIZE: u32 = <Transport as crate::Handshake>::MAX_SIZE;
-        assert_eq!(MAX_SIZE, <Records as crate::Records>::MAX_SIZE);
+        const MAX_SIZE: u32 = <TestUpgrade as crate::Handshake>::MAX_SIZE;
+        assert_eq!(MAX_SIZE, <TestCups as crate::Transport>::MAX_SIZE);
         deterministic::Runner::default().start(|context| async move {
             for max_message_size in [0, MAX_SIZE, MAX_SIZE + 1] {
                 for dialer in [true, false] {
@@ -321,8 +321,8 @@ mod test {
     }
 
     /// Returns a handshake that signs with `signer` at `version` and keys `records`.
-    fn transport(signer: PrivateKey, version: Version, records: cups::Version) -> Transport {
-        Transport::new(
+    fn transport(signer: PrivateKey, version: Version, records: cups::Version) -> TestUpgrade {
+        TestUpgrade::new(
             Exchange::new(Config {
                 signer,
                 version,
@@ -334,7 +334,7 @@ mod test {
     }
 
     /// Returns a handshake that signs with `signer` at `version` and keys the paired records.
-    fn transport_handshake(signer: PrivateKey, version: Version) -> Transport {
+    fn transport_handshake(signer: PrivateKey, version: Version) -> TestUpgrade {
         transport(signer, version, record_version(version))
     }
 

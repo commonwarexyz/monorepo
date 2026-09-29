@@ -1,22 +1,25 @@
-//! Pair an [Exchange] with [Records].
+//! Pair an [Exchange] with a [Transport].
 
-use crate::{Exchange, Handshake, Records};
+use crate::{Exchange, Handshake, Transport};
 use commonware_runtime::{BufferPooler, Clock, Sink, Stream};
 use rand_core::CryptoRng;
 use std::future::Future;
 
-/// Implements [Handshake] by running the key exchange `K`, then keying the records `R` with the
+/// Implements [Handshake] by running the key exchange `K`, then keying the transport `T` with the
 /// agreed ciphers.
 #[derive(Clone)]
-pub struct Upgrade<K, R> {
+pub struct Upgrade<K, T> {
     exchange: K,
-    records: R,
+    transport: T,
 }
 
-impl<K, R> Upgrade<K, R> {
-    /// Creates an upgrade that runs `exchange` and keys `records`.
-    pub const fn new(exchange: K, records: R) -> Self {
-        Self { exchange, records }
+impl<K, T> Upgrade<K, T> {
+    /// Creates an upgrade that runs `exchange` and keys `transport`.
+    pub const fn new(exchange: K, transport: T) -> Self {
+        Self {
+            exchange,
+            transport,
+        }
     }
 
     /// Returns the key exchange.
@@ -25,17 +28,17 @@ impl<K, R> Upgrade<K, R> {
     }
 }
 
-impl<K, R> Handshake for Upgrade<K, R>
+impl<K, T> Handshake for Upgrade<K, T>
 where
     K: Exchange,
-    R: Records,
+    T: Transport,
 {
-    const MAX_SIZE: u32 = R::MAX_SIZE;
+    const MAX_SIZE: u32 = T::MAX_SIZE;
 
     type PublicKey = K::PublicKey;
     type Error = K::Error;
-    type Sender<I: Stream, O: Sink> = R::Sender<O>;
-    type Receiver<I: Stream, O: Sink> = R::Receiver<I>;
+    type Sender<I: Stream, O: Sink> = T::Sender<O>;
+    type Receiver<I: Stream, O: Sink> = T::Receiver<I>;
 
     fn public_key(&self) -> Self::PublicKey {
         self.exchange.public_key()
@@ -61,20 +64,20 @@ where
         );
         let pool = context.network_buffer_pool().clone();
 
-        // Agree on ciphers bound to this record format, then key the records on the same transport.
+        // Agree on ciphers bound to this transport, then key it on the same connection.
         let (send, recv) = self
             .exchange
             .dial(
                 context,
                 namespace,
-                self.records.namespace(),
+                self.transport.namespace(),
                 peer,
                 &mut stream,
                 &mut sink,
             )
             .await?;
         Ok(self
-            .records
+            .transport
             .split(send, recv, stream, sink, max_message_size, pool))
     }
 
@@ -100,20 +103,20 @@ where
         );
         let pool = context.network_buffer_pool().clone();
 
-        // Agree on ciphers bound to this record format, then key the records on the same transport.
+        // Agree on ciphers bound to this transport, then key it on the same connection.
         let (peer, send, recv) = self
             .exchange
             .listen(
                 context,
                 namespace,
-                self.records.namespace(),
+                self.transport.namespace(),
                 bouncer,
                 &mut stream,
                 &mut sink,
             )
             .await?;
         let (sender, receiver) =
-            self.records
+            self.transport
                 .split(send, recv, stream, sink, max_message_size, pool);
         Ok((peer, sender, receiver))
     }

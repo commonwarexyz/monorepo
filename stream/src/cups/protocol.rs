@@ -46,7 +46,7 @@ fn open<C: Cipher>(cipher: &mut Option<C>, mut buf: IoBufMut) -> Result<IoBufMut
         .checked_sub(<C::Tag as FixedSize>::SIZE)
         .ok_or(Error::OpenFailed)?;
     let (data, tag) = buf.as_mut().split_at_mut(len);
-    let tag = C::Tag::decode(Copying(&*tag)).expect("tag has a fixed size");
+    let tag = C::Tag::decode(Copying(&*tag)).map_err(|_| Error::OpenFailed)?;
     *cipher = Some(opener.open(&[], data, &tag).ok_or(Error::OpenFailed)?);
     buf.truncate(len);
     Ok(buf)
@@ -130,7 +130,7 @@ impl<C: Cipher> Cups<C> {
     pub fn header_len(&self, len: usize) -> usize {
         let len = u32::try_from(len)
             .ok()
-            .filter(|len| *len <= <Self as crate::Records>::MAX_SIZE)
+            .filter(|len| *len <= <Self as crate::Transport>::MAX_SIZE)
             .expect("payload exceeds stream limit");
         match self.version {
             Version::V0 => UInt(len + tag_size::<C>()).encode_size(),
@@ -152,7 +152,7 @@ impl<C: Cipher> Cups<C> {
     }
 }
 
-impl<C: Cipher> crate::Records for Cups<C> {
+impl<C: Cipher> crate::Transport for Cups<C> {
     type Cipher = C;
     type Sender<O: Sink> = Sender<C, O>;
     type Receiver<I: Stream> = Receiver<C, I>;
@@ -507,9 +507,9 @@ mod test {
 
     type RecordCipher = ChaCha20Poly1305;
     type Tag = <RecordCipher as Cipher>::Tag;
-    type Records = Cups<RecordCipher>;
+    type TestCups = Cups<RecordCipher>;
     const TAG_SIZE: u32 = tag_size::<RecordCipher>();
-    const MAX_SIZE: u32 = <Records as crate::Records>::MAX_SIZE;
+    const MAX_SIZE: u32 = <TestCups as crate::Transport>::MAX_SIZE;
 
     /// Returns the cipher every test peer derives, so each side replays the other's positions.
     fn cipher() -> Option<RecordCipher> {
@@ -580,7 +580,7 @@ mod test {
                     };
                     expected.extend(sealed(&mut cipher, message));
                     assert_eq!(
-                        Records::new(version).record_len(message.len()),
+                        TestCups::new(version).record_len(message.len()),
                         expected.len()
                     );
                     assert_eq!(
@@ -602,7 +602,7 @@ mod test {
     #[test]
     #[should_panic(expected = "payload exceeds stream limit")]
     fn test_header_len_rejects_oversized_payload() {
-        Records::new(Version::V1).header_len(Widen::<usize>::widen(u32::MAX));
+        TestCups::new(Version::V1).header_len(Widen::<usize>::widen(u32::MAX));
     }
 
     /// Checks that a version 0 receiver reports the payload length of an oversized record, which
