@@ -5,7 +5,7 @@ use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks}
 use commonware_stream::{
     Upgrader as _,
     cups::{self, Cups},
-    sake::{self, Config, Version},
+    sake::{Sake, Version},
     utils::Timeout,
 };
 use libfuzzer_sys::fuzz_target;
@@ -38,23 +38,23 @@ fn fuzz(data: &[u8]) {
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
         let dialer_handshake = (
-            sake::Exchange::new(Config {
-                signer: dialer_signer.clone(),
+            Sake {
                 version,
+                signer: dialer_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
-            }),
+            },
             records(version),
         );
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
         let listener_handshake = (
-            sake::Exchange::new(Config {
-                signer: listener_signer.clone(),
+            Sake {
                 version,
+                signer: listener_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
-            }),
+            },
             records(version),
         );
         let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(1));

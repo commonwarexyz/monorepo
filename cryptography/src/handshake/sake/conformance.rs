@@ -55,11 +55,11 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
         &mut rng,
         Context::new(
             &namespace,
-            version,
             dialer_time,
             listener_time..listener_time + 1,
             dialer_key.clone(),
             listener_key.public_key(),
+            version,
         ),
     );
     log.extend(dialer_greeting.encode());
@@ -68,11 +68,11 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
         &mut rng,
         Context::new(
             &namespace,
-            version,
             listener_time,
             dialer_time..dialer_time + 1,
             listener_key,
             dialer_key.public_key(),
+            version,
         ),
         dialer_greeting,
     )

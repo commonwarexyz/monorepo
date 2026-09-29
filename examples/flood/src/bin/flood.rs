@@ -18,7 +18,7 @@ use commonware_runtime::{
 };
 use commonware_stream::{
     cups::{self, Cups},
-    sake::{self, Version},
+    sake::{Sake, Version},
 };
 use commonware_utils::{TryCollect, ordered::Set, probability, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
@@ -135,7 +135,7 @@ fn main() {
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
         let mut p2p_cfg = discovery::Config::local(
             (
-                sake::Exchange::new(sake::Config::new(signer.clone(), Version::V1)),
+                Sake::new(signer.clone(), Version::V1),
                 Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),
             &union(FLOOD_NAMESPACE, b"_P2P"),

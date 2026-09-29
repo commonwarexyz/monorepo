@@ -26,14 +26,14 @@ pub enum TimeoutError<E> {
 /// use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
 /// use commonware_stream::{
 ///     cups::{self, Cups},
-///     sake::{Config, Exchange, Version},
+///     sake::{Version, Sake},
 ///     utils::Timeout,
 /// };
 /// use std::time::Duration;
 ///
 /// let upgrader = Timeout::new(
 ///     (
-///         Exchange::new(Config::new(PrivateKey::from_seed(0), Version::V1)),
+///         Sake::new(PrivateKey::from_seed(0), Version::V1),
 ///         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 ///     ),
 ///     Duration::from_secs(5),

@@ -1,4 +1,3 @@
-use super::Config;
 use crate::utils::codec::{Error as FrameError, recv_frame, send_frame};
 use commonware_codec::{DecodeExt, Encode, Error as CodecError, FixedSize};
 use commonware_cryptography::{
@@ -12,7 +11,7 @@ use commonware_formatting::hex;
 use commonware_runtime::{Clock, Sink, Stream};
 use commonware_utils::{DurationExt, SystemTimeExt};
 use rand_core::CryptoRng;
-use std::future::Future;
+use std::{future::Future, time::Duration};
 use thiserror::Error;
 
 /// Errors that can occur when establishing a stream.
@@ -41,15 +40,42 @@ impl From<HandshakeError> for Error {
 }
 
 /// Implements [crate::Exchange] with SAKE.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
+/// use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}};
+///
+/// let upgrader = (
+///     Sake::new(PrivateKey::from_seed(0), Version::V1),
+///     Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+/// );
+/// ```
 #[derive(Clone)]
-pub struct Exchange<S> {
-    config: Config<S>,
+pub struct Sake<S> {
+    /// Signer used to authenticate the local peer.
+    pub signer: S,
+
+    /// SAKE version.
+    pub version: Version,
+
+    /// Maximum time drift allowed for future timestamps.
+    pub synchrony_bound: Duration,
+
+    /// Maximum age of handshake messages before rejection.
+    pub max_handshake_age: Duration,
 }
 
-impl<S> Exchange<S> {
-    /// Creates an exchange with `config`.
-    pub const fn new(config: Config<S>) -> Self {
-        Self { config }
+impl<S> Sake<S> {
+    /// Creates an exchange that accepts timestamps up to five seconds ahead or ten seconds old.
+    pub const fn new(signer: S, version: Version) -> Self {
+        Self {
+            signer,
+            version,
+            synchrony_bound: Duration::from_secs(5),
+            max_handshake_age: Duration::from_secs(10),
+        }
     }
 
     /// Returns the SAKE context for a handshake with `peer` in `namespace`.
@@ -67,17 +93,16 @@ impl<S> Exchange<S> {
         // Accept peer timestamps from `max_handshake_age` before now up to, but excluding,
         // `synchrony_bound` after now.
         let current_time = clock.current().epoch().as_millis_u64();
-        let ok_timestamps = current_time
-            .saturating_sub(self.config.max_handshake_age.as_millis_u64())
-            ..current_time.saturating_add(self.config.synchrony_bound.as_millis_u64());
-        let version = self.config.version;
+        let ok_timestamps = current_time.saturating_sub(self.max_handshake_age.as_millis_u64())
+            ..current_time.saturating_add(self.synchrony_bound.as_millis_u64());
+        let version = self.version;
         let context = Context::new(
             namespace,
-            version,
             current_time,
             ok_timestamps,
-            self.config.signer,
+            self.signer,
             peer,
+            version,
         );
         match version {
             Version::V0 => context,
@@ -110,19 +135,19 @@ where
     Ok(M::decode(frame)?)
 }
 
-impl<S: Signer> Exchange<S> {
+impl<S: Signer> Sake<S> {
     /// Signs `message` in `namespace` with the identity this exchange authenticates.
     pub fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
-        self.config.signer.sign(namespace, message)
+        self.signer.sign(namespace, message)
     }
 }
 
-impl<S: Signer> crate::Exchange for Exchange<S> {
+impl<S: Signer> crate::Exchange for Sake<S> {
     type PublicKey = S::PublicKey;
     type Error = Error;
 
     fn public_key(&self) -> Self::PublicKey {
-        self.config.signer.public_key()
+        self.signer.public_key()
     }
 
     async fn dial<C, E, I, O>(
@@ -142,7 +167,7 @@ impl<S: Signer> crate::Exchange for Exchange<S> {
     {
         // Send the local identity as a cleartext prelude. The listener passes it to its bouncer and
         // binds it into its SAKE context.
-        send_handshake_frame(sink, self.config.signer.public_key()).await?;
+        send_handshake_frame(sink, self.signer.public_key()).await?;
 
         let sake = self.context(&context, namespace, transport, peer);
         let (state, syn) = dial_start(context, sake);
@@ -225,7 +250,7 @@ mod test {
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
     type TestCups = Cups<ChaCha20Poly1305>;
-    type TestUpgrade = (Exchange<PrivateKey>, TestCups);
+    type TestUpgrade = (Sake<PrivateKey>, TestCups);
 
     /// Returns the record version that pairs with the SAKE `version`.
     const fn record_version(version: Version) -> cups::Version {
@@ -323,12 +348,12 @@ mod test {
     /// Returns a handshake that signs with `signer` at `version` and keys `records`.
     fn transport(signer: PrivateKey, version: Version, records: cups::Version) -> TestUpgrade {
         (
-            Exchange::new(Config {
-                signer,
+            Sake {
                 version,
+                signer,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
-            }),
+            },
             Cups::new(records),
         )
     }

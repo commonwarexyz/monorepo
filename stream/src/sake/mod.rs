@@ -1,11 +1,11 @@
 //! Run [Simple Authenticated Key Exchange (SAKE)](commonware_cryptography::handshake::sake) over
 //! a connection.
 //!
-//! [Exchange] implements [crate::Exchange], deriving one
+//! [Sake] implements [crate::Exchange], deriving one
 //! [Cipher](commonware_cryptography::Cipher) per direction. Pair it with a [crate::Transport] (for
 //! example [Cups](crate::cups::Cups)) as an [crate::Upgrader] to establish streams.
 //!
-//! The core SAKE protocol receives both peer identities as inputs. [Exchange] first sends the
+//! The core SAKE protocol receives both peer identities as inputs. [Sake] first sends the
 //! dialer's public key in a framed, cleartext prelude, separate from SAKE's three messages. The
 //! listener's bouncer may reject that claim before authentication. Accepting it only permits the
 //! handshake to continue. A successful handshake authenticates the returned identity.
@@ -30,12 +30,9 @@
 //! messages. The transcript does not commit the cipher of the transport, so peers with different
 //! ciphers complete the handshake and then fail to open the first record.
 
-mod config;
-pub use config::Config;
-
 mod protocol;
 pub use commonware_cryptography::handshake::sake::Version;
-pub use protocol::{Error, Exchange};
+pub use protocol::{Error, Sake};
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;

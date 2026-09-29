@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_stream::{
     cups::{self, Cups},
-    sake::{self, Version},
+    sake::{Sake, Version},
 };
 use commonware_utils::{
     NZU32, NZUsize, TryCollect,
@@ -239,7 +239,7 @@ impl NetworkScheme for Discovery {
         // Create config with recommended defaults
         let mut config = discovery::Config::recommended(
             (
-                sake::Exchange::new(sake::Config::new(peer.info.signer.clone(), Version::V1)),
+                Sake::new(peer.info.signer.clone(), Version::V1),
                 Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),
             b"fuzz_namespace",
@@ -320,7 +320,7 @@ impl NetworkScheme for Lookup {
         // Create lookup config - no bootstrappers needed since we register addresses directly
         let mut config = lookup::Config::recommended(
             (
-                sake::Exchange::new(sake::Config::new(peer.info.signer.clone(), Version::V1)),
+                Sake::new(peer.info.signer.clone(), Version::V1),
                 Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),
             b"fuzz_namespace",

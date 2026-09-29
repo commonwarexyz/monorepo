@@ -22,7 +22,7 @@ use commonware_p2p::authenticated::{self, discovery};
 use commonware_runtime::{Strategizer, Supervisor as _, tokio};
 use commonware_stream::{
     cups::{self, Cups},
-    sake::{self, Version},
+    sake::{Sake, Version},
 };
 use commonware_utils::{NZUsize, sequence::Unit};
 use std::{
@@ -53,7 +53,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
 
     let mut p2p_config = discovery::Config::local(
         (
-            sake::Exchange::new(sake::Config::new(node.signer.clone(), Version::V1)),
+            Sake::new(node.signer.clone(), Version::V1),
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         &[NAMESPACE, b"_P2P"].concat(),

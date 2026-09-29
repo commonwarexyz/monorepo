@@ -5,7 +5,7 @@ use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks}
 use commonware_stream::{
     Upgrader as StreamUpgrader,
     cups::{self, Cups},
-    sake::{self, Config, Version},
+    sake::{Sake, Version},
     utils::Timeout,
 };
 use futures::executor::block_on;
@@ -13,7 +13,7 @@ use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
 
 /// SAKE handshake that keys CUPS records.
-type Upgrader<S> = (sake::Exchange<S>, Cups<ChaCha20Poly1305>);
+type Upgrader<S> = (Sake<S>, Cups<ChaCha20Poly1305>);
 
 /// Returns the records that pair with the SAKE `version`.
 fn records(version: Version) -> Cups<ChaCha20Poly1305> {
@@ -48,23 +48,23 @@ fn connect(version: Version) -> TransportPair {
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
         let dialer_handshake = (
-            sake::Exchange::new(Config {
-                signer: dialer_signer.clone(),
+            Sake {
                 version,
+                signer: dialer_signer.clone(),
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
-            }),
+            },
             records(version),
         );
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(2));
 
         let listener_handshake = (
-            sake::Exchange::new(Config {
-                signer: listener_signer.clone(),
+            Sake {
                 version,
+                signer: listener_signer.clone(),
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
-            }),
+            },
             records(version),
         );
         let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(2));

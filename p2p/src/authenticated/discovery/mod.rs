@@ -170,7 +170,7 @@
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::{cups::{self, Cups}, sake::{self, Version}};
+//! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}};
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -209,7 +209,7 @@
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
 //!     (
-//!         sake::Exchange::new(sake::Config::new(signer.clone(), Version::V1)),
+//!         Sake::new(signer.clone(), Version::V1),
 //!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 //!     ),
 //!     application_namespace,
@@ -249,7 +249,7 @@
 //! ```
 
 use commonware_cryptography::{PublicKey, Signer, Verifier};
-use commonware_stream::{Transport, sake};
+use commonware_stream::{Transport, sake::Sake};
 
 mod actors;
 mod config;
@@ -272,7 +272,7 @@ pub trait Upgrader: commonware_stream::Upgrader<PublicKey: PublicKey> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
 }
 
-impl<S: Signer, T: Transport> Upgrader for (sake::Exchange<S>, T) {
+impl<S: Signer, T: Transport> Upgrader for (Sake<S>, T) {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
         self.0.sign(namespace, message)
     }

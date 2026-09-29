@@ -7,22 +7,19 @@ use commonware_stream::Upgrader;
 #[cfg(test)]
 use commonware_stream::{
     cups::{self, Cups},
-    sake::{self, Version},
+    sake::{Sake, Version},
 };
 use rand_core::CryptoRng;
 use std::future::Future;
 
 /// SAKE handshake that keys CUPS records, shared by tests.
 #[cfg(test)]
-pub(crate) type StreamHandshake<S> = (sake::Exchange<S>, Cups<ChaCha20Poly1305>);
+pub(crate) type StreamHandshake<S> = (Sake<S>, Cups<ChaCha20Poly1305>);
 
 /// Returns a version 1 [StreamHandshake] that signs with `signer`.
 #[cfg(test)]
 pub(crate) const fn sake_handshake<S: Signer>(signer: S) -> StreamHandshake<S> {
-    (
-        sake::Exchange::new(sake::Config::new(signer, Version::V1)),
-        Cups::new(cups::Version::V1),
-    )
+    (Sake::new(signer, Version::V1), Cups::new(cups::Version::V1))
 }
 
 /// Reuses a handshake with a fixed namespace and plaintext message limit.

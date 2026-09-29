@@ -20,22 +20,22 @@ fn connect() -> Result<(ChaCha20Poly1305, ChaCha20Poly1305), Error> {
         &mut rng,
         Context::new(
             b"bench_namespace",
-            Version::V1,
             0,
             0..1,
             dialer_crypto.clone(),
             listener_crypto.public_key(),
+            Version::V1,
         ),
     );
     let (l_state, msg2) = listen_start(
         &mut rng,
         Context::new(
             b"bench_namespace",
-            Version::V1,
             0,
             0..1,
             listener_crypto,
             dialer_crypto.public_key(),
+            Version::V1,
         ),
         msg1,
     )?;

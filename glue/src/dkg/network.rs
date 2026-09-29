@@ -268,7 +268,7 @@ mod tests {
     };
     use commonware_stream::{
         cups::{self, Cups},
-        sake::{self, Version},
+        sake::{Sake, Version},
     };
     use commonware_utils::{NZU32, NZUsize, channel::mpsc, sync::Mutex};
     use std::{
@@ -495,7 +495,7 @@ mod tests {
                 context.child("dealer"),
                 lookup::Config::local(
                     (
-                        sake::Exchange::new(sake::Config::new(dealer_signer, Version::V1)),
+                        Sake::new(dealer_signer, Version::V1),
                         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
                     ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
@@ -508,7 +508,7 @@ mod tests {
                 context.child("participant"),
                 lookup::Config::local(
                     (
-                        sake::Exchange::new(sake::Config::new(participant_signer, Version::V1)),
+                        Sake::new(participant_signer, Version::V1),
                         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
                     ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",

@@ -45,7 +45,7 @@ use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_stream::{
     cups::{self, Cups},
-    sake::{self, Version},
+    sake::{Sake, Version},
 };
 use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
@@ -79,7 +79,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
 
     let mut p2p_config = discovery::Config::local(
         (
-            sake::Exchange::new(sake::Config::new(node.signer.clone(), Version::V1)),
+            Sake::new(node.signer.clone(), Version::V1),
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         &[NAMESPACE, b"_P2P"].concat(),

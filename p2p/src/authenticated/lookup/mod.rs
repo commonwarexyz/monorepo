@@ -123,7 +123,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::{cups::{self, Cups}, sake::{self, Version}};
+//! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}};
 //! use commonware_utils::{NZU32, NZUsize, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -160,7 +160,7 @@
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = lookup::Config::local(
 //!     (
-//!         sake::Exchange::new(sake::Config::new(signer.clone(), Version::V1)),
+//!         Sake::new(signer.clone(), Version::V1),
 //!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 //!     ),
 //!     application_namespace,

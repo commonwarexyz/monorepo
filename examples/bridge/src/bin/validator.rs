@@ -28,7 +28,7 @@ use commonware_runtime::{
 use commonware_stream::{
     Upgrader as _,
     cups::{self, Cups},
-    sake::{self, Version},
+    sake::{Sake, Version},
     utils::Timeout,
 };
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
@@ -168,12 +168,12 @@ fn main() {
     // Configure indexer
     let indexer_handshake = Timeout::new(
         (
-            sake::Exchange::new(sake::Config {
-                signer: signer.clone(),
+            Sake {
                 version: Version::V1,
+                signer: signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(60),
-            }),
+            },
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         Duration::from_secs(5),
@@ -182,7 +182,7 @@ fn main() {
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
         (
-            sake::Exchange::new(sake::Config::new(signer, Version::V1)),
+            Sake::new(signer, Version::V1),
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),

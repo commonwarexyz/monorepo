@@ -219,11 +219,11 @@ impl<S, P> Context<S, P> {
     /// Creates a new handshake context.
     pub fn new(
         namespace: &[u8],
-        version: Version,
         current_time_ms: u64,
         ok_timestamps: Range<u64>,
         my_identity: S,
         peer_identity: P,
+        version: Version,
     ) -> Self {
         let transcript = Transcript::new(namespace, version.transcript());
         Self {
@@ -454,11 +454,11 @@ mod test {
                 &mut rng,
                 Context::new(
                     b"test_namespace",
-                    version,
                     0,
                     0..1,
                     dialer_crypto.clone(),
                     listener_crypto.public_key(),
+                    version,
                 ),
             );
             test_encode_roundtrip(&msg1);
@@ -466,11 +466,11 @@ mod test {
                 &mut rng,
                 Context::new(
                     b"test_namespace",
-                    version,
                     0,
                     0..1,
                     listener_crypto,
                     dialer_crypto.public_key(),
+                    version,
                 ),
                 msg1,
             )?;
@@ -499,11 +499,11 @@ mod test {
                 &mut rng,
                 Context::new(
                     b"namespace_a",
-                    version,
                     0,
                     0..1,
                     dialer_crypto.clone(),
                     listener_crypto.public_key(),
+                    version,
                 ),
             );
 
@@ -511,11 +511,11 @@ mod test {
                 &mut rng,
                 Context::new(
                     b"namespace_b",
-                    version,
                     0,
                     0..1,
                     listener_crypto,
                     dialer_crypto.public_key(),
+                    version,
                 ),
                 msg1,
             );
@@ -547,11 +547,11 @@ mod test {
                     fork(
                         Context::new(
                             b"namespace",
-                            version,
                             0,
                             0..1,
                             dialer_crypto.clone(),
                             listener_crypto.public_key(),
+                            version,
                         ),
                         dialer_label,
                     ),
@@ -562,11 +562,11 @@ mod test {
                     fork(
                         Context::new(
                             b"namespace",
-                            version,
                             0,
                             0..1,
                             listener_crypto,
                             dialer_crypto.public_key(),
+                            version,
                         ),
                         listener_label,
                     ),
@@ -597,11 +597,11 @@ mod test {
                 &mut rng,
                 Context::new(
                     b"test_namespace",
-                    dialer_version,
                     0,
                     0..1,
                     dialer_crypto.clone(),
                     listener_crypto.public_key(),
+                    dialer_version,
                 ),
             );
 
@@ -609,11 +609,11 @@ mod test {
                 &mut rng,
                 Context::new(
                     b"test_namespace",
-                    listener_version,
                     0,
                     0..1,
                     listener_crypto,
                     dialer_crypto.public_key(),
+                    listener_version,
                 ),
                 msg1,
             );
@@ -635,11 +635,11 @@ mod test {
                 &mut rng,
                 Context::new(
                     b"test_namespace",
-                    version,
                     0,
                     0..1,
                     dialer_crypto,
                     listener_crypto.public_key(),
+                    version,
                 ),
             );
 
@@ -647,11 +647,11 @@ mod test {
                 &mut rng,
                 Context::new(
                     b"test_namespace",
-                    version,
                     0,
                     0..1,
                     listener_crypto,
                     impostor_crypto.public_key(),
+                    version,
                 ),
                 msg1,
             );
@@ -695,11 +695,11 @@ mod test {
                 &mut rng,
                 Context::new(
                     b"test_namespace",
-                    version,
                     0,
                     0..1,
                     dialer_crypto,
                     listener.clone(),
+                    version,
                 ),
             );
 
@@ -752,11 +752,11 @@ mod test {
                 &mut rng,
                 Context::new(
                     b"test_namespace",
-                    version,
                     0,
                     0..1,
                     dialer.clone(),
                     listener.public_key(),
+                    version,
                 ),
             );
 
@@ -778,7 +778,7 @@ mod test {
             claimed.commit(derived.encode());
             let result = listen_start(
                 &mut rng,
-                Context::new(b"test_namespace", version, 0, 0..1, listener, derived),
+                Context::new(b"test_namespace", 0, 0..1, listener, derived, version),
                 syn,
             );
 

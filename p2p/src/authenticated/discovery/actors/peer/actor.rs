@@ -298,7 +298,7 @@ mod tests {
     use commonware_stream::{
         Upgrader as _,
         cups::{self, Cups},
-        sake::{self, Version},
+        sake::{Sake, Version},
         utils::Timeout,
     };
     use commonware_utils::{NZU32, NZUsize, SystemTimeExt, bitmap::BitMap};
@@ -332,12 +332,12 @@ mod tests {
 
     fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
         let handshake = (
-            sake::Exchange::new(sake::Config {
-                signer,
+            Sake {
                 version: Version::V1,
+                signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
-            }),
+            },
             Cups::new(cups::Version::V1),
         );
         Timeout::new(handshake, Duration::from_secs(10))

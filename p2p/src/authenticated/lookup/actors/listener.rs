@@ -332,7 +332,7 @@ mod tests {
     };
     use commonware_stream::{
         cups::{self, Cups},
-        sake::{self, Version},
+        sake::{Sake, Version},
         utils::Timeout,
     };
     use commonware_utils::{NZU32, NZUsize};
@@ -369,12 +369,12 @@ mod tests {
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
             let handshake: StreamHandshake<_> = (
-                sake::Exchange::new(sake::Config {
-                    signer: PrivateKey::from_seed(1),
+                Sake {
                     version: Version::V1,
+                    signer: PrivateKey::from_seed(1),
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),
-                }),
+                },
                 Cups::new(cups::Version::V1),
             );
 
@@ -542,12 +542,12 @@ mod tests {
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
             let handshake: StreamHandshake<_> = (
-                sake::Exchange::new(sake::Config {
-                    signer: PrivateKey::from_seed(1),
+                Sake {
                     version: Version::V1,
+                    signer: PrivateKey::from_seed(1),
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),
-                }),
+                },
                 Cups::new(cups::Version::V1),
             );
 
@@ -632,12 +632,12 @@ mod tests {
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
             let handshake: StreamHandshake<_> = (
-                sake::Exchange::new(sake::Config {
-                    signer: PrivateKey::from_seed(1),
+                Sake {
                     version: Version::V1,
+                    signer: PrivateKey::from_seed(1),
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),
-                }),
+                },
                 Cups::new(cups::Version::V1),
             );
 
@@ -722,12 +722,12 @@ mod tests {
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
             let handshake: StreamHandshake<_> = (
-                sake::Exchange::new(sake::Config {
-                    signer: PrivateKey::from_seed(1),
+                Sake {
                     version: Version::V1,
+                    signer: PrivateKey::from_seed(1),
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),
-                }),
+                },
                 Cups::new(cups::Version::V1),
             );
 
