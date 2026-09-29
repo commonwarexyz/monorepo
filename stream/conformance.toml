@@ -1,0 +1,7 @@
+["commonware_stream::sake::conformance::CupsV0"]
+n_cases = 256
+hash = "b17c25f55663c938bf57c2142f28e820e8cb8ebd61ec36c619a965ec7021f83e"
+
+["commonware_stream::sake::conformance::CupsV1"]
+n_cases = 256
+hash = "15ab7b232c6f37a8fb43faecdba699ca7e8fbfe1c9dbacb6974139a85ae69684"
