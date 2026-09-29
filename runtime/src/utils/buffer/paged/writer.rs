@@ -947,6 +947,11 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         Ok(sync)
     }
 
+    /// The shared page cache this writer populates.
+    pub const fn cache_ref(&self) -> &CacheRef {
+        &self.cache_ref
+    }
+
     /// Returns the size of the blob.
     pub const fn size(&self) -> u64 {
         self.buffer.size()
