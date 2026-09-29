@@ -253,6 +253,29 @@ where
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root();
 
+        // Warm the next floor raise's candidate window: its scan starts at the new floor
+        // and reads cold regions of the log on large databases. The window tracks the
+        // applied batch's own scanned floor advance, the per-merkleize quantity the next
+        // raise repeats. Snap-to-tip floor jumps (a fresh database's first commit, an
+        // emptied database anywhere in the applied chain) sample as zero by construction,
+        // so they never poison the estimate.
+        let advance = batch.bounds.scan_advance;
+        if advance > 0 {
+            let prior = self.floor_prefetch_target;
+            let smoothed = if prior == 0 {
+                advance
+            } else {
+                prior - prior / 4 + advance / 4
+            };
+            self.floor_prefetch_target = smoothed;
+            // Cover at least the latest observed span: a smoothed estimate alone lags a
+            // step increase in batch size, leaving the next scan partially cold.
+            let window = smoothed.max(advance).saturating_mul(2);
+            if let Some(fut) = self.start_floor_prefetch(window) {
+                self.floor_prefetch_spawn.submit(fut);
+            }
+        }
+
         self.update_metrics();
         self.metrics
             .operations_applied
