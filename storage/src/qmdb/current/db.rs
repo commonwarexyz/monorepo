@@ -140,10 +140,10 @@ pub struct Db<
     /// Internal nodes are hashed using their position in the ops tree rather than their
     /// grafted position.
     ///
-    /// Held in an [`Arc`] so merkleize can hand a zero-copy, immutable snapshot to the
+    /// Held in an [`Arc`] so merkleize can hand a zero-copy, immutable view to the
     /// grafted-layer hashing job running off the calling task. Mutations go through
-    /// [`Arc::make_mut`]: they are in-place while no snapshot is alive and copy-on-write
-    /// otherwise, so a snapshot never observes later mutations.
+    /// [`Arc::make_mut`]: they are in-place while no view is alive and copy-on-write
+    /// otherwise, so a view never observes later mutations.
     pub(super) grafted_tree: Arc<Mem<F, H::Digest>>,
 
     /// Persists:
@@ -320,7 +320,7 @@ where
         })
     }
 
-    /// Snapshot of the grafted tree for use in batch chains.
+    /// View of the grafted tree for use in batch chains.
     pub(super) fn grafted_batch(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>> {
         merkle::batch::MerkleizedBatch::from_mem_with_strategy(
             &self.grafted_tree,

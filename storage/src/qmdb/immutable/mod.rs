@@ -18,8 +18,8 @@
 //!   onward. Keys set before the floor are not loaded into memory.
 //!
 //! The floor must be monotonically non-decreasing across commits and must not exceed
-//! the batch's total operation count. Pass `db.inactivity_floor_loc()` to keep the
-//! floor unchanged, or a higher value to advance it.
+//! the location of the batch's own commit operation. Pass `db.inactivity_floor_loc()` to keep
+//! the floor unchanged, or a higher value to advance it.
 //!
 //! # Examples
 //!
@@ -359,6 +359,9 @@ where
 
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
     /// has been pruned.
+    ///
+    /// Unlike batch reads, this may return a value written below the inactivity floor, but only on
+    /// a node that has not pruned it or rebuilt its index since (a reopen indexes from the floor).
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         self.get_from(key, Location::new(0)).await
     }
@@ -680,8 +683,9 @@ where
     ///   commit is its own location; a floor past the commit would permit
     ///   pruning the commit itself.
     ///
-    /// Floor validation happens before any journal mutation, so on floor errors the on-disk
-    /// state is unchanged and reopening recovers the database as it was.
+    /// [`batch::UnmerkleizedBatch::merkleize`] already enforces both floor rules, so a batch it
+    /// produced never fails them here. Apply re-checks them as a guard, before any journal
+    /// mutation.
     ///
     /// Returns the range of locations written.
     ///
@@ -1467,6 +1471,20 @@ pub(super) mod tests {
         (db, snapshot) = db.snapshot().await.unwrap();
         assert_eq!(snapshot.size(), op_count);
 
+        // A boundary request, which serves the frozen Merkle's pinned nodes, answers like the
+        // live database at capture.
+        let boundary_request = crate::qmdb::sync::Request::Boundary {
+            size: op_count,
+            start: Location::new(3),
+        };
+        let (live_boundary, _) = crate::qmdb::sync::Source::serve(&db, boundary_request)
+            .await
+            .unwrap();
+        let (snap_boundary, _) = crate::qmdb::sync::Source::serve(&snapshot, boundary_request)
+            .await
+            .unwrap();
+        assert_eq!(snap_boundary.encode(), live_boundary.encode());
+
         let (proof, ops) =
             crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
                 .await
@@ -1507,6 +1525,10 @@ pub(super) mod tests {
             &ops2,
             &root,
         ));
+        let (snap_boundary2, _) = crate::qmdb::sync::Source::serve(&snapshot, boundary_request)
+            .await
+            .unwrap();
+        assert_eq!(snap_boundary2.encode(), snap_boundary.encode());
 
         // Anything at or above the frozen size is rejected.
         assert!(matches!(
@@ -1685,6 +1707,9 @@ pub(super) mod tests {
         );
         let (parent_proof, child_proof) = (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
         let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+        // At the parent's tip, the child proves from the live store with the same result.
+        assert_eq!(child.proof(&db).unwrap(), child_proof);
+        assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
         let (db, child_range) = db.apply_batch(child).await.unwrap();
         assert_eq!(parent_start, parent_range.start);
         assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
@@ -3865,11 +3890,11 @@ pub(super) mod tests {
     }
 
     /// A chained batch that declares a floor below its parent's floor must be rejected, even
-    /// when its floor is still at or above the database's current floor. This isolates the cross-batch monotonicity step (every
-    /// commit's floor at or above the previous commit's floor) from the simpler "every
-    /// commit's floor at or above the live floor" rule.
+    /// when its floor is still at or above the database's current floor. This isolates the
+    /// cross-batch monotonicity step (every commit's floor at or above the previous commit's
+    /// floor) from the simpler "every commit's floor at or above the live floor" rule.
     #[boxed]
-    pub(crate) async fn run_chained_ancestor_floor_regression<F: Family, V, C>(
+    pub(crate) async fn run_chained_floor_regression<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3914,7 +3939,7 @@ pub(super) mod tests {
     /// operations, is refused at merkleize. Monotonicity alone would accept it, while the floor
     /// would poison future `historical_proof` and recovery.
     #[boxed]
-    pub(crate) async fn run_chained_ancestor_floor_beyond_size<F: Family, V, C>(
+    pub(crate) async fn run_chained_floor_beyond_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
