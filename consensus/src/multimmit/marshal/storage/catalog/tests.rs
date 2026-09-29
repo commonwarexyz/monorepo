@@ -47,17 +47,18 @@ fn committee(namespace: &[u8]) -> Committee<MinPk> {
 fn config(committee: &Committee<MinPk>, prefix: &str) -> TestConfig {
     let mut archive = ArchiveConfig::new(TwoCap, CacheRef::new(NZU16!(1024), NZUsize!(10)));
     archive.items_per_section = NZU64!(1);
-    let mut config = Config::new(
+    Config::new(
         Start::Genesis(committee.config.genesis().clone()),
         prefix.into(),
         committee.codec(),
         (),
         archive,
-    );
-    config.retention.lqc = ArchiveMode::Prunable;
-    config.retention.history = ArchiveMode::Immutable;
-    config.retention.blocks = ArchiveMode::Prunable;
-    config
+    )
+    .with_retention(Retention {
+        lqc: ArchiveMode::Prunable,
+        history: ArchiveMode::Immutable,
+        blocks: ArchiveMode::Prunable,
+    })
 }
 
 /// Opens the store and completes any recovery its record owes, as the catalog does at start.
