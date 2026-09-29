@@ -80,10 +80,14 @@ impl<'a> arbitrary::Arbitrary<'a> for Message {
 }
 
 /// Sending half of an [Upgrader] connection over mock channels.
-type Sender = <SakeCups<PrivateKey> as StreamUpgrader>::Sender<mocks::Stream, mocks::Sink>;
+type Sender =
+    <SakeCups<PrivateKey, ChaCha20Poly1305> as StreamUpgrader>::Sender<mocks::Stream, mocks::Sink>;
 
 /// Receiving half of an [Upgrader] connection over mock channels.
-type Receiver = <SakeCups<PrivateKey> as StreamUpgrader>::Receiver<mocks::Stream, mocks::Sink>;
+type Receiver = <SakeCups<PrivateKey, ChaCha20Poly1305> as StreamUpgrader>::Receiver<
+    mocks::Stream,
+    mocks::Sink,
+>;
 
 #[derive(Debug)]
 pub struct FuzzInput {
@@ -302,7 +306,7 @@ fn fuzz(input: FuzzInput) {
                         ),
                     };
 
-                    // Send a legitimate plaintext message through the encrypted channel.
+                    // Send a legitimate plaintext message through the connection.
                     sender.send(data.clone()).await.unwrap();
 
                     // Intercept the resulting record from the wire.
@@ -345,7 +349,7 @@ fn fuzz(input: FuzzInput) {
                         ),
                     };
 
-                    // Trigger one legitimate record so nonce/state advance as normal.
+                    // Send one legitimate record so the sender's cipher advances.
                     sender.send(vec![0u8]).await.unwrap();
 
                     // Adversary intercepts and drops that record.
@@ -366,7 +370,7 @@ fn fuzz(input: FuzzInput) {
                     let res = receiver.recv().await;
                     assert!(res.is_err());
 
-                    // After unauthenticated injection, this direction's stream state is corrupted.
+                    // After a failed open, this direction's receiver refuses every later record.
                     if matches!(&direction, Direction::D2L) {
                         d2l_corrupted = true;
                     } else {
@@ -424,7 +428,7 @@ fn fuzz(input: FuzzInput) {
                     let res = receiver.recv().await;
                     assert!(res.is_err());
 
-                    // After tampering, this direction's stream state is corrupted.
+                    // After a failed open, this direction's receiver refuses every later record.
                     if matches!(&direction, Direction::D2L) {
                         d2l_corrupted = true;
                     } else {

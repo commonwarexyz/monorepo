@@ -229,7 +229,7 @@ mod tests {
     };
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
@@ -256,7 +256,7 @@ mod tests {
             let dial_timeout = Duration::from_millis(100);
 
             // The deterministic network completes the transport dial immediately, but retaining
-            // the listener without accepting leaves the encrypted handshake pending.
+            // the listener without accepting leaves the handshake pending.
             let _listener = context
                 .bind(address)
                 .await
@@ -273,7 +273,7 @@ mod tests {
                                     max_handshake_age: Duration::from_secs(10),
                                     version: sake::Version::V1,
                                 },
-                                Cups::new(cups::Version::V1),
+                                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
                             ),
                             Duration::from_secs(5),
                         ),
@@ -339,7 +339,7 @@ mod tests {
                                 max_handshake_age: Duration::from_secs(10),
                                 version: sake::Version::V1,
                             },
-                            Cups::new(cups::Version::V1),
+                            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
                         ),
                         Duration::from_secs(5),
                     ),
@@ -440,7 +440,7 @@ mod tests {
                                     max_handshake_age: Duration::from_secs(10),
                                     version: sake::Version::V1,
                                 },
-                                Cups::new(cups::Version::V1),
+                                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
                             ),
                             Duration::from_secs(5),
                         ),
@@ -515,7 +515,7 @@ mod tests {
                                     max_handshake_age: Duration::from_secs(10),
                                     version: sake::Version::V1,
                                 },
-                                Cups::new(cups::Version::V1),
+                                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
                             ),
                             Duration::from_secs(5),
                         ),
@@ -609,7 +609,7 @@ mod tests {
                                     max_handshake_age: Duration::from_secs(10),
                                     version: sake::Version::V1,
                                 },
-                                Cups::new(cups::Version::V1),
+                                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
                             ),
                             Duration::from_secs(5),
                         ),

@@ -26,7 +26,7 @@ use rand_core::CryptoRng;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-/// Unique suffix for all messages signed in a stream.
+/// Unique suffix for stream authentication.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.

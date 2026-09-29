@@ -316,7 +316,7 @@ mod tests {
     use super::*;
     use crate::{Ingress, Manager, authenticated::discovery::actors::peer};
     use commonware_codec::Encode;
-    use commonware_cryptography::{Signer, ed25519::PrivateKey};
+    use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_stream::{cups, cups::Cups, sake, sake::Sake, sake_cups};
     use commonware_utils::NZUsize;
@@ -339,7 +339,7 @@ mod tests {
                         max_handshake_age: Duration::from_secs(10),
                         version: sake::Version::V1,
                     },
-                    Cups::new(cups::Version::V1),
+                    Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
                 ),
                 b"discovery-test",
                 address,
@@ -368,7 +368,7 @@ mod tests {
                     .is_ok()
             );
 
-            // Check that the greeting uses the handshake's identity and the gossip namespace.
+            // Check that the greeting uses the upgrader's identity and the gossip namespace.
             network.tracker.start();
             oracle.track(0, Set::try_from([local.clone(), peer.clone()]).unwrap());
             let _reservation = network.tracker_mailbox.listen(peer.clone()).await.unwrap();

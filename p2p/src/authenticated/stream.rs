@@ -9,9 +9,9 @@ use commonware_stream::Upgrader;
 use rand_core::CryptoRng;
 use std::future::Future;
 
-/// Reuses a handshake with a fixed namespace and plaintext message limit.
+/// Reuses an [Upgrader] with a fixed namespace and plaintext message limit.
 ///
-/// Works with any [Upgrader] implementation, cloning it for each connection attempt.
+/// Clones the upgrader for each connection attempt.
 pub(crate) struct Config<U: Upgrader> {
     handshake: U,
     namespace: Vec<u8>,
@@ -93,7 +93,7 @@ impl<U: Upgrader> Config<U> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::ed25519::PrivateKey;
+    use commonware_cryptography::{ChaCha20Poly1305, ed25519::PrivateKey};
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{cups, cups::Cups, sake, sake::Sake, sake_cups};
     use std::time::Duration;
@@ -101,7 +101,7 @@ mod tests {
     const NAMESPACE: &[u8] = b"test_namespace";
     const LIMIT: u32 = 1024;
 
-    fn handshake(seed: u64) -> SakeCups<PrivateKey> {
+    fn handshake(seed: u64) -> SakeCups<PrivateKey, ChaCha20Poly1305> {
         sake_cups(
             Sake {
                 signer: PrivateKey::from_seed(seed),
@@ -109,13 +109,13 @@ mod tests {
                 max_handshake_age: Duration::from_secs(10),
                 version: sake::Version::V1,
             },
-            Cups::new(cups::Version::V1),
+            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         )
     }
 
     #[test]
     fn test_max_message_size_within_limit() {
-        for max_message_size in [0, SakeCups::<PrivateKey>::MAX_SIZE] {
+        for max_message_size in [0, SakeCups::<PrivateKey, ChaCha20Poly1305>::MAX_SIZE] {
             Config::new(handshake(0), NAMESPACE, max_message_size);
         }
     }
@@ -126,12 +126,12 @@ mod tests {
         Config::new(
             handshake(0),
             NAMESPACE,
-            SakeCups::<PrivateKey>::MAX_SIZE + 1,
+            SakeCups::<PrivateKey, ChaCha20Poly1305>::MAX_SIZE + 1,
         );
     }
 
-    /// Dials through the config against a listener given the namespace and limit directly, so the
-    /// connection completes and bounds messages at the limit only if the config forwards both.
+    /// Dials through the config to a listener configured with the namespace and limit directly.
+    /// The connection completes and the limit holds only if the config forwards both.
     #[test]
     fn test_dial_forwards_namespace_and_limit() {
         deterministic::Runner::default()
@@ -142,7 +142,7 @@ mod tests {
                 let listener = handshake(1);
                 let listener_key = listener.public_key();
 
-                // Listen with the bare handshake while dialing through the config.
+                // Listen with the bare upgrader while dialing through the config.
                 let listen = context.child("listener").spawn(move |context| {
                     listener.listen(
                         context,

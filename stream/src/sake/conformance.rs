@@ -1,4 +1,4 @@
-//! SAKE stream conformance tests.
+//! SAKE and CUPS wire conformance tests.
 
 use crate::{
     Upgrader as _,

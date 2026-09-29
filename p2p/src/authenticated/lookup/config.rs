@@ -1,5 +1,5 @@
 #[cfg(test)]
-use commonware_cryptography::Signer;
+use commonware_cryptography::{ChaCha20Poly1305, Signer};
 use commonware_runtime::Quota;
 use commonware_stream::Upgrader;
 #[cfg(test)]
@@ -206,7 +206,7 @@ impl<U: Upgrader> Config<U> {
 }
 
 #[cfg(test)]
-impl<C: Signer> Config<SakeCups<C>> {
+impl<C: Signer> Config<SakeCups<C, ChaCha20Poly1305>> {
     pub fn test(signer: C, listen: SocketAddr, max_message_size: u32) -> Self {
         let mut config = Self::local(
             sake_cups(
@@ -216,7 +216,7 @@ impl<C: Signer> Config<SakeCups<C>> {
                     max_handshake_age: Duration::from_secs(10),
                     version: sake::Version::V1,
                 },
-                Cups::new(cups::Version::V1),
+                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),
             b"test_namespace",
             listen,

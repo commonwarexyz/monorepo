@@ -28,7 +28,7 @@ use commonware_runtime::{
 use commonware_stream::{
     Upgrader as _,
     cups::{self, Cups},
-    sake::{self, Sake, Version},
+    sake::{self, Sake},
     sake_cups,
     utils::Timeout,
 };
@@ -167,13 +167,13 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
-    let indexer_handshake = Timeout::new(
+    let indexer_upgrader = Timeout::new(
         (
             Sake {
                 signer: signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(60),
-                version: Version::V1,
+                version: sake::Version::V1,
             },
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
@@ -189,7 +189,7 @@ fn main() {
                 max_handshake_age: Duration::from_secs(10),
                 version: sake::Version::V1,
             },
-            Cups::new(cups::Version::V1),
+            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -206,7 +206,7 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer = indexer_handshake
+        let indexer = indexer_upgrader
             .dial(
                 context.child("dialer"),
                 INDEXER_NAMESPACE,

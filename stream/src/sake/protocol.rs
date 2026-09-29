@@ -14,7 +14,7 @@ use rand_core::CryptoRng;
 use std::{future::Future, time::Duration};
 use thiserror::Error;
 
-/// Errors that can occur when establishing a stream.
+/// Errors that can occur during a SAKE handshake.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("handshake error: {0}")]
@@ -278,7 +278,7 @@ mod test {
         });
     }
 
-    /// Checks that the handshake limit equals the record limit, and that dial and listen panic
+    /// Checks that the upgrader limit equals the record limit, and that dial and listen panic
     /// only when `max_message_size` exceeds it.
     #[test]
     fn test_max_message_size_bounds() {
@@ -334,7 +334,7 @@ mod test {
         });
     }
 
-    /// Returns a handshake that signs with `signer` at `version` and keys `records`.
+    /// Returns an upgrader that runs SAKE `version` with `signer` and CUPS `records`.
     fn transport(signer: PrivateKey, version: Version, records: cups::Version) -> TestUpgrade {
         (
             Sake {
@@ -347,7 +347,7 @@ mod test {
         )
     }
 
-    /// Returns a handshake that signs with `signer` at `version` and keys the paired records.
+    /// Returns an upgrader that runs SAKE `version` with `signer` and the matching CUPS version.
     fn transport_handshake(signer: PrivateKey, version: Version) -> TestUpgrade {
         transport(signer, version, record_version(version))
     }

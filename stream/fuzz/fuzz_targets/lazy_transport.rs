@@ -24,17 +24,22 @@ static NAMESPACE: &[u8] = b"lazy_fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 1023 * 1024; // ~1MB buffer
 
 /// Sending half of an [Upgrader] connection over mock channels.
-type Sender = <SakeCups<PrivateKey> as StreamUpgrader>::Sender<mocks::Stream, mocks::Sink>;
+type Sender =
+    <SakeCups<PrivateKey, ChaCha20Poly1305> as StreamUpgrader>::Sender<mocks::Stream, mocks::Sink>;
 
 /// Receiving half of an [Upgrader] connection over mock channels.
-type Receiver = <SakeCups<PrivateKey> as StreamUpgrader>::Receiver<mocks::Stream, mocks::Sink>;
+type Receiver = <SakeCups<PrivateKey, ChaCha20Poly1305> as StreamUpgrader>::Receiver<
+    mocks::Stream,
+    mocks::Sink,
+>;
 
 struct TransportPair {
     dialer_sender: Sender,
     listener_receiver: Receiver,
 }
 
-/// Establishes a connected transport pair for `version`.
+/// Connects a dialer and listener at `version` and returns the dialer's sender and the
+/// listener's receiver.
 fn connect(version: Version) -> TransportPair {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {

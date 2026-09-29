@@ -30,7 +30,9 @@ use commonware_consensus::{
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256};
+use commonware_cryptography::{
+    ChaCha20Poly1305, bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256,
+};
 use commonware_glue::{
     dkg::{
         SecretStore as _,
@@ -107,7 +109,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 max_handshake_age: Duration::from_secs(10),
                 version: sake::Version::V1,
             },
-            Cups::new(cups::Version::V1),
+            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
@@ -481,7 +483,9 @@ mod tests {
         simplex::types::{Finalization, Finalize, Proposal},
         types::{Round, View},
     };
-    use commonware_cryptography::{Hasher as _, Signer as _, bls12381::dkg::feldman_desmedt::deal};
+    use commonware_cryptography::{
+        ChaCha20Poly1305, Hasher as _, Signer as _, bls12381::dkg::feldman_desmedt::deal,
+    };
     use commonware_glue::dkg::types::EpochOutcome;
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{N3f1, TestRng, non_empty, ordered::Set};
@@ -604,7 +608,7 @@ mod tests {
                             max_handshake_age: Duration::from_secs(10),
                             version: sake::Version::V1,
                         },
-                        Cups::new(cups::Version::V1),
+                        Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
                     ),
                     NAMESPACE,
                     address,

@@ -5,7 +5,7 @@ use rand_core::CryptoRng;
 use std::{future::Future, time::Duration};
 use thiserror::Error;
 
-/// Errors returned by a handshake with a deadline.
+/// Errors returned by [Timeout].
 #[derive(Debug, Error)]
 pub enum TimeoutError<E> {
     #[error("handshake failed: {0}")]
@@ -14,16 +14,16 @@ pub enum TimeoutError<E> {
     Timeout,
 }
 
-/// Applies a timeout to each handshake attempt.
+/// Applies a deadline to each [Upgrader] attempt.
 ///
 /// The deadline starts when [`Upgrader::dial`] or [`Upgrader::listen`] is called.
 /// It covers the entire attempt, including the listener's peer admission check.
-/// Expiration drops the handshake future and releases its connection.
+/// Expiration drops the attempt and releases its connection.
 ///
 /// # Examples
 ///
 /// ```
-/// use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+/// use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
 /// use commonware_stream::{
 ///     cups::{self, Cups},
 ///     sake::{Sake, Version},
@@ -40,21 +40,21 @@ pub enum TimeoutError<E> {
 ///             max_handshake_age: Duration::from_secs(10),
 ///             version: Version::V1,
 ///         },
-///         Cups::new(cups::Version::V1),
+///         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 ///     ),
 ///     Duration::from_secs(5),
 /// );
 /// ```
 #[derive(Clone)]
 pub struct Timeout<U> {
-    handshake: U,
+    upgrader: U,
     timeout: Duration,
 }
 
 impl<U> Timeout<U> {
-    /// Wraps a handshake with a deadline for each connection attempt.
-    pub const fn new(handshake: U, timeout: Duration) -> Self {
-        Self { handshake, timeout }
+    /// Wraps `upgrader` with a deadline for each connection attempt.
+    pub const fn new(upgrader: U, timeout: Duration) -> Self {
+        Self { upgrader, timeout }
     }
 }
 
@@ -67,7 +67,7 @@ impl<U: Upgrader> Upgrader for Timeout<U> {
     type Receiver<I: Stream, O: Sink> = U::Receiver<I, O>;
 
     fn public_key(&self) -> Self::PublicKey {
-        self.handshake.public_key()
+        self.upgrader.public_key()
     }
 
     fn dial<C, I, O>(
@@ -84,10 +84,10 @@ impl<U: Upgrader> Upgrader for Timeout<U> {
         I: Stream,
         O: Sink,
     {
-        // Construct the handshake future before wrapping it so it can consume a non-Send peer.
+        // Construct the attempt before wrapping it so it can consume a non-Send peer.
         let timeout = context.sleep(self.timeout);
         let attempt = self
-            .handshake
+            .upgrader
             .dial(context, namespace, max_message_size, peer, stream, sink);
         async move {
             select! {
@@ -117,7 +117,7 @@ impl<U: Upgrader> Upgrader for Timeout<U> {
     {
         let timeout = context.sleep(self.timeout);
         let attempt =
-            self.handshake
+            self.upgrader
                 .listen(context, namespace, max_message_size, bouncer, stream, sink);
         async move {
             select! {

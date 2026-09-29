@@ -69,7 +69,7 @@ pub enum Error {
     SendFailed(RuntimeError),
     #[error("send too large: {0} bytes")]
     SendTooLarge(usize),
-    #[error("connection closed")]
+    #[error("closed after an earlier seal or open failure")]
     StreamClosed,
 }
 
@@ -396,13 +396,10 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
         self.sink.send(chunk).await.map_err(Error::SendFailed)
     }
 
-    /// Encrypts and sends multiple messages in a single sink call.
+    /// Encrypts and sends messages in a single sink call, one record per message.
     ///
-    /// Each message is framed independently so receivers still observe the
-    /// original message boundaries. Aggregate writes are broken into contiguous
-    /// chunks capped to one network buffer-pool item, then submitted together as
-    /// a chunked `IoBufs`. An individual message larger than that cap is still
-    /// sent as its own chunk.
+    /// Records are packed into contiguous chunks of at most one network buffer-pool item. A record
+    /// larger than that item occupies its own chunk.
     pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
     where
         B: Into<IoBufs>,

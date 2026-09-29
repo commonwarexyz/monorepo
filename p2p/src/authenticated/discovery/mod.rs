@@ -15,9 +15,10 @@
 //!
 //! ## Authentication
 //!
-//! [`Config`] and [`Network`] use [`commonware_stream::Upgrader`] to authenticate peers
-//! and supply their message streams. [`Network`] additionally requires [`Upgrader`]
-//! to sign discovery gossip under the same identity.
+//! [`Config`] and [`Network`] are generic over [`commonware_stream::Upgrader`], which
+//! authenticates peers and supplies their message streams. [`Network`] also requires this
+//! module's [`Upgrader`], which signs discovery gossip under the same identity. Any
+//! ([`Handshake`], [`commonware_stream::Transport`]) pair implements it.
 //!
 //! ## Discovery
 //!
@@ -168,7 +169,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
-//! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
+//! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
 //! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}, sake_cups};
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
@@ -215,7 +216,7 @@
 //!             max_handshake_age: Duration::from_secs(10),
 //!             version: Version::V1,
 //!         },
-//!         Cups::new(cups::Version::V1),
+//!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 //!     ),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
@@ -309,7 +310,7 @@ mod tests {
         },
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_cryptography::ed25519;
+    use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
         BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,
@@ -769,7 +770,7 @@ mod tests {
 
     #[test]
     fn test_max_message_size_stream_boundary() {
-        let limit = max_size::<SakeCups<ed25519::PrivateKey>>();
+        let limit = max_size::<SakeCups<ed25519::PrivateKey, ChaCha20Poly1305>>();
         for size in [0, limit] {
             deterministic::Runner::default().start(|context| async move {
                 let config = Config::test(
@@ -787,7 +788,7 @@ mod tests {
     #[should_panic(expected = "maximum message size exceeds stream limit")]
     fn test_max_message_size_above_stream_boundary() {
         deterministic::Runner::default().start(|context| async move {
-            let limit = max_size::<SakeCups<ed25519::PrivateKey>>();
+            let limit = max_size::<SakeCups<ed25519::PrivateKey, ChaCha20Poly1305>>();
             let config = Config::test(
                 ed25519::PrivateKey::from_seed(0),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),

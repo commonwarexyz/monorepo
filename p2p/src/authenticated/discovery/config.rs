@@ -1,7 +1,7 @@
 use crate::Ingress;
 use commonware_cryptography::PublicKey;
 #[cfg(test)]
-use commonware_cryptography::Signer;
+use commonware_cryptography::{ChaCha20Poly1305, Signer};
 use commonware_runtime::Quota;
 use commonware_stream::Upgrader;
 #[cfg(test)]
@@ -34,7 +34,7 @@ pub struct Config<U: Upgrader>
 where
     U::PublicKey: PublicKey,
 {
-    /// Upgrader used to authenticate transport connections and sign discovery gossip.
+    /// Authenticates peers, establishes their message streams, and signs discovery gossip.
     pub handshake: U,
 
     /// Prefix for all signed messages to avoid replay attacks.
@@ -250,7 +250,7 @@ where
 }
 
 #[cfg(test)]
-impl<C: Signer> Config<SakeCups<C>> {
+impl<C: Signer> Config<SakeCups<C, ChaCha20Poly1305>> {
     pub fn test(
         signer: C,
         listen: SocketAddr,
@@ -265,7 +265,7 @@ impl<C: Signer> Config<SakeCups<C>> {
                     max_handshake_age: Duration::from_secs(10),
                     version: sake::Version::V1,
                 },
-                Cups::new(cups::Version::V1),
+                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),
             b"test_namespace",
             listen,

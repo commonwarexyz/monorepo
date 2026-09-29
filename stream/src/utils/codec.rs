@@ -46,9 +46,10 @@ pub async fn send_frame<S: Sink>(
     sink.send(bufs).await.map_err(Error::SendFailed)
 }
 
-/// Receives data from the stream with a varint length prefix.
-/// Returns an error if the message is too large, the varint is invalid, or the
-/// stream is closed.
+/// Receives one frame with a varint length prefix from the stream.
+///
+/// Returns an error if the declared length exceeds `max_message_size`, the varint is invalid, or
+/// the stream is closed.
 pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Result<IoBufs, Error> {
     let (len, skip) = recv_length(stream).await?;
     if len > Widen::<usize>::widen(max_message_size) {

@@ -288,7 +288,7 @@ mod tests {
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        Signer,
+        ChaCha20Poly1305, Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
@@ -330,7 +330,7 @@ mod tests {
         }
     }
 
-    fn handshake<S: Signer>(signer: S) -> Timeout<SakeCups<S>> {
+    fn handshake<S: Signer>(signer: S) -> Timeout<SakeCups<S, ChaCha20Poly1305>> {
         let handshake = (
             Sake {
                 signer,

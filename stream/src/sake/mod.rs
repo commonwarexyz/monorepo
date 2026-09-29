@@ -10,13 +10,13 @@
 //! listener's bouncer may reject that claim before authentication. Accepting it only permits the
 //! handshake to continue. A successful handshake authenticates the returned identity.
 //!
-//! The SAKE [Version] and the version of the transport are configured separately.
-//! [Version::V1] forks the transcript with the [namespace](crate::Transport::namespace) of the
-//! records ([Context::fork](commonware_cryptography::handshake::sake::Context::fork)), so peers
-//! with different transports fail the handshake, and these handshakes differ from SAKE
-//! handshakes that another protocol runs with the same application namespace. [Version::V0] binds
-//! no transport namespace, so peers with different transports complete the handshake and then
-//! fail to open the first record.
+//! The SAKE [Version] and the transport version are configured separately. [Version::V1] forks
+//! the transcript with the transport [namespace](crate::Transport::namespace)
+//! ([Context::fork](commonware_cryptography::handshake::sake::Context::fork)). Peers with
+//! different transports then fail the handshake, and the transcript differs from that of a SAKE
+//! handshake another protocol runs with the same application namespace. [Version::V0] binds no
+//! transport namespace, so peers with different transports complete the handshake and then fail
+//! to open the first record.
 //!
 //! Peers must agree on a unique, application-specific namespace, a [Version], and the transport,
 //! and their clocks must be within the configured timestamp acceptance windows. The version is not

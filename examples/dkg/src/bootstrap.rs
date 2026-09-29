@@ -12,7 +12,9 @@ use crate::{
 };
 use clap::Args;
 use commonware_consensus::types::Epoch;
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
+use commonware_cryptography::{
+    ChaCha20Poly1305, bls12381::primitives::variant::MinSig, ed25519::PublicKey,
+};
 use commonware_glue::dkg::{
     SecretStore as _, bootstrap,
     types::{EpochInfo, EpochOutcome},
@@ -65,7 +67,7 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
                 max_handshake_age: Duration::from_secs(10),
                 version: sake::Version::V1,
             },
-            Cups::new(cups::Version::V1),
+            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,

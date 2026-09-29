@@ -52,7 +52,7 @@ mod tests {
     use crate::authenticated::discovery::actors::tracker::{self, Metadata};
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
@@ -69,11 +69,13 @@ mod tests {
     const STREAM_NAMESPACE: &[u8] = b"test_discovery_spawner_ingress";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Sender = <SakeCups<PrivateKey> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
-    type Receiver = <SakeCups<PrivateKey> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
+    type Sender =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
+    type Receiver =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
     type Connection = (Sender, Receiver);
 
-    fn handshake(signer: PrivateKey) -> Timeout<SakeCups<PrivateKey>> {
+    fn handshake(signer: PrivateKey) -> Timeout<SakeCups<PrivateKey, ChaCha20Poly1305>> {
         let handshake = (
             Sake {
                 signer,

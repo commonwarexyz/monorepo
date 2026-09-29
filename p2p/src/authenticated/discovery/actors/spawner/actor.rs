@@ -165,7 +165,7 @@ mod tests {
     use crate::authenticated::discovery::types;
     use commonware_actor::{Feedback, Unreliable, mailbox};
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
@@ -186,11 +186,13 @@ mod tests {
     const IP_NAMESPACE: &[u8] = b"test_discovery_spawner_actor_IP";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Sender = <SakeCups<PrivateKey> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
-    type Receiver = <SakeCups<PrivateKey> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
+    type Sender =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
+    type Receiver =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
     type Connection = (Sender, Receiver);
 
-    fn handshake(signer: PrivateKey) -> Timeout<SakeCups<PrivateKey>> {
+    fn handshake(signer: PrivateKey) -> Timeout<SakeCups<PrivateKey, ChaCha20Poly1305>> {
         let handshake = (
             Sake {
                 signer,

@@ -1,6 +1,6 @@
 use arbitrary::Arbitrary;
 use commonware_codec::codec::FixedSize;
-use commonware_cryptography::{Signer, ed25519};
+use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519};
 use commonware_p2p::{
     Address, AddressableManager as _, Blocker, Channel, Manager as _, Receiver, Recipients, Sender,
     authenticated::{
@@ -246,7 +246,7 @@ impl NetworkScheme for Discovery {
                     max_handshake_age: Duration::from_secs(10),
                     version: sake::Version::V1,
                 },
-                Cups::new(cups::Version::V1),
+                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),
             b"fuzz_namespace",
             peer.info.address,
@@ -332,7 +332,7 @@ impl NetworkScheme for Lookup {
                     max_handshake_age: Duration::from_secs(10),
                     version: sake::Version::V1,
                 },
-                Cups::new(cups::Version::V1),
+                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),
             b"fuzz_namespace",
             peer.info.address,

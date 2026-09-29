@@ -13,8 +13,8 @@
 //! 3. [Ack]: The dialer verifies the response and sends the opposite-direction confirmation.
 //!
 //! The current suite uses X25519 for ephemeral key agreement, BLAKE3 for the transcript and key
-//! derivation, a generic [Signer](crate::Signer) implementation for identity signatures, and a
-//! generic [Cipher](crate::Cipher) implementation for the resulting directional traffic ciphers.
+//! derivation, any [Signer](crate::Signer) for identity signatures, and any
+//! [Cipher](crate::Cipher) for the two directional traffic ciphers.
 //!
 //! Both public identities are inputs to the core exchange and are incorporated into the transcript
 //! with the timestamps, ephemeral keys, and shared secret in a fixed order. Identities are visible,

@@ -262,7 +262,7 @@ mod tests {
     use super::*;
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::test_traced;
@@ -298,7 +298,7 @@ mod tests {
                     max_handshake_age: Duration::from_secs(1),
                     version: Version::V1,
                 },
-                Cups::new(cups::Version::V1),
+                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             );
 
             let actor = Actor::new(
@@ -449,7 +449,7 @@ mod tests {
                     max_handshake_age: Duration::from_secs(1),
                     version: Version::V1,
                 },
-                Cups::new(cups::Version::V1),
+                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             );
 
             let actor = Actor::new(

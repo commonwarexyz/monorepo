@@ -28,7 +28,7 @@ use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, to
 use commonware_stream::{
     Upgrader as _,
     cups::{self, Cups},
-    sake::{Sake, Version},
+    sake::{self, Sake},
     utils::Timeout,
 };
 use commonware_utils::{
@@ -242,13 +242,13 @@ fn main() {
 
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
-        let handshake = Timeout::new(
+        let upgrader = Timeout::new(
             (
                 Sake {
                     signer,
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(60),
-                    version: Version::V1,
+                    version: sake::Version::V1,
                 },
                 Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),
@@ -261,7 +261,7 @@ fn main() {
                 continue;
             };
 
-            let (peer, mut sender, mut receiver) = match handshake
+            let (peer, mut sender, mut receiver) = match upgrader
                 .clone()
                 .listen(
                     context.child("listener"),

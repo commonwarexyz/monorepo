@@ -64,7 +64,7 @@ impl Version {
 }
 
 /// First handshake message sent by the dialer.
-/// Contains dialer's ephemeral key and timestamp signature.
+/// Contains the dialer's timestamp, ephemeral key, and transcript signature.
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct Syn<S: Signature> {
     time_ms: u64,
@@ -111,7 +111,7 @@ where
 }
 
 /// Second handshake message sent by the listener.
-/// Contains listener's ephemeral key, signature, and confirmation tag.
+/// Contains the listener's timestamp, ephemeral key, transcript signature, and confirmation tag.
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct SynAck<S: Signature> {
     time_ms: u64,
@@ -204,8 +204,8 @@ pub struct ListenState {
     transcript: Transcript,
 }
 
-/// Handshake context containing timing and identity information.
-/// Used by both dialer and listener to initialize handshake state.
+/// Inputs that start a dialer or listener: the namespace, timing bounds, identities, and
+/// [Version].
 pub struct Context<S, P> {
     version: Version,
     transcript: Transcript,
@@ -216,7 +216,9 @@ pub struct Context<S, P> {
 }
 
 impl<S, P> Context<S, P> {
-    /// Creates a new handshake context.
+    /// Creates a context from the application namespace, the local time, the accepted range of
+    /// peer timestamps (both in milliseconds), the local signer, the expected peer identity, and
+    /// the [Version].
     pub fn new(
         namespace: &[u8],
         current_time_ms: u64,
@@ -293,7 +295,8 @@ pub fn dial_start<S: Signer, P: PublicKey>(
 }
 
 /// Completes a handshake as the dialer.
-/// Verifies the listener's response and returns final message and the send and receive ciphers.
+/// Verifies the listener's [SynAck] and returns the [Ack] to send, the send cipher, and the
+/// receive cipher.
 pub fn dial_end<C: Cipher, P: PublicKey>(
     state: DialState<P>,
     msg: SynAck<<P as Verifier>::Signature>,
@@ -338,7 +341,7 @@ pub fn dial_end<C: Cipher, P: PublicKey>(
 }
 
 /// Processes the first handshake message as the listener.
-/// Verifies the dialer's message and returns state and response.
+/// Verifies the dialer's [Syn] and returns the listener state and the [SynAck] to send.
 pub fn listen_start<S: Signer, P: PublicKey>(
     rng: impl CryptoRng,
     ctx: Context<S, P>,

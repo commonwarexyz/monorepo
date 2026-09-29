@@ -4,15 +4,10 @@ use thiserror::Error;
 /// Errors relating to the handshake.
 #[derive(Error, Debug)]
 pub enum Error {
-    /// An error indicating that the handshake failed.
+    /// The handshake failed.
     ///
-    /// We don't provide detail on why the handshake failed, following a common
-    /// precautionary principle. The basis of this reasoning is that:
-    ///
-    /// - the application can't meaningfully respond to different failure reasons,
-    /// - an adversary might gain an advantage by knowing the failure reason.
-    ///
-    /// In other words, there's only disadvantages and extra effort in doing so.
+    /// The error does not say why. The application cannot act on the reason, and revealing it
+    /// could help an adversary.
     #[error("handshake failed")]
     HandshakeFailed,
     /// The timestamp is not in the allowable bounds

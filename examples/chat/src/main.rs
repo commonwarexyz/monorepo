@@ -56,7 +56,7 @@ mod handler;
 mod logger;
 
 use clap::{Arg, Command, value_parser};
-use commonware_cryptography::{Signer as _, ed25519};
+use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519};
 use commonware_p2p::{
     Manager as _,
     authenticated::{self, discovery},
@@ -171,7 +171,7 @@ fn main() {
                 max_handshake_age: Duration::from_secs(10),
                 version: sake::Version::V1,
             },
-            Cups::new(cups::Version::V1),
+            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

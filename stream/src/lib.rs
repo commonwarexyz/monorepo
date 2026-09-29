@@ -1,4 +1,4 @@
-//! Exchange messages over arbitrary transport.
+//! Exchange authenticated messages over arbitrary byte streams.
 //!
 //! # Status
 //!
@@ -10,7 +10,7 @@
 )]
 
 commonware_macros::stability_scope!(BETA {
-    use commonware_cryptography::{ChaCha20Poly1305, Cipher};
+    use commonware_cryptography::Cipher;
     use commonware_runtime::{BufferPool, BufferPooler, Clock, IoBufs, Sink, Stream};
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
@@ -18,15 +18,18 @@ commonware_macros::stability_scope!(BETA {
     pub mod cups;
     pub mod sake;
     mod upgrade;
+    pub mod utils;
 
-    /// [SAKE](sake::Sake) paired with [CUPS](cups::Cups) records sealed by [ChaCha20Poly1305].
-    pub type SakeCups<S> = (sake::Sake<S>, cups::Cups<ChaCha20Poly1305>);
+    /// [SAKE](sake::Sake) paired with [CUPS](cups::Cups) records sealed by `C`.
+    pub type SakeCups<S, C> = (sake::Sake<S>, cups::Cups<C>);
 
-    /// Pairs `sake` with `cups` records sealed by [ChaCha20Poly1305].
-    pub const fn sake_cups<S>(sake: sake::Sake<S>, cups: cups::Cups<ChaCha20Poly1305>) -> SakeCups<S> {
+    /// Pairs `sake` with `cups`.
+    pub const fn sake_cups<S, C: Cipher>(
+        sake: sake::Sake<S>,
+        cups: cups::Cups<C>,
+    ) -> SakeCups<S, C> {
         (sake, cups)
     }
-    pub mod utils;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
     ///
@@ -42,8 +45,9 @@ commonware_macros::stability_scope!(BETA {
     /// messages and enforce the limit before allocating for an inbound message. Protocol overhead
     /// does not count toward this limit.
     ///
-    /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping the handshake
-    /// future cancels the attempt, and implementations must release the underlying connection.
+    /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping a [Self::dial]
+    /// or [Self::listen] future cancels the attempt, and implementations must release the
+    /// underlying connection.
     pub trait Upgrader: Clone + Send + Sync + 'static {
         /// Largest plaintext message supported by the established streams, in bytes.
         const MAX_SIZE: u32;
@@ -62,7 +66,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Returns the local authenticated identity.
         ///
-        /// The identity must remain stable across attempts and clones of this handshake.
+        /// The identity must remain stable across attempts and clones of this upgrader.
         fn public_key(&self) -> Self::PublicKey;
 
         /// Authenticates an outbound connection to `peer`.
@@ -88,7 +92,7 @@ commonware_macros::stability_scope!(BETA {
         /// Authenticates an inbound connection accepted by `bouncer`.
         ///
         /// The bouncer may receive an unverified identity claim before authentication completes.
-        /// Accepting this claim permits authentication to continue. Only a successful handshake
+        /// Accepting this claim permits authentication to continue. Only a successful listen
         /// proves the returned peer's identity.
         ///
         /// # Panics
