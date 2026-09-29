@@ -153,8 +153,8 @@ use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery},
 };
-use commonware_utils::Cached;
-use futures::{FutureExt as _, Stream, future::try_join_all};
+use commonware_utils::{Cached, futures::try_join_all};
+use futures::{FutureExt as _, Stream};
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     future::Future,
