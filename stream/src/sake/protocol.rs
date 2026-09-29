@@ -218,19 +218,10 @@ mod test {
     };
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
-    /// Default `max_message_size` passed to dial and listen.
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
     type TestCups = Cups<(), ChaCha20Poly1305>;
     type TestUpgrade = Cups<Sake<PrivateKey>, ChaCha20Poly1305>;
-
-    /// Returns the record version that pairs with the SAKE `version`.
-    const fn record_version(version: Version) -> cups::Version {
-        match version {
-            Version::V0 => cups::Version::V0,
-            Version::V1 => cups::Version::V1,
-        }
-    }
 
     /// Checks that a closed peer fails the first handshake frame with a send error.
     #[test]
@@ -239,7 +230,7 @@ mod test {
             let (sink, peer_stream) = mocks::Channel::init();
             let (_peer_sink, stream) = mocks::Channel::init();
             drop(peer_stream);
-            let result = matched(PrivateKey::from_seed(0), Version::V1)
+            let result = upgrader(PrivateKey::from_seed(0), Version::V1, cups::Version::V1)
                 .dial(
                     context.child("dialer"),
                     NAMESPACE,
@@ -267,7 +258,8 @@ mod test {
                 for dialer in [true, false] {
                     let (sink, _) = mocks::Channel::init();
                     let (_, stream) = mocks::Channel::init();
-                    let handshake = matched(PrivateKey::from_seed(0), Version::V1);
+                    let handshake =
+                        upgrader(PrivateKey::from_seed(0), Version::V1, cups::Version::V1);
                     let attempt = async {
                         if dialer {
                             handshake
@@ -323,11 +315,6 @@ mod test {
             },
             records,
         )
-    }
-
-    /// Returns an upgrader that runs SAKE `version` with `signer` and the matching CUPS version.
-    fn matched(signer: PrivateKey, version: Version) -> TestUpgrade {
-        upgrader(signer, version, record_version(version))
     }
 
     /// Returns a frame length prefix that declares one byte more than the encoding of `message`.
@@ -389,11 +376,11 @@ mod test {
         }
     }
 
-    /// Checks that a dialer and listener at the same version establish streams that reject payloads
-    /// above `max_message_size` and exchange messages in both directions.
+    /// Checks that a dialer and listener at the same CUPS version establish streams that reject
+    /// payloads above `max_message_size` and exchange messages in both directions.
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Box<dyn std::error::Error>> {
-        for version in [Version::V0, Version::V1] {
+        for records in [cups::Version::V0, cups::Version::V1] {
             for max_message_size in [0, 1, 100, MAX_MESSAGE_SIZE] {
                 let executor = deterministic::Runner::timed(Duration::from_secs(5));
                 executor.start(move |context| async move {
@@ -405,8 +392,9 @@ mod test {
                     let (dialer_sink, listener_stream) = mocks::Channel::init();
                     let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-                    let dialer_handshake = matched(dialer_signer.clone(), version);
-                    let listener_handshake = matched(listener_signer.clone(), version);
+                    let dialer_handshake = upgrader(dialer_signer.clone(), Version::V1, records);
+                    let listener_handshake =
+                        upgrader(listener_signer.clone(), Version::V1, records);
 
                     // Run both sides of the handshake.
                     let listener_handle =
@@ -527,15 +515,14 @@ mod test {
         })
     }
 
-    /// Checks that a handshake succeeds only when the dialer and listener run the same version.
+    /// Checks that a handshake succeeds only when the dialer and listener run the same SAKE
+    /// version.
     #[test]
     fn test_versions() {
         for dialer in [Version::V0, Version::V1] {
             for listener in [Version::V0, Version::V1] {
-                let result = connect_with(
-                    (dialer, record_version(dialer)),
-                    (listener, record_version(listener)),
-                );
+                let result =
+                    connect_with((dialer, cups::Version::V1), (listener, cups::Version::V1));
                 if dialer == listener {
                     result.unwrap().unwrap();
                 } else {
@@ -562,7 +549,7 @@ mod test {
     /// read returned.
     #[test]
     fn test_recv_decrypts_unique_frame_in_place() -> Result<(), Box<dyn std::error::Error>> {
-        for version in [Version::V0, Version::V1] {
+        for records in [cups::Version::V0, cups::Version::V1] {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
                 let dialer_signer = PrivateKey::from_seed(42);
@@ -578,8 +565,8 @@ mod test {
                     last_alloc: last_alloc.clone(),
                 };
 
-                let dialer_handshake = matched(dialer_signer, version);
-                let listener_handshake = matched(listener_signer.clone(), version);
+                let dialer_handshake = upgrader(dialer_signer, Version::V1, records);
+                let listener_handshake = upgrader(listener_signer.clone(), Version::V1, records);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -632,7 +619,7 @@ mod test {
     /// Checks that `send_many` of small messages reaches the sink as one single-chunk send.
     #[test]
     fn test_send_many_uses_single_runtime_send() -> Result<(), Box<dyn std::error::Error>> {
-        for version in [Version::V0, Version::V1] {
+        for records in [cups::Version::V0, cups::Version::V1] {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
                 let dialer_signer = PrivateKey::from_seed(42);
@@ -643,8 +630,8 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = matched(dialer_signer.clone(), version);
-                let listener_handshake = matched(listener_signer.clone(), version);
+                let dialer_handshake = upgrader(dialer_signer.clone(), Version::V1, records);
+                let listener_handshake = upgrader(listener_signer.clone(), Version::V1, records);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -712,7 +699,7 @@ mod test {
     /// at most one sink call per batch.
     #[test]
     fn test_send_many_flushes_at_network_pool_item_max() -> Result<(), Box<dyn std::error::Error>> {
-        for version in [Version::V0, Version::V1] {
+        for records in [cups::Version::V0, cups::Version::V1] {
             // Cap network pool items at 256 bytes.
             let executor = deterministic::Runner::new(
                 deterministic::Config::new().with_network_buffer_pool_config(
@@ -730,8 +717,8 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = matched(dialer_signer.clone(), version);
-                let listener_handshake = matched(listener_signer.clone(), version);
+                let dialer_handshake = upgrader(dialer_signer.clone(), Version::V1, records);
+                let listener_handshake = upgrader(listener_signer.clone(), Version::V1, records);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -777,7 +764,7 @@ mod test {
                         assert!(chunk_counts.lock().is_empty());
                     } else {
                         assert_eq!(sends.load(Ordering::Relaxed), 1);
-                        let expected_chunks = if version == Version::V1 {
+                        let expected_chunks = if records == cups::Version::V1 {
                             count
                         } else {
                             count.div_ceil(2)
@@ -803,7 +790,7 @@ mod test {
     #[test]
     fn test_send_many_sends_oversized_single_message_alone()
     -> Result<(), Box<dyn std::error::Error>> {
-        for version in [Version::V0, Version::V1] {
+        for records in [cups::Version::V0, cups::Version::V1] {
             // Cap network pool items at 128 bytes, below the frame of the 200-byte message.
             let executor = deterministic::Runner::new(
                 deterministic::Config::new().with_network_buffer_pool_config(
@@ -821,8 +808,8 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = matched(dialer_signer.clone(), version);
-                let listener_handshake = matched(listener_signer.clone(), version);
+                let dialer_handshake = upgrader(dialer_signer.clone(), Version::V1, records);
+                let listener_handshake = upgrader(listener_signer.clone(), Version::V1, records);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -881,7 +868,7 @@ mod test {
     /// any of it, leaving the sender usable.
     #[test]
     fn test_send_many_too_large_preserves_sender_state() -> Result<(), Box<dyn std::error::Error>> {
-        for version in [Version::V0, Version::V1] {
+        for records in [cups::Version::V0, cups::Version::V1] {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
                 let dialer_signer = PrivateKey::from_seed(42);
@@ -892,8 +879,8 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = matched(dialer_signer.clone(), version);
-                let listener_handshake = matched(listener_signer.clone(), version);
+                let dialer_handshake = upgrader(dialer_signer.clone(), Version::V1, records);
+                let listener_handshake = upgrader(listener_signer.clone(), Version::V1, records);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -969,7 +956,7 @@ mod test {
 
             // Even with a large application limit, the listener should bound the
             // unauthenticated peer-key frame to the fixed public-key size.
-            let listener_handshake = matched(listener_signer, Version::V1);
+            let listener_handshake = upgrader(listener_signer, Version::V1, cups::Version::V1);
             let max_message_size = 1024 * 1024;
 
             // Advertise a frame that is one byte larger than the encoded public key and send no
@@ -1015,13 +1002,13 @@ mod test {
 
             // Use a large application limit to make sure this path is guarded by
             // the fixed SynAck size rather than by post-handshake settings.
-            let dialer_handshake = matched(dialer_signer, Version::V1);
+            let dialer_handshake = upgrader(dialer_signer, Version::V1, cups::Version::V1);
             let max_message_size = 1024 * 1024;
 
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.
             let listener_public_key = listener_signer.public_key();
-            let listener_handshake = matched(listener_signer, Version::V1);
+            let listener_handshake = upgrader(listener_signer, Version::V1, cups::Version::V1);
             let dialer_context = dialer_handshake.handshake.clone().context(
                 &context,
                 NAMESPACE,
