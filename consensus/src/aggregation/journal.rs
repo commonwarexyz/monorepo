@@ -2,7 +2,7 @@
 
 use super::{
     scheme,
-    types::{Certificate, RecoveryNamespace},
+    types::{Certificate, RecoveryNamespace, Schedule},
 };
 use crate::types::{Epoch, Height};
 use bytes::BufMut;
@@ -21,7 +21,7 @@ use commonware_utils::futures::rebind;
 use rand_core::CryptoRng;
 use std::num::{NonZeroU64, NonZeroUsize};
 
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 const COMMITTEE_DOMAIN: &[u8] = b"_COMMONWARE_CONSENSUS_AGGREGATION_JOURNAL_COMMITTEE_V1";
 
 /// Scope and identity durably bound to an aggregation journal.
@@ -29,10 +29,7 @@ const COMMITTEE_DOMAIN: &[u8] = b"_COMMONWARE_CONSENSUS_AGGREGATION_JOURNAL_COMM
 struct Identity {
     namespace: RecoveryNamespace,
     committee: Sha256Digest,
-    epoch: Epoch,
-    first: Height,
-    last: Height,
-    window: NonZeroU64,
+    schedule: Schedule,
 }
 
 impl Identity {
@@ -41,10 +38,7 @@ impl Identity {
         Self {
             namespace: scheme.recovery_namespace(),
             committee: Sha256::hash(&[COMMITTEE_DOMAIN, participants.as_ref()]),
-            epoch: config.epoch,
-            first: config.first,
-            last: config.last,
-            window: config.window,
+            schedule: config.schedule,
         }
     }
 }
@@ -53,10 +47,10 @@ impl Write for Identity {
     fn write(&self, writer: &mut impl BufMut) {
         self.namespace.write(writer);
         self.committee.write(writer);
-        self.epoch.write(writer);
-        self.first.write(writer);
-        self.last.write(writer);
-        self.window.get().write(writer);
+        self.schedule.epoch.write(writer);
+        self.schedule.first.write(writer);
+        self.schedule.last.write(writer);
+        self.schedule.interval.get().write(writer);
     }
 }
 
@@ -67,13 +61,15 @@ impl Read for Identity {
         Ok(Self {
             namespace: RecoveryNamespace::read(reader)?,
             committee: Sha256Digest::read(reader)?,
-            epoch: Epoch::read(reader)?,
-            first: Height::read(reader)?,
-            last: Height::read(reader)?,
-            window: NonZeroU64::new(u64::read(reader)?).ok_or(CodecError::Invalid(
-                "consensus::aggregation::journal::Identity",
-                "zero window",
-            ))?,
+            schedule: Schedule {
+                epoch: Epoch::read(reader)?,
+                first: Height::read(reader)?,
+                last: Height::read(reader)?,
+                interval: NonZeroU64::new(u64::read(reader)?).ok_or(CodecError::Invalid(
+                    "consensus::aggregation::journal::Identity",
+                    "zero interval",
+                ))?,
+            },
         })
     }
 }
@@ -82,10 +78,10 @@ impl EncodeSize for Identity {
     fn encode_size(&self) -> usize {
         self.namespace.encode_size()
             + self.committee.encode_size()
-            + self.epoch.encode_size()
-            + self.first.encode_size()
-            + self.last.encode_size()
-            + self.window.get().encode_size()
+            + self.schedule.epoch.encode_size()
+            + self.schedule.first.encode_size()
+            + self.schedule.last.encode_size()
+            + self.schedule.interval.get().encode_size()
     }
 }
 
@@ -94,20 +90,14 @@ impl EncodeSize for Identity {
 pub(crate) struct JournalConfig {
     /// Storage partition.
     pub partition: String,
-    /// Epoch represented by the journal.
-    pub epoch: Epoch,
-    /// First mandatory position, inclusive.
-    pub first: Height,
-    /// Last mandatory position, inclusive.
-    pub last: Height,
-    /// Maximum number of live positions.
-    pub window: NonZeroU64,
+    /// Checkpoints recorded by the journal.
+    pub schedule: Schedule,
     /// Write-buffer size.
     pub write_buffer: NonZeroUsize,
     /// Replay-buffer size.
     pub replay_buffer: NonZeroUsize,
-    /// Number of positions assigned to each journal section.
-    pub heights_per_section: NonZeroU64,
+    /// Number of checkpoints assigned to each journal section.
+    pub checkpoints_per_section: NonZeroU64,
     /// Compression level.
     pub compression: Option<u8>,
     /// Page cache.
@@ -129,7 +119,7 @@ pub(crate) enum JournalError {
     /// The format version differs.
     #[error("aggregation journal version mismatch")]
     VersionMismatch,
-    /// The namespace, committee, epoch, range, or window differs.
+    /// The namespace, committee, or schedule differs.
     #[error("aggregation journal identity mismatch")]
     IdentityMismatch,
     /// A certificate does not belong to the configured scope or fails verification.
@@ -188,7 +178,8 @@ where
     D: Digest,
 {
     inner: Option<StorageJournal<E, Record<S, D>>>,
-    heights_per_section: NonZeroU64,
+    schedule: Schedule,
+    checkpoints_per_section: NonZeroU64,
     restarted: bool,
 }
 
@@ -243,14 +234,7 @@ where
                 (false, Record::Certificate(_)) => return Err(JournalError::MissingHeader),
                 (true, Record::Header(..)) => return Err(JournalError::DuplicateHeader),
                 (true, Record::Certificate(certificate)) => {
-                    if !certificate.verify_for(
-                        verifier,
-                        scheme,
-                        identity.epoch,
-                        identity.first,
-                        identity.last,
-                        strategy,
-                    ) {
+                    if !certificate.verify_for(verifier, scheme, &identity.schedule, strategy) {
                         return Err(JournalError::InvalidCertificate);
                     }
                     certificates.push(certificate);
@@ -269,7 +253,8 @@ where
         Ok((
             Self {
                 inner: Some(journal),
-                heights_per_section: config.heights_per_section,
+                schedule: config.schedule,
+                checkpoints_per_section: config.checkpoints_per_section,
                 restarted: !empty,
             },
             certificates,
@@ -281,7 +266,10 @@ where
     }
 
     pub async fn append(&mut self, certificate: Certificate<S, D>) -> Result<(), JournalError> {
-        let section = certificate.item.position.get() / self.heights_per_section.get();
+        // Consecutive checkpoints have consecutive indices, so sections fill evenly at any interval.
+        let index = (certificate.item.position.get() - self.schedule.first.get())
+            / self.schedule.interval.get();
+        let section = index / self.checkpoints_per_section.get();
         let record = Record::Certificate(certificate);
         rebind(&mut self.inner, |journal| journal.append(section, &record)).await?;
         rebind(&mut self.inner, |journal| journal.sync(section)).await?;
@@ -310,13 +298,15 @@ mod tests {
     fn config(context: &deterministic::Context, partition: &str) -> JournalConfig {
         JournalConfig {
             partition: partition.into(),
-            epoch: EPOCH,
-            first: FIRST,
-            last: LAST,
-            window: NonZeroU64::new(2).unwrap(),
+            schedule: Schedule {
+                epoch: EPOCH,
+                first: FIRST,
+                last: LAST,
+                interval: NonZeroU64::new(2).unwrap(),
+            },
             write_buffer: NZUsize!(4096),
             replay_buffer: NZUsize!(4096),
-            heights_per_section: NonZeroU64::new(2).unwrap(),
+            checkpoints_per_section: NonZeroU64::new(2).unwrap(),
             compression: None,
             page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10)),
         }
@@ -439,37 +429,42 @@ mod tests {
                 );
             }
 
+            let schedule = config.schedule;
             let mismatches = [
                 (
                     "epoch",
-                    JournalConfig {
+                    Schedule {
                         epoch: EPOCH.next(),
-                        ..config.clone()
+                        ..schedule
                     },
                 ),
                 (
                     "first",
-                    JournalConfig {
+                    Schedule {
                         first: FIRST.next(),
-                        ..config.clone()
+                        ..schedule
                     },
                 ),
                 (
                     "last",
-                    JournalConfig {
+                    Schedule {
                         last: LAST.next(),
-                        ..config.clone()
+                        ..schedule
                     },
                 ),
                 (
-                    "window",
-                    JournalConfig {
-                        window: config.window.checked_add(1).unwrap(),
-                        ..config.clone()
+                    "interval",
+                    Schedule {
+                        interval: NonZeroU64::new(1).unwrap(),
+                        ..schedule
                     },
                 ),
             ];
-            for (name, mismatch) in mismatches {
+            for (name, schedule) in mismatches {
+                let mismatch = JournalConfig {
+                    schedule,
+                    ..config.clone()
+                };
                 let result = open(&mut context, mismatch, scheme).await;
                 assert!(
                     matches!(result, Err(JournalError::IdentityMismatch)),
@@ -483,19 +478,28 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_rejects_certificate_from_other_committee() {
+    fn test_rejects_invalid_certificates() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = ed25519::fixture(&mut context, NAMESPACE, 4);
             let other = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let config = config(&context, "tampered");
-            let (mut journal, _) = open(&mut context, config.clone(), &fixture.schemes[0])
-                .await
-                .unwrap();
-            journal.append(certificate(&other, FIRST)).await.unwrap();
-            drop(journal);
+            let cases = [
+                ("committee", certificate(&other, FIRST)),
+                ("schedule", certificate(&fixture, FIRST.next())),
+            ];
+            for (name, invalid) in cases {
+                let config = config(&context, name);
+                let (mut journal, _) = open(&mut context, config.clone(), &fixture.schemes[0])
+                    .await
+                    .unwrap();
+                journal.append(invalid).await.unwrap();
+                drop(journal);
 
-            let result = open(&mut context, config, &fixture.schemes[0]).await;
-            assert!(matches!(result, Err(JournalError::InvalidCertificate)));
+                let result = open(&mut context, config, &fixture.schemes[0]).await;
+                assert!(
+                    matches!(result, Err(JournalError::InvalidCertificate)),
+                    "{name}"
+                );
+            }
         });
     }
 

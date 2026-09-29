@@ -1,7 +1,7 @@
 use super::{
     CertificateOutcome, Config, Engine, EngineOutcome, Recoverer,
     scheme::{self, Scheme},
-    types::{Ack, Certificate, Item, RecoveryKey, RecoveryNamespace},
+    types::{Ack, Certificate, Item, RecoveryKey, RecoveryNamespace, Schedule},
 };
 use crate::{
     Automaton, Reporter,
@@ -328,9 +328,13 @@ where
     A: Automaton<Context = Height, Digest = Sha256Digest>,
 {
     Config {
-        epoch: scope.epoch,
-        first: scope.first,
-        last: scope.last,
+        schedule: Schedule {
+            epoch: scope.epoch,
+            first: scope.first,
+            last: scope.last,
+            interval: NonZeroU64::new(1).unwrap(),
+        },
+        floor: scope.first,
         scheme,
         automaton,
         reporter,
@@ -343,7 +347,7 @@ where
         journal_partition: scope.partition,
         journal_write_buffer: NZUsize!(4096),
         journal_replay_buffer: NZUsize!(4096),
-        journal_heights_per_section: NonZeroU64::new(4).unwrap(),
+        journal_checkpoints_per_section: NonZeroU64::new(4).unwrap(),
         journal_compression: None,
         journal_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
@@ -379,7 +383,7 @@ where
     .unwrap()
 }
 
-fn all_online<S, F>(fixture: F)
+fn all_online<S, F>(fixture: F, interval: u64)
 where
     S: Scheme<Sha256Digest, PublicKey = PublicKey>,
     F: FnOnce(&mut Context, &[u8], u32) -> Fixture<S>,
@@ -400,7 +404,7 @@ where
             let requested = application.requested.clone();
             let reporter = RecordingReporter::default();
             let certificates = reporter.certificates.clone();
-            let cfg = config(
+            let mut cfg = config(
                 &child,
                 fixture.schemes[index].clone(),
                 application,
@@ -414,6 +418,7 @@ where
                     window: 3,
                 },
             );
+            cfg.schedule.interval = NonZeroU64::new(interval).unwrap();
             let (engine, _mailbox) = Engine::new(child.child("engine"), cfg);
             let network = registrations.remove(participant).unwrap();
             handles.push(engine.start(network));
@@ -426,32 +431,31 @@ where
                 EngineOutcome::Completed
             );
         }
+        // Checkpoints count down from `last`, so a sparse schedule may skip `first`.
+        let checkpoints: BTreeSet<_> = (first.get()..=last.get())
+            .rev()
+            .step_by(usize::try_from(interval).unwrap())
+            .map(Height::new)
+            .collect();
         for (requested, certificates) in observations {
-            let requested = requested.lock();
-            assert_eq!(requested.len(), 16);
-            assert!(
-                requested
-                    .iter()
-                    .all(|position| *position >= first && *position <= last)
-            );
-
-            let certificates = certificates.lock();
-            let certificates: BTreeMap<_, _> = certificates
+            let requested: BTreeSet<_> = requested.lock().iter().copied().collect();
+            assert_eq!(requested, checkpoints);
+            let certified: BTreeSet<_> = certificates
+                .lock()
                 .iter()
-                .map(|certificate| (certificate.item.position, certificate))
+                .map(|certificate| certificate.item.position)
                 .collect();
-            assert_eq!(certificates.len(), 16);
-            assert_eq!(certificates.first_key_value().unwrap().0, &first);
-            assert_eq!(certificates.last_key_value().unwrap().0, &last);
+            assert_eq!(certified, checkpoints);
         }
     });
 }
 
 #[test_traced("INFO")]
 fn test_fixed_range_all_online() {
-    all_online(scheme::ed25519::fixture);
-    all_online(scheme::bls12381_threshold::fixture::<MinPk, _>);
-    all_online(scheme::bls12381_threshold::fixture::<MinSig, _>);
+    all_online(scheme::ed25519::fixture, 1);
+    all_online(scheme::ed25519::fixture, 4);
+    all_online(scheme::bls12381_threshold::fixture::<MinPk, _>, 4);
+    all_online(scheme::bls12381_threshold::fixture::<MinSig, _>, 1);
 }
 
 #[test_traced("INFO")]
@@ -1633,58 +1637,74 @@ fn test_journal_replay_resumes_partial_mid_range() {
     });
 }
 
+/// Runs a single-validator engine over checkpoints 120, 125, 130, and 135 to completion.
+///
+/// Returns the proposed and reported checkpoints.
+async fn run_floor(
+    context: &Context,
+    fixture: &Fixture<scheme::ed25519::Scheme>,
+    run: &'static str,
+    floor: u64,
+    window: u64,
+) -> (BTreeSet<u64>, BTreeSet<u64>) {
+    let context = context.child(run);
+    let participant = fixture.participants[0].clone();
+    let (oracle, mut registrations) = simulation(context.child("simulation"), fixture, false).await;
+    let application = ImmediateApplication::default();
+    let requested = application.requested.clone();
+    let reporter = RecordingReporter::default();
+    let certificates = reporter.certificates.clone();
+    let mut cfg = config(
+        &context,
+        fixture.schemes[0].clone(),
+        application,
+        reporter,
+        oracle.control(participant.clone()),
+        EngineScope {
+            partition: "aggregation-floor".into(),
+            epoch: Epoch::new(13),
+            first: Height::new(120),
+            last: Height::new(135),
+            window,
+        },
+    );
+    cfg.schedule.interval = NonZeroU64::new(5).unwrap();
+    cfg.floor = Height::new(floor);
+    let (engine, _mailbox) = Engine::new(context.child("engine"), cfg);
+    assert_eq!(
+        engine
+            .start(registrations.remove(&participant).unwrap())
+            .await
+            .expect("aggregation engine failed"),
+        EngineOutcome::Completed
+    );
+    let requested = requested.lock().iter().map(|height| height.get()).collect();
+    let reported = certificates
+        .lock()
+        .iter()
+        .map(|certificate| certificate.item.position.get())
+        .collect();
+    (requested, reported)
+}
+
 #[test_traced("INFO")]
-#[should_panic(expected = "aggregation journal identity mismatch")]
-fn test_journal_rejects_window_mismatch() {
+fn test_floor_and_window_can_change_across_restarts() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
         let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
-        let participant = fixture.participants[0].clone();
-        let epoch = Epoch::new(13);
-        let position = Height::new(100);
-        let partition = "aggregation_window_mismatch";
 
-        let (first_oracle, mut first_registrations) =
-            simulation(context.child("first_simulation"), &fixture, false).await;
-        let first_cfg = config(
-            &context,
-            fixture.schemes[0].clone(),
-            ImmediateApplication::default(),
-            RecordingReporter::default(),
-            first_oracle.control(participant.clone()),
-            EngineScope {
-                partition: partition.into(),
-                epoch,
-                first: position,
-                last: position,
-                window: 1,
-            },
-        );
-        let (first_engine, _mailbox) = Engine::new(context.child("first_engine"), first_cfg);
-        first_engine
-            .start(first_registrations.remove(&participant).unwrap())
-            .await
-            .expect("first aggregation engine failed");
+        // A floor between checkpoints starts at the next checkpoint.
+        let (requested, reported) = run_floor(&context, &fixture, "sync", 126, 4).await;
+        assert_eq!(requested, BTreeSet::from([130, 135]));
+        assert_eq!(reported, BTreeSet::from([130, 135]));
 
-        let (mismatch_oracle, mut mismatch_registrations) =
-            simulation(context.child("mismatch_simulation"), &fixture, false).await;
-        let mismatch_cfg = config(
-            &context,
-            fixture.schemes[0].clone(),
-            ImmediateApplication::default(),
-            RecordingReporter::default(),
-            mismatch_oracle.control(participant.clone()),
-            EngineScope {
-                partition: partition.into(),
-                epoch,
-                first: position,
-                last: position,
-                window: 2,
-            },
-        );
-        let (mismatch_engine, _mailbox) =
-            Engine::new(context.child("mismatch_engine"), mismatch_cfg);
-        let _ = mismatch_engine
-            .start(mismatch_registrations.remove(&participant).unwrap())
-            .await;
+        // Lowering the floor and shrinking the window backfills around the journal.
+        let (requested, reported) = run_floor(&context, &fixture, "backfill", 0, 1).await;
+        assert_eq!(requested, BTreeSet::from([120, 125]));
+        assert_eq!(reported, BTreeSet::from([120, 125, 130, 135]));
+
+        // A floor above the schedule completes without proposing.
+        let (requested, reported) = run_floor(&context, &fixture, "past", 136, 2).await;
+        assert!(requested.is_empty());
+        assert_eq!(reported, BTreeSet::from([120, 125, 130, 135]));
     });
 }

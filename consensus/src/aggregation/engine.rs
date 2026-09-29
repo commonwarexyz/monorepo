@@ -4,11 +4,11 @@ use super::{
     Config, Recoverer,
     journal::{Journal, JournalConfig},
     metrics, scheme,
-    types::{Ack, Certificate, Error, Item, RecoveryKey, RecoveryNamespace},
+    types::{Ack, Certificate, Error, Item, RecoveryKey, RecoveryNamespace, Schedule},
 };
 use crate::{
     Automaton, Reporter,
-    types::{Epoch, Height, Participant},
+    types::{Height, Participant},
 };
 use commonware_actor::{
     Unreliable,
@@ -53,10 +53,10 @@ enum Shares<S: commonware_cryptography::certificate::Scheme, D: Digest> {
     Verified(D, BTreeMap<Participant, Ack<S, D>>),
 }
 
-/// State of one uncertified position in the window.
+/// State of one uncertified checkpoint in the window.
 struct Pending<S: commonware_cryptography::certificate::Scheme, D: Digest> {
     shares: Shares<S, D>,
-    /// Aborts the digest request, if still outstanding, when the position leaves the window.
+    /// Aborts the digest request, if still outstanding, when the checkpoint leaves the window.
     _digest_request: Aborter,
     rebroadcasts: u64,
     recovering: bool,
@@ -76,9 +76,9 @@ struct DigestRequest<D: Digest> {
 pub enum CertificateOutcome {
     /// The certificate was valid and advanced local state.
     Accepted,
-    /// The position was already certified or is no longer active.
+    /// The checkpoint was already certified or is no longer active.
     Ignored,
-    /// The epoch, range, or signature was invalid.
+    /// The epoch, checkpoint, or signature was invalid.
     Invalid,
     /// The bounded ingress queue was full; the caller should retry later.
     Backpressured,
@@ -98,9 +98,9 @@ impl From<CertificateOutcome> for commonware_resolver::Outcome {
 /// Reason an aggregation engine stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineOutcome {
-    /// Every position in the configured range has a certificate.
+    /// Every checkpoint at or above the floor has a certificate.
     Completed,
-    /// The engine stopped before certifying the full range.
+    /// The engine stopped before certifying every checkpoint.
     Stopped,
 }
 
@@ -156,7 +156,7 @@ impl<S: commonware_cryptography::certificate::Scheme, D: Digest> Mailbox<S, D> {
     }
 }
 
-/// Aggregates every position in one immutable epoch and inclusive global range.
+/// Aggregates the checkpoints of one immutable epoch [`Schedule`].
 pub struct Engine<E, S, D, A, Z, B, T, R>
 where
     E: BufferPooler + Clock + Spawner + Storage + RuntimeMetrics + CryptoRng,
@@ -169,9 +169,7 @@ where
     R: Recoverer,
 {
     context: ContextCell<E>,
-    epoch: Epoch,
-    first: Height,
-    last: Height,
+    schedule: Schedule,
     scheme: S,
     automaton: A,
     reporter: Z,
@@ -208,9 +206,14 @@ where
     T: Strategy,
     R: Recoverer,
 {
-    /// Creates an engine. Panics if the configured range is empty.
+    /// Creates an engine. Panics if the schedule is empty.
     pub fn new(context: E, cfg: Config<S, D, A, Z, B, T, R>) -> (Self, Mailbox<S, D>) {
-        assert!(cfg.first <= cfg.last, "aggregation range must not be empty");
+        let schedule = cfg.schedule;
+        assert!(
+            schedule.first <= schedule.last,
+            "aggregation schedule must not be empty"
+        );
+        let frontier = schedule.ceil(cfg.floor);
         let metrics = metrics::Metrics::init(&context);
         let mailbox_capacity =
             NonZeroUsize::try_from(cfg.window).expect("aggregation window exceeds usize");
@@ -220,29 +223,24 @@ where
         let recovery_namespace = cfg.scheme.recovery_namespace();
         let journal_config = JournalConfig {
             partition: cfg.journal_partition,
-            epoch: cfg.epoch,
-            first: cfg.first,
-            last: cfg.last,
-            window: cfg.window,
+            schedule,
             write_buffer: cfg.journal_write_buffer,
             replay_buffer: cfg.journal_replay_buffer,
-            heights_per_section: cfg.journal_heights_per_section,
+            checkpoints_per_section: cfg.journal_checkpoints_per_section,
             compression: cfg.journal_compression,
             page_cache: cfg.journal_page_cache,
         };
         let engine = Self {
             context: ContextCell::new(context),
-            epoch: cfg.epoch,
-            first: cfg.first,
-            last: cfg.last,
+            schedule,
             scheme: cfg.scheme,
             automaton: cfg.automaton,
             reporter: cfg.reporter,
             blocker: cfg.blocker,
             strategy: cfg.strategy,
             window: cfg.window.get(),
-            frontier: cfg.first,
-            complete: false,
+            frontier: frontier.unwrap_or(schedule.last),
+            complete: frontier.is_none(),
             digest_requests: FuturesPool::default(),
             pending: BTreeMap::new(),
             confirmed: BTreeMap::new(),
@@ -328,6 +326,7 @@ where
         let mut network_first = true;
         loop {
             if self.complete {
+                let _ = self.metrics.complete.try_set(1);
                 break EngineOutcome::Completed;
             }
             let rebroadcast = match self.rebroadcast_deadlines.peek() {
@@ -438,13 +437,12 @@ where
         if self.complete {
             return;
         }
-        let end = self
-            .frontier
-            .get()
-            .saturating_add(self.window - 1)
-            .min(self.last.get());
-        for raw in self.frontier.get()..=end {
-            let position = Height::new(raw);
+        let mut next = Some(self.frontier);
+        for _ in 0..self.window {
+            let Some(position) = next else {
+                break;
+            };
+            next = self.schedule.next(position);
             if self.pending.contains_key(&position) || self.confirmed.contains_key(&position) {
                 continue;
             }
@@ -468,7 +466,7 @@ where
                 self.fetch_recovery(position);
             }
         }
-        debug_assert!(self.pending.len() + self.confirmed.len() <= self.window as usize);
+        debug_assert!(self.pending.len() <= self.window as usize);
     }
 
     fn request_digest(&mut self, position: Height) -> Aborter {
@@ -564,7 +562,7 @@ where
         }
         let certificate = Certificate::from_acks(
             &self.scheme,
-            self.epoch,
+            self.schedule.epoch,
             non_empty![@matching],
             &self.strategy,
         )
@@ -597,7 +595,7 @@ where
         certificate: Certificate<S, D>,
     ) -> CertificateOutcome {
         let position = certificate.item.position;
-        if certificate.epoch != self.epoch || position < self.first || position > self.last {
+        if certificate.epoch != self.schedule.epoch || !self.schedule.contains(position) {
             return CertificateOutcome::Invalid;
         }
         if !self.pending.contains_key(&position) {
@@ -606,9 +604,7 @@ where
         if !certificate.verify_for(
             self.context.as_mut(),
             &self.scheme,
-            self.epoch,
-            self.first,
-            self.last,
+            &self.schedule,
             &self.strategy,
         ) {
             return CertificateOutcome::Invalid;
@@ -644,7 +640,7 @@ where
     const fn recovery_key(&self, position: Height) -> RecoveryKey {
         RecoveryKey {
             namespace: self.recovery_namespace,
-            epoch: self.epoch,
+            epoch: self.schedule.epoch,
             position,
         }
     }
@@ -679,7 +675,7 @@ where
             self.replay_certificate(certificate);
         }
         self.journal = Some(journal);
-        info!(epoch = %self.epoch, first = %self.first, last = %self.last, frontier = %self.frontier, "replayed aggregation journal");
+        info!(epoch = %self.schedule.epoch, frontier = %self.frontier, complete = self.complete, "replayed aggregation journal");
         restarted
     }
 
@@ -697,15 +693,14 @@ where
         self.reporter.report(certificate);
     }
 
-    /// Advances the frontier past consecutive confirmed positions.
+    /// Advances the frontier past consecutive confirmed checkpoints.
     fn advance_frontier(&mut self) {
         while self.confirmed.remove(&self.frontier).is_some() {
-            if self.frontier == self.last {
+            let Some(next) = self.schedule.next(self.frontier) else {
                 self.complete = true;
-                let _ = self.metrics.complete.try_set(1);
                 break;
-            }
-            self.frontier = self.frontier.next();
+            };
+            self.frontier = next;
         }
     }
 
@@ -746,6 +741,7 @@ mod tests {
     use crate::{
         aggregation::{Recoverer, scheme::ed25519},
         simplex::mocks::wrapped::{Behavior, Scheme as WrappedScheme},
+        types::Epoch,
     };
     use commonware_actor::{Feedback, Unreliable};
     use commonware_cryptography::{Hasher, Sha256, certificate::mocks::Fixture};
@@ -832,9 +828,13 @@ mod tests {
             let (mut engine, _) = Engine::new(
                 context.child("engine"),
                 Config {
-                    epoch,
-                    first: position,
-                    last: position,
+                    schedule: Schedule {
+                        epoch,
+                        first: position,
+                        last: position,
+                        interval: NonZeroU64::new(1).unwrap(),
+                    },
+                    floor: position,
                     scheme,
                     automaton: NoopAutomaton,
                     reporter: NoopReporter(std::marker::PhantomData),
@@ -847,7 +847,7 @@ mod tests {
                     journal_partition: "aggregation-recovery-failure".to_string(),
                     journal_write_buffer: NZUsize!(4096),
                     journal_replay_buffer: NZUsize!(4096),
-                    journal_heights_per_section: NonZeroU64::new(4).unwrap(),
+                    journal_checkpoints_per_section: NonZeroU64::new(4).unwrap(),
                     journal_compression: None,
                     journal_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                     strategy: Sequential,

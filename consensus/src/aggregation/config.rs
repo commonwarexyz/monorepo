@@ -1,8 +1,8 @@
-use super::{Recoverer, scheme, types::Certificate};
-use crate::{
-    Automaton, Reporter,
-    types::{Epoch, Height},
+use super::{
+    Recoverer, scheme,
+    types::{Certificate, Schedule},
 };
+use crate::{Automaton, Reporter, types::Height};
 use commonware_cryptography::{Digest, certificate::Verifier};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
@@ -20,15 +20,17 @@ pub struct Config<
     T: Strategy,
     R: Recoverer,
 > {
-    /// Epoch represented by this engine.
-    pub epoch: Epoch,
-    /// First mandatory global position, inclusive.
-    pub first: Height,
-    /// Last mandatory global position, inclusive.
-    pub last: Height,
-    /// Fixed signing scheme for `epoch`.
+    /// Checkpoints this engine aggregates.
+    pub schedule: Schedule,
+    /// Lowest height this engine certifies.
+    ///
+    /// Checkpoints below `floor` are skipped. A node that state-syncs to a checkpoint can set
+    /// `floor` above it to avoid certifying older checkpoints. A `floor` above `schedule.last`
+    /// completes the engine immediately. Changing `floor` across restarts is safe.
+    pub floor: Height,
+    /// Fixed signing scheme for `schedule.epoch`.
     pub scheme: S,
-    /// Provides the canonical digest for each position.
+    /// Provides the canonical digest for each checkpoint.
     ///
     /// Every successful response for a position must return the same digest across clones and
     /// restarts. Closing a response declines the position for this engine instance. The position
@@ -46,9 +48,9 @@ pub struct Config<
     pub recovery_after_rebroadcasts: NonZeroU64,
     /// Shared resolver recovery coordinator.
     pub recoverer: R,
-    /// Maximum number of live positions.
+    /// Maximum number of checkpoints aggregated concurrently.
     ///
-    /// This value must remain unchanged while retaining the engine's journal.
+    /// Changing `window` across restarts is safe.
     pub window: NonZeroU64,
     /// Journal partition.
     pub journal_partition: String,
@@ -56,8 +58,8 @@ pub struct Config<
     pub journal_write_buffer: NonZeroUsize,
     /// Journal replay-buffer size.
     pub journal_replay_buffer: NonZeroUsize,
-    /// Number of positions assigned to each journal section.
-    pub journal_heights_per_section: NonZeroU64,
+    /// Number of checkpoints assigned to each journal section.
+    pub journal_checkpoints_per_section: NonZeroU64,
     /// Journal compression level.
     pub journal_compression: Option<u8>,
     /// Journal page cache.

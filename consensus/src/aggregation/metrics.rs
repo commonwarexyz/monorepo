@@ -5,9 +5,9 @@ use commonware_runtime::{
 
 /// Metrics for the [super::Engine].
 pub struct Metrics {
-    /// Lowest height without a certificate while incomplete; equals the last height when complete
+    /// Lowest uncertified checkpoint while incomplete; equals the last checkpoint when complete
     pub frontier: Gauge,
-    /// Whether the full configured range is certified
+    /// Whether every checkpoint at or above the floor is certified
     pub complete: Gauge,
     /// Number of digests returned by the automaton by status
     pub digest: status::Counter,
@@ -24,9 +24,12 @@ impl Metrics {
     pub fn init(context: &impl RuntimeMetrics) -> Self {
         let frontier = context.gauge(
             "frontier",
-            "Lowest uncertified position while incomplete; last position when complete",
+            "Lowest uncertified checkpoint while incomplete; last checkpoint when complete",
         );
-        let complete = context.gauge("complete", "Whether the full configured range is certified");
+        let complete = context.gauge(
+            "complete",
+            "Whether every checkpoint at or above the floor is certified",
+        );
         let digest = context.family(
             "digest",
             "Number of digests returned by the automaton by status",
