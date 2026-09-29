@@ -227,7 +227,7 @@ mod tests {
     use crate::authenticated::{
         dialing::Dialable,
         lookup::actors::tracker::{Metadata, ingress::Releaser},
-        stream::sake_upgrader,
+        stream::sake_cups,
     };
     use commonware_actor::mailbox;
     use commonware_cryptography::{
@@ -262,7 +262,7 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(sake_upgrader(signer), Duration::from_secs(5)),
+                        Timeout::new(sake_cups(signer), Duration::from_secs(5)),
                         b"test",
                         1024,
                     )),
@@ -315,7 +315,7 @@ mod tests {
 
             let dialer_cfg = Config {
                 stream: Arc::new(StreamConfig::new(
-                    Timeout::new(sake_upgrader(signer), Duration::from_secs(5)),
+                    Timeout::new(sake_cups(signer), Duration::from_secs(5)),
                     b"test",
                     1024,
                 )),
@@ -406,7 +406,7 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(sake_upgrader(signer), Duration::from_secs(5)),
+                        Timeout::new(sake_cups(signer), Duration::from_secs(5)),
                         b"test",
                         1024,
                     )),
@@ -470,7 +470,7 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(sake_upgrader(signer), Duration::from_secs(5)),
+                        Timeout::new(sake_cups(signer), Duration::from_secs(5)),
                         b"test",
                         1024,
                     )),
@@ -553,7 +553,7 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(sake_upgrader(signer), Duration::from_secs(5)),
+                        Timeout::new(sake_cups(signer), Duration::from_secs(5)),
                         b"test",
                         1024,
                     )),

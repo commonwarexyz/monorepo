@@ -111,7 +111,7 @@ impl arbitrary::Arbitrary<'_> for Data {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::stream::StreamUpgrader;
+    use crate::authenticated::stream::SakeCups;
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_cryptography::ed25519;
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
@@ -119,8 +119,8 @@ mod tests {
     #[test]
     fn test_max_size_bounds() {
         assert_eq!(
-            max_size::<StreamUpgrader<ed25519::PrivateKey>>() + MAX_PAYLOAD_OVERHEAD,
-            StreamUpgrader::<ed25519::PrivateKey>::MAX_SIZE
+            max_size::<SakeCups<ed25519::PrivateKey>>() + MAX_PAYLOAD_OVERHEAD,
+            SakeCups::<ed25519::PrivateKey>::MAX_SIZE
         );
     }
 

@@ -51,7 +51,7 @@ mod tests {
     use super::*;
     use crate::authenticated::{
         discovery::actors::tracker::{self, Metadata},
-        stream::StreamUpgrader,
+        stream::SakeCups,
     };
     use commonware_actor::mailbox;
     use commonware_cryptography::{
@@ -72,11 +72,11 @@ mod tests {
     const STREAM_NAMESPACE: &[u8] = b"test_discovery_spawner_ingress";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Sender = <StreamUpgrader<PrivateKey> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
-    type Receiver = <StreamUpgrader<PrivateKey> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
+    type Sender = <SakeCups<PrivateKey> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
+    type Receiver = <SakeCups<PrivateKey> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
     type Connection = (Sender, Receiver);
 
-    fn handshake(signer: PrivateKey) -> Timeout<StreamUpgrader<PrivateKey>> {
+    fn handshake(signer: PrivateKey) -> Timeout<SakeCups<PrivateKey>> {
         let handshake = (
             Sake {
                 version: Version::V1,

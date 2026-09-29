@@ -14,11 +14,11 @@ use std::future::Future;
 
 /// SAKE handshake that keys CUPS records, shared by tests.
 #[cfg(test)]
-pub(crate) type StreamUpgrader<S> = (Sake<S>, Cups<ChaCha20Poly1305>);
+pub(crate) type SakeCups<S> = (Sake<S>, Cups<ChaCha20Poly1305>);
 
-/// Returns a version 1 [StreamUpgrader] that signs with `signer`.
+/// Returns a version 1 [SakeCups] that signs with `signer`.
 #[cfg(test)]
-pub(crate) const fn sake_upgrader<S: Signer>(signer: S) -> StreamUpgrader<S> {
+pub(crate) const fn sake_cups<S: Signer>(signer: S) -> SakeCups<S> {
     (Sake::new(signer, Version::V1), Cups::new(cups::Version::V1))
 }
 
@@ -110,18 +110,16 @@ mod tests {
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::cups;
 
-    type SakeHandshake = StreamUpgrader<PrivateKey>;
-
     const NAMESPACE: &[u8] = b"test_namespace";
     const LIMIT: u32 = 1024;
 
-    fn handshake(seed: u64) -> SakeHandshake {
-        sake_upgrader(PrivateKey::from_seed(seed))
+    fn handshake(seed: u64) -> SakeCups<PrivateKey> {
+        sake_cups(PrivateKey::from_seed(seed))
     }
 
     #[test]
     fn test_max_message_size_within_limit() {
-        for max_message_size in [0, SakeHandshake::MAX_SIZE] {
+        for max_message_size in [0, SakeCups::<PrivateKey>::MAX_SIZE] {
             Config::new(handshake(0), NAMESPACE, max_message_size);
         }
     }
@@ -129,7 +127,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "maximum message size exceeds stream limit")]
     fn test_max_message_size_above_limit() {
-        Config::new(handshake(0), NAMESPACE, SakeHandshake::MAX_SIZE + 1);
+        Config::new(
+            handshake(0),
+            NAMESPACE,
+            SakeCups::<PrivateKey>::MAX_SIZE + 1,
+        );
     }
 
     /// Dials through the config against a listener given the namespace and limit directly, so the
