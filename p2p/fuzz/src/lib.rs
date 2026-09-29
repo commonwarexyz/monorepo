@@ -12,7 +12,11 @@ use commonware_runtime::{
     Clock, Handle, IoBuf, Quota, Runner, Supervisor as _,
     deterministic::{self, Context},
 };
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
+    sake_cups,
+};
 use commonware_utils::{
     NZU32, NZUsize, TryCollect,
     ordered::{Map, Set},
@@ -235,7 +239,15 @@ impl NetworkScheme for Discovery {
 
         // Create config with recommended defaults
         let mut config = discovery::Config::recommended(
-            Handshake::new(peer.info.signer.clone()),
+            sake_cups(
+                Sake {
+                    signer: peer.info.signer.clone(),
+                    version: sake::Version::V1,
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                },
+                Cups::new(cups::Version::V1),
+            ),
             b"fuzz_namespace",
             peer.info.address,
             peer.info.address,
@@ -313,7 +325,15 @@ impl NetworkScheme for Lookup {
     ) -> PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle> {
         // Create lookup config - no bootstrappers needed since we register addresses directly
         let mut config = lookup::Config::recommended(
-            Handshake::new(peer.info.signer.clone()),
+            sake_cups(
+                Sake {
+                    signer: peer.info.signer.clone(),
+                    version: sake::Version::V1,
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                },
+                Cups::new(cups::Version::V1),
+            ),
             b"fuzz_namespace",
             peer.info.address,
             peer.topo

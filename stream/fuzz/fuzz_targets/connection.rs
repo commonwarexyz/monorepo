@@ -1,14 +1,30 @@
 #![no_main]
 
-use commonware_cryptography::{Signer, ed25519::PrivateKey};
+use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
-use commonware_stream::{Handshake as _, encrypted::Handshake, utils::Timeout};
+use commonware_stream::{
+    Upgrader as _,
+    cups::{self, Cups},
+    sake::{Sake, Version},
+    utils::Timeout,
+};
 use futures::join;
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
+/// Returns the records that pair with the SAKE `version`.
+fn records(version: Version) -> Cups<ChaCha20Poly1305> {
+    Cups::new(match version {
+        Version::V0 => cups::Version::V0,
+        Version::V1 => cups::Version::V1,
+    })
+}
+
 #[derive(Debug)]
 pub struct FuzzInput {
+    // Protocol version shared by both peers
+    version: Version,
+
     // Seeds for cryptographic identities
     dialer_seed: u64,
     listener_seed: u64,
@@ -27,6 +43,13 @@ pub struct FuzzInput {
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        // Pick the protocol version
+        let version = if bool::arbitrary(u)? {
+            Version::V1
+        } else {
+            Version::V0
+        };
+
         // Generate basic seeds
         let dialer_seed = u64::arbitrary(u)?;
         let listener_seed = dialer_seed.wrapping_add(1);
@@ -66,6 +89,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         }
 
         Ok(FuzzInput {
+            version,
             dialer_seed,
             listener_seed,
             namespace,
@@ -93,23 +117,27 @@ fn fuzz(input: FuzzInput) {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_handshake = Timeout::new(
-            Handshake {
+        let dialer_handshake = (
+            Sake {
                 signer: dialer_signer.clone(),
+                version: input.version,
                 synchrony_bound,
                 max_handshake_age,
             },
-            handshake_timeout,
+            records(input.version),
         );
+        let dialer_handshake = Timeout::new(dialer_handshake, handshake_timeout);
 
-        let listener_handshake = Timeout::new(
-            Handshake {
+        let listener_handshake = (
+            Sake {
                 signer: listener_signer.clone(),
+                version: input.version,
                 synchrony_bound,
                 max_handshake_age,
             },
-            handshake_timeout,
+            records(input.version),
         );
+        let listener_handshake = Timeout::new(listener_handshake, handshake_timeout);
 
         let listener_namespace = input.namespace.clone();
         let listener_handle = context.child("listener").spawn({
