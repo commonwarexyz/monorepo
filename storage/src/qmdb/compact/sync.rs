@@ -9,7 +9,6 @@ use crate::{
         sync::{self, journal::Memory},
     },
 };
-use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
@@ -26,7 +25,7 @@ where
     type Family = F;
     type Op = O;
     type Journal = Memory<F, E, O>;
-    type Config = Config<<O as Read>::Cfg, S>;
+    type Config = Config<O::Cfg, S>;
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;

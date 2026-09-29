@@ -902,6 +902,35 @@ pub(crate) mod tests {
     use core::future::Future;
     use std::num::{NonZeroU16, NonZeroUsize};
 
+    fn assert_send<T: Send>(_: T) {}
+
+    // Mutators consume the db, so each consuming future is constructed in its own match arm (only
+    // one arm ever runs, but all are type-checked).
+    #[allow(dead_code)]
+    fn assert_db_futures_are_send<F, E, O, H, S>(
+        db: Db<F, E, O, H, S>,
+        context: E,
+        cfg: Config<O::Cfg, S>,
+        batch: Arc<MerkleizedBatch<F, H::Digest, O, S>>,
+    ) where
+        F: Family,
+        E: Context,
+        O: Operation<F>,
+        H: Hasher,
+        S: Strategy,
+    {
+        assert_send(Db::<F, E, O, H, S>::init(context, cfg, None));
+        assert_send(db.new_batch().merkleize(&db, None, Location::new(0)));
+        match 0u8 {
+            0 => assert_send(db.apply_batch(batch)),
+            1 => assert_send(db.start_sync()),
+            2 => assert_send(db.commit()),
+            3 => assert_send(db.sync()),
+            4 => assert_send(db.prune(Location::new(0))),
+            _ => assert_send(db.destroy()),
+        }
+    }
+
     /// An operation type under test: its values and mutations derive from a seed.
     pub(crate) trait TestOperation:
         Operation<Self::Family, Metadata: PartialEq + std::fmt::Debug>

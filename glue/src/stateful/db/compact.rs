@@ -8,7 +8,6 @@ use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
     SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_compact_db, validate_initialization,
 };
-use commonware_codec::Read as CodecRead;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
@@ -184,7 +183,7 @@ where
     type Unmerkleized = CompactUnmerkleized<F, E, O, H, S>;
     type Merkleized = CompactMerkleized<F, E, O, H, S>;
     type Error = Error<F>;
-    type Config = Config<<O as CodecRead>::Cfg, S>;
+    type Config = Config<O::Cfg, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(
@@ -1107,6 +1106,9 @@ mod tests {
         );
     }
 
+    /// The seeds of the stale and latest batches the superseding tests sync.
+    const SUPERSEDE_SEEDS: [u64; 2] = [7, 8];
+
     async fn state_sync_supersedes_in_flight_stale_compact_target<O, S>(
         context: deterministic::Context,
         source: Arc<S>,
@@ -1154,7 +1156,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(synced.target(), latest_target);
-        assert_eq!(synced.get_metadata(), Some(O::commit_metadata(8)));
+        assert_eq!(
+            synced.get_metadata(),
+            Some(O::commit_metadata(SUPERSEDE_SEEDS[1]))
+        );
     }
 
     fn managed_db_initializes_multiple_commit_ranges<O: AdapterOperation>() {
@@ -1320,7 +1325,8 @@ mod tests {
                 fn state_sync_supersedes_in_flight_stale_target_from_compact_source() {
                     deterministic::Runner::default().start(|context| async move {
                         let (source, targets) =
-                            compact_source::<$operation>(context.child("source"), &[7, 8]).await;
+                            compact_source::<$operation>(context.child("source"), &SUPERSEDE_SEEDS)
+                                .await;
                         super::state_sync_supersedes_in_flight_stale_compact_target::<
                             $operation,
                             _,
@@ -1333,7 +1339,8 @@ mod tests {
                 fn state_sync_supersedes_in_flight_stale_target_from_full_source() {
                     deterministic::Runner::default().start(|context| async move {
                         let (source, targets) =
-                            <$operation>::full_source(context.child("source"), &[7, 8]).await;
+                            <$operation>::full_source(context.child("source"), &SUPERSEDE_SEEDS)
+                                .await;
                         super::state_sync_supersedes_in_flight_stale_compact_target::<
                             $operation,
                             _,

@@ -116,7 +116,6 @@ where
 }
 
 /// A witness whose commit has been checked and whose root and commit proof are derived from it.
-#[derive(Clone)]
 pub(super) struct VerifiedWitness<F: Family, D: Digest, O: Operation<F>> {
     pub(super) witness: Witness<F, D, O>,
     /// Inactivity floor declared by the commit.

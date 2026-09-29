@@ -12,7 +12,7 @@ use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 
-impl<F: Family, V: ValueEncoding> compact::sealed::Sealed<F> for Operation<F, V> {
+impl<F: Family, V: ValueEncoding> compact::sealed::Sealed for Operation<F, V> {
     type Mutations = Vec<V::Value>;
     const NAME: &'static str = "keyless";
 

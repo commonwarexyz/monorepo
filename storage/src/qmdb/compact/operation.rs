@@ -7,10 +7,8 @@ use crate::{
 use commonware_codec::CodecShared;
 
 pub(in crate::qmdb) mod sealed {
-    use crate::merkle::Family;
-
     /// The parts of [`super::Operation`] only the compact db uses.
-    pub trait Sealed<F: Family> {
+    pub trait Sealed {
         /// The mutations a batch accumulates before merkleization. Their iteration order is the
         /// order their operations are appended.
         type Mutations: Default + Send + IntoIterator<IntoIter: ExactSizeIterator + Send>;
@@ -28,10 +26,10 @@ pub(in crate::qmdb) mod sealed {
 /// Sealed: implemented by [`crate::qmdb::keyless::Operation`] and
 /// [`crate::qmdb::immutable::Operation`].
 pub trait Operation<F: Family>:
-    sealed::Sealed<F> + Floored<F> + CodecShared + Clone + 'static
+    sealed::Sealed + Floored<F> + CodecShared + Clone + 'static
 {
     /// The commit metadata type.
-    type Metadata: Clone + Send + Sync + 'static;
+    type Metadata: Clone + Send;
 
     /// Build a commit operation.
     fn commit(metadata: Option<Self::Metadata>, inactivity_floor_loc: Location<F>) -> Self;

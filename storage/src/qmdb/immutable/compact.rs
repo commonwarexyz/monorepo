@@ -13,7 +13,7 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use std::collections::BTreeMap;
 
-impl<F: Family, K: Key, V: ValueEncoding> compact::sealed::Sealed<F> for Operation<F, K, V> {
+impl<F: Family, K: Key, V: ValueEncoding> compact::sealed::Sealed for Operation<F, K, V> {
     type Mutations = BTreeMap<K, V::Value>;
     const NAME: &'static str = "immutable";
 
