@@ -37,6 +37,7 @@ use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
 use core::{
+    cmp::Ordering,
     fmt::{Debug, Display},
     ops::Deref,
 };
@@ -245,10 +246,28 @@ impl Hasher for Sha256 {
 }
 
 /// Digest of a SHA-256 hashing operation.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, FixedArray)]
 #[fixed_array(infallible)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
+
+// Same order as comparing the bytes, but without the `memcmp` call derived `Ord` makes on x86-64.
+impl Ord for Digest {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        let (a, _) = self.0.as_chunks::<8>();
+        let (b, _) = other.0.as_chunks::<8>();
+        let word = |w: &[u8; 8]| u64::from_be_bytes(*w);
+        a.iter().map(word).cmp(b.iter().map(word))
+    }
+}
+
+impl PartialOrd for Digest {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 #[cfg(feature = "arbitrary")]
 impl<'a> arbitrary::Arbitrary<'a> for Digest {
@@ -334,6 +353,24 @@ mod tests {
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
     );
+
+    #[test]
+    fn test_digest_ord_matches_bytes() {
+        let mut rng = commonware_utils::test_rng();
+        let digests: Vec<Digest> = (0..64).map(|_| Digest::random(&mut rng)).collect();
+        for a in &digests {
+            for b in &digests {
+                // Copy a's first `words` words into b so each word position decides some pairs
+                for words in 0..=DIGEST_LENGTH / 8 {
+                    let mut c = *b;
+                    c.0[..words * 8].copy_from_slice(&a.0[..words * 8]);
+                    assert_eq!(a.cmp(&c), a.0.cmp(&c.0));
+                    assert_eq!(c.cmp(a), c.0.cmp(&a.0));
+                    assert_eq!(a.partial_cmp(&c), Some(a.0.cmp(&c.0)));
+                }
+            }
+        }
+    }
 
     /// Anchor the streaming and one-shot paths to a known SHA-256 digest,
     /// which the differential fuzz tests (comparing paths against each
