@@ -12,6 +12,10 @@
 //! any local crash by replay. Every publish site labels at the latest applied
 //! height, so publication stays monotone (asserted in [`Publisher::publish`]).
 //!
+//! Each publication is merged into the set served before it (see
+//! [`DatabaseSet::merge_snapshots`](super::DatabaseSet::merge_snapshots)), which lets a
+//! compact member keep serving its recent tips.
+//!
 //! A prune leaves the served snapshots pinning the pruned storage, so the prune
 //! path captures and publishes fresh snapshots right after pruning.
 
@@ -40,9 +44,10 @@ struct Cell<S> {
 struct Metrics {
     /// Height at which every member was last published.
     height: Registered<Gauge>,
-    /// Height at which the cheap members of a mixed set were last refreshed.
+    /// Height at which the cheap members of a mixed set were last captured, by a refresh or a
+    /// full publication.
     refreshed: Registered<Gauge>,
-    /// Publications since startup.
+    /// Publications and refreshes since startup.
     published: Registered<Counter>,
 }
 
@@ -56,7 +61,7 @@ impl Metrics {
         height.set(-1);
         let refreshed = context.register(
             "refreshed_height",
-            "Height at which the cheap members of a mixed set were last refreshed, or -1",
+            "Height the cheap members of a mixed set serve (last refresh or full publication), or -1",
             Gauge::default(),
         );
         refreshed.set(-1);
@@ -65,7 +70,7 @@ impl Metrics {
             refreshed,
             published: context.register(
                 "publications",
-                "Publications since startup",
+                "Publications and refreshes since startup",
                 Counter::default(),
             ),
         }
@@ -73,11 +78,21 @@ impl Metrics {
 }
 
 /// Publishes the latest snapshots to its [`Subscriber`]s.
+///
+/// Only the [`Stateful`](crate::stateful::Stateful) actor publishes: pass the publisher in its
+/// config and hand the subscriber to the serving resolvers.
 pub struct Publisher<S> {
     /// The cell subscribers take the served snapshots from.
     cell: Arc<Cell<S>>,
     /// Height of the latest published snapshots.
     last_published: Option<Height>,
+    /// Merges a publication into the set served before it.
+    merge: fn(&S, S) -> S,
+}
+
+/// Serves each publication alone.
+const fn serve_fresh<S>(_served: &S, fresh: S) -> S {
+    fresh
 }
 
 impl<S> Publisher<S> {
@@ -91,6 +106,7 @@ impl<S> Publisher<S> {
             Self {
                 cell: cell.clone(),
                 last_published: None,
+                merge: serve_fresh,
             },
             Subscriber {
                 cell,
@@ -99,10 +115,17 @@ impl<S> Publisher<S> {
         )
     }
 
+    /// Merge every publication into the set served before it with `merge`.
+    pub(crate) fn with_merge(mut self, merge: fn(&S, S) -> S) -> Self {
+        self.merge = merge;
+        self
+    }
+
     /// Replace the served set with `snapshots`, every member taken at `height`.
     pub(crate) fn publish(&mut self, height: Height, snapshots: S) {
         self.replace(height, snapshots);
         let _ = self.cell.metrics.height.try_set(height.get());
+        let _ = self.cell.metrics.refreshed.try_set(height.get());
     }
 
     /// Replace the served set with `snapshots`, whose cheap members were taken at `height` and
@@ -127,6 +150,10 @@ impl<S> Publisher<S> {
             "published height must not regress"
         );
         self.last_published = Some(height);
+        let snapshots = match self.served() {
+            Some(served) => (self.merge)(&served, snapshots),
+            None => snapshots,
+        };
         let replaced = replace(
             &mut *self.cell.state.lock(),
             State::Published(Arc::new(snapshots)),
@@ -181,6 +208,9 @@ impl<S, M> Subscriber<S, M> {
     /// The latest published snapshots, or `None` before the first publish or
     /// after the publisher drops. The members of a set with cheap and costly
     /// members may reflect different heights.
+    ///
+    /// A held snapshot keeps the storage it was captured from, even across later prunes, so drop
+    /// it once the read is done.
     pub fn latest(&self) -> Option<M>
     where
         M: Clone,
@@ -258,6 +288,23 @@ mod tests {
             drop(publisher);
             assert!(cheap.latest().is_none());
             assert_eq!(gauge(&context, "refreshed_height"), -1);
+        });
+    }
+
+    /// Publications and refreshes merge into the served set.
+    #[test]
+    fn publications_merge_into_the_served_set() {
+        deterministic::Runner::default().start(|context| async move {
+            let (publisher, subscriber) = Publisher::<Vec<u32>>::new(&context);
+            let mut publisher = publisher.with_merge(|served, fresh| {
+                let mut merged = served.clone();
+                merged.extend(fresh);
+                merged
+            });
+            publisher.publish(Height::new(1), vec![1]);
+            publisher.refresh(Height::new(2), vec![2]);
+            publisher.publish(Height::new(3), vec![3]);
+            assert_eq!(subscriber.latest(), Some(vec![1, 2, 3]));
         });
     }
 

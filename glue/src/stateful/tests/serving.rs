@@ -1,9 +1,9 @@
 //! Late-joiner state sync of a compact member while barriers span several blocks.
 //!
-//! A compact member serves only its exact published tip, so every height a joiner may target must
-//! be published. These tests slow every barrier, run a mixed set (full + compact) and an
-//! all-compact set under the same barrier delay and acknowledgement window, and record what the
-//! joiner requested and what servers published.
+//! A compact member serves only the tips it published, so its served state must follow every
+//! finalized block even while a barrier is in flight. These tests slow every barrier, run a mixed
+//! set (full + compact) and an all-compact set under the same barrier delay and acknowledgement
+//! window, and check what each node serves and whether a late joiner converges.
 
 use super::{
     NUM_VALIDATORS,
@@ -23,8 +23,8 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, StateSyncSet, SyncEngineConfig,
-            TipUpdate, Unmerkleized as _, p2p as qmdb_resolver,
+            Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, SnapshotsOf, StateSyncSet,
+            Subscriber, SyncEngineConfig, TipUpdate, Unmerkleized as _, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -95,20 +95,19 @@ fn now_ms(clock: &impl Clock) -> u64 {
 /// Events recorded across every validator in one run.
 #[derive(Default)]
 pub(super) struct Events {
-    /// Compact member size at each finalized height (identical on every node).
-    size_at_height: BTreeMap<u64, u64>,
-    /// First time any node proposed or verified each height, with the block's compact size.
-    consensus: BTreeMap<u64, (u64, u64)>,
     /// Latest finalized height per node.
     height: BTreeMap<usize, u64>,
-    /// Publications: (node, ms, compact size, starts a barrier).
-    published: Vec<(usize, u64, u64, bool)>,
-    /// Barrier completions: (node, ms).
-    barriers_done: Vec<(usize, u64)>,
-    /// Joiner fetch starts: (ms, member, requested size).
-    requests: Vec<(u64, usize, u64)>,
-    /// Joiner fetches answered: (ms, member, requested size).
-    served: Vec<(u64, usize, u64)>,
+    /// Compact member size after each finalized height (identical on every node).
+    compact_size: BTreeMap<u64, u64>,
+    /// Served-state checks made at a finalized hook.
+    served_checks: usize,
+    /// Checks whose served compact size lagged the previous block: (node, height, served,
+    /// expected).
+    served_lags: Vec<(usize, u64, u64, u64)>,
+    /// Joiner fetch starts: (member, requested size).
+    requests: Vec<(usize, u64)>,
+    /// Joiner fetches answered: (member, requested size).
+    served: Vec<(usize, u64)>,
     /// State sync start: (ms, anchor height).
     sync_start: Option<(u64, u64)>,
     /// State sync result: (ms, converged anchor height).
@@ -132,10 +131,9 @@ impl Log {
     }
 }
 
-/// Slows every barrier by `delay` and logs publications and state sync.
+/// Slows every barrier by `delay` and logs state sync.
 #[derive(Clone)]
 pub(super) struct Slow {
-    node: usize,
     delay: Duration,
     log: Log,
 }
@@ -158,8 +156,8 @@ pub(super) trait Layout: Clone + Send + Sync + 'static {
 
     fn targets(block: &Block) -> <Self::Set as DatabaseSet<Ctx>>::SyncTargets;
 
-    /// The compact member's (DB-B) size in `targets`.
-    fn compact_size(targets: &<Self::Set as DatabaseSet<Ctx>>::SyncTargets) -> u64;
+    /// The size the compact member (DB-B) of `snapshots` serves at its latest tip.
+    fn served_compact_size(snapshots: &<Self::Set as DatabaseSet<Ctx>>::Snapshots) -> u64;
 }
 
 type Header = (
@@ -218,8 +216,8 @@ impl Layout for Mixed {
         )
     }
 
-    fn compact_size(targets: &<Self::Set as DatabaseSet<Ctx>>::SyncTargets) -> u64 {
-        *targets.1.size
+    fn served_compact_size(snapshots: &<Self::Set as DatabaseSet<Ctx>>::Snapshots) -> u64 {
+        *snapshots.1.latest().size()
     }
 }
 
@@ -307,8 +305,8 @@ impl Layout for AllCompact {
         )
     }
 
-    fn compact_size(targets: &<Self::Set as DatabaseSet<Ctx>>::SyncTargets) -> u64 {
-        *targets.1.size
+    fn served_compact_size(snapshots: &<Self::Set as DatabaseSet<Ctx>>::Snapshots) -> u64 {
+        *snapshots.1.latest().size()
     }
 }
 
@@ -326,19 +324,6 @@ impl<L: Layout> Clone for SlowSet<L> {
             clock: self.clock.clone(),
             slow: self.slow.clone(),
         }
-    }
-}
-
-impl<L: Layout> SlowSet<L> {
-    async fn record_publication(&self, barrier: bool) {
-        let size = L::compact_size(&self.inner.committed_targets().await);
-        let at = now_ms(&*self.clock);
-        self.slow
-            .log
-            .0
-            .lock()
-            .published
-            .push((self.slow.node, at, size, barrier));
     }
 }
 
@@ -388,34 +373,34 @@ impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
 
     async fn finalize(&self) -> (Self::Snapshots, Barrier) {
         let (snapshots, barrier) = self.inner.finalize().await;
-        self.record_publication(true).await;
         if self.slow.delay.is_zero() {
             return (snapshots, barrier);
         }
         let clock = self.clock.clone();
-        let (delay, node, log) = (self.slow.delay, self.slow.node, self.slow.log.clone());
+        let delay = self.slow.delay;
         let slowed = Handle::from_future(async move {
             clock.sleep(delay).await;
             if !barrier.durable().await {
                 return Err(RuntimeError::Closed);
             }
-            let at = now_ms(&*clock);
-            log.0.lock().barriers_done.push((node, at));
             Ok(())
         });
         (snapshots, Barrier::from_handles::<Self>([slowed]))
     }
 
-    async fn snapshot(&self) -> Self::Snapshots {
-        let snapshots = self.inner.snapshot().await;
-        self.record_publication(false).await;
-        snapshots
+    fn snapshot(&self) -> impl Future<Output = Self::Snapshots> + Send {
+        self.inner.snapshot()
     }
 
-    async fn refresh_cheap(&self, served: &Self::Snapshots) -> Self::Snapshots {
-        let snapshots = self.inner.refresh_cheap(served).await;
-        self.record_publication(false).await;
-        snapshots
+    fn refresh_cheap(
+        &self,
+        served: &Self::Snapshots,
+    ) -> impl Future<Output = Self::Snapshots> + Send {
+        self.inner.refresh_cheap(served)
+    }
+
+    fn merge_snapshots(served: &Self::Snapshots, fresh: Self::Snapshots) -> Self::Snapshots {
+        L::Set::merge_snapshots(served, fresh)
     }
 
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send {
@@ -468,7 +453,6 @@ where
 pub(super) struct Recorded<R> {
     inner: R,
     member: usize,
-    clock: Arc<Ctx>,
     log: Log,
 }
 
@@ -480,40 +464,23 @@ impl<R: QmdbSource> QmdbSource for Recorded<R> {
 
     async fn serve(&self, request: Request<Self::Family>) -> source::Result<Self> {
         let size = *request.size();
-        let started = now_ms(&*self.clock);
-        self.log
-            .0
-            .lock()
-            .requests
-            .push((started, self.member, size));
+        self.log.0.lock().requests.push((self.member, size));
         let result = self.inner.serve(request).await;
         if result.is_ok() {
-            let at = now_ms(&*self.clock);
-            self.log.0.lock().served.push((at, self.member, size));
+            self.log.0.lock().served.push((self.member, size));
         }
         result
     }
 }
 
-/// Writes every finalized height to the log.
+/// Writes every finalized height to the log, and checks at each finalized hook that the node
+/// serves the compact state of the previous block.
 #[derive(Clone)]
 pub(super) struct ServingApp<L: Layout> {
     genesis: Block,
     node: usize,
     log: Log,
-    _layout: std::marker::PhantomData<L>,
-}
-
-impl<L: Layout> ServingApp<L> {
-    fn saw(&self, context: &Ctx, block: &Block) {
-        let at = now_ms(context);
-        self.log
-            .0
-            .lock()
-            .consensus
-            .entry(block.height().get())
-            .or_insert((at, *block.range_b.end()));
-    }
+    served: Subscriber<SnapshotsOf<SlowSet<L>, Ctx>>,
 }
 
 impl<L: Layout> Application<Ctx> for ServingApp<L> {
@@ -550,19 +517,17 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
             root_b,
             range_b,
         };
-        self.saw(&context.0, &block);
         Some(Proposed { block, merkleized })
     }
 
     async fn verify(
         &mut self,
-        context: (Ctx, Self::Context),
+        _context: (Ctx, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<Ctx>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<Ctx>>::Merkleized> {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
-        self.saw(&context.0, &tip);
         let merkleized = L::execute(tip.height(), batches).await;
         let header = (
             tip.root_a,
@@ -591,7 +556,7 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
     ) {
         let height = block.height().get();
         let mut events = self.log.0.lock();
-        events.size_at_height.insert(height, *block.range_b.end());
+        events.compact_size.insert(height, *block.range_b.end());
         let latest = events.height.entry(self.node).or_insert(0);
         *latest = (*latest).max(height);
     }
@@ -599,10 +564,26 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
     async fn finalized(
         &mut self,
         _context: (Ctx, Self::Context),
-        _block: &Self::Block,
+        block: &Self::Block,
         _captured: Self::Captured,
         _readers: <Self::Databases as DatabaseSet<Ctx>>::Readers,
     ) {
+        // Every block before this one was published before this block applied.
+        let Some(snapshots) = self.served.latest() else {
+            return;
+        };
+        let served = L::served_compact_size(&snapshots);
+        let height = block.height().get();
+        let mut events = self.log.0.lock();
+        let Some(expected) = events.compact_size.get(&(height - 1)).copied() else {
+            return;
+        };
+        events.served_checks += 1;
+        if served != expected {
+            events
+                .served_lags
+                .push((self.node, height, served, expected));
+        }
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<Ctx>>::SyncTargets {
@@ -675,7 +656,6 @@ macro_rules! serving_engine {
                 let partition_prefix = format!("validator-{index}");
                 let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
                 let slow = Slow {
-                    node: index,
                     delay: self.delay,
                     log: self.log.clone(),
                 };
@@ -802,7 +782,7 @@ macro_rules! serving_engine {
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(100),
                     max_serve_ops: NZU64!(16),
-                    serve_timeout: Duration::from_secs(10),
+                    serve_timeout: Duration::from_secs(2),
                     priority_requests: false,
                     priority_responses: false,
                 };
@@ -818,18 +798,15 @@ macro_rules! serving_engine {
                     snapshot_subscriber.view(|snapshots| &snapshots.1),
                 );
                 qmdb_actor_b.start(qmdb_b_network);
-                let clock = Arc::new(context.child("recorded"));
                 let resolvers = (
                     Recorded {
                         inner: qmdb_mailbox_a,
                         member: 0,
-                        clock: clock.clone(),
                         log: self.log.clone(),
                     },
                     Recorded {
                         inner: qmdb_mailbox_b,
                         member: 1,
-                        clock: clock.clone(),
                         log: self.log.clone(),
                     },
                 );
@@ -841,7 +818,7 @@ macro_rules! serving_engine {
                             genesis: genesis_block.clone(),
                             node: index,
                             log: self.log.clone(),
-                            _layout: std::marker::PhantomData,
+                            served: snapshot_subscriber.clone(),
                         },
                         db_config,
                         provider: (),
@@ -983,33 +960,36 @@ impl<S: Send + Sync> ExitCondition<ed25519::PublicKey, S> for SyncedOrBound {
 /// One run's outcome, printed through `Debug`.
 #[derive(Debug)]
 struct Outcome {
+    /// The joiner's state sync result: (ms, converged anchor height).
+    synced: Option<(u64, u64)>,
     /// Distinct compact sizes the joiner requested.
     compact_targets: usize,
-    /// Compact targets below the servers' newest compact publication that no server published.
-    never_published: usize,
+    /// Answered fetches per member.
+    served: [usize; 2],
+    /// Served-state checks made at finalized hooks.
+    served_checks: usize,
+    /// Checks whose served compact size lagged the previous block.
+    served_lags: Vec<(usize, u64, u64, u64)>,
 }
 
-fn summarize(log: &Log, joiner: usize) -> Outcome {
+fn summarize(log: &Log) -> Outcome {
     let events = log.0.lock();
-    let requested: BTreeSet<u64> = events
+    let compact_targets: BTreeSet<u64> = events
         .requests
         .iter()
-        .filter(|(_, member, _)| *member == 1)
-        .map(|(_, _, size)| *size)
+        .filter(|(member, _)| *member == 1)
+        .map(|(_, size)| *size)
         .collect();
-    let published: BTreeSet<u64> = events
-        .published
-        .iter()
-        .filter(|(node, ..)| *node != joiner)
-        .map(|(_, _, size, _)| *size)
-        .collect();
-    let newest = published.last().copied().unwrap_or(0);
+    let mut served = [0; 2];
+    for (member, _) in &events.served {
+        served[*member] += 1;
+    }
     Outcome {
-        compact_targets: requested.len(),
-        never_published: requested
-            .iter()
-            .filter(|size| **size < newest && !published.contains(size))
-            .count(),
+        synced: events.synced,
+        compact_targets: compact_targets.len(),
+        served,
+        served_checks: events.served_checks,
+        served_lags: events.served_lags.clone(),
     }
 }
 
@@ -1036,21 +1016,19 @@ where
         })
         .run()
         .unwrap();
-    summarize(&log, joiner)
+    summarize(&log)
 }
 
-/// Every compact target a late joiner requests is published by the servers, for a mixed set as
-/// for an all-compact one, even when barriers span several blocks.
+/// Every node serves each finalized block's compact state before the next block applies, for a
+/// mixed set as for an all-compact one, even while barriers span several blocks.
 ///
-/// A compact member serves only the exact state it published. With a 250 ms barrier and an
-/// acknowledgement window of 4, seed 3 phase-locks every server's barrier starts to heights 0 and
-/// 1 mod 4, while the joiner retargets at heights 3 mod 4. A mixed set that published only when
-/// a barrier starts would never publish any of those targets, so its compact member could never
-/// be served. Refreshing the cheap members every block publishes them all. Whether the joiner
-/// then converges depends on whether servers keep up with consensus, which this does not check.
+/// A compact member serves only the tips it published. A mixed set that published only when a
+/// barrier starts would leave its compact member behind for the whole barrier, and with a 250 ms
+/// barrier and an acknowledgement window of 4 the servers' barrier starts phase-lock against a
+/// joiner's retargets so none of its compact targets is ever published. Checks cover servers and a
+/// joiner's state-sync handoff alike.
 #[test]
-fn mixed_set_publishes_every_compact_target() {
-    const BOUND: u64 = 60;
+fn cheap_members_serve_every_finalized_block() {
     let delay = Duration::from_millis(250);
     for seed in [3u64, 4] {
         for (layout, outcome) in [
@@ -1058,13 +1036,53 @@ fn mixed_set_publishes_every_compact_target() {
             ("mixed", run::<Mixed>(delay, 4, seed, BOUND)),
         ] {
             assert!(
-                outcome.compact_targets > 0,
-                "{layout} joiner requested nothing"
+                outcome.served_checks > 0,
+                "{layout} made no checks (seed {seed})"
             );
-            assert_eq!(
-                outcome.never_published, 0,
-                "{layout} servers skipped compact targets (seed {seed}): {outcome:?}"
+            assert!(
+                outcome.served_lags.is_empty(),
+                "{layout} served a stale compact state (seed {seed}): {outcome:?}"
             );
+        }
+    }
+}
+
+/// Blocks servers may finalize past a joiner's sync start before it must have converged.
+const BOUND: u64 = 60;
+
+/// A late joiner converges, with answers for both members, for a mixed set as for an all-compact
+/// one, even when barriers span several blocks.
+///
+/// The joiner must finish before servers finalize [`BOUND`] blocks past the height it started
+/// syncing from. A server applies at most an acknowledgement window of blocks per barrier, so once
+/// a barrier lasts about that many block intervals every server trails a joiner's targets and it
+/// converges only by chance, for any layout (a 250 ms barrier with a window of 4 is at that edge
+/// here). The combinations stay clear of it.
+#[test]
+fn late_joiner_converges() {
+    for (delay_ms, max_pending_acks) in [(0, 2), (100, 4), (250, 8)] {
+        let delay = Duration::from_millis(delay_ms);
+        for seed in [3u64, 4] {
+            for (layout, outcome) in [
+                (
+                    "all-compact",
+                    run::<AllCompact>(delay, max_pending_acks, seed, BOUND),
+                ),
+                ("mixed", run::<Mixed>(delay, max_pending_acks, seed, BOUND)),
+            ] {
+                let case = format!(
+                    "{layout} delay={delay_ms}ms window={max_pending_acks} seed={seed}: {outcome:?}"
+                );
+                assert!(outcome.synced.is_some(), "joiner did not converge ({case})");
+                assert!(
+                    outcome.compact_targets > 0,
+                    "joiner requested nothing ({case})"
+                );
+                assert!(
+                    outcome.served.iter().all(|served| *served > 0),
+                    "a member got no answers ({case})"
+                );
+            }
         }
     }
 }

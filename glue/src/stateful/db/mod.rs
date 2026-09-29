@@ -79,9 +79,10 @@
 //! # Failures
 //!
 //! Database failures are fatal. [`DatabaseSet`] implementations panic when a database fails to
-//! open, apply, finalize, or prune, and [`Barrier::durable`] panics when a deferred sync fails. A
-//! mutation that is cancelled also loses its database until restart (see [`Shared`]). A database
-//! that fails state sync is reported through the error returned by [`StateSyncSet::sync`].
+//! open, apply, finalize, capture a snapshot, or prune, and [`Barrier::durable`] panics when a
+//! deferred sync fails. A mutation that is cancelled also loses its database until restart (see
+//! [`Shared`]). A database that fails state sync is reported through the error returned by
+//! [`StateSyncSet::sync`].
 
 use commonware_codec::Encode;
 use commonware_consensus::{
@@ -121,8 +122,10 @@ pub mod immutable;
 pub mod keyless;
 pub mod p2p;
 mod snapshot;
+mod tips;
 
 pub use snapshot::{Publisher, Subscriber};
+pub use tips::{CompactTips, RETAINED_TIPS};
 
 /// A database shared across tasks.
 ///
@@ -366,8 +369,11 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Whether [`Self::snapshot`] is cheap enough to capture after every applied batch.
     ///
-    /// Such a database's published snapshot is refreshed for every finalized block. Other
-    /// databases publish when a barrier starts (see [`DatabaseSet::CHEAP_SNAPSHOT`]).
+    /// Such a database's published snapshot is refreshed for every finalized block, including
+    /// while a [`Self::finalize`] is still persisting, so its capture must not wait on that
+    /// persistence. Other databases publish when a barrier starts (see
+    /// [`DatabaseSet::CHEAP_SNAPSHOT`]). Set it for databases that can serve only the exact state
+    /// a snapshot captured, such as compact ones.
     const CHEAP_SNAPSHOT: bool = false;
 
     /// Opens the database at `expected`, or at its latest checkpoint when `expected` is `None`.
@@ -418,8 +424,18 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Captures a snapshot of the current applied state.
     ///
     /// The snapshot reflects every batch applied before this call and nothing applied after it,
-    /// including state that may not yet be durable.
+    /// including state that may not yet be durable. It may wait for the persistence a pending
+    /// [`Self::finalize`] started.
     fn snapshot(self) -> impl Future<Output = Result<(Self, Self::Snapshot), Self::Error>> + Send;
+
+    /// Returns the snapshot to serve next, given the one `served` now and a `fresh` capture of a
+    /// later (or the same) state.
+    ///
+    /// The default serves `fresh` alone. A database that serves only exact captured states can
+    /// keep serving recent ones (see [`CompactTips`]).
+    fn merge_snapshot(_served: &Self::Snapshot, fresh: Self::Snapshot) -> Self::Snapshot {
+        fresh
+    }
 
     /// Prunes the database to a previously finalized sync target.
     ///
@@ -534,14 +550,14 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Holds only if every member's [`ManagedDb::CHEAP_SNAPSHOT`] does. Such a set publishes every
     /// finalized block. Otherwise members that snapshot at real cost publish only when a barrier
     /// starts, so their served state can trail the applied tip by up to one active barrier.
-    const CHEAP_SNAPSHOT: bool = false;
+    const CHEAP_SNAPSHOT: bool;
 
     /// Whether any member's [`ManagedDb::CHEAP_SNAPSHOT`] holds.
     ///
     /// A set with cheap and costly members refreshes the cheap members' published snapshots for
     /// every finalized block (see [`Self::refresh_cheap`]), since a compact database can only
-    /// serve the exact state it published.
-    const ANY_CHEAP_SNAPSHOT: bool = false;
+    /// serve the exact states it published. Must hold whenever [`Self::CHEAP_SNAPSHOT`] does.
+    const ANY_CHEAP_SNAPSHOT: bool;
 
     /// Read-only handles for observing the applied database state.
     ///
@@ -638,6 +654,10 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
         &self,
         served: &Self::Snapshots,
     ) -> impl Future<Output = Self::Snapshots> + Send;
+
+    /// Returns the snapshots to serve next, merging each member's `fresh` capture into the one
+    /// `served` now (see [`ManagedDb::merge_snapshot`]).
+    fn merge_snapshots(served: &Self::Snapshots, fresh: Self::Snapshots) -> Self::Snapshots;
 
     /// Prunes each database to its target in `targets`.
     ///
@@ -900,6 +920,10 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
         } else {
             served.clone()
         }
+    }
+
+    fn merge_snapshots(served: &Self::Snapshots, fresh: Self::Snapshots) -> Self::Snapshots {
+        T::merge_snapshot(served, fresh)
     }
 
     async fn prune(&self, target: &Self::SyncTargets) {
@@ -1182,6 +1206,13 @@ macro_rules! impl_database_set {
                         served.$idx.clone()
                     }
                 },)+)
+            }
+
+            fn merge_snapshots(
+                served: &Self::Snapshots,
+                fresh: Self::Snapshots,
+            ) -> Self::Snapshots {
+                ($($T::merge_snapshot(&served.$idx, fresh.$idx),)+)
             }
 
             async fn prune(

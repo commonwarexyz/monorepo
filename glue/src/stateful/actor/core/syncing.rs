@@ -6,7 +6,7 @@ use crate::stateful::{
             mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
-        processor::{Applied, Processor, Pruning},
+        processor::{Applied, Processor, Pruning, Publication},
         syncer::{self, Artifact, SyncPlan},
     },
     db::{Anchor, DatabaseSet as _, Publisher, SnapshotsOf},
@@ -282,14 +282,25 @@ where
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(block.as_ref()) {
-                        // A cheap snapshot is not published here: the handoff publishes once
-                        // when its barrier starts.
-                        let Applied {
-                            publication: _,
-                            prune,
-                        } = processor
+                        let Applied { publication, prune } = processor
                             .finalize(self.context.as_present(), block.as_ref(), false)
                             .await;
+
+                        // Cheap members serve every replayed block, as in processing.
+                        match publication {
+                            Publication::Snapshot(snapshots) => {
+                                self.snapshot_publisher.publish(block.height(), snapshots);
+                            }
+                            Publication::None if A::Databases::ANY_CHEAP_SNAPSHOT => {
+                                processor
+                                    .refresh_snapshot(&mut self.snapshot_publisher)
+                                    .await;
+                            }
+                            Publication::None => {}
+                            Publication::WithBarrier(..) => {
+                                unreachable!("the handoff requests no barrier per block")
+                            }
+                        }
                         pending_prune = prune.or(pending_prune);
                         completed_height = block.height();
                     }

@@ -11,8 +11,8 @@
 //!
 //! A response that fails to decode, or that does not match its request, is reported invalid, and
 //! the resolver blocks the sender and retries. Callers judge the validity of every other
-//! response, and a rejection has the same effect. Serving is best effort: a peer request goes
-//! unanswered when no snapshot has been published, when it asks for more than
+//! response, and a rejection has the same effect. Serving is best effort: a peer request gets an
+//! error response when no snapshot has been published, when it asks for more than
 //! [`Config::max_serve_ops`] operations, when the snapshot cannot serve it within
 //! [`Config::serve_timeout`], or when the actor is overloaded. A serve holds its snapshot until it
 //! finishes, so the timeout also bounds how long a slow serve pins that snapshot's storage.

@@ -185,6 +185,12 @@ where
     ///
     /// Panics if [`Config::prune_config`] fails [`PruneConfig::assert_valid`].
     pub fn new(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
+        const {
+            assert!(
+                !A::Databases::CHEAP_SNAPSHOT || A::Databases::ANY_CHEAP_SNAPSHOT,
+                "CHEAP_SNAPSHOT requires ANY_CHEAP_SNAPSHOT"
+            );
+        }
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
@@ -204,7 +210,9 @@ where
                 db_config: config.db_config,
                 plan: config.plan,
                 resolvers: config.resolvers,
-                snapshot_publisher: config.snapshot_publisher,
+                snapshot_publisher: config
+                    .snapshot_publisher
+                    .with_merge(A::Databases::merge_snapshots),
                 sync_config: config.sync_config,
                 pruning,
             },

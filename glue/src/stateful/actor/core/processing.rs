@@ -543,10 +543,23 @@ where
                         .run(self.processor.databases(), &self.marshal)
                         .await;
                     // The published snapshots predate this prune and pin the pruned
-                    // storage, so capture and publish afresh right away.
-                    self.processor
-                        .publish_snapshot(&mut self.snapshot_publisher)
-                        .await;
+                    // storage, so capture and publish afresh right away. Starting the
+                    // successor barrier now does both.
+                    if durability.needs_barrier() {
+                        if !start_barrier(
+                            self.context.as_present(),
+                            &mut durability,
+                            &mut verifications,
+                            self.processor.databases(),
+                            &mut self.snapshot_publisher,
+                        ).await {
+                            return;
+                        }
+                    } else {
+                        self.processor
+                            .publish_snapshot(&mut self.snapshot_publisher)
+                            .await;
+                    }
                     requeue(retry_mailbox.as_ref(), retry);
                 }
                 Step::Barrier(completion) => {
@@ -3016,11 +3029,10 @@ mod tests {
             }
             assert_eq!(control.pruned.lock().clone(), vec![1]);
 
-            // The prune publishes fresh snapshots right away. They carry the
-            // same content as later publishes, so count publications instead
-            // (startup, block 1's sync, the post-prune publish, then block 2's
-            // successor sync).
-            while publications(&context) < 4 {
+            // The prune publishes fresh snapshots right away. Block 2 is not yet durable, so
+            // the successor sync starts at once and its capture is that publication: startup,
+            // block 1's sync, then block 2's successor sync, with no separate capture.
+            while publications(&context) < 3 {
                 context.sleep(Duration::from_millis(10)).await;
             }
             assert_eq!(
@@ -3036,6 +3048,7 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
+            assert_eq!(publications(&context), 3);
         });
     }
 

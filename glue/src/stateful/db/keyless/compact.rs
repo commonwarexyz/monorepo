@@ -5,8 +5,9 @@
 //! merkleization but no historical reads.
 
 use crate::stateful::db::{
-    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
-    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_compact_db, validate_initialization,
+    BatchContext, CompactTips, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared,
+    StateSyncDb, SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_compact_db,
+    validate_initialization,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -18,7 +19,6 @@ use commonware_storage::{
     qmdb::{
         Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
-        compact,
         keyless::{
             CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation, fixed,
             initial_root, variable,
@@ -218,7 +218,7 @@ where
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
-    type Snapshot = compact::Snapshot<F, Operation<F, FixedEncoding<V>>, H::Digest>;
+    type Snapshot = CompactTips<F, Operation<F, FixedEncoding<V>>, H::Digest>;
 
     const CHEAP_SNAPSHOT: bool = true;
 
@@ -261,13 +261,17 @@ where
 
     async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, handle) = self.start_sync().await?;
-        let snapshot = Self::snapshot(&db);
+        let snapshot = CompactTips::new(Self::snapshot(&db));
         Ok((db, snapshot, handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
-        let snapshot = Self::snapshot(&self);
+        let snapshot = CompactTips::new(Self::snapshot(&self));
         Ok((self, snapshot))
+    }
+
+    fn merge_snapshot(served: &Self::Snapshot, fresh: Self::Snapshot) -> Self::Snapshot {
+        CompactTips::merge(served, fresh)
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -294,7 +298,7 @@ where
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
-    type Snapshot = compact::Snapshot<F, Operation<F, VariableEncoding<V>>, H::Digest>;
+    type Snapshot = CompactTips<F, Operation<F, VariableEncoding<V>>, H::Digest>;
 
     const CHEAP_SNAPSHOT: bool = true;
 
@@ -337,13 +341,17 @@ where
 
     async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, handle) = self.start_sync().await?;
-        let snapshot = Self::snapshot(&db);
+        let snapshot = CompactTips::new(Self::snapshot(&db));
         Ok((db, snapshot, handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
-        let snapshot = Self::snapshot(&self);
+        let snapshot = CompactTips::new(Self::snapshot(&self));
         Ok((self, snapshot))
+    }
+
+    fn merge_snapshot(served: &Self::Snapshot, fresh: Self::Snapshot) -> Self::Snapshot {
+        CompactTips::merge(served, fresh)
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -563,6 +571,63 @@ mod tests {
         assert_managed_db::<VariableDb>();
         assert_state_sync_db::<FixedDb, Arc<FixedDb>>();
         assert_state_sync_db::<VariableDb, Arc<VariableDb>>();
+    }
+
+    /// Batches that leave the floor unset carry it forward instead of regressing it to zero.
+    #[test]
+    fn unset_floor_carries_forward_across_commits() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "floor-carry");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            // Raise the floor once, then commit a batch that leaves it unset.
+            for (value, floor) in [(1u8, Some(mmr::Location::new(1))), (2, None)] {
+                let batch = db
+                    .new_batch_for_test::<_>()
+                    .await
+                    .append(U64::new(u64::from(value)));
+                let batch = match floor {
+                    Some(floor) => batch.with_inactivity_floor(floor),
+                    None => batch,
+                };
+                let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                    .await
+                    .unwrap();
+                let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
+                    .await
+                    .unwrap();
+                let (database, _snapshot, sync) =
+                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
+                slot.put(database);
+                sync.await.expect("database sync failed");
+            }
+            assert_eq!(
+                db.read().await.inactivity_floor_loc(),
+                mmr::Location::new(1)
+            );
+
+            // A batch forked from a merkleized parent carries the parent's floor, which here is
+            // above the database's.
+            let value = 3u8;
+            let parent = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(u64::from(value)))
+                .with_inactivity_floor(mmr::Location::new(3));
+            let parent = crate::stateful::db::Unmerkleized::merkleize(parent)
+                .await
+                .unwrap();
+            let value = 4u8;
+            let fork = MerkleizedTrait::new_batch(&parent).append(U64::new(u64::from(value)));
+            let fork = crate::stateful::db::Unmerkleized::merkleize(fork)
+                .await
+                .unwrap();
+            assert_eq!(fork.bounds().inactivity_floor, mmr::Location::new(3));
+        });
     }
 
     #[test]

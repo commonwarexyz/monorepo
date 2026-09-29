@@ -258,6 +258,9 @@ mod tests {
         type Config = u64;
         type SyncTargets = u64;
 
+        const CHEAP_SNAPSHOT: bool = false;
+        const ANY_CHEAP_SNAPSHOT: bool = false;
+
         async fn init(
             _context: deterministic::Context,
             config: Self::Config,
@@ -300,6 +303,8 @@ mod tests {
         async fn snapshot(&self) -> Self::Snapshots {}
 
         async fn refresh_cheap(&self, _served: &Self::Snapshots) -> Self::Snapshots {}
+
+        fn merge_snapshots(_served: &Self::Snapshots, _fresh: Self::Snapshots) -> Self::Snapshots {}
 
         async fn prune(&self, _targets: &Self::SyncTargets) {
             unreachable!("WedgeSet only serves the syncer harness")
