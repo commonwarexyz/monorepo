@@ -484,7 +484,8 @@ impl Cancellation for Verification {
 
 /// What serving receives from one finalization.
 pub(super) enum Publication<S> {
-    /// Nothing new: no barrier was requested, and the set's snapshots are not cheap.
+    /// Nothing new: no barrier was requested, and not every member's snapshot is cheap. A set
+    /// with some cheap members still refreshes them (see [`Processor::refresh_snapshot`]).
     None,
     /// A snapshot of the applied state, captured without a barrier because the set's snapshots
     /// are cheap (see [`DatabaseSet::CHEAP_SNAPSHOT`]).
@@ -710,6 +711,29 @@ where
         async move {
             let snapshots = databases.snapshot().await;
             publisher.publish(height, snapshots);
+        }
+    }
+
+    /// Refresh the cheap members of the served snapshots with their applied state, at the
+    /// processed height (see [`DatabaseSet::refresh_cheap`]).
+    ///
+    /// Does nothing before the first publish. Like [`Self::publish_snapshot`], the future
+    /// captures a clone of the set rather than `&self`.
+    pub(super) fn refresh_snapshot<'p>(
+        &self,
+        publisher: &'p mut Publisher<SnapshotsOf<A::Databases, E>>,
+    ) -> impl Future<Output = ()> + Send + 'p {
+        let databases = self.execution.databases.clone();
+        let height = self.execution.processed().height;
+        async move {
+            let Some(served) = publisher.served() else {
+                return;
+            };
+            let snapshots = databases.refresh_cheap(&served).await;
+            // The publisher releases the replaced set outside its lock only if it holds the
+            // last reference.
+            drop(served);
+            publisher.refresh(height, snapshots);
         }
     }
 

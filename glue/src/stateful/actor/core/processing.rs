@@ -464,6 +464,16 @@ where
 
                             // Snapshots serve immediately, ahead of the barrier that covers them.
                             match publication {
+                                // A compact member serves only the exact state it published,
+                                // so a mixed set refreshes its cheap members every block.
+                                Publication::None if A::Databases::ANY_CHEAP_SNAPSHOT => {
+                                    verifications
+                                        .drive(
+                                            self.processor
+                                                .refresh_snapshot(&mut self.snapshot_publisher),
+                                        )
+                                        .await;
+                                }
                                 Publication::None => {}
                                 Publication::Snapshot(snapshots) => {
                                     self.snapshot_publisher.publish(height, snapshots);

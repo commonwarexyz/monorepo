@@ -299,6 +299,8 @@ mod tests {
 
         async fn snapshot(&self) -> Self::Snapshots {}
 
+        async fn refresh_cheap(&self, _served: &Self::Snapshots) -> Self::Snapshots {}
+
         async fn prune(&self, _targets: &Self::SyncTargets) {
             unreachable!("WedgeSet only serves the syncer harness")
         }

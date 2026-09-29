@@ -73,6 +73,7 @@ mod floor;
 pub(crate) mod mocks;
 mod multi_db_app;
 mod properties;
+mod serving;
 mod single_db_app;
 
 const NUM_VALIDATORS: u32 = 5;

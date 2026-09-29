@@ -366,8 +366,8 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Whether [`Self::snapshot`] is cheap enough to capture after every applied batch.
     ///
-    /// A set made only of such databases publishes a snapshot for every finalized block. Other
-    /// sets publish when a barrier starts (see [`DatabaseSet::CHEAP_SNAPSHOT`]).
+    /// Such a database's published snapshot is refreshed for every finalized block. Other
+    /// databases publish when a barrier starts (see [`DatabaseSet::CHEAP_SNAPSHOT`]).
     const CHEAP_SNAPSHOT: bool = false;
 
     /// Opens the database at `expected`, or at its latest checkpoint when `expected` is `None`.
@@ -531,10 +531,17 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Whether [`Self::snapshot`] is cheap enough to capture after every applied batch.
     ///
-    /// Holds only if every member's [`ManagedDb::CHEAP_SNAPSHOT`] does. A set with any member
-    /// that snapshots at real cost publishes only when a barrier starts, so its served state can
-    /// trail the applied tip by up to one active barrier.
+    /// Holds only if every member's [`ManagedDb::CHEAP_SNAPSHOT`] does. Such a set publishes every
+    /// finalized block. Otherwise members that snapshot at real cost publish only when a barrier
+    /// starts, so their served state can trail the applied tip by up to one active barrier.
     const CHEAP_SNAPSHOT: bool = false;
+
+    /// Whether any member's [`ManagedDb::CHEAP_SNAPSHOT`] holds.
+    ///
+    /// A set with cheap and costly members refreshes the cheap members' published snapshots for
+    /// every finalized block (see [`Self::refresh_cheap`]), since a compact database can only
+    /// serve the exact state it published.
+    const ANY_CHEAP_SNAPSHOT: bool = false;
 
     /// Read-only handles for observing the applied database state.
     ///
@@ -544,7 +551,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     type Readers: Send;
 
     /// One [`ManagedDb::Snapshot`] per database, shaped like [`Self::Unmerkleized`].
-    type Snapshots: Send + Sync + 'static;
+    type Snapshots: Clone + Send + Sync + 'static;
 
     /// Configuration needed to construct every database in the set.
     ///
@@ -619,6 +626,18 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Cancelling the future mid-flight loses the databases whose mutations
     /// were in progress (see [Shared]); every later access panics.
     fn snapshot(&self) -> impl Future<Output = Self::Snapshots> + Send;
+
+    /// Captures a snapshot of every member whose [`ManagedDb::CHEAP_SNAPSHOT`] holds, and takes
+    /// every other member's snapshot from `served`.
+    ///
+    /// Members of the result may reflect different applied heights.
+    ///
+    /// Cancelling the future mid-flight loses the databases whose mutations
+    /// were in progress (see [Shared]); every later access panics.
+    fn refresh_cheap(
+        &self,
+        served: &Self::Snapshots,
+    ) -> impl Future<Output = Self::Snapshots> + Send;
 
     /// Prunes each database to its target in `targets`.
     ///
@@ -827,6 +846,7 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     type SyncTargets = T::SyncTarget;
 
     const CHEAP_SNAPSHOT: bool = T::CHEAP_SNAPSHOT;
+    const ANY_CHEAP_SNAPSHOT: bool = T::CHEAP_SNAPSHOT;
 
     async fn init(context: E, config: Self::Config, expected: Option<Self::SyncTargets>) -> Self {
         let db = T::init(context, config, expected)
@@ -872,6 +892,14 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
 
     async fn snapshot(&self) -> Self::Snapshots {
         snapshot_shared::<E, T>(self, None).await
+    }
+
+    async fn refresh_cheap(&self, served: &Self::Snapshots) -> Self::Snapshots {
+        if T::CHEAP_SNAPSHOT {
+            snapshot_shared::<E, T>(self, None).await
+        } else {
+            served.clone()
+        }
     }
 
     async fn prune(&self, target: &Self::SyncTargets) {
@@ -1061,6 +1089,7 @@ macro_rules! impl_database_set {
             type SyncTargets = ($($T::SyncTarget,)+);
 
             const CHEAP_SNAPSHOT: bool = $($T::CHEAP_SNAPSHOT)&&+;
+            const ANY_CHEAP_SNAPSHOT: bool = $($T::CHEAP_SNAPSHOT)||+;
 
             async fn init(
                 context: E,
@@ -1143,6 +1172,16 @@ macro_rules! impl_database_set {
                     &self.$idx,
                     Some($idx),
                 ),)+)
+            }
+
+            async fn refresh_cheap(&self, served: &Self::Snapshots) -> Self::Snapshots {
+                join!($(async {
+                    if $T::CHEAP_SNAPSHOT {
+                        snapshot_shared::<E, $T>(&self.$idx, Some($idx)).await
+                    } else {
+                        served.$idx.clone()
+                    }
+                },)+)
             }
 
             async fn prune(
@@ -2591,20 +2630,91 @@ mod tests {
         fn sync_target(&self) -> Self::SyncTarget {}
     }
 
-    /// A set's snapshots are cheap only if every member's are.
+    /// A set's snapshots are cheap only if every member's are, and partly cheap if any member's
+    /// are.
     #[test]
     fn cheap_snapshot_requires_every_member() {
         type Ctx = deterministic::Context;
+        type Mixed = (Shared<CheapSnapshotDb>, Shared<TestDb>);
         const {
             assert!(<Shared<CheapSnapshotDb> as DatabaseSet<Ctx>>::CHEAP_SNAPSHOT);
             assert!(!<Shared<TestDb> as DatabaseSet<Ctx>>::CHEAP_SNAPSHOT);
             assert!(
                 <(Shared<CheapSnapshotDb>, Shared<CheapSnapshotDb>) as DatabaseSet<Ctx>>::CHEAP_SNAPSHOT
             );
-            assert!(
-                !<(Shared<CheapSnapshotDb>, Shared<TestDb>) as DatabaseSet<Ctx>>::CHEAP_SNAPSHOT
-            );
+            assert!(!<Mixed as DatabaseSet<Ctx>>::CHEAP_SNAPSHOT);
+            assert!(<Mixed as DatabaseSet<Ctx>>::ANY_CHEAP_SNAPSHOT);
+            assert!(!<(Shared<TestDb>, Shared<TestDb>) as DatabaseSet<Ctx>>::ANY_CHEAP_SNAPSHOT);
         }
+    }
+
+    /// Counts its snapshot captures, and snapshots cheaply if `CHEAP`.
+    struct CaptureCountingDb<const CHEAP: bool> {
+        captures: u64,
+    }
+
+    impl<E: Send, const CHEAP: bool> ManagedDb<E> for CaptureCountingDb<CHEAP> {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = ();
+        type Snapshot = u64;
+
+        const CHEAP_SNAPSHOT: bool = CHEAP;
+
+        async fn snapshot(mut self) -> Result<(Self, Self::Snapshot), Self::Error> {
+            self.captures += 1;
+            let captures = self.captures;
+            Ok((self, captures))
+        }
+
+        fn initial_sync_target() -> Self::SyncTarget {}
+
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
+            Ok(Self { captures: 0 })
+        }
+
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn apply(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+            Ok(self)
+        }
+
+        async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
+            let (db, snapshot) = <Self as ManagedDb<E>>::snapshot(self).await?;
+            Ok((db, snapshot, Handle::ready(Ok(()))))
+        }
+
+        fn sync_target(&self) -> Self::SyncTarget {}
+    }
+
+    /// Refreshing a mixed set captures only its cheap members and keeps the served snapshots of
+    /// the others.
+    #[test]
+    fn refresh_cheap_captures_only_cheap_members() {
+        type Set = (
+            Shared<CaptureCountingDb<true>>,
+            Shared<CaptureCountingDb<false>>,
+        );
+        type Ctx = deterministic::Context;
+        deterministic::Runner::default().start(|context| async move {
+            let set = <Set as DatabaseSet<Ctx>>::init(context, ((), ()), None).await;
+            let refresh = |set| <Set as DatabaseSet<Ctx>>::refresh_cheap(set, &(10, 20));
+            assert_eq!(refresh(&set).await, (1, 20));
+            assert_eq!(refresh(&set).await, (2, 20));
+            assert_eq!(<Set as DatabaseSet<Ctx>>::snapshot(&set).await, (3, 1));
+        });
     }
 
     impl<E: Send> ManagedDb<E> for InitializationDb {
