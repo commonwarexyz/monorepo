@@ -215,10 +215,11 @@ pub(super) fn config(
     );
     set_capacity(&mut config, 16);
     config.capacities.max_commit_outputs = NZUsize!(1);
-    config.retention.lqc = ArchiveMode::Prunable;
-    config.retention.history = ArchiveMode::Immutable;
-    config.retention.blocks = ArchiveMode::Prunable;
-    config
+    config.with_retention(Retention {
+        lqc: ArchiveMode::Prunable,
+        history: ArchiveMode::Immutable,
+        blocks: ArchiveMode::Prunable,
+    })
 }
 
 /// Returns the next committed batch sent to delivery.
