@@ -5,9 +5,9 @@
 //!
 //! # Keys
 //!
-//! [Cups] implements [crate::Transport]. A [crate::Handshake] agrees on one cipher per direction,
-//! and [Cups] turns them into the [Sender] and [Receiver] halves. Both peers must use the same
-//! [Version] and cipher. Each version has its own [namespace](crate::Transport::namespace).
+//! [Cups] runs its [handshake](crate::Handshake) to agree on one cipher per direction, then
+//! turns them into the [Sender] and [Receiver] halves. Both peers must use the same
+//! [Version] and cipher. Each version has its own [namespace](Cups::namespace).
 //!
 //! # Records
 //!

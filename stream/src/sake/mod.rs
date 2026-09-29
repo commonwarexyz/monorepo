@@ -2,8 +2,8 @@
 //! a connection.
 //!
 //! [Sake] implements [crate::Handshake], deriving one
-//! [Cipher](commonware_cryptography::Cipher) per direction. Pair it with a [crate::Transport] (for
-//! example [Cups](crate::cups::Cups)) as an [crate::Upgrader] to establish streams.
+//! [Cipher](commonware_cryptography::Cipher) per direction. Use it with
+//! [Cups](crate::cups::Cups) as an [crate::Upgrader] to establish streams.
 //!
 //! The core SAKE protocol receives both peer identities as inputs. [Sake] first sends the
 //! dialer's public key in a framed, cleartext prelude, separate from SAKE's three messages. The
@@ -11,7 +11,7 @@
 //! handshake to continue. A successful handshake authenticates the returned identity.
 //!
 //! The SAKE [Version] and the transport version are configured separately. [Version::V1] forks
-//! the transcript with the transport [namespace](crate::Transport::namespace)
+//! the transcript with the record [namespace](crate::cups::Cups::namespace)
 //! ([Context::fork](commonware_cryptography::handshake::sake::Context::fork)). Peers with
 //! different transports then fail the handshake, and the transcript differs from that of a SAKE
 //! handshake another protocol runs with the same application namespace. [Version::V0] binds no

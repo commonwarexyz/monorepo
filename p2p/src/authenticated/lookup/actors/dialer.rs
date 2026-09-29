@@ -238,7 +238,6 @@ mod tests {
     use commonware_stream::{
         cups::{self, Cups},
         sake::{self, Sake},
-        sake_cups,
         utils::Timeout,
     };
     use commonware_utils::NZUsize;
@@ -267,14 +266,14 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            sake_cups(
+                            Cups::<_, ChaCha20Poly1305>::new(
                                 Sake {
                                     signer,
                                     synchrony_bound: Duration::from_secs(5),
                                     max_handshake_age: Duration::from_secs(10),
                                     version: sake::Version::V1,
                                 },
-                                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                                cups::Version::V1,
                             ),
                             Duration::from_secs(5),
                         ),
@@ -331,14 +330,14 @@ mod tests {
             let dialer_cfg = Config {
                 stream: Arc::new(StreamConfig::new(
                     Timeout::new(
-                        sake_cups(
+                        Cups::<_, ChaCha20Poly1305>::new(
                             Sake {
                                 signer,
                                 synchrony_bound: Duration::from_secs(5),
                                 max_handshake_age: Duration::from_secs(10),
                                 version: sake::Version::V1,
                             },
-                            Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                            cups::Version::V1,
                         ),
                         Duration::from_secs(5),
                     ),
@@ -433,14 +432,14 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            sake_cups(
+                            Cups::<_, ChaCha20Poly1305>::new(
                                 Sake {
                                     signer,
                                     synchrony_bound: Duration::from_secs(5),
                                     max_handshake_age: Duration::from_secs(10),
                                     version: sake::Version::V1,
                                 },
-                                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                                cups::Version::V1,
                             ),
                             Duration::from_secs(5),
                         ),
@@ -508,14 +507,14 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            sake_cups(
+                            Cups::<_, ChaCha20Poly1305>::new(
                                 Sake {
                                     signer,
                                     synchrony_bound: Duration::from_secs(5),
                                     max_handshake_age: Duration::from_secs(10),
                                     version: sake::Version::V1,
                                 },
-                                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                                cups::Version::V1,
                             ),
                             Duration::from_secs(5),
                         ),
@@ -602,14 +601,14 @@ mod tests {
                 Config {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
-                            sake_cups(
+                            Cups::<_, ChaCha20Poly1305>::new(
                                 Sake {
                                     signer,
                                     synchrony_bound: Duration::from_secs(5),
                                     max_handshake_age: Duration::from_secs(10),
                                     version: sake::Version::V1,
                                 },
-                                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                                cups::Version::V1,
                             ),
                             Duration::from_secs(5),
                         ),

@@ -257,7 +257,6 @@ mod tests {
     use commonware_stream::{
         cups::{self, Cups},
         sake::{self, Sake},
-        sake_cups,
     };
     use commonware_utils::{NZU32, NZUsize, channel::mpsc, sync::Mutex};
     use std::{
@@ -484,14 +483,14 @@ mod tests {
             let (mut dealer_network, dealer_oracle) = lookup::Network::new(
                 context.child("dealer"),
                 lookup::Config::local(
-                    sake_cups(
+                    Cups::<_, ChaCha20Poly1305>::new(
                         Sake {
                             signer: dealer_signer,
                             synchrony_bound: Duration::from_secs(5),
                             max_handshake_age: Duration::from_secs(10),
                             version: sake::Version::V1,
                         },
-                        Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                        cups::Version::V1,
                     ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     dealer_socket,
@@ -502,14 +501,14 @@ mod tests {
             let (mut participant_network, participant_oracle) = lookup::Network::new(
                 context.child("participant"),
                 lookup::Config::local(
-                    sake_cups(
+                    Cups::<_, ChaCha20Poly1305>::new(
                         Sake {
                             signer: participant_signer,
                             synchrony_bound: Duration::from_secs(5),
                             max_handshake_age: Duration::from_secs(10),
                             version: sake::Version::V1,
                         },
-                        Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                        cups::Version::V1,
                     ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     participant_socket,

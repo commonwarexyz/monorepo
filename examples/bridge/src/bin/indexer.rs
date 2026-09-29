@@ -243,14 +243,14 @@ fn main() {
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
         let upgrader = Timeout::new(
-            (
+            Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
                     signer,
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(60),
                     version: sake::Version::V1,
                 },
-                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                cups::Version::V1,
             ),
             Duration::from_secs(5),
         );

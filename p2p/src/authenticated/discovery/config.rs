@@ -9,7 +9,6 @@ use commonware_stream::{
     SakeCups,
     cups::{self, Cups},
     sake::{self, Sake},
-    sake_cups,
 };
 use commonware_utils::{NZU32, NZUsize};
 use std::{
@@ -258,14 +257,14 @@ impl<C: Signer> Config<SakeCups<C, ChaCha20Poly1305>> {
         max_message_size: u32,
     ) -> Self {
         let mut config = Self::local(
-            sake_cups(
+            Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
                     signer,
                     synchrony_bound: Duration::from_secs(5),
                     max_handshake_age: Duration::from_secs(10),
                     version: sake::Version::V1,
                 },
-                Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+                cups::Version::V1,
             ),
             b"test_namespace",
             listen,

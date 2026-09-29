@@ -17,8 +17,7 @@
 //!
 //! [`Config`] and [`Network`] are generic over [`commonware_stream::Upgrader`], which
 //! authenticates peers and supplies their message streams. [`Network`] also requires this
-//! module's [`Upgrader`], which signs discovery gossip under the same identity. Any
-//! ([`Handshake`], [`commonware_stream::Transport`]) pair implements it.
+//! module's [`Upgrader`], which signs discovery gossip under the same identity.
 //!
 //! ## Discovery
 //!
@@ -171,7 +170,7 @@
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}, sake_cups};
+//! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}};
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
 //! use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, time::Duration};
 //!
@@ -209,14 +208,14 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
-//!     sake_cups(
+//!     Cups::<_, ChaCha20Poly1305>::new(
 //!         Sake {
 //!             signer: signer.clone(),
 //!             synchrony_bound: Duration::from_secs(5),
 //!             max_handshake_age: Duration::from_secs(10),
 //!             version: Version::V1,
 //!         },
-//!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
+//!         cups::Version::V1,
 //!     ),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
@@ -254,8 +253,8 @@
 //! });
 //! ```
 
-use commonware_cryptography::{PublicKey, Signer, Verifier};
-use commonware_stream::{Transport, sake::Sake};
+use commonware_cryptography::{Cipher, PublicKey, Signer, Verifier};
+use commonware_stream::{cups::Cups, sake::Sake};
 
 mod actors;
 mod config;
@@ -291,9 +290,9 @@ pub trait Upgrader: commonware_stream::Upgrader<PublicKey: PublicKey> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
 }
 
-impl<H: Handshake, T: Transport> Upgrader for (H, T) {
+impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> <H::PublicKey as Verifier>::Signature {
-        self.0.sign(namespace, message)
+        self.handshake.sign(namespace, message)
     }
 }
 
