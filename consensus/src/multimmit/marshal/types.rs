@@ -146,6 +146,18 @@ pub struct Families<T> {
 }
 
 impl<T> Families<T> {
+    /// Returns families that all hold `value`.
+    pub const fn uniform(value: T) -> Self
+    where
+        T: Copy,
+    {
+        Self {
+            lqc: value,
+            history: value,
+            blocks: value,
+        }
+    }
+
     /// Returns whether any family satisfies `f`.
     pub(super) fn any(&self, mut f: impl FnMut(&T) -> bool) -> bool {
         f(&self.lqc) || f(&self.history) || f(&self.blocks)
