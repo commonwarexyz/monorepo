@@ -767,7 +767,6 @@ impl EngineDefinition for MultiDbEngine {
         (
             handle,
             MockValidatorState {
-                public_key: public_key.clone(),
                 marshal: marshal_mailbox,
                 state_sync_entries: self
                     .sync_entries

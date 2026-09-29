@@ -326,17 +326,13 @@ impl<
                         }
                     });
 
-                // Heights verified before joining the committee have no local ack or
-                // rebroadcast deadline. Schedule an ack for each that is still unconfirmed.
-                if let Some(signer) = scheme.me() {
+                // Heights verified without signing authority have no rebroadcast deadline.
+                // Schedule one for each that is still unconfirmed once we can sign.
+                if scheme.me().is_some() {
                     for (height, pending) in &self.pending {
-                        if self.confirmed.contains_key(height) {
-                            continue;
-                        }
-                        if let Pending::Verified(_, acks) = pending
-                            && !acks
-                                .get(&epoch)
-                                .is_some_and(|acks| acks.contains_key(&signer))
+                        if matches!(pending, Pending::Verified(..))
+                            && !self.confirmed.contains_key(height)
+                            && !self.rebroadcast_deadlines.contains(height)
                         {
                             self.rebroadcast_deadlines.put(*height, self.context.current());
                         }

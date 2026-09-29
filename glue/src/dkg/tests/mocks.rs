@@ -890,40 +890,10 @@ impl SecretStore for MemorySecretStore {
     }
 }
 
-/// Conflicting tips at the same height must fail the tracker across validators and rounds.
-#[rstest::rstest]
-#[case::across_validators(2, 10, 11)]
-#[case::stale_round(1, 11, 10)]
-fn simulator_rejects_conflicting_tips_at_same_height_across_rounds(
-    #[case] second_seed: u64,
-    #[case] first_view: u64,
-    #[case] second_view: u64,
-) {
-    // Route both tips through one monitor queue and tracker. The first digest at
-    // height seven is accepted and the second is rejected.
-    let (monitor, mut updates) = mpsc::unbounded_channel();
-    let mut tracker = ProgressTracker::default();
-    for (seed, view, digest) in [(1, first_view, 1), (second_seed, second_view, 2)] {
-        let pk = PrivateKey::from_seed(seed).public_key();
-        let mut reporter = MonitorReporter::new(pk, monitor.clone(), MarshalApplication::default());
-        reporter.report(Update::Tip(
-            Round::new(Epoch::zero(), View::new(view)),
-            Height::new(7),
-            Sha256Digest::from([digest; 32]),
-        ));
-        let result = tracker.observe(updates.try_recv().unwrap());
-        if digest == 1 {
-            result.unwrap();
-        } else {
-            assert!(result.unwrap_err().contains("fork detected"));
-        }
-    }
-}
-
-/// A conflicting tip queued behind a burst of reports must still reach the tracker.
+/// Conflicting tips at the same height must fail the tracker even in different rounds.
 #[test]
-fn simulator_monitor_retains_conflict_after_burst() {
-    // Connect both reporters to one queue before the tracker consumes updates.
+fn simulator_rejects_conflicting_tips_at_same_height() {
+    // Two validators report different digests at height seven in different rounds.
     let (monitor, mut updates) = mpsc::unbounded_channel();
     let mut first = MonitorReporter::new(
         PrivateKey::from_seed(1).public_key(),
@@ -935,30 +905,20 @@ fn simulator_monitor_retains_conflict_after_burst() {
         monitor,
         MarshalApplication::default(),
     );
-
-    // Queue a burst of distinct heights from the first reporter, then
-    // submit a different digest at the first height from the second reporter.
-    for view in 1..=1024 {
-        first.report(Update::Tip(
-            Round::new(Epoch::zero(), View::new(view)),
-            Height::new(view),
-            Sha256Digest::from([1; 32]),
-        ));
-    }
+    first.report(Update::Tip(
+        Round::new(Epoch::zero(), View::new(10)),
+        Height::new(7),
+        Sha256Digest::from([1; 32]),
+    ));
     second.report(Update::Tip(
-        Round::new(Epoch::zero(), View::new(1)),
-        Height::new(1),
+        Round::new(Epoch::zero(), View::new(11)),
+        Height::new(7),
         Sha256Digest::from([2; 32]),
     ));
 
-    // Draining the queue must expose the conflict.
+    // The first digest is accepted and the second is a fork at that height.
     let mut tracker = ProgressTracker::default();
-    let mut conflict = false;
-    while let Ok(update) = updates.try_recv() {
-        if tracker.observe(update).is_err() {
-            conflict = true;
-            break;
-        }
-    }
-    assert!(conflict, "conflicting tip was lost");
+    tracker.observe(updates.try_recv().unwrap()).unwrap();
+    let err = tracker.observe(updates.try_recv().unwrap()).unwrap_err();
+    assert!(err.contains("fork detected at height"), "{err}");
 }

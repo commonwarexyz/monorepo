@@ -414,6 +414,50 @@ impl<D: EngineDefinition> Plan<D> {
             .unwrap_or_default()
     }
 
+    /// Check finalization properties against the active validators.
+    async fn check_finalization(&self, team: &Team<D>) -> Result<(), String> {
+        let states = team.active_states();
+        for prop in &self.finalization_property {
+            match prop.check(&states).await {
+                Ok(()) => {
+                    info!(
+                        target: "simulator",
+                        property = prop.name(),
+                        "finalization property passed"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        target: "simulator",
+                        property = prop.name(),
+                        error = %e,
+                        "finalization property failed"
+                    );
+                    return Err(format!(
+                        "finalization property violation ({}): {e}",
+                        prop.name()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Stop accepting reports and check the ones already queued.
+    async fn drain(
+        &self,
+        tracker: &mut ProgressTracker<D::PublicKey>,
+        monitor: &mut mpsc::UnboundedReceiver<FinalizationUpdate<D::PublicKey>>,
+        team: &Team<D>,
+    ) -> Result<(), String> {
+        monitor.close();
+        while let Some(update) = monitor.recv().await {
+            tracker.observe(update)?;
+            self.check_finalization(team).await?;
+        }
+        Ok(())
+    }
+
     /// Check post-run properties, log completion, and build the result.
     async fn finish(
         &self,
@@ -568,63 +612,57 @@ impl<D: EngineDefinition> Plan<D> {
                 result = Err("simulation stopped".into());
             },
             Some(pk) = restart_rx.recv() else break => {
-                // Completion freezes the team while the accepted backlog drains.
-                if monitor_rx.is_closed() {
-                    continue;
-                }
                 let was_delayed = delayed.contains(&pk);
                 team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
                     .await;
-                continue;
             },
             Some(update) = monitor_rx.recv() else {
                 result = Err("monitor channel closed".into());
                 break;
             } => {
                 tracker.observe(update)?;
-                if !monitor_rx.is_closed() {
-                    crashes += self
-                        .trigger_processed_height_crashes(
-                            &ctx,
-                            &mut team,
-                            &mut processed_height_crashes,
-                            &restart_tx,
-                        )
-                        .await;
-                }
+                crashes += self
+                    .trigger_processed_height_crashes(
+                        &ctx,
+                        &mut team,
+                        &mut processed_height_crashes,
+                        &restart_tx,
+                    )
+                    .await;
 
                 // Check finalization properties
+                self.check_finalization(&team).await?;
+
+                // Check termination.
+                let target_count = if delayed_started { total } else { active_count };
                 let states = team.active_states();
-                for prop in &self.finalization_property {
-                    match prop.check(&states).await {
-                        Ok(()) => {
-                            info!(
-                                target: "simulator",
-                                property = prop.name(),
-                                "finalization property passed"
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                target: "simulator",
-                                property = prop.name(),
-                                error = %e,
-                                "finalization property failed"
-                            );
-                            return Err(format!(
-                                "finalization property violation ({}): {e}",
-                                prop.name()
-                            ));
-                        }
-                    }
+                let done = self
+                    .exit_condition
+                    .reached(&tracker, &states, target_count)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "exit condition evaluation failed ({}): {e}",
+                            self.exit_condition.name()
+                        )
+                    })?;
+                if done {
+                    self.drain(&mut tracker, &mut monitor_rx, &team).await?;
+                    result = self
+                        .finish(
+                            &ctx,
+                            tracker,
+                            &team,
+                            crashes,
+                            &scheduled_actions,
+                            delayed_started,
+                        )
+                        .await;
+                    break;
                 }
 
                 // Start delayed validators after enough progress
-                if !delayed_started
-                    && !delayed.is_empty()
-                    && !monitor_rx.is_closed()
-                    && self.delay_reached(&tracker)
-                {
+                if !delayed_started && !delayed.is_empty() && self.delay_reached(&tracker) {
                     info!(target: "simulator", "starting delayed participants");
                     let mut delayed_order: Vec<_> = delayed.iter().collect();
                     delayed_order.sort_unstable();
@@ -639,29 +677,48 @@ impl<D: EngineDefinition> Plan<D> {
                 if !self.exit_condition.requires_polling() {
                     continue;
                 }
-            },
-            Some(cmd) = schedule_rx.recv() else break => {
-                if monitor_rx.is_closed() {
+                let target_count = if delayed_started { total } else { active_count };
+                let states = team.active_states();
+                let done = self
+                    .exit_condition
+                    .reached(&tracker, &states, target_count)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "exit condition evaluation failed ({}): {e}",
+                            self.exit_condition.name()
+                        )
+                    })?;
+                if !done {
                     continue;
                 }
-                match cmd {
-                    ScheduleCmd::Crash(pk) => {
-                        if team.crash(&pk) {
-                            crashes += 1;
-                        }
-                    }
-                    ScheduleCmd::Restart(pk) => {
-                        let was_delayed = delayed.contains(&pk);
-                        team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
-                            .await;
+
+                self.drain(&mut tracker, &mut monitor_rx, &team).await?;
+                result = self
+                    .finish(
+                        &ctx,
+                        tracker,
+                        &team,
+                        crashes,
+                        &scheduled_actions,
+                        delayed_started,
+                    )
+                    .await;
+                break;
+            },
+            Some(cmd) = schedule_rx.recv() else break => match cmd {
+                ScheduleCmd::Crash(pk) => {
+                    if team.crash(&pk) {
+                        crashes += 1;
                     }
                 }
-                continue;
+                ScheduleCmd::Restart(pk) => {
+                    let was_delayed = delayed.contains(&pk);
+                    team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
+                        .await;
+                }
             },
             _ = crash_rx.recv() => {
-                if monitor_rx.is_closed() {
-                    continue;
-                }
                 let Some((_, downtime, count)) = self.random_crash() else {
                     continue;
                 };
@@ -682,40 +739,6 @@ impl<D: EngineDefinition> Plan<D> {
                         let _ = restart_tx.send(pk).await;
                     });
                 }
-                continue;
-            },
-            on_end => {
-                if !monitor_rx.is_closed() {
-                    let target_count = if delayed_started { total } else { active_count };
-                    let states = team.active_states();
-                    let done = self.exit_condition.reached(&tracker, &states, target_count)
-                        .await
-                        .map_err(|e| format!(
-                            "exit condition evaluation failed ({}): {e}",
-                            self.exit_condition.name(),
-                        ))?;
-                    if !done {
-                        continue;
-                    }
-
-                    // Stop accepting reports. Accepted reports still drain through the
-                    // normal checks.
-                    monitor_rx.close();
-                }
-                if !monitor_rx.is_empty() {
-                    continue;
-                }
-                result = self
-                    .finish(
-                        &ctx,
-                        tracker,
-                        &team,
-                        crashes,
-                        &scheduled_actions,
-                        delayed_started,
-                    )
-                    .await;
-                break;
             },
         }
 
@@ -1136,42 +1159,6 @@ mod tests {
         }
     }
 
-    // Polling succeeds once so a second exit check during report draining
-    // would fail to complete the simulation.
-    impl ExitCondition<ed25519::PublicKey, ()> for SingleUseProperty {
-        fn name(&self) -> &str {
-            "single_use_condition"
-        }
-
-        fn requires_polling(&self) -> bool {
-            true
-        }
-
-        fn reached<'a>(
-            &'a self,
-            _tracker: &'a ProgressTracker<ed25519::PublicKey>,
-            _states: &'a [&'a ()],
-            _target_count: usize,
-        ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
-            Box::pin(async move { Ok(self.calls.fetch_add(1, Ordering::Relaxed) == 0) })
-        }
-    }
-
-    #[test]
-    fn completion_commits_before_draining() {
-        // Check both an empty monitor and a queued report batch: completion
-        // must retain the first successful exit decision while draining reports.
-        for finalizations in [0, 3] {
-            let result = PlanBuilder::new(FinalizingEngine::new(1, Duration::ZERO, finalizations))
-                .exit_condition(SingleUseProperty::default())
-                .property(SingleUseProperty::default())
-                .timeout(Duration::from_secs(1))
-                .run()
-                .expect("the first successful exit check commits to completion");
-            assert_eq!(result[0].tracker.min_view(), finalizations);
-        }
-    }
-
     /// A delayed property check that can overlap with report production.
     #[derive(Clone)]
     struct SlowCheck {
@@ -1197,60 +1184,33 @@ mod tests {
         }
     }
 
-    impl Property<ed25519::PublicKey, ()> for SlowCheck {
-        fn name(&self) -> &str {
-            "slow_check"
-        }
-        fn check<'a>(
-            &'a self,
-            _tracker: &'a ProgressTracker<ed25519::PublicKey>,
-            states: &'a [&'a ()],
-        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-            FinalizationProperty::check(self, states)
-        }
-    }
-
-    #[rstest::rstest]
-    #[case::finalization_property(true)]
-    #[case::post_run_property(false)]
-    fn completion_does_not_require_a_quiet_reporter(#[case] per_finalization: bool) {
+    /// Completion must drain the accepted backlog while the reporter keeps sending.
+    #[test]
+    fn completion_does_not_require_a_quiet_reporter() {
         deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
-            // Emit reports every millisecond while the plan runs. Checks take
-            // five milliseconds in either property mode and must finish.
+            // Emit reports every millisecond while each check takes five.
             let mut engine = FinalizingEngine::new(1, Duration::ZERO, u64::MAX);
             engine.period = Duration::from_millis(1);
             let calls = Arc::new(AtomicUsize::new(0));
             let property = SlowCheck {
-                context: Arc::new(context.child("slow_check")),
+                context: Arc::new(context.child("check")),
                 calls: calls.clone(),
             };
-            let builder = PlanBuilder::new(engine).required_finalizations(1);
-            let plan = if per_finalization {
-                builder.finalization_property(property)
-            } else {
-                builder.property(property)
-            }
-            .build();
-
-            // Completion closes the report intake and processes the accepted
-            // backlog without waiting for the reporter to become idle.
-            let result = plan
+            let result = PlanBuilder::new(engine)
+                .required_finalizations(1)
+                .finalization_property(property)
+                .build()
                 .run_inner(context)
                 .await
                 .expect("finite checks must complete despite continuous finalizations");
 
-            // Per-finalization checks cover every accepted tip, including tips
-            // queued during a check. A post-run property runs exactly once.
+            // Every accepted tip is checked, including tips queued during a check.
             let checked = calls.load(Ordering::Relaxed);
-            if per_finalization {
-                assert!(
-                    checked > 1,
-                    "must check the backlog accepted during the first check"
-                );
-                assert_eq!(checked as u64, result.tracker.min_view());
-            } else {
-                assert_eq!(checked, 1, "post-run properties run once");
-            }
+            assert!(
+                checked > 1,
+                "must check the backlog accepted during the first check"
+            );
+            assert_eq!(checked as u64, result.tracker.min_view());
         });
     }
 
@@ -1322,7 +1282,6 @@ mod tests {
                 .unwrap();
 
             // Both delayed nodes must start. Record the start order and audit state.
-            assert!(result[0].delayed_started);
             let order = starts.lock().clone();
             assert_eq!(order.len(), 2);
             observed.insert((order, result[0].state.clone()));

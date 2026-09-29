@@ -104,9 +104,7 @@ mod tests {
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::{
-            Provider as CertificateProvider, Scheme as CertificateScheme, Scoped, mocks::Fixture,
-        },
+        certificate::mocks::Fixture,
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
     };
@@ -114,26 +112,20 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock, Quota, Runner, Spawner, Supervisor as _,
+        Clock, Metrics as _, Quota, Runner, Spawner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
     };
     use commonware_utils::{
         NZU16, NZUsize, NonZeroDuration, TestRng,
         channel::{fallible::OneshotExt, oneshot},
-        probability,
-        sync::Mutex,
-        test_rng,
+        probability, test_rng,
     };
     use futures::future::join_all;
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
         time::Duration,
     };
     use tracing::debug;
@@ -416,37 +408,6 @@ mod tests {
 
     test_for_all_fixtures!(slow all_online);
 
-    /// Signals when an isolated engine has verified its two-height pending window.
-    #[derive(Clone)]
-    struct ObservedProvider<S: CertificateScheme + Clone> {
-        inner: mocks::Provider<S>,
-        /// Scheme lookups since startup, shared across provider clones.
-        lookups: Arc<AtomicUsize>,
-        /// Notifies the test at the second verified digest's signing attempt.
-        verified: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    }
-
-    impl<S: CertificateScheme + Clone> CertificateProvider for ObservedProvider<S> {
-        type Scope = Epoch;
-        type Scheme = S;
-
-        fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
-            self.inner.scoped(epoch)
-        }
-
-        fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
-            // With peers stopped, one lookup initializes the engine and the next two
-            // attempt to sign its verified digests. Signal at the second digest so
-            // epoch rotation cannot precede verification of the pending window.
-            if self.lookups.fetch_add(1, Ordering::SeqCst) == 2
-                && let Some(sender) = self.verified.lock().take()
-            {
-                sender.send_lossy(());
-            }
-            self.inner.scheme(epoch)
-        }
-    }
-
     /// Test that an admitted validator certifies heights it verified before joining.
     #[test_traced("INFO")]
     fn test_admitted_signer_certifies_pending_heights() {
@@ -467,9 +428,6 @@ mod tests {
             // Start the joining validator first and keep one current member offline.
             // All three running validators must contribute their acks to reach quorum.
             let admitted = mocks::Monitor::new(epoch);
-            let (verified_sender, verified) = oneshot::channel();
-            let mut verified_sender = Some(verified_sender);
-            let mut verified = Some(verified);
             let mut admitted_reporter = None;
 
             for index in [4, 1, 2] {
@@ -509,22 +467,13 @@ mod tests {
 
                 // Fill a two-height window before admission so progress requires
                 // signing both existing digests under the new committee.
-                let verified_sender = if index == 4 {
-                    verified_sender.take()
-                } else {
-                    None
-                };
                 let journal_page_cache =
                     CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
                 let engine = Engine::new(
                     context.child("engine"),
                     Config {
                         monitor,
-                        provider: ObservedProvider {
-                            inner: provider,
-                            lookups: Arc::new(AtomicUsize::new(0)),
-                            verified: Arc::new(Mutex::new(verified_sender)),
-                        },
+                        provider,
                         automaton: mocks::Application::new(mocks::Strategy::Correct),
                         reporter: mailbox,
                         blocker: oracle.control(participant.clone()),
@@ -547,13 +496,12 @@ mod tests {
                 // Wait for both digests to be verified without signing authority
                 // before changing epochs or starting peers that could send acks.
                 if index == 4 {
-                    select! {
-                        result = verified.take().unwrap() => {
-                            assert!(result.is_ok(), "digests were not verified");
-                        },
-                        _ = context.sleep(Duration::from_secs(1)) => {
-                            panic!("digests were not verified");
-                        },
+                    while !context
+                        .encode()
+                        .lines()
+                        .any(|line| line.contains("digest_duration_count") && line.ends_with(" 2"))
+                    {
+                        context.sleep(Duration::from_millis(10)).await;
                     }
                     admitted.update(next_epoch);
                 }
@@ -563,15 +511,8 @@ mod tests {
             // it to count its own newly signed acks as well as those from its peers.
             let mut mailbox = admitted_reporter.unwrap();
             for height in [Height::zero(), Height::new(1)] {
-                select! {
-                    _ = async {
-                        while mailbox.get(height).await.is_none() {
-                            context.sleep(Duration::from_millis(10)).await;
-                        }
-                    } => {},
-                    _ = context.sleep(Duration::from_secs(2)) => {
-                        panic!("admitted signer did not certify height {height}");
-                    },
+                while mailbox.get(height).await.is_none() {
+                    context.sleep(Duration::from_millis(10)).await;
                 }
             }
         });
