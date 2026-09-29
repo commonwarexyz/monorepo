@@ -185,8 +185,12 @@ consensus storage. `marshal/mod.rs` lists the actors; each owns its own store:
   dense rows. Producer ancestry is serial within each chain and concurrent across chains up to
   `backfill_concurrency`, so a stalled chain does not block another chain. Once block references
   are known, missing bodies share one global pool at the same bound. Fetch completion order cannot
-  affect output order because each result retains its canonical output position. The ancestry
-  scheduler also verifies state-sync frontiers. Synchronizer owns no finalized archive handle.
+  affect output order because each result retains its canonical output position. Each new block
+  is read off its target tip's own path, so an anchor may jump to another branch, and only blocks
+  emitted past the ordered tip must lie on that path. A run of openings shares one walk and one
+  custody window only while their tips share one path; otherwise each record is opened and
+  recorded in turn. The ancestry scheduler also verifies state-sync frontiers. Synchronizer owns
+  no finalized archive handle.
 - `Delivery` owns the acknowledgement cursor. It fills a configurable window with consecutive
   committed `OutputIndex` entries and reports each complete transaction block with an `Exact`
   acknowledgement. It retires only the ready FIFO prefix and syncs that prefix to its cursor once.
