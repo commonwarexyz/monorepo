@@ -488,7 +488,7 @@ mod tests {
                 },
             );
             broadcast_engine.start(broadcast_network);
-            let mut config = marshal::Config::new(
+            let config = marshal::Config::new(
                 Start::Genesis(committee.config.genesis().clone()),
                 "log_multimmit_actor_test".into(),
                 committee.codec(),
@@ -497,12 +497,12 @@ mod tests {
                     EightCap,
                     CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
                 ),
-            );
-            config.capacities.catalog_mailbox_size = NZUsize!(64);
-            config.capacities.admission_cut_capacity = NZUsize!(64);
-            config.capacities.pending_segment_items = NZU64!(64);
-            config.capacities.resolver_mailbox_size = NZUsize!(64);
-            config.capacities.backfill_concurrency = config.capacities.resolver_mailbox_size;
+            )
+            .with_catalog_mailbox_size(NZUsize!(64))
+            .with_admission_cut_capacity(NZUsize!(64))
+            .with_pending_segment_items(NZU64!(64))
+            .with_resolver_mailbox_size(NZUsize!(64))
+            .with_backfill_concurrency(NZUsize!(64));
             let (mut service, bridge) =
                 marshal::open::<_, EightCap, Sha256, MinPk, Body, ed25519::PublicKey>(
                     context.child("marshal"),
