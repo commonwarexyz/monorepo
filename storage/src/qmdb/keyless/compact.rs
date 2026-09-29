@@ -134,6 +134,12 @@ mod tests {
         compact_db_tests!(VariableTestOp);
     }
 
+    mod variable_mmb_tests {
+        use super::*;
+
+        compact_db_tests!(VariableTestOp<mmb::Family>);
+    }
+
     /// Appends are ordered: the same values in a different order give a different root.
     #[test_traced("INFO")]
     fn test_compact_append_order_is_significant() {

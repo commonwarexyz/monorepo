@@ -136,6 +136,12 @@ mod tests {
         compact_db_tests!(VariableTestOp);
     }
 
+    mod variable_mmb_tests {
+        use super::*;
+
+        compact_db_tests!(VariableTestOp<mmb::Family>);
+    }
+
     /// Setting a key twice in one batch keeps the later value and emits one operation.
     #[test_traced("INFO")]
     fn test_compact_set_same_key_twice_keeps_last() {

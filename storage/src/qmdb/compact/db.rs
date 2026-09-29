@@ -342,7 +342,7 @@ where
         self.tip.root
     }
 
-    /// Return the inactivity floor declared by the last committed batch.
+    /// Return the inactivity floor declared by the last applied batch.
     pub const fn inactivity_floor_loc(&self) -> Location<F> {
         self.tip.inactivity_floor_loc
     }
@@ -352,7 +352,7 @@ where
         self.tip.size()
     }
 
-    /// Get the metadata associated with the last commit.
+    /// Get the metadata of the last applied commit.
     pub fn get_metadata(&self) -> Option<O::Metadata> {
         self.tip.metadata().cloned()
     }
