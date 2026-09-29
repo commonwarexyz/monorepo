@@ -870,8 +870,7 @@ where
     /// Capture an owned immutable [Snapshot] of the journal and its Merkle structure.
     ///
     /// Capture writes buffered data and keeps the journal's and Merkle structure's blobs open
-    /// while the snapshot is alive, as [`Snapshottable`](super::contiguous::Snapshottable)
-    /// describes.
+    /// while the snapshot is alive, as [`Snapshottable`] describes.
     ///
     /// # Errors
     ///
