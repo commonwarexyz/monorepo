@@ -57,10 +57,9 @@ mod tests {
     };
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
-        Handshake as _,
-        encrypted::{
-            Handshake as StreamHandshake, Receiver as EncryptedReceiver, Sender as EncryptedSender,
-        },
+        SakeCups, Upgrader,
+        cups::{self, Cups},
+        sake::{Sake, Version},
         utils::Timeout,
     };
     use commonware_utils::NZUsize;
@@ -70,20 +69,21 @@ mod tests {
     const STREAM_NAMESPACE: &[u8] = b"test_lookup_spawner_ingress";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (
-        EncryptedSender<mocks::Sink>,
-        EncryptedReceiver<mocks::Stream>,
-    );
+    type Sender = <SakeCups<PrivateKey> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
+    type Receiver = <SakeCups<PrivateKey> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
+    type Connection = (Sender, Receiver);
 
-    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
-        Timeout::new(
-            StreamHandshake {
+    fn handshake(signer: PrivateKey) -> Timeout<SakeCups<PrivateKey>> {
+        let handshake = (
+            Sake {
                 signer,
+                version: Version::V1,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },
-            Duration::from_secs(10),
-        )
+            Cups::new(cups::Version::V1),
+        );
+        Timeout::new(handshake, Duration::from_secs(10))
     }
 
     async fn connections(
@@ -145,7 +145,7 @@ mod tests {
             let peer_2 = PrivateKey::from_seed(2).public_key();
 
             let (mut spawner, mut receiver) =
-                Mailbox::<Message<EncryptedSender<mocks::Sink>, EncryptedReceiver<mocks::Stream>, PublicKey>>::new(
+                Mailbox::<Message<Sender, Receiver, PublicKey>>::new(
                     context.child("spawner_mailbox"),
                     NZUsize!(1),
                 );

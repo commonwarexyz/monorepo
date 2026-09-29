@@ -199,7 +199,10 @@ mod tests {
         deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::{
-        Handshake as _, encrypted::Handshake as StreamHandshake, utils::Timeout,
+        SakeCups, Upgrader as _,
+        cups::{self, Cups},
+        sake::{Sake, Version},
+        utils::Timeout,
     };
     use commonware_utils::NZUsize;
     use std::{
@@ -243,15 +246,17 @@ mod tests {
         }
     }
 
-    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
-        Timeout::new(
-            StreamHandshake {
+    fn handshake<S: Signer>(signer: S) -> Timeout<SakeCups<S>> {
+        let handshake = (
+            Sake {
                 signer,
+                version: Version::V1,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },
-            Duration::from_secs(10),
-        )
+            Cups::new(cups::Version::V1),
+        );
+        Timeout::new(handshake, Duration::from_secs(10))
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
