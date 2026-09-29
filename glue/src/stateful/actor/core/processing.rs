@@ -601,16 +601,32 @@ where
                             },
                         }
                         // The published snapshots predate this prune and pin the pruned
-                        // storage, so capture and publish afresh right away.
-                        select! {
-                            _ = &mut shutdown => {
-                                debug!("shutdown signal received, stopping processing");
+                        // storage, so capture and publish afresh right away. Starting the
+                        // successor barrier now does both.
+                        if durability.needs_barrier() {
+                            let Some(driven) = start_barrier(
+                                &mut shutdown,
+                                &mut durability,
+                                &mut verifications,
+                                processor,
+                                &mut self.snapshot_publisher,
+                            )
+                            .await
+                            else {
                                 return;
-                            },
-                            driven = verifications
-                                .drive(processor.publish_snapshot(&mut self.snapshot_publisher)) => {
-                                processor = driven;
-                            },
+                            };
+                            processor = driven;
+                        } else {
+                            select! {
+                                _ = &mut shutdown => {
+                                    debug!("shutdown signal received, stopping processing");
+                                    return;
+                                },
+                                driven = verifications
+                                    .drive(processor.publish_snapshot(&mut self.snapshot_publisher)) => {
+                                    processor = driven;
+                                },
+                            }
                         }
                     }
                     Step::Barrier(completion) => {
@@ -3804,11 +3820,10 @@ mod tests {
             }
             assert_eq!(control.pruned.lock().clone(), vec![1]);
 
-            // The prune publishes fresh snapshots right away. They carry the
-            // same content as later publishes, so count publications instead
-            // (startup, block 1's sync, the post-prune publish, then block 2's
-            // successor sync).
-            while publications(&context) < 4 {
+            // The prune publishes fresh snapshots right away. Block 2 is not yet durable, so
+            // the successor sync starts at once and its capture is that publication: startup,
+            // block 1's sync, then block 2's successor sync, with no separate capture.
+            while publications(&context) < 3 {
                 context.sleep(Duration::from_millis(10)).await;
             }
             assert_eq!(
@@ -3824,6 +3839,7 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
+            assert_eq!(publications(&context), 3);
         });
     }
 

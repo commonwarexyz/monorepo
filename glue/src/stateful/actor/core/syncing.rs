@@ -15,10 +15,10 @@ use crate::stateful::{
             mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
-        processor::{Processor, Pruning},
+        processor::{Processor, Pruning, Publication},
         syncer::{self, Artifact, SyncPlan},
     },
-    db::{Anchor, Publisher, SnapshotsOf},
+    db::{Anchor, DatabaseSet as _, Publisher, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -346,8 +346,31 @@ where
                                 (processor, applied) = driven;
                             },
                         }
-                        // A cheap snapshot is not published here: the handoff publishes once
-                        // when its barrier starts.
+
+                        // Cheap members serve every replayed block, as in processing.
+                        match applied.publication {
+                            Publication::Snapshot(snapshots) => {
+                                snapshot_publisher.publish(block.height(), snapshots);
+                            }
+                            Publication::None if A::Databases::ANY_CHEAP_SNAPSHOT => {
+                                select! {
+                                    _ = &mut shutdown => {
+                                        warn!(
+                                            height = block.height().get(),
+                                            "exiting mid-handoff on shutdown"
+                                        );
+                                        return;
+                                    },
+                                    driven = processor.refresh_snapshot(&mut snapshot_publisher) => {
+                                        processor = driven;
+                                    },
+                                }
+                            }
+                            Publication::None => {}
+                            Publication::WithBarrier(..) => {
+                                unreachable!("the handoff requests no barrier per block")
+                            }
+                        }
                         pending_prune = applied.prune.or(pending_prune);
                         completed_height = block.height();
                     }

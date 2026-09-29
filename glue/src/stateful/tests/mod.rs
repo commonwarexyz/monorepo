@@ -2066,8 +2066,8 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             &operations,
             &expected.0.root
         ));
-        assert_eq!(compact.root(), expected.1.root);
-        assert_eq!(compact.size(), expected.1.size);
+        assert_eq!(compact.latest().root(), expected.1.root);
+        assert_eq!(compact.latest().size(), expected.1.size);
 
         stateful_actor.abort();
         marshal_actor.abort();

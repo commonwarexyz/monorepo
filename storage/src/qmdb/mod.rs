@@ -157,7 +157,7 @@ fn validate_initialization_commit<F: Family>(
     Ok(Some(floor))
 }
 
-/// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
+/// Check the selected commit before recovery discards history. Rebuilding an index from its floor
 /// additionally requires retaining that floor. Keyless only restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
     pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
@@ -327,9 +327,10 @@ where
 /// # Errors
 ///
 /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `op_count`
-///   exceeds the operations `log` holds or `start_loc >= op_count`.
-/// - Returns [`Error::HistoricalFloorPruned`] if `op_count` is zero or the operation at
-///   `op_count - 1` is not a commit.
+///   exceeds the operations `log` holds or `start_loc >= op_count` (so always for a zero
+///   `op_count`).
+/// - Returns [`Error::HistoricalFloorPruned`] if the operation at `op_count - 1` is not a commit.
+/// - Returns [`Error::DataCorrupted`] if that commit's floor lies past the commit.
 /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
 ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or node was pruned.
 pub(crate) async fn historical_proof<F, C, M, H>(
@@ -392,12 +393,16 @@ pub enum Error<F: Family> {
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
-    /// The batch cannot be merkleized or applied against the current database state: the
-    /// database moved off the batch's chain, an unapplied ancestor was dropped, or the batch
-    /// belongs to another database instance.
+    /// The batch cannot be merkleized or applied against the current database state.
     ///
-    /// Reads report the same condition as [`Error::StaleRead`]. See [`chain`] for more details
-    /// on staleness detection.
+    /// Causes:
+    /// - The database moved off the batch's chain. Reads report this case as
+    ///   [`Error::StaleRead`].
+    /// - Merkleize only: an unapplied ancestor was dropped, so the chain no longer reaches the live
+    ///   database. Reads stay exact, since each merkleized batch retains its ancestors' overlays.
+    /// - Current merkleize only: the batch was built against another database instance.
+    ///
+    /// See [`chain`] for more details on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 

@@ -59,6 +59,7 @@ pub trait Storage: Send + Sync {
     /// # Errors
     ///
     /// - Returns [Error::LocationOverflow] if `loc` is not a valid location.
+    /// - Returns [Error::RangeOutOfBounds] if `loc` exceeds the number of leaves.
     /// - Returns [Error::ElementPruned] if a node the boundary requires has been pruned.
     /// - Returns any error [`Storage::get_node`] returns for a required node.
     fn pinned_nodes_at(
@@ -68,6 +69,9 @@ pub trait Storage: Send + Sync {
         async move {
             if !loc.is_valid() {
                 return Err(Error::LocationOverflow(loc));
+            }
+            if loc > Location::try_from(self.size())? {
+                return Err(Error::RangeOutOfBounds(loc));
             }
             let nodes = Self::Family::nodes_to_pin(loc)
                 .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })

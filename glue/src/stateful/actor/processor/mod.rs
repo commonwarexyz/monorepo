@@ -414,8 +414,9 @@ impl Cancellation for Verification {
 
 /// What serving receives from one finalization.
 pub(super) enum Publication<S> {
-    /// Nothing new: no barrier was requested, and not every member's snapshot is cheap. A set
-    /// with some cheap members still refreshes them (see [`Processor::refresh_snapshot`]).
+    /// Nothing new: no barrier was requested, and not every member's snapshot is cheap. The
+    /// caller refreshes the cheap members of a set that has some (see
+    /// [`Processor::refresh_snapshot`]).
     None,
     /// A snapshot of the applied state, captured without a barrier because the set's snapshots
     /// are cheap (see [`DatabaseSet::CHEAP_SNAPSHOT`]).

@@ -5,8 +5,8 @@
 //! merkleization but no historical reads.
 
 use crate::stateful::db::{
-    InitError, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_compact_db, validate_initialization,
+    CompactTips, InitError, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_compact_db, validate_initialization,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -18,7 +18,6 @@ use commonware_storage::{
     qmdb::{
         Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
-        compact,
         immutable::{
             CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation, fixed,
             initial_root, variable,
@@ -234,7 +233,7 @@ where
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
-    type Snapshot = compact::Snapshot<F, Operation<F, K, FixedEncoding<V>>, H::Digest>;
+    type Snapshot = CompactTips<F, Operation<F, K, FixedEncoding<V>>, H::Digest>;
 
     const CHEAP_SNAPSHOT: bool = true;
 
@@ -280,13 +279,17 @@ where
 
     async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, handle) = self.start_sync().await?;
-        let snapshot = Self::snapshot(&db);
+        let snapshot = CompactTips::new(Self::snapshot(&db));
         Ok((db, snapshot, handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
-        let snapshot = Self::snapshot(&self);
+        let snapshot = CompactTips::new(Self::snapshot(&self));
         Ok((self, snapshot))
+    }
+
+    fn merge_snapshot(served: &Self::Snapshot, fresh: Self::Snapshot) -> Self::Snapshot {
+        CompactTips::merge(served, fresh)
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -315,7 +318,7 @@ where
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
-    type Snapshot = compact::Snapshot<F, Operation<F, K, VariableEncoding<V>>, H::Digest>;
+    type Snapshot = CompactTips<F, Operation<F, K, VariableEncoding<V>>, H::Digest>;
 
     const CHEAP_SNAPSHOT: bool = true;
 
@@ -361,13 +364,17 @@ where
 
     async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, handle) = self.start_sync().await?;
-        let snapshot = Self::snapshot(&db);
+        let snapshot = CompactTips::new(Self::snapshot(&db));
         Ok((db, snapshot, handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
-        let snapshot = Self::snapshot(&self);
+        let snapshot = CompactTips::new(Self::snapshot(&self));
         Ok((self, snapshot))
+    }
+
+    fn merge_snapshot(served: &Self::Snapshot, fresh: Self::Snapshot) -> Self::Snapshot {
+        CompactTips::merge(served, fresh)
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -585,6 +592,110 @@ mod tests {
         assert_state_sync_db::<VariableDb, Arc<VariableDb>>();
     }
 
+    /// Batches that leave the floor unset carry it forward instead of regressing it to zero.
+    #[test]
+    fn unset_floor_carries_forward_across_commits() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "floor-carry");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let mut db = Single::from(db);
+
+            // Raise the floor once, then commit a batch that leaves it unset.
+            for (value, floor) in [(1u8, Some(mmr::Location::new(1))), (2, None)] {
+                let batch = <FixedDb as ManagedDb<_>>::new_batch(db.reader())
+                    .await
+                    .set(Sha256::hash(&[&[value]]), Sha256::hash(&[&[value, 1]]));
+                let batch = match floor {
+                    Some(floor) => batch.with_inactivity_floor(floor),
+                    None => batch,
+                };
+                let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                    .await
+                    .unwrap();
+                db = DatabaseSet::apply(db, merkleized).await;
+                let barrier;
+                (db, _, barrier) = DatabaseSet::finalize(db).await;
+                assert!(barrier.durable().await, "database sync failed");
+            }
+            assert_eq!(
+                db.reader().read().await.inactivity_floor_loc(),
+                mmr::Location::new(1)
+            );
+
+            // A batch forked from a merkleized parent carries the parent's floor, which here is
+            // above the database's.
+            let value = 3u8;
+            let parent = <FixedDb as ManagedDb<_>>::new_batch(db.reader())
+                .await
+                .set(Sha256::hash(&[&[value]]), Sha256::hash(&[&[value, 1]]))
+                .with_inactivity_floor(mmr::Location::new(3));
+            let parent = crate::stateful::db::Unmerkleized::merkleize(parent)
+                .await
+                .unwrap();
+            let value = 4u8;
+            let fork = MerkleizedTrait::new_batch(&parent)
+                .set(Sha256::hash(&[&[value]]), Sha256::hash(&[&[value, 1]]));
+            let fork = crate::stateful::db::Unmerkleized::merkleize(fork)
+                .await
+                .unwrap();
+            assert_eq!(fork.bounds().inactivity_floor, mmr::Location::new(3));
+        });
+    }
+
+    /// The full immutable database carries an unset floor forward like the compact one.
+    #[test]
+    fn full_unset_floor_carries_forward_across_commits() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = full_fixed_config(&context, "floor-carry");
+            let db = FullFixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let mut db = Single::from(db);
+
+            // Raise the floor once, then commit a batch that leaves it unset.
+            for (value, floor) in [(1u8, Some(mmr::Location::new(1))), (2, None)] {
+                let batch = <FullFixedDb as ManagedDb<_>>::new_batch(db.reader())
+                    .await
+                    .set(Sha256::hash(&[&[value]]), Sha256::hash(&[&[value, 1]]));
+                let batch = match floor {
+                    Some(floor) => batch.with_inactivity_floor(floor),
+                    None => batch,
+                };
+                let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                    .await
+                    .unwrap();
+                db = DatabaseSet::apply(db, merkleized).await;
+                let barrier;
+                (db, _, barrier) = DatabaseSet::finalize(db).await;
+                assert!(barrier.durable().await, "database sync failed");
+            }
+            assert_eq!(
+                db.reader().read().await.inactivity_floor_loc(),
+                mmr::Location::new(1)
+            );
+
+            // A batch forked from a merkleized parent carries the parent's floor, which here is
+            // above the database's.
+            let value = 3u8;
+            let parent = <FullFixedDb as ManagedDb<_>>::new_batch(db.reader())
+                .await
+                .set(Sha256::hash(&[&[value]]), Sha256::hash(&[&[value, 1]]))
+                .with_inactivity_floor(mmr::Location::new(3));
+            let parent = crate::stateful::db::Unmerkleized::merkleize(parent)
+                .await
+                .unwrap();
+            let value = 4u8;
+            let fork = MerkleizedTrait::new_batch(&parent)
+                .set(Sha256::hash(&[&[value]]), Sha256::hash(&[&[value, 1]]));
+            let fork = crate::stateful::db::Unmerkleized::merkleize(fork)
+                .await
+                .unwrap();
+            assert_eq!(fork.bounds().inactivity_floor, mmr::Location::new(3));
+        });
+    }
+
     #[test]
     fn managed_db_apply_and_finalize_persists_fixed_immutable_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
@@ -620,11 +731,11 @@ mod tests {
             assert_eq!(target.root, db.root());
             assert_eq!(target.size, mmr::Location::new(3));
             assert_eq!(
-                snapshot.root(),
+                snapshot.latest().root(),
                 expected_root,
                 "captured snapshot must carry the applied root",
             );
-            assert_eq!(snapshot.size(), mmr::Location::new(3));
+            assert_eq!(snapshot.latest().size(), mmr::Location::new(3));
         });
     }
 
