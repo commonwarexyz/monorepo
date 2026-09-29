@@ -16,10 +16,9 @@
 //!
 //! Peers must agree on a unique, application-specific namespace, a [Version], and the record
 //! format, and their clocks must be within the configured timestamp acceptance windows. The version
-//! is not negotiated, so a mismatch fails the handshake. Keep the older version until every peer
-//! has upgraded. Callers must enforce a handshake deadline, for example with
-//! [crate::utils::Timeout]. Identities are exposed during the handshake, and there is no 0-RTT
-//! resumption.
+//! is not negotiated, so a mismatch fails the handshake. Callers must enforce a handshake deadline,
+//! for example with [crate::utils::Timeout]. Identities are exposed during the handshake, and there
+//! is no 0-RTT resumption.
 //!
 //! # Security
 //!
