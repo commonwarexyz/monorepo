@@ -1,19 +1,17 @@
 use commonware_cryptography::{
-    Signer,
+    ChaCha20Poly1305, Signer,
     ed25519::PrivateKey,
-    handshake::{
-        Context, Error, RecvCipher, SendCipher, dial_end, dial_start, listen_end, listen_start,
-    },
+    handshake::sake::{Context, Error, Version, dial_end, dial_start, listen_end, listen_start},
 };
 use commonware_math::algebra::Random;
 use criterion::criterion_main;
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha8Rng;
 
-mod handshake;
+mod sake;
 mod transport;
 
-fn connect() -> Result<(SendCipher, RecvCipher), Error> {
+fn connect() -> Result<(ChaCha20Poly1305, ChaCha20Poly1305), Error> {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let dialer_crypto = PrivateKey::random(&mut rng);
     let listener_crypto = PrivateKey::random(&mut rng);
@@ -26,6 +24,7 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
             0..1,
             dialer_crypto.clone(),
             listener_crypto.public_key(),
+            Version::V1,
         ),
     );
     let (l_state, msg2) = listen_start(
@@ -36,6 +35,7 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
             0..1,
             listener_crypto,
             dialer_crypto.public_key(),
+            Version::V1,
         ),
         msg1,
     )?;
@@ -44,4 +44,4 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
     Ok((d_send, l_recv))
 }
 
-criterion_main!(handshake::benches, transport::benches);
+criterion_main!(sake::benches, transport::benches);
