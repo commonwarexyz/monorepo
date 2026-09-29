@@ -8,6 +8,7 @@ mod avx2;
 mod avx512;
 mod input;
 mod pair;
+mod pair36;
 mod row;
 mod row4;
 mod scalar;
@@ -77,6 +78,14 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<[[u8; OUT_LEN
         }
         // SAFETY: AVX2 and equal input lengths were established above.
         return Some(unsafe { pair::hash_direct(&left, &right) });
+    }
+    if let Some(left) = pair36::Input::new(left)
+        && let Some(right) = pair36::Input::new(right)
+        && supports_avx512vl()
+    {
+        // SAFETY: AVX2, AVX-512F, and AVX-512VL were established above,
+        // and both inputs validate exactly 36 bytes.
+        return Some(unsafe { pair36::hash(&left, &right) });
     }
     let (mut left_buffer, mut right_buffer) = ([0u8; PAIR_LEN], [0u8; PAIR_LEN]);
     let len = gather(left, &mut left_buffer)?;
