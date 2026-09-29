@@ -10,8 +10,8 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     Reporter,
     multimmit::marshal::{
-        ArchiveConfig, ArchiveMode, Config, SchemeVerifier, ServiceHandle, Start, Update,
-        open as open_marshal,
+        ArchiveConfig, ArchiveMode, Config, Retention, SchemeVerifier, ServiceHandle, Start,
+        Update, open as open_marshal,
     },
     types::Participant,
 };
@@ -65,7 +65,7 @@ fn config(
         EightCap,
         CacheRef::from_pooler(pooler, ARCHIVE_PAGE_SIZE, ARCHIVE_CACHE_PAGES),
     );
-    let mut config = Config::new(
+    let config = Config::new(
         Start::Genesis(committee.config.genesis().clone()),
         PARTITION_PREFIX.into(),
         committee.codec(),
@@ -75,17 +75,15 @@ fn config(
     .with_max_block_bytes(
         NonZeroUsize::new(Body::max_block_size(tuning.body_size))
             .expect("encoded blocks are non-empty"),
-    );
-    config.limits.max_hot_block_bytes = tuning.marshal_live_cache_bytes;
-    config.limits.max_materialized_block_bytes = tuning.marshal_materialized_cache_bytes;
-    config.capacities.max_pending_acks = DELIVERY_ACK_WINDOW;
-    if let Some(bytes) = tuning.marshal_delivery_bytes {
-        config.limits.max_delivery_bytes = bytes;
+    )
+    .with_max_hot_block_bytes(tuning.marshal_live_cache_bytes)
+    .with_max_materialized_block_bytes(tuning.marshal_materialized_cache_bytes)
+    .with_max_pending_acks(DELIVERY_ACK_WINDOW)
+    .with_retention(Retention::uniform(ArchiveMode::Prunable));
+    match tuning.marshal_delivery_bytes {
+        Some(bytes) => config.with_max_delivery_bytes(bytes),
+        None => config,
     }
-    config.retention.lqc = ArchiveMode::Prunable;
-    config.retention.history = ArchiveMode::Prunable;
-    config.retention.blocks = ArchiveMode::Prunable;
-    config
 }
 
 /// Handles of marshal and the transport services it runs on.
