@@ -318,6 +318,36 @@ impl<E: Context> Writable<E> {
         }
     }
 
+    /// Byte cap for one prefetch pass: the page cache's admission capacity, so warming never
+    /// evicts its own critical prefix.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) const fn prefetch_budget(&self) -> u64 {
+        let cache = self.tail.cache_ref();
+        cache.admission_capacity() as u64 * cache.page_size().get() as u64
+    }
+
+    /// Bounds of the sealed history: the first sealed blob's index and the sealed count.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) const fn sealed_bounds(&self) -> (u64, usize) {
+        (self.oldest_blob_index, self.sealed.len())
+    }
+
+    /// Owned handles for the sealed blobs whose indices fall in `range`, clamped to the
+    /// sealed history: the first cloned blob's index and its handles.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn sealed_range(&self, range: std::ops::Range<u64>) -> (u64, Vec<Sealed<E::Blob>>) {
+        let lo = range.start.max(self.oldest_blob_index);
+        let hi = range
+            .end
+            .min(self.oldest_blob_index + self.sealed.len() as u64);
+        if lo >= hi {
+            return (lo, Vec::new());
+        }
+        let from = (lo - self.oldest_blob_index) as usize;
+        let to = (hi - self.oldest_blob_index) as usize;
+        (lo, self.sealed[from..to].to_vec())
+    }
+
     /// Capture owned blob handles for a snapshot reader.
     pub(super) async fn snapshot(mut self) -> Result<(Self, Blobs<'static, E::Blob>), Error> {
         // Reuse the immutable history shared by snapshots until its membership changes.
