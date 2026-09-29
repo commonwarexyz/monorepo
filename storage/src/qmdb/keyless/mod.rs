@@ -168,7 +168,7 @@ where
     where
         C: authenticated::Backing<E>,
     {
-        // Keyless restores commit fields without replaying a keyed snapshot, so its logical floor
+        // Keyless restores commit fields without replaying a keyed index, so its logical floor
         // may precede the retained operation prefix.
         let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
             context.child("journal"),
@@ -1002,6 +1002,20 @@ pub(crate) mod tests {
         (db, snapshot) = db.snapshot().await.unwrap();
         assert_eq!(snapshot.size(), op_count);
 
+        // A boundary request, which serves the frozen Merkle's pinned nodes, answers like the
+        // live database at capture.
+        let boundary_request = crate::qmdb::sync::Request::Boundary {
+            size: op_count,
+            start: Location::new(3),
+        };
+        let (live_boundary, _) = crate::qmdb::sync::Source::serve(&db, boundary_request)
+            .await
+            .unwrap();
+        let (snap_boundary, _) = crate::qmdb::sync::Source::serve(&snapshot, boundary_request)
+            .await
+            .unwrap();
+        assert_eq!(snap_boundary.encode(), live_boundary.encode());
+
         let (proof, ops) =
             crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
                 .await
@@ -1042,6 +1056,10 @@ pub(crate) mod tests {
             &ops2,
             &root,
         ));
+        let (snap_boundary2, _) = crate::qmdb::sync::Source::serve(&snapshot, boundary_request)
+            .await
+            .unwrap();
+        assert_eq!(snap_boundary2.encode(), snap_boundary.encode());
 
         // Anything at or above the frozen size is rejected.
         assert!(matches!(

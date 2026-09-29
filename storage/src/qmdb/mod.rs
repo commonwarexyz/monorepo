@@ -157,7 +157,7 @@ fn validate_initialization_commit<F: Family>(
     Ok(Some(floor))
 }
 
-/// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
+/// Check the selected commit before recovery discards history. Rebuilding an index from its floor
 /// additionally requires retaining that floor. Keyless only restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
     pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
@@ -327,9 +327,10 @@ where
 /// # Errors
 ///
 /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `op_count`
-///   exceeds the operations `log` holds or `start_loc >= op_count`.
-/// - Returns [`Error::HistoricalFloorPruned`] if `op_count` is zero or the operation at
-///   `op_count - 1` is not a commit.
+///   exceeds the operations `log` holds or `start_loc >= op_count` (so always for a zero
+///   `op_count`).
+/// - Returns [`Error::HistoricalFloorPruned`] if the operation at `op_count - 1` is not a commit.
+/// - Returns [`Error::DataCorrupted`] if that commit's floor lies past the commit.
 /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
 ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or node was pruned.
 pub(crate) async fn historical_proof<F, C, M, H>(

@@ -484,7 +484,10 @@ where
     ///
     /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is retained
     /// but is not a commit op, either because the caller passed a non-commit-boundary size or
-    /// because pruning removed the commit that would have governed it.
+    /// because pruning removed the commit that would have governed it. Returns
+    /// [`crate::merkle::Error::RangeOutOfBounds`] if `historical_size` exceeds the log or
+    /// `start_loc >= historical_size`, and a pruned-data error if a required operation or node
+    /// was pruned.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.db.historical_proof",

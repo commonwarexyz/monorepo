@@ -1281,7 +1281,9 @@ mod tests {
             .unwrap();
 
             let snapshot = imported.snapshot();
-            assert!(snapshot.serve(boundary_for(tip.size)).await.is_ok());
+            let (served, _) = snapshot.serve(boundary_for(tip.size)).await.unwrap();
+            let (expected, _) = db.serve(boundary_for(tip.size)).await.unwrap();
+            assert_eq!(served.encode(), expected.encode());
             assert!(matches!(
                 snapshot.serve(boundary_for(below.size)).await,
                 Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
@@ -1935,11 +1937,11 @@ mod tests {
             let floor = db.inactivity_floor_loc();
 
             let pre_apply_root = db.root();
-            let pre_snapshot = db.to_batch();
+            let pre_view = db.to_batch();
             assert_eq!(
-                pre_snapshot.root(),
+                pre_view.root(),
                 pre_apply_root,
-                "snapshot before any mutation should match the live root"
+                "view before any mutation should match the live root"
             );
 
             let batch = db

@@ -1373,11 +1373,11 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-to-batch-live").await;
 
             let pre_apply_root = db.root();
-            let pre_snapshot = db.to_batch();
+            let pre_view = db.to_batch();
             assert_eq!(
-                pre_snapshot.root(),
+                pre_view.root(),
                 pre_apply_root,
-                "snapshot before any mutation should match the live root"
+                "view before any mutation should match the live root"
             );
 
             let key = Sha256::hash(&[&[1]]);

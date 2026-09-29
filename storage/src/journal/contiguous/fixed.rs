@@ -1612,8 +1612,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
     /// creation, and the snapshot stays readable across concurrent appends and prunes.
     ///
-    /// Capture writes buffered data and keeps the journal's blobs open while the snapshot is
-    /// alive, as [`Snapshottable::snapshot`](super::Snapshottable::snapshot) describes.
+    /// Capture writes buffered items to the tail blob without making them durable, first waiting
+    /// for any in-flight sync of that blob when there are buffered items to write. While the
+    /// snapshot is alive it keeps the journal's blobs open, so reopening one of them fails with
+    /// `BlobAlreadyOpen`.
     ///
     /// # Errors
     ///

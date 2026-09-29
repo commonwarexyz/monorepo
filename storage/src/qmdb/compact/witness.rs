@@ -92,10 +92,15 @@ where
     }
 }
 
-/// A commit with the data to serve and prove it: the store's latest applied commit, or the one
-/// a snapshot captured.
+/// A compact database's commit with the data to serve and prove it: its latest applied commit,
+/// or the one a snapshot captured.
+///
+/// As a [`Source`], a tip serves only requests for its own state: `size` equal to
+/// [`Self::size`] and `start` at the commit (`size - 1`). Other requests fail with the errors a
+/// pruned operation log reports ([`crate::journal::Error::ItemPruned`] or
+/// [`crate::merkle::Error::RangeOutOfBounds`]).
 pub struct Tip<F: Family, Op, D: Digest> {
-    /// The persisted witness of this commit.
+    /// The witness of this commit, as written (or to be written) to the witness journal.
     witness: Witness<F, D>,
     /// The commit operation.
     op: Op,
@@ -106,7 +111,7 @@ pub struct Tip<F: Family, Op, D: Digest> {
 }
 
 impl<F: Family, Op, D: Digest> Tip<F, Op, D> {
-    /// The committed size. The last commit is at location `size - 1`.
+    /// The number of operations through this commit, which is at location `size - 1`.
     pub const fn size(&self) -> Location<F> {
         self.witness.size
     }
@@ -247,6 +252,9 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
 
     /// Record the commit just applied to `merkle`, whose commit operation is `op`, as the new tip
     /// and append its witness to the journal.
+    ///
+    /// If no commit was applied since the tip was installed, this only writes a pending import's
+    /// tip (see [`Self::write_import`]).
     pub(crate) async fn apply<H, S>(
         mut self,
         merkle: &mut compact::Merkle<F, D, S>,
@@ -257,12 +265,15 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
         S: Strategy,
         Op: Floored<F> + Encode,
     {
-        // Stage before pruning because a new witness's commit proof needs the unpruned Merkle.
-        let staged;
-        (self, staged) = self.stage::<H, S>(merkle, op).await?;
-        let Some(tip) = staged else {
-            return Ok(self);
-        };
+        if self.tip.size() >= merkle.leaves() {
+            return self.write_import(merkle).await;
+        }
+
+        // Build the tip before pruning because its commit proof needs the unpruned Merkle.
+        let tip = Arc::new(tip_from_parts::<F, H, S, Op>(merkle, op)?);
+        if self.import_pending {
+            self = self.clear_for_import().await?;
+        }
 
         // Append before pruning and clearing import state so every successful apply has a matching
         // journal entry.
@@ -396,52 +407,6 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
         Ok(self)
     }
 
-    /// Decide what [`Self::apply`] must write, clearing the journal first when an import is
-    /// pending.
-    ///
-    /// Returns `None` if the tip already matches the in-memory Merkle and no import is
-    /// pending, otherwise the tip to append and install.
-    async fn stage<H, S>(
-        mut self,
-        merkle: &compact::Merkle<F, D, S>,
-        op: Op,
-    ) -> Result<(Self, Option<Arc<Tip<F, Op, D>>>), Error<F>>
-    where
-        H: Hasher<Digest = D>,
-        S: Strategy,
-        Op: Floored<F> + Encode,
-    {
-        // An equal size means no commit has been applied since the tip was installed.
-        // Normally the tip mirrors the journal tip, so there is no witness to append. A
-        // start_sync may still be proving that tip durable, which pending_sync tracks separately.
-        // During a pending import the tip is not in the journal yet, so it is exactly
-        // what must be persisted. Replace the journal's contents with it.
-        let tip_size = self.tip.size();
-        let tip = if tip_size == merkle.leaves() {
-            if !self.import_pending {
-                return Ok((self, None));
-            }
-            Arc::clone(&self.tip)
-        } else if tip_size > merkle.leaves() {
-            return Err(Error::DataCorrupted("witness ahead of in-memory state"));
-        } else {
-            let inactivity_floor_loc = op
-                .has_floor()
-                .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-            let op_bytes = op.encode();
-            Arc::new(tip_from_parts::<F, H, S, Op>(
-                merkle,
-                inactivity_floor_loc,
-                op_bytes,
-                op,
-            )?)
-        };
-        if self.import_pending {
-            self = self.clear_for_import().await?;
-        }
-        Ok((self, Some(tip)))
-    }
-
     /// Drop all entries committing fewer than `pruning_boundary` leaves, bounding how far back
     /// bounded initialization can reach. The tip entry always survives. Some entries
     /// below the boundary may survive.
@@ -525,31 +490,30 @@ where
     S: Strategy,
     Op: Floored<F> + Encode,
 {
-    let inactivity_floor_loc = op
-        .has_floor()
-        .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-    let op_bytes = op.encode();
     let hasher = qmdb::hasher::<H>();
-    merkle.append_leaf(&hasher, &op_bytes)?;
-    let tip = tip_from_parts::<F, H, S, Op>(merkle, inactivity_floor_loc, op_bytes, op)?;
+    merkle.append_leaf(&hasher, &op.encode())?;
+    let tip = tip_from_parts::<F, H, S, Op>(merkle, op)?;
     merkle.prune_to_frontier();
     Ok(tip)
 }
 
-/// Derive the root, proof, and pinned nodes for the commit at the Merkle's tip and assemble
-/// the [`Tip`]. `op_bytes` must be the encoding the tip leaf was merkleized with, which is
-/// enforced against the Merkle.
+/// Derive the root, proof, and pinned nodes for the commit `op` at the Merkle's tip and assemble
+/// the [`Tip`]. The tip leaf must commit to `op`'s encoding, which is enforced against the Merkle,
+/// so the op a tip serves is exactly the one its proof authenticates.
 fn tip_from_parts<F, H, S, Op>(
     merkle: &compact::Merkle<F, H::Digest, S>,
-    inactivity_floor_loc: Location<F>,
-    op_bytes: Bytes,
     op: Op,
 ) -> Result<Tip<F, Op, H::Digest>, Error<F>>
 where
     F: Family,
     H: Hasher,
     S: Strategy,
+    Op: Floored<F> + Encode,
 {
+    let inactivity_floor_loc = op
+        .has_floor()
+        .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
+    let op_bytes = op.encode();
     let hasher = qmdb::hasher::<H>();
     let mem = merkle.mem();
     let size = mem.leaves();
@@ -652,10 +616,6 @@ where
         return Err(Error::DataCorrupted("non-canonical commit operation"));
     }
 
-    let inactivity_floor_loc = op
-        .has_floor()
-        .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-
     let hasher = qmdb::hasher::<H>();
     merkle
         .reset_to(last_commit_loc, witness.pinned_nodes.clone())
@@ -663,7 +623,7 @@ where
     merkle
         .append_leaf(&hasher, &witness.op_bytes)
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
-    let tip = tip_from_parts::<F, H, S, Op>(merkle, inactivity_floor_loc, witness.op_bytes, op)
+    let tip = tip_from_parts::<F, H, S, Op>(merkle, op)
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
     merkle.prune_to_frontier();
     Ok(tip)
@@ -785,9 +745,6 @@ where
     S: Strategy,
     Op: Floored<F> + Encode,
 {
-    let inactivity_floor_loc = initial_commit_op
-        .has_floor()
-        .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
     let op_bytes = initial_commit_op.encode();
     let hasher = qmdb::hasher::<H>();
     let batch = {
@@ -796,8 +753,7 @@ where
     };
     merkle.apply_batch(&batch)?;
 
-    let tip =
-        tip_from_parts::<F, H, S, Op>(merkle, inactivity_floor_loc, op_bytes, initial_commit_op)?;
+    let tip = tip_from_parts::<F, H, S, Op>(merkle, initial_commit_op)?;
     let (journal, _) = journal.append(&tip.witness).await?;
     let journal = journal.sync().await?;
     Ok(journal)
@@ -895,33 +851,28 @@ pub(crate) mod tests {
         let op_bytes = op.encode();
 
         assert!(matches!(
-            tip_from_parts::<mmr::Family, Sha256, Sequential, PaddedCommit>(
-                &merkle,
-                Location::new(0),
-                op_bytes.clone(),
-                op.clone(),
-            ),
+            tip_from_parts::<mmr::Family, Sha256, Sequential, PaddedCommit>(&merkle, op.clone()),
             Err(Error::DataCorrupted("compact merkle has no commit"))
         ));
 
         let hasher = qmdb::hasher::<Sha256>();
+        let mut other =
+            compact::Merkle::<mmr::Family, sha256::Digest, Sequential>::from_compact_state(
+                Sequential,
+                Location::new(0),
+                vec![],
+            )
+            .unwrap();
         merkle.append_leaf(&hasher, &op_bytes).unwrap();
         assert!(
-            tip_from_parts::<mmr::Family, Sha256, Sequential, PaddedCommit>(
-                &merkle,
-                Location::new(0),
-                op_bytes,
-                op.clone(),
-            )
-            .is_ok()
+            tip_from_parts::<mmr::Family, Sha256, Sequential, PaddedCommit>(&merkle, op.clone())
+                .is_ok()
         );
+        other
+            .append_leaf(&hasher, &PaddedCommit(8).encode())
+            .unwrap();
         assert!(matches!(
-            tip_from_parts::<mmr::Family, Sha256, Sequential, PaddedCommit>(
-                &merkle,
-                Location::new(0),
-                PaddedCommit(8).encode(),
-                op,
-            ),
+            tip_from_parts::<mmr::Family, Sha256, Sequential, PaddedCommit>(&other, op),
             Err(Error::DataCorrupted("commit bytes do not match merkle tip"))
         ));
     }

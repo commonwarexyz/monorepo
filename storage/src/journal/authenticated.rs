@@ -280,6 +280,11 @@ where
     }
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `loc` exceeds the item
+    /// count, and with [merkle::Error::ElementPruned] if a required node has been pruned.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
         self.merkle.pinned_nodes_at(loc).await.map_err(Into::into)
     }
@@ -1195,7 +1200,7 @@ where
 
 /// Owned immutable snapshot of an authenticated journal, with bounds frozen at capture.
 ///
-/// The snapshot reflects the journal's current size, including applied operations that are
+/// The snapshot reflects the journal's size at capture, including applied operations that are
 /// not yet durable.
 #[commonware_macros::stability(ALPHA)]
 pub type Snapshot<F, E, R, H> =
@@ -4099,6 +4104,14 @@ mod tests {
         context: Context,
     ) {
         let mut journal = create_journal_with_ops::<F>(context, "snapshot-frozen", 50).await;
+
+        // Leave some operations buffered and unsynced, as a capture before `start_sync` does.
+        for i in 0..5u8 {
+            (journal, _) = journal
+                .append(&create_operation::<F>(i.wrapping_add(200)))
+                .await
+                .unwrap();
+        }
 
         let size = journal.size();
         let live_proof;

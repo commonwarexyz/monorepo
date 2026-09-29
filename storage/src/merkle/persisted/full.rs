@@ -913,9 +913,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Capture an owned immutable [Snapshot] of the structure, sharing its in-memory nodes and
     /// freezing its flushed journal.
     ///
-    /// Capture writes buffered data and keeps the structure's journal blobs open while the
+    /// Capture writes the node journal's buffered data and keeps its blobs open while the
     /// snapshot is alive, as [`Snapshottable`](crate::journal::contiguous::Snapshottable)
-    /// describes.
+    /// describes. Nodes still in memory are shared rather than written, so the next mutation of
+    /// the live structure copies them.
     ///
     /// # Errors
     ///
@@ -1073,7 +1074,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Stor
     }
 }
 
-/// Owned immutable snapshot of a [Merkle] structure, with bounds frozen at capture.
+/// Owned immutable snapshot of a [Merkle] structure, frozen at capture.
 pub struct Snapshot<F: Family, E: Context, D: Digest> {
     /// Nodes resident in memory at capture.
     mem: Arc<Mem<F, D>>,
