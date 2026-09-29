@@ -71,10 +71,11 @@ mod tests {
     use crate::{
         merkle::{Location, mmb, mmr},
         qmdb::{
-            any::value::FixedEncoding,
+            any::value::{FixedEncoding, VariableEncoding},
             compact::db::tests::{TestBatch, TestOperation, compact_db_tests, open_db},
         },
     };
+    use commonware_codec::RangeCfg;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
@@ -99,12 +100,40 @@ mod tests {
         }
     }
 
+    type VariableTestOp<F = mmr::Family> = Operation<F, Digest, VariableEncoding<Vec<u8>>>;
+
+    impl<F: Family> TestOperation for VariableTestOp<F> {
+        type Family = F;
+
+        fn codec_config() -> ((), (RangeCfg<usize>, ())) {
+            ((), ((..=64).into(), ()))
+        }
+
+        fn value(seed: u64) -> Vec<u8> {
+            seed.to_be_bytes().to_vec()
+        }
+
+        fn mutate(batch: TestBatch<Self>, seed: u64) -> TestBatch<Self> {
+            batch.set(Sha256::hash(&[&seed.to_be_bytes()]), Self::value(seed))
+        }
+
+        fn op(seed: u64) -> Self {
+            Self::Set(Sha256::hash(&[&seed.to_be_bytes()]), Self::value(seed))
+        }
+    }
+
     compact_db_tests!(TestOp);
 
     mod mmb_tests {
         use super::*;
 
         compact_db_tests!(TestOp<mmb::Family>);
+    }
+
+    mod variable_tests {
+        use super::*;
+
+        compact_db_tests!(VariableTestOp);
     }
 
     /// Setting a key twice in one batch keeps the later value and emits one operation.
