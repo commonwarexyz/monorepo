@@ -74,7 +74,12 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
 
         // Complete the handshake.
         let listener_handshake = (
-            Sake::new(listener.clone(), version),
+            Sake {
+                signer: listener.clone(),
+                version,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+            },
             Cups::<ChaCha20Poly1305>::new(records),
         );
         let handle = context.child("listener").spawn(move |context| async move {
@@ -90,7 +95,12 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
                 .await
         });
         let (mut dialer_tx, mut dialer_rx) = (
-            Sake::new(dialer, version),
+            Sake {
+                signer: dialer,
+                version,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+            },
             Cups::<ChaCha20Poly1305>::new(records),
         )
             .dial(

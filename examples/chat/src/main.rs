@@ -72,6 +72,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 use tracing::info;
 
@@ -164,7 +165,12 @@ fn main() {
     let max_peers_per_set = authenticated::peer_set_limit(&recipients, &signer.public_key());
     let p2p_cfg = discovery::Config::local(
         sake_cups(
-            Sake::new(signer.clone(), sake::Version::V1),
+            Sake {
+                signer: signer.clone(),
+                version: sake::Version::V1,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+            },
             Cups::new(cups::Version::V1),
         ),
         APPLICATION_NAMESPACE,

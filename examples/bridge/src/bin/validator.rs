@@ -170,8 +170,8 @@ fn main() {
     let indexer_handshake = Timeout::new(
         (
             Sake {
-                version: Version::V1,
                 signer: signer.clone(),
+                version: Version::V1,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(60),
             },
@@ -183,7 +183,12 @@ fn main() {
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
         sake_cups(
-            Sake::new(signer, sake::Version::V1),
+            Sake {
+                signer,
+                version: sake::Version::V1,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+            },
             Cups::new(cups::Version::V1),
         ),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),

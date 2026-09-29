@@ -210,7 +210,12 @@ impl<C: Signer> Config<SakeCups<C>> {
     pub fn test(signer: C, listen: SocketAddr, max_message_size: u32) -> Self {
         let mut config = Self::local(
             sake_cups(
-                Sake::new(signer, sake::Version::V1),
+                Sake {
+                    signer,
+                    version: sake::Version::V1,
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                },
                 Cups::new(cups::Version::V1),
             ),
             b"test_namespace",

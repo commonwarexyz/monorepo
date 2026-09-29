@@ -46,9 +46,15 @@ impl From<HandshakeError> for Error {
 /// ```
 /// use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
 /// use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}};
+/// use std::time::Duration;
 ///
 /// let upgrader = (
-///     Sake::new(PrivateKey::from_seed(0), Version::V1),
+///     Sake {
+///         signer: PrivateKey::from_seed(0),
+///         version: Version::V1,
+///         synchrony_bound: Duration::from_secs(5),
+///         max_handshake_age: Duration::from_secs(10),
+///     },
 ///     Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 /// );
 /// ```
@@ -68,16 +74,6 @@ pub struct Sake<S> {
 }
 
 impl<S> Sake<S> {
-    /// Creates a handshake that accepts timestamps up to five seconds ahead or ten seconds old.
-    pub const fn new(signer: S, version: Version) -> Self {
-        Self {
-            signer,
-            version,
-            synchrony_bound: Duration::from_secs(5),
-            max_handshake_age: Duration::from_secs(10),
-        }
-    }
-
     /// Returns the SAKE context for a handshake with `peer` in `namespace`.
     ///
     /// Each version must produce transcripts that no other version produces, so peers on different
@@ -133,13 +129,6 @@ where
     )
     .await?;
     Ok(M::decode(frame)?)
-}
-
-impl<S: Signer> Sake<S> {
-    /// Signs `message` in `namespace` with the identity this handshake authenticates.
-    pub fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
-        self.signer.sign(namespace, message)
-    }
 }
 
 impl<S: Signer> crate::Handshake for Sake<S> {
@@ -349,8 +338,8 @@ mod test {
     fn transport(signer: PrivateKey, version: Version, records: cups::Version) -> TestUpgrade {
         (
             Sake {
-                version,
                 signer,
+                version,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },

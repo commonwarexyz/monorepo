@@ -268,7 +268,12 @@ mod tests {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
                             sake_cups(
-                                Sake::new(signer, sake::Version::V1),
+                                Sake {
+                                    signer,
+                                    version: sake::Version::V1,
+                                    synchrony_bound: Duration::from_secs(5),
+                                    max_handshake_age: Duration::from_secs(10),
+                                },
                                 Cups::new(cups::Version::V1),
                             ),
                             Duration::from_secs(5),
@@ -327,7 +332,12 @@ mod tests {
                 stream: Arc::new(StreamConfig::new(
                     Timeout::new(
                         sake_cups(
-                            Sake::new(signer, sake::Version::V1),
+                            Sake {
+                                signer,
+                                version: sake::Version::V1,
+                                synchrony_bound: Duration::from_secs(5),
+                                max_handshake_age: Duration::from_secs(10),
+                            },
                             Cups::new(cups::Version::V1),
                         ),
                         Duration::from_secs(5),
@@ -424,7 +434,12 @@ mod tests {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
                             sake_cups(
-                                Sake::new(signer, sake::Version::V1),
+                                Sake {
+                                    signer,
+                                    version: sake::Version::V1,
+                                    synchrony_bound: Duration::from_secs(5),
+                                    max_handshake_age: Duration::from_secs(10),
+                                },
                                 Cups::new(cups::Version::V1),
                             ),
                             Duration::from_secs(5),
@@ -494,7 +509,12 @@ mod tests {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
                             sake_cups(
-                                Sake::new(signer, sake::Version::V1),
+                                Sake {
+                                    signer,
+                                    version: sake::Version::V1,
+                                    synchrony_bound: Duration::from_secs(5),
+                                    max_handshake_age: Duration::from_secs(10),
+                                },
                                 Cups::new(cups::Version::V1),
                             ),
                             Duration::from_secs(5),
@@ -583,7 +603,12 @@ mod tests {
                     stream: Arc::new(StreamConfig::new(
                         Timeout::new(
                             sake_cups(
-                                Sake::new(signer, sake::Version::V1),
+                                Sake {
+                                    signer,
+                                    version: sake::Version::V1,
+                                    synchrony_bound: Duration::from_secs(5),
+                                    max_handshake_age: Duration::from_secs(10),
+                                },
                                 Cups::new(cups::Version::V1),
                             ),
                             Duration::from_secs(5),

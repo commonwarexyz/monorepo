@@ -27,6 +27,7 @@ use commonware_utils::{NZUsize, sequence::Unit};
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use tracing::info;
 
@@ -52,7 +53,12 @@ pub async fn run(context: tokio::Context, args: Dkg) {
 
     let mut p2p_config = discovery::Config::local(
         sake_cups(
-            Sake::new(node.signer.clone(), sake::Version::V1),
+            Sake {
+                signer: node.signer.clone(),
+                version: sake::Version::V1,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+            },
             Cups::new(cups::Version::V1),
         ),
         &[NAMESPACE, b"_P2P"].concat(),

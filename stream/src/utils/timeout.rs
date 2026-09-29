@@ -33,7 +33,15 @@ pub enum TimeoutError<E> {
 /// use std::time::Duration;
 ///
 /// let upgrader = Timeout::new(
-///     sake_cups(Sake::new(PrivateKey::from_seed(0), Version::V1), Cups::new(cups::Version::V1)),
+///     sake_cups(
+///         Sake {
+///             signer: PrivateKey::from_seed(0),
+///             version: Version::V1,
+///             synchrony_bound: Duration::from_secs(5),
+///             max_handshake_age: Duration::from_secs(10),
+///         },
+///         Cups::new(cups::Version::V1),
+///     ),
 ///     Duration::from_secs(5),
 /// );
 /// ```

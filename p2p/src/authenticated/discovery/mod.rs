@@ -172,7 +172,7 @@
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
 //! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}, sake_cups};
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
-//! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+//! use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, time::Duration};
 //!
 //! // Configure context
 //! let runtime_cfg = deterministic::Config::default();
@@ -208,7 +208,15 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
-//!     sake_cups(Sake::new(signer.clone(), Version::V1), Cups::new(cups::Version::V1)),
+//!     sake_cups(
+//!         Sake {
+//!             signer: signer.clone(),
+//!             version: Version::V1,
+//!             synchrony_bound: Duration::from_secs(5),
+//!             max_handshake_age: Duration::from_secs(10),
+//!         },
+//!         Cups::new(cups::Version::V1),
+//!     ),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr
@@ -262,6 +270,19 @@ pub use actors::tracker::Oracle;
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
 
+/// Authenticates connections under an identity that can also sign.
+pub trait Handshake: commonware_stream::Handshake<PublicKey: PublicKey> {
+    /// Signs a namespaced message with the identity returned by
+    /// [`public_key`](commonware_stream::Handshake::public_key).
+    fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
+}
+
+impl<S: Signer> Handshake for Sake<S> {
+    fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
+        self.signer.sign(namespace, message)
+    }
+}
+
 /// Authenticates connections and signs discovery gossip under the same local identity.
 pub trait Upgrader: commonware_stream::Upgrader<PublicKey: PublicKey> {
     /// Signs a namespaced message with the identity returned by
@@ -269,8 +290,8 @@ pub trait Upgrader: commonware_stream::Upgrader<PublicKey: PublicKey> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
 }
 
-impl<S: Signer, T: Transport> Upgrader for (Sake<S>, T) {
-    fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
+impl<H: Handshake, T: Transport> Upgrader for (H, T) {
+    fn sign(&self, namespace: &[u8], message: &[u8]) -> <H::PublicKey as Verifier>::Signature {
         self.0.sign(namespace, message)
     }
 }

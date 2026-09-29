@@ -275,6 +275,7 @@ mod tests {
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::Arc,
+        time::Duration,
     };
 
     type PublicKey = ed25519::PublicKey;
@@ -496,7 +497,12 @@ mod tests {
                 context.child("dealer"),
                 lookup::Config::local(
                     sake_cups(
-                        Sake::new(dealer_signer, sake::Version::V1),
+                        Sake {
+                            signer: dealer_signer,
+                            version: sake::Version::V1,
+                            synchrony_bound: Duration::from_secs(5),
+                            max_handshake_age: Duration::from_secs(10),
+                        },
                         Cups::new(cups::Version::V1),
                     ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
@@ -509,7 +515,12 @@ mod tests {
                 context.child("participant"),
                 lookup::Config::local(
                     sake_cups(
-                        Sake::new(participant_signer, sake::Version::V1),
+                        Sake {
+                            signer: participant_signer,
+                            version: sake::Version::V1,
+                            synchrony_bound: Duration::from_secs(5),
+                            max_handshake_age: Duration::from_secs(10),
+                        },
                         Cups::new(cups::Version::V1),
                     ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",

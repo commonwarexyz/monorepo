@@ -245,8 +245,8 @@ fn main() {
         let handshake = Timeout::new(
             (
                 Sake {
-                    version: Version::V1,
                     signer,
+                    version: Version::V1,
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(60),
                 },

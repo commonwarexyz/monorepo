@@ -96,13 +96,19 @@ mod tests {
     use commonware_cryptography::ed25519::PrivateKey;
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{cups, cups::Cups, sake, sake::Sake, sake_cups};
+    use std::time::Duration;
 
     const NAMESPACE: &[u8] = b"test_namespace";
     const LIMIT: u32 = 1024;
 
     fn handshake(seed: u64) -> SakeCups<PrivateKey> {
         sake_cups(
-            Sake::new(PrivateKey::from_seed(seed), sake::Version::V1),
+            Sake {
+                signer: PrivateKey::from_seed(seed),
+                version: sake::Version::V1,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+            },
             Cups::new(cups::Version::V1),
         )
     }

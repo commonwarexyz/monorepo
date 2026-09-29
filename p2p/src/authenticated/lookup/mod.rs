@@ -125,7 +125,7 @@
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
 //! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}, sake_cups};
 //! use commonware_utils::{NZU32, NZUsize, ordered::Map};
-//! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+//! use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, time::Duration};
 //!
 //! // Configure context
 //! let runtime_cfg = deterministic::Config::default();
@@ -159,7 +159,15 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = lookup::Config::local(
-//!     sake_cups(Sake::new(signer.clone(), Version::V1), Cups::new(cups::Version::V1)),
+//!     sake_cups(
+//!         Sake {
+//!             signer: signer.clone(),
+//!             version: Version::V1,
+//!             synchrony_bound: Duration::from_secs(5),
+//!             max_handshake_age: Duration::from_secs(10),
+//!         },
+//!         Cups::new(cups::Version::V1),
+//!     ),
 //!     application_namespace,
 //!     my_addr,
 //!     max_peers_per_set,
@@ -2386,7 +2394,12 @@ mod tests {
                 .ok_or(TestHandshakeError::UnknownApplicationIdentity)?;
             self.authenticate().await?;
             let (sender, receiver) = sake_cups(
-                Sake::new(self.transport_signer, sake::Version::V1),
+                Sake {
+                    signer: self.transport_signer,
+                    version: sake::Version::V1,
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                },
                 Cups::new(cups::Version::V1),
             )
             .dial(
@@ -2428,7 +2441,12 @@ mod tests {
             self.observations.listens.fetch_add(1, Ordering::Relaxed);
             let handshake = self.clone();
             let (transport_peer, sender, receiver) = sake_cups(
-                Sake::new(self.transport_signer.clone(), sake::Version::V1),
+                Sake {
+                    signer: self.transport_signer.clone(),
+                    version: sake::Version::V1,
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                },
                 Cups::new(cups::Version::V1),
             )
             .listen(

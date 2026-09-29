@@ -240,7 +240,12 @@ impl NetworkScheme for Discovery {
         // Create config with recommended defaults
         let mut config = discovery::Config::recommended(
             sake_cups(
-                Sake::new(peer.info.signer.clone(), sake::Version::V1),
+                Sake {
+                    signer: peer.info.signer.clone(),
+                    version: sake::Version::V1,
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                },
                 Cups::new(cups::Version::V1),
             ),
             b"fuzz_namespace",
@@ -321,7 +326,12 @@ impl NetworkScheme for Lookup {
         // Create lookup config - no bootstrappers needed since we register addresses directly
         let mut config = lookup::Config::recommended(
             sake_cups(
-                Sake::new(peer.info.signer.clone(), sake::Version::V1),
+                Sake {
+                    signer: peer.info.signer.clone(),
+                    version: sake::Version::V1,
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                },
                 Cups::new(cups::Version::V1),
             ),
             b"fuzz_namespace",

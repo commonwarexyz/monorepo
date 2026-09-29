@@ -46,8 +46,8 @@ fn connect(version: Version) -> TransportPair {
 
         let dialer_handshake = (
             Sake {
-                version,
                 signer: dialer_signer.clone(),
+                version,
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
             },
@@ -57,8 +57,8 @@ fn connect(version: Version) -> TransportPair {
 
         let listener_handshake = (
             Sake {
-                version,
                 signer: listener_signer.clone(),
+                version,
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
             },
