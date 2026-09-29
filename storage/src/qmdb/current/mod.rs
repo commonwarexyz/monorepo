@@ -4015,19 +4015,19 @@ pub mod tests {
             let (db, _) = db.apply_batch(m).await.unwrap();
 
             // Get an owned batch from the committed state.
-            let snapshot = db.to_batch();
-            assert_eq!(snapshot.root(), db.root());
+            let view = db.to_batch();
+            assert_eq!(view.root(), db.root());
 
-            // Chain a child batch from the snapshot.
-            let child = snapshot
+            // Chain a child batch from the view.
+            let child = view
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1)))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
 
-            // The child's root should differ from the snapshot.
-            assert_ne!(child.root(), snapshot.root());
+            // The child's root should differ from the view.
+            assert_ne!(child.root(), view.root());
 
             // Apply child.
             let (db, _) = db.apply_batch(child).await.unwrap();

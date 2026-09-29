@@ -1313,7 +1313,7 @@ where
     /// reading through it (or a descendant of it) refuses with [`Error::StaleRead`]
     /// and applying it is rejected with [`Error::StaleBatch`].
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, N, S>> {
-        let grafted = self.grafted_snapshot();
+        let grafted = self.grafted_batch();
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
             grafted,

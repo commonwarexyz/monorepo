@@ -2898,7 +2898,7 @@ where
     /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is off this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (a [`Db::to_batch`] snapshot).
+    /// operations (a [`Db::to_batch`] view).
     pub fn proof<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,

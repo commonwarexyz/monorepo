@@ -1886,16 +1886,19 @@ pub(crate) mod test {
             ));
 
             // Anything at or above the frozen size is rejected.
-            assert!(
+            assert!(matches!(
                 crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
-                    .await
-                    .is_err()
-            );
-            assert!(
-                crate::qmdb::historical_proof(&snapshot, op_count, op_count, NZU64!(1))
-                    .await
-                    .is_err()
-            );
+                    .await,
+                Err(crate::qmdb::Error::Merkle(
+                    crate::merkle::Error::RangeOutOfBounds(_)
+                ))
+            ));
+            assert!(matches!(
+                crate::qmdb::historical_proof(&snapshot, op_count, op_count, NZU64!(1)).await,
+                Err(crate::qmdb::Error::Merkle(
+                    crate::merkle::Error::RangeOutOfBounds(_)
+                ))
+            ));
 
             db.destroy().await.unwrap();
         });

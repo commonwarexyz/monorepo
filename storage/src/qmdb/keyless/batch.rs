@@ -431,7 +431,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is off this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (a [`Keyless::to_batch`] snapshot).
+    /// operations (a [`Keyless::to_batch`] view).
     pub fn proof<E, C, H>(&self, db: &Keyless<F, E, V, C, H, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
