@@ -1,53 +1,82 @@
 //! Simple Authenticated Key Exchange (SAKE).
 //!
+//! SAKE derives one [Cipher](crate::Cipher) per direction from signed ephemeral X25519 keys.
+//! It uses a BLAKE3 [Transcript](crate::transcript::Transcript) and identity signatures from any
+//! [Signer](crate::Signer).
+//!
 //! _This construction is unrelated to [EAP-SAKE] or the [symmetric-key SAKE] protocol._
 //!
-//! # Construction
+//! # Protocol
 //!
-//! SAKE is a fixed three-message handshake between a **dialer** and **listener**:
+//! Both peers supply an application namespace, their own signer, the expected peer identity,
+//! a [Version], and local and accepted peer timestamps in milliseconds through [Context]. Let
+//! `D` and `L` be their public identities, `t_D` and `t_L` their timestamps, and `X` and `Y`
+//! their fresh ephemeral public keys.
 //!
-//! 1. [Syn]: The dialer sends a timestamp, an ephemeral X25519 public key, and a signature bound
-//!    to the transcript and intended listener.
-//! 2. [SynAck]: The listener sends its timestamp, ephemeral X25519 public key, transcript
-//!    signature, and key-confirmation tag.
-//! 3. [Ack]: The dialer verifies the response and sends the opposite-direction confirmation.
+//! ```text
+//! Dialer                                       Listener
+//!   |-- Syn(t_D, X, sig_D) ----------------------->|
+//!   |<-- SynAck(t_L, Y, sig_L, confirmation_l2d) --|
+//!   |-- Ack(confirmation_d2l) -------------------->|
+//! ```
 //!
-//! The current suite uses X25519 for ephemeral key agreement, BLAKE3 for the transcript and key
-//! derivation, any [Signer](crate::Signer) for identity signatures, and any
-//! [Cipher](crate::Cipher) for the two directional traffic ciphers.
+//! 1. [dial_start] generates `X` and signs the initial transcript to produce [Syn].
+//! 2. [listen_start] checks `t_D` against the accepted range and verifies `sig_D` before
+//!    generating `Y` and signing the extended transcript. It rejects a non-contributory X25519
+//!    exchange, commits the shared secret, and returns [SynAck] with its key confirmation.
+//! 3. [dial_end] checks `t_L`, verifies `sig_L`, and performs the same exchange. It rejects a
+//!    non-contributory result or incorrect listener confirmation, then returns [Ack] and the
+//!    send and receive ciphers. The dialer must send [Ack] before application data.
+//! 4. [listen_end] verifies the dialer's confirmation before returning its send and receive
+//!    ciphers. The listener may then accept application data.
 //!
-//! Both public identities are inputs to the core exchange and are incorporated into the transcript
-//! with the timestamps, ephemeral keys, and shared secret in a fixed order. The construction does
-//! not hide identities. SAKE has no 0-RTT mode or resumption mechanism. Application data can be
-//! sent only after the three messages complete.
+//! # Transcript
 //!
-//! The BLAKE3 transcript first commits the caller-provided application namespace as one packet,
-//! then forks it with a protocol namespace. Distinct labels derive the listener-to-dialer and
-//! dialer-to-listener traffic keys and confirmations. These namespace bytes, transcript order, and
-//! labels are protocol constants.
+//! The transcript commits the application namespace as one packet, then forks it with the
+//! version's protocol namespace. Each field below is committed as a separate encoded packet,
+//! in order. Signatures authenticate the transcript at the indicated point and are not themselves
+//! committed.
+//!
+//! | Point | V0 fields | V1 fields |
+//! |-------|-----------|-----------|
+//! | Before `sig_D` | `t_D, L, X` | `t_D, L, D, X` |
+//! | Before `sig_L` | `t_D, L, X, D, t_L, Y` | `t_D, L, D, X, t_L, Y` |
+//! | Before key derivation | Append the X25519 shared secret | Append the X25519 shared secret |
+//!
+//! From the final transcript `T`, `Cipher::random(T.noise(b"cipher_l2d"))` derives the
+//! listener-to-dialer cipher and `Cipher::random(T.noise(b"cipher_d2l"))` derives the reverse
+//! direction. The confirmations are `T.fork(b"confirmation_l2d").summarize()` and
+//! `T.fork(b"confirmation_d2l").summarize()`. Separate labels bind each output to its purpose
+//! and direction.
 //!
 //! # Versions
 //!
-//! [Version] selects the transcript schema. Both peers must use the same version. A mismatch fails
-//! signature verification. The message encodings are identical across versions.
+//! Both peers must use the same [Version]. Versions have identical message encodings but
+//! different signatures and derived keys. A mismatch fails signature verification.
 //!
-//! - [Version::V0] signs [Syn] over the timestamp, listener identity, and ephemeral key, and
-//!   commits the dialer identity only afterwards. If the signature scheme lacks conservative
-//!   exclusive ownership (it admits key substitution), a dialer can complete a handshake under a
-//!   public key other than its own under which its [Syn] signature also verifies. Whether such a
-//!   key can match one a listener admits depends on the signature scheme. V0 uses the protocol
-//!   namespace `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` and
-//!   [transcript::Version::V0](crate::transcript::Version::V0), which is sound here because SAKE
-//!   commits a fixed sequence of canonical encodings at fixed positions.
-//! - [Version::V1] commits both identities before every signature, so each signature covers the
-//!   signer's own identity. V1 uses the protocol namespace `_COMMONWARE_CRYPTOGRAPHY_SAKE` and
-//!   [transcript::Version::V1](crate::transcript::Version::V1).
+//! - [Version::V0] uses `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` and
+//!   [transcript::Version::V0](crate::transcript::Version::V0). Its fixed packet schema makes
+//!   this framing unambiguous. It commits `D` after `sig_D`, so authentication requires a
+//!   signature scheme with conservative exclusive ownership: a signature must not also verify
+//!   under a substituted public key. Otherwise a dialer can complete the exchange under such
+//!   a key if the listener admits it.
+//! - [Version::V1] uses `_COMMONWARE_CRYPTOGRAPHY_SAKE` and
+//!   [transcript::Version::V1](crate::transcript::Version::V1). Both identities precede every
+//!   signature, binding each signer to its declared identity.
 //!
-//! # Timing
+//! # Security
 //!
-//! Callers provide the accepted timestamp range to limit replay and clock skew. Because this core
-//! performs no I/O, callers must separately enforce deadlines around the handshake to bound stalled
-//! attempts.
+//! The listener checks the signed [Syn] before responding. A valid [Syn] can be replayed within
+//! the accepted timestamp range. The final confirmation proves possession of this exchange's
+//! shared secret. Timestamps alone do not prove fresh participation.
+//!
+//! Fresh ephemeral secrets provide forward secrecy against later compromise of the identity
+//! signing keys, provided the ephemeral secrets and secret transcript state have been erased.
+//! Protecting application messages requires a record protocol using the derived ciphers.
+//!
+//! The construction does not hide identities or provide 0-RTT data or resumption. The transcript
+//! does not bind the selected cipher or a record format. Peers must agree on them out of band.
+//! Callers must enforce a handshake deadline separately from the accepted timestamp range.
 //!
 //! [EAP-SAKE]: https://www.rfc-editor.org/rfc/rfc4763
 //! [symmetric-key SAKE]: https://eprint.iacr.org/2019/444

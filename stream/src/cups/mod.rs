@@ -1,40 +1,54 @@
 //! Counter Unidirectional Packet Stream (CUPS).
 //!
-//! CUPS protects ordered message records using a separate key and implicit counter for each
-//! direction. "Packet" refers to a framed message on an ordered byte stream.
+//! CUPS encrypts and authenticates ordered messages using a separate
+//! [Cipher](commonware_cryptography::Cipher) per direction. A packet is one framed message on an
+//! ordered byte stream.
 //!
-//! # Keys
+//! # Setup
 //!
-//! [Cups] runs its [handshake](crate::Handshake) to agree on one cipher per direction, then
-//! turns them into the [Sender] and [Receiver] halves. Both peers must use the same
-//! [Version] and cipher.
+//! [Cups] runs its [handshake](crate::Handshake), then wraps the agreed ciphers in [Sender] and
+//! [Receiver] halves. Peer authentication, key establishment, and application namespace binding come
+//! from the handshake. Both peers must use the same [Version] and cipher. CUPS does not negotiate
+//! them. The caller sets a plaintext message limit no greater than [Cups::MAX_SIZE].
 //!
 //! # Records
 //!
-//! Each message becomes one record, and batching writes preserves record boundaries. Records are
-//! sealed by the [Cipher](commonware_cryptography::Cipher) that [Cups] is instantiated with, which
-//! appends a fixed-size tag.
+//! Let `m` be a message of `n` bytes and `t` the cipher's fixed tag size. `seal_i(x)` denotes
+//! the ciphertext of `x` followed by its tag at cipher position `i`, with empty associated data.
+//! Positions advance independently in each direction and are never transmitted.
 //!
-//! - Version 0: a visible u32 varint holding the length of the encrypted payload and its tag,
-//!   then the encrypted payload and its tag.
-//! - Version 1: a header holding the payload length as an encrypted 4-byte big-endian integer and
-//!   its tag, then the encrypted payload and its tag.
+//! Each record consists of a header followed by a body:
 //!
-//! CUPS never changes a direction's key. Any key evolution is internal to the cipher. A record
-//! consumes one position of its cipher in version 0 and two in version 1, first for the header and
-//! then for the payload. Positions are never transmitted, so replayed, reordered, or corrupted
-//! records fail authentication rather than being reordered for delivery. A cipher that can seal no
-//! more messages requires a new connection. After a record fails to seal or open, that half refuses
-//! every later record.
+//! | Version | Header | Body | Positions per record |
+//! |---------|--------|------|----------------------|
+//! | [V0](Version::V0) | `varint_u32(n + t)` | `seal_i(m)` | 1 |
+//! | [V1](Version::V1) | `seal_i(BE32(n))` | `seal_(i+1)(m)` | 2 |
+//!
+//! V0's length prefix is visible and canonical. The receiver bounds it before requesting the
+//! body, then authenticates the body at the expected cipher position. Changing the prefix can
+//! change how many bytes it waits for, but cannot make it deliver an unauthenticated message.
+//!
+//! V1's header is exactly `4 + t` bytes. The receiver authenticates and decrypts it, checks the
+//! plaintext length against the message limit, then requests and authenticates the `n + t` byte
+//! body. A forged header is rejected before any body is requested. An authenticated peer can still
+//! announce an allowed length and stall while sending the body.
+//!
+//! Empty messages are valid records. Batching preserves each record and its cipher positions.
+//! No plaintext is delivered until the complete body authenticates.
 //!
 //! # Security
 //!
-//! CUPS protects the confidentiality and integrity of each record. Peer authentication and key
-//! freshness come from the handshake. Version 0 exposes record lengths and boundaries in the byte
-//! stream. Version 1 removes them from the byte stream, but message sizes and timing remain
-//! observable through transport segments. CUPS adds no padding, key ratchet, or rekeying.
-//! Callers must discard the connection after an I/O error or cancellation, as required by
-//! [crate::Sender] and [crate::Receiver].
+//! Cipher positions enforce order: modified, replayed, or reordered records cannot authenticate
+//! at the next expected position. After a seal or open failure, that half cannot process further
+//! records. Callers must discard the connection after an I/O error or cancellation, as required
+//! by [crate::Sender] and [crate::Receiver], and after any receive error.
+//!
+//! V0 exposes record lengths and boundaries. V1 encrypts them, but transport sizes and timing
+//! still reveal traffic patterns. CUPS adds no padding or authenticated end-of-stream marker,
+//! so it does not establish whether a closed connection delivered every intended message.
+//!
+//! CUPS does not evolve keys itself. A cipher may rekey internally. Exhaustion requires a new
+//! connection.
 
 mod protocol;
 pub use protocol::{Cups, Error, Receiver, Sender, Version};
