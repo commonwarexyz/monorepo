@@ -1,5 +1,6 @@
 use super::{input::Input, pair, row4, supports_avx2, supports_avx512, supports_avx512vl};
 use crate::{Hasher as _, blake3::Blake3};
+use commonware_utils::iter::zip_eq;
 use core::{arch::x86_64::_mm_storeu_si128, cell::Cell};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -143,6 +144,70 @@ fn test_row4_lanes_and_batch() {
     }
 }
 
+fn check_multipart_row4<const P: usize>(sizes: [usize; P]) {
+    for alignment in 0..32 {
+        let buffers: [[(Box<[u8]>, usize); P]; 4] = core::array::from_fn(|lane| {
+            core::array::from_fn(|part| {
+                let offset = (alignment + lane * 7 + part * 11) % 32;
+                let salt = (17 + lane * 43 + part * 31) as u8;
+                let buffer = fragments(sizes[part], false, offset, salt).pop().unwrap();
+                (buffer, offset)
+            })
+        });
+        let messages: [[&[u8]; P]; 4] = core::array::from_fn(|lane| {
+            core::array::from_fn(|part| {
+                let (buffer, offset) = &buffers[lane][part];
+                &buffer[*offset..]
+            })
+        });
+        let expected: [_; 4] = core::array::from_fn(|lane| reference(&messages[lane]));
+        for active in [3, 4] {
+            let actual = super::hash_many_parts(&messages[..active]).unwrap();
+            assert_eq!(actual.len(), active);
+            for (digest, expected) in zip_eq(&actual, &expected[..active]) {
+                assert_eq!(digest.as_ref(), expected);
+            }
+            let public = Blake3::hash_many_parts(&messages[..active]);
+            for (digest, expected) in zip_eq(&public, &expected[..active]) {
+                assert_eq!(digest.as_ref(), expected);
+            }
+            assert_eq!(public.len(), active);
+        }
+
+        let mut aliases = messages;
+        aliases[1] = aliases[0];
+        aliases[3] = aliases[2];
+        for active in [3, 4] {
+            let actual = super::hash_many_parts(&aliases[..active]).unwrap();
+            for (digest, parts) in zip_eq(&actual, &aliases[..active]) {
+                assert_eq!(digest.as_ref(), reference(parts));
+            }
+        }
+    }
+}
+
+#[test]
+fn test_row4_multipart_fragment_extents_and_aliases() {
+    if !supports_avx512() {
+        return;
+    }
+    check_multipart_row4([8, 32]);
+    check_multipart_row4([32, 32]);
+    check_multipart_row4([8, 32, 32]);
+
+    // Both digest fragments share one exact-size allocation.
+    let position = fragments(8, false, 7, 11).pop().unwrap();
+    let digest = fragments(32, false, 13, 97).pop().unwrap();
+    let aliased = [&position[7..], &digest[13..], &digest[13..]];
+    let messages = [aliased; 4];
+    for active in [3, 4] {
+        let actual = super::hash_many_parts(&messages[..active]).unwrap();
+        for output in actual {
+            assert_eq!(output.as_ref(), reference(&aliased));
+        }
+    }
+}
+
 #[test]
 fn test_row4_rejects_changed_input_lengths() {
     if !supports_avx512() {
@@ -171,9 +236,62 @@ fn test_row4_rejects_changed_input_lengths() {
                 shorten: index == count / 16 * 16 + 1,
             })
             .collect();
-        // The middle lane of the final batch changes length after grouping.
-        // Kernels must reject unequal captured slices before compressing them.
+        // A direct batch may capture the initial views before any changes.
+        // Grouped batches must reject unequal captured slices.
         let result = catch_unwind(AssertUnwindSafe(|| Blake3::hash_many(&messages)));
-        assert!(result.is_err(), "count={count}");
+        if let Ok(digests) = result {
+            assert!(count < 16, "count={count}");
+            assert_eq!(digests.len(), count);
+            for digest in digests {
+                assert_eq!(digest.as_ref(), &reference(&[&[0x5a; 64]]));
+            }
+        }
+    }
+}
+
+#[test]
+fn test_row_dispatch_captured_views() {
+    if !supports_avx512() {
+        return;
+    }
+    struct Message<'a> {
+        initial: &'a [u8],
+        later: &'a [u8],
+        captured: Cell<bool>,
+    }
+    impl AsRef<[u8]> for Message<'_> {
+        fn as_ref(&self) -> &[u8] {
+            if self.captured.replace(true) {
+                self.later
+            } else {
+                self.initial
+            }
+        }
+    }
+    let buffers = fragments(72, false, 7, 31);
+    let full = &buffers[0][7..];
+    for active in [3, 4] {
+        let messages: Vec<_> = (0..active)
+            .map(|_| Message {
+                initial: full,
+                later: &full[..1],
+                captured: Cell::new(false),
+            })
+            .collect();
+        let actual = super::hash_rows(&messages).unwrap();
+        assert_eq!(actual.len(), active);
+        for digest in actual {
+            assert_eq!(digest.as_ref(), &reference(&[full]));
+        }
+        for unsupported in [1, 36, 40, 64] {
+            let mut inputs = vec![full; active];
+            inputs[1] = &full[..unsupported];
+            assert!(super::hash_rows(&inputs).is_none());
+        }
+        assert!(super::hash_rows(&vec![&full[..36]; active]).is_none());
+        let actual = super::hash_many(&vec![full; active]).unwrap();
+        for digest in actual {
+            assert_eq!(digest.as_ref(), &reference(&[full]));
+        }
     }
 }

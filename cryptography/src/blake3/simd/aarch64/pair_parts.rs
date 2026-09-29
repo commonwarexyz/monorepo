@@ -1,6 +1,6 @@
 //! Direct loads for pairs of short messages with fixed part layouts.
 
-use super::{Dup, Words, supported, supports_sha3};
+use super::{Dup, Words, supported, supports_sha3, supports_sve2};
 use blake3::{BLOCK_LEN, OUT_LEN};
 use core::arch::aarch64::{
     uint32x4_t, vcombine_u8, vdup_n_u8, vdupq_n_u32, vextq_u32, vld1_u8, vld1q_u8,
@@ -10,7 +10,7 @@ use core::arch::aarch64::{
 /// Hash two messages when both have the same supported part layout.
 ///
 /// Each part is loaded within its own bounds. Unsupported layouts and CPUs
-/// without the SHA-3 extension use the general pair path.
+/// supporting neither SVE2 nor the SHA-3 extension use the general pair path.
 #[inline]
 pub(in crate::blake3::simd) fn hash_pair_parts(
     left: &[&[u8]],
@@ -20,7 +20,14 @@ pub(in crate::blake3::simd) fn hash_pair_parts(
     if !matches!(left.first(), Some(part) if matches!(part.len(), 4 | 8 | 32)) {
         return None;
     }
-    if !supported() || !supports_sha3() {
+    if !supported() {
+        return None;
+    }
+    if supports_sve2() {
+        // SAFETY: NEON and SVE2 availability were established above.
+        return unsafe { super::row_pair::hash_pair_parts(left, right) };
+    }
+    if !supports_sha3() {
         return None;
     }
     // SAFETY: The CPU supports NEON and SHA-3. The kernel checks the exact
@@ -87,39 +94,82 @@ const unsafe fn word4(input: &[u8]) -> u32 {
     u32::from_le(unsafe { core::ptr::read_unaligned(input.as_ptr().cast::<u32>()) })
 }
 
-/// Hash two validated part layouts with the existing duplicated SHA-3 words.
+pub(super) type Rows = [uint32x4_t; 4];
+pub(super) type PairRows = [Rows; 2];
+
+#[inline(always)]
+unsafe fn leaf_rows(p: &[u8], d: &[u8]) -> Rows {
+    // SAFETY: The caller validates an eight-byte position and 32-byte digest
+    // and establishes NEON.
+    unsafe {
+        [
+            row8_then8(p, d),
+            row16(&d[8..]),
+            row8(&d[24..]),
+            vdupq_n_u32(0),
+        ]
+    }
+}
+
+#[inline(always)]
+unsafe fn child_rows(l: &[u8], r: &[u8]) -> Rows {
+    // SAFETY: The caller validates two 32-byte digests and establishes NEON.
+    unsafe { [row16(l), row16(&l[16..]), row16(r), row16(&r[16..])] }
+}
+
+#[inline(always)]
+unsafe fn node_rows(p: &[u8], l: &[u8], r: &[u8]) -> Rows {
+    // SAFETY: The caller validates an eight-byte position and two 32-byte
+    // digests and establishes NEON.
+    unsafe {
+        [
+            row8_then8(p, l),
+            row16(&l[8..]),
+            row8_then8(&l[24..], r),
+            row16(&r[8..]),
+        ]
+    }
+}
+
+#[inline(always)]
+unsafe fn indexed_rows(i: &[u8], d: &[u8]) -> Rows {
+    // SAFETY: The caller validates a four-byte index and 32-byte digest and
+    // establishes NEON.
+    unsafe {
+        let zero = vdupq_n_u32(0);
+        let head = row16(d);
+        let head = vsetq_lane_u32::<0>(word4(i), vextq_u32::<3>(head, head));
+        [
+            head,
+            row16(&d[12..]),
+            vsetq_lane_u32::<0>(word4(&d[28..]), zero),
+            zero,
+        ]
+    }
+}
+
+/// Load one of the exact supported layouts without crossing any part boundary.
 ///
 /// # Safety
 ///
-/// The caller must establish NEON and SHA-3 availability.
-#[target_feature(enable = "neon,sha3")]
-unsafe fn hash_pair_parts_sha3(left: &[&[u8]], right: &[&[u8]]) -> Option<[[u8; OUT_LEN]; 2]> {
-    let (left_rows, right_rows, tail, len) = match (left, right) {
+/// The caller must establish NEON availability.
+#[inline(always)]
+pub(super) unsafe fn load_parts(
+    left: &[&[u8]],
+    right: &[&[u8]],
+) -> Option<(PairRows, Option<PairRows>, usize)> {
+    Some(match (left, right) {
         ([lp, ld], [rp, rd])
             if lp.len() == 8 && ld.len() == 32 && rp.len() == 8 && rd.len() == 32 =>
         {
             // SAFETY: Both positions are eight bytes and both digests are 32 bytes.
-            unsafe {
-                let rows = |p: &[u8], d: &[u8]| {
-                    [
-                        row8_then8(p, d),
-                        row16(&d[8..]),
-                        row8(&d[24..]),
-                        vdupq_n_u32(0),
-                    ]
-                };
-                (rows(lp, ld), rows(rp, rd), None, 40)
-            }
+            unsafe { ([leaf_rows(lp, ld), leaf_rows(rp, rd)], None, 40) }
         }
         ([ll, lr], [rl, rr])
             if ll.len() == 32 && lr.len() == 32 && rl.len() == 32 && rr.len() == 32 =>
         {
             // SAFETY: Each child digest is 32 bytes.
-            unsafe {
-                let rows =
-                    |l: &[u8], r: &[u8]| [row16(l), row16(&l[16..]), row16(r), row16(&r[16..])];
-                (rows(ll, lr), rows(rl, rr), None, 64)
-            }
+            unsafe { ([child_rows(ll, lr), child_rows(rl, rr)], None, 64) }
         }
         ([lp, ll, lr], [rp, rl, rr])
             if lp.len() == 8
@@ -131,20 +181,13 @@ unsafe fn hash_pair_parts_sha3(left: &[&[u8]], right: &[&[u8]]) -> Option<[[u8; 
         {
             // SAFETY: Both positions are eight bytes and all digests are 32 bytes.
             unsafe {
-                let rows = |p: &[u8], l: &[u8], r: &[u8]| {
-                    [
-                        row8_then8(p, l),
-                        row16(&l[8..]),
-                        row8_then8(&l[24..], r),
-                        row16(&r[8..]),
-                    ]
-                };
                 let zero = vdupq_n_u32(0);
-                let tail = |r: &[u8]| [row8(&r[24..]), zero, zero, zero];
                 (
-                    rows(lp, ll, lr),
-                    rows(rp, rl, rr),
-                    Some((tail(lr), tail(rr))),
+                    [node_rows(lp, ll, lr), node_rows(rp, rl, rr)],
+                    Some([
+                        [row8(&lr[24..]), zero, zero, zero],
+                        [row8(&rr[24..]), zero, zero, zero],
+                    ]),
                     72,
                 )
             }
@@ -153,23 +196,21 @@ unsafe fn hash_pair_parts_sha3(left: &[&[u8]], right: &[&[u8]]) -> Option<[[u8; 
             if li.len() == 4 && ld.len() == 32 && ri.len() == 4 && rd.len() == 32 =>
         {
             // SAFETY: Each index contains four bytes and each digest contains 32 bytes.
-            unsafe {
-                let zero = vdupq_n_u32(0);
-                let rows = |i: &[u8], d: &[u8]| {
-                    let head = row16(d);
-                    let head = vsetq_lane_u32::<0>(word4(i), vextq_u32::<3>(head, head));
-                    [
-                        head,
-                        row16(&d[12..]),
-                        vsetq_lane_u32::<0>(word4(&d[28..]), zero),
-                        zero,
-                    ]
-                };
-                (rows(li, ld), rows(ri, rd), None, 36)
-            }
+            unsafe { ([indexed_rows(li, ld), indexed_rows(ri, rd)], None, 36) }
         }
         _ => return None,
-    };
+    })
+}
+
+/// Hash two validated part layouts with duplicated SHA-3 words.
+///
+/// # Safety
+///
+/// The caller must establish NEON and SHA-3 availability.
+#[target_feature(enable = "neon,sha3")]
+unsafe fn hash_pair_parts_sha3(left: &[&[u8]], right: &[&[u8]]) -> Option<[[u8; OUT_LEN]; 2]> {
+    // SAFETY: NEON is enabled for this function.
+    let ([left_rows, right_rows], tail, len) = unsafe { load_parts(left, right)? };
 
     // SAFETY: The shape guard established all input extents. This function
     // enables SHA-3 and NEON, and each message is one BLAKE3 chunk.
@@ -182,7 +223,7 @@ unsafe fn hash_pair_parts_sha3(left: &[&[u8]], right: &[&[u8]]) -> Option<[[u8; 
             super::super::CHUNK_START | super::super::CHUNK_END | super::super::ROOT
         };
         super::super::compress(&mut cv, &message, 0, len.min(BLOCK_LEN), flags);
-        if let Some((left_tail, right_tail)) = tail {
+        if let Some([left_tail, right_tail]) = tail {
             let message = block(left_tail, right_tail);
             super::super::compress(
                 &mut cv,
@@ -219,7 +260,7 @@ mod tests {
 
     #[test]
     fn exact_part_layouts_match_reference_with_unaligned_separate_allocations() {
-        if !supported() || !supports_sha3() {
+        if !supported() || !(supports_sve2() || supports_sha3()) {
             return;
         }
         for lengths in [[4, 32, 0], [8, 32, 0], [32, 32, 0], [8, 32, 32]] {
@@ -237,6 +278,11 @@ mod tests {
                     hash_pair_parts(&left, &right).expect("supported part layout");
                 assert_eq!(left_digest, *blake3::hash(&left.concat()).as_bytes());
                 assert_eq!(right_digest, *blake3::hash(&right.concat()).as_bytes());
+                if supports_sha3() {
+                    // SAFETY: NEON and SHA-3 availability were established.
+                    let duplicated = unsafe { hash_pair_parts_sha3(&left, &right) };
+                    assert_eq!(duplicated, Some([left_digest, right_digest]));
+                }
                 assert_eq!(
                     hash_pair_parts(&left, &left),
                     Some([left_digest, left_digest]),

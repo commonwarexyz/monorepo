@@ -209,6 +209,11 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     {
         return Some(digests);
     }
+    if matches!(messages.len(), 3 | 4)
+        && let Some(digests) = hash_rows(messages)
+    {
+        return Some(digests);
+    }
     if supports_avx512() {
         let pack = |messages: &[&[u8]], digests: &mut _| Avx512(()).pack(messages, digests);
         return Some(batch(messages, avx512::MINIMUM, pack, |inputs, active| {
@@ -225,6 +230,70 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
         }));
     }
     None
+}
+
+/// Keep the row inputs and outputs in a separate frame from the general
+/// batch dispatcher.
+#[inline(never)]
+fn hash_rows<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
+    if !supports_avx512() {
+        return None;
+    }
+    let [first, second, third, rest @ ..] = messages else {
+        return None;
+    };
+    if rest.len() > 1 {
+        return None;
+    }
+    let first = first.as_ref();
+    let inputs = [
+        first,
+        second.as_ref(),
+        third.as_ref(),
+        rest.first().map_or(first, AsRef::as_ref),
+    ];
+    let len = inputs[0].len();
+    if !input::Input::supports_len(len) || inputs.iter().any(|input| input.len() != len) {
+        return None;
+    }
+
+    // SAFETY: AVX-512F is available, and all captured slices have the same
+    // supported length.
+    let outputs = unsafe { row4::hash(inputs) };
+    Some(
+        outputs
+            .into_iter()
+            .take(messages.len())
+            .map(Digest)
+            .collect(),
+    )
+}
+
+/// Hash three or four messages directly from supported fragments.
+pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option<Vec<Digest>> {
+    if !matches!(messages.len(), 3 | 4) || !supports_avx512() {
+        return None;
+    }
+    let inputs = [
+        input::Input::new(&messages[0])?,
+        input::Input::new(&messages[1])?,
+        input::Input::new(&messages[2])?,
+        input::Input::new(messages.get(3).unwrap_or(&messages[0]))?,
+    ];
+    if inputs.iter().any(|input| input.len() != inputs[0].len()) {
+        return None;
+    }
+
+    // SAFETY: AVX-512F is available, each Input validates its fragments,
+    // and every captured message has the same supported length.
+    let outputs = unsafe { row4::hash_parts(inputs.each_ref()) };
+    Some(
+        outputs
+            .into_iter()
+            .take(messages.len())
+            .map(Digest)
+            .collect(),
+    )
 }
 
 /// Keep the pair kernel's temporaries in a separate stack frame from the

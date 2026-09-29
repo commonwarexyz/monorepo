@@ -4,7 +4,8 @@
 //! independent mixing chains fill the vector pipes that one four-lane chain
 //! leaves idle. When SVE2 is available, their 12, 8, and 7 bit xor-rotates use
 //! the `XAR` instruction. Partial batches use four-lane words, whose fused
-//! xor-rotates all use `XAR` when available. Pairs use duplicated words and
+//! xor-rotates all use `XAR` when available. Pairs with fixed short layouts
+//! use two state-row streams with SVE2. Other pairs use duplicated words and
 //! the SHA-3 extension's `XAR` when available.
 //!
 //! A single message of two or more chunks hashes its chunks in the same lanes,
@@ -21,6 +22,7 @@ use blake3::{
 use core::arch::{aarch64::*, asm};
 
 mod pair_parts;
+mod row_pair;
 pub(super) use pair_parts::hash_pair_parts;
 
 /// Messages per NEON vector.
@@ -294,8 +296,46 @@ impl Words<LANES> for Xar {
 
     #[inline(always)]
     unsafe fn load(blocks: [&[u8; BLOCK_LEN]; LANES]) -> [Self; 16] {
+        // Explicit word construction keeps constant tail words visible to compression.
         // SAFETY: The caller establishes NEON.
-        unsafe { <uint32x4_t as Words<LANES>>::load(blocks).map(Self) }
+        unsafe {
+            let [
+                m0,
+                m1,
+                m2,
+                m3,
+                m4,
+                m5,
+                m6,
+                m7,
+                m8,
+                m9,
+                m10,
+                m11,
+                m12,
+                m13,
+                m14,
+                m15,
+            ] = <uint32x4_t as Words<LANES>>::load(blocks);
+            [
+                Self(m0),
+                Self(m1),
+                Self(m2),
+                Self(m3),
+                Self(m4),
+                Self(m5),
+                Self(m6),
+                Self(m7),
+                Self(m8),
+                Self(m9),
+                Self(m10),
+                Self(m11),
+                Self(m12),
+                Self(m13),
+                Self(m14),
+                Self(m15),
+            ]
+        }
     }
 
     #[inline(always)]
@@ -697,7 +737,8 @@ cfg_if::cfg_if! {
 ///
 /// # Safety
 ///
-/// The caller must establish NEON availability.
+/// The caller must establish NEON availability and SVE2 availability when
+/// `sve2` is true.
 #[inline]
 unsafe fn hash_quad(inputs: [&[u8]; LANES], sve2: bool) -> [[u8; OUT_LEN]; LANES] {
     if sve2 {
@@ -1006,6 +1047,70 @@ pub(in crate::blake3) fn subtree(input: &[u8], first: u64) -> Option<ChainingVal
     Some(cvs[0])
 }
 
+/// Hash four 72-byte messages with a full block and an eight-byte tail.
+///
+/// # Safety
+///
+/// The caller must establish NEON and SVE2 availability.
+#[inline(never)]
+#[target_feature(enable = "neon")]
+unsafe fn hash_quad_72(inputs: [&[u8; 72]; LANES]) -> [[u8; OUT_LEN]; LANES] {
+    // SAFETY: The caller establishes NEON and SVE2. Each input contains one
+    // full block followed by an eight-byte tail.
+    unsafe {
+        let blocks = inputs.map(|input| {
+            input[..BLOCK_LEN]
+                .try_into()
+                .expect("block is BLOCK_LEN bytes")
+        });
+        let mut cv = super::iv::<Xar, LANES>();
+        let message = Xar::load(blocks);
+        super::compress(&mut cv, &message, 0, BLOCK_LEN, super::CHUNK_START);
+        let tail = Xar::load_partial(inputs.map(|input| &input[..]), BLOCK_LEN, 8);
+        super::compress(&mut cv, &tail, 0, 8, super::CHUNK_END | super::ROOT);
+        Xar::store(cv)
+    }
+}
+
+/// Hash three or four short messages with the four-lane kernel.
+///
+/// # Safety
+///
+/// The caller must establish NEON availability. If `sve2` is true, it must also
+/// establish SVE2 availability.
+#[inline(never)]
+#[target_feature(enable = "neon")]
+unsafe fn hash_small<M: AsRef<[u8]>>(messages: &[M], sve2: bool) -> Option<Vec<Digest>> {
+    let inputs = match messages {
+        [a, b, c] => {
+            let first = a.as_ref();
+            [first, b.as_ref(), c.as_ref(), first]
+        }
+        [a, b, c, d] => [a.as_ref(), b.as_ref(), c.as_ref(), d.as_ref()],
+        _ => return None,
+    };
+    let len = inputs[0].len();
+    if !matches!(len, 36 | 40 | 64 | 72) || inputs.iter().any(|input| input.len() != len) {
+        return None;
+    }
+    // SAFETY: NEON is enabled, the caller established the optional SVE2
+    // feature, and every captured lane has the same validated length.
+    let outputs = unsafe {
+        if sve2 && len == 72 {
+            hash_quad_72(inputs.map(|input| input.try_into().expect("input is 72 bytes")))
+        } else {
+            hash_quad(inputs, sve2)
+        }
+    };
+    Some(
+        outputs
+            .into_iter()
+            .take(messages.len())
+            .map(Digest)
+            .collect(),
+    )
+}
+
 /// Hash independent messages in batches of eight, hashing partial batches of
 /// at most four messages with narrower kernels.
 pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
@@ -1016,6 +1121,32 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
         sve2: supports_sve2(),
         sha3: supports_sha3(),
     };
+    if let [left, right] = messages
+        && (features.sve2 || features.sha3)
+    {
+        let left = left.as_ref();
+        let right = right.as_ref();
+        let pair = match (left.len(), right.len()) {
+            (36, 36) => hash_pair_parts(&[&left[..4], &left[4..]], &[&right[..4], &right[4..]]),
+            (40, 40) => hash_pair_parts(&[&left[..8], &left[8..]], &[&right[..8], &right[8..]]),
+            (64, 64) => hash_pair_parts(&[&left[..32], &left[32..]], &[&right[..32], &right[32..]]),
+            (72, 72) => hash_pair_parts(
+                &[&left[..8], &left[8..40], &left[40..]],
+                &[&right[..8], &right[8..40], &right[40..]],
+            ),
+            _ => None,
+        };
+        if let Some([left, right]) = pair {
+            return Some(Vec::from([Digest(left), Digest(right)]));
+        }
+    }
+    if matches!(messages.len(), 3 | 4) {
+        // SAFETY: NEON availability was established above, and the feature
+        // snapshot records whether the four-lane SVE2 kernel is available.
+        if let Some(digests) = unsafe { hash_small(messages, features.sve2) } {
+            return Some(digests);
+        }
+    }
     let pack = |messages: &[&[u8]], digests: &mut _| features.pack(messages, digests);
     Some(batch(messages, MINIMUM, pack, |inputs, active| {
         if active > LANES {

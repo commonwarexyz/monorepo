@@ -549,8 +549,8 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     }
 }
 
-/// Hash messages of `P` parts each, using the pair kernel for two short
-/// messages and otherwise concatenating them for the batch kernel.
+/// Hash messages of `P` parts each, using short-message kernels where available
+/// and otherwise concatenating them for the batch kernel.
 ///
 /// Returns `None` when no kernel is available or there are fewer than two
 /// messages.
@@ -563,6 +563,12 @@ pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option
         && let Some((left, right)) = hash_pair(left, right)
     {
         return Some(vec![left, right]);
+    }
+    #[cfg(target_arch = "x86_64")]
+    if matches!(messages.len(), 3 | 4)
+        && let Some(digests) = x86_64::hash_many_parts(messages)
+    {
+        return Some(digests);
     }
     let len = messages.iter().flatten().map(|part| part.len()).sum();
     let mut buffer = Vec::with_capacity(len);

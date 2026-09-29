@@ -181,7 +181,6 @@ pub(super) unsafe fn hash_pair_vl(
 #[inline(always)]
 unsafe fn direct<const VL: bool>(left: &Input<'_>, right: &Input<'_>) -> [[u8; OUT_LEN]; 2] {
     let len = left.len();
-    let blocks = len.div_ceil(BLOCK_LEN);
 
     // SAFETY: The caller establishes the features this build requires. Input
     // validates fragment extents, and every load offset is a multiple of 16.
@@ -190,22 +189,37 @@ unsafe fn direct<const VL: bool>(left: &Input<'_>, right: &Input<'_>) -> [[u8; O
             _mm256_broadcastsi128_si256(_mm_loadu_si128(IV.as_ptr().cast())),
             _mm256_broadcastsi128_si256(_mm_loadu_si128(IV.as_ptr().add(4).cast())),
         ];
-        for block in 0..blocks {
-            let offset = block * BLOCK_LEN;
-            let flags = if block == 0 { CHUNK_START } else { 0 }
-                | if block + 1 == blocks {
-                    CHUNK_END | ROOT
-                } else {
-                    0
-                };
-            let message = core::array::from_fn(|quarter| {
-                let offset = offset + 16 * quarter;
-                _mm256_inserti128_si256::<1>(
-                    _mm256_castsi128_si256(left.load(offset)),
-                    right.load(offset),
-                )
-            });
-            row::compress::<_, VL>(&mut cv, message, (len - offset).min(BLOCK_LEN), flags);
+        let flags = CHUNK_START
+            | if len <= BLOCK_LEN {
+                CHUNK_END | ROOT
+            } else {
+                0
+            };
+        let message = core::array::from_fn(|quarter| {
+            let offset = 16 * quarter;
+            _mm256_inserti128_si256::<1>(
+                _mm256_castsi128_si256(left.load(offset)),
+                right.load(offset),
+            )
+        });
+        row::compress::<_, VL>(&mut cv, message, len.min(BLOCK_LEN), flags);
+        if len == 72 {
+            let tail = _mm256_inserti128_si256::<1>(
+                _mm256_castsi128_si256(left.load(BLOCK_LEN)),
+                right.load(BLOCK_LEN),
+            );
+            let tail = _mm256_unpacklo_epi64(tail, _mm256_setzero_si256());
+            row::compress::<_, VL>(
+                &mut cv,
+                [
+                    tail,
+                    _mm256_setzero_si256(),
+                    _mm256_setzero_si256(),
+                    _mm256_setzero_si256(),
+                ],
+                8,
+                CHUNK_END | ROOT,
+            );
         }
         let mut outputs = [[0; OUT_LEN]; 2];
         _mm256_storeu_si256(

@@ -491,12 +491,18 @@ mod tests {
         refs[9] = &messages[9][..63];
         let expected: Vec<Digest> = refs.iter().map(|message| reference(&[message])).collect();
         assert_eq!(Blake3::hash_many(&refs), expected);
+        for count in 2..=4 {
+            assert_eq!(
+                Blake3::hash_many(&refs[8..8 + count]),
+                expected[8..8 + count]
+            );
+        }
     }
 
     #[test]
     fn test_hash_many_aliased_unaligned_inputs_match_individual_hashes() {
         let backing = random(2100, 0);
-        for len in [129, 1025, 2049] {
+        for len in [36, 40, 64, 72, 129, 1025, 2049] {
             let messages: [&[u8]; 16] = core::array::from_fn(|lane| &backing[lane..lane + len]);
             let expected: Vec<Digest> = messages
                 .iter()
@@ -507,6 +513,35 @@ mod tests {
             }
             let repeated = [&backing[1..=len]; 16];
             assert_eq!(Blake3::hash_many(&repeated), vec![expected[1]; 16]);
+        }
+
+        // Shared wrappers may expose different slices on successive conversions.
+        // Every returned digest must correspond to one of those slices.
+        struct SharedView {
+            bytes: [u8; 64],
+            shortened: core::cell::Cell<bool>,
+        }
+        impl AsRef<[u8]> for SharedView {
+            fn as_ref(&self) -> &[u8] {
+                if self.shortened.replace(true) {
+                    &self.bytes[..1]
+                } else {
+                    &self.bytes
+                }
+            }
+        }
+        for count in 2..=4 {
+            let message = SharedView {
+                bytes: [0x5a; 64],
+                shortened: core::cell::Cell::new(false),
+            };
+            let views = [
+                reference(&[&message.bytes]),
+                reference(&[&message.bytes[..1]]),
+            ];
+            let digests = Blake3::hash_many(&vec![&message; count]);
+            assert_eq!(digests.len(), count);
+            assert!(digests.iter().all(|digest| views.contains(digest)));
         }
     }
 
