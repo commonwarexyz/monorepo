@@ -21,7 +21,9 @@ enum Message<S: Scheme, D: Digest> {
     Ack(Ack<S, D>),
     Certified(Certificate<S, D>),
     Tip(Height),
+    Diverged(Height),
     GetTip(oneshot::Sender<Option<(Height, Epoch)>>),
+    GetDiverged(oneshot::Sender<Vec<Height>>),
     GetContiguousTip(oneshot::Sender<Option<Height>>),
     Get(Height, oneshot::Sender<Option<(D, Epoch)>>),
 }
@@ -58,6 +60,9 @@ pub struct Reporter<R: CryptoRng, S: Scheme, D: Digest> {
 
     // Current epoch (tracked from acks)
     current_epoch: Epoch,
+
+    // Heights whose digest diverged from honest validators
+    diverged: Vec<Height>,
 }
 
 impl<R, S, D> Reporter<R, S, D>
@@ -78,6 +83,7 @@ where
                 contiguous: None,
                 highest: None,
                 current_epoch: Epoch::new(111), // Initialize with the expected epoch
+                diverged: Vec::new(),
             },
             Mailbox { sender },
         )
@@ -157,8 +163,16 @@ where
                         self.highest = Some((height, self.current_epoch));
                     }
                 }
+                Message::Diverged(height) => {
+                    // Divergence is reported once per height
+                    assert!(!self.diverged.contains(&height));
+                    self.diverged.push(height);
+                }
                 Message::GetTip(sender) => {
                     sender.send(self.highest).unwrap();
+                }
+                Message::GetDiverged(sender) => {
+                    sender.send(self.diverged.clone()).unwrap();
                 }
                 Message::GetContiguousTip(sender) => {
                     sender.send(self.contiguous).unwrap();
@@ -191,6 +205,7 @@ where
                 self.sender.enqueue(Message::Certified(certificate))
             }
             Activity::Tip(height) => self.sender.enqueue(Message::Tip(height)),
+            Activity::Diverged(item) => self.sender.enqueue(Message::Diverged(item.height)),
         }
     }
 }
@@ -225,6 +240,14 @@ where
         assert!(
             self.sender.enqueue(Message::Get(height, sender)).accepted(),
             "Failed to send get"
+        );
+        receiver.await.unwrap()
+    }
+    pub async fn get_diverged(&mut self) -> Vec<Height> {
+        let (sender, receiver) = oneshot::channel();
+        assert!(
+            self.sender.enqueue(Message::GetDiverged(sender)).accepted(),
+            "Failed to send get diverged"
         );
         receiver.await.unwrap()
     }
