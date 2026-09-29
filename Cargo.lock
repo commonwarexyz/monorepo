@@ -2423,6 +2423,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-simd"
+version = "2026.9.0"
+
+[[package]]
 name = "commonware-sol-fuzz"
 version = "2026.9.0"
 dependencies = [

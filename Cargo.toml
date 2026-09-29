@@ -23,6 +23,7 @@ members = [
     "resolver",
     "runtime",
     "runtime/macros",
+    "simd",
     "storage",
     "stream",
     "invariants",
@@ -142,6 +143,7 @@ commonware-parallel = { version = "2026.9.0", path = "parallel", default-feature
 commonware-resolver = { version = "2026.9.0", path = "resolver" }
 commonware-runtime = { version = "2026.9.0", path = "runtime" }
 commonware-runtime-macros = { version = "2026.9.0", path = "runtime/macros" }
+commonware-simd = { version = "2026.9.0", path = "simd" }
 commonware-storage = { version = "2026.9.0", path = "storage", default-features = false }
 commonware-stream = { version = "2026.9.0", path = "stream" }
 commonware-utils = { version = "2026.9.0", path = "utils", default-features = false }
