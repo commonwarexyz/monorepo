@@ -73,6 +73,41 @@ rendered prompts and paper text go to `extract/`.
 profile binds the simplex registry, the `marshal` profile both), so review the new files
 first: edit them, delete the ones you do not want, and run `just check-invariants`.
 
+## The knowledge base
+
+A campaign's beacon step can consult a knowledge base of developer artifacts while it
+instruments: the findings reported against this workspace, plus the curated documents beside
+them. Point `STATELENS_KB` at one or more corpus roots, separated by `:`.
+
+```
+export STATELENS_KB=/path/to/commonware-findings
+```
+
+The instrumenter reads a component's code, and when a candidate state needs context the
+source does not carry -- what an assumption means, whether it has failed before, which code
+manages a transition -- it queries. You can run the same queries by hand:
+
+```
+python3 scripts/statelens.py kb modules --registry marshal
+python3 scripts/statelens.py kb find --registry marshal certification
+python3 scripts/statelens.py kb cites --registry marshal consensus/src/marshal/core
+python3 scripts/statelens.py kb grep --registry marshal "availability waiters"
+python3 scripts/statelens.py kb show <identifier> "Root Cause"
+```
+
+`kb cites` is the one to start from: it turns a path in this repository into the findings
+about that code, with the files and symbols each one names. Queries see only the findings
+whose `module` belongs to the subsystem being instrumented, and only the state-bearing
+sections of each; the impact, exploitation, reachability and fix sections are not reachable
+through the interface.
+
+A finding is evidence, never a property: it can aim a probe, and never becomes an assertion.
+Without `STATELENS_KB` a campaign still runs, with beacons mined from the code alone.
+
+The knowledge base is private. Its index and the campaign logs quote what was retrieved, and
+both live in the git-ignored `extract/` and `campaign/` directories; nothing derived from a
+finding is committed to this repository.
+
 ## Phase 2: instrument the code and generate fuzz targets
 
 ```

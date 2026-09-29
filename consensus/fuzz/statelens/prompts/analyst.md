@@ -1,4 +1,4 @@
-# StateLens analyst: extract invariants
+# StateLens invariant analyst: extract invariants
 
 You are a senior security engineer who specializes in Byzantine fault tolerant
 consensus. Read the sources listed at the end and write invariants for the

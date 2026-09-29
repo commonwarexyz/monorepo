@@ -51,12 +51,44 @@ FILE_NAMES = {
     "false-invariants": re.compile(r"^FALSE-\d{4,}\.md$"),
 }
 
+FINDING_STATES = ("valid", "tested", "triaged", "intake", "invalid")
+STATE_RANK = {state: rank for rank, state in enumerate(FINDING_STATES)}
+# SPEC section 6.3: the knowledge base and its index.
+KB_INDEX = "extract/kb-index.json"
+KB_DOC_DIRS = ("kb", "config", "context")
+KB_STATE_SECTIONS = (
+    "Context",
+    "Root Cause",
+    "Lifecycle Events",
+    "Exploitation Or Trigger Conditions",
+)
+KB_CLAIM_FIELDS = (
+    "module",
+    "summary",
+    "tags",
+    "severity_current",
+    "confidence",
+    "remediation_status",
+    "related_findings",
+)
+# A finding's own citations of code. Harvested from every section, because they sit mostly
+# in sections whose prose is not retrievable; a citation is not exploit detail (SPEC 6.3).
+KB_REF_PATH = re.compile(r"\b[a-z][a-z0-9_-]*/src/[A-Za-z0-9_/.-]+\.rs(?::\d+(?:-\d+)?)?")
+KB_REF_SYMBOL = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)`")
+KB_REF_SHOWN = 6
+KB_FIND_LIMIT = 20
+KB_GREP_LIMIT = 40
+KB_GREP_CONTEXT = 3
+MODULE_FILTER = {"simplex": "consensus/simplex", "marshal": "consensus/marshal"}
+
 CONFIG_KEYS = (
     "STATELENS_AGENT",
     "STATELENS_CLAUDE_MODEL",
     "STATELENS_CODEX_MODEL",
     "STATELENS_TEST_TOOLCHAIN",
     "STATELENS_FUZZ_TOOLCHAIN",
+    "STATELENS_KB",
+    "STATELENS_BEACONS",
 )
 
 STOP_STEPS = ("materialize", "instrument", "build")
@@ -362,27 +394,24 @@ def agent_command(config, agent, phase, repo):
         command = ["claude", "-p", "--output-format", "text"]
         if model:
             command += ["--model", model]
-        if phase == 1:
-            command += [
-                "--permission-mode",
-                "acceptEdits",
-                "--allowedTools",
-                "Read",
-                "Grep",
-                "Glob",
-                "Write",
-                "Edit",
-                "WebFetch",
-                "Bash(gh:*)",
-                "Bash(curl:*)",
-            ]
+        if phase in (1, "beacons"):
+            command += ["--permission-mode", "acceptEdits", "--allowedTools"]
+            command += ["Read", "Grep", "Glob", "Write", "Edit", "WebFetch"]
+            if phase == "beacons":
+                # The corpus is reachable only through the `kb` commands (SPEC section 12).
+                command += [f"Bash(python3 {SL}/scripts/statelens.py kb:*)"]
+            else:
+                command += ["Bash(gh:*)", "Bash(curl:*)"]
         else:
             command += ["--dangerously-skip-permissions"]
         return command
     command = ["codex", "exec", "-C", str(repo)]
     if model:
         command += ["-m", model]
-    if phase == 1:
+    if phase == "beacons":
+        # No per-tool allowlist: writes stay in the workspace and the network is off.
+        command += ["-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=false"]
+    elif phase == 1:
         command += ["-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]
     else:
         command += ["--dangerously-bypass-approvals-and-sandbox"]
@@ -710,6 +739,470 @@ def cmd_extract(args):
     else:
         say("extract: the agent wrote no invariants")
     return 3 if problems else 0
+
+
+def inside_repo(repo, path):
+    """True when `path` is under `repo`, following symlinks (D34 depends on this)."""
+    try:
+        Path(os.path.realpath(str(path))).relative_to(Path(os.path.realpath(str(repo))))
+    except ValueError:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base (SPEC section 6.3)
+# ---------------------------------------------------------------------------
+
+
+def kb_roots(repo, config):
+    """Readable corpus roots outside this repository; skips what it cannot use."""
+    value = (config.get("STATELENS_KB") or "").strip()
+    if not value:
+        raise Abort(
+            2,
+            "STATELENS_KB names no knowledge-base root; set it in config.env or in the "
+            "environment to one or more corpus roots separated by ':'",
+        )
+    roots, tried = [], []
+    for item in value.split(":"):
+        item = item.strip()
+        if not item:
+            continue
+        path = Path(item).expanduser()
+        root = path if path.is_absolute() else repo / path
+        tried.append(str(root))
+        if inside_repo(repo, root):
+            say(f"warning: knowledge-base root {root} is inside the repository; skipped")
+            continue
+        if not root.is_dir():
+            say(f"warning: knowledge-base root {root} is not a readable directory; skipped")
+            continue
+        documents = any((root / name).is_dir() for name in KB_DOC_DIRS)
+        if not (root / "findings").is_dir() and not documents:
+            say(f"warning: {root} has no findings/ and no document directory; skipped")
+            continue
+        roots.append(root)
+    if not roots:
+        raise Abort(2, "no readable knowledge-base root; tried: " + ", ".join(tried))
+    return roots
+
+
+def claim_fields(text):
+    """The fenced ```claim block of a finding as key -> value, or None when absent."""
+    match = re.search(r"^```claim\s*\n(.*?)^```\s*$", text, re.S | re.M)
+    if not match:
+        return None
+    values = {}
+    for line in match.group(1).split("\n"):
+        key, sep, value = line.partition(":")
+        if sep:
+            values[key.strip()] = value.strip()
+    return values
+
+
+def code_references(text):
+    """The files and symbols a finding cites, most-cited first (SPEC section 6.3)."""
+    found = {}
+    for name, pattern, group in (("paths", KB_REF_PATH, 0), ("symbols", KB_REF_SYMBOL, 1)):
+        counts = collections.Counter(match.group(group) for match in pattern.finditer(text))
+        found[name] = [item for item, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    return found
+
+
+def section_spans(text):
+    """Level-2 section name -> [start, end] character offsets of its body."""
+    spans, previous = {}, None
+    for match in re.finditer(r"^## (.+)$", text, re.M):
+        if previous:
+            spans[previous[0]] = [previous[1], match.start()]
+        previous = (match.group(1).strip(), match.end() + 1)
+    if previous:
+        spans[previous[0]] = [previous[1], len(text)]
+    return spans
+
+
+def normalize_module(value):
+    """Maps a `module` value to its crate module (SPEC section 6.3)."""
+    module = value.strip().strip("`")
+    if not module:
+        return ""
+    if "/src/" in module:
+        # A source path names its crate module: consensus/src/simplex/actors/x.rs
+        # is consensus/simplex, so it ranks as an exact match like any other.
+        crate, _, rest = module.partition("/src/")
+        first = rest.split("/", 1)[0]
+        module = f"{crate}/{first}" if first else crate
+    tail = module.rsplit("/", 1)[-1]
+    if "." in tail and "/" in module:
+        module = module.rsplit("/", 1)[0]
+    return module.rstrip("/")
+
+
+def module_matches(module, registry):
+    prefix = MODULE_FILTER[registry]
+    return module == prefix or module.startswith(prefix + "/")
+
+
+def kb_index(sl_dir, roots):
+    """Builds or refreshes the index and returns (entries, unparsed count)."""
+    path = sl_dir / KB_INDEX
+    previous = {}
+    if path.is_file():
+        try:
+            for entry in json.loads(path.read_text()).get("entries", []):
+                previous[tuple(entry["key"])] = entry
+        except (ValueError, KeyError):
+            previous = {}
+    entries, unparsed = [], 0
+    for order, root in enumerate(roots):
+        findings = root / "findings"
+        states = sorted(p for p in findings.glob("*") if p.is_dir()) if findings.is_dir() else []
+        for state_dir in states:
+            for file in sorted(state_dir.glob("*.md")):
+                relative = str(file.relative_to(root))
+                key = (str(root), file.stem)
+                try:
+                    stat = file.stat()
+                except OSError as error:
+                    say(f"warning: cannot read {file}: {error.strerror or error}; skipped")
+                    continue
+                if not file.is_file():
+                    continue
+                cached = previous.get(key)
+                if (
+                    cached
+                    and cached.get("path") == relative
+                    and cached.get("mtime") == stat.st_mtime_ns
+                    and cached.get("size") == stat.st_size
+                ):
+                    cached["order"] = order
+                    entries.append(cached)
+                    unparsed += 1 if cached.get("unparsed") else 0
+                    continue
+                text = read_corpus(file)
+                if text is None:
+                    continue
+                claim = claim_fields(text)
+                unreadable = claim is None
+                if unreadable:
+                    unparsed += 1
+                    claim = {}
+                modules = [
+                    normalize_module(item)
+                    for item in claim.get("module", "").split(",")
+                    if item.strip()
+                ]
+                entries.append(
+                    {
+                        "key": list(key),
+                        "kind": "finding",
+                        "order": order,
+                        "root": str(root),
+                        "path": relative,
+                        "identifier": file.stem,
+                        "state": state_dir.name,
+                        "mtime": stat.st_mtime_ns,
+                        "size": stat.st_size,
+                        "unparsed": unreadable,
+                        "claim": {field: claim.get(field, "") for field in KB_CLAIM_FIELDS},
+                        "modules": [module for module in modules if module],
+                        "sections": {
+                            name: span
+                            for name, span in section_spans(text).items()
+                            if name in KB_STATE_SECTIONS
+                        },
+                        "refs": code_references(text),
+                    }
+                )
+        for name in KB_DOC_DIRS:
+            base = root / name
+            if not base.is_dir():
+                continue
+            for file in sorted(base.rglob("*.md")):
+                relative = str(file.relative_to(root))
+                try:
+                    stat = file.stat()
+                except OSError as error:
+                    say(f"warning: cannot read {file}: {error.strerror or error}; skipped")
+                    continue
+                if not file.is_file():
+                    continue
+                entries.append(
+                    {
+                        "key": [str(root), relative],
+                        "kind": "document",
+                        "order": order,
+                        "root": str(root),
+                        "path": relative,
+                        "identifier": relative,
+                        "state": "",
+                        "mtime": stat.st_mtime_ns,
+                        "size": stat.st_size,
+                        "unparsed": False,
+                        "claim": {},
+                        "modules": [],
+                        "sections": {},
+                        "refs": {"paths": [], "symbols": []},
+                    }
+                )
+    fresh = {tuple(entry["key"]): (entry["mtime"], entry["size"]) for entry in entries}
+    stale = {key: (entry.get("mtime"), entry.get("size")) for key, entry in previous.items()}
+    if fresh != stale or not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"entries": entries}, indent=1, sort_keys=True) + "\n")
+    return entries, unparsed
+
+
+_CORPUS_CACHE = {}
+
+
+def kb_text(entry):
+    """A corpus file's text, read at most once per invocation."""
+    key = (entry["root"], entry["path"])
+    if key not in _CORPUS_CACHE:
+        _CORPUS_CACHE[key] = read_corpus(Path(entry["root"]) / entry["path"]) or ""
+    return _CORPUS_CACHE[key]
+
+
+def read_corpus(path):
+    """Text of a corpus file, or None when it cannot be read (R-KB-2: skip and report)."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError as error:
+        say(f"warning: cannot read {path}: {error.strerror or error}; skipped")
+        return None
+    return text.lstrip("\ufeff")
+
+
+def kb_find(entries, registry, terms):
+    """Findings whose claim fields match, ranked as SPEC section 6.3 says."""
+    wanted = [term.lower() for term in terms]
+    ranked = []
+    for position, entry in enumerate(entries):
+        if entry["kind"] != "finding":
+            continue
+        modules = [module for module in entry["modules"] if module_matches(module, registry)]
+        if not modules:
+            continue
+        claim = entry["claim"]
+        haystack = f"{claim.get('summary', '')} {claim.get('tags', '')}".lower()
+        matched = sum(1 for term in set(wanted) if term in haystack)
+        if wanted and not matched:
+            continue
+        exact = 1 if MODULE_FILTER[registry] in modules else 0
+        rank = (-exact, -matched, STATE_RANK.get(entry["state"], len(FINDING_STATES)), position)
+        ranked.append((rank, entry))
+    ranked.sort(key=lambda item: item[0])
+    return [entry for _, entry in ranked]
+
+
+def kb_cites(entries, registry, prefix):
+    """Findings citing a path under `prefix`, most citations first (SPEC section 6.3)."""
+    ranked = []
+    for position, entry in enumerate(entries):
+        if entry["kind"] != "finding":
+            continue
+        if not any(module_matches(module, registry) for module in entry["modules"]):
+            continue
+        hits = [
+            path
+            for path in ((entry.get("refs") or {}).get("paths") or [])
+            if path.startswith(prefix)
+        ]
+        if not hits:
+            continue
+        rank = (-len(hits), STATE_RANK.get(entry["state"], len(FINDING_STATES)), position)
+        ranked.append((rank, entry, hits))
+    ranked.sort(key=lambda item: item[0])
+    return [(entry, hits) for _, entry, hits in ranked]
+
+
+def kb_grep(entries, registry, needle):
+    """Case-insensitive literal snippets, ordered by root, then path, then offset."""
+    wanted = needle.lower()
+    hits = []
+    for entry in entries:
+        if entry["kind"] == "finding":
+            if not any(module_matches(module, registry) for module in entry["modules"]):
+                continue
+            spans = entry["sections"]
+        else:
+            spans = None
+        text = kb_text(entry)
+        regions = (
+            [(name, span[0], span[1]) for name, span in sorted(spans.items())]
+            if spans is not None
+            else [("", 0, len(text))]
+        )
+        for name, start, end in regions:
+            body = text[start:end]
+            position = body.lower().find(wanted)
+            while position >= 0:
+                offset = start + position
+                line = text.count("\n", 0, offset) + 1
+                hits.append((entry["order"], entry["path"], offset, entry, name, line))
+                position = body.lower().find(wanted, position + 1)
+    hits.sort(key=lambda hit: hit[:3])
+    return hits
+
+
+def kb_snippet(entry, line, context=None):
+    lines = kb_text(entry).split("\n")
+    span = KB_GREP_CONTEXT if context is None else context
+    start = max(0, line - 1 - span // 2)
+    return "\n".join(f"    {text}" for text in lines[start : start + span])
+
+
+def reference_lines(entry):
+    """The `files:` and `symbols:` lines of a hit, or "" when the finding cites none."""
+    refs = entry.get("refs") or {}
+    lines = ""
+    for name, label in (("paths", "files"), ("symbols", "symbols")):
+        items = refs.get(name) or []
+        if not items:
+            continue
+        shown = ", ".join(items[:KB_REF_SHOWN])
+        more = len(items) - KB_REF_SHOWN
+        lines += f"    {label}: {shown}" + (f" (+{more} more)" if more > 0 else "") + "\n"
+    return lines
+
+
+def cmd_kb(args):
+    """The retrieval interface of SPEC section 6.3, used by the beacon agent."""
+    repo = repo_root()
+    sl_dir = repo / SL
+    config = load_config(sl_dir)
+    entries, unparsed = kb_index(sl_dir, kb_roots(repo, config))
+    if unparsed:
+        say(f"warning: {unparsed} finding(s) have no parsable claim block")
+    registry = args.registry
+    if args.query == "modules":
+        counts = collections.Counter()
+        for entry in entries:
+            for module in entry["modules"]:
+                counts[module] += 1
+        rows = [(module, count) for module, count in sorted(counts.items())]
+        in_scope = [row for row in rows if module_matches(row[0], registry)]
+        for module, count in in_scope:
+            print(f"{count:5d}  {module}")
+        outside = [row for row in rows if not module_matches(row[0], registry)]
+        excluded = sum(count for _, count in outside)
+        print(
+            f"\n{len(in_scope)} module(s) in scope for the {registry} registry; "
+            f"{excluded} finding-module pair(s) out of scope"
+        )
+        coarse = next((count for module, count in outside if module == "consensus"), 0)
+        if coarse:
+            print(f"{coarse} finding(s) name only `consensus`, too coarse to attribute")
+        return 0
+    if args.query == "find":
+        found = kb_find(entries, registry, args.terms)
+        for entry in found[:KB_FIND_LIMIT]:
+            claim = entry["claim"]
+            print(
+                f"{entry['identifier']}  ({Path(entry['root']).name})\n"
+                f"    state={entry['state']} module={', '.join(entry['modules'])} "
+                f"severity={claim.get('severity_current', '?')} "
+                f"remediation={claim.get('remediation_status', '?')}\n"
+                f"    {claim.get('summary', '')}"
+            )
+            print(reference_lines(entry), end="")
+        dropped = max(0, len(found) - KB_FIND_LIMIT)
+        print(f"\n{min(len(found), KB_FIND_LIMIT)} hit(s), {dropped} dropped")
+        return 0
+    if args.query == "show":
+        args.section = " ".join(args.section) if args.section else ""
+    if args.query == "cites":
+        found = kb_cites(entries, registry, args.prefix)
+        for entry, hits in found[:KB_FIND_LIMIT]:
+            claim = entry["claim"]
+            print(
+                f"{entry['identifier']}  ({Path(entry['root']).name})\n"
+                f"    state={entry['state']} cites={len(hits)} "
+                f"remediation={claim.get('remediation_status', '?')}\n"
+                f"    {claim.get('summary', '')}\n"
+                f"    here: {', '.join(hits[:KB_REF_SHOWN])}"
+            )
+            symbols = ((entry.get("refs") or {}).get("symbols") or [])[:KB_REF_SHOWN]
+            if symbols:
+                print(f"    symbols: {', '.join(symbols)}")
+        dropped = max(0, len(found) - KB_FIND_LIMIT)
+        print(f"\n{min(len(found), KB_FIND_LIMIT)} finding(s) cite {args.prefix}, {dropped} dropped")
+        return 0
+    if args.query == "grep":
+        hits = kb_grep(entries, registry, args.text)
+        for _, _, _, entry, section, line in hits[:KB_GREP_LIMIT]:
+            where = f"{entry['identifier']} ({Path(entry['root']).name})"
+            where += f" ## {section}" if section else ""
+            print(f"{where} (line {line})")
+            print(kb_snippet(entry, line))
+        dropped = max(0, len(hits) - KB_GREP_LIMIT)
+        print(f"\n{min(len(hits), KB_GREP_LIMIT)} snippet(s), {dropped} dropped")
+        return 0
+    wanted = [
+        entry
+        for entry in entries
+        if entry["identifier"] == args.identifier
+        and (
+            entry["kind"] == "document"
+            or any(module_matches(module, registry) for module in entry["modules"])
+        )
+    ]
+    if not wanted:
+        raise Abort(
+            1,
+            f"no knowledge-base entry with identifier {args.identifier} in scope for the "
+            f"{registry} registry",
+        )
+    for index, entry in enumerate(wanted):
+        if index:
+            print()
+        text = kb_text(entry)
+        origin = f"{Path(entry['root']).name}/{entry['path']}"
+        if not args.section:
+            match = re.search(r"^```claim\s*\n.*?^```\s*$", text, re.S | re.M)
+            print(f"{entry['identifier']}  ({entry['state'] or entry['kind']})  {origin}")
+            print(match.group(0) if match else "(no claim block)")
+            print(reference_lines(entry), end="")
+            print("state-bearing sections: " + ", ".join(sorted(entry["sections"])))
+            continue
+        if args.section not in KB_STATE_SECTIONS:
+            raise Abort(
+                1,
+                f"{args.section} is not a state-bearing section; choose one of: "
+                + ", ".join(KB_STATE_SECTIONS),
+            )
+        span = entry["sections"].get(args.section)
+        if not span:
+            raise Abort(1, f"{entry['identifier']} has no section {args.section}")
+        print(f"{entry['identifier']} ## {args.section}  {origin}")
+        print(text[span[0] : span[1]].rstrip("\n"))
+    return 0
+
+
+def kb_query_help(registry):
+    """The QUERY placeholder: the concrete command line of every query (SPEC 6.3)."""
+    base = f"python3 {SL}/scripts/statelens.py kb"
+    return "\n".join(
+        [
+            f"- `{base} modules --registry {registry}`",
+            "  every `module` value in scope, with a count.",
+            f"- `{base} find --registry {registry} TERM...`",
+            f"  up to {KB_FIND_LIMIT} findings whose claim fields match, ranked; per hit the",
+            "  identifier, state, module, severity, remediation status and summary.",
+            f"- `{base} cites --registry {registry} PATH`",
+            f"  up to {KB_FIND_LIMIT} findings that cite a file under PATH, most citations first;",
+            "  per hit the identifier, state, how many citations, summary, and which of its files",
+            "  fall under PATH. This is how a sweep starts.",
+            f"- `{base} grep --registry {registry} TEXT`",
+            f"  up to {KB_GREP_LIMIT} snippets from the state-bearing sections and the documents;",
+            "  TEXT is matched as a case-insensitive literal, never a regular expression.",
+            f"- `{base} show --registry {registry} IDENTIFIER [SECTION]`",
+            "  one finding's claim block, or one of its state-bearing sections:",
+            "  " + ", ".join(KB_STATE_SECTIONS) + ".",
+        ]
+    )
 
 
 def read_edit_file(repo, relative, hint="update the paths and anchors in scripts/statelens.py"):
@@ -1178,6 +1671,17 @@ class Campaign:
         paths = [path for _, path in self.invariants]
         if lint_paths(checked, registry_files(self.sl_dir)):
             say("warning: some invariant files have format problems (see above)")
+        # SPEC section 7.4: the knowledge base, when one is configured. A campaign runs
+        # without it and the beacon step then mines the code alone.
+        self.kb = []
+        try:
+            self.kb = kb_roots(self.repo, self.config)
+        except Abort as error:
+            say(f"warning: no knowledge base for the beacon step ({error})")
+        if self.kb:
+            entries, _ = kb_index(self.sl_dir, self.kb)
+            findings = sum(1 for entry in entries if entry["kind"] == "finding")
+            say(f"campaign: knowledge base indexed, {findings} finding(s)")
         self.targets = profile_targets(self.repo, self.profile_name)
         ids = [path.stem for path in paths]
         meta = {
@@ -1281,6 +1785,7 @@ class Campaign:
                 self.common_values(),
                 ACTOR=actor,
                 ACTOR_DIR=actor_dir,
+                QUERY=kb_query_help(subsystem) if self.kb else "",
                 SUBSYSTEM_RULES=subsystem_prompt(self.sl_dir, subsystem, "instrument"),
             )
             prompt = compose(self.sl_dir, "instrument.md", "instrument-beacons.md", values)
@@ -1489,8 +1994,8 @@ def main(argv):
     parser = Parser(
         prog="statelens.py",
         description=(
-            "StateLens for Simplex and marshal: check the invariant registries, extract "
-            "invariants with an agent, and run instrumentation campaigns "
+            "StateLens for Simplex and marshal: check the invariant registry, extract "
+            "invariants with an agent, query the knowledge base, and run campaigns "
             "(see consensus/fuzz/statelens/docs/SPEC.md)."
         ),
     )
@@ -1521,6 +2026,33 @@ def main(argv):
     )
     extract.add_argument("kind", choices=KINDS, help="source kind")
     extract.add_argument("sources", nargs="+", metavar="SOURCE", help="a source (SPEC section 6.1)")
+    kb = commands.add_parser(
+        "kb",
+        help="query the knowledge base (the instrumenter uses it too)",
+        description="The retrieval interface of SPEC section 6.3.",
+    )
+    kb.add_argument(
+        "--registry",
+        choices=SUBSYSTEMS,
+        default="simplex",
+        help="registry whose module filter applies (default: simplex)",
+    )
+    registry_flag = argparse.ArgumentParser(add_help=False)
+    # SUPPRESS so that `kb --registry R find ...` and `kb find --registry R ...` agree:
+    # without it the subparser default would overwrite the outer value.
+    registry_flag.add_argument("--registry", choices=SUBSYSTEMS, default=argparse.SUPPRESS)
+    queries = kb.add_subparsers(dest="query", required=True, parser_class=lambda **kw: Parser(parents=[registry_flag], **kw))
+    queries.add_parser("modules", help="every module value in scope, with a count")
+    kb_find_parser = queries.add_parser("find", help="findings whose claim fields match")
+    kb_find_parser.add_argument("terms", nargs="*", metavar="TERM", help="a term to match")
+    kb_cites_parser = queries.add_parser("cites", help="findings that cite a path in the code")
+    kb_cites_parser.add_argument("prefix", metavar="PATH", help="a file or directory path")
+    kb_grep_parser = queries.add_parser("grep", help="snippets of the state-bearing sections")
+    kb_grep_parser.add_argument("text", metavar="TEXT", help="a case-insensitive literal")
+    kb_show_parser = queries.add_parser("show", help="one finding's claim block or section")
+    kb_show_parser.add_argument("identifier", metavar="IDENTIFIER")
+    # Section names contain spaces ("Root Cause"), so accept them unquoted too.
+    kb_show_parser.add_argument("section", nargs="*", metavar="SECTION")
     campaign = commands.add_parser(
         "campaign",
         help="instrument this checkout, build the StateLens targets, run the test gate (Phase 2)",
@@ -1546,6 +2078,8 @@ def main(argv):
             return cmd_lint(args)
         if args.command == "extract":
             return cmd_extract(args)
+        if args.command == "kb":
+            return cmd_kb(args)
         return Campaign(args).run()
     except Abort as error:
         say(f"error: {error}")

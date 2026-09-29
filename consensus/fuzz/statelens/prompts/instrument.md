@@ -41,8 +41,9 @@ probes that tell the fuzzer when an execution reached a new internal state.
    plan under "Edited lines".
 2. Mark everything you add with a comment line `// [statelens] <tag>` directly above
    it. Tags: `INV-NNNN` for assertions and invariant probes, `ghost:INV-NNNN` for ghost
-   fields and their updates, `beacon:<label>` for beacon probes, and `me` for code added
-   only to make the replica index available.
+   fields and their updates, `beacon:<label>` for beacon probes, `ghost:beacon:<label>` for
+   ghost state a beacon probe needs, and `me` for code added only to make the replica index
+   available.
 3. Observe only honest replicas. The macros, `with_ghost` and `with_global` apply the
    Byzantine guard themselves. Ghost fields you add to existing structs may be updated
    without the guard, but act on them only through the macros. Always pass the

@@ -64,8 +64,9 @@ End-to-end campaigns at commit `2e56fa856e`, with Claude as the agent, in scratc
 
 Section 8.1 lists what was checked for marshal, at commit `2649e4a668`.
 
-Nothing in the knowledge base and beacon chapters (sections 4.8, 6.3, 6.4) has been
-exercised yet: they are specified, not verified. AC-14 to AC-16 cover them.
+The knowledge base has not been exercised with a real agent: section 5.6, the `kb` row of
+5.4, and the knowledge-base part of the beacon step (7.4, prompt 13.9). AC-14 and AC-15
+cover it.
 
 ---
 
@@ -99,14 +100,11 @@ them; the last column names the PRD requirement.
 | D21 | Both subsystems use the runtime module at `consensus/src/simplex/statelens.rs` (Appendix A), and marshal code calls it as `crate::simplex::statelens::...`. | G8 |
 | D22 | The per-subsystem parts of the prompts live in `prompts/subsystems/` (sections 13.11 to 13.14), and the shared prompts take them through placeholders. | R-P1-2 |
 | D23 | A campaign does not run the fuzzer, in either profile. It ends after the test gate with the result `READY`, and prints, for each StateLens target, the command that runs it and the command that replays a crash. The operator runs the targets with the existing `just run` recipe, and chooses which ones, for how long, and with which libFuzzer arguments. The campaign passes no arguments to libFuzzer. Exit codes 5 and 6 are retired. | R-P2-2 step 7, R-P2-3, R-P3-1 |
-| D31 | Beacon extraction is a Phase 1 activity with its own command, not a campaign step. A campaign binds what a registry already holds. | R-P1-6 |
+| D31 | Beacon discovery happens inside the campaign's beacon step, not as a separate phase with its own artifact. The knowledge base is private and an instrumented checkout is never pushed, so nothing has to cross a reviewed boundary between them. | R-FB-4 |
 | D32 | The knowledge base stays outside this repository and is read-only. `STATELENS_KB` names its roots, and an empty value disables beacon extraction without affecting anything else. | R-KB-1 to R-KB-3 |
 | D33 | Retrieval is a structured index over the findings' claim fields plus full-text search of their prose sections. No vector store and no embedding service. | R-KB-4 |
-| D34 | The beacon registry is not committed. `STATELENS_BEACONS` names it and defaults to a git-ignored `SL/beacons/`; a registry inside the repository that git would track is refused. A path outside the checkout survives the fresh clone a campaign needs. | R-BEA-1, R-KB-6 |
-| D35 | Beacon IDs are `BEACON-NNNN` with a counter of their own, not the invariant counter, because the two registries are reviewed, deleted and committed differently. | R-BEA-2 |
-| D36 | A beacon produces `sl_probe!` sites only. No beacon file states a property, so nothing derived from one can panic. | R-BEA-6 |
-| D37 | A finding's state and remediation status are recorded in the beacon file, not used to filter findings out. Weak evidence costs coverage, not correctness. | R-KB-8 |
-| D38 | `check-beacons` is a recipe of its own, separate from `check-invariants`, because a beacon registry may live outside the checkout. | R-BEA-7 |
+| D37 | A finding's state and remediation status are shown to the instrumenter, not used to filter findings out. Weak evidence costs coverage, not correctness. | R-KB-8 |
+| D42 | The beacon step is an agent loop over actions (read code, the five `kb` queries, add a probe), not a fixed procedure. Reading code leads, and a query is what the agent does when its hypothesis needs developer context. How long to spend on a candidate is the agent's judgment; there is no step budget. | R-FB-4 |
 
 D24 to D30 concern marshal only; they are in section 8.2.
 
@@ -122,16 +120,15 @@ consensus/fuzz/statelens/
   README.md                      operator guide (Appendix D)
   config.env                     defaults (section 5.1)
   justfile                       recipes (section 5.3)
-  .gitignore                     three lines: `campaign/`, `extract/` and `beacons/`
+  .gitignore                     two lines: `campaign/` and `extract/`
   invariants/                    the registries; every INV-*.md is active (section 4.1)
     simplex/
-    marshal/                     holds `.gitkeep` until its first invariant
+    marshal/                     the marshal invariants
   false-invariants/
     simplex/FALSE-0001.md        deliberately false invariant for AC-6 (Appendix C)
     marshal/FALSE-0002.md        deliberately false invariant for AC-10 (Appendix E)
   templates/
     invariant.md                 reference format (section 4.5)
-    beacon.md                    reference format (section 4.9)
   prompts/
     analyst.md                   Phase 1, shared part (section 13.1)
     analyst-issue.md             Phase 1, per kind (sections 13.2 to 13.6)
@@ -139,7 +136,6 @@ consensus/fuzz/statelens/
     analyst-comment.md
     analyst-spec.md
     analyst-paper.md
-    beacon.md                    Phase 1, knowledge base to beacons (section 13.15)
     instrument.md                Phase 2, shared rules and API (section 13.7)
     instrument-invariants.md     Phase 2, bind invariants (section 13.8)
     instrument-beacons.md        Phase 2, beacon probes (section 13.9)
@@ -147,15 +143,13 @@ consensus/fuzz/statelens/
     subsystems/
       simplex-analyst.md         Phase 1, Simplex part (section 13.11)
       marshal-analyst.md         Phase 1, marshal part (section 13.12)
-      simplex-beacon.md          Phase 1, Simplex beacon part (section 13.16)
-      marshal-beacon.md          Phase 1, marshal beacon part (section 13.17)
       simplex-instrument.md      Phase 2, Simplex rules (section 13.13)
       marshal-instrument.md      Phase 2, marshal rules (section 13.14)
   runtime/
     statelens.rs                 runtime support module (Appendix A)
     target.rs                    fuzz target, cert_mock scheme only (Appendix B.1, D15)
   scripts/
-    statelens.py                 lint, extract, beacons, campaign (sections 5 to 7)
+    statelens.py                 lint, extract, kb, campaign (sections 5 to 7)
 ```
 
 Constraints on committed files:
@@ -165,16 +159,10 @@ Constraints on committed files:
 - `runtime/*.rs` pass `rustfmt +<pinned nightly> --edition 2024 --check` with the
   repository `rustfmt.toml`.
 - Nothing outside `SL/` is changed (R-LAYOUT-3).
-- The beacon registry is not part of this layout. Its default path, `SL/beacons/`, is
-  git-ignored, and no beacon file or knowledge-base content is ever committed here
-  (D34, R-KB-6). Section 4.8 gives its format.
 
 ---
 
-## 4. Registries
-
-Sections 4.1 to 4.7 are the invariant registry, which is committed. Section 4.8 is the
-beacon registry, which is not.
+## 4. Invariant registry
 
 ### 4.1 Files and IDs
 
@@ -295,120 +283,6 @@ and only when `STATELENS_FALSE_INVARIANTS=1`.
 
 ---
 
-### 4.8 Beacon registry
-
-A beacon file records one semantic beacon extracted from the knowledge base (section 6.3).
-It aims probes at a state; it never states a property, and nothing derived from it can
-panic (D36).
-
-**Location.** `<beacons>/<subsystem>/BEACON-NNNN.md`, where `<beacons>` is
-`STATELENS_BEACONS` resolved as in section 5.1. The registry is not committed (D34): when
-it resolves inside this repository, `git check-ignore` MUST match it, and `beacons`,
-`lint-beacons` and a campaign all refuse it otherwise. A subsystem directory that does not
-exist is an empty registry, which is not an error.
-
-**IDs.** `BEACON-NNNN`, at least four digits, unique across the subsystem directories of
-one `STATELENS_BEACONS` root. The next free ID is one above the highest found there; the
-counter is independent of the invariant counter (D35). Two roots can hold the same ID:
-they are separate registries, and only one is used at a time.
-
-**Front matter.** Between two `---` lines, keys in this order:
-
-| Key | Required | Value |
-|---|---|---|
-| `id` | yes | Equal to the file name without `.md`. |
-| `title` | yes | One line, at most 80 characters. |
-| `kb_ref` | yes | Inline list of one or more references, each a finding identifier or a document path relative to a corpus root. |
-| `module` | yes | Inline list of the `module` values of the cited findings. Every value MUST be in the registry's filter (section 5.5). |
-| `scope` | yes | Inline list, one or more of the subsystem's scope values (section 4.2). |
-| `status` | yes | The strongest state among the cited findings: `valid`, `tested`, `triaged`, `intake` or `invalid`. |
-| `remediation` | no | `fixed`, `open` or `mixed`. |
-
-**Body.** Level-2 sections, in this order:
-
-1. `## States` (required): the states the beacon names, in protocol terms.
-2. `## Transition` (required): the suspected transition as a before-and-after pair, and
-   why edge coverage cannot distinguish its outcomes, or `none` when the beacon is about a
-   state with no identified transition.
-3. `## Seed symbols` (required): the functions, types or fields Phase 2 starts from, one
-   per line. These MAY name implementation identifiers; a beacon is not an invariant.
-4. `## Evidence` (required): what the knowledge base says, in two to five sentences.
-5. `## Candidate sites` (optional): where in today's code the states are established,
-   changed and read. One `path:symbol` per line.
-6. `## Rejected` (required): snippets the queries returned and the agent rejected, one per
-   line as `<reference>: <reason>`, or `none` (R-KB-7).
-
-**Lint rules.** `statelens.py lint-beacons [PATH...]` checks each file (default: every
-`*.md` under `<beacons>/*/`) and prints `path: problem` for every violation:
-
-1. The file is in `<beacons>/<subsystem>/` and named `BEACON-\d{4,}\.md`, where
-   `<subsystem>` is one of the known subsystems.
-2. Plain ASCII.
-3. Front matter opens and closes with `---`; every line is `key: value`; required keys are
-   present and non-empty; unknown keys are reported.
-4. `id` equals the file name without `.md`.
-5. `status` is one of the five states; `remediation`, when present, is one of the three
-   values.
-6. `scope` is an inline list of the subsystem's values; `module` and `kb_ref` are non-empty
-   inline lists.
-7. The required sections are present, non-empty, and in order. `## Transition` MAY read
-   `none`, for a beacon about a state with no identified transition. `## Rejected` MAY read
-   `none`.
-8. The body has no level-2 heading outside the six of this section. This is a closed set,
-   so a section copied from the knowledge base is rejected whatever it is called, including
-   `## Impact`, `## Exploitation Or Trigger Conditions`, `## Reachability And
-   Prerequisites`, `## Defense Analysis`, `## Validation`, `## Triage Notes` and
-   `## Suggested Fix` (R-BEA-5). The rule is a coarse guard: it stops a copied section, not
-   a paraphrase, which is why the prompt forbids paraphrasing and a human reviews the file
-   before the next campaign (R-BEA-8).
-9. Every line of `## Seed symbols` and of `## Candidate sites` is a single entry, and a
-   candidate site is `path:symbol` with the path relative to the repository root.
-10. IDs are unique among the files being linted, which is one `STATELENS_BEACONS` root.
-
-Semantic quality is a human judgment, as for invariants: whether a beacon is worth probing
-is not a lint rule.
-
----
-
-### 4.9 `templates/beacon.md` (verbatim)
-
-~~~markdown
----
-id: BEACON-NNNN
-title: <one line, at most 80 characters>
-kb_ref: [<finding identifier or document path, one or more>]
-module: [<module value of each cited finding>]
-scope: [<one or more of the registry's scope values, listed in the prompt context>]
-status: <valid | tested | triaged | intake | invalid>
-remediation: <fixed | open | mixed; optional>
----
-
-## States
-<The states this beacon names, in protocol terms. One per line.>
-
-## Transition
-<The suspected transition as a before-and-after pair, and why the outcomes are
-indistinguishable to edge coverage. Write `none` when the beacon is about a state with no
-identified transition.>
-
-## Seed symbols
-<Functions, types or fields to start from, one per line.>
-
-## Evidence
-<What the source says about the state change, in your own words, in two to five sentences.
-No exploit steps, prerequisites, severity or impact.>
-
-## Candidate sites
-<Optional. One `path:symbol` per line: where the states are established, changed and read.
-Delete this section if unused.>
-
-## Rejected
-<Snippets a query returned that you rejected, one `<reference>: <reason>` per line, or
-`none`.>
-~~~
-
----
-
 ## 5. Configuration and command line
 
 ### 5.1 `config.env` (verbatim)
@@ -434,10 +308,6 @@ STATELENS_FUZZ_TOOLCHAIN=
 # Knowledge base roots for beacon extraction, separated by `:`. Empty disables
 # beacon extraction; nothing else depends on it.
 STATELENS_KB=
-
-# Beacon registry. Never committed. A path outside the checkout survives the
-# fresh clone that a campaign needs.
-STATELENS_BEACONS=beacons
 ~~~
 
 Parsing: `KEY=VALUE` lines; `#` starts a comment line; values are not shell-expanded.
@@ -445,16 +315,10 @@ Precedence: command-line flag, then non-empty environment variable, then `config
 
 Generated outputs stay inside the subproject and are ignored by git: `SL/campaign/` for
 campaigns, `SL/extract/` for Phase 1 logs, paper text, the knowledge-base index
-(`SL/extract/kb-index.json`) and beacon-extraction logs, and `SL/beacons/` when
-`STATELENS_BEACONS` keeps its default.
+(`SL/extract/kb-index.json`).
 
-The index and the extraction log are the densest knowledge-base content on disk: the index
-holds every indexed finding's summary and tags, and the log holds the snippets the agent
-retrieved. Both are ignored by git, and neither may be attached to a bug report or shared
-outside the operator's machine (R-KB-6).
-
-Relative values of `STATELENS_BEACONS` are resolved against `SL/`; absolute values are
-used as given, which is how a registry outlives a clone (D34).
+The index holds every indexed finding's summary, tags and citations. It is ignored by git,
+like the campaign logs that quote what the instrumenter retrieved.
 
 Environment-only switches:
 
@@ -472,8 +336,7 @@ toolchains, `cargo-nextest`, `cargo-fuzz`, and the chosen agent CLI (`claude` or
 `codex`), logged in. Phase 1 with `issue` sources also needs `gh` (logged in) or
 network access for `curl`. Phase 1 with PDF papers uses `pdftotext` or the Python
 `pypdf` module when available. Beacon extraction needs `STATELENS_KB` to name at least
-one readable corpus root, and uses `rg` (ripgrep) for full-text retrieval, falling back
-to `grep -r` when `rg` is absent.
+one readable corpus root.
 
 ### 5.3 `justfile` (verbatim)
 
@@ -486,10 +349,6 @@ set positional-arguments := true
 extract *args:
     python3 scripts/statelens.py extract "$@"
 
-# Turn the knowledge base into beacons: just beacons <topic>...
-beacons *args:
-    python3 scripts/statelens.py beacons "$@"
-
 # Run a campaign (instrument, build the StateLens targets, test): just fuzz [--agent A] [--profile P]
 fuzz *args:
     python3 scripts/statelens.py campaign "$@"
@@ -497,10 +356,6 @@ fuzz *args:
 # Check invariant files: just check-invariants [path...]
 check-invariants *args:
     python3 scripts/statelens.py lint "$@"
-
-# Check beacon files: just check-beacons [path...]
-check-beacons *args:
-    python3 scripts/statelens.py lint-beacons "$@"
 ~~~
 
 ### 5.4 `scripts/statelens.py`
@@ -513,9 +368,7 @@ prefixed with `statelens:`.
 |---|---|---|
 | `lint` | `lint [PATH...]` | 0 clean, 3 problems |
 | `extract` | `extract [--agent A] [--registry R] KIND SOURCE...`, where `R` is `simplex` (default) or `marshal` | 0 done (including zero files), 1 usage, 2 agent failed, 3 lint problems |
-| `beacons` | `beacons [--agent A] [--registry R] TOPIC...` | 0 done (including zero files), 1 usage, 2 agent failed or no readable knowledge base, 3 lint problems |
-| `lint-beacons` | `lint-beacons [PATH...]`; with no path it lints every registry under `STATELENS_BEACONS` | 0 clean, 3 problems |
-| `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb show IDENTIFIER [SECTION]` (section 6.3) | 0 done, including no hits, 1 usage or a section that is not state-bearing, 2 no readable corpus root |
+| `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, or a section that is not state-bearing, 2 no readable corpus root |
 | `campaign` | `campaign [--agent A] [--profile P] [--stop-after STEP]`, where `P` is `simplex` (default) or `marshal` | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
 
 `--stop-after` accepts `materialize`, `instrument` or `build`. It exists for
@@ -534,8 +387,7 @@ are data in `statelens.py`:
 | Item | `simplex` | `marshal` |
 |---|---|---|
 | Registries, in binding order | `simplex` | `simplex`, `marshal` |
-| Beacon registries, in binding order | `simplex` | `simplex`, `marshal` |
-| Beacon `module` filter, per registry | `simplex`: `consensus/simplex` and its submodules | `simplex` as before; `marshal`: `consensus/marshal` and its submodules |
+| Knowledge-base `module` filter, per component's subsystem | `consensus/simplex` and its submodules | the same, and `consensus/marshal` and its submodules |
 | Editable roots (scope check) | `consensus/src/simplex/` | `consensus/src/simplex/`, `consensus/src/marshal/` |
 | Warn-only paths | `consensus/src/simplex/mocks/`, `consensus/src/simplex/scheme/` | the same, and `consensus/src/marshal/mocks/` |
 | Beacon components, as `ACTOR`: `ACTOR_DIR` | `voter`, `batcher`, `resolver`: `consensus/src/simplex/actors/<actor>` | the three of `simplex`; `marshal.core`: `consensus/src/marshal/core`; `marshal.standard`: `consensus/src/marshal/standard`; `marshal.coding`: `consensus/src/marshal/coding` |
@@ -545,11 +397,127 @@ are data in `statelens.py`:
 | Fuzz targets it builds | `simplex_statelens` | One StateLens variant per target in `consensus/fuzz/marshal/fuzz_targets/` |
 | Test filter | Section 7.7 | Section 8.3, step 6 |
 
+### 5.6 Knowledge base
+
+**What it is.** One or more read-only corpus roots named by `STATELENS_KB` (D32). A corpus
+is a directory tree of Markdown documents of two kinds:
+
+- **Findings**: reports under `findings/<state>/<name>.md`, where `<state>` is one of
+  `valid`, `tested`, `triaged`, `intake` or `invalid`. Each opens with a fenced ` ```claim `
+  block of `key: value` lines, of which `module`, `summary`, `tags`, `severity_current`,
+  `confidence`, `remediation_status` and `related_findings` are read, followed by level-2
+  prose sections. The state-bearing sections are `## Root Cause`, `## Lifecycle Events`,
+  `## Exploitation Or Trigger Conditions` and `## Context`.
+- **Documents**: Markdown under the root's `kb/`, `config/` or `context/` directory. These
+  are the design-document tier, the paper's second artifact kind. They are retrieved by
+  `kb grep` only and cited by path. A document carries no `module`, so it is returned for
+  every registry; R-KB-5 scopes findings, and a document is scoped by the component the
+  instrumenter is working on and by its own judgment instead. Markdown anywhere else under a root
+  is not indexed.
+
+A corpus root that is missing, unreadable, or has no `findings/` directory and no Markdown
+document is reported and skipped. When no root survives, the command exits with code 2
+(R-KB-2).
+
+**Read-only.** StateLens opens corpus files for reading only, and writes nothing under a
+corpus root (R-KB-3). The index lives in `SL/extract/kb-index.json`.
+
+**Index.** Building or refreshing the index walks every root in full and records, per
+finding: its identifier (the file stem), the corpus root, the path, the state from the
+directory, every field of the claim block that is read, and the byte offsets of the
+state-bearing sections, and the files and symbols the finding cites. The index is keyed by
+identifier, not by path, because the corpus moves a finding between state directories as it
+is triaged. Every refresh re-walks the
+roots and drops an entry whose file is gone; an entry whose path or state changed is
+rewritten. Re-parsing is skipped only for a file whose path, modification time and size are
+all unchanged, and the index file is rewritten only when some entry was added, removed or
+re-parsed, so a read-only query leaves it untouched. A corpus file is read at most once per
+invocation. A finding whose claim block is absent or unparsable is indexed by path and
+its path, state and citations alone, with every claim field empty, and every command that
+refreshes the index reports how many such findings
+there are, from the index rather than from the parse, so the count survives the cache. Two
+findings with the same identifier in different roots
+are both indexed, and the root is part of the identity the commands print.
+
+**Retrieval.** The agent must reach the corpus only through these commands; section 12 says
+how far each agent CLI enforces that. It runs these commands, from the
+repository root, and gets back only what they print (D33):
+
+| Command | Returns |
+|---|---|
+| `kb modules` | Every `module` value in the index that passes the registry's filter, with a count |
+| `kb find TERM...` | Up to 20 findings whose `summary` or `tags` match, ranked; per hit the identifier, state, `module`, severity, remediation status, `summary`, and the files and symbols it cites |
+| `kb grep TEXT` | Up to 40 snippets from the state-bearing sections and the documents, each with its identifier or path, the section name, and three lines of context |
+| `kb cites PATH` | Up to 20 findings that cite a file under `PATH`, most citations first; per hit the identifier, state, how many citations, remediation status, `summary`, which of its files fall under `PATH`, and its symbols |
+| `kb show IDENTIFIER [SECTION]` | One finding's claim block, the files and symbols it cites and the names of its state-bearing sections, or one of those sections |
+
+Each is `python3 consensus/fuzz/statelens/scripts/statelens.py kb <subcommand>`. The
+`--registry` flag defaults to `simplex`, so the command lines rendered into the prompt pass
+the run's registry explicitly on every query, `show` included. Section 12 gives the allowlist entry
+that permits exactly this command.
+
+`kb cites` is the entry point for a component: it turns a path in this repository into the
+findings about that code, so the instrumenter can ask what is known about the file in front
+of it.
+
+`kb find`, `kb grep` and `kb cites` are restricted to the `module` filter of the subsystem
+whose component is being instrumented (section 5.5), not of the profile, so a marshal
+component's queries never return Simplex findings and the reverse.
+The `module` filter applies to findings, so `kb show` refuses a finding out of scope exactly
+as it refuses an unknown identifier; a document has no `module` and is addressable by its
+path through `show` as well as `grep`, returning neither a claim block nor a state-bearing
+section; this matters because a finding's claim block names related findings, and
+those names must not become a way around the filter. `kb show` also refuses a section
+outside the state-bearing set, so `## Impact` and the other exploit-bearing sections are not
+reachable through the interface at all. Every command prints the corpus root of each hit,
+because one identifier can occur in two roots.
+
+**Retrieval is an action, not a prologue.** The prompt gives the agent a loop rather than a
+procedure: at each step it chooses between reading code, one of the five `kb` queries, and
+writing a beacon. Reading code leads, because a candidate announces itself there as an enum, a
+`debug_assert!`, a per-view flag or a comment about a race. A query is what the agent does
+when its hypothesis needs context the source does not carry: what an assumption means, why it
+matters, whether it has failed before, or which code manages the transition (D42). This is the paper's on-demand retrieval and its query refinement, within
+one agent run. The campaign's instrumenter is the agent doing this, so retrieval and
+instrumentation happen in one loop. What this project does not have is the paper's Phase 2
+frontier: no call-graph or data-flow tool, so tracing a state across functions is search and
+reading, and the findings' own citations stand in for it.
+
+**Citations.** A hit names the files and symbols its finding cites: paths matching
+`<crate>/src/**/*.rs`, with an optional `:line`, and backticked `Type::method` symbols, each
+list ordered by how often the finding cites it. This is what connects a retrieved feature to
+the relevant files and functions, and it is the material a beacon's `Seed symbols` and
+`Candidate sites` are built from, so the agent does not have to rediscover by reading what
+the corpus already states.
+
+Citations are harvested from every section of a finding, including those whose prose is not
+retrievable. In this corpus they sit overwhelmingly in `## Evidence`, which is not
+state-bearing, so harvesting only from the state-bearing sections would find almost none. A
+path or a symbol is a pointer into this repository's own code, not exploit detail, so
+exposing the citation while withholding the prose around it keeps R-KB-6 intact.
+
+**Module normalization.** Before filtering, a `module` value is normalized: a value naming
+a source path (`consensus/src/simplex/actors/voter/actor.rs`) is mapped to its crate module
+(`consensus/simplex`), and a trailing file name is dropped. A value that normalizes to
+`consensus` alone is too coarse to attribute and matches no registry; the finding is
+indexed and reported in the `kb modules` output under `consensus`, so an operator can see
+what was excluded.
+
+**Determinism.** `kb find` ranks by: an exact `module` match above a submodule match; then
+the number of distinct terms matched in `summary` and `tags`; then `valid` above `tested`
+above `triaged` above `intake` above `invalid`. `kb grep` matches a case-insensitive
+literal substring, never a regular expression, so the two backends of section 5.2 agree; it
+orders hits by corpus root in the order `STATELENS_KB` lists them, then by path, then by
+byte offset. All three of `kb find`, `kb cites` and `kb grep` truncate after their limit and say how many
+hits were dropped. `kb cites` orders by citation count, then by the state rank above, then by
+index order. Ties keep
+index order, so one index gives one answer.
+
 ---
 
-## 6. Phase 1: discover invariants and beacons
+## 6. Phase 1: discover invariants
 
-### 6.1 Invariant sources (`extract`)
+### 6.1 Sources
 
 | Kind | Source syntax |
 |---|---|
@@ -562,7 +530,7 @@ are data in `statelens.py`:
 Several sources of one kind MAY be passed at once (R-P1-1). Local paths are relative to
 the repository root, which is the agent's working directory.
 
-### 6.2 Invariant procedure
+### 6.2 Procedure
 
 1. Validate `KIND`, the registry, and that at least one source is given.
 2. Record the content hash of every file under `SL/invariants/`, in all registries.
@@ -582,118 +550,13 @@ the repository root, which is the agent's working directory.
    repository root, prompt on standard input. Log to
    `SL/extract/<UTC timestamp>-<kind>.log`.
 7. New files = files that did not exist in step 2. Report any pre-existing file whose
-   hash changed as a problem ("agent modified an existing invariant"), and any new file
+   hash changed as a problem ("agent modified or deleted an existing invariant"), and any new file
    outside `SL/invariants/<registry>/` ("agent wrote outside the registry").
 8. Lint the new files (section 4.6).
 9. Print each new file with its title and the reminder: "Every file in a registry is
    used by the next campaign that binds it. Review, edit or delete these files first."
 
 ---
-
-### 6.3 Knowledge base
-
-**What it is.** One or more read-only corpus roots named by `STATELENS_KB` (D32). A corpus
-is a directory tree of Markdown documents of two kinds:
-
-- **Findings**: reports under `findings/<state>/<name>.md`, where `<state>` is one of
-  `valid`, `tested`, `triaged`, `intake` or `invalid`. Each opens with a fenced ` ```claim `
-  block of `key: value` lines, of which `module`, `summary`, `tags`, `severity_current`,
-  `confidence`, `remediation_status` and `related_findings` are read, followed by level-2
-  prose sections. The state-bearing sections are `## Root Cause`, `## Lifecycle Events`,
-  `## Exploitation Or Trigger Conditions` and `## Context`.
-- **Documents**: Markdown under the root's `kb/`, `config/` or `context/` directory. These
-  are the design-document tier, the paper's second artifact kind. They are retrieved by
-  `kb grep` only and cited by path. A document carries no `module`, so it is returned for
-  every registry; R-KB-5 scopes findings, and a document is scoped by the operator's topic
-  and by the agent's keep-or-reject judgment instead. Markdown anywhere else under a root
-  is not indexed.
-
-A corpus root that is missing, unreadable, or has no `findings/` directory and no Markdown
-document is reported and skipped. When no root survives, the command exits with code 2
-(R-KB-2).
-
-**Read-only.** StateLens opens corpus files for reading only, and writes nothing under a
-corpus root (R-KB-3). The index lives in `SL/extract/kb-index.json`.
-
-**Index.** Building or refreshing the index walks every root in full and records, per
-finding: its identifier (the file stem), the corpus root, the path, the state from the
-directory, every field of the claim block that is read, and the byte offsets of the
-state-bearing sections. The index is keyed by identifier, not by path, because the corpus
-moves a finding between state directories as it is triaged. Every refresh re-walks the
-roots and drops an entry whose file is gone; an entry whose path or state changed is
-rewritten. Re-parsing is skipped only for a file whose path, modification time and size are
-all unchanged. A finding whose claim block is absent or unparsable is indexed by path and
-summary alone, and reported once. Two findings with the same identifier in different roots
-are both indexed, and the root is part of the identity the commands print.
-
-**Retrieval.** The agent never reads a corpus root. It runs these commands, from the
-repository root, and gets back only what they print (D33):
-
-| Command | Returns |
-|---|---|
-| `kb modules` | Every `module` value in the index that passes the registry's filter, with a count |
-| `kb find TERM...` | Up to 20 findings whose claim fields match, ranked; per hit the identifier, state, `module`, severity and `summary` |
-| `kb grep TEXT` | Up to 40 snippets from the state-bearing sections and the documents, each with its identifier or path, the section name, and three lines of context |
-| `kb show IDENTIFIER [SECTION]` | One finding's claim block, or one of its state-bearing sections |
-
-Each is `python3 consensus/fuzz/statelens/scripts/statelens.py kb <subcommand>`, with
-`--registry` defaulting to the registry of the run. Section 12 gives the allowlist entry
-that permits exactly this command.
-
-`kb find` and `kb grep` are restricted to the `module` filter of the registry being
-written, not of the profile (section 5.5). A beacon file therefore always sits in the
-registry of the subsystem whose code it names; a `marshal` campaign binds both registries,
-but it does not merge their filters.
-`kb show` refuses a section outside the state-bearing set, so `## Impact` and the other
-exploit-bearing sections are not reachable through the interface at all.
-
-**Module normalization.** Before filtering, a `module` value is normalized: a value naming
-a source path (`consensus/src/simplex/actors/voter/actor.rs`) is mapped to its crate module
-(`consensus/simplex`), and a trailing file name is dropped. A value that normalizes to
-`consensus` alone is too coarse to attribute and matches no registry; the finding is
-indexed and reported in the `kb modules` output under `consensus`, so an operator can see
-what was excluded.
-
-**Determinism.** `kb find` ranks by: an exact `module` match above a submodule match; then
-the number of distinct terms matched in `summary` and `tags`; then `valid` above `tested`
-above `triaged` above `intake` above `invalid`. `kb grep` matches a case-insensitive
-literal substring, never a regular expression, so the two backends of section 5.2 agree; it
-orders hits by corpus root in the order `STATELENS_KB` lists them, then by path, then by
-byte offset. Both truncate after their limit and say how many hits were dropped. Ties keep
-index order, so one index gives one answer.
-
-### 6.4 Beacon procedure (`beacons`)
-
-1. Validate the registry and that at least one topic is given. Resolve
-   `STATELENS_BEACONS` (section 5.1). When the resolved registry is inside this
-   repository and `git check-ignore` does not match it, exit with code 2 and say so: a
-   registry that git would track breaks R-KB-6 before anything is written. Resolve
-   `STATELENS_KB`; refuse a corpus root inside this repository for the same reason, and
-   when no readable root is left, print what was tried and exit with code 2.
-2. Build or refresh the index (section 6.3).
-3. Record the content hash of every file under `<beacons>/`, in all registries.
-4. Compute the next free beacon ID (section 4.8).
-5. Render the prompt: `prompts/beacon.md`, which carries the registry's part in
-   `CONTEXT`. Placeholders: `TOPICS` (one `- <topic>` line
-   per topic), `NEXT_ID`, `REGISTRY`, `BEACON_DIR` (`<beacons>/<registry>`, relative to the
-   repository root when it is inside it), `TEMPLATE` (the content of `templates/beacon.md`, section 4.9),
-   `QUERY` (the query commands of section 6.3 with the concrete command line for each),
-   `SOURCE_ROOT` (`consensus/src/<registry>`) and `CONTEXT` (the content of
-   `prompts/subsystems/<registry>-beacon.md`).
-6. Run the agent with the Phase 1 invocation (section 12), working directory = the
-   repository root, prompt on standard input. Log to
-   `SL/extract/<UTC timestamp>-beacons.log`. The agent may read the corpus only through
-   the query commands, and the invocation's tool allowlist reflects that.
-7. New files = files that did not exist in step 3. Report any pre-existing file whose hash
-   changed ("agent modified an existing beacon") and any new file outside
-   `<beacons>/<registry>/` ("agent wrote outside the registry").
-8. Lint the new files (section 4.8).
-9. Print each new file with its ID, its title and its `status`, and the reminder:
-   "Every beacon in a registry is used by the next campaign that binds it. Review, edit or
-   delete these files first." Print no `kb_ref` and no finding text: an identifier is a
-   descriptive file name and is itself knowledge-base content (R-KB-6).
-
-Writing no beacon file is a valid outcome and exits 0. The agent is expected to say why.
 
 ---
 
@@ -736,14 +599,13 @@ A campaign runs in place in the checkout (D10); `repo` is its root
 - Agent: <agent>
 - Profile: <profile>
 - Invariants: <count> (<registry>: <ID, ID, ...>; <registry>: <ID, ID, ...>)
-- Beacons: <count> (<registry>: <ID, ID, ...>; <registry>: <ID, ID, ...>)
 
 ## Invariants
 
 ## Beacon probes
 
-| Label | File and function | a | b | Beacon | ID |
-|---|---|---|---|---|---|
+| Label | File and function | a | b | Beacon |
+|---|---|---|---|---|
 ~~~
 
 All steps run with working directory `repo` unless stated otherwise. The campaign never
@@ -812,19 +674,18 @@ allows `unexpected_cfgs` itself.
 For each beacon component of the profile (section 5.5), render `prompts/instrument.md`, a
 blank line, then `prompts/instrument-beacons.md`. Placeholders: `BASE`, `PLAN`, `CHECK`,
 `ACTOR` and `ACTOR_DIR` from the profile table, `SUBSYSTEM_RULES` of the component's
-subsystem, and `BEACONS`, the beacon files to bind in this component. Run and log as in
+subsystem, and `QUERY`, the knowledge-base commands of section 5.6 with the concrete command
+line for each, carrying the `module` filter of the component's subsystem. Run and log as in
 section 7.3, with `beacons-<ACTOR>` as the file stem.
 
-`BEACONS` is built from the beacon registries of the profile, in binding order
-(section 5.5). A beacon file goes to the component whose `ACTOR_DIR` contains the most of
-its candidate sites, counting one per line of `## Candidate sites` (section 4.8, lint rule
-9); a tie goes to the component that comes first in the section 5.5 table. A file with no
-candidate sites, or none under any component, goes to every component of its subsystem,
-and the prompt marks it as belonging to no single component. Each entry gives the beacon's
-ID, title, States, Transition, Seed symbols and Candidate sites; `Evidence` and `Rejected`
-are not rendered, because the instrumenter does not need them and they are the parts
-closest to the knowledge base (R-KB-6). When a registry is absent or empty, `BEACONS` is
-the single line `none`, and the step proceeds with code-mined beacons only.
+The agent discovers the beacons in this step. It reads the component's code, where a
+candidate announces itself as a state enum, a `debug_assert!`, a per-view flag or a comment
+about a race, and it queries the knowledge base when a candidate needs developer context the
+source does not carry: what an assumption means, why it matters, whether it has failed
+before, or which code manages the transition. The campaign resolves the corpus roots during
+setup (section 7.1) and refreshes the index before the first agent step, so a query costs no
+corpus walk. When `STATELENS_KB` names no readable root, the campaign says so, `QUERY` is
+empty and the step proceeds from the code alone.
 
 ### 7.5 Step 4: finalize the plan and check scope
 
@@ -843,7 +704,7 @@ the single line `none`, and the step proceeds with code-mined beacons only.
    the added `sl_assert!`, `sl_implies!` and `sl_probe!` call sites, and the beacon table
    rows.
 5. Append a `## Summary` section to the plan with the status counts, call-site counts,
-   beacon count and deleted-line count. Deleted lines are expected to be 0; any other
+   beacon-table row count and deleted-line count. Deleted lines are expected to be 0; any other
    value must match the "Edited lines" entries of the plan.
 6. Write `SL/campaign/instrumentation.diff` with the output of `git diff`.
 
@@ -898,7 +759,7 @@ statelens: agent      <agent>
 statelens: profile    <profile>
 statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)
 statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
-statelens: result     READY | PANIC (tests) | BUILD FAILED | SETUP FAILED
+statelens: result     READY | STOPPED after <step> | PANIC (tests) | BUILD FAILED | SETUP FAILED
 statelens: reason     <why the campaign stopped, for any result other than READY>
 statelens: panic      <first [statelens][...] line, or the first panic message>
 statelens: run        cd <repo>/consensus/fuzz && NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- -rss_limit_mb=4000 -print_final_stats=1
@@ -998,8 +859,8 @@ invariants, 49 assertion sites, 146 probe sites), on 16 cores:
   Simplex sites.
 
 Not verified: the script changes, the generated variants, the wedge hook, marshal
-instrumentation, and AC-9 to AC-13. The knowledge base and beacons (sections 4.8, 4.9, 6.3
-and 6.4) are specified and not implemented, so AC-14 to AC-16 are unverified too.
+instrumentation, and AC-9 to AC-13. The knowledge base and beacons (section 5.6
+and 6.4) have not been exercised with a real agent, so AC-14 to AC-17 are unverified too.
 
 ### 8.2 Decisions
 
@@ -1033,8 +894,7 @@ Step 2, bind invariants (section 7.3): the batches of the simplex registry come 
 with the Simplex subsystem rules, then those of the marshal registry, with the marshal
 subsystem rules.
 
-Step 3, beacon probes (section 7.4): the beacon files of both registries are distributed
-over the components as section 7.4 says, and there is one run for each of the six components of the profile
+Step 3, beacon probes (section 7.4): one run for each of the six components of the profile
 (section 5.5).
 
 Step 4, plan and scope check (section 7.5): both editable roots of the profile are
@@ -1117,7 +977,6 @@ participant, and it is checked without ghost state.
 | AC-11 | In an instrumented checkout, for each variant: `STATELENS_BYZANTINE=panic just run <variant> -- -max_total_time=120`, then the same without the variable. | With the variable, the four Twins variants and the wedge-scenario variant panic with `[statelens][BYZANTINE]`, and no other variant does. Without it, none does. `[statelens] participant index mismatch` never appears. Verified for the Simplex sites of the stock standard Twins target (section 8.1). |
 | AC-12 | `just run <variant> <artifact>` in the checkout of a crashing Phase 3 run, with that run's `STATELENS_BYZANTINE` value. | The same `[statelens][...]` line as in that run. |
 | AC-13 | Two 10-minute runs of `marshal_e2e_standard_app_cert_mock_twins_statelens` on empty corpora, one with `STATELENS_FEEDBACK=0` and one without. | `ft:` on the `DONE` line is higher with feedback. |
-| AC-16 | With one beacon file in each registry, both with candidate sites in their subsystem: `just fuzz --profile marshal`. | The plan's `Beacons:` line lists both IDs; the beacon table has at least one row per ID; a grep of the plan and of `instrumentation.diff` finds no finding identifier and no sentence from the knowledge base. |
 | R-NF-3 | With the same duration and flags: each variant in an instrumented checkout, and its original target in an uninstrumented checkout at the same commit. | The exec/s values are reported side by side. A slowdown above 2x is recorded as an instrumentation problem. |
 
 ### 8.7 Known limitations
@@ -1195,7 +1054,8 @@ location is the macro call site (`#[track_caller]`).
   guarded replica; `with_ghost` also does so when `me` is `None`. The closures MUST NOT
   nest.
 - Instrumentation adds `pub` fields with `Default` types to `Ghost` and `Global`, each
-  marked `// [statelens] ghost:<ID>`.
+  marked `// [statelens] ghost:INV-NNNN`, or `// [statelens] ghost:beacon:<label>` when a
+  beacon probe is what needs the history.
 - Ghost fields added to existing structs (PRD R-INS-5) belong to one replica and are
   updated without the guard. Only the guarded macros act on them, and
   `STATELENS_BYZANTINE` does not apply to their updates.
@@ -1223,9 +1083,9 @@ The prompts in section 13.7 are normative for the agent. In summary:
 
 | Topic | Rule |
 |---|---|
-| Editable code | Non-test code of the profile's subsystems (section 5.5): `consensus/src/simplex/`, except `mocks/` and `scheme/`, and for the `marshal` profile `consensus/src/marshal/`, except `mocks/`. Each invariant only in the code of its own subsystem. New-field initializers may be added to struct literals anywhere, including tests. In `statelens.rs`, only `Ghost` and `Global` fields and private helpers. |
+| Editable code | A beacon run: its component directory and the code it calls (section 8.5). Otherwise the non-test code of the profile's subsystems (section 5.5): `consensus/src/simplex/`, except `mocks/` and `scheme/`, and for the `marshal` profile `consensus/src/marshal/`, except `mocks/`. Each invariant only in the code of its own subsystem. New-field initializers may be added to struct literals anywhere, including tests. In `statelens.rs`, only `Ghost` and `Global` fields and private helpers. |
 | Additions only | No deleted or changed logic. The only allowed edit of an existing line is wrapping an expression in a block, keeping its tokens; each such edit is listed in the plan. |
-| Markers | `// [statelens] <tag>` above every added statement, block, field or item. Tags: `INV-NNNN`, `ghost:INV-NNNN`, `beacon:<label>`, `me`. |
+| Markers | `// [statelens] <tag>` above every added statement, block, field or item. Tags: `INV-NNNN`, `ghost:INV-NNNN`, `beacon:<label>`, `ghost:beacon:<label>`, `me`. |
 | Replica index | Simplex: `self.scheme.me()`; otherwise a `// [statelens] me` field of type `Option<Participant>`. Marshal: section 8.5. Never `None` for an index that could not be obtained. |
 | Non-interference | Observe program state without changing the semantics or control logic of the protocol or its implementation. Write only StateLens state: ghost state, probe counters, added `me` fields. No writes to existing variables, fields or collections (directly, through `&mut` methods or interior mutability); no methods whose reads change state that any code, tests included, can observe; no added `return`, `break`, `continue` or `?` that leaves or skips original code; no channel endpoints, `Arc`s (such as blocks) or values with a `Drop` effect kept in ghost state; no block clones; no `await`, spawn, lock, runtime context, RNG, clock, network, storage, metrics or logging; no reordering or consuming of values. Exception: forcing a memoized decode (`Lazy::get`, `==` on a `Lazy`), even on original values, and keeping clones of decoded messages that hold `Bytes`, such as votes. |
 | Panics | Only through violations: saturating or checked arithmetic, no `unwrap` or `expect`, no out-of-bounds indexing. |
@@ -1255,14 +1115,11 @@ Agents add sections under `## Invariants`:
 and rows to the beacon table:
 
 ~~~markdown
-| voter.certify.transition | actors/voter/round.rs Round::<fn> | disc(old) | disc(new) | CertifyState enum; comment at <line> | - |
-| voter.certify.repair | actors/voter/state.rs State::<fn> | flag(pinned) | delta(v, floor) | seed symbol from the beacon | BEACON-0003 |
+| voter.certify.transition | actors/voter/round.rs Round::<fn> | disc(old) | disc(new) | CertifyState enum; comment at <line> |
 ~~~
 
-The `ID` column is the beacon file the row came from, or `-` for a beacon mined from the
-code. A bound beacon file gets at least one row; a beacon the agent could not bind gets a
-row with `-` in the `a` and `b` columns and the reason in the `Beacon` column. The plan
-names beacons by ID only and quotes no knowledge-base text (R-KB-6).
+The `Beacon` column says what the probe watches and where the agent found it: the code
+construct, or the finding identifier when the knowledge base is what pointed at it.
 
 The script adds the `## Summary` section (section 7.5).
 
@@ -1276,7 +1133,7 @@ Both phases run with the repository root as the working directory.
 
 | Agent | Phase 1 | Phase 2 |
 |---|---|---|
-| `claude` | `claude -p --output-format text [--model M] --permission-mode acceptEdits --allowedTools Read Grep Glob Write Edit WebFetch "Bash(gh:*)" "Bash(curl:*)"`; beacon extraction replaces the two `Bash` entries with `"Bash(python3 consensus/fuzz/statelens/scripts/statelens.py kb:*)"` | `claude -p --output-format text [--model M] --dangerously-skip-permissions` |
+| `claude` | `claude -p --output-format text [--model M] --permission-mode acceptEdits --allowedTools Read Grep Glob Write Edit WebFetch "Bash(gh:*)" "Bash(curl:*)"` | `claude -p --output-format text [--model M] --dangerously-skip-permissions` |
 | `codex` | `codex exec -C <repo root> [-m M] -s workspace-write -c sandbox_workspace_write.network_access=true -` | `codex exec -C <repo root> [-m M] --dangerously-bypass-approvals-and-sandbox -` |
 
 Notes:
@@ -1284,12 +1141,8 @@ Notes:
 - Both CLIs read `AGENTS.md` or `CLAUDE.md` from the working directory. The Phase 2
   prompt states that its rules take precedence during a campaign.
 - Phase 2 agents have unrestricted access to the host (D4). The README MUST say that
-  campaigns run on a dedicated machine or container.
-- Beacon extraction narrows the Phase 1 allowlist: the agent may run the `kb` commands of
-  section 6.3 and nothing else through `Bash`, and no corpus root is readable through
-  `Read` or `Grep`, because every root lies outside the working directory. For `codex`,
-  which has no per-tool allowlist, the sandbox is `read-only` with network access off, and
-  the prompt states that the corpus may be reached only through the `kb` commands.
+  campaigns run on a dedicated machine or container. Being unrestricted is also what lets
+  the instrumenter run the `kb` commands of section 5.6; its prompt says when to.
 - The script checks that the chosen CLI is on `PATH` before any other work.
 
 ---
@@ -1299,7 +1152,7 @@ Notes:
 ### 13.1 `prompts/analyst.md`
 
 ~~~markdown
-# StateLens analyst: extract invariants
+# StateLens invariant analyst: extract invariants
 
 You are a senior security engineer who specializes in Byzantine fault tolerant
 consensus. Read the sources listed at the end and write invariants for the
@@ -1552,8 +1405,9 @@ probes that tell the fuzzer when an execution reached a new internal state.
    plan under "Edited lines".
 2. Mark everything you add with a comment line `// [statelens] <tag>` directly above
    it. Tags: `INV-NNNN` for assertions and invariant probes, `ghost:INV-NNNN` for ghost
-   fields and their updates, `beacon:<label>` for beacon probes, and `me` for code added
-   only to make the replica index available.
+   fields and their updates, `beacon:<label>` for beacon probes, `ghost:beacon:<label>` for
+   ghost state a beacon probe needs, and `me` for code added only to make the replica index
+   available.
 3. Observe only honest replicas. The macros, `with_ghost` and `with_global` apply the
    Byzantine guard themselves. Ghost fields you add to existing structs may be updated
    without the guard, but act on them only through the macros. Always pass the
@@ -1704,26 +1558,36 @@ Invariants:
 Add state probes that let the fuzzer tell apart executions that run the same code in
 different internal states. Do not add assertions in this task.
 
-Beacons come from two places. The registry below holds beacons extracted from developer
-artifacts and reviewed by a human; bind those first. Then mine this component's code for
-more.
+This is a loop, not a checklist. At each step you choose one action, look at what it
+returned, and choose again. Your actions are: read and search the code of this component;
+query the knowledge base with one of the commands below; add a probe.
 
-### Beacons from the registry
+Reading the code leads, because that is where a candidate announces itself. Query the
+knowledge base when your hypothesis needs developer context the source does not carry.
+Source shows you that an assumption exists. It rarely tells you what the assumption means,
+why it matters, whether it has failed before, or which code manages the transition. The
+moment you find yourself asking one of those, query. For example, reading
 
-{{BEACONS}}
+    let task = self.gates.take(round, digest);
 
-For each entry: start from its seed symbols and candidate sites, find the transition it
-describes, and add at least one probe whose `(a, b)` distinguishes the outcomes. Put the
-entry's ID in the `ID` column of the plan. When you cannot bind one, add a plan row with
-`-` for `a` and `b` and the reason in the `Beacon` column, and move on. An entry marked as
-belonging to no single component may not be about this one; skip it and say so.
+tells you that certification consumes a gate, but not why a gate might be absent, nor what
+happens to certification when it is: that is a query, not a guess.
 
-These entries come from reports that may describe weaknesses that are not fixed, and the
-files you edit are tracked by git. Refer to a beacon by its ID. In probe labels, in
-`// [statelens]` comments and in the plan, describe the state in the code's own terms, and
-never why it matters, what it could cause, or how it could be reached.
+### The knowledge base
 
-### Beacons from the code
+{{QUERY}}
+
+The knowledge base holds findings reported against this workspace, each with a summary, the
+state it concerns, and the files and symbols it cites. `kb cites {{ACTOR_DIR}}` is the
+fastest way to see which of them are about the code in front of you, and what they name.
+When nothing is listed above, there is no knowledge base configured: work from the code
+alone.
+
+A finding tells you which states have gone wrong before, so a state it describes is worth
+probing even when the code looks unremarkable. It never tells you to add an assertion: a
+finding is evidence, not a property, and this task adds probes only.
+
+### Beacons in the code
 
 1. Inventory the semantic beacons in the non-test code of `{{ACTOR_DIR}}` and the types
    it owns: enums that describe states, modes, reasons or outcomes; boolean and
@@ -1744,8 +1608,7 @@ never why it matters, what it could cause, or how it could be reached.
    for views and counts, and `pack` to put two small values on one side.
 5. Budget: 20 to 60 probes for this component. Avoid per-message hot loops unless the state
    there is interesting.
-6. Add one row per probe to the "Beacon probes" table of the plan, with `-` in the `ID`
-   column for a beacon you mined here.
+6. Add one row per probe to the "Beacon probes" table of the plan.
 ~~~
 
 ### 13.10 `prompts/repair.md`
@@ -1891,151 +1754,6 @@ Last lines of its output:
   finalized tip, never raw. Never feed commitments or shard indices to a probe.
 ~~~
 
-### 13.15 `prompts/beacon.md`
-
-~~~markdown
-# StateLens beacon analyst: extract beacons from the knowledge base
-
-You write beacon files for the `{{REGISTRY}}` registry of StateLens in this repository.
-
-{{CONTEXT}}
-
-## What a beacon is
-
-A semantic beacon is not a property to check. It is evidence that some internal state or
-transition mattered enough for a developer to write it down. A beacon file aims state
-probes at that state, so the fuzzer can tell apart executions that run the same code with
-different state. Nothing derived from a beacon can fail: beacons never become assertions.
-
-A property that must always hold belongs in the invariant registry instead. When the
-evidence you read states such a property, say so in your reply and write no beacon for it.
-
-## The knowledge base
-
-You cannot read the knowledge base directly. Use these commands, which are already
-restricted to this registry's modules:
-
-{{QUERY}}
-
-Work on demand: query, read the ranked hits, and open a whole document only when a hit
-justifies it.
-
-## Method
-
-For each topic below:
-
-1. Turn the topic into two or more queries. Run `list-modules` first, to see what the
-   knowledge base actually covers for this registry.
-2. For every hit, decide keep or reject, and give the reason in one line. A hit can use the
-   right words for the wrong entity: a word may name a protocol concept in one finding and
-   an unrelated type in another. Reject those.
-3. For what you keep, read the state-bearing sections, then read the code under
-   `{{SOURCE_ROOT}}` that they name. Find where the state is established, where it changes,
-   and where it is read to decide something.
-4. Write one beacon file per state or transition, not one per finding. Several findings may
-   support one beacon; list them all in `kb_ref`.
-5. Record every rejected hit in the file's `## Rejected` section.
-
-## What makes a good beacon
-
-- A transition whose outcomes run the same code. When the outcomes take different branches,
-  edge coverage already separates them and the beacon adds nothing.
-- A state established in one place and used in another, especially across a mailbox, a
-  component boundary, or a restart.
-- A state that a side effect can change between the moment it is checked and the moment it
-  is used.
-- Something observable without side effects: a field, a flag, an enum, a length, or a
-  side-effect-free accessor.
-
-Avoid: states decided only by the content of a Byzantine peer's message; states with no
-expression that can be read where the transition happens; anything that would need a new
-method to observe.
-
-## Disclosure
-
-The knowledge base contains unfixed vulnerabilities, and this repository is public.
-
-- Write states, transitions and code locations. Never write exploit steps, attack
-  prerequisites, severity or impact.
-- Never copy a finding's `## Impact`, `## Exploitation Or Trigger Conditions`,
-  `## Reachability And Prerequisites` or `## Suggested Fix` section. You may use what a
-  trigger condition tells you about the state itself, which is the transition and where it
-  happens; you may not carry over what makes it reachable or what it would cost.
-- `## Evidence` says which state change the source describes, in your own words, in two to
-  five sentences.
-
-## Output
-
-- Write one file per beacon: `{{BEACON_DIR}}/<ID>.md`.
-- Use IDs starting at `{{NEXT_ID}}` and increasing by one with no gaps.
-- Follow the template below exactly: the same front matter keys and section headings, in
-  the same order. Delete optional sections you do not use.
-- Plain ASCII only. Wrap lines at 100 characters.
-- Do not modify or delete existing files, and do not write code.
-
-When you finish, reply with a list of the files you wrote (ID, title, one line of
-evidence), or with the reason you wrote none.
-
-## Template
-
-```markdown
-{{TEMPLATE}}
-```
-
-## Topics
-
-{{TOPICS}}
-~~~
-
-### 13.16 `prompts/subsystems/simplex-beacon.md`
-
-~~~markdown
-- `consensus/src/simplex` implements the Simplex consensus protocol: replicas move through
-  views, vote to notarize, nullify and finalize proposals, assemble certificates from
-  quorums of votes, certify proposals with the application, and repair missing history
-  from peers. The module docs in `consensus/src/simplex/mod.rs` describe the protocol.
-- Knowledge-base modules in scope: `consensus/simplex` and its submodules. Findings about
-  `consensus/aggregation`, marshal, storage, p2p, codec or the fuzz harnesses belong to
-  another registry or to none.
-- Components a beacon can land in: the voter, batcher and resolver actors, under
-  `consensus/src/simplex/actors/<actor>`.
-- Scope values: `protocol`, `replica`, `voter`, `batcher`, `resolver`, `cross-actor`.
-- States that have already proved fragile here: the certification state of a view, the
-  status of a proposal slot, per-view broadcast flags, which timeout deadline is armed and
-  which reason fired, the certified floor, and the repair requests in flight with the peer
-  each one is pinned to.
-- Example of a beacon this registry wants: before and after the certified floor moves,
-  whether the view being repaired can still be requested. Both outcomes run the same repair
-  code, so edge coverage cannot separate them.
-~~~
-
-### 13.17 `prompts/subsystems/marshal-beacon.md`
-
-~~~markdown
-- `consensus/src/marshal` turns Simplex certificates, and the blocks disseminated for its
-  proposals, into an ordered stream of finalized blocks for the application. It caches
-  blocks and certificates, persists finalized blocks, keeps a processed floor, delivers
-  blocks in height order, prunes what it no longer needs, and backfills what it misses.
-  In coding mode, blocks are erasure coded into shards that a shard engine disseminates,
-  checks and reconstructs. The module docs in `consensus/src/marshal/mod.rs` describe the
-  design.
-- Knowledge-base modules in scope: `consensus/marshal` and its submodules, which the
-  knowledge base writes as `consensus/marshal/core`, `/standard`, `/coding`,
-  `/application` and `/ancestry`. Simplex findings belong to the `simplex` registry.
-- Components a beacon can land in: `consensus/src/marshal/core`,
-  `consensus/src/marshal/standard` and `consensus/src/marshal/coding`.
-- Scope values: `protocol`, `replica`, `core`, `resolver` (marshal's backfill resolver),
-  `standard`, `coding`, `application`, `cross-component`.
-- States that have already proved fragile here: whether a block is held in a cache a peer
-  can evict versus storage a peer cannot, whether a subscription or a certification gate is
-  registered yet, the processed floor and its pending anchor, what is in flight for
-  backfill or repair, durability flags, and in coding mode the retention round of a
-  reconstructed block and the per-peer shard buffers.
-- Example of a beacon this registry wants: at the moment a notarized-block fetch is
-  skipped because the block was found locally, where the block was found. The skip runs the
-  same code whichever cache answered.
-~~~
-
 ---
 
 ## 14. Acceptance procedures
@@ -2050,11 +1768,11 @@ evidence), or with the reason you wrote none.
 | AC-6 | `STATELENS_FALSE_INVARIANTS=1 just fuzz`; if the result is `READY`, a short run of the printed `run` command. | Result `PANIC (tests)` with `[statelens][FALSE-0001]`, or a panic with it in the short run. |
 | AC-7 | In an instrumented checkout: `STATELENS_BYZANTINE=panic just run simplex_statelens -- -max_total_time=120`, then the same without the variable. | The first run panics with `[statelens][BYZANTINE]`; the second does not; `[statelens] participant index mismatch` never appears. Verified at the reference commit (section 1.2). |
 | AC-8 | `just run simplex_statelens <artifact>` in the checkout of a crashing Phase 3 run, with that run's `STATELENS_BYZANTINE` value. | The same `[statelens][...]` line as in that run. Verified for `BYZANTINE` (section 1.2). |
-| AC-14 | With `STATELENS_KB` set to a findings corpus: `just beacons <topic>`; then `just check-beacons`; then read the new files. | At least one new `BEACON-*.md`; lint reports no problem; every `module` value is in the registry's filter; `## States`, `## Transition` and `## Seed symbols` are non-empty; no forbidden heading (rule 8 of section 4.8); when the log shows a rejected hit, `## Rejected` records it. |
-| AC-15 | `STATELENS_KB= just beacons <topic>`; then a campaign with no beacon registry. | `beacons` exits 2 and names `STATELENS_KB`, and writes nothing; the campaign still reaches `READY`, and the plan's `Beacons:` line reports 0. |
+| AC-14 | With `STATELENS_KB` set to a findings corpus, run the queries of section 5.6 by hand for each registry: `kb modules`, `kb find`, `kb cites <a component directory>`, `kb grep`, `kb show`. | Every command answers from the index; `find` and `cites` return only findings whose `module` is in that subsystem's filter; `cites` returns the findings that name files under the directory, with those files listed; `show` refuses a section that is not state-bearing and an identifier out of scope. |
+| AC-15 | `STATELENS_KB=` with a campaign. | The campaign warns that there is no knowledge base, renders the beacon step with no query commands, and still reaches `READY`. |
 | R-NF-3 | Same duration and flags: `simplex_statelens` in an instrumented checkout, and `simplex_cert_mock_twins_mutator` in an uninstrumented checkout at the same commit. | exec/s from `-print_final_stats=1` are reported side by side; a slowdown above 2x is recorded as an instrumentation problem. |
 
-Section 8.6 gives the procedures for AC-9 to AC-13 and AC-16, and for R-NF-3 on the marshal
+Section 8.6 gives the procedures for AC-9 to AC-13, and for R-NF-3 on the marshal
 variants.
 
 ---
@@ -2062,8 +1780,7 @@ variants.
 ## 15. Implementation order
 
 1. Create the layout of section 3 with the verbatim files: `config.env`, `justfile`,
-   `templates/invariant.md`, `templates/beacon.md`, all prompts with the subsystem parts
-   (section 13),
+   `templates/invariant.md`, all prompts with the subsystem parts (section 13),
    `false-invariants/simplex/FALSE-0001.md` (Appendix C),
    `false-invariants/marshal/FALSE-0002.md` (Appendix E), `runtime/statelens.rs`
    (Appendix A) and `runtime/target.rs` (Appendix B.1). Create `invariants/simplex/` and
@@ -2072,8 +1789,8 @@ variants.
 2. Check the runtime templates:
    `rustfmt +<pinned nightly> --edition 2024 --config-path rustfmt.toml --check consensus/fuzz/statelens/runtime/*.rs`.
 3. Implement `scripts/statelens.py` in this order: config and argument parsing, `lint`,
-   `lint-beacons`, prompt rendering, agent invocation, `extract`, the knowledge-base index
-   and the `kb` commands, `beacons`, then `campaign`. Implement `campaign`
+   prompt rendering, agent invocation, `extract`, the knowledge-base index and the `kb`
+   commands, then `campaign`. Implement `campaign`
    for the `simplex` profile first, starting with the materialize step and
    `--stop-after materialize`, and then for the `marshal` profile (chapter 8).
 4. Write `README.md` (Appendix D).
@@ -2082,8 +1799,8 @@ variants.
    - `STATELENS_FALSE_INVARIANTS=1 just fuzz --stop-after build`, then AC-1 to AC-8;
    - `STATELENS_FALSE_INVARIANTS=1 just fuzz --profile marshal --stop-after build`, then
      AC-9 to AC-13;
-   - with `STATELENS_KB` set to a findings corpus, `just beacons <topic>`, then AC-14 to
-     AC-16.
+   - with `STATELENS_KB` set to a findings corpus, the queries of section 5.6, then AC-14
+     and AC-15.
 6. Change nothing outside `consensus/fuzz/statelens/`.
 
 ---
@@ -2098,12 +1815,12 @@ variants.
   campaigns. The plan and `instrumentation.diff` document each binding.
 - A campaign instruments the checkout in place, so every campaign needs a fresh clone.
   The script refuses a checkout that an earlier campaign instrumented.
-- The beacon registry is not committed (D34), so it does not arrive with the clone a
-  campaign needs. Either `STATELENS_BEACONS` points outside the checkout, or beacon
-  extraction runs again in the clone. A campaign with no beacon registry is not an error:
-  it binds the code-mined beacons only.
-- Retrieval is lexical (D33). A finding that describes the right state in words the topic
-  does not contain is not returned. Rerunning `beacons` with other terms is the remedy.
+- The beacon components cover the Simplex actors and marshal's core, standard and coding
+  (D28). Code outside them, such as `types.rs`, the backfill resolver or the application
+  code, gets no beacon probes even when the knowledge base has findings about it.
+- `kb find` and `kb grep` are lexical (D33), so a word query misses a finding whose wording
+  differs. A component's queries do not depend on wording, because they start from
+  `kb cites <its directory>`; the remedy for a word query is another query in the loop.
 - Replicas without a participant index (`me() == None`) have no per-replica ghost
   state, so ghost-based checks skip them.
 - The Twins tests are not part of the test gate (D2). The fuzz harness itself exercises
@@ -2768,18 +2485,20 @@ Workflow test, see SPEC.md section 14.
    dedicated machine or container, run the campaign and the fuzzers in that clone, and
    discard the clone afterwards. Never commit an instrumented checkout.
 3. Prerequisites (section 5.2) and `config.env`.
-4. Phase 1: `just extract [--registry simplex|marshal] <kind> <source>...` with one example
+4. Phase 1a: `just extract [--registry simplex|marshal] <kind> <source>...` with one example
    per kind, then review: every file in a registry is used by the next campaign that binds
    it; edit or delete drafts; `just check-invariants`.
-5. Phase 2: `just fuzz`, `just fuzz --profile marshal`, `just fuzz --agent codex`,
+5. The knowledge base: what `STATELENS_KB` points at, that a campaign's beacon step queries
+   it while instrumenting, and the `kb` commands an operator can run by hand.
+6. Phase 2: `just fuzz`, `just fuzz --profile marshal`, `just fuzz --agent codex`,
    `--stop-after`. The campaign builds the StateLens targets and does not fuzz. Note that
    `just fuzz` in `consensus/fuzz/` or at the repository root is the existing recipe that
    runs a package's fuzz targets.
-6. Phase 3: run the printed `run` commands, adding libFuzzer arguments such as `-fork=8`
+7. Phase 3: run the printed `run` commands, adding libFuzzer arguments such as `-fork=8`
    (section 7.10); which marshal variants have an adversary that runs Simplex or marshal code.
-7. Results: the summary lines, exit codes, and `campaign/` (plan, diff, logs, prompts).
-8. Investigating a panic (section 7.12).
-9. Testing the workflow itself: `STATELENS_FALSE_INVARIANTS=1` (the campaign must panic on
+8. Results: the summary lines, exit codes, and `campaign/` (plan, diff, logs, prompts).
+9. Investigating a panic (section 7.12).
+10. Testing the workflow itself: `STATELENS_FALSE_INVARIANTS=1` (the campaign must panic on
    the deliberately false invariants), `STATELENS_BYZANTINE=panic` (guard test) and
    `STATELENS_FEEDBACK=0` (feedback comparison).
 

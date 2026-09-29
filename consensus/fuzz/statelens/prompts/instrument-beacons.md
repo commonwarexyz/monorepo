@@ -3,6 +3,37 @@
 Add state probes that let the fuzzer tell apart executions that run the same code in
 different internal states. Do not add assertions in this task.
 
+This is a loop, not a checklist. At each step you choose one action, look at what it
+returned, and choose again. Your actions are: read and search the code of this component;
+query the knowledge base with one of the commands below; add a probe.
+
+Reading the code leads, because that is where a candidate announces itself. Query the
+knowledge base when your hypothesis needs developer context the source does not carry.
+Source shows you that an assumption exists. It rarely tells you what the assumption means,
+why it matters, whether it has failed before, or which code manages the transition. The
+moment you find yourself asking one of those, query. For example, reading
+
+    let task = self.gates.take(round, digest);
+
+tells you that certification consumes a gate, but not why a gate might be absent, nor what
+happens to certification when it is: that is a query, not a guess.
+
+### The knowledge base
+
+{{QUERY}}
+
+The knowledge base holds findings reported against this workspace, each with a summary, the
+state it concerns, and the files and symbols it cites. `kb cites {{ACTOR_DIR}}` is the
+fastest way to see which of them are about the code in front of you, and what they name.
+When nothing is listed above, there is no knowledge base configured: work from the code
+alone.
+
+A finding tells you which states have gone wrong before, so a state it describes is worth
+probing even when the code looks unremarkable. It never tells you to add an assertion: a
+finding is evidence, not a property, and this task adds probes only.
+
+### Beacons in the code
+
 1. Inventory the semantic beacons in the non-test code of `{{ACTOR_DIR}}` and the types
    it owns: enums that describe states, modes, reasons or outcomes; boolean and
    `Option` fields of per-view or per-round state; the conditions of `debug_assert!`,
