@@ -8,7 +8,7 @@ fn bench_encode(c: &mut Criterion) {
 }
 
 fn bench_decode(c: &mut Criterion) {
-    bench_decode_generic::<PhasedAsScheme<Zoda<Sha256>>>("zoda::decode", c);
+    bench_decode_generic::<PhasedAsScheme<Zoda<Sha256>>>("zoda::decode", c, &[]);
 }
 
 criterion_group! {

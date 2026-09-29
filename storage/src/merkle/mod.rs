@@ -32,7 +32,7 @@ use commonware_cryptography::Digest;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};
 pub use position::Position;
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 pub(crate) use proof::build_range_proof;
 pub use proof::{MAX_PROOF_DIGESTS_PER_ELEMENT, Proof};
 pub use read::Readable;
@@ -406,8 +406,4 @@ pub enum Error<F: Family> {
     /// Bit offset is out of bounds.
     #[error("bit offset {0} out of bounds (size: {1})")]
     BitOutOfBounds(u64, u64),
-
-    /// Rewind was attempted but no prior committed state is available.
-    #[error("rewind beyond history")]
-    RewindBeyondHistory,
 }

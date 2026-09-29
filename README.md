@@ -23,7 +23,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
 * [glue](./glue/README.md): Default constructions that span multiple primitives.
 * [math](./math/README.md): Create and manipulate mathematical objects.
-* [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
+* [p2p](./p2p/README.md): Communicate with authenticated peers.
 * [parallel](./parallel/README.md): Parallelize fold operations with pluggable execution strategies.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
@@ -38,10 +38,10 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [battleware](https://github.com/commonwarexyz/battleware): An onchain battle secured by a VRF, Timelock Encryption, and MMRs.
 * [bridge](./examples/bridge/README.md): Send succinct consensus certificates between two networks.
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends.
+* [dkg](./examples/dkg/README.md): Generate and reshare a threshold secret over an epoched log.
 * [estimator](./examples/estimator/README.md): Simulate mechanism performance under realistic network conditions.
 * [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
-* [reshare](./examples/reshare/README.md): Reshare a threshold secret over an epoched log.
 
 ## Miscellaneous
 
@@ -54,6 +54,7 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
 * [mcp](./mcp/README.md): Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.
 * [pipeline](./pipeline): Mechanisms under development.
+* [sol](./sol/README.md): Verify proofs and certificates in Solidity.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
 ## Stability

@@ -28,8 +28,7 @@
             paddd xmm3, xmm14
             paddd xmm4, xmm15
 
-            sub rsp, 64
-            movdqu xmmword ptr [rsp], xmm1
-            movdqu xmmword ptr [rsp + 16], xmm2
-            movdqu xmmword ptr [rsp + 32], xmm3
-            movdqu xmmword ptr [rsp + 48], xmm4
+            movdqa xmm5, xmm1
+            movdqa xmm6, xmm2
+            movdqa xmm7, xmm3
+            movdqa xmm8, xmm4

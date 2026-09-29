@@ -21,6 +21,7 @@ commonware-formatting.workspace = true
 commonware-macros.workspace = true
 commonware-p2p.workspace = true
 commonware-runtime.workspace = true
+commonware-stream.workspace = true
 commonware-utils.workspace = true
 crossterm.workspace = true
 futures.workspace = true

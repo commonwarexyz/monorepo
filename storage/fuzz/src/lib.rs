@@ -1,5 +1,5 @@
-//! Shared input generators, crash-recovery flows, and raw-image oracles for storage fuzz
-//! targets.
+//! Shared input generators, model checks, crash-recovery flows, and raw-image oracles for
+//! storage fuzz targets.
 
 use arbitrary::Unstructured;
 use commonware_runtime::{
@@ -9,7 +9,27 @@ use commonware_runtime::{
 use commonware_utils::{Probability, probability};
 use futures::future::poll_immediate;
 use rand::{Rng, RngExt as _};
-use std::future::Future;
+use std::{fmt::Debug, future::Future};
+
+/// Check strict, non-wrapping neighbors against the model's live keys.
+pub fn assert_ordered_neighbors<K: Ord + Debug>(
+    keys: impl IntoIterator<Item = K>,
+    query: &K,
+    prev: Option<K>,
+    next: Option<K>,
+) {
+    let mut expected_prev = None;
+    let mut expected_next = None;
+    for key in keys {
+        if key < *query && expected_prev.as_ref().is_none_or(|prev| key > *prev) {
+            expected_prev = Some(key);
+        } else if key > *query && expected_next.as_ref().is_none_or(|next| key < *next) {
+            expected_next = Some(key);
+        }
+    }
+    assert_eq!(prev, expected_prev, "incorrect predecessor for {query:?}");
+    assert_eq!(next, expected_next, "incorrect successor for {query:?}");
+}
 
 /// Complete the oldest parked durability completion, if any.
 ///
@@ -34,8 +54,8 @@ pub fn release_oldest_pending_sync(pending: &PendingSyncs) {
 /// unfinished polls.
 ///
 /// Returns the output when the future completes within the budget. Otherwise returns `None`
-/// and drops the abandoned future, so the crash lands between its internal barriers. Arming
-/// the pending gate and crediting durability from a completed output stay with the caller.
+/// and drops the abandoned future, so the crash lands between its internal barriers. The caller
+/// arms the pending gate and updates its durability expectations from the returned output.
 pub async fn poll_interrupted<F: Future>(
     pending: &PendingSyncs,
     fut: F,

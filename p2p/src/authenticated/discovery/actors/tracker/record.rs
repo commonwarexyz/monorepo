@@ -372,7 +372,13 @@ mod tests {
         S: commonware_cryptography::PrivateKey,
     {
         let signer = S::from_seed(signer_seed);
-        types::Info::sign(&signer, NAMESPACE, socket, timestamp)
+        types::Info::sign(
+            signer.public_key(),
+            NAMESPACE,
+            socket,
+            timestamp,
+            |namespace, message| signer.sign(namespace, message),
+        )
     }
 
     // Common test sockets

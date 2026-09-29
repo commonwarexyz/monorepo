@@ -51,11 +51,14 @@ where
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
     pub async fn init(
         context: E,
         cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
+        max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg).await
+        crate::qmdb::any::init(context, cfg, max_size).await
     }
 }
 
@@ -118,11 +121,14 @@ pub mod partitioned {
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+        /// `None` selects the latest retained state.
         pub async fn init(
             context: E,
             cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg).await
+            crate::qmdb::any::init(context, cfg, max_size).await
         }
     }
 
@@ -184,7 +190,7 @@ pub(crate) mod test {
                 page_cache,
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
         }
@@ -201,7 +207,7 @@ pub(crate) mod test {
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed, &context);
-        AnyTest::init(context, config).await.unwrap()
+        AnyTest::init(context, config, None).await.unwrap()
     }
 
     /// Deterministic byte vector generator for variable-value tests.
@@ -522,7 +528,7 @@ pub(crate) mod test {
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
         let cfg = create_test_config(0, &context);
-        AnyTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -742,6 +748,169 @@ pub(crate) mod test {
             assert_eq!(db.get(&key2).await.unwrap(), None);
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_staged_merkleize_rejects_stale_sibling() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db(context.child("storage")).await;
+            let key = Sha256::hash(&[b"key"]);
+
+            let seed = db
+                .new_batch()
+                .write(key, Some(vec![0]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            let keys = [&key];
+            let (_, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let sibling = db
+                .new_batch()
+                .write(key, Some(vec![1]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+
+            assert!(matches!(
+                staged
+                    .merkleize(vec![(0, Some(vec![2]))], Vec::new(), None, &db)
+                    .await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_prepared_staged_merkleize_retains_ancestors() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = create_test_db(context.child("prepared")).await;
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let mut seed = db.new_batch();
+            for i in 0..64 {
+                seed = seed.write(key(i), Some(to_bytes(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            let grandparent = db
+                .new_batch()
+                .write(key(0), Some(to_bytes(1_000)))
+                .write(key(100), Some(to_bytes(1_001)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let parent = grandparent
+                .new_batch::<Sha256>()
+                .write(key(1), Some(to_bytes(2_000)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            assert!(!parent.diff.iter().any(|(k, _)| *k == key(100)));
+            let expected_root = parent
+                .new_batch::<Sha256>()
+                .write(key(0), Some(to_bytes(3_000)))
+                .write(key(101), Some(to_bytes(3_001)))
+                .merkleize(&db, None)
+                .await
+                .unwrap()
+                .root();
+
+            let target = key(0);
+            let (values, staged) = parent
+                .new_batch::<Sha256>()
+                .stage(&[&target], &db)
+                .await
+                .unwrap();
+            assert_eq!(values, vec![Some(to_bytes(1_000))]);
+            let weak_grandparent = Arc::downgrade(&grandparent);
+            let mut caller_ancestors = Some((grandparent, parent));
+            let (prepared, updates, prefetched) = staged
+                .resolve_updates_prefetched(
+                    vec![(0, Some(to_bytes(3_000)))],
+                    vec![(key(101), Some(to_bytes(3_001)))],
+                    &db,
+                    |floor, tip, limit, out| {
+                        // Preparation must retain the chain before prefetch starts.
+                        drop(caller_ancestors.take());
+                        Location::new(db.bitmap.fill_candidates(*floor, tip, limit, out))
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(caller_ancestors.is_none());
+            assert!(weak_grandparent.upgrade().is_some());
+
+            let (batch, retained_ancestors) = prepared
+                .merkleize_with_floor_scan(
+                    None,
+                    updates,
+                    Some(prefetched),
+                    |floor, tip, limit, out| {
+                        Location::new(db.bitmap.fill_candidates(*floor, tip, limit, out))
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(batch.root(), expected_root);
+            // Current's additional root computation needs this post-merkleization lifetime.
+            assert!(weak_grandparent.upgrade().is_some());
+            assert_eq!(
+                batch.get(&key(100), &db).await.unwrap(),
+                Some(to_bytes(1_001))
+            );
+            drop(retained_ancestors);
+
+            let (db, _) = db.apply_batch(batch).await.unwrap();
+            for (k, value) in [(0, 3_000), (1, 2_000), (100, 1_001), (101, 3_001)] {
+                assert_eq!(db.get(&key(k)).await.unwrap(), Some(to_bytes(value)));
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_stage_and_expand_reject_foreign_db() {
+        deterministic::Runner::default().start(|context| async move {
+            let db_a = open_db(context.child("a")).await;
+            let db_b = AnyTest::init(context.child("b"), create_test_config(1, &context), None)
+                .await
+                .unwrap();
+            let key_a = Sha256::hash(&[b"a"]);
+            let key_b = Sha256::hash(&[b"b"]);
+
+            let seed_a = db_a
+                .new_batch()
+                .write(key_a, Some(vec![1]))
+                .merkleize(&db_a, None)
+                .await
+                .unwrap();
+            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let seed_b = db_b
+                .new_batch()
+                .write(key_b, Some(vec![2]))
+                .merkleize(&db_b, None)
+                .await
+                .unwrap();
+            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+
+            assert_eq!(db_a.bounds().end, db_b.bounds().end);
+            assert_ne!(db_a.root(), db_b.root());
+
+            let keys = [&key_a];
+            assert!(matches!(
+                db_a.new_batch().stage(&keys, &db_b).await,
+                Err(Error::StaleBatch)
+            ));
+
+            let (_, staged) = db_a.new_batch().stage(&keys, &db_a).await.unwrap();
+            assert!(matches!(
+                staged.expand(&keys, &db_b).await,
+                Err(Error::StaleBatch)
+            ));
         });
     }
 

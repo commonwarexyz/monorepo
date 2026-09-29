@@ -1,6 +1,12 @@
-//! Epoch readiness gate used to synchronize the [`Provider`] and the [`orchestrator::Actor`].
+//! Monotonic epoch readiness signal.
 //!
-//! [`Provider`]: commonware_cryptography::certificate::Provider
+//! A [`Fence`] marks epochs as ready and its [`Gate`] waits for them. The
+//! [`reshare::Actor`] marks an epoch once its [`Registrar::register`] call for
+//! that epoch resolves, and the [`orchestrator::Actor`] enters an epoch only
+//! after the gate reaches it.
+//!
+//! [`reshare::Actor`]: super::reshare::Actor
+//! [`Registrar::register`]: super::Registrar::register
 //! [`orchestrator::Actor`]: super::orchestrator::Actor
 
 use commonware_consensus::types::Epoch;
@@ -15,16 +21,24 @@ use std::{
     task::{Context, Poll},
 };
 
-/// Epoch producer dropped before the requested epoch became available.
+/// The [`Fence`] was dropped before the requested epoch was ready.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("epoch fence closed")]
 pub struct Closed;
 
+/// Producer side of an epoch readiness signal.
+///
+/// Dropping the fence closes its [`Gate`].
 pub struct Fence {
     state: Arc<State>,
 }
 
 impl Fence {
+    /// Creates a fence and its gate with every epoch at or below `epoch` ready.
+    ///
+    /// The orchestrator may enter such an epoch without waiting, so the
+    /// consensus provider must already hold a scheme for any of them it can
+    /// start in (for example, the genesis epoch or the state-synced epoch).
     pub fn new(epoch: Epoch) -> (Self, Gate) {
         let state = Arc::new(State::new(epoch));
         (
@@ -35,10 +49,14 @@ impl Fence {
         )
     }
 
+    /// Returns the highest ready epoch.
     pub fn epoch(&self) -> Epoch {
         self.state.epoch()
     }
 
+    /// Marks every epoch at or below `epoch` as ready and returns the highest ready epoch.
+    ///
+    /// Marking an epoch at or below the highest ready epoch has no effect.
     pub fn mark(&self, epoch: Epoch) -> Epoch {
         self.state.mark(epoch)
     }
@@ -50,25 +68,28 @@ impl Drop for Fence {
     }
 }
 
+/// Consumer side of an epoch readiness signal.
 pub struct Gate {
     state: Arc<State>,
 }
 
 impl Gate {
+    /// Returns the highest ready epoch.
     pub fn epoch(&self) -> Epoch {
         self.state.epoch()
     }
 
-    /// Wait for `epoch` to become available.
+    /// Returns a future that resolves once `epoch` is ready.
     ///
-    /// Returns [`Closed`] if the producer is dropped before the gate reaches the
-    /// requested epoch. Already-reached epochs still resolve successfully after
-    /// closure.
+    /// The future returns [`Closed`] if the [`Fence`] is dropped before `epoch` is
+    /// ready. An epoch that is already ready still resolves successfully after the
+    /// fence is dropped.
     pub const fn wait(&mut self, epoch: Epoch) -> Waiter<'_> {
         Waiter { gate: self, epoch }
     }
 }
 
+/// Future returned by [`Gate::wait`].
 pub struct Waiter<'a> {
     gate: &'a Gate,
     epoch: Epoch,

@@ -110,13 +110,13 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     page_cache,
                 },
                 translator: EightCap,
-                init_cache_size: Some(NZUsize!(3)),
+                init_cache: Some(NZUsize!(3)),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             };
 
             let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.child("storage"), cfg)
+                commonware_storage::qmdb::any::init(context.child("storage"), cfg, None)
                     .await
                     .expect("init qmdb");
             let mut last_commit = None;

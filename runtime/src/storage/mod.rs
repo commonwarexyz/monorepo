@@ -4,46 +4,44 @@ use commonware_macros::stability_scope;
 
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::{BlobVersion, Error};
+    use cfg_if::cfg_if;
+    use commonware_formatting::hex;
+    use commonware_utils::Widen;
     use std::{
         fs::File,
-        io::{Read as _, Seek as _, SeekFrom},
+        io::{self, Read as _, Seek as _, SeekFrom, Write as _},
         ops::RangeInclusive,
         path::Path,
     };
 
-    /// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote
-    /// but did not `fsync` are crash-durable before any storage structure reads.
-    ///
-    /// Per-platform guarantee:
-    /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
-    /// - **macOS/BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
-    ///   crash-durable.
-    ///
-    /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
-    /// >= 5.8.
-    pub(crate) fn sync(dir: &std::path::Path) -> std::io::Result<()> {
-        cfg_if::cfg_if! {
-            if #[cfg(target_os = "linux")] {
-                use std::os::fd::AsRawFd;
-                let file = std::fs::File::open(dir)?;
+    mod pending;
+    pub(crate) use pending::{Generation, Pending, Sender};
+    mod tracker;
+    pub(crate) use tracker::Tracker;
+
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            use std::os::fd::AsRawFd;
+
+            /// Make what a prior process wrote crash-durable before any storage structure reads by
+            /// flushing the whole filesystem containing `dir` with `syncfs(2)`.
+            ///
+            /// Assumes storage lives on a single filesystem. Reliable error detection needs
+            /// kernel >= 5.8.
+            pub(crate) fn sync(dir: &Path) -> io::Result<()> {
+                let file = File::open(dir)?;
                 // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
                 // that fd, performs no memory access, and returns -1 on error.
                 if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
-                    return Err(std::io::Error::last_os_error());
+                    return Err(io::Error::last_os_error());
                 }
-                tracing::debug!(
-                    storage_directory = %dir.display(),
-                    "made storage filesystem durable at startup (syncfs)"
-                );
                 Ok(())
-            } else {
-                // SAFETY: `sync` takes no arguments and cannot fail.
-                unsafe { libc::sync() };
-                tracing::debug!(
-                    storage_directory = %dir.display(),
-                    "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"
-                );
-                Ok(())
+            }
+        } else {
+            /// Make inherited partition entries durable before user code starts. Partition
+            /// directories and existing blob contents are synchronized on their first access.
+            pub(crate) fn sync(dir: &Path) -> io::Result<()> {
+                File::open(dir)?.sync_all()
             }
         }
     }
@@ -76,11 +74,48 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         partition: &str,
         name: &[u8],
     ) -> Result<Option<(u64, BlobVersion, u64)>, Error> {
-        let mut raw = vec![0u8; Header::resolve_len(raw_len)];
+        let requested = Header::resolve_len(raw_len);
+        let mut raw = Vec::with_capacity(requested);
         file.seek(SeekFrom::Start(0))
             .map_err(|_| Error::ReadFailed)?;
-        file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-        header::resolve(&raw, raw_len, layouts, versions, partition, name)
+        file.take(Widen::widen(requested))
+            .read_to_end(&mut raw)
+            .map_err(|_| Error::ReadFailed)?;
+
+        // V0's prefix includes mutable payload that may shrink after metadata was read.
+        // A complete prefix must retain the original length, which yields the logical size.
+        let parse_len = if raw.len() < requested { Widen::widen(raw.len()) } else { raw_len };
+        header::resolve(&raw, parse_len, layouts, versions, partition, name)
+    }
+
+    /// Write and sync a fresh header, returning the new blob's size, version, and data offset.
+    ///
+    /// Callers make the blob's directory entries durable first, so a parseable header implies
+    /// they are.
+    pub(crate) fn create_header(
+        file: &mut File,
+        layouts: &RangeInclusive<Layout>,
+        versions: &RangeInclusive<BlobVersion>,
+        generation: &Generation,
+    ) -> Result<(u64, BlobVersion, u64), Error> {
+        let (partition, name) = &generation.key;
+        let (region, blob_version) = Header::create(layouts, versions);
+        let data_offset = Widen::widen(region.len());
+
+        // Clear any previous bytes so a partial write cannot splice them into a valid header.
+        file.set_len(0)
+            .map_err(|e| Error::BlobResizeFailed(partition.clone(), hex(name), e.into()))?;
+        file.seek(SeekFrom::Start(0)).map_err(|_| Error::WriteFailed)?;
+        #[cfg(test)]
+        if let Some(len) = generation.pending.test.fail_creation_after.lock().take() {
+            file.write_all(&region[..len.min(region.len())])
+                .map_err(|_| Error::WriteFailed)?;
+            return Err(Error::Closed);
+        }
+        file.write_all(&region).map_err(|_| Error::WriteFailed)?;
+        file.sync_all()
+            .map_err(|e| Error::BlobSyncFailed(partition.clone(), hex(name), e.into()))?;
+        Ok((0, blob_version, data_offset))
     }
 
     pub(crate) mod hold;
@@ -121,6 +156,9 @@ stability_scope!(BETA {
 });
 
 #[cfg(test)]
+pub(crate) mod shared;
+
+#[cfg(test)]
 pub(crate) mod tests {
     pub(crate) use super::header::tests::v0_blob_bytes;
     use crate::{
@@ -128,6 +166,7 @@ pub(crate) mod tests {
         WriteOptions,
     };
     use futures::FutureExt;
+    use std::sync::Arc;
 
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(context: impl Spawner, storage: S)
@@ -141,7 +180,7 @@ pub(crate) mod tests {
         test_read_after_remove_partition(&storage).await;
         test_recreate_after_remove(&storage).await;
         test_read_after_remove_unsynced(&storage).await;
-        test_read_after_remove_handle_clones(&storage).await;
+        test_read_after_remove_shared_owners(&storage).await;
         test_recreate_generations(&storage).await;
         test_read_after_remove_partition_multi(&storage).await;
         test_scan(&storage).await;
@@ -354,17 +393,18 @@ pub(crate) mod tests {
         assert_eq!(read.coalesce().as_ref(), &data[data.len() - 1..]);
     }
 
-    /// Removal liveness is per-blob, not per-handle: clones taken before or after removal keep
-    /// reading regardless of other handles' lifetimes, and out-of-bounds reads still fail.
-    async fn test_read_after_remove_handle_clones<S>(storage: &S)
+    /// Shared owners keep reading after removal regardless of other owners' lifetimes,
+    /// and out-of-bounds reads still fail.
+    async fn test_read_after_remove_shared_owners<S>(storage: &S)
     where
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
         let (first, _) = storage
-            .open("read_after_remove_clones", b"name")
+            .open("read_after_remove_shared", b"name")
             .await
             .unwrap();
+        let first = Arc::new(first);
         let data: Vec<u8> = (0u8..=255).collect();
         first
             .write_at(0, data.clone(), WriteOptions::default())
@@ -372,22 +412,17 @@ pub(crate) mod tests {
             .unwrap();
         first.sync().await.unwrap();
         let second = first.clone();
-        // Opened independently: a distinct handle to the same blob, not a clone.
-        let (independent, _) = storage
-            .open("read_after_remove_clones", b"name")
-            .await
-            .unwrap();
 
         storage
-            .remove("read_after_remove_clones", Some(b"name"))
+            .remove("read_after_remove_shared", Some(b"name"))
             .await
             .unwrap();
 
-        // A clone taken after removal reads too, and outlives the handle it was cloned from.
+        // An owner retained after removal can outlive the original owner.
         let third = first.clone();
         drop(first);
 
-        for handle in [&second, &third, &independent] {
+        for handle in [&second, &third] {
             let read = handle
                 .read_at(0, data.len(), ReadOptions::default())
                 .await
@@ -548,6 +583,7 @@ pub(crate) mod tests {
         S::Blob: Send + Sync,
     {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let blob = Arc::new(blob);
 
         // Initialize blob with data of sufficient length first
         blob.write_at(0, b"concurrent write", WriteOptions::default())

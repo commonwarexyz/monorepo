@@ -21,6 +21,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use core::ops::RangeBounds;
 use futures::stream::Stream;
 
 /// The generic Db type for ordered Current QMDB variants.
@@ -56,16 +57,34 @@ where
         self.any.get_span(key).await
     }
 
-    /// Streams all active (key, value) pairs in the database in key order, starting from the first
-    /// active key greater than or equal to `start`.
-    pub async fn stream_range<'a>(
+    /// Returns the smallest active key strictly greater than `key`, or `None` if there is none.
+    ///
+    /// The query key need not be active. This lookup does not wrap around to the first key.
+    pub async fn get_next_key(&self, key: &K) -> Result<Option<K>, Error<F>> {
+        self.any.get_next_key(key).await
+    }
+
+    /// Returns the largest active key strictly less than `key`, or `None` if there is none.
+    ///
+    /// The query key need not be active. This lookup does not wrap around to the last key.
+    pub async fn get_prev_key(&self, key: &K) -> Result<Option<K>, Error<F>> {
+        self.any.get_prev_key(key).await
+    }
+
+    /// Streams active (key, value) pairs in ascending key order within `range`.
+    pub fn stream_range<'a>(
         &'a self,
-        start: K,
-    ) -> Result<impl Stream<Item = Result<(K, V::Value), Error<F>>> + 'a, Error<F>>
-    where
-        V: 'a,
-    {
-        self.any.stream_range(start).await
+        range: impl RangeBounds<K> + Send + 'a,
+    ) -> impl Stream<Item = Result<(K, V::Value), Error<F>>> + Send + 'a {
+        self.any.stream_range(range)
+    }
+
+    /// Streams active keys in ascending order within `range`.
+    pub fn keys<'a>(
+        &'a self,
+        range: impl RangeBounds<K> + Send + 'a,
+    ) -> impl Stream<Item = Result<K, Error<F>>> + Send + 'a {
+        self.any.keys(range)
     }
 }
 

@@ -12,6 +12,7 @@ use commonware_runtime::{
     Clock, Handle, IoBuf, Quota, Runner, Supervisor as _,
     deterministic::{self, Context},
 };
+use commonware_stream::encrypted::Handshake;
 use commonware_utils::{
     NZU32, NZUsize, TryCollect,
     ordered::{Map, Set},
@@ -126,8 +127,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 /// Information about a peer in the network.
 #[derive(Clone)]
 pub struct PeerInfo {
-    /// The peer's private key.
-    pub private_key: ed25519::PrivateKey,
+    /// Signer used to authenticate the peer.
+    pub signer: ed25519::PrivateKey,
     /// The peer's public key.
     pub public_key: ed25519::PublicKey,
     /// The network address where this peer can be reached.
@@ -234,7 +235,7 @@ impl NetworkScheme for Discovery {
 
         // Create config with recommended defaults
         let mut config = discovery::Config::recommended(
-            peer.info.private_key.clone(),
+            Handshake::new(peer.info.signer.clone()),
             b"fuzz_namespace",
             peer.info.address,
             peer.info.address,
@@ -312,7 +313,7 @@ impl NetworkScheme for Lookup {
     ) -> PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle> {
         // Create lookup config - no bootstrappers needed since we register addresses directly
         let mut config = lookup::Config::recommended(
-            peer.info.private_key.clone(),
+            Handshake::new(peer.info.signer.clone()),
             b"fuzz_namespace",
             peer.info.address,
             peer.topo
@@ -423,14 +424,14 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
         let mut peer_infos = Vec::new();
 
         for i in 0..input.peers {
-            let private_key = ed25519::PrivateKey::from_seed(context.random());
-            let public_key = private_key.public_key();
+            let signer = ed25519::PrivateKey::from_seed(context.random());
+            let public_key = signer.public_key();
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
 
             pk_to_id.insert(public_key.clone(), i);
 
             peer_infos.push(PeerInfo {
-                private_key,
+                signer,
                 public_key,
                 address,
             });

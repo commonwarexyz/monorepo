@@ -119,7 +119,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
             page_cache,
         },
         translator: OneCap,
-        init_cache_size: Some(NZUsize!(3)),
+        init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -154,7 +154,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
     runner.start(|context| async move {
         let cfg = test_config(suffix, &context);
-        let db: Db<F> = Db::init(context.child("storage"), cfg)
+        let db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("init unordered any db");
 
