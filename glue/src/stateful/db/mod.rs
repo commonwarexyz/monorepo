@@ -87,7 +87,8 @@
 //! # Failures
 //!
 //! Database failures are fatal. [`DatabaseSet`] implementations panic when a database fails to
-//! open, apply, finalize, or prune, and [`Barrier::durable`] panics when a deferred sync fails. A
+//! open, apply, capture a snapshot, finalize, or prune, and [`Barrier::durable`] panics when a
+//! deferred sync fails. A
 //! mutation that is cancelled also loses its database until restart (see [`Writer`]). A database
 //! that fails state sync is reported through the error returned by [`StateSyncSet::sync`].
 

@@ -92,11 +92,12 @@
 //!
 //! # Failures
 //!
-//! [`Stateful`] panics on invalid proposal state, on a finalized block that cannot be executed
-//! or reproduced, on skipped heights, on a successor whose parent is not the applied tip, or
-//! on a conflicting block at the tip's height. It also panics on state sync, storage, or metadata
-//! failures, or if marshal cannot return a block needed for startup. See [database
-//! failures](db#failures) for the storage contract.
+//! [`Stateful`] panics on invalid proposal state or a proposed block whose parent or round
+//! differs from the request, on a finalized block that cannot be executed or reproduced, on
+//! skipped heights, on a successor whose parent is not the applied tip, or on a conflicting block
+//! at the tip's height. It also panics on state sync, storage, or metadata failures, or if marshal
+//! cannot return a block needed for startup. See [database failures](db#failures) for the storage
+//! contract.
 //!
 //! # Compatibility
 //!
@@ -137,8 +138,9 @@ mod tests;
 /// completes, since a stopping runtime can fail storage mid-operation.
 #[derive(Debug, Error)]
 pub enum ExecutionError {
-    /// A competing finalization invalidated the batch's reads or merkleization.
-    #[error("stale execution: a competing block was finalized")]
+    /// A finalized block that is not an ancestor of the batch invalidated its reads or
+    /// merkleization.
+    #[error("stale execution: a non-ancestor block was finalized")]
     Stale,
     /// The block's execution is invalid for its inputs, for example because it declares an
     /// inactivity floor that regresses or passes its commit, or reads below its chain's floor.
@@ -249,8 +251,8 @@ where
     /// durable progress.
     ///
     /// Storage errors from batch operations are propagated as [`ExecutionError`].
-    /// The wrapper declines the proposal on `Ok(None)` and panics on
-    /// [`Fatal`](ExecutionError::Fatal). Unlike [`verify`](Self::verify) and
+    /// The wrapper declines the proposal on `Ok(None)` or [`Invalid`](ExecutionError::Invalid)
+    /// and panics on [`Fatal`](ExecutionError::Fatal). Unlike [`verify`](Self::verify) and
     /// [`apply`](Self::apply), a proposal cannot observe
     /// [`Stale`](ExecutionError::Stale). The wrapper never interleaves a
     /// finalization with an active proposal, so its batch reads cannot be
@@ -312,9 +314,9 @@ where
     /// `Ok(None)`, mismatched sync targets, or any [`ExecutionError`] cause [`Stateful`] to panic
     /// (see the table on [`ExecutionError`]).
     ///
-    /// This future may be cancelled if its originating request is dropped or
-    /// the actor shuts down; the wrapper never cancels it while the actor runs.
-    /// Cancellation must not violate invariants or lose durable progress.
+    /// Dropping the originating request, or actor shutdown, drops this future. [`Stateful`]
+    /// never drops it otherwise, and dropping it must not violate invariants or lose durable
+    /// progress.
     ///
     /// Storage errors from batch operations are propagated as [`ExecutionError`],
     /// never interpreted (see [`verify`](Self::verify)). The wrapper re-checks
@@ -335,7 +337,8 @@ where
     ///
     /// Only reads completed through `readers` during this call are guaranteed to observe
     /// pre-apply state. Capture owned values for [`finalized`](Self::finalized), which receives
-    /// the returned value after the batches are applied.
+    /// the returned value after the batches are applied. `readers` follow the same rules as in
+    /// [`finalized`](Self::finalized).
     ///
     /// [`Stateful`] handles no other message while this future or [`finalized`](Self::finalized) is
     /// pending (verifications already running continue). Keep this capture cheap, and spawn
@@ -366,9 +369,13 @@ where
     /// so consecutive calls may skip heights after state sync.
     ///
     /// `readers` are readers over the database set. They may be used concurrently with descendant
-    /// verification. Hold no [`ReadGuard`](db::ReadGuard) across an await, and never hold two at
-    /// once, since a waiting apply blocks new guards. Mutations that affect execution results must
-    /// go through normal block execution.
+    /// verification. Each [`ReadGuard`](db::ReadGuard) must cover one storage call, never an
+    /// application await. Never hold two at once, since a waiting apply blocks new guards.
+    /// Mutations that affect execution results must go through normal block execution.
+    ///
+    /// Readers kept past this hook see later applies. The databases of a set apply
+    /// concurrently, so reads of different databases may then observe different blocks. Reads
+    /// park forever once the actor stops.
     ///
     /// Capture, application, and this hook may repeat after a crash or a graceful stop, which may
     /// drop this future, until both the block's state and marshal's processed position are

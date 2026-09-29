@@ -46,7 +46,9 @@
 //! When its verification was cached, the finalized block stays in the pending
 //! map until the anchor moves, so a job forking from it mid-apply finds it
 //! instead of rebuilding it on top of itself. A replayed miss caches nothing,
-//! and the flag alone protects forks in that window.
+//! and the flag keeps new forks from the anchor out of that window. A
+//! verification of the same block that forked before the window can still
+//! cache its state, which matches the replay's.
 
 use crate::stateful::{
     Application, ExecutionError, Input, Proposed, PruneConfig,
@@ -1146,7 +1148,9 @@ where
     ///
     /// Cancellation caches nothing. A block that cannot be executed, a
     /// commitment mismatch, or state that the applied anchor has already moved
-    /// past, makes the ancestry invalid.
+    /// past, makes the ancestry invalid. A finalization that overlaps the replay
+    /// makes it [`PrepareBatchesError::Stale`]. A fatal application error panics,
+    /// or parks the replay once shutdown has fired.
     async fn replay<C>(
         &self,
         app: &mut A,
@@ -1222,7 +1226,8 @@ where
     ///
     /// One request executes the replay and the others wait for its result. If the executing
     /// request is cancelled, a remaining request takes over. A waiter adopts the executing
-    /// request's failure.
+    /// request's failure, except [`PrepareBatchesError::Stale`], which it re-claims because
+    /// staleness depends on each request's own view of the anchor.
     async fn replay_shared<C>(
         &self,
         app: &mut A,
@@ -1311,9 +1316,10 @@ where
     ///
     /// Returns [`PrepareBatchesError::Invalid`] if the walk reaches the processed height without
     /// meeting the processed anchor, if `provider` returns a block that is not the parent at the
-    /// preceding height, or if a replay fails. Returns [`PrepareBatchesError::Incomplete`] if
-    /// `provider` stops before delivering a parent, and [`PrepareBatchesError::Cancelled`] if
-    /// `cancellation` fires first.
+    /// preceding height, or if a replay is invalid. Returns [`PrepareBatchesError::Stale`] if a
+    /// finalization overlaps a replay, [`PrepareBatchesError::Incomplete`] if `provider` stops
+    /// before delivering a parent, and [`PrepareBatchesError::Cancelled`] if `cancellation` fires
+    /// first.
     async fn rebuild_pending<P, C>(
         &self,
         app: &mut A,
@@ -2036,20 +2042,22 @@ mod tests {
             let Some(observer) = &self.finalized_observer else {
                 return;
             };
-            let db = readers.read().await;
-            let post_view = db
+            let post_view = readers
+                .read()
+                .await
                 .get(&height_key(block.height()))
                 .await
                 .expect("database read should succeed")
                 .map(|value| digest_to_u64(&value))
                 .expect("finalized view should be reflected in the database set");
-            let post_counter = db
+            let post_counter = readers
+                .read()
+                .await
                 .get(&counter_key())
                 .await
                 .expect("database read should succeed")
                 .map(|value| digest_to_u64(&value))
                 .expect("finalized counter should be reflected in the database set");
-            drop(db);
             let observation = FinalizedObservation {
                 captured,
                 post_counter,

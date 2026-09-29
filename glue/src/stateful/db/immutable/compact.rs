@@ -30,8 +30,9 @@ use commonware_storage::{
 use commonware_utils::{Array, channel::mpsc};
 use std::{ops::Deref, sync::Arc};
 
-/// A speculative batch of new keyed values that reads a compact immutable database through a
-/// [`Reader`].
+/// A speculative batch of new keyed values that merkleizes against a compact immutable database
+/// through a [`Reader`]. Merkleizing it refuses with [`Error::StaleBatch`] once a batch
+/// that is not an ancestor of this one is finalized.
 pub struct ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C = ()>
 where
     F: Family,

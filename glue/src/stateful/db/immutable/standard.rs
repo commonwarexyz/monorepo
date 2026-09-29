@@ -40,7 +40,8 @@ use std::{ops::Deref, sync::Arc};
 type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Reader<Immutable<F, E, K, V, C, H, T, S>>;
 
 /// A speculative batch of new keyed values that reads an immutable database through a
-/// [`Reader`].
+/// [`Reader`]. Merkleizing it refuses with [`Error::StaleBatch`] once a batch
+/// that is not an ancestor of this one is finalized.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -107,6 +108,11 @@ where
     }
 
     /// Reads a value by key, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
@@ -115,6 +121,11 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
@@ -196,6 +207,11 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     /// Reads a value by key, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
@@ -204,6 +220,11 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await

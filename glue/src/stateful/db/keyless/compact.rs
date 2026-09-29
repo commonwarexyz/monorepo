@@ -29,8 +29,9 @@ use commonware_storage::{
 use commonware_utils::channel::mpsc;
 use std::{ops::Deref, sync::Arc};
 
-/// A speculative batch of appended values that reads a compact keyless database through a
-/// [`Reader`].
+/// A speculative batch of appended values that merkleizes against a compact keyless database
+/// through a [`Reader`]. Merkleizing it refuses with [`Error::StaleBatch`] once a batch
+/// that is not an ancestor of this one is finalized.
 pub struct KeylessUnjournaledUnmerkleized<F, E, V, H, S, C = ()>
 where
     F: Family,

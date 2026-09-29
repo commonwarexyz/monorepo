@@ -26,7 +26,8 @@ use std::{
 
 enum State<T> {
     Live(T),
-    /// A mutation was interrupted before restoring the database. Fatal.
+    /// Held while a mutation owns the database. An interrupted mutation drops its writer, which
+    /// then replaces this with `Closed`.
     Poisoned,
     /// The writer dropped and reclaimed the database.
     Closed,
@@ -55,8 +56,8 @@ impl<T> Cell<T> {
         }) {
             Ok(guard) => ReadGuard(guard),
             Err(guard) => {
-                // Poisoning only happens during actor teardown. Park until
-                // this task is dropped with it.
+                // A mutation was interrupted or the writer is gone. Park until
+                // this task is dropped with the actor.
                 drop(guard);
                 tracing::debug!(cell = self.label, "database cell poisoned, parking reader");
                 future::pending().await
@@ -144,8 +145,11 @@ impl<T> Reader<T> {
     }
 }
 
+/// Shared access to the database behind a cell.
+///
 /// Must cover exactly one storage call, never an application await, so a waiting mutation is
-/// delayed by at most one call.
+/// delayed by at most one call. A merkleize counts as one call and holds its guard for the whole
+/// merkleization.
 pub struct ReadGuard<'a, T>(AsyncRwLockReadGuard<'a, T>);
 
 impl<T> Deref for ReadGuard<'_, T> {

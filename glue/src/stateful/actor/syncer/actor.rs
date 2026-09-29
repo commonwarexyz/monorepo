@@ -314,10 +314,10 @@ mod tests {
             tip_updates: ring::Receiver<TipUpdate<Sha256Digest, Self::SyncTargets>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<(Self, Anchor<Sha256Digest>), Self::Error> {
-            // Hold the ring receiver without draining it. The deterministic clock advances
-            // only at quiescence, so the sleep fires only once every other task has parked,
-            // which includes the actor forwarding a tip update into the ring buffer.
-            // Completing then drops the receiver with the update still queued.
+            // Hold the ring receiver without draining it. The 1 s sleep spans many scheduling
+            // rounds of the deterministic clock, so the actor forwards a tip update into the
+            // ring buffer first. Completing then drops the receiver with the update still
+            // queued.
             context.sleep(Duration::from_secs(1)).await;
             drop(tip_updates);
             Ok((Self::default(), anchor))
@@ -1095,7 +1095,7 @@ mod tests {
             let actor = syncer.start();
 
             // The update is forwarded into the ring buffer and its observation parks before
-            // the sync task completes (the task's clock only advances at quiescence). The
+            // the sync task's 1 s sleep ends. The
             // stranded observation must resolve through a retry that reports completion,
             // with the artifact arriving on the completion channel.
             let update = context

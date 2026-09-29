@@ -110,9 +110,10 @@ where
     /// A block that was proposed or verified locally, or that is the canonical block at or below
     /// the processed height, is accepted without execution. Any other block at or below the
     /// processed height is rejected. Otherwise, the block is accepted only if the application
-    /// verifies it and the resulting state matches the block's commitments and can still be
-    /// cached. An attempt that a finalization makes stale re-checks the block once the anchor
-    /// moves.
+    /// verifies it and the resulting state matches the block's commitments. That state is cached
+    /// only if the block can still extend the canonical chain, which never changes the verdict.
+    /// An attempt that a finalization makes stale re-checks the block once the anchor moves. A
+    /// fatal application error panics, or parks the request once shutdown has fired.
     pub(in crate::stateful::actor) async fn run<S, V>(
         &mut self,
         context: &E,

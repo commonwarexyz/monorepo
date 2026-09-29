@@ -51,7 +51,8 @@ const ANY_BITMAP_CHUNK_BYTES: usize = 64;
 type AnyDb<F, E, C, I, H, U, S> = Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>;
 
 /// A speculative batch of updates and deletes that reads an `any` database through a
-/// [`Reader`].
+/// [`Reader`]. Merkleizing it refuses with [`Error::StaleBatch`] once a batch
+/// that is not an ancestor of this one is finalized.
 pub struct AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -108,6 +109,11 @@ where
     }
 
     /// Reads a value by key, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
@@ -116,6 +122,11 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
@@ -124,6 +135,11 @@ where
     /// Reads multiple values and returns a staged batch for the same keys.
     ///
     /// Returns results in the same order as `keys`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn stage(
         self,
         keys: &[&U::Key],
@@ -249,6 +265,11 @@ where
     /// assigned the returned range. Expansion does not deduplicate against previously staged keys
     /// and does not observe values computed for earlier staged slots but not yet passed to
     /// `merkleize`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn expand(
         self,
         keys: &[&U::Key],
@@ -293,6 +314,11 @@ where
     /// Metadata set through [`with_metadata`](Self::with_metadata), or before staging, is committed
     /// with the batch.
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying merkleize.
+    ///
     /// # Panics
     ///
     /// Panics if an index in `updates` is outside the staged read set.
@@ -333,6 +359,11 @@ where
     /// Metadata set through [`with_metadata`](Self::with_metadata), or before staging, is committed
     /// with the batch.
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying merkleize.
+    ///
     /// # Panics
     ///
     /// Panics if an index in `updates` is outside the staged read set.
@@ -366,6 +397,11 @@ where
     Operation<F, U>: Codec,
 {
     /// Reads a value by key, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
@@ -374,6 +410,11 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await

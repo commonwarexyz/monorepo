@@ -35,7 +35,8 @@ use commonware_utils::{channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
 /// A speculative batch of appended values that reads a keyless database through a
-/// [`Reader`].
+/// [`Reader`]. Merkleizing it refuses with [`Error::StaleBatch`] once a batch
+/// that is not an ancestor of this one is finalized.
 pub struct KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -96,6 +97,11 @@ where
     }
 
     /// Reads a value by location, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(location, &db).await
@@ -104,6 +110,11 @@ where
     /// Reads multiple values by location, falling back to applied state.
     ///
     /// Returns results in the same order as `locations`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     ///
     /// # Panics
     ///
@@ -184,6 +195,11 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Reads a value by location, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(location, &db).await
@@ -192,6 +208,11 @@ where
     /// Reads multiple values by location, falling back to applied state.
     ///
     /// Returns results in the same order as `locations`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     ///
     /// # Panics
     ///
