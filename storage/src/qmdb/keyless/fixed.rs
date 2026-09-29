@@ -196,6 +196,7 @@ mod tests {
     fn standard_mmb_proof_refused_after_off_chain_reopen() {
         deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmb::Family>);
     }
+
     /// A live snapshot keeps the log's blobs open: reopening the partitions fails until the
     /// snapshot drops, even after the database itself is gone.
     async fn snapshot_blocks_reopen<F: Family>(context: deterministic::Context) {
@@ -868,14 +869,14 @@ mod tests {
         test_keyless_fixed_bounded_initialization_pruned_target_errors =>
             run_bounded_initialization_pruned_target_errors, bounded;
         test_keyless_fixed_floor_tracking => run_floor_tracking, reopen_indexed;
-        test_keyless_fixed_floor_regression_rejected => run_floor_regression_rejected, reopen;
-        test_keyless_fixed_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
+        test_keyless_fixed_floor_regression_rejected => run_floor_regression_rejected, db;
+        test_keyless_fixed_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, db;
         test_keyless_fixed_bounded_initialization_restores_floor =>
             run_bounded_initialization_restores_floor, bounded_floor;
         test_keyless_fixed_floor_at_commit_loc_accepted => run_floor_at_commit_loc_accepted, db;
         test_keyless_fixed_bounded_initialization_after_reopen_with_floor =>
             run_bounded_initialization_after_reopen_with_floor, bounded_indexed;
-        test_keyless_fixed_ancestor_floor_regression_rejected => run_ancestor_floor_regression_rejected, reopen;
+        test_keyless_fixed_ancestor_floor_regression_rejected => run_ancestor_floor_regression_rejected, db;
         test_keyless_fixed_ancestor_floor_beyond_commit_loc_rejected => run_ancestor_floor_beyond_commit_loc_rejected, db;
         test_keyless_fixed_chained_apply_with_valid_floors_succeeds => run_chained_apply_with_valid_floors_succeeds, db;
         test_keyless_fixed_single_commit_live_set => run_single_commit_live_set, reopen_indexed;
@@ -885,6 +886,8 @@ mod tests {
         test_keyless_fixed_merkleize_across_prune => run_merkleize_across_prune, db;
         test_keyless_fixed_stale_fork_refuses => run_stale_fork_refuses, db;
         test_keyless_fixed_snapshot => run_snapshot, db;
+        test_keyless_fixed_descendant_apply_makes_parent_reads_stale =>
+            run_descendant_apply_makes_parent_reads_stale, db;
         test_keyless_fixed_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 

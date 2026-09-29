@@ -348,6 +348,9 @@ pub trait Snapshottable: Contiguous + Sized {
     /// Capture an owned snapshot reader over the current journal. Bounds freeze at capture,
     /// and the reader stays readable across appends and prunes.
     ///
+    /// Capture writes buffered items to the tail blob without making them durable, first waiting
+    /// for any in-flight sync of that blob when there are buffered items to write.
+    ///
     /// The snapshot keeps the journal's blobs open. While it is alive, an initialization that
     /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
     /// capture (for example by a prune) can be recreated. On filesystem-backed storage the

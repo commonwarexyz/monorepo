@@ -1,7 +1,7 @@
 //! Shared machinery for the compact-db witness journal.
 //!
 //! The witness journal is the single durable source of truth for a compact database. Each
-//! [`Witness`] is a complete snapshot of one applied state. It contains the encoded commit,
+//! [`Witness`] is a complete record of one applied state. It contains the encoded commit,
 //! committed size, and pinned nodes one operation below it. The commit's inclusion proof is not
 //! stored. It is derived from the pinned nodes and the operation when an entry is loaded. On open,
 //! the in-memory Merkle is rebuilt by appending the commit operation to the pinned nodes, and a
@@ -92,7 +92,8 @@ where
     }
 }
 
-/// The latest commit with the data to serve and prove it.
+/// A commit with the data to serve and prove it: the store's latest applied commit, or the one
+/// a snapshot captured.
 pub struct Tip<F: Family, Op, D: Digest> {
     /// The persisted witness of this commit.
     witness: Witness<F, D>,
@@ -275,8 +276,8 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
         Ok(self)
     }
 
-    /// Persist the current compact state as a new witness journal entry, committing the journal
-    /// so the entry survives a crash. Journal recovery may be required on reopen.
+    /// Commit the journal so every applied witness, and a pending import's tip, survives a crash.
+    /// Journal recovery may be required on reopen.
     ///
     /// First waits for any sync pipelined by [`Self::start_sync`], surfacing its failure, then
     /// commits every applied witness.
@@ -288,8 +289,8 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
         self.persist(merkle, Durability::Commit).await
     }
 
-    /// Persist the current compact state as a new witness journal entry, syncing the journal and
-    /// all of its metadata to minimize recovery work on reopen.
+    /// Sync the journal and all of its metadata so every applied witness, and a pending import's
+    /// tip, survives a crash with minimal recovery work on reopen.
     ///
     /// This also settles any sync pipelined by [`Self::start_sync`].
     pub(crate) async fn sync<S: Strategy>(
@@ -326,8 +327,8 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
         Ok(self)
     }
 
-    /// Persist the current compact state as a new witness journal entry, starting the journal
-    /// sync instead of awaiting it.
+    /// Start a journal sync covering every applied witness, and a pending import's tip, instead
+    /// of awaiting it.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
     /// plus a best-effort attempt to bound the recovery needed on reopen. When nothing new must
@@ -512,7 +513,8 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
 /// Append `op` as the Merkle's final leaf, build the resulting [`Tip`], and prune the Merkle
 /// to its frontier.
 ///
-/// Returns [`Error::DataCorrupted`] if `op` is not a commit.
+/// Returns [`Error::DataCorrupted`] if `op` is not a commit or its floor lies past its own
+/// location, and [`Error::Merkle`] if the Merkle cannot append or prove it.
 pub(crate) fn import_tip<F, H, S, Op>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     op: Op,
