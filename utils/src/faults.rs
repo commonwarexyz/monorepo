@@ -53,7 +53,9 @@ pub trait Faults {
     /// Compute the quorum size for `n` participants.
     ///
     /// This is the minimum number of participants that must agree for the protocol
-    /// to make progress. It equals `n - max_faults(n)`.
+    /// to make progress. It defaults to `n - max_faults(n)`. A model for a protocol that
+    /// only needs every quorum to contain a correct participant may choose a smaller quorum,
+    /// but never one of `max_faults(n)` or fewer.
     ///
     /// # Panics
     ///
