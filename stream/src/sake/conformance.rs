@@ -1,9 +1,9 @@
 //! SAKE stream conformance tests.
 
 use crate::{
-    Handshake as _,
+    Handshake as _, Session,
     cups::{self, Cups},
-    sake::{Config, Handshake, Version},
+    sake::{Config, Exchange, Version},
 };
 use commonware_conformance::{Conformance, conformance_tests};
 use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
@@ -72,8 +72,8 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
         };
 
         // Complete the handshake.
-        let listener_handshake = Handshake::new(
-            Config::new(listener.clone(), version),
+        let listener_handshake = Session::new(
+            Exchange::new(Config::new(listener.clone(), version)),
             Cups::<ChaCha20Poly1305>::new(records),
         );
         let handle = context.child("listener").spawn(move |context| async move {
@@ -88,8 +88,8 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
                 )
                 .await
         });
-        let (mut dialer_tx, mut dialer_rx) = Handshake::new(
-            Config::new(dialer, version),
+        let (mut dialer_tx, mut dialer_rx) = Session::new(
+            Exchange::new(Config::new(dialer, version)),
             Cups::<ChaCha20Poly1305>::new(records),
         )
         .dial(

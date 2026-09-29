@@ -26,7 +26,7 @@ use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
 use commonware_stream::{
-    Handshake as _,
+    Handshake as _, Session,
     cups::{self, Cups},
     sake::{self, Version},
     utils::Timeout,
@@ -167,13 +167,13 @@ fn main() {
 
     // Configure indexer
     let indexer_handshake = Timeout::new(
-        sake::Handshake::new(
-            sake::Config {
+        Session::new(
+            sake::Exchange::new(sake::Config {
                 signer: signer.clone(),
                 version: Version::V1,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(60),
-            },
+            }),
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         Duration::from_secs(5),
@@ -181,8 +181,8 @@ fn main() {
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        sake::Handshake::new(
-            sake::Config::new(signer, Version::V1),
+        Session::new(
+            sake::Exchange::new(sake::Config::new(signer, Version::V1)),
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),

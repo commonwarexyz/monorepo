@@ -123,7 +123,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::{cups::{self, Cups}, sake::{self, Version}};
+//! use commonware_stream::{Session, cups::{self, Cups}, sake::{self, Version}};
 //! use commonware_utils::{NZU32, NZUsize, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -159,8 +159,8 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = lookup::Config::local(
-//!     sake::Handshake::new(
-//!         sake::Config::new(signer.clone(), Version::V1),
+//!     Session::new(
+//!         sake::Exchange::new(sake::Config::new(signer.clone(), Version::V1)),
 //!         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 //!     ),
 //!     application_namespace,
@@ -236,11 +236,11 @@ mod tests {
         tokio,
     };
     use commonware_stream::{
-        Handshake, Receiver as StreamReceiver, Sender as StreamSender,
+        Handshake, Receiver as StreamReceiver, Sender as StreamSender, Session,
         cups::{self, Cups},
         sake::{self, Version},
     };
-    type StreamHandshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
+    type StreamHandshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
     use commonware_utils::{
         Hostname, NZU32, NZUsize, TryCollect,
         channel::mpsc,
@@ -2389,7 +2389,7 @@ mod tests {
                 .ok_or(TestHandshakeError::UnknownApplicationIdentity)?;
             self.authenticate().await?;
             let (sender, receiver) = StreamHandshake::new(
-                sake::Config::new(self.transport_signer, Version::V1),
+                sake::Exchange::new(sake::Config::new(self.transport_signer, Version::V1)),
                 Cups::new(cups::Version::V1),
             )
             .dial(
@@ -2429,16 +2429,19 @@ mod tests {
                 "maximum message size exceeds stream limit"
             );
             self.observations.listens.fetch_add(1, Ordering::Relaxed);
-            let handshake = &self;
+            let handshake = self.clone();
             let (transport_peer, sender, receiver) = StreamHandshake::new(
-                sake::Config::new(self.transport_signer.clone(), Version::V1),
+                sake::Exchange::new(sake::Config::new(
+                    self.transport_signer.clone(),
+                    Version::V1,
+                )),
                 Cups::new(cups::Version::V1),
             )
             .listen(
                 context,
                 namespace,
                 max_message_size,
-                |transport_peer| async move {
+                move |transport_peer| async move {
                     let Some(application_peer) =
                         handshake.transport_to_application.get(&transport_peer)
                     else {

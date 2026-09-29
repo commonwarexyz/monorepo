@@ -13,6 +13,7 @@ use commonware_runtime::{
     deterministic::{self, Context},
 };
 use commonware_stream::{
+    Session,
     cups::{self, Cups},
     sake::{self, Version},
 };
@@ -238,8 +239,8 @@ impl NetworkScheme for Discovery {
 
         // Create config with recommended defaults
         let mut config = discovery::Config::recommended(
-            sake::Handshake::new(
-                sake::Config::new(peer.info.signer.clone(), Version::V1),
+            Session::new(
+                sake::Exchange::new(sake::Config::new(peer.info.signer.clone(), Version::V1)),
                 Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),
             b"fuzz_namespace",
@@ -319,8 +320,8 @@ impl NetworkScheme for Lookup {
     ) -> PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle> {
         // Create lookup config - no bootstrappers needed since we register addresses directly
         let mut config = lookup::Config::recommended(
-            sake::Handshake::new(
-                sake::Config::new(peer.info.signer.clone(), Version::V1),
+            Session::new(
+                sake::Exchange::new(sake::Config::new(peer.info.signer.clone(), Version::V1)),
                 Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
             ),
             b"fuzz_namespace",

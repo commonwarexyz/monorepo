@@ -1,18 +1,15 @@
 use super::Config;
-use crate::{
-    Records,
-    utils::codec::{Error as FrameError, recv_frame, send_frame},
-};
+use crate::utils::codec::{Error as FrameError, recv_frame, send_frame};
 use commonware_codec::{DecodeExt, Encode, Error as CodecError, FixedSize};
 use commonware_cryptography::{
-    Signer,
+    Cipher, Signer,
     handshake::sake::{
         Ack, Context, Error as HandshakeError, Syn, SynAck, Version, dial_end, dial_start,
         listen_end, listen_start,
     },
 };
 use commonware_formatting::hex;
-use commonware_runtime::{BufferPooler, Clock, Error as RuntimeError, Sink, Stream};
+use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
 use commonware_utils::{DurationExt, SystemTimeExt};
 use rand_core::CryptoRng;
 use std::{future::Future, ops::Range};
@@ -63,17 +60,16 @@ impl From<FrameError> for Error {
     }
 }
 
-/// Implements [crate::Handshake] with SAKE, returning the halves of the records `R`.
+/// Implements [crate::Exchange] with SAKE.
 #[derive(Clone)]
-pub struct Handshake<S, R> {
+pub struct Exchange<S> {
     config: Config<S>,
-    records: R,
 }
 
-impl<S, R> Handshake<S, R> {
-    /// Creates a handshake with `config` that keys `records`.
-    pub const fn new(config: Config<S>, records: R) -> Self {
-        Self { config, records }
+impl<S> Exchange<S> {
+    /// Creates an exchange with `config`.
+    pub const fn new(config: Config<S>) -> Self {
+        Self { config }
     }
 
     /// Computes the current time and acceptable timestamp range.
@@ -88,12 +84,15 @@ impl<S, R> Handshake<S, R> {
     /// Returns the SAKE context for a handshake with `peer` in `namespace`.
     ///
     /// Each version must produce transcripts that no other version produces, so peers on different
-    /// versions fail the handshake. Version 1 also binds the namespace of the records, so peers
-    /// with different record formats fail the handshake too.
-    fn context<P>(self, clock: &impl Clock, namespace: &[u8], peer: P) -> Context<S, P>
-    where
-        R: Records,
-    {
+    /// versions fail the handshake. Version 1 also binds the `records` namespace, so peers with
+    /// different record formats fail the handshake too.
+    fn context<P>(
+        self,
+        clock: &impl Clock,
+        namespace: &[u8],
+        records: &'static [u8],
+        peer: P,
+    ) -> Context<S, P> {
         let (current_time, ok_timestamps) = self.time_information(clock);
         let version = self.config.version;
         let context = Context::new(
@@ -106,7 +105,7 @@ impl<S, R> Handshake<S, R> {
         );
         match version {
             Version::V0 => context,
-            Version::V1 => context.fork(self.records.namespace()),
+            Version::V1 => context.fork(records),
         }
     }
 }
@@ -135,98 +134,81 @@ where
     Ok(M::decode(frame)?)
 }
 
-impl<S: Signer, R> Handshake<S, R> {
-    /// Signs `message` in `namespace` with the identity this handshake authenticates.
+impl<S: Signer> Exchange<S> {
+    /// Signs `message` in `namespace` with the identity this exchange authenticates.
     pub fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
         self.config.signer.sign(namespace, message)
     }
 }
 
-impl<S: Signer, R: Records> crate::Handshake for Handshake<S, R> {
-    const MAX_SIZE: u32 = R::MAX_SIZE;
-
+impl<S: Signer> crate::Exchange for Exchange<S> {
     type PublicKey = S::PublicKey;
     type Error = Error;
-    type Sender<I: Stream, O: Sink> = R::Sender<O>;
-    type Receiver<I: Stream, O: Sink> = R::Receiver<I>;
 
     fn public_key(&self) -> Self::PublicKey {
         self.config.signer.public_key()
     }
 
-    async fn dial<E, I, O>(
+    async fn dial<C, E, I, O>(
         self,
         context: E,
         namespace: &[u8],
-        max_message_size: u32,
+        records: &'static [u8],
         peer: S::PublicKey,
-        mut stream: I,
-        mut sink: O,
-    ) -> Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
+        stream: &mut I,
+        sink: &mut O,
+    ) -> Result<(C, C), Self::Error>
     where
-        E: BufferPooler + Clock + CryptoRng,
+        C: Cipher,
+        E: Clock + CryptoRng,
         I: Stream,
         O: Sink,
     {
-        assert!(
-            max_message_size <= Self::MAX_SIZE,
-            "maximum message size exceeds stream limit"
-        );
-        let pool = context.network_buffer_pool().clone();
-        send_handshake_frame(&mut sink, self.config.signer.public_key()).await?;
+        send_handshake_frame(sink, self.config.signer.public_key()).await?;
 
-        let records = self.records.clone();
-        let sake = self.context(&context, namespace, peer);
+        let sake = self.context(&context, namespace, records, peer);
         let (state, syn) = dial_start(context, sake);
-        send_handshake_frame(&mut sink, syn).await?;
+        send_handshake_frame(sink, syn).await?;
 
-        let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _>(&mut stream).await?;
+        let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _>(stream).await?;
 
         let (ack, send, recv) = dial_end(state, syn_ack)?;
-        send_handshake_frame(&mut sink, ack).await?;
-
-        Ok(records.split(send, recv, stream, sink, max_message_size, pool))
+        send_handshake_frame(sink, ack).await?;
+        Ok((send, recv))
     }
 
-    async fn listen<E, I, O, B, F>(
+    async fn listen<C, E, I, O, B, F>(
         self,
         context: E,
         namespace: &[u8],
-        max_message_size: u32,
+        records: &'static [u8],
         bouncer: B,
-        mut stream: I,
-        mut sink: O,
-    ) -> Result<(S::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
+        stream: &mut I,
+        sink: &mut O,
+    ) -> Result<(S::PublicKey, C, C), Self::Error>
     where
-        E: BufferPooler + Clock + CryptoRng,
+        C: Cipher,
+        E: Clock + CryptoRng,
         I: Stream,
         O: Sink,
         B: FnOnce(S::PublicKey) -> F + Send,
         F: Future<Output = bool> + Send,
     {
-        assert!(
-            max_message_size <= Self::MAX_SIZE,
-            "maximum message size exceeds stream limit"
-        );
-        let pool = context.network_buffer_pool().clone();
-        let peer = recv_handshake_frame::<S::PublicKey, _>(&mut stream).await?;
+        let peer = recv_handshake_frame::<S::PublicKey, _>(stream).await?;
         if !bouncer(peer.clone()).await {
             return Err(Error::PeerRejected(peer.encode().to_vec()));
         }
 
-        let msg1 = recv_handshake_frame::<Syn<S::Signature>, _>(&mut stream).await?;
+        let msg1 = recv_handshake_frame::<Syn<S::Signature>, _>(stream).await?;
 
-        let records = self.records.clone();
-        let sake = self.context(&context, namespace, peer.clone());
+        let sake = self.context(&context, namespace, records, peer.clone());
         let (state, syn_ack) = listen_start(context, sake, msg1)?;
-        send_handshake_frame(&mut sink, syn_ack).await?;
+        send_handshake_frame(sink, syn_ack).await?;
 
-        let ack = recv_handshake_frame::<Ack, _>(&mut stream).await?;
+        let ack = recv_handshake_frame::<Ack, _>(stream).await?;
 
         let (send, recv) = listen_end(state, ack)?;
-
-        let (sender, receiver) = records.split(send, recv, stream, sink, max_message_size, pool);
-        Ok((peer, sender, receiver))
+        Ok((peer, send, recv))
     }
 }
 
@@ -234,15 +216,15 @@ impl<S: Signer, R: Records> crate::Handshake for Handshake<S, R> {
 mod test {
     use super::*;
     use crate::{
-        Handshake as _,
+        Handshake as _, Records as _, Session,
         cups::{self, Cups},
         utils::{Timeout, TimeoutError},
     };
     use commonware_codec::varint::UInt;
     use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
     use commonware_runtime::{
-        BufMut, BufferPool, BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _,
-        Spawner as _, Supervisor as _, deterministic, mocks,
+        BufMut, BufferPool, BufferPoolConfig, BufferPooler as _, Error as RuntimeError, IoBuf,
+        IoBufs, Runner as _, Spawner as _, Supervisor as _, deterministic, mocks,
     };
     use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use futures::FutureExt as _;
@@ -259,7 +241,7 @@ mod test {
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
 
     type Records = Cups<ChaCha20Poly1305>;
-    type Transport = Handshake<PrivateKey, Records>;
+    type Transport = Session<Exchange<PrivateKey>, Records>;
 
     /// Returns the record version that pairs with the SAKE `version`.
     const fn record_version(version: Version) -> cups::Version {
@@ -307,7 +289,7 @@ mod test {
                     let (sink, _) = mocks::Channel::init();
                     let (_, stream) = mocks::Channel::init();
                     let handshake = Transport::new(
-                        Config::new(PrivateKey::from_seed(0), Version::V1),
+                        Exchange::new(Config::new(PrivateKey::from_seed(0), Version::V1)),
                         records(Version::V1),
                     );
                     let attempt = async {
@@ -354,12 +336,12 @@ mod test {
     /// Returns a handshake that signs with `signer` at `version`.
     fn transport_handshake(signer: PrivateKey, version: Version) -> Transport {
         Transport::new(
-            Config {
+            Exchange::new(Config {
                 signer,
                 version,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
-            },
+            }),
             records(version),
         )
     }
@@ -513,12 +495,12 @@ mod test {
             let listener_signer = PrivateKey::from_seed(24);
             let handshake = |signer, (version, records): (Version, cups::Version)| {
                 Transport::new(
-                    Config {
+                    Exchange::new(Config {
                         signer,
                         version,
                         synchrony_bound: Duration::from_secs(1),
                         max_handshake_age: Duration::from_secs(1),
-                    },
+                    }),
                     Cups::new(records),
                 )
             };
@@ -1050,12 +1032,19 @@ mod test {
             // oversized prefix we inject below.
             let listener_public_key = listener_signer.public_key();
             let listener_handshake = transport_handshake(listener_signer, Version::V1);
-            let dialer_context =
-                dialer_handshake
-                    .clone()
-                    .context(&context, NAMESPACE, listener_public_key.clone());
-            let listener_context =
-                listener_handshake.context(&context, NAMESPACE, dialer_handshake.public_key());
+            let scope = records(Version::V1).namespace();
+            let dialer_context = dialer_handshake.exchange().clone().context(
+                &context,
+                NAMESPACE,
+                scope,
+                listener_public_key.clone(),
+            );
+            let listener_context = listener_handshake.exchange().clone().context(
+                &context,
+                NAMESPACE,
+                scope,
+                dialer_handshake.public_key(),
+            );
             let (_, syn) = dial_start(context.child("dialer"), dialer_context);
             let (_, syn_ack) = listen_start(context.child("listener"), listener_context, syn)
                 .expect("mock handshake should produce a valid syn_ack");

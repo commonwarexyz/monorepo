@@ -63,6 +63,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Quota, Runner as _, Supervisor as _, tokio};
 use commonware_stream::{
+    Session,
     cups::{self, Cups},
     sake::{self, Version},
 };
@@ -162,8 +163,8 @@ fn main() {
     const MAX_MESSAGE_SIZE: u32 = 1024; // 1 KB
     let max_peers_per_set = authenticated::peer_set_limit(&recipients, &signer.public_key());
     let p2p_cfg = discovery::Config::local(
-        sake::Handshake::new(
-            sake::Config::new(signer.clone(), Version::V1),
+        Session::new(
+            sake::Exchange::new(sake::Config::new(signer.clone(), Version::V1)),
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         APPLICATION_NAMESPACE,

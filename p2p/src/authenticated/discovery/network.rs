@@ -319,10 +319,11 @@ mod tests {
     use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_stream::{
+        Session,
         cups::{self, Cups},
         sake::{self, Version},
     };
-    type StreamHandshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
+    type StreamHandshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
     use commonware_utils::NZUsize;
     use std::{net::SocketAddr, time::Duration};
 
@@ -337,7 +338,7 @@ mod tests {
             let address = SocketAddr::from(([127, 0, 0, 1], 7000));
             let cfg = Config::local(
                 StreamHandshake::new(
-                    sake::Config::new(signer.clone(), Version::V1),
+                    sake::Exchange::new(sake::Config::new(signer.clone(), Version::V1)),
                     Cups::new(cups::Version::V1),
                 ),
                 b"discovery-test",

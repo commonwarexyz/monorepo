@@ -267,6 +267,7 @@ mod tests {
         Clock as _, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
     use commonware_stream::{
+        Session,
         cups::{self, Cups},
         sake::{self, Version},
     };
@@ -494,8 +495,8 @@ mod tests {
             let (mut dealer_network, dealer_oracle) = lookup::Network::new(
                 context.child("dealer"),
                 lookup::Config::local(
-                    sake::Handshake::new(
-                        sake::Config::new(dealer_signer, Version::V1),
+                    Session::new(
+                        sake::Exchange::new(sake::Config::new(dealer_signer, Version::V1)),
                         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
                     ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
@@ -507,8 +508,8 @@ mod tests {
             let (mut participant_network, participant_oracle) = lookup::Network::new(
                 context.child("participant"),
                 lookup::Config::local(
-                    sake::Handshake::new(
-                        sake::Config::new(participant_signer, Version::V1),
+                    Session::new(
+                        sake::Exchange::new(sake::Config::new(participant_signer, Version::V1)),
                         Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
                     ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",

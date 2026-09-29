@@ -17,6 +17,8 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod cups;
     pub mod sake;
+    mod session;
+    pub use session::Session;
     pub mod utils;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
@@ -187,6 +189,70 @@ commonware_macros::stability_scope!(BETA {
             max_message_size: u32,
             pool: BufferPool,
         ) -> (Self::Sender<O>, Self::Receiver<I>);
+    }
+
+    /// Authenticates a raw connection and agrees on one [Cipher] per direction.
+    ///
+    /// Implementations must authenticate each peer's declared identity and bind the supplied
+    /// application namespace and both peer identities to the agreed ciphers. A successful dial must
+    /// authenticate the expected peer. A listen may succeed only if the bouncer returns `true` for
+    /// the same authenticated peer that is returned. Implementations should also bind `records`,
+    /// the [namespace](Records::namespace) of the record format the ciphers will key, so that peers
+    /// with different record formats fail the exchange.
+    ///
+    /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping the exchange
+    /// future cancels the attempt.
+    pub trait Exchange: Clone + Send + Sync + 'static {
+        /// Public key identifying an authenticated peer.
+        type PublicKey: Send;
+
+        /// Error returned when authentication fails.
+        type Error: Error + Send + Sync + 'static;
+
+        /// Returns the local authenticated identity.
+        ///
+        /// The identity must remain stable across attempts and clones of this exchange.
+        fn public_key(&self) -> Self::PublicKey;
+
+        /// Authenticates an outbound connection to `peer` and returns the send and receive
+        /// ciphers.
+        fn dial<C, E, I, O>(
+            self,
+            context: E,
+            namespace: &[u8],
+            records: &'static [u8],
+            peer: Self::PublicKey,
+            stream: &mut I,
+            sink: &mut O,
+        ) -> impl Future<Output = Result<(C, C), Self::Error>> + Send
+        where
+            C: Cipher,
+            E: Clock + CryptoRng,
+            I: Stream,
+            O: Sink;
+
+        /// Authenticates an inbound connection accepted by `bouncer` and returns the peer with the
+        /// send and receive ciphers.
+        ///
+        /// The bouncer may receive an unverified identity claim before authentication completes.
+        /// Accepting this claim permits authentication to continue. Only a successful exchange
+        /// proves the returned peer's identity.
+        fn listen<C, E, I, O, B, F>(
+            self,
+            context: E,
+            namespace: &[u8],
+            records: &'static [u8],
+            bouncer: B,
+            stream: &mut I,
+            sink: &mut O,
+        ) -> impl Future<Output = Result<(Self::PublicKey, C, C), Self::Error>> + Send
+        where
+            C: Cipher,
+            E: Clock + CryptoRng,
+            I: Stream,
+            O: Sink,
+            B: FnOnce(Self::PublicKey) -> F + Send,
+            F: Future<Output = bool> + Send;
     }
 
     #[cfg(test)]

@@ -60,6 +60,7 @@ use commonware_p2p::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_stream::{
+    Session,
     cups::{self, Cups},
     sake::{self, Version},
 };
@@ -159,8 +160,8 @@ fn main() {
 
     // Configure network
     let p2p_cfg = discovery::Config::local(
-        sake::Handshake::new(
-            sake::Config::new(signer.clone(), Version::V1),
+        Session::new(
+            sake::Exchange::new(sake::Config::new(signer.clone(), Version::V1)),
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         &union(APPLICATION_NAMESPACE, b"_P2P"),

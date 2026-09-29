@@ -3,7 +3,7 @@
 use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
-    Handshake as _,
+    Handshake as _, Session,
     cups::{self, Cups},
     sake::{self, Config, Version},
     utils::Timeout,
@@ -12,7 +12,7 @@ use futures::join;
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
-type Handshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
+type Handshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
 
 /// Returns the records that pair with the SAKE `version`.
 fn records(version: Version) -> Cups<ChaCha20Poly1305> {
@@ -120,23 +120,23 @@ fn fuzz(input: FuzzInput) {
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
         let dialer_handshake = Handshake::new(
-            Config {
+            sake::Exchange::new(Config {
                 signer: dialer_signer.clone(),
                 version: input.version,
                 synchrony_bound,
                 max_handshake_age,
-            },
+            }),
             records(input.version),
         );
         let dialer_handshake = Timeout::new(dialer_handshake, handshake_timeout);
 
         let listener_handshake = Handshake::new(
-            Config {
+            sake::Exchange::new(Config {
                 signer: listener_signer.clone(),
                 version: input.version,
                 synchrony_bound,
                 max_handshake_age,
-            },
+            }),
             records(input.version),
         );
         let listener_handshake = Timeout::new(listener_handshake, handshake_timeout);

@@ -92,18 +92,19 @@ mod tests {
     use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
+        Session,
         cups::{self, Cups},
         sake::{self, Version},
     };
 
-    type SakeHandshake = sake::Handshake<PrivateKey, cups::Cups<ChaCha20Poly1305>>;
+    type SakeHandshake = Session<sake::Exchange<PrivateKey>, cups::Cups<ChaCha20Poly1305>>;
 
     const NAMESPACE: &[u8] = b"test_namespace";
     const LIMIT: u32 = 1024;
 
     fn handshake(seed: u64) -> SakeHandshake {
         SakeHandshake::new(
-            sake::Config::new(PrivateKey::from_seed(seed), Version::V1),
+            sake::Exchange::new(sake::Config::new(PrivateKey::from_seed(seed), Version::V1)),
             Cups::new(cups::Version::V1),
         )
     }

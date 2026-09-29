@@ -199,12 +199,12 @@ mod tests {
         deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::{
-        Handshake as _,
+        Handshake as _, Session,
         cups::{self, Cups},
         sake::{self, Version},
         utils::Timeout,
     };
-    type StreamHandshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
+    type StreamHandshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
     use commonware_utils::NZUsize;
     use std::{
         num::NonZeroU32,
@@ -249,12 +249,12 @@ mod tests {
 
     fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
         let handshake = StreamHandshake::new(
-            sake::Config {
+            sake::Exchange::new(sake::Config {
                 signer,
                 version: Version::V1,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
-            },
+            }),
             Cups::new(cups::Version::V1),
         );
         Timeout::new(handshake, Duration::from_secs(10))

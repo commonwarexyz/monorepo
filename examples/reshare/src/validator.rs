@@ -44,6 +44,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_stream::{
+    Session,
     cups::{self, Cups},
     sake::{self, Version},
 };
@@ -78,8 +79,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        sake::Handshake::new(
-            sake::Config::new(node.signer.clone(), Version::V1),
+        Session::new(
+            sake::Exchange::new(sake::Config::new(node.signer.clone(), Version::V1)),
             Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
         ),
         &[NAMESPACE, b"_P2P"].concat(),

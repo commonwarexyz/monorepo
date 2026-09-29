@@ -114,9 +114,9 @@ mod tests {
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
-    use commonware_stream::{cups::Cups, sake};
+    use commonware_stream::{Session, cups::Cups, sake};
 
-    type StreamHandshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
+    type StreamHandshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
 
     #[test]
     fn test_max_size_bounds() {

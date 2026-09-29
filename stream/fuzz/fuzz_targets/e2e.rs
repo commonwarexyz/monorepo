@@ -6,7 +6,7 @@ use commonware_runtime::{
     Handle, Runner as _, Sink as _, Spawner, Stream as _, Supervisor as _, deterministic, mocks,
 };
 use commonware_stream::{
-    Handshake as StreamHandshake,
+    Handshake as StreamHandshake, Session,
     cups::{self, Cups},
     sake::{self, Config, Version},
     utils::{
@@ -18,7 +18,7 @@ use futures::future::{Either, select};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
-type Handshake<S> = sake::Handshake<S, Cups<ChaCha20Poly1305>>;
+type Handshake<S> = Session<sake::Exchange<S>, Cups<ChaCha20Poly1305>>;
 
 /// Returns the records that pair with the SAKE `version`.
 fn records(version: Version) -> Cups<ChaCha20Poly1305> {
@@ -136,23 +136,23 @@ fn fuzz(input: FuzzInput) {
         let (mut adversary_l_sink, dialer_stream) = mocks::Channel::init();
 
         let dialer_handshake = Handshake::new(
-            Config {
+            sake::Exchange::new(Config {
                 signer: dialer_signer.clone(),
                 version,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
-            },
+            }),
             records(version),
         );
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
         let listener_handshake = Handshake::new(
-            Config {
+            sake::Exchange::new(Config {
                 signer: listener_signer.clone(),
                 version,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
-            },
+            }),
             records(version),
         );
         let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(1));

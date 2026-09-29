@@ -1,16 +1,16 @@
 use commonware_cryptography::handshake::sake::Version;
 use std::time::Duration;
 
-/// Configuration for a [Handshake](super::Handshake).
+/// Configuration for an [Exchange](super::Exchange).
 ///
 /// # Examples
 ///
 /// ```
 /// use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
-/// use commonware_stream::{cups::{self, Cups}, sake::{Config, Handshake, Version}};
+/// use commonware_stream::{Session, cups::{self, Cups}, sake::{Config, Exchange, Version}};
 ///
-/// let handshake = Handshake::new(
-///     Config::new(PrivateKey::from_seed(0), Version::V1),
+/// let handshake = Session::new(
+///     Exchange::new(Config::new(PrivateKey::from_seed(0), Version::V1)),
 ///     Cups::<ChaCha20Poly1305>::new(cups::Version::V1),
 /// );
 /// ```
