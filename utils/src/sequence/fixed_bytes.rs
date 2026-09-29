@@ -1,9 +1,9 @@
-use crate::{Array, Span};
+use crate::{Array, Span, sequence::cmp_bytes};
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use core::{
-    cmp::{Ord, PartialOrd},
+    cmp::{Ord, Ordering, PartialOrd},
     fmt::{Debug, Display},
     hash::Hash,
     ops::Deref,
@@ -19,7 +19,7 @@ pub enum Error {
 }
 
 /// An `Array` implementation for fixed-length byte arrays.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, FixedArray)]
+#[derive(Clone, Eq, PartialEq, Hash, Debug, FixedArray)]
 #[fixed_array(infallible, bytes([u8; N]))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
@@ -29,6 +29,20 @@ impl<const N: usize> FixedBytes<N> {
     /// Creates a new `FixedBytes` instance from an array of length `N`.
     pub const fn new(value: [u8; N]) -> Self {
         Self(value)
+    }
+}
+
+impl<const N: usize> Ord for FixedBytes<N> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        cmp_bytes(&self.0, &other.0)
+    }
+}
+
+impl<const N: usize> PartialOrd for FixedBytes<N> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
