@@ -1585,6 +1585,7 @@ mod tests {
             Anchor, Barrier, DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Single,
             SyncTargetsOf, UnmerkleizedOf,
         },
+        tests::mocks,
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
@@ -2601,6 +2602,58 @@ mod tests {
         });
     }
 
+    /// When a replay's owner is cancelled mid-apply, a live waiter re-claims the flight and
+    /// finishes the replay itself with exactly one more apply.
+    #[test]
+    fn live_waiter_takes_over_cancelled_replay() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let (block, _) = harness.build_child(&genesis, View::new(1)).await;
+            let (gate, started, _release) = apply_gate();
+            let probe = ApplicationProbe::new(block.digest(), [gate]);
+            harness.processor.app.apply_probe = Some(probe.clone());
+            let replays = ReplayFlights::default();
+            let execution = &harness.processor.execution;
+            let block = Arc::new(block);
+
+            let mut owner_app = harness.processor.app.clone();
+            let (mut owner_live, owner_cancelled) = oneshot::channel::<()>();
+            let mut owner = Box::pin(execution.replay_shared(
+                &mut owner_app,
+                &context,
+                block.digest(),
+                block.clone(),
+                &mut owner_live,
+                &replays,
+            ));
+            assert!(futures::poll!(&mut owner).is_pending());
+            started.await.expect("owner must reach apply");
+            let mut waiter_app = harness.processor.app.clone();
+            let (mut waiter_live, _waiter_cancelled) = oneshot::channel::<()>();
+            let mut waiter = Box::pin(execution.replay_shared(
+                &mut waiter_app,
+                &context,
+                block.digest(),
+                block.clone(),
+                &mut waiter_live,
+                &replays,
+            ));
+            assert!(futures::poll!(&mut waiter).is_pending());
+
+            drop(owner_cancelled);
+            assert!(matches!(
+                futures::poll!(&mut owner),
+                std::task::Poll::Ready(Err(PrepareBatchesError::Cancelled))
+            ));
+            drop(owner);
+            assert_eq!(waiter.await, Ok(()));
+            assert_eq!(probe.calls(), 2, "the waiter must replay exactly once more");
+            assert!(execution.pending_contains(&block.digest()));
+            assert!(replays.is_empty());
+        });
+    }
+
     /// Fatal storage in an ancestor replay without shutdown panics.
     #[test]
     #[should_panic(expected = "application replay failed")]
@@ -2779,6 +2832,54 @@ mod tests {
             release.send(()).expect("finalize is parked");
             let (processor, applied) = finalize.await;
             assert_durable(applied.publication.into_barrier()).await;
+            drop(processor);
+        });
+    }
+
+    /// A fork that passed its initial checks, then waited out a whole finalization, refuses
+    /// because the anchor moved, even though the finalizing window has already closed.
+    #[test]
+    fn fork_refuses_after_an_overlapping_finalization() {
+        deterministic::Runner::default().start(|context| async move {
+            let processor = Processor::new(
+                mocks::TestApp::default(),
+                mocks::test_databases(),
+                mocks::anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let genesis = mocks::TestBlock::new(0, 0);
+            let child = mocks::TestBlock::child(&genesis, 1);
+            // Cache the child, so its finalization forks nothing from the anchor.
+            assert!(processor.execution.cache_pending(
+                child.digest(),
+                PendingEntry {
+                    round: child.context().round,
+                    parent: genesis.digest(),
+                    merkleized: mocks::TestMerkleized,
+                    provenance: Provenance::Verified,
+                },
+            ));
+            let verifier = processor.verifier();
+            let (started, release) = mocks::TestDb::gate_next_new_batch();
+            let (mut never, _live) = oneshot::channel::<()>();
+            let parent = genesis.digest();
+            let mut fork = Box::pin(verifier.execution.fork_batches(&parent, &mut never));
+            assert!(futures::poll!(&mut fork).is_pending());
+            started.await.expect("fork must reach new_batches");
+
+            let context_cell = ContextCell::new(context.child("processor"));
+            let (processor, _applied) = processor
+                .finalize(context_cell.as_present(), &child, false)
+                .await;
+            {
+                let state = verifier.execution.state.lock();
+                assert!(!state.finalizing, "the finalizing window must be closed");
+                assert_eq!(state.processed.digest, child.digest());
+            }
+
+            release.send(()).expect("fork is parked");
+            assert!(matches!(fork.await, Err(PrepareBatchesError::Stale)));
             drop(processor);
         });
     }

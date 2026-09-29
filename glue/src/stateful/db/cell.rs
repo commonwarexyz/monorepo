@@ -168,7 +168,7 @@ mod tests {
     /// and no read ever observes taken-out state.
     #[test]
     fn mutation_is_not_starved_by_read_storm() {
-        deterministic::Runner::default().start(|context| async move {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (writer, reader) = split(0u64);
 
             let mut workers = Vec::new();
@@ -318,7 +318,7 @@ mod tests {
             futures::pin_mut!(read);
             assert!(
                 read.as_mut().now_or_never().is_none(),
-                "a read after poisoning must park, not observe a gap",
+                "a read after an interrupted mutation must park, not observe a gap",
             );
         });
     }

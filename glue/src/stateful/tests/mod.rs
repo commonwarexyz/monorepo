@@ -64,6 +64,7 @@ use commonware_utils::{
     Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
     non_empty_range, probability, sync::Mutex,
 };
+use futures::FutureExt as _;
 use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
     MarshalPrunedBelow, QmdbPruned,
@@ -1729,6 +1730,10 @@ fn verification_survives_prune_on_real_qmdbs() {
             .expect("block 4 finalization should become durable");
 
         context.sleep(Duration::from_millis(50)).await;
+        assert!(
+            full.read().now_or_never().is_none(),
+            "the due prune must be queued behind the held reader",
+        );
         assert_eq!(
             full_database.bounds(),
             before_prune,

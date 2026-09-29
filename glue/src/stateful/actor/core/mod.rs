@@ -304,7 +304,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Stateful};
+    use super::{Config, Mailbox, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
         db::{Publisher, StateSyncDb, SyncEngineConfig},
@@ -321,9 +321,13 @@ mod tests {
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
-    use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Clock as _, Handle, Runner as _, Spawner as _, Supervisor as _, deterministic,
+    };
     use commonware_utils::{
-        Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::mpsc,
+        Acknowledgement as _, NZU64, NZUsize,
+        acknowledgement::Exact,
+        channel::{mpsc, oneshot},
     };
     use futures::poll;
     use std::{convert::Infallible, sync::Arc, time::Duration};
@@ -467,52 +471,83 @@ mod tests {
         });
     }
 
+    /// Starts a recovering actor whose startup publish parks on a snapshot gate. Returns the
+    /// actor, its mailbox, the marshal fixture, and the gate's release once startup reaches it.
+    async fn start_gated_recovery(
+        context: &mut deterministic::Context,
+        prefix: &str,
+    ) -> (
+        Handle<()>,
+        Mailbox<deterministic::Context, TestApp>,
+        fixtures::MarshalFixture,
+        oneshot::Sender<()>,
+    ) {
+        let scheme = scheme_mocks::fixture(context, prefix.as_bytes(), 1);
+        let marshal = fixtures::marshal_fixture(
+            context.child("marshal"),
+            prefix,
+            scheme.schemes[0].clone(),
+            None,
+            NZUsize!(8),
+            true,
+        )
+        .await;
+
+        let (startup_started, startup_release) = TestDb::gate_next_snapshot();
+        let plan = SyncPlan::init(context.child("plan"), format!("{prefix}-stateful")).await;
+        let publication_context = context.child("publication");
+        let (stateful, mailbox) = Stateful::new(
+            context.child("stateful"),
+            Config {
+                application: TestApp::default(),
+                db_config: (),
+                provider: (),
+                marshal: (marshal.mailbox.clone(), marshal.floor),
+                mailbox_size: NZUsize!(1),
+                plan,
+                resolvers: NoopResolver,
+                snapshot_publisher: Publisher::new(&publication_context).0,
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: 1,
+                    update_channel_size: NZUsize!(1),
+                    max_retained_roots: 1,
+                },
+                prune_config: None,
+            },
+        );
+        let actor = stateful.start();
+        startup_started
+            .await
+            .expect("startup should reach the snapshot publish before processing");
+        (actor, mailbox, marshal, startup_release)
+    }
+
+    /// A stop while startup's first publish is parked exits before processing starts.
+    #[test]
+    fn shutdown_interrupts_startup_publish() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|mut context| async move {
+            let (actor, _mailbox, marshal, _startup_release) =
+                start_gated_recovery(&mut context, "startup-publish-shutdown").await;
+            let stopper = context.child("stopper");
+            context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, None).await });
+            actor.await.expect("the actor should exit cleanly");
+            drop(marshal.guards);
+        });
+    }
+
     #[test]
     fn startup_recovery_releases_cancelled_verify_ancestries() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|mut context| async move {
             // Hold startup after database recovery but before processing polls the mailbox.
-            let prefix = "startup-recovery-cancelled-verifications";
-            let scheme = scheme_mocks::fixture(&mut context, prefix.as_bytes(), 1);
             let genesis = TestBlock::new(0, 0);
             let finalized = TestBlock::child(&genesis, 1);
-            let marshal = fixtures::marshal_fixture(
-                context.child("marshal"),
-                prefix,
-                scheme.schemes[0].clone(),
-                None,
-                NZUsize!(8),
-                true,
-            )
-            .await;
-
-            let (startup_started, startup_release) = TestDb::gate_next_snapshot();
-            let plan = SyncPlan::init(context.child("plan"), format!("{prefix}-stateful")).await;
-            let publication_context = context.child("publication");
-            let (stateful, mut mailbox) = Stateful::new(
-                context.child("stateful"),
-                Config {
-                    application: TestApp::default(),
-                    db_config: (),
-                    provider: (),
-                    marshal: (marshal.mailbox.clone(), marshal.floor),
-                    mailbox_size: NZUsize!(1),
-                    plan,
-                    resolvers: NoopResolver,
-                    snapshot_publisher: Publisher::new(&publication_context).0,
-                    sync_config: SyncEngineConfig {
-                        fetch_batch_size: NZU64!(1),
-                        apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
-                        update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
-                    },
-                    prune_config: None,
-                },
-            );
-            let actor = stateful.start();
-            startup_started
-                .await
-                .expect("startup should reach the snapshot publish before processing");
+            let (actor, mut mailbox, marshal, startup_release) =
+                start_gated_recovery(&mut context, "startup-recovery-cancelled-verifications")
+                    .await;
 
             // Fill the single ready slot and reliable overflow with independently owned ancestries.
             let owners = [

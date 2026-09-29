@@ -2507,7 +2507,7 @@ mod tests {
     }
 
     #[test]
-    fn anchor_redelivery_keeps_retained_verification_progressing() {
+    fn anchor_redelivery_keeps_running_verification() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let finalized = TestBlock::child(&genesis, 1);
@@ -2580,7 +2580,7 @@ mod tests {
 
             assert!(
                 poll!(&mut verify_child).is_pending(),
-                "anchor redelivery must not resolve a retained verification",
+                "anchor redelivery must not resolve a running verification",
             );
             verify_release
                 .send(())
@@ -3256,7 +3256,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_verification_can_finish_before_queued_finalization() {
+    fn running_verification_finishes_before_queued_finalization() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let first = TestBlock::child(&genesis, 1);
@@ -3336,10 +3336,10 @@ mod tests {
                 .expect("finalization should retain the replay owner");
             verify_release
                 .send(())
-                .expect("retained verification should remain active");
+                .expect("running verification should remain active");
             verify_started
                 .await
-                .expect("retained verification should start");
+                .expect("running verification should start");
             finalized_started
                 .await
                 .expect("first finalization hook should start");
@@ -3349,12 +3349,12 @@ mod tests {
                     valid
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {
-                    panic!("queued finalization blocked retained verification");
+                    panic!("queued finalization blocked running verification");
                 },
             };
             assert!(
                 valid,
-                "retained branch-relative verification must remain valid"
+                "running branch-relative verification must remain valid"
             );
             finalized_release
                 .send(())
@@ -5262,7 +5262,7 @@ mod tests {
             processing_fence(&context, &mailbox).await;
             let attempts = clones.load(Ordering::SeqCst);
 
-            // Redeliver the applied tip, then fence behind any requeued verification.
+            // Redeliver the applied tip, then fence behind any re-run verification.
             let (ack, waiter) = Exact::handle();
             mailbox.report(Update::Block(Arc::new(TestBlock::new(0, 0)), ack));
             waiter.await.expect("redelivered tip must be acknowledged");

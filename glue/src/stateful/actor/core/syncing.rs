@@ -1063,6 +1063,49 @@ mod tests {
         });
     }
 
+    /// A stop while the handoff's initial publish or its block replay is parked exits within the
+    /// stop deadline, leaves the block unacknowledged, and records no completion.
+    #[rstest::rstest]
+    #[case::initial_publish(TestDb::gate_next_snapshot as fn() -> _)]
+    #[case::finalize(TestDb::gate_next_new_batch as fn() -> _)]
+    fn shutdown_interrupts_parked_handoff(
+        #[case] gate: fn() -> (oneshot::Receiver<()>, oneshot::Sender<()>),
+    ) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (harness, artifact) =
+                TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+            let (started, _release) = gate();
+            let (acknowledgement, waiter) = Exact::handle();
+            let sync_done = harness.syncing.metrics.sync_done.clone();
+            let transition = context.child("transition").spawn(move |_| {
+                harness.syncing.transition(
+                    artifact,
+                    [FinalizedHandoff::Apply(
+                        Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
+                        acknowledgement,
+                    )],
+                )
+            });
+            started.await.expect("the handoff should reach the gate");
+
+            let stopper = context.child("stopper");
+            let stop = context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
+            assert!(
+                stop.await.expect("stop task should finish").is_ok(),
+                "shutdown must interrupt the parked handoff",
+            );
+            transition.await.expect("transition should exit cleanly");
+            assert!(waiter.await.is_err());
+            assert_eq!(sync_done.get(), 0);
+            let reopened =
+                SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), "syncing-test")
+                    .await;
+            assert_eq!(reopened.completed(), None);
+        });
+    }
+
     /// A live floor during state sync redelivers receipts. The handoff applies each block once
     /// and releases every receipt only after its flush.
     #[rstest::rstest]

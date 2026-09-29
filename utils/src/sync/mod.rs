@@ -258,6 +258,24 @@ mod tests {
     }
 
     #[test]
+    fn test_traced_async_rwlock_try_write() {
+        futures::executor::block_on(async {
+            let lock = TracedAsyncRwLock::new("test", 100u64);
+
+            let reader = lock.read().await;
+            assert!(lock.try_write().is_none());
+            drop(reader);
+
+            let mut writer = lock.try_write().expect("no guard is held");
+            *writer += 1;
+            assert!(lock.try_write().is_none());
+            drop(writer);
+
+            assert_eq!(*lock.read().await, 101);
+        });
+    }
+
+    #[test]
     fn test_async_rwlock() {
         futures::executor::block_on(async {
             let lock = AsyncRwLock::new(100u64);

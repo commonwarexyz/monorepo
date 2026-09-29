@@ -83,16 +83,48 @@ struct PruneGate {
     release: oneshot::Receiver<()>,
 }
 
-/// Signals that a snapshot capture has started, then blocks it until the test releases it.
-struct SnapshotGate {
+/// Signals that a gated [`TestDb`] call has started, then blocks it until the test releases it.
+struct CallGate {
     started: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
+}
+
+impl CallGate {
+    /// Installs a gate in `slot`, returning its entry signal and release sender.
+    fn install(
+        slot: &'static std::thread::LocalKey<RefCell<Option<Self>>>,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        slot.with(|gate| {
+            assert!(
+                gate.borrow_mut()
+                    .replace(Self {
+                        started,
+                        release: release_rx,
+                    })
+                    .is_none(),
+                "gate already installed",
+            );
+        });
+        (started_rx, release)
+    }
+
+    /// Parks on the gate in `slot`, if one is installed, consuming it.
+    async fn pass(slot: &'static std::thread::LocalKey<RefCell<Option<Self>>>) {
+        if let Some(mut gate) = slot.with(|gate| gate.borrow_mut().take()) {
+            gate.started.send(()).expect("test must await the gate");
+            let _ = (&mut gate.release).await;
+        }
+    }
 }
 
 thread_local! {
     /// Single-use gate consumed by the next [`TestDb`] snapshot capture. Parks an actor's
     /// startup publish between database recovery and mailbox polling.
-    static SNAPSHOT_GATE: RefCell<Option<SnapshotGate>> = const { RefCell::new(None) };
+    static SNAPSHOT_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
+    /// Single-use gate consumed by the next [`TestDb`] batch fork, which holds no read guard.
+    static NEW_BATCH_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
 }
 
 /// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
@@ -159,20 +191,12 @@ impl TestDb {
     /// Gates the next snapshot capture on this thread. The receiver reports entry, and
     /// sending on the returned sender lets the capture continue.
     pub(crate) fn gate_next_snapshot() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (started, started_rx) = oneshot::channel();
-        let (release, release_rx) = oneshot::channel();
-        SNAPSHOT_GATE.with(|gate| {
-            assert!(
-                gate.borrow_mut()
-                    .replace(SnapshotGate {
-                        started,
-                        release: release_rx,
-                    })
-                    .is_none(),
-                "snapshot gate already installed",
-            );
-        });
-        (started_rx, release)
+        CallGate::install(&SNAPSHOT_GATE)
+    }
+
+    /// Gates the next batch fork on this thread, like [`Self::gate_next_snapshot`].
+    pub(crate) fn gate_next_new_batch() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        CallGate::install(&NEW_BATCH_GATE)
     }
 }
 
@@ -186,12 +210,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
 
     async fn snapshot(mut self) -> Result<(Self, Self::Snapshot), Self::Error> {
         self.settle().await;
-        if let Some(mut gate) = SNAPSHOT_GATE.with(|gate| gate.borrow_mut().take()) {
-            gate.started
-                .send(())
-                .expect("test must await the snapshot gate");
-            let _ = (&mut gate.release).await;
-        }
+        CallGate::pass(&SNAPSHOT_GATE).await;
         let snapshot = self.finalized;
         Ok((self, snapshot))
     }
@@ -209,6 +228,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
     }
 
     async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
+        CallGate::pass(&NEW_BATCH_GATE).await;
         TestUnmerkleized
     }
 
