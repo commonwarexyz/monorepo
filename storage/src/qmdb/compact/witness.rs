@@ -249,7 +249,7 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
     /// and append its witness to the journal.
     pub(crate) async fn apply<H, S>(
         mut self,
-        merkle: &compact::Merkle<F, D, S>,
+        merkle: &mut compact::Merkle<F, D, S>,
         op: Op,
     ) -> Result<Self, Error<F>>
     where
@@ -516,7 +516,7 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
 /// Returns [`Error::DataCorrupted`] if `op` is not a commit or its floor lies past its own
 /// location, and [`Error::Merkle`] if the Merkle cannot append or prove it.
 pub(crate) fn import_tip<F, H, S, Op>(
-    merkle: &compact::Merkle<F, H::Digest, S>,
+    merkle: &mut compact::Merkle<F, H::Digest, S>,
     op: Op,
 ) -> Result<Tip<F, Op, H::Digest>, Error<F>>
 where
@@ -551,35 +551,34 @@ where
     S: Strategy,
 {
     let hasher = qmdb::hasher::<H>();
-    merkle.with_mem(|mem| {
-        let size = mem.leaves();
-        if size == 0 {
-            return Err(Error::DataCorrupted("compact merkle has no commit"));
-        }
-        let last_commit_loc = size - 1;
-        validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
-        let leaf_pos = F::location_to_position(last_commit_loc);
-        if *mem.get_node_unchecked(leaf_pos)
-            != MerkleHasher::<F>::leaf_digest(&hasher, leaf_pos, &op_bytes)
-        {
-            return Err(Error::DataCorrupted("commit bytes do not match merkle tip"));
-        }
-        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
-        let root = mem.root(&hasher, inactive_peaks)?;
-        let pinned_nodes = F::nodes_to_pin(last_commit_loc)
-            .map(|pos| *mem.get_node_unchecked(pos))
-            .collect::<Vec<_>>();
-        let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
-        Ok(Tip {
-            witness: Witness {
-                op_bytes,
-                size,
-                pinned_nodes,
-            },
-            op,
-            root,
-            proof,
-        })
+    let mem = merkle.mem();
+    let size = mem.leaves();
+    if size == 0 {
+        return Err(Error::DataCorrupted("compact merkle has no commit"));
+    }
+    let last_commit_loc = size - 1;
+    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+    let leaf_pos = F::location_to_position(last_commit_loc);
+    if *mem.get_node_unchecked(leaf_pos)
+        != MerkleHasher::<F>::leaf_digest(&hasher, leaf_pos, &op_bytes)
+    {
+        return Err(Error::DataCorrupted("commit bytes do not match merkle tip"));
+    }
+    let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
+    let root = mem.root(&hasher, inactive_peaks)?;
+    let pinned_nodes = F::nodes_to_pin(last_commit_loc)
+        .map(|pos| *mem.get_node_unchecked(pos))
+        .collect::<Vec<_>>();
+    let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
+    Ok(Tip {
+        witness: Witness {
+            op_bytes,
+            size,
+            pinned_nodes,
+        },
+        op,
+        root,
+        proof,
     })
 }
 
@@ -601,7 +600,7 @@ fn validate_inactivity_floor<F: Family>(
 /// Load the tip witness from the journal and rebuild the Merkle from it.
 async fn load_tip<E, F, H, S, Op>(
     journal: &Journal<E, F, H::Digest>,
-    merkle: &compact::Merkle<F, H::Digest, S>,
+    merkle: &mut compact::Merkle<F, H::Digest, S>,
     commit_codec_config: &Op::Cfg,
 ) -> Result<Tip<F, Op, H::Digest>, Error<F>>
 where
@@ -626,7 +625,7 @@ where
 /// state. A structurally invalid entry fails with [`Error::DataCorrupted`].
 fn rebuild<F, D, H, S, Op>(
     witness: Witness<F, D>,
-    merkle: &compact::Merkle<F, D, S>,
+    merkle: &mut compact::Merkle<F, D, S>,
     commit_codec_config: &Op::Cfg,
 ) -> Result<Tip<F, Op, D>, Error<F>>
 where
@@ -793,7 +792,7 @@ where
     let hasher = qmdb::hasher::<H>();
     let batch = {
         let batch = merkle.new_batch().add(&hasher, &op_bytes);
-        merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
+        batch.merkleize(merkle.mem(), &hasher)
     };
     merkle.apply_batch(&batch)?;
 
@@ -868,14 +867,15 @@ pub(crate) mod tests {
         let op_bytes = Bytes::from(op_bytes);
         assert_eq!(PaddedCommit::decode_cfg(op_bytes.clone(), &()).unwrap(), op);
 
-        let merkle = compact::Merkle::<mmr::Family, sha256::Digest, Sequential>::new(Sequential);
+        let mut merkle =
+            compact::Merkle::<mmr::Family, sha256::Digest, Sequential>::new(Sequential);
         let entry = Witness {
             op_bytes,
             size: Location::new(1),
             pinned_nodes: vec![],
         };
         assert!(matches!(
-            rebuild::<mmr::Family, _, Sha256, Sequential, PaddedCommit>(entry, &merkle, &()),
+            rebuild::<mmr::Family, _, Sha256, Sequential, PaddedCommit>(entry, &mut merkle, &()),
             Err(Error::DataCorrupted("non-canonical commit operation"))
         ));
     }
@@ -884,7 +884,7 @@ pub(crate) mod tests {
     /// never from a Merkle without a commit.
     #[test]
     fn test_tip_requires_bytes_matching_merkle() {
-        let merkle =
+        let mut merkle =
             compact::Merkle::<mmr::Family, sha256::Digest, Sequential>::from_compact_state(
                 Sequential,
                 Location::new(0),

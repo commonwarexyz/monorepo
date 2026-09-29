@@ -57,8 +57,6 @@ where
     C: Clone + Send + Sync + 'static,
 {
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
-    root: H::Digest,
-    last_commit_loc: Location<F>,
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
     witness: witness::Store<E, F, Operation<F, V>, H::Digest>,
@@ -167,15 +165,13 @@ where
         let db = self.bounds.on_chain(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         let hasher = qmdb::hasher::<H>();
-        db.merkle
-            .with_mem(|base| {
-                self.merkle_batch.range_proof(
-                    base,
-                    &hasher,
-                    self.bounds.base.size..self.bounds.tip.size,
-                    inactive_peaks,
-                )
-            })
+        self.merkle_batch
+            .range_proof(
+                db.merkle.mem(),
+                &hasher,
+                self.bounds.base.size..self.bounds.tip.size,
+                inactive_peaks,
+            )
             .map_err(Into::into)
     }
 
@@ -202,17 +198,15 @@ where
         Operation<F, V>: Read<Cfg = C>,
     {
         let db = self.bounds.on_chain(db, db.commitment())?;
-        db.merkle
-            .with_mem(|base| {
-                F::nodes_to_pin(self.bounds.base.size)
-                    .map(|pos| {
-                        self.merkle_batch
-                            .get_node(pos)
-                            .or_else(|| base.get_node(pos))
-                            .ok_or(crate::merkle::Error::ElementPruned(pos))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
+        let base = db.merkle.mem();
+        F::nodes_to_pin(self.bounds.base.size)
+            .map(|pos| {
+                self.merkle_batch
+                    .get_node(pos)
+                    .or_else(|| base.get_node(pos))
+                    .ok_or(crate::merkle::Error::ElementPruned(pos))
             })
+            .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 
@@ -408,19 +402,15 @@ where
         )
         .await?;
 
-        // Commit metadata, location, and root must all come from the same verified witness.
+        // Commit metadata and floor must come from the verified witness the root reads from.
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) =
             witness.tip().op().clone()
         else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
-        let last_commit_loc = witness.tip().size() - 1;
-        let root = witness.tip().root();
 
         Ok(Self {
             merkle,
-            root,
-            last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
             witness,
@@ -446,16 +436,13 @@ where
         let (last_commit_metadata, inactivity_floor_loc) =
             (last_commit_metadata.clone(), *inactivity_floor_loc);
 
-        let merkle =
+        let mut merkle =
             compact_merkle::Merkle::from_compact_state(strategy, last_commit_loc, pinned_nodes)?;
-        let imported = witness::import_tip::<F, H, S, _>(&merkle, last_commit_op)?;
+        let imported = witness::import_tip::<F, H, S, _>(&mut merkle, last_commit_op)?;
 
         let store = witness::Store::from_import(journal, imported);
-        let root = store.tip().root();
         Ok(Self {
             merkle,
-            root,
-            last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
             witness: store,
@@ -463,18 +450,8 @@ where
     }
 
     /// Return the root of the db.
-    pub const fn root(&self) -> H::Digest {
-        self.root
-    }
-
-    /// Return a reference to the merkleization strategy.
-    pub const fn strategy(&self) -> &S {
-        self.merkle.strategy()
-    }
-
-    /// Return the location of the last commit.
-    pub const fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
+    pub fn root(&self) -> H::Digest {
+        self.witness.tip().root()
     }
 
     /// Return the inactivity floor declared by the last committed batch.
@@ -484,7 +461,7 @@ where
 
     /// Return the location of the next operation appended to this db.
     pub fn size(&self) -> Location<F> {
-        self.last_commit_loc + 1
+        self.witness.tip().size()
     }
 
     /// Get the metadata associated with the last commit.
@@ -502,7 +479,7 @@ where
 
     /// The [`Commitment`] for the database's current state.
     pub(crate) fn commitment(&self) -> chain::Commitment<F, H::Digest> {
-        chain::Commitment::new(self.last_commit_loc + 1, self.root())
+        chain::Commitment::new(self.size(), self.root())
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -559,14 +536,13 @@ where
     ) -> Result<(Self, core::ops::Range<Location<F>>), Error<F>> {
         self.validate_batch(&batch)?;
 
-        let start_loc = self.last_commit_loc + 1;
+        let start_loc = self.size();
         self.merkle.apply_batch(&batch.merkle_batch)?;
-        self.root = batch.root();
-        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.last_commit_metadata = batch.commit_metadata.clone();
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         let op = Operation::Commit(self.last_commit_metadata.clone(), self.inactivity_floor_loc);
-        self.witness = self.witness.apply::<H, S>(&self.merkle, op).await?;
+        self.witness = self.witness.apply::<H, S>(&mut self.merkle, op).await?;
+        assert_eq!(self.commitment(), batch.bounds.tip);
         Ok((self, start_loc..batch.bounds.tip.size))
     }
 
@@ -3043,7 +3019,6 @@ mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), Location::new(4));
             assert_eq!(db.root(), root_after_first);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
@@ -3077,7 +3052,6 @@ mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), Location::new(4));
             assert_eq!(db.root(), root_before_drop);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
@@ -3124,7 +3098,6 @@ mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), Location::new(4));
             assert_eq!(db.root(), root_after_first);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
