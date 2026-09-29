@@ -49,6 +49,12 @@ jobs:
       run: forge build --sizes --deny warnings
     - name: Test Solidity contracts
       run: forge test
+    - name: Brutalized tests
+      run: FORGE_SNAPSHOT_CHECK=false forge test --brutalize
+    - name: Install Z3
+      run: sudo apt-get update && sudo apt-get install -y z3
+    - name: Symbolic tests
+      run: forge test --symbolic --match-test '^(check|prove)_'
     - name: Build fuzz input generator
       run: cargo build --release --locked -p commonware-sol-fuzz
     - name: Differential tests

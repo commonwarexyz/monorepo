@@ -1,3 +1,4 @@
+use super::FinalizedTip;
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     network::{Directory, Manager},
@@ -9,6 +10,7 @@ use crate::dkg::{
     types::{EpochInfo, EpochOutcome, Participants, Payload, SchemeInfo},
 };
 use commonware_consensus::{
+    Block,
     marshal::{
         Identifier,
         core::{Processed, Variant as MarshalVariant},
@@ -78,7 +80,8 @@ where
     pub(super) floor: Height,
 }
 
-/// State sync carries epoch metadata, but not dealer logs skipped before its floor.
+/// Returns whether a state-sync floor lies after its epoch's midpoint, so the
+/// blocks it skipped may have carried dealer logs.
 fn state_sync_skips_inclusion_prefix(
     epocher: &FixedEpocher,
     state_sync_floor: Option<Height>,
@@ -93,28 +96,35 @@ fn state_sync_skips_inclusion_prefix(
         == EpochPhase::Late
 }
 
-/// Selects the first height setup may process.
+/// Returns the later of marshal's processed position and the parent of the
+/// state-sync floor (`None` when neither exists).
 ///
-/// State sync never starts below its certified floor. Otherwise, an existing
-/// ceremony restarts at its epoch boundary, and a fresh setup resumes after
-/// Marshal's processed height.
-fn startup_height(
-    epocher: &FixedEpocher,
-    current_epoch: Option<Epoch>,
-    state_sync_floor: Option<Height>,
-    processed: Option<Height>,
-) -> Height {
-    if let Some(floor) = state_sync_floor {
-        // A certified floor remains the lower bound when Marshal's processed
-        // height has not caught up to its resolved floor block.
-        return processed.map_or(floor, |height| height.next().max(floor));
-    }
-    if let Some(epoch) = current_epoch {
-        return epocher
-            .first(epoch)
-            .expect("epocher must know hinted epoch");
-    }
-    processed.map_or_else(Height::zero, Height::next)
+/// `processed` pairs the position with a stored block: the processed block
+/// itself, or its child when the processed block is absent.
+pub(super) fn startup<B: Block>(
+    processed: Option<(Processed, B)>,
+    floor: Option<B>,
+) -> Option<FinalizedTip<B::Digest>> {
+    let processed = processed.map(|(processed, block)| match processed {
+        Processed::Block(height) => FinalizedTip {
+            height,
+            digest: block.digest(),
+        },
+        Processed::Absent(height) => FinalizedTip {
+            height,
+            digest: block.parent(),
+        },
+    });
+    let floor = floor.and_then(|block| {
+        Some(FinalizedTip {
+            height: block.height().previous()?,
+            digest: block.parent(),
+        })
+    });
+    processed
+        .into_iter()
+        .chain(floor)
+        .max_by_key(|tip| tip.height)
 }
 
 /// Retains a dealer that can still produce a selectable log.
@@ -156,33 +166,22 @@ where
     pub(super) async fn setup(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-        current_epoch: Option<Epoch>,
         state_sync: Option<StateSyncStart<V, C::PublicKey, B::Directory>>,
     ) -> Option<Setup<V, C>> {
         self.metrics.set_phase(Phase::Setup);
 
-        // Reconcile the epoch hint with Marshal progress and the certified
-        // state-sync floor. The floor remains authoritative while Marshal has
-        // not yet recorded its block as processed.
-        let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
-        let processed = if state_sync_floor.is_some() || current_epoch.is_none() {
-            self.marshal.get_processed().await.map(Processed::height)
-        } else {
-            None
-        };
-        let height = startup_height(&self.epocher, current_epoch, state_sync_floor, processed);
+        let height = self.tip.map_or_else(Height::zero, |tip| tip.height.next());
         let bounds = self
             .epocher
             .containing(height)
             .expect("epocher must know of block height");
         let epoch = bounds.epoch();
 
-        // Resolve canonical metadata for the selected epoch and determine whether
-        // its public inclusion history is complete. Durable state takes
-        // precedence over recovered state-sync metadata. Without either source,
-        // participation requires the finalized boundary block.
+        // Prefer the epoch committed earlier in this run, then state-sync
+        // material, then the finalized boundary block.
         let current = store.current().filter(|current| current.epoch == epoch);
         let already_committed = current.is_some();
+        let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
         let follow = state_sync_skips_inclusion_prefix(&self.epocher, state_sync_floor);
         let info = match current.or_else(|| state_sync.map(|start| start.info)) {
             Some(info) => info,
@@ -200,9 +199,8 @@ where
             );
         }
 
-        // Every metadata source crosses a persistence or consensus boundary.
-        // Validate participant and inclusion-window limits before constructing
-        // protocol state.
+        // Each source is read from storage or produced by consensus, so check
+        // participant and dealer-log limits before building protocol state.
         let participants = info.participants();
         let round = epoch.get();
         participants
@@ -212,9 +210,8 @@ where
             .validate_epoch_capacity(self.blocks_per_epoch, Some(&info.output))
             .expect("boundary epoch must have enough dealer-log slots");
 
-        // Establish the epoch's share and seed before entering either operating
-        // mode. Setup persists an uncommitted epoch before registering its scheme,
-        // then prunes only after the selected epoch is durable.
+        // Persist the epoch's share and seed before registering its scheme, and
+        // prune only once the epoch is durable.
         let share = self.recovered_share(store, &info).await;
         let seed = store
             .seed_or_random(epoch, self.context.as_present_mut())
@@ -225,9 +222,8 @@ where
         }
         store.prune(epoch.previous().unwrap_or(epoch)).await;
 
-        // A late state-sync floor omits public dealer-log history required by
-        // local dealer and player actors. Preserve the selected epoch state,
-        // then follow its finalized outcome without participating.
+        // A floor after the midpoint skipped blocks that may carry dealer logs,
+        // so follow the committed epoch instead of participating.
         if follow {
             return Some(Setup::Follow);
         }
@@ -245,6 +241,11 @@ where
         ))))
     }
 
+    /// Returns this node's share stored for `info.epoch`.
+    ///
+    /// If none is stored and `info` records a failed ceremony, returns the share
+    /// stored for the previous epoch when this node is a player of the
+    /// carried-forward output.
     pub(super) async fn recovered_share(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
@@ -261,6 +262,10 @@ where
         store.share(previous).await
     }
 
+    /// Returns the [`EpochInfo`] carried by the finalized boundary block that
+    /// introduced `epoch` (`None` if marshal does not have the block).
+    ///
+    /// Panics if the block carries no [`EpochInfo`].
     async fn boundary_epoch_info(
         &mut self,
         epoch: Epoch,
@@ -280,6 +285,8 @@ where
         Some(info)
     }
 
+    /// Registers a signer scheme for `info` if `share` is present and a verifier
+    /// scheme otherwise, then marks `info.epoch` on the fence.
     pub(super) async fn register_epoch(
         &mut self,
         info: &EpochInfo<V, C::PublicKey, B::Directory>,
@@ -356,14 +363,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{dealer_for_phase, startup_height, state_sync_skips_inclusion_prefix};
+    use super::{dealer_for_phase, startup, state_sync_skips_inclusion_prefix};
     use crate::dkg::{
         reshare::store::{AckOutcome, Store},
-        tests::mocks::{MemorySecretStore, TestBlsVariant},
+        tests::mocks::{self, MemorySecretStore, TestBlsVariant, child, genesis_block},
     };
-    use commonware_consensus::types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height};
+    use commonware_consensus::{
+        marshal::core::Processed,
+        types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height},
+    };
     use commonware_cryptography::{
-        Signer,
+        Digestible as _, Signer,
         bls12381::{
             dkg::feldman_desmedt::{Info, Player, Reveal, deal},
             primitives::sharing::Mode,
@@ -371,34 +381,41 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::{N3f1, NZU32, NZU64, ordered::Set, test_rng};
+    use commonware_utils::{N3f1, NZU64, ordered::Set, test_rng};
 
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_SETUP_TEST";
 
+    /// State sync never resumes below its certified floor, and marshal's
+    /// processed position takes its digest from the stored block that backs it.
     #[test]
-    fn state_sync_start_does_not_precede_certified_floor() {
-        let epocher = FixedEpocher::new(NZU64!(64));
-        let epoch = Epoch::new(3);
-        let floor = epocher.midpoint(epoch).expect("test epoch");
-        let older = floor
-            .previous()
-            .and_then(Height::previous)
-            .expect("test floor has earlier height");
+    fn startup_tip_covers_processed_and_floor() {
+        let mut blocks = vec![genesis_block(PrivateKey::from_seed(0).public_key())];
+        while blocks.len() < 5 {
+            blocks.push(child(blocks.last().unwrap()));
+        }
+        let tip = |processed: Option<Processed>, floor: Option<usize>| {
+            let processed = processed.map(|processed| {
+                let anchor = processed.anchor().get() as usize;
+                (processed, blocks[anchor].clone())
+            });
+            startup(processed, floor.map(|floor| blocks[floor].clone()))
+                .map(|tip| (tip.height, tip.digest))
+        };
+        let covered = |index: usize| Some((Height::new(index as u64), blocks[index].digest()));
+        let stored = |height| Some(Processed::Block(Height::new(height)));
+        let absent = |height| Some(Processed::Absent(Height::new(height)));
 
-        assert_eq!(
-            startup_height(&epocher, Some(epoch), Some(floor), None),
-            floor
-        );
-        assert_eq!(
-            startup_height(&epocher, Some(epoch), Some(floor), Some(older)),
-            floor
-        );
+        // Without state sync, the actor resumes after marshal's processed position.
+        assert_eq!(tip(None, None), None);
+        assert_eq!(tip(stored(2), None), covered(2));
+        assert_eq!(tip(absent(2), None), covered(2));
 
-        let newer = floor.next();
-        assert_eq!(
-            startup_height(&epocher, Some(epoch), Some(floor), Some(newer)),
-            newer.next()
-        );
+        // A floor covers every block below it until marshal passes it.
+        assert_eq!(tip(None, Some(0)), None);
+        assert_eq!(tip(None, Some(3)), covered(2));
+        assert_eq!(tip(stored(1), Some(3)), covered(2));
+        assert_eq!(tip(absent(2), Some(3)), covered(2));
+        assert_eq!(tip(stored(4), Some(3)), covered(4));
     }
 
     #[test]
@@ -444,10 +461,9 @@ mod tests {
             )
             .expect("valid reshare info");
             let secret_store = MemorySecretStore::default();
-            let mut store = Store::<_, _, TestBlsVariant, PublicKey>::init(
+            let mut store: Store<_, _, TestBlsVariant, PublicKey> = mocks::store(
                 context.child("store"),
                 "recovered-dealer-after-dealing",
-                NZU32!(16),
                 secret_store,
             )
             .await;

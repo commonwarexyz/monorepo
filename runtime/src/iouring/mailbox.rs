@@ -11,7 +11,7 @@
 use super::{
     request::RequestOutput,
     sleep::TimerId,
-    task::{BoxedTask, Target},
+    task::{Target, Task},
     waiter::WaiterId,
     waker::Waker,
 };
@@ -24,7 +24,7 @@ pub enum Message {
     /// Wake the root future or a task.
     Wake(Target),
     /// Place a spawned task on this worker.
-    Spawn(BoxedTask),
+    Spawn(Task),
     /// Transfer observation of an operation or timer to a channel.
     Forward(Forward),
     /// Release observation of an operation or timer.
@@ -172,12 +172,25 @@ mod tests {
             mailbox: Arc::downgrade(mailbox),
             dropped: dropped.clone(),
         };
-        let task = Task::boxed(async move {
-            let _guard = guard;
-            pending::<()>().await;
-        });
+        let task = Task::new(
+            async move {
+                let _guard = guard;
+                pending::<()>().await;
+            },
+            Weak::new(),
+        );
 
         (Message::Spawn(task), dropped)
+    }
+
+    /// Dispose of messages as worker cleanup does, clearing each spawned
+    /// task's future in place before releasing the message.
+    fn dispose(messages: impl IntoIterator<Item = Message>) {
+        for message in messages {
+            if let Message::Spawn(task) = &message {
+                task.clear();
+            }
+        }
     }
 
     #[test]
@@ -190,7 +203,11 @@ mod tests {
 
         // Multiple messages share one publication and retain their send order.
         assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
-        assert!(mailbox.send(Message::Spawn(Task::boxed(pending()))).is_ok());
+        assert!(
+            mailbox
+                .send(Message::Spawn(Task::new(pending(), Weak::new())))
+                .is_ok()
+        );
         assert!(mailbox.waker.pending(0));
         assert!(mailbox.take(&mut scratch));
         assert!(!mailbox.waker.pending(1));
@@ -203,7 +220,7 @@ mod tests {
         assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
         assert!(mailbox.waker.pending(1));
 
-        scratch.clear();
+        dispose(scratch.drain(..));
         assert!(mailbox.take(&mut scratch));
         assert!(!mailbox.waker.pending(2));
         assert!(matches!(scratch.as_slice(), [Message::Wake(Target::Root)]));
@@ -246,7 +263,7 @@ mod tests {
         assert!(matches!(queued.as_slice(), [Message::Spawn(_)]));
         assert!(!dropped.load(Ordering::Relaxed));
 
-        drop(queued);
+        dispose(queued);
         assert!(dropped.load(Ordering::Relaxed));
 
         // Rejected tasks also reach the caller, without another publication.
@@ -257,7 +274,7 @@ mod tests {
         assert!(mailbox.waker.pending(0));
         assert!(!mailbox.waker.pending(1));
 
-        drop(rejected);
+        dispose(rejected.err());
         assert!(dropped.load(Ordering::Relaxed));
 
         let mut scratch = Vec::new();
@@ -289,8 +306,8 @@ mod tests {
         assert!(!mailbox.is_open());
         assert!(!dropped.load(Ordering::Relaxed));
 
-        drop(queued);
-        drop(result);
+        dispose(queued);
+        dispose(result.err());
         assert!(dropped.load(Ordering::Relaxed));
     }
 }

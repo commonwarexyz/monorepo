@@ -1,23 +1,24 @@
-//! `dkg` subcommand: one-shot glue DKG bootstrap for the epoch-0 committee.
+//! `bootstrap` subcommand: one-shot glue DKG for the epoch-0 committee.
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
-        DKG_CHANNEL, FileSecretStore, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, NAMESPACE, Participants, RESOLVER_CHANNEL, REVEAL, SHARING_MODE,
-        VOTE_CHANNEL,
+        DKG_CHANNEL, IO_BUFFER_SIZE, ITEMS_PER_SECTION, MAILBOX_SIZE, MAX_MESSAGE_SIZE,
+        MAX_SUPPORTED_MODE, MESSAGE_RATE, MUXER_SIZE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE,
+        Participants, Partition, RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
     },
+    validator,
 };
 use clap::Args;
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_glue::dkg::{
-    bootstrap,
+    SecretStore as _, bootstrap,
     types::{EpochInfo, EpochOutcome},
 };
 use commonware_p2p::authenticated::{self, discovery};
-use commonware_runtime::{Strategizer, Supervisor as _, tokio};
+use commonware_runtime::{Handle, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
@@ -29,20 +30,25 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tracing::info;
+use tracing::{error, info};
 
 type ReshareEpochInfo = EpochInfo<MinSig, PublicKey>;
 
-/// Run the one-shot DKG bootstrap and write the resulting genesis.
+/// Partition of the bootstrap's [`Secrets`] store.
+pub const PARTITION: Partition = Partition::Bootstrap;
+
+/// Run the one-shot DKG, write the resulting genesis, and keep serving until
+/// stopped.
 #[derive(Args)]
-pub struct Dkg {
-    /// Validator node directory containing config, secrets, and runtime storage.
+pub struct Bootstrap {
+    /// Validator node directory containing config and runtime storage.
     #[arg(long, default_value = "./data/validator-0")]
     pub node_dir: PathBuf,
 }
 
-/// Run the bootstrap engine to completion and distribute the genesis artifact.
-pub async fn run(context: tokio::Context, args: Dkg) {
+/// Run the [`bootstrap::Engine`], distribute the genesis artifact on completion,
+/// and keep serving peers that have not completed.
+pub async fn run(context: tokio::Context, args: Bootstrap) {
     let node = NodeConfig::load(&args.node_dir).expect("failed to load node config");
     let network = NetworkConfig::load(&args.node_dir).expect("failed to load network config");
     network.validate().expect("invalid network config");
@@ -81,21 +87,26 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     let dkg = p2p.register(DKG_CHANNEL, MESSAGE_RATE);
 
     let strategy = context.strategy(NZUsize!(2));
-    let store = FileSecretStore::load(args.node_dir.join("secrets.json"))
-        .expect("failed to load secret store");
+    let mut store = Secrets::init(context.child("secrets"), PARTITION).await;
     let engine = bootstrap::Engine::new(
         context.child("bootstrap"),
         bootstrap::Config {
             signer: node.signer,
             manager: oracle.clone(),
             blocker: oracle.clone(),
-            secret_store: store,
+            secret_store: store.clone(),
             strategy,
             namespace: NAMESPACE,
             sharing_mode: SHARING_MODE,
             reveal: REVEAL,
             max_supported_mode: MAX_SUPPORTED_MODE,
             partition_prefix: "bootstrap".to_string(),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
+            mailbox_size: MAILBOX_SIZE,
+            muxer_size: MUXER_SIZE,
+            items_per_section: ITEMS_PER_SECTION,
             participants: participants.get(Epoch::zero()),
             directory: Unit,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
@@ -110,26 +121,41 @@ pub async fn run(context: tokio::Context, args: Dkg) {
         .expect("bootstrap completion dropped")
         .info
         .expect("bootstrap DKG failed");
+
+    // Hand only the epoch-0 share to the validator store. The bootstrap store
+    // also holds this ceremony's epoch-0 seed and dealings, which the
+    // validator's first reshare must not reuse.
+    if let Some(share) = store.get_share(Epoch::zero()).await {
+        let mut handoff = Secrets::init(context.child("handoff"), validator::PARTITION).await;
+        handoff.put_share(Epoch::zero(), share).await;
+    }
+
     let mut genesis = info;
     genesis.outcome = EpochOutcome::Success;
     genesis.next_players = participants.get(genesis.epoch.next());
-    let written = write_genesis_to_sibling_validators(&args.node_dir, &network, &genesis)
+    let written = write_genesis_to_sibling_validators(&args.node_dir, &local, &network, &genesis)
         .expect("failed to write genesis");
     info!(
         epoch = genesis.epoch.get(),
         players = genesis.players.len(),
         next_players = genesis.next_players.len(),
-        written,
-        "wrote genesis"
+        directories = written,
+        "bootstrap complete, serving peers until stopped"
     );
-    p2p_handle.abort();
-    engine_handle.abort();
+
+    // Keep serving the one-shot chain so participants that have not completed
+    // can catch up.
+    if let Err(err) = Handle::select([p2p_handle, engine_handle]).await {
+        error!(?err, "bootstrap task failed");
+    }
 }
 
 /// Write `genesis` into every sibling validator directory that belongs to
-/// `network`, or into `node_dir` alone when none are found.
+/// `network`, except those of players other than `local`, or into `node_dir`
+/// alone when none are found.
 fn write_genesis_to_sibling_validators(
     node_dir: &Path,
+    local: &PublicKey,
     network: &NetworkConfig,
     genesis: &ReshareEpochInfo,
 ) -> anyhow::Result<usize> {
@@ -147,7 +173,11 @@ fn write_genesis_to_sibling_validators(
         let Ok(node) = NodeConfig::load(&candidate) else {
             continue;
         };
-        if !network.participants.contains(&node.public_key()) {
+        let public_key = node.public_key();
+        if !network.participants.contains(&public_key) {
+            continue;
+        }
+        if public_key != *local && genesis.players.position(&public_key).is_some() {
             continue;
         }
         types::write_genesis(&candidate, genesis)?;
@@ -172,9 +202,9 @@ mod tests {
     use commonware_utils::{N3f1, ordered::Set, test_rng};
 
     #[test]
-    fn writes_dkg_genesis_to_all_generated_validators() {
+    fn writes_bootstrap_genesis_to_own_and_non_player_validators() {
         let root =
-            std::env::temp_dir().join(format!("commonware-reshare-dkg-{}", std::process::id()));
+            std::env::temp_dir().join(format!("commonware-dkg-bootstrap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
@@ -230,12 +260,19 @@ mod tests {
             directory: Unit,
         };
 
-        let written =
-            write_genesis_to_sibling_validators(&root.join("validator-0"), &network, &genesis)
-                .unwrap();
+        let written = write_genesis_to_sibling_validators(
+            &root.join("validator-0"),
+            &network.participants[0],
+            &network,
+            &genesis,
+        )
+        .unwrap();
 
-        assert_eq!(written, 4);
-        for i in 0..4 {
+        // Player 0 writes its own directory and every non-player's, but not
+        // the directory of player 1.
+        assert_eq!(written, 3);
+        assert!(!types::genesis_path(&root.join("validator-1")).exists());
+        for i in [0, 2, 3] {
             assert_eq!(
                 types::read_genesis(&root.join(format!("validator-{i}"))).unwrap(),
                 genesis

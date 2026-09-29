@@ -2065,6 +2065,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-dkg"
+version = "2026.9.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "commonware-actor",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-glue",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-stream",
+ "commonware-utils",
+ "futures",
+ "rand 0.10.2",
+ "rand_core 0.10.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-estimator"
 version = "2026.9.0"
 dependencies = [
@@ -2292,38 +2324,6 @@ dependencies = [
  "futures",
  "proptest",
  "rayon",
-]
-
-[[package]]
-name = "commonware-reshare"
-version = "2026.9.0"
-dependencies = [
- "anyhow",
- "clap",
- "commonware-actor",
- "commonware-broadcast",
- "commonware-codec",
- "commonware-consensus",
- "commonware-cryptography",
- "commonware-formatting",
- "commonware-glue",
- "commonware-macros",
- "commonware-math",
- "commonware-p2p",
- "commonware-parallel",
- "commonware-resolver",
- "commonware-runtime",
- "commonware-storage",
- "commonware-stream",
- "commonware-utils",
- "futures",
- "rand 0.10.2",
- "rand_core 0.10.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
