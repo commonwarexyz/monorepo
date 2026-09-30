@@ -1819,26 +1819,44 @@ where
         let db_size = db.log.size();
         let mut remaining = quota.map(NonZeroUsize::get);
         while location < tip {
-            let operation = if location < db_size {
+            if location < db_size {
+                let end = remaining
+                    .map_or(*tip, |remaining| {
+                        (*location).saturating_add(remaining as u64).min(*tip)
+                    })
+                    .min(*db_size);
                 // The final commit has a set bit but is not a live update.
-                if location + 1 < db_size && db.bitmap.get_bit(*location) {
-                    Some(db.log.read(*location).await?)
-                } else {
-                    None
+                let candidate = db.bitmap.first_one(*location, end.min(*db_size - 1));
+                let next = candidate.unwrap_or(end);
+                if let Some(remaining) = &mut remaining {
+                    *remaining -= (next - *location) as usize;
                 }
+                location = Location::new(next);
+                batch.manual_floor = Some(location);
+                if remaining == Some(0) || location >= tip {
+                    break;
+                }
+                if candidate.is_none() {
+                    continue;
+                }
+            }
+            let operation = if location < db_size {
+                Cow::Owned(db.log.read(*location).await?)
             } else {
-                Some(read_op_from_ancestors(&ancestors, *location, *db_size).clone())
+                Cow::Borrowed(read_op_from_ancestors(&ancestors, *location, *db_size))
             };
             batch.manual_floor = Some(location + 1);
-            if let Some(Operation::Update(update)) = operation {
-                let key = update::Update::key(&update);
+            if let Operation::Update(update) = operation.as_ref() {
+                let key = update::Update::key(update);
+                // A committed candidate's set bit already proves snapshot activity.
                 let active = !batch.mutations.contains_key(key)
-                    && resolve_in_ancestors(&ancestors, key).map_or_else(
-                        || db.snapshot.get(key).any(|&loc| loc == location),
-                        |entry| entry.loc() == Some(location),
-                    );
+                    && resolve_in_ancestors(&ancestors, key)
+                        .map_or(location < db_size, |entry| entry.loc() == Some(location));
                 if active {
                     batch.mutations.insert(key.clone(), None);
+                    let Operation::Update(update) = operation.into_owned() else {
+                        unreachable!("active operation is an update");
+                    };
                     return Ok((batch, Some(ActiveEntry { location, update })));
                 }
             }
@@ -3519,11 +3537,79 @@ mod tests {
         },
         translator::OneCap,
     };
+    use commonware_codec::{Buf, FixedSize, Read, Write};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::test_rng;
     use rand::RngExt as _;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    struct CountedValue(Arc<AtomicUsize>);
+
+    impl Clone for CountedValue {
+        fn clone(&self) -> Self {
+            self.0.fetch_add(1, AtomicOrdering::Relaxed);
+            Self(self.0.clone())
+        }
+    }
+
+    impl FixedSize for CountedValue {
+        const SIZE: usize = 1;
+    }
+
+    impl Write for CountedValue {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            0u8.write(buf);
+        }
+    }
+
+    impl Read for CountedValue {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+            u8::read_cfg(buf, &())?;
+            Ok(Self(Arc::new(AtomicUsize::new(0))))
+        }
+    }
+
+    #[test]
+    fn pop_active_clones_only_returned_ancestor_update() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                CountedValue,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("pop-clones", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+            let clones = Arc::new(AtomicUsize::new(0));
+            let first = sha256::Digest::from([0; 32]);
+            let second = sha256::Digest::from([1; 32]);
+            let parent = db
+                .new_batch()
+                .with_manual_floor()
+                .write(first, Some(CountedValue(clones.clone())))
+                .write(second, Some(CountedValue(clones.clone())))
+                .merkleize(&db, Some(CountedValue(clones.clone())))
+                .await
+                .unwrap();
+            let child = parent.new_batch::<Sha256>().write(first, None);
+            clones.store(0, AtomicOrdering::Relaxed);
+            let (child, popped) = child.pop_active(&db, None).await.unwrap();
+            assert_eq!(*update::Update::key(&popped.unwrap().update), second);
+            assert_eq!(clones.load(AtomicOrdering::Relaxed), 1);
+            let (_, popped) = child.pop_active(&db, None).await.unwrap();
+            assert!(popped.is_none());
+            assert_eq!(clones.load(AtomicOrdering::Relaxed), 1);
+            drop(parent);
+            db.destroy().await.unwrap();
+        });
+    }
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
 
