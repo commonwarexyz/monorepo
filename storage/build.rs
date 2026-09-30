@@ -2,12 +2,17 @@
 //! `src/merkle/position.rs`, `src/merkle/location.rs`,
 //! `src/merkle/mmr/mod.rs` and `src/merkle/mmr/iterator.rs` as written,
 //! proves `rustoleum/mmr/LAWS.rs` about them (and that they never panic
-//! within their stated preconditions) and writes the record
-//! `OUT_DIR/mmr-verified.txt`. rustc compiles the same files; a failing
-//! proof fails this crate's build. The specification lock is not accepted
-//! yet, so the §15 gates are reported, not enforced (the record says
-//! `PROOFS CHECKED, §15 GATES PENDING`); once it is, this becomes
-//! `compile_lifted`.
+//! within their stated preconditions). rustc compiles the same files; a
+//! failing proof fails this crate's build. The specification lock is not
+//! accepted yet, so this uses the development aid
+//! `compile_lifted_pending_gates` (to be removed before landing): the §15
+//! gates are reported, not enforced, and it issues no verdict — it writes
+//! `OUT_DIR/mmr-pending.txt` (`NOT VERIFIED — DEVELOPMENT BUILD: PROOFS
+//! CHECKED, §15 GATES PENDING`) and a `NOT VERIFIED` stub as
+//! `OUT_DIR/mmr-verified.txt`. Once the lock is accepted this becomes
+//! `compile_lifted` (which also runs the lift conformance check; with the
+//! wip/augment toolchain that check does not support in-place modules yet,
+//! so `compile_lifted` issues no verdict for this crate until it does).
 fn main() {
     rustoleum::build::compile_lifted_pending_gates("rustoleum/mmr/mod.rs", "mmr");
 }

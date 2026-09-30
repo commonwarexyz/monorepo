@@ -10,7 +10,7 @@ mod merkle;
 
 // the toolchain's domain-free proof library (its `bridges` are prover rules)
 #[cfg(rustoleum)]
-#[path = "../../../../ar2-mmr/crates/rustoleum-front/stdlib/mod.rs"]
+#[path = "../../../../wt-aug/crates/rustoleum-front/stdlib/mod.rs"]
 mod stdlib;
 
 // word facts the prover applies by itself

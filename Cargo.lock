@@ -2470,6 +2470,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_distr",
  "rstest",
+ "rustoleum",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
