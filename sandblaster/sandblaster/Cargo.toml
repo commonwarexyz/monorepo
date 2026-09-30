@@ -1,0 +1,16 @@
+[package]
+name = "sandblaster"
+description = "sandblaster: a proven subset of Rust with Bend-style laws, inline proofs and proven optimization."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# Not published yet: the toolchain lives in the monorepo as a build tool.
+publish = false
+
+[features]
+build = ["dep:sandblaster-front"]
+
+[dependencies]
+sandblaster-macros.workspace = true
+sandblaster-front = { workspace = true, optional = true }

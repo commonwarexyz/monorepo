@@ -1,0 +1,539 @@
+//! Prelude lemmas (DESIGN.md §6) and §3.4 method facts.
+//!
+//! The lemmas are core text (§5.12) in `sandblaster/front/lemmas/*.core`
+//! — checked by the kernel when loaded, untrusted (a wrong lemma cannot be
+//! loaded). [`load`] adds them to an environment that already has the
+//! prelude definitions (`Env::with_prelude()`); the files may use the
+//! prelude's `%for W in … %end` width templates.
+//!
+//! `bits.core` is generated (with its linarith certificates) by
+//! [`super::bitlib`] from the kernel's K1 bit-count definitions; the
+//! per-literal bit lemmas are added on demand ([`super::bitlib::ensure`]).
+//!
+//! [`LemmaDb`] tells `auto` how to use each lemma ([`Role`]); it also picks
+//! up the elaborator's derived `…::eq_sound` lemmas (§7.7) by name (the
+//! owner must be a type of the crate: a user lemma named `eq_sound` is not
+//! a rule).
+//! [`method_facts`] is the table of §3.4 method facts — the one table: the
+//! elaborator adds its [`FactShape::Always`] facts at call sites
+//! (`elab::facts`), and `auto` uses the lemmas as forward rules on path
+//! equations (`OnSome`/`OnNone`) — with [`MethodFact::apply`] to build the
+//! fact's proof term and [`fact_prop`] to compute its proposition.
+
+use sandblaster_kernel::api::{Ctx, Env, KernelError, KernelErrorKind};
+use sandblaster_kernel::term::{GlobalId, Lvl, Rel, Tm};
+use sandblaster_kernel::util::mk;
+use sandblaster_kernel::value::{Budget, EnvEntry, V, Value};
+
+use super::util::{inst, irr_entry};
+use crate::builtins::{Builtin, SliceMethod};
+
+/// The lemma files, in load order.
+pub const FILES: &[(&str, &str)] = &[
+    ("bool.core", include_str!("../../lemmas/bool.core")),
+    ("int.core", include_str!("../../lemmas/int.core")),
+    ("list.core", include_str!("../../lemmas/list.core")),
+    ("slice.core", include_str!("../../lemmas/slice.core")),
+    ("array.core", include_str!("../../lemmas/array.core")),
+    ("methods.core", include_str!("../../lemmas/methods.core")),
+    ("chunks.core", include_str!("../../lemmas/chunks.core")),
+    ("bits.core", include_str!("../../lemmas/bits.core")),
+    ("words.core", include_str!("../../lemmas/words.core")),
+    // facts about the ghost library's `Nat` functions (loaded first, below)
+    ("nat.core", include_str!("../../lemmas/nat.core")),
+    // `take`/`drop` of an append, `chunks` of a `flatten` (§15 S5; uses the ghost library)
+    ("flatten.core", include_str!("../../lemmas/flatten.core")),
+    // the generic `Seq` library: get / skip / take / append / index (pe P3)
+    ("seq_lib.core", include_str!("../../lemmas/seq_lib.core")),
+    // `x >> s` is `x / pow2(s)` (pe P3; uses the ghost library)
+    ("bits_pow2.core", include_str!("../../lemmas/bits_pow2.core")),
+];
+
+/// The chunk sizes with an `as_chunks` length lemma (`%forn N in …` in
+/// `chunks.core`).
+pub const CHUNK_SIZES: &[u64] = &[1, 2, 4, 8, 16, 32, 64, 128, 256];
+
+/// Expand `%forn N in n₁ n₂ … / %end` blocks (`$N` ↦ each literal), the
+/// lemma files' template for chunk sizes; width templates (`%for W in …`)
+/// are expanded afterwards by the kernel's `expand_templates`.
+pub fn expand_n_templates(src: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(src.len());
+    let mut lines = src.lines().enumerate();
+    while let Some((i, line)) = lines.next() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("%forn N in ") {
+            let ns: Vec<u64> = rest
+                .split_whitespace()
+                .map(|n| n.parse::<u64>().map_err(|_| format!("line {}: bad size `{n}`", i + 1)))
+                .collect::<Result<_, _>>()?;
+            let mut body = Vec::new();
+            loop {
+                match lines.next() {
+                    Some((_, l)) if l.trim_start().starts_with("%end") => break,
+                    Some((_, l)) => body.push(l),
+                    None => return Err(format!("line {}: unterminated %forn", i + 1)),
+                }
+            }
+            for n in ns {
+                for l in &body {
+                    out.push_str(&l.replace("$N", &n.to_string()));
+                    out.push('\n');
+                }
+            }
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+/// Load (parse and check) every lemma file into `env`, which must already
+/// contain the prelude definitions. Returns the names of the added lemmas.
+pub fn load(env: &mut Env) -> Result<Vec<String>, KernelError> {
+    let mut b = Budget { steps: 4_000_000_000 };
+    let mut names = Vec::new();
+    for (file, src) in FILES {
+        if *file == "nat.core" {
+            crate::elab::semantics::load_ghost_library(env).map_err(|m| KernelError { kind: KernelErrorKind::IllFormed, message: m })?;
+        }
+        let text = expand_n_templates(src)
+            .and_then(|t| sandblaster_kernel::expand_templates(&t))
+            .map_err(|m| KernelError { kind: KernelErrorKind::IllFormed, message: format!("{file}: {m}") })?;
+        let added =
+            env.load_core(&text, &mut b).map_err(|e| KernelError { kind: e.kind, message: format!("lemmas/{file}: {}", e.message) })?;
+        names.extend(added.iter().map(|n| n.to_string()));
+    }
+    Ok(names)
+}
+
+/// How `auto` uses a lemma (see [`super::ematch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// The conclusion is matched against the target; hypotheses are
+    /// subgoals.
+    Backward,
+    /// The first hypothesis is matched against a new fact; the conclusion
+    /// becomes a fact.
+    Forward,
+    /// An equation used as a (conditional) rewrite rule on the target.
+    Rewrite,
+    /// An arithmetic conclusion added to linarith problems whose atoms
+    /// match it.
+    Linarith,
+}
+
+use Role::*;
+
+/// The registered lemmas and their roles.
+pub const LEMMA_ROLES: &[(&str, &[Role])] = &[
+    // bool.core
+    ("bool::and_left", &[Forward]),
+    ("bool::and_right", &[Forward]),
+    ("bool::not_true", &[Forward]),
+    ("bool::not_false", &[Forward]),
+    ("bool::eq_sound", &[Forward, Backward]),
+    // a negated boolean fact is the other value (§15 S5)
+    ("bool::false_of_not_true", &[Forward]),
+    ("bool::true_of_not_false", &[Forward]),
+    // int.core
+    ("u8::eq_sound", &[Backward]),
+    ("u16::eq_sound", &[Backward]),
+    ("u32::eq_sound", &[Backward]),
+    ("u64::eq_sound", &[Backward]),
+    ("usize::eq_sound", &[Backward]),
+    // prelude length lemmas (kernel prelude, list.core)
+    ("seq::len_take", &[Linarith]),
+    ("seq::len_drop", &[Linarith]),
+    ("seq::len_append", &[Linarith]),
+    ("seq::len_update", &[Linarith]),
+    ("seq::len_rev", &[Linarith]),
+    // list.core
+    ("seq::take_drop_append", &[Rewrite]),
+    ("seq::append_nil", &[Rewrite]),
+    ("seq::drop_zero", &[Rewrite]),
+    ("seq::take_zero", &[Rewrite]),
+    ("seq::take_len", &[Rewrite]),
+    // boolean sequence equality of a sequence with itself (§15 S5: spec
+    // code compares `Seq`s with `==`, laws state equalities)
+    ("seq::eq_refl", &[Backward]),
+    // the same at machine-integer element types, both directions (§15 S5)
+    ("seq::eq_sound_u8", &[Forward]),
+    ("seq::eq_complete_u8", &[Backward]),
+    ("seq::eq_sound_u16", &[Forward]),
+    ("seq::eq_complete_u16", &[Backward]),
+    ("seq::eq_sound_u32", &[Forward]),
+    ("seq::eq_complete_u32", &[Backward]),
+    ("seq::eq_sound_u64", &[Forward]),
+    ("seq::eq_complete_u64", &[Backward]),
+    ("seq::eq_sound_usize", &[Forward]),
+    ("seq::eq_complete_usize", &[Backward]),
+    ("seq::index_update_same", &[Rewrite]),
+    ("seq::index_update_other", &[Rewrite]),
+    // kernel prelude: slice/array well-formedness (lengths of their lists)
+    ("slice::ok_len", &[Linarith]),
+    ("slice::ok_bound", &[Linarith]),
+    ("array::ok_len", &[Linarith]),
+    // slice.core
+    ("slice::ext", &[Backward]),
+    ("slice::is_empty_nil", &[Forward]),
+    // array.core
+    ("array::ext", &[Backward]),
+    ("array::eq_sound_u8", &[Forward, Backward]),
+    ("array::eq_sound_u16", &[Forward, Backward]),
+    ("array::eq_sound_u32", &[Forward, Backward]),
+    ("array::eq_sound_u64", &[Forward, Backward]),
+    ("array::eq_sound_usize", &[Forward, Backward]),
+    // methods.core
+    ("slice::split_at_checked_some", &[Forward]),
+    ("slice::split_at_checked_none", &[Forward]),
+    ("slice::split_first_some", &[Forward]),
+    ("slice::split_first_none", &[Forward]),
+    ("slice::split_last_some", &[Forward]),
+    ("slice::split_first_chunk_some", &[Forward]),
+    ("slice::split_first_chunk_none", &[Forward]),
+    ("slice::first_chunk_some", &[Forward]),
+    ("slice::first_chunk_none", &[Forward]),
+    ("slice::get_some", &[Forward]),
+    ("slice::get_none", &[Forward]),
+    ("slice::first_chunk_exact", &[Forward]),
+    // chunks.core: one step of `seq::chunks` (§15 S5)
+    ("seq::chunks_cons", &[Rewrite]),
+    ("seq::take_append_len", &[Rewrite]),
+    ("seq::drop_append_len", &[Rewrite]),
+    ("seq::chunks_arrays_flatten", &[Rewrite]),
+    ("seq::append_assoc", &[Rewrite]),
+    // seq_lib.core: the generic `Seq` library (pe P3/C1), conditional rewrites
+    // gated on their left side's head (`ematch::rewrite_rules`); structural
+    // rules first, `get_index` / `get_past` last
+    ("seq::get_cons_succ", &[Rewrite]),
+    ("seq::get_skip", &[Rewrite]),
+    ("seq::get_take", &[Rewrite]),
+    ("seq::get_take_past", &[Rewrite]),
+    ("seq::get_append", &[Rewrite]),
+    ("seq::get_append_past", &[Rewrite]),
+    ("seq::skip_skip", &[Rewrite]),
+    ("seq::skip_append", &[Rewrite]),
+    ("seq::skip_append_past", &[Rewrite]),
+    ("seq::take_append", &[Rewrite]),
+    ("seq::take_append_past", &[Rewrite]),
+    ("seq::skip_cons", &[Rewrite]),
+    ("seq::take_cons", &[Rewrite]),
+    ("seq::skip_past", &[Rewrite]),
+    ("seq::take_past", &[Rewrite]),
+    ("seq::index_skip", &[Rewrite]),
+    ("seq::index_take", &[Rewrite]),
+    ("seq::index_append", &[Rewrite]),
+    ("seq::index_append_past", &[Rewrite]),
+    // a buffer written at its front (pe P3/C9: `buf[n] = x` after
+    // `buf[..n].copy_from_slice(..)`); `seq::update_append_past` is applied
+    // by name (as a rewrite it competes with `seq::index_update_same`)
+    ("seq::take_update_one", &[Rewrite]),
+    ("seq::get_index", &[Rewrite]),
+    ("seq::get_past", &[Rewrite]),
+    // the `[init @ .., last]` view: `seq![..l.take(n), l[n]]` is `l` for
+    // `n + 1 == l.len()` (as the PROOF-GUIDE promises: no call needed)
+    ("seq::take_snoc", &[Rewrite]),
+    // equal indices give equal elements (pe P3/C1): the index positions of
+    // `l[a] == l[b]` differ only by arithmetic, and the bound proofs make
+    // argument congruence's motive ill-typed
+    ("seq::index_eq", &[Backward]),
+    // constructor congruence (pe P3/C2)
+    ("option::some_eq", &[Backward]),
+    ("option::pair_eq", &[Backward]),
+    // a view fact `s == l` gives `len l = s.len()` (pe P3/C2)
+    ("slice::view_len", &[Forward]),
+];
+
+/// A registered rule.
+#[derive(Clone, Debug)]
+pub struct RuleEntry {
+    pub g: GlobalId,
+    pub name: String,
+    pub roles: Vec<Role>,
+    /// The head global of a `Rewrite` (`Backward`) rule's left side, when it
+    /// is a global application: the rule is tried only on targets that
+    /// mention that global (`ematch::rewrite_rules`) / whose left side it
+    /// heads (`ematch::backward`); `None` (no gate) when the left side is
+    /// not a global application or the rule has neither role.
+    pub head: Option<GlobalId>,
+    /// A last-resort rewrite (`seq::get_index`, `seq::get_past`): tried after
+    /// every other rewrite rule failed.
+    pub late: bool,
+}
+
+/// The lemma database of an environment (refreshed incrementally as the
+/// environment grows).
+#[derive(Clone, Debug, Default)]
+pub struct LemmaDb {
+    pub rules: Vec<RuleEntry>,
+    /// Number of globals scanned so far, and the name of the last one (to
+    /// detect a different environment).
+    scanned: u32,
+    last_name: Option<String>,
+}
+
+impl LemmaDb {
+    /// Scan the globals added since the last call (or everything, for a
+    /// different environment).
+    pub fn refresh(&mut self, env: &Env) {
+        let n = env.num_globals();
+        let same = n >= self.scanned
+            && (self.scanned == 0 || env.global_name(GlobalId(self.scanned - 1)).map(|s| s.to_string()) == self.last_name);
+        if !same {
+            *self = LemmaDb::default();
+        }
+        for g in self.scanned..n {
+            let g = GlobalId(g);
+            let Some(name) = env.global_name(g) else { continue };
+            let roles: Vec<Role> = if let Some((_, r)) = LEMMA_ROLES.iter().find(|(x, _)| *x == &*name) {
+                r.to_vec()
+            } else if is_derived_eq_sound(env, &name) {
+                vec![Backward]
+            } else if name.starts_with("slice::as_chunks_len_") || name.starts_with("seq::chunks_len_") {
+                vec![Linarith]
+            } else if let Some(role) = bridge_role(&name) {
+                // a lemma of a `#[bridges]` module (a checked equation between
+                // an operation of the code's machine types and the model's,
+                // `register_bridge`): an unconditional equation is a rewrite
+                // rule, a conditional one a backward rule, so an atom of a
+                // lockstep (`count_ones` against `popcount`) meets the model;
+                // an unconditional inequality is a linarith rule (its instances
+                // join the linear problems whose atoms match it)
+                vec![role]
+            } else if name.contains("::fact#") {
+                // an optimizer's exported fact of a function's result
+                // (`opt::facts`; `#` is in no source name): a forward rule
+                // on the path equation `f x̄ = Some(v)`
+                vec![Forward]
+            } else {
+                continue;
+            };
+            self.rules.retain(|r| r.name != *name);
+            let head = if roles.contains(&Rewrite) || roles.contains(&Backward) { rewrite_head(env, g) } else { None };
+            let late = LATE_REWRITES.contains(&&*name);
+            self.rules.push(RuleEntry { g, name: name.to_string(), roles, head, late });
+        }
+        self.scanned = n;
+        self.last_name = if n == 0 { None } else { env.global_name(GlobalId(n - 1)).map(|s| s.to_string()) };
+    }
+}
+
+thread_local! {
+    /// The bridges of the crate being elaborated: lemma name ↦ whether it
+    /// is an unconditional equation (a rewrite rule; else backward).
+    static BRIDGES: std::cell::RefCell<std::collections::HashMap<String, Role>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Registers the checked lemma `name` of a `#[bridges]` module
+/// (`elab::script`) as a rule of `auto`: a rewrite rule when `rewrite` (no
+/// `requires`, not generic), else a backward rule. The lemma database picks
+/// it up at its next refresh ([`LemmaDb::refresh`] scans the globals added
+/// since).
+pub fn register_bridge(name: &str, rewrite: bool) {
+    BRIDGES.with(|b| b.borrow_mut().insert(name.to_string(), if rewrite { Rewrite } else { Backward }));
+}
+
+/// Registers the checked lemma `name` of a `#[bridges]` module with an
+/// explicit role (an unconditional inequality: [`Role::Linarith`]).
+pub fn register_bridge_role(name: &str, role: Role) {
+    BRIDGES.with(|b| b.borrow_mut().insert(name.to_string(), role));
+}
+
+/// Forgets the bridges (a new crate is elaborated).
+pub fn clear_bridges() {
+    BRIDGES.with(|b| b.borrow_mut().clear());
+}
+
+/// Whether `name` is a registered lemma of a `#[bridges]` module.
+pub fn is_bridge(name: &str) -> bool {
+    bridge_role(name).is_some()
+}
+
+fn bridge_role(name: &str) -> Option<Role> {
+    BRIDGES.with(|b| b.borrow().get(name).copied())
+}
+
+/// Rewrite rules tried only after every other rewrite rule failed: they
+/// turn `l.get(i)` into `Some(l[i])` / `None`, which the structural `get`
+/// rules (`get_skip`, `get_append`, …) could no longer apply to.
+const LATE_REWRITES: &[&str] = &["seq::get_index", "seq::get_past"];
+
+/// The head global of the left side of a rule's equation (after its Π
+/// binders), if the left side is a global application.
+fn rewrite_head(env: &Env, g: GlobalId) -> Option<GlobalId> {
+    let mut t = env.global_type(g)?;
+    while let sandblaster_kernel::term::Term::Pi { cod, .. } = &*t.clone() {
+        t = cod.clone();
+    }
+    let sandblaster_kernel::term::Term::Eq { lhs, .. } = &*t else { return None };
+    let mut h = lhs;
+    while let sandblaster_kernel::term::Term::App { fun, .. } = &**h {
+        h = fun;
+    }
+    match &**h {
+        sandblaster_kernel::term::Term::Global(x) => Some(*x),
+        _ => None,
+    }
+}
+
+/// Whether a global is an `eq_sound` lemma of the built-in theory: a
+/// prelude one (`seq::eq_sound`, `array::eq_sound`; the integer and bool
+/// ones are listed in [`LEMMA_ROLES`]) or one the elaborator derives for a
+/// type of the crate (`<type path>::eq_sound`, §7.7) — never a user
+/// `#[lemma]` that happens to be called `eq_sound`.
+fn is_derived_eq_sound(env: &Env, name: &str) -> bool {
+    let Some(owner) = name.strip_suffix("::eq_sound") else { return false };
+    if owner != "crate" && !owner.starts_with("crate::") {
+        return true;
+    }
+    env.lookup_ind(owner).is_some()
+}
+
+/// When a method fact holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FactShape {
+    /// `lemma T recv args.. : P` holds for every call.
+    Always,
+    /// `lemma T recv args.. payload.. (e : Eq(Option(R), call, Some(payload))) : P`,
+    /// in the `Some(..)` arm of a match on the result; `payload` fields
+    /// (e.g. the two slices of `Some((a, b))`).
+    OnSome { payload: usize },
+    /// `lemma T recv args.. (e : Eq(Option(R), call, None)) : P`, in the
+    /// `None` arm.
+    OnNone,
+}
+
+/// A §3.4 method fact: a prelude lemma whose conclusion the elaborator adds
+/// as a fact (`FactOrigin::MethodFact`) at a call site.
+#[derive(Clone, Debug)]
+pub struct MethodFact {
+    /// The lemma (a global of the environment after [`load`]).
+    pub lemma: &'static str,
+    pub shape: FactShape,
+    /// Human-readable statement.
+    pub doc: &'static str,
+}
+
+impl MethodFact {
+    /// The fact's proof term: the lemma applied to the element type, the
+    /// call's arguments (receiver first, then e.g. `mid`, `N`, `i`; the
+    /// `N > 0` proof of `as_chunks` last), the payload and the path
+    /// equation. All terms in the same context. `None` if the lemma is not
+    /// loaded.
+    pub fn apply(&self, env: &Env, elem_ty: &Tm, args: &[Tm], payload: &[Tm], eq: Option<&Tm>) -> Option<Tm> {
+        let g = env.lookup_global(self.lemma)?;
+        let rels = env.global_param_rels(g)?;
+        let mut all: Vec<Tm> = vec![elem_ty.clone()];
+        all.extend(args.iter().cloned());
+        all.extend(payload.iter().cloned());
+        if let Some(e) = eq {
+            all.push(e.clone());
+        }
+        if all.len() != rels.len() {
+            return None;
+        }
+        Some(super::util::apps(mk::global(g), rels.into_iter().zip(all)))
+    }
+}
+
+/// The `as_chunks` lemma names, parallel to [`CHUNK_SIZES`].
+const AS_CHUNKS_LEMMAS: &[&str] = &[
+    "slice::as_chunks_len_1",
+    "slice::as_chunks_len_2",
+    "slice::as_chunks_len_4",
+    "slice::as_chunks_len_8",
+    "slice::as_chunks_len_16",
+    "slice::as_chunks_len_32",
+    "slice::as_chunks_len_64",
+    "slice::as_chunks_len_128",
+    "slice::as_chunks_len_256",
+];
+
+/// The method facts of a builtin (DESIGN.md §3.4).
+pub fn method_facts(b: &Builtin) -> Vec<MethodFact> {
+    let f = |lemma, shape, doc| MethodFact { lemma, shape, doc };
+    match b {
+        Builtin::Slice(SliceMethod::SplitAtChecked) => vec![
+            f(
+                "slice::split_at_checked_some",
+                FactShape::OnSome { payload: 2 },
+                "s.split_at_checked(mid) == Some((a, b)) ⇒ mid ≤ s.len() ∧ a.len() == mid ∧ b.len() == s.len() − mid ∧ append(a, b) == s",
+            ),
+            f("slice::split_at_checked_none", FactShape::OnNone, "s.split_at_checked(mid) == None ⇒ s.len() < mid"),
+        ],
+        Builtin::Slice(SliceMethod::SplitAt) => {
+            vec![f("slice::split_at_append", FactShape::Always, "s.split_at(mid) = (a, b) ⇒ append(a, b) == s (lengths are definitional)")]
+        }
+        Builtin::Slice(SliceMethod::SplitFirst) => vec![
+            f(
+                "slice::split_first_some",
+                FactShape::OnSome { payload: 2 },
+                "s.split_first() == Some((x, r)) ⇒ 0 < s.len() ∧ r.len() == s.len() − 1 ∧ s == cons(x, r)",
+            ),
+            f("slice::split_first_none", FactShape::OnNone, "s.split_first() == None ⇒ s.len() == 0"),
+        ],
+        Builtin::Slice(SliceMethod::SplitLast) => vec![f(
+            "slice::split_last_some",
+            FactShape::OnSome { payload: 2 },
+            "s.split_last() == Some((x, r)) ⇒ 0 < s.len() ∧ r.len() == s.len() − 1",
+        )],
+        Builtin::Slice(SliceMethod::SplitFirstChunk(_)) => vec![
+            f(
+                "slice::split_first_chunk_some",
+                FactShape::OnSome { payload: 2 },
+                "s.split_first_chunk::<N>() == Some((a, r)) ⇒ N ≤ s.len() ∧ r.len() == s.len() − N ∧ append(a, r) == s",
+            ),
+            f("slice::split_first_chunk_none", FactShape::OnNone, "s.split_first_chunk::<N>() == None ⇒ s.len() < N"),
+        ],
+        Builtin::Slice(SliceMethod::FirstChunk(_)) => vec![
+            f(
+                "slice::first_chunk_some",
+                FactShape::OnSome { payload: 1 },
+                "s.first_chunk::<N>() == Some(a) ⇒ N ≤ s.len() ∧ a == take(s, N)",
+            ),
+            f("slice::first_chunk_none", FactShape::OnNone, "s.first_chunk::<N>() == None ⇒ s.len() < N"),
+        ],
+        Builtin::Slice(SliceMethod::Get) => vec![
+            f("slice::get_some", FactShape::OnSome { payload: 1 }, "s.get(i) == Some(x) ⇒ i < s.len()"),
+            f("slice::get_none", FactShape::OnNone, "s.get(i) == None ⇒ s.len() ≤ i"),
+        ],
+        Builtin::Slice(SliceMethod::AsChunks(n)) => match CHUNK_SIZES.iter().position(|k| k == n) {
+            // the lemma is per size: its arguments omit the literal `N`
+            Some(i) => vec![f(
+                AS_CHUNKS_LEMMAS[i],
+                FactShape::Always,
+                "let (c, r) = s.as_chunks::<N>() ⇒ c.len()·N + r.len() == s.len() ∧ r.len() < N (for N in CHUNK_SIZES)",
+            )],
+            // any other size: the remainder bound only (`N` is an argument)
+            None => vec![f("slice::as_chunks_rest_lt", FactShape::Always, "let (c, r) = s.as_chunks::<N>() ⇒ r.len() < N")],
+        },
+        _ => vec![],
+    }
+}
+
+/// The proposition proved by a method fact's proof term (or any lemma
+/// application spine), computed without checking — the proof may use
+/// irrelevant facts (the elaborator binds it with an irrelevant `let`).
+pub fn fact_prop(env: &Env, ctx: &Ctx, proof: &Tm, b: &mut Budget) -> Option<V> {
+    let mut args = Vec::new();
+    let mut h = proof;
+    while let sandblaster_kernel::term::Term::App { rel, fun, arg } = &**h {
+        args.push((*rel, arg.clone()));
+        h = fun;
+    }
+    args.reverse();
+    let sandblaster_kernel::term::Term::Global(g) = &**h else { return None };
+    let mut cur = env.global_type_value(*g)?;
+    let venv = env.ctx_venv(ctx);
+    let d = ctx.depth().0;
+    for (rel, a) in args {
+        let Value::Pi { cod, .. } = &*cur.clone() else { return None };
+        let e = match rel {
+            Rel::Rel => EnvEntry::Rel(env.eval(&venv, Lvl(d), &a, b).ok()?),
+            Rel::Irr => irr_entry(&venv, &a),
+        };
+        cur = inst(env, cod, vec![e], d, b).ok()?;
+    }
+    Some(cur)
+}

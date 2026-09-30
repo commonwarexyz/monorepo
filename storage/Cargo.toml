@@ -34,10 +34,9 @@ tracing = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
 [build-dependencies]
-# the rustoleum verifier (wip/augment toolchain, as codec uses), run by
-# build.rs: it verifies the MMR position and peak arithmetic in place
-# (rustoleum/mmr/)
-rustoleum = { path = "../../wt-aug/crates/rustoleum", features = ["build"] }
+# the sandblaster verifier (sandblaster/, as codec uses), run by build.rs: it
+# verifies the MMR position and peak arithmetic in place (sandblaster/mmr/)
+sandblaster = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
 commonware-bench.workspace = true

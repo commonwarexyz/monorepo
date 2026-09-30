@@ -1,0 +1,18 @@
+[package]
+name = "sandblaster-kernel"
+description = "The trusted kernel of sandblaster: a small dependently typed core calculus."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# Not published yet: the toolchain lives in the monorepo as a build tool.
+publish = false
+
+[dependencies]
+# Resource control only (not in the TCB): `tick` polls its soft allocation
+# limit and fails with `OutOfFuel` (never success). Linking it installs the
+# counting global allocator in every binary that links the kernel.
+sandblaster-memguard.workspace = true
+num-bigint = { workspace = true, features = ["std"] }
+num-integer.workspace = true
+num-traits = { workspace = true, features = ["std"] }

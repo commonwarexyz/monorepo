@@ -1,0 +1,15 @@
+[package]
+name = "sandblaster-memguard"
+description = "Process-wide allocation cap for sandblaster tools (resource safety, not part of the TCB)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# Not published yet: the toolchain lives in the monorepo as a build tool.
+publish = false
+
+[dependencies]
+
+[[bench]]
+name = "contention"
+harness = false

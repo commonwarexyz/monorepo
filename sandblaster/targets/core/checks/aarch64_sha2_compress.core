@@ -1,0 +1,106 @@
+-- SHA-256 compression of one block assembled in core text from the aarch64
+-- core models (core/aarch64.core), statement for statement the `sha2` crate's
+-- `aarch64_sha2::compress` (as src/compress.rs::compress_aarch64_models). NOT
+-- trusted: a test fixture for the cross-check against checks::fips::compress
+-- (tests/kernel_crosscheck.rs). Load after the prelude and core/aarch64.core.
+
+-- Four rounds: tmp = W + K; abcd' = SHA256H(abcd, efgh, tmp); efgh' = SHA256H2(efgh, abcd_prev, tmp)
+-- (efgh first, PRE-update abcd). Returns abcd' ++ efgh'.
+def[spec] checks::aarch64::rounds4 : (abcd : Array U32 4usize) -> (efgh : Array U32 4usize) -> (s : Array U32 4usize)
+    -> (k : Array U32 4usize) -> Array U32 8usize :=
+  fun (abcd : Array U32 4usize) (efgh : Array U32 4usize) (s : Array U32 4usize) (k : Array U32 4usize) =>
+    let tmp : Array U32 4usize = aarch64::vaddq_u32 s (aarch64::vld1q_u32 k);
+    let abcd_prev : Array U32 4usize = abcd;
+    let abcd' : Array U32 4usize = aarch64::vsha256hq_u32 abcd_prev efgh tmp;
+    let efgh' : Array U32 4usize = aarch64::vsha256h2q_u32 efgh abcd_prev tmp;
+    aarch64::concat_u32x4 abcd' efgh'
+
+-- The low / high half of an 8-word array.
+def[spec] checks::aarch64::lo : (x : Array U32 8usize) -> Array U32 4usize :=
+  fun (x : Array U32 8usize) =>
+    aarch64::u32x4 (array::index U32 8usize x 0usize .refl(Bool, true)) (array::index U32 8usize x 1usize .refl(Bool, true))
+                   (array::index U32 8usize x 2usize .refl(Bool, true)) (array::index U32 8usize x 3usize .refl(Bool, true))
+
+def[spec] checks::aarch64::hi : (x : Array U32 8usize) -> Array U32 4usize :=
+  fun (x : Array U32 8usize) =>
+    aarch64::u32x4 (array::index U32 8usize x 4usize .refl(Bool, true)) (array::index U32 8usize x 5usize .refl(Bool, true))
+                   (array::index U32 8usize x 6usize .refl(Bool, true)) (array::index U32 8usize x 7usize .refl(Bool, true))
+
+-- The block's 16-byte chunk i (what `vld1q_u8(block[16 i ..].as_ptr())` reads) as big-endian words:
+-- vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(chunk))).
+def[spec] checks::aarch64::load_be : (chunk : Array U8 16usize) -> Array U32 4usize :=
+  fun (chunk : Array U8 16usize) => aarch64::vreinterpretq_u32_u8 (aarch64::vrev32q_u8 (aarch64::vld1q_u8 chunk))
+
+def[spec] checks::aarch64::compress_sha2 : (state : Array U32 8usize) -> (block : Array U8 64usize) -> Array U32 8usize :=
+  fun (state : Array U32 8usize) (block : Array U8 64usize) =>
+    let abcd0 : Array U32 4usize = aarch64::vld1q_u32 (aarch64::u32x4 (array::index U32 8usize state 0usize .refl(Bool, true)) (array::index U32 8usize state 1usize .refl(Bool, true)) (array::index U32 8usize state 2usize .refl(Bool, true)) (array::index U32 8usize state 3usize .refl(Bool, true)));
+    let efgh0 : Array U32 4usize = aarch64::vld1q_u32 (aarch64::u32x4 (array::index U32 8usize state 4usize .refl(Bool, true)) (array::index U32 8usize state 5usize .refl(Bool, true)) (array::index U32 8usize state 6usize .refl(Bool, true)) (array::index U32 8usize state 7usize .refl(Bool, true)));
+    let abcd_orig : Array U32 4usize = abcd0;
+    let efgh_orig : Array U32 4usize = efgh0;
+    let s0_0 : Array U32 4usize = checks::aarch64::load_be (aarch64::u8x16 (array::index U8 64usize block 0usize .refl(Bool, true)) (array::index U8 64usize block 1usize .refl(Bool, true)) (array::index U8 64usize block 2usize .refl(Bool, true)) (array::index U8 64usize block 3usize .refl(Bool, true)) (array::index U8 64usize block 4usize .refl(Bool, true)) (array::index U8 64usize block 5usize .refl(Bool, true)) (array::index U8 64usize block 6usize .refl(Bool, true)) (array::index U8 64usize block 7usize .refl(Bool, true)) (array::index U8 64usize block 8usize .refl(Bool, true)) (array::index U8 64usize block 9usize .refl(Bool, true)) (array::index U8 64usize block 10usize .refl(Bool, true)) (array::index U8 64usize block 11usize .refl(Bool, true)) (array::index U8 64usize block 12usize .refl(Bool, true)) (array::index U8 64usize block 13usize .refl(Bool, true)) (array::index U8 64usize block 14usize .refl(Bool, true)) (array::index U8 64usize block 15usize .refl(Bool, true)));
+    let s1_0 : Array U32 4usize = checks::aarch64::load_be (aarch64::u8x16 (array::index U8 64usize block 16usize .refl(Bool, true)) (array::index U8 64usize block 17usize .refl(Bool, true)) (array::index U8 64usize block 18usize .refl(Bool, true)) (array::index U8 64usize block 19usize .refl(Bool, true)) (array::index U8 64usize block 20usize .refl(Bool, true)) (array::index U8 64usize block 21usize .refl(Bool, true)) (array::index U8 64usize block 22usize .refl(Bool, true)) (array::index U8 64usize block 23usize .refl(Bool, true)) (array::index U8 64usize block 24usize .refl(Bool, true)) (array::index U8 64usize block 25usize .refl(Bool, true)) (array::index U8 64usize block 26usize .refl(Bool, true)) (array::index U8 64usize block 27usize .refl(Bool, true)) (array::index U8 64usize block 28usize .refl(Bool, true)) (array::index U8 64usize block 29usize .refl(Bool, true)) (array::index U8 64usize block 30usize .refl(Bool, true)) (array::index U8 64usize block 31usize .refl(Bool, true)));
+    let s2_0 : Array U32 4usize = checks::aarch64::load_be (aarch64::u8x16 (array::index U8 64usize block 32usize .refl(Bool, true)) (array::index U8 64usize block 33usize .refl(Bool, true)) (array::index U8 64usize block 34usize .refl(Bool, true)) (array::index U8 64usize block 35usize .refl(Bool, true)) (array::index U8 64usize block 36usize .refl(Bool, true)) (array::index U8 64usize block 37usize .refl(Bool, true)) (array::index U8 64usize block 38usize .refl(Bool, true)) (array::index U8 64usize block 39usize .refl(Bool, true)) (array::index U8 64usize block 40usize .refl(Bool, true)) (array::index U8 64usize block 41usize .refl(Bool, true)) (array::index U8 64usize block 42usize .refl(Bool, true)) (array::index U8 64usize block 43usize .refl(Bool, true)) (array::index U8 64usize block 44usize .refl(Bool, true)) (array::index U8 64usize block 45usize .refl(Bool, true)) (array::index U8 64usize block 46usize .refl(Bool, true)) (array::index U8 64usize block 47usize .refl(Bool, true)));
+    let s3_0 : Array U32 4usize = checks::aarch64::load_be (aarch64::u8x16 (array::index U8 64usize block 48usize .refl(Bool, true)) (array::index U8 64usize block 49usize .refl(Bool, true)) (array::index U8 64usize block 50usize .refl(Bool, true)) (array::index U8 64usize block 51usize .refl(Bool, true)) (array::index U8 64usize block 52usize .refl(Bool, true)) (array::index U8 64usize block 53usize .refl(Bool, true)) (array::index U8 64usize block 54usize .refl(Bool, true)) (array::index U8 64usize block 55usize .refl(Bool, true)) (array::index U8 64usize block 56usize .refl(Bool, true)) (array::index U8 64usize block 57usize .refl(Bool, true)) (array::index U8 64usize block 58usize .refl(Bool, true)) (array::index U8 64usize block 59usize .refl(Bool, true)) (array::index U8 64usize block 60usize .refl(Bool, true)) (array::index U8 64usize block 61usize .refl(Bool, true)) (array::index U8 64usize block 62usize .refl(Bool, true)) (array::index U8 64usize block 63usize .refl(Bool, true)));
+    let st1 : Array U32 8usize = checks::aarch64::rounds4 abcd0 efgh0 s0_0 (aarch64::u32x4 0x428a2f98u32 0x71374491u32 0xb5c0fbcfu32 0xe9b5dba5u32);
+    let abcd1 : Array U32 4usize = checks::aarch64::lo st1;
+    let efgh1 : Array U32 4usize = checks::aarch64::hi st1;
+    let st2 : Array U32 8usize = checks::aarch64::rounds4 abcd1 efgh1 s1_0 (aarch64::u32x4 0x3956c25bu32 0x59f111f1u32 0x923f82a4u32 0xab1c5ed5u32);
+    let abcd2 : Array U32 4usize = checks::aarch64::lo st2;
+    let efgh2 : Array U32 4usize = checks::aarch64::hi st2;
+    let st3 : Array U32 8usize = checks::aarch64::rounds4 abcd2 efgh2 s2_0 (aarch64::u32x4 0xd807aa98u32 0x12835b01u32 0x243185beu32 0x550c7dc3u32);
+    let abcd3 : Array U32 4usize = checks::aarch64::lo st3;
+    let efgh3 : Array U32 4usize = checks::aarch64::hi st3;
+    let st4 : Array U32 8usize = checks::aarch64::rounds4 abcd3 efgh3 s3_0 (aarch64::u32x4 0x72be5d74u32 0x80deb1feu32 0x9bdc06a7u32 0xc19bf174u32);
+    let abcd4 : Array U32 4usize = checks::aarch64::lo st4;
+    let efgh4 : Array U32 4usize = checks::aarch64::hi st4;
+    let s0_1 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s0_0 s1_0) s2_0 s3_0;
+    let st5 : Array U32 8usize = checks::aarch64::rounds4 abcd4 efgh4 s0_1 (aarch64::u32x4 0xe49b69c1u32 0xefbe4786u32 0x0fc19dc6u32 0x240ca1ccu32);
+    let abcd5 : Array U32 4usize = checks::aarch64::lo st5;
+    let efgh5 : Array U32 4usize = checks::aarch64::hi st5;
+    let s1_1 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s1_0 s2_0) s3_0 s0_1;
+    let st6 : Array U32 8usize = checks::aarch64::rounds4 abcd5 efgh5 s1_1 (aarch64::u32x4 0x2de92c6fu32 0x4a7484aau32 0x5cb0a9dcu32 0x76f988dau32);
+    let abcd6 : Array U32 4usize = checks::aarch64::lo st6;
+    let efgh6 : Array U32 4usize = checks::aarch64::hi st6;
+    let s2_1 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s2_0 s3_0) s0_1 s1_1;
+    let st7 : Array U32 8usize = checks::aarch64::rounds4 abcd6 efgh6 s2_1 (aarch64::u32x4 0x983e5152u32 0xa831c66du32 0xb00327c8u32 0xbf597fc7u32);
+    let abcd7 : Array U32 4usize = checks::aarch64::lo st7;
+    let efgh7 : Array U32 4usize = checks::aarch64::hi st7;
+    let s3_1 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s3_0 s0_1) s1_1 s2_1;
+    let st8 : Array U32 8usize = checks::aarch64::rounds4 abcd7 efgh7 s3_1 (aarch64::u32x4 0xc6e00bf3u32 0xd5a79147u32 0x06ca6351u32 0x14292967u32);
+    let abcd8 : Array U32 4usize = checks::aarch64::lo st8;
+    let efgh8 : Array U32 4usize = checks::aarch64::hi st8;
+    let s0_2 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s0_1 s1_1) s2_1 s3_1;
+    let st9 : Array U32 8usize = checks::aarch64::rounds4 abcd8 efgh8 s0_2 (aarch64::u32x4 0x27b70a85u32 0x2e1b2138u32 0x4d2c6dfcu32 0x53380d13u32);
+    let abcd9 : Array U32 4usize = checks::aarch64::lo st9;
+    let efgh9 : Array U32 4usize = checks::aarch64::hi st9;
+    let s1_2 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s1_1 s2_1) s3_1 s0_2;
+    let st10 : Array U32 8usize = checks::aarch64::rounds4 abcd9 efgh9 s1_2 (aarch64::u32x4 0x650a7354u32 0x766a0abbu32 0x81c2c92eu32 0x92722c85u32);
+    let abcd10 : Array U32 4usize = checks::aarch64::lo st10;
+    let efgh10 : Array U32 4usize = checks::aarch64::hi st10;
+    let s2_2 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s2_1 s3_1) s0_2 s1_2;
+    let st11 : Array U32 8usize = checks::aarch64::rounds4 abcd10 efgh10 s2_2 (aarch64::u32x4 0xa2bfe8a1u32 0xa81a664bu32 0xc24b8b70u32 0xc76c51a3u32);
+    let abcd11 : Array U32 4usize = checks::aarch64::lo st11;
+    let efgh11 : Array U32 4usize = checks::aarch64::hi st11;
+    let s3_2 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s3_1 s0_2) s1_2 s2_2;
+    let st12 : Array U32 8usize = checks::aarch64::rounds4 abcd11 efgh11 s3_2 (aarch64::u32x4 0xd192e819u32 0xd6990624u32 0xf40e3585u32 0x106aa070u32);
+    let abcd12 : Array U32 4usize = checks::aarch64::lo st12;
+    let efgh12 : Array U32 4usize = checks::aarch64::hi st12;
+    let s0_3 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s0_2 s1_2) s2_2 s3_2;
+    let st13 : Array U32 8usize = checks::aarch64::rounds4 abcd12 efgh12 s0_3 (aarch64::u32x4 0x19a4c116u32 0x1e376c08u32 0x2748774cu32 0x34b0bcb5u32);
+    let abcd13 : Array U32 4usize = checks::aarch64::lo st13;
+    let efgh13 : Array U32 4usize = checks::aarch64::hi st13;
+    let s1_3 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s1_2 s2_2) s3_2 s0_3;
+    let st14 : Array U32 8usize = checks::aarch64::rounds4 abcd13 efgh13 s1_3 (aarch64::u32x4 0x391c0cb3u32 0x4ed8aa4au32 0x5b9cca4fu32 0x682e6ff3u32);
+    let abcd14 : Array U32 4usize = checks::aarch64::lo st14;
+    let efgh14 : Array U32 4usize = checks::aarch64::hi st14;
+    let s2_3 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s2_2 s3_2) s0_3 s1_3;
+    let st15 : Array U32 8usize = checks::aarch64::rounds4 abcd14 efgh14 s2_3 (aarch64::u32x4 0x748f82eeu32 0x78a5636fu32 0x84c87814u32 0x8cc70208u32);
+    let abcd15 : Array U32 4usize = checks::aarch64::lo st15;
+    let efgh15 : Array U32 4usize = checks::aarch64::hi st15;
+    let s3_3 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 s3_2 s0_3) s1_3 s2_3;
+    let st16 : Array U32 8usize = checks::aarch64::rounds4 abcd15 efgh15 s3_3 (aarch64::u32x4 0x90befffau32 0xa4506cebu32 0xbef9a3f7u32 0xc67178f2u32);
+    let abcd16 : Array U32 4usize = checks::aarch64::lo st16;
+    let efgh16 : Array U32 4usize = checks::aarch64::hi st16;
+    let abcd_out : Array U32 4usize = aarch64::vst1q_u32 (aarch64::vaddq_u32 abcd16 abcd_orig);
+    let efgh_out : Array U32 4usize = aarch64::vst1q_u32 (aarch64::vaddq_u32 efgh16 efgh_orig);
+    aarch64::concat_u32x4 abcd_out efgh_out

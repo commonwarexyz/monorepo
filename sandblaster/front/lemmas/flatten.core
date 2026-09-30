@@ -1,0 +1,188 @@
+-- sandblaster prelude lemmas: `take`/`drop` of an append, and `chunks` against `flatten`
+-- (§15 S5: QMDB's proof digests are 32-byte chunks of the proof bytes, and the proof
+-- bytes are the digests flattened). Checked, untrusted. Loaded after the ghost library
+-- (`ghost::arrays_flatten`).
+
+-- `take (xs ++ ys) (len xs) = xs`.
+def[lemma] seq::take_append_len : (T : Type) -> (xs : List(T)) -> (ys : List(T))
+    -> Eq(List(T), seq::take T (seq::append T xs ys) (seq::len T xs), xs) :=
+  fun (T : Type) (xs : List(T)) (ys : List(T)) =>
+    match xs : List(T) as u return Eq(List(T), seq::take T (seq::append T u ys) (seq::len T u), u) with
+    | Nil => seq::take_zero T ys
+    | Cons(x, t) =>
+        -- the test `1 + len t <= 0` is false, and `1 + len t - 1 = len t`
+        let .nn : Eq(Bool, #le_int(#iadd(1int, seq::len T t), 0int), false) =
+          linarith([]; Eq(Bool, #le_int(#iadd(1int, seq::len T t), 0int), false); []);
+        let .m : Eq(Int, #isub(#iadd(1int, seq::len T t), 1int), seq::len T t) =
+          eq::promote Int (#isub(#iadd(1int, seq::len T t), 1int)) (seq::len T t) .linarith([]; Eq(Int, #isub(#iadd(1int, seq::len T t), 1int), seq::len T t); []);
+        eq::trans (List(T)) (seq::take T (Cons[T](x, seq::append T t ys)) (#iadd(1int, seq::len T t)))
+          (if #le_int(#iadd(1int, seq::len T t), 0int) return List(T) then Nil[T] else Cons[T](x, seq::take T (seq::append T t ys) (#isub(#iadd(1int, seq::len T t), 1int))))
+          (Cons[T](x, t))
+          (delta(seq::take; T, Cons[T](x, seq::append T t ys), #iadd(1int, seq::len T t)))
+        (transport(Bool, false, #le_int(#iadd(1int, seq::len T t), 0int), eq::sym Bool (#le_int(#iadd(1int, seq::len T t), 0int)) false nn,
+          z. Eq(List(T), if z return List(T) then Nil[T] else Cons[T](x, seq::take T (seq::append T t ys) (#isub(#iadd(1int, seq::len T t), 1int))), Cons[T](x, t)),
+          transport(Int, seq::len T t, #isub(#iadd(1int, seq::len T t), 1int), eq::sym Int (#isub(#iadd(1int, seq::len T t), 1int)) (seq::len T t) m,
+            z. Eq(List(T), Cons[T](x, seq::take T (seq::append T t ys) z), Cons[T](x, t)),
+            eq::cong (List(T)) (List(T)) (fun (r : List(T)) => Cons[T](x, r)) (seq::take T (seq::append T t ys) (seq::len T t)) t
+              (rec(T, t, ys)))))
+    end
+  structural 1
+
+-- `drop (xs ++ ys) (len xs) = ys`.
+def[lemma] seq::drop_append_len : (T : Type) -> (xs : List(T)) -> (ys : List(T))
+    -> Eq(List(T), seq::drop T (seq::append T xs ys) (seq::len T xs), ys) :=
+  fun (T : Type) (xs : List(T)) (ys : List(T)) =>
+    match xs : List(T) as u return Eq(List(T), seq::drop T (seq::append T u ys) (seq::len T u), ys) with
+    | Nil => seq::drop_zero T ys
+    | Cons(x, t) =>
+        let .nn : Eq(Bool, #le_int(#iadd(1int, seq::len T t), 0int), false) =
+          linarith([]; Eq(Bool, #le_int(#iadd(1int, seq::len T t), 0int), false); []);
+        let .m : Eq(Int, #isub(#iadd(1int, seq::len T t), 1int), seq::len T t) =
+          eq::promote Int (#isub(#iadd(1int, seq::len T t), 1int)) (seq::len T t) .linarith([]; Eq(Int, #isub(#iadd(1int, seq::len T t), 1int), seq::len T t); []);
+        eq::trans (List(T)) (seq::drop T (Cons[T](x, seq::append T t ys)) (#iadd(1int, seq::len T t)))
+          (if #le_int(#iadd(1int, seq::len T t), 0int) return List(T) then Cons[T](x, seq::append T t ys) else seq::drop T (seq::append T t ys) (#isub(#iadd(1int, seq::len T t), 1int)))
+          ys
+          (delta(seq::drop; T, Cons[T](x, seq::append T t ys), #iadd(1int, seq::len T t)))
+        (transport(Bool, false, #le_int(#iadd(1int, seq::len T t), 0int), eq::sym Bool (#le_int(#iadd(1int, seq::len T t), 0int)) false nn,
+          z. Eq(List(T), if z return List(T) then Cons[T](x, seq::append T t ys) else seq::drop T (seq::append T t ys) (#isub(#iadd(1int, seq::len T t), 1int)), ys),
+          transport(Int, seq::len T t, #isub(#iadd(1int, seq::len T t), 1int), eq::sym Int (#isub(#iadd(1int, seq::len T t), 1int)) (seq::len T t) m,
+            z. Eq(List(T), seq::drop T (seq::append T t ys) z, ys),
+            rec(T, t, ys))))
+    end
+  structural 1
+
+-- `chunks (flatten ds) = ds`: the bytes of arrays, cut into chunks of their size, are the arrays.
+def[lemma] seq::chunks_arrays_flatten : (T : Type) -> (width : Usize) -> (.hN : Eq(Bool, #lt_usize(0usize, width), true)) -> (ds : List(Array T width))
+    -> Eq(List(Array T width), seq::chunks T width .hN (ghost::arrays_flatten T width ds), ds) :=
+  fun (T : Type) (width : Usize) (.hN : Eq(Bool, #lt_usize(0usize, width), true)) (ds : List(Array T width)) =>
+    match ds : List(Array T width) as u return Eq(List(Array T width), seq::chunks T width .hN (ghost::arrays_flatten T width u), u) with
+    | Nil => seq::chunks_c_small T width .hN Nil[T] .(linarith([hN : Eq(Bool, #lt_usize(0usize, width), true)]; Eq(Bool, #lt_int(seq::len T Nil[T], #cast_usize_int(width)), true); []))
+    | Cons(a, t) =>
+        -- the first array has `width` elements: it is the first chunk, and the rest are `t`'s
+        let ft : List(T) = ghost::arrays_flatten T width t;
+        let l : List(T) = seq::append T fst(a) ft;
+        let .w : Eq(Int, seq::len T fst(a), #cast_usize_int(width)) = snd(a);
+        let .c : Eq(Bool, #lt_int(seq::len T l, #cast_usize_int(width)), false) =
+          linarith([seq::len_append T fst(a) ft : Eq(Int, seq::len T l, #iadd(seq::len T fst(a), seq::len T ft)),
+                    w : Eq(Int, seq::len T fst(a), #cast_usize_int(width))];
+                   Eq(Bool, #lt_int(seq::len T l, #cast_usize_int(width)), false); []);
+        let .tk : Eq(List(T), seq::take T l (#cast_usize_int(width)), fst(a)) =
+          transport(Int, seq::len T fst(a), #cast_usize_int(width), w,
+            z. Eq(List(T), seq::take T l z, fst(a)),
+            seq::take_append_len T fst(a) ft);
+        let .dr : Eq(List(T), seq::drop T l (#cast_usize_int(width)), ft) =
+          transport(Int, seq::len T fst(a), #cast_usize_int(width), w,
+            z. Eq(List(T), seq::drop T l z, ft),
+            seq::drop_append_len T fst(a) ft);
+        let p : Array T width =
+          pair(Array T width, seq::take T l (#cast_usize_int(width)),
+            transport(List(T), fst(a), seq::take T l (#cast_usize_int(width)), eq::sym (List(T)) (seq::take T l (#cast_usize_int(width))) (fst(a)) tk,
+              z. Eq(Int, seq::len T z, #cast_usize_int(width)), w));
+        let cs : List(Array T width) = seq::chunks T width .hN (seq::drop T l (#cast_usize_int(width)));
+        let e1 : Eq(Array T width, p, a) = array::ext T width p a .tk;
+        let e2 : Eq(List(Array T width), cs, t) =
+          transport(List(T), ft, seq::drop T l (#cast_usize_int(width)), eq::sym (List(T)) (seq::drop T l (#cast_usize_int(width))) ft dr,
+            z. Eq(List(Array T width), seq::chunks T width .hN z, t),
+            rec(T, width, .hN, t));
+        eq::trans (List(Array T width)) (seq::chunks T width .hN l) (Cons[Array T width](p, cs)) (Cons[Array T width](a, t))
+          (seq::chunks_cons T width .hN l .c)
+          (eq::trans (List(Array T width)) (Cons[Array T width](p, cs)) (Cons[Array T width](a, cs)) (Cons[Array T width](a, t))
+            (eq::cong (Array T width) (List(Array T width)) (fun (x : Array T width) => Cons[Array T width](x, cs)) p a e1)
+            (eq::cong (List(Array T width)) (List(Array T width)) (fun (r : List(Array T width)) => Cons[Array T width](a, r)) cs t e2))
+    end
+  structural 3
+
+-- `(xs ++ ys) ++ zs = xs ++ (ys ++ zs)`.
+def[lemma] seq::append_assoc : (T : Type) -> (xs : List(T)) -> (ys : List(T)) -> (zs : List(T))
+    -> Eq(List(T), seq::append T (seq::append T xs ys) zs, seq::append T xs (seq::append T ys zs)) :=
+  fun (T : Type) (xs : List(T)) (ys : List(T)) (zs : List(T)) =>
+    match xs : List(T) as u return Eq(List(T), seq::append T (seq::append T u ys) zs, seq::append T u (seq::append T ys zs)) with
+    | Nil => refl(List(T), seq::append T ys zs)
+    | Cons(x, t) =>
+        eq::cong (List(T)) (List(T)) (fun (r : List(T)) => Cons[T](x, r)) (seq::append T (seq::append T t ys) zs) (seq::append T t (seq::append T ys zs))
+          (rec(T, t, ys, zs))
+    end
+  structural 1
+
+-- `flatten (chunks l) ++ chunks_rest l = l`: chunking loses nothing.
+def[lemma] seq::flatten_chunks_rest : (T : Type) -> (width : Usize) -> (.hN : Eq(Bool, #lt_usize(0usize, width), true)) -> (l : List(T))
+    -> Eq(List(T), seq::append T (ghost::arrays_flatten T width (seq::chunks T width .hN l)) (seq::chunks_rest T width .hN l), l) :=
+  fun (T : Type) (width : Usize) (.hN : Eq(Bool, #lt_usize(0usize, width), true)) (l : List(T)) =>
+    if #lt_int(seq::len T l, #cast_usize_int(width)) as .c
+      return Eq(List(T), seq::append T (ghost::arrays_flatten T width (seq::chunks T width .hN l)) (seq::chunks_rest T width .hN l), l)
+    then
+      -- no chunks, and the rest is `l`
+      transport(List(Array T width), Nil[Array T width], seq::chunks T width .hN l,
+        eq::sym (List(Array T width)) (seq::chunks T width .hN l) (Nil[Array T width]) (seq::chunks_c_small T width .hN l .c),
+        z. Eq(List(T), seq::append T (ghost::arrays_flatten T width z) (seq::chunks_rest T width .hN l), l),
+        transport(List(T), l, seq::chunks_rest T width .hN l,
+          eq::sym (List(T)) (seq::chunks_rest T width .hN l) l (seq::chunks_rest_c_small T width .hN l .c),
+          z. Eq(List(T), seq::append T (ghost::arrays_flatten T width Nil[Array T width]) z, l),
+          refl(List(T), l)))
+    else
+      -- the first chunk is `take l width`, and the rest of the list is chunked the same way
+      let dl : List(T) = seq::drop T l (#cast_usize_int(width));
+      let tk : List(T) = seq::take T l (#cast_usize_int(width));
+      let ih : Eq(List(T), seq::append T (ghost::arrays_flatten T width (seq::chunks T width .hN dl)) (seq::chunks_rest T width .hN dl), dl) =
+        rec(T, width, .hN, dl;
+          pair(Sigma (_ : Eq(Bool, #le_int(0int, seq::len T dl), true)), Eq(Bool, #lt_int(seq::len T dl, seq::len T l), true),
+            linarith([]; Eq(Bool, #le_int(0int, seq::len T dl), true); []),
+            linarith([seq::len_drop T l (#cast_usize_int(width)) (linarith([]; Eq(Bool, #le_int(0int, #cast_usize_int(width)), true); [])) (linarith([eq::promote Bool (#lt_int(seq::len T l, #cast_usize_int(width))) false .c : Eq(Bool, #lt_int(seq::len T l, #cast_usize_int(width)), false)]; Eq(Bool, #le_int(#cast_usize_int(width), seq::len T l), true); [])) : Eq(Int, seq::len T dl, #isub(seq::len T l, #cast_usize_int(width))),
+                      hN : Eq(Bool, #lt_usize(0usize, width), true)];
+                     Eq(Bool, #lt_int(seq::len T dl, seq::len T l), true); [])));
+      let fc : List(T) = ghost::arrays_flatten T width (seq::chunks T width .hN dl);
+      let rs : List(T) = seq::chunks_rest T width .hN dl;
+      transport(List(Array T width),
+        Cons[Array T width](pair(Array T width, tk, seq::len_take T l (#cast_usize_int(width)) (linarith([]; Eq(Bool, #le_int(0int, #cast_usize_int(width)), true); [])) (linarith([eq::promote Bool (#lt_int(seq::len T l, #cast_usize_int(width))) false .c : Eq(Bool, #lt_int(seq::len T l, #cast_usize_int(width)), false)]; Eq(Bool, #le_int(#cast_usize_int(width), seq::len T l), true); []))), seq::chunks T width .hN dl),
+        seq::chunks T width .hN l,
+        eq::sym (List(Array T width)) (seq::chunks T width .hN l) (Cons[Array T width](pair(Array T width, tk, seq::len_take T l (#cast_usize_int(width)) (linarith([]; Eq(Bool, #le_int(0int, #cast_usize_int(width)), true); [])) (linarith([eq::promote Bool (#lt_int(seq::len T l, #cast_usize_int(width))) false .c : Eq(Bool, #lt_int(seq::len T l, #cast_usize_int(width)), false)]; Eq(Bool, #le_int(#cast_usize_int(width), seq::len T l), true); []))), seq::chunks T width .hN dl)) (seq::chunks_cons T width .hN l .c),
+        z. Eq(List(T), seq::append T (ghost::arrays_flatten T width z) (seq::chunks_rest T width .hN l), l),
+        transport(List(T), rs, seq::chunks_rest T width .hN l,
+          eq::sym (List(T)) (seq::chunks_rest T width .hN l) rs (seq::chunks_rest_c_step T width .hN l .c),
+          z. Eq(List(T), seq::append T (seq::append T tk fc) z, l),
+          eq::trans (List(T)) (seq::append T (seq::append T tk fc) rs) (seq::append T tk (seq::append T fc rs)) l
+            (seq::append_assoc T tk fc rs)
+            (transport(List(T), dl, seq::append T fc rs, eq::sym (List(T)) (seq::append T fc rs) dl ih,
+               z. Eq(List(T), seq::append T tk z, l),
+               seq::take_drop_append T l (#cast_usize_int(width))))))
+  measure (seq::len T l)
+
+-- A list of length 0 is empty.
+def[lemma] seq::len_zero_nil : (T : Type) -> (l : List(T)) -> (.h : Eq(Int, seq::len T l, 0int)) -> Eq(List(T), l, Nil[T]) :=
+  fun (T : Type) (l : List(T)) (.h : Eq(Int, seq::len T l, 0int)) =>
+    (match l : List(T) as u return (.h2 : Eq(Int, seq::len T u, 0int)) -> Eq(List(T), u, Nil[T]) with
+     | Nil => fun (.h2 : Eq(Int, 0int, 0int)) => refl(List(T), Nil[T])
+     | Cons(x, t) => fun (.h2 : Eq(Int, #iadd(1int, seq::len T t), 0int)) =>
+         absurd(Eq(List(T), Cons[T](x, t), Nil[T]), linarith([h2 : Eq(Int, #iadd(1int, seq::len T t), 0int)]; Empty; []))
+     end) .h
+
+-- `32 k` elements, cut into 32-element chunks and flattened, are the elements (the literal size makes
+-- `len (chunks l) · 32` linear; the rest is empty because its length is a multiple of 32 below 32).
+def[lemma] seq::flatten_chunks_32 : (T : Type) -> (.hN : Eq(Bool, #lt_usize(0usize, 32usize), true)) -> (l : List(T)) -> (k : Int)
+    -> (.h : Eq(Int, seq::len T l, #imul(k, 32int)))
+    -> Eq(List(T), ghost::arrays_flatten T 32usize (seq::chunks T 32usize .hN l), l) :=
+  fun (T : Type) (.hN : Eq(Bool, #lt_usize(0usize, 32usize), true)) (l : List(T)) (k : Int) (.h : Eq(Int, seq::len T l, #imul(k, 32int))) =>
+    let cl : Sigma (_ : Eq(Int, #iadd(#imul(seq::len (Array T 32usize) fst(seq::chunks_c T 32usize .hN l), 32int), seq::len T fst(seq::chunks_rest_c T 32usize .hN l)), seq::len T l)), Eq(Bool, #lt_int(seq::len T fst(seq::chunks_rest_c T 32usize .hN l), 32int), true) =
+      seq::chunks_len_32 T .hN l;
+    -- the rest has length `32 (k - chunks)`, below 32 and not negative: 0
+    let .r0 : Eq(Int, seq::len T (seq::chunks_rest T 32usize .hN l), 0int) =
+      if #le_int(#isub(k, seq::len (Array T 32usize) (seq::chunks T 32usize .hN l)), 0int) as .d return Eq(Int, seq::len T (seq::chunks_rest T 32usize .hN l), 0int)
+      then eq::promote Int (seq::len T (seq::chunks_rest T 32usize .hN l)) 0int
+             .linarith([fst(cl) : Eq(Int, #iadd(#imul(seq::len (Array T 32usize) fst(seq::chunks_c T 32usize .hN l), 32int), seq::len T fst(seq::chunks_rest_c T 32usize .hN l)), seq::len T l),
+                        h : Eq(Int, seq::len T l, #imul(k, 32int)),
+                        eq::promote Bool (#le_int(#isub(k, seq::len (Array T 32usize) (seq::chunks T 32usize .hN l)), 0int)) true .d : Eq(Bool, #le_int(#isub(k, seq::len (Array T 32usize) (seq::chunks T 32usize .hN l)), 0int), true)];
+                       Eq(Int, seq::len T (seq::chunks_rest T 32usize .hN l), 0int); [])
+      else absurd(Eq(Int, seq::len T (seq::chunks_rest T 32usize .hN l), 0int),
+             linarith([fst(cl) : Eq(Int, #iadd(#imul(seq::len (Array T 32usize) fst(seq::chunks_c T 32usize .hN l), 32int), seq::len T fst(seq::chunks_rest_c T 32usize .hN l)), seq::len T l),
+                       snd(cl) : Eq(Bool, #lt_int(seq::len T fst(seq::chunks_rest_c T 32usize .hN l), 32int), true),
+                       h : Eq(Int, seq::len T l, #imul(k, 32int)),
+                       eq::promote Bool (#le_int(#isub(k, seq::len (Array T 32usize) (seq::chunks T 32usize .hN l)), 0int)) false .d : Eq(Bool, #le_int(#isub(k, seq::len (Array T 32usize) (seq::chunks T 32usize .hN l)), 0int), false)];
+                      Empty; []));
+    eq::trans (List(T)) (ghost::arrays_flatten T 32usize (seq::chunks T 32usize .hN l))
+      (seq::append T (ghost::arrays_flatten T 32usize (seq::chunks T 32usize .hN l)) (seq::chunks_rest T 32usize .hN l)) l
+      (transport(List(T), Nil[T], seq::chunks_rest T 32usize .hN l,
+         eq::sym (List(T)) (seq::chunks_rest T 32usize .hN l) (Nil[T]) (seq::len_zero_nil T (seq::chunks_rest T 32usize .hN l) .r0),
+         z. Eq(List(T), ghost::arrays_flatten T 32usize (seq::chunks T 32usize .hN l), seq::append T (ghost::arrays_flatten T 32usize (seq::chunks T 32usize .hN l)) z),
+         eq::sym (List(T)) (seq::append T (ghost::arrays_flatten T 32usize (seq::chunks T 32usize .hN l)) Nil[T]) (ghost::arrays_flatten T 32usize (seq::chunks T 32usize .hN l))
+           (seq::append_nil T (ghost::arrays_flatten T 32usize (seq::chunks T 32usize .hN l)))))
+      (seq::flatten_chunks_rest T 32usize .hN l)

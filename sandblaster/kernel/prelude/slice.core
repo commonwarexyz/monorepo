@@ -1,0 +1,354 @@
+-- sandblaster prelude: slices and fixed-length arrays (DESIGN.md §3.5, §3.4).
+--
+--   &[T]    = Slice T    := Σ(n : Usize). Σ(l : List T). .SliceOk T n l
+--   [T; N]  = Array T N  := Σ(l : List T). .Eq(Int, len l, N)
+--
+-- Slice methods work on the usize length `fst s` and obtain their range
+-- proofs from `SliceOk`. TRUSTED definitions; `def[lemma]` items are checked.
+
+def[prelude] ISIZE_MAX : Int := 9223372036854775807int
+
+def[prelude] SliceOk : (T : Type) -> (n : Usize) -> (l : List(T)) -> Type :=
+  fun (T : Type) (n : Usize) (l : List(T)) =>
+    And (Eq(Int, seq::len T l, #cast_usize_int(n))) (Eq(Bool, #le_int(#cast_usize_int(n), ISIZE_MAX), true))
+
+def[prelude] Slice : (T : Type) -> Type :=
+  fun (T : Type) => Sigma (n : Usize), Sigma (l : List(T)), .SliceOk T n l
+
+def[prelude] Array : (T : Type) -> (N : Usize) -> Type :=
+  fun (T : Type) (N : Usize) => Sigma (l : List(T)), .Eq(Int, seq::len T l, #cast_usize_int(N))
+
+def[prelude] slice::mk : (T : Type) -> (n : Usize) -> (l : List(T)) -> (.p : SliceOk T n l) -> Slice T :=
+  fun (T : Type) (n : Usize) (l : List(T)) (.p : SliceOk T n l) =>
+    pair(Slice T, n, pair(Sigma (l2 : List(T)), .SliceOk T n l2, l, p))
+
+-- Relevant access to the irrelevant well-formedness facts.
+def[lemma] slice::ok_len : (T : Type) -> (s : Slice T) -> Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s))) :=
+  fun (T : Type) (s : Slice T) => eq::promote Int (seq::len T fst(snd(s))) (#cast_usize_int(fst(s))) .fst(snd(snd(s)))
+
+def[lemma] slice::ok_bound : (T : Type) -> (s : Slice T) -> Eq(Bool, #le_int(#cast_usize_int(fst(s)), ISIZE_MAX), true) :=
+  fun (T : Type) (s : Slice T) => eq::promote Bool (#le_int(#cast_usize_int(fst(s)), ISIZE_MAX)) true .snd(snd(snd(s)))
+
+def[lemma] array::ok_len : (T : Type) -> (N : Usize) -> (a : Array T N) -> Eq(Int, seq::len T fst(a), #cast_usize_int(N)) :=
+  fun (T : Type) (N : Usize) (a : Array T N) => eq::promote Int (seq::len T fst(a)) (#cast_usize_int(N)) .snd(a)
+
+-- ---------------------------------------------------------------------------
+-- Arrays: len, indexing, update, as_slice, equality, reversal, repeat.
+-- ---------------------------------------------------------------------------
+
+def[prelude] array::len : (T : Type) -> (N : Usize) -> (a : Array T N) -> Usize :=
+  fun (T : Type) (N : Usize) (a : Array T N) => N
+
+def[prelude] array::index : (T : Type) -> (N : Usize) -> (a : Array T N) -> (i : Usize) -> (.h : Eq(Bool, #lt_usize(i, N), true)) -> T :=
+  fun (T : Type) (N : Usize) (a : Array T N) (i : Usize) (.h : Eq(Bool, #lt_usize(i, N), true)) =>
+    seq::index T fst(a) (#cast_usize_int(i))
+      .linarith([]; Eq(Bool, #le_int(0int, #cast_usize_int(i)), true); [1, 1, 0])
+      .linarith([h : Eq(Bool, #lt_usize(i, N), true), array::ok_len T N a : Eq(Int, seq::len T fst(a), #cast_usize_int(N))];
+                Eq(Bool, #lt_int(#cast_usize_int(i), seq::len T fst(a)), true); [1, -1, 1, 0, 0, 0, 0, 0])
+
+-- `a[i] = v`.
+def[prelude] array::set : (T : Type) -> (N : Usize) -> (a : Array T N) -> (i : Usize) -> (v : T) -> (.h : Eq(Bool, #lt_usize(i, N), true)) -> Array T N :=
+  fun (T : Type) (N : Usize) (a : Array T N) (i : Usize) (v : T) (.h : Eq(Bool, #lt_usize(i, N), true)) =>
+    pair(Array T N, seq::update T fst(a) (#cast_usize_int(i)) v,
+      eq::trans Int (seq::len T (seq::update T fst(a) (#cast_usize_int(i)) v)) (seq::len T fst(a)) (#cast_usize_int(N))
+        (seq::len_update T fst(a) (#cast_usize_int(i)) v) snd(a))
+
+-- `a.as_slice()`, `&a[..]`, unsizing `&[T; N] → &[T]` (N ≤ isize::MAX).
+def[prelude] array::as_slice : (T : Type) -> (N : Usize) -> (a : Array T N)
+    -> (.hN : Eq(Bool, #le_int(#cast_usize_int(N), ISIZE_MAX), true)) -> Slice T :=
+  fun (T : Type) (N : Usize) (a : Array T N) (.hN : Eq(Bool, #le_int(#cast_usize_int(N), ISIZE_MAX), true)) =>
+    slice::mk T N fst(a) .pair(SliceOk T N fst(a), snd(a), hN)
+
+def[prelude] array::eq : (T : Type) -> (N : Usize) -> (eq : T -> T -> Bool) -> (a : Array T N) -> (b : Array T N) -> Bool :=
+  fun (T : Type) (N : Usize) (eq : T -> T -> Bool) (a : Array T N) (b : Array T N) => seq::eq T eq fst(a) fst(b)
+
+def[prelude] array::rev : (T : Type) -> (N : Usize) -> (a : Array T N) -> Array T N :=
+  fun (T : Type) (N : Usize) (a : Array T N) =>
+    pair(Array T N, seq::rev T fst(a),
+      eq::trans Int (seq::len T (seq::rev T fst(a))) (seq::len T fst(a)) (#cast_usize_int(N)) (seq::len_rev T fst(a)) snd(a))
+
+-- `[v; N]` (the length proof computes for a literal N).
+def[prelude] array::repeat : (T : Type) -> (N : Usize) -> (v : T)
+    -> (.p : Eq(Int, seq::len T (seq::replicate T (#cast_usize_int(N)) v), #cast_usize_int(N))) -> Array T N :=
+  fun (T : Type) (N : Usize) (v : T) (.p : Eq(Int, seq::len T (seq::replicate T (#cast_usize_int(N)) v), #cast_usize_int(N))) =>
+    pair(Array T N, seq::replicate T (#cast_usize_int(N)) v, p)
+
+-- ---------------------------------------------------------------------------
+-- Slices.
+-- ---------------------------------------------------------------------------
+
+def[prelude] slice::len : (T : Type) -> (s : Slice T) -> Usize :=
+  fun (T : Type) (s : Slice T) => fst(s)
+
+def[prelude] slice::list : (T : Type) -> (s : Slice T) -> List(T) :=
+  fun (T : Type) (s : Slice T) => fst(snd(s))
+
+def[prelude] slice::is_empty : (T : Type) -> (s : Slice T) -> Bool :=
+  fun (T : Type) (s : Slice T) => #eq_usize(fst(s), 0usize)
+
+-- `s[i]`.
+def[prelude] slice::index : (T : Type) -> (s : Slice T) -> (i : Usize) -> (.h : Eq(Bool, #lt_usize(i, fst(s)), true)) -> T :=
+  fun (T : Type) (s : Slice T) (i : Usize) (.h : Eq(Bool, #lt_usize(i, fst(s)), true)) =>
+    seq::index T fst(snd(s)) (#cast_usize_int(i))
+      .linarith([]; Eq(Bool, #le_int(0int, #cast_usize_int(i)), true); [1, 1, 0])
+      .linarith([h : Eq(Bool, #lt_usize(i, fst(s)), true), slice::ok_len T s : Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s)))];
+                Eq(Bool, #lt_int(#cast_usize_int(i), seq::len T fst(snd(s))), true); [1, -1, 1, 0, 0, 0, 0, 0])
+
+def[prelude] slice::get : (T : Type) -> (s : Slice T) -> (i : Usize) -> Option(T) :=
+  fun (T : Type) (s : Slice T) (i : Usize) =>
+    if #lt_usize(i, fst(s)) as .h return Option(T) then Some[T](slice::index T s i .h) else None[T]
+
+-- `&s[..k]`.
+def[prelude] slice::prefix : (T : Type) -> (s : Slice T) -> (k : Usize) -> (.h : Eq(Bool, #le_usize(k, fst(s)), true)) -> Slice T :=
+  fun (T : Type) (s : Slice T) (k : Usize) (.h : Eq(Bool, #le_usize(k, fst(s)), true)) =>
+    slice::mk T k (seq::take T fst(snd(s)) (#cast_usize_int(k)))
+      .pair(SliceOk T k (seq::take T fst(snd(s)) (#cast_usize_int(k))),
+        seq::len_take T fst(snd(s)) (#cast_usize_int(k))
+          (linarith([]; Eq(Bool, #le_int(0int, #cast_usize_int(k)), true); [1, 1, 0]))
+          (linarith([h : Eq(Bool, #le_usize(k, fst(s)), true), slice::ok_len T s : Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s)))];
+                    Eq(Bool, #le_int(#cast_usize_int(k), seq::len T fst(snd(s))), true); [1, -1, 1, 0, 0, 0, 0, 0])),
+        linarith([h : Eq(Bool, #le_usize(k, fst(s)), true), slice::ok_bound T s : Eq(Bool, #le_int(#cast_usize_int(fst(s)), ISIZE_MAX), true)];
+                 Eq(Bool, #le_int(#cast_usize_int(k), ISIZE_MAX), true); [1, 1, 1, 0, 0, 0, 0]))
+
+-- `&s[k..]`.
+def[prelude] slice::suffix : (T : Type) -> (s : Slice T) -> (k : Usize) -> (.h : Eq(Bool, #le_usize(k, fst(s)), true)) -> Slice T :=
+  fun (T : Type) (s : Slice T) (k : Usize) (.h : Eq(Bool, #le_usize(k, fst(s)), true)) =>
+    slice::mk T (#sub_usize(fst(s), k; h)) (seq::drop T fst(snd(s)) (#cast_usize_int(k)))
+      .pair(SliceOk T (#sub_usize(fst(s), k; h)) (seq::drop T fst(snd(s)) (#cast_usize_int(k))),
+        linarith([seq::len_drop T fst(snd(s)) (#cast_usize_int(k))
+                    (linarith([]; Eq(Bool, #le_int(0int, #cast_usize_int(k)), true); [1, 1, 0]))
+                    (linarith([h : Eq(Bool, #le_usize(k, fst(s)), true), slice::ok_len T s : Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s)))];
+                              Eq(Bool, #le_int(#cast_usize_int(k), seq::len T fst(snd(s))), true); [1, -1, 1, 0, 0, 0, 0, 0]))
+                    : Eq(Int, seq::len T (seq::drop T fst(snd(s)) (#cast_usize_int(k))), #isub(seq::len T fst(snd(s)), #cast_usize_int(k))),
+                  slice::ok_len T s : Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s)))];
+                 Eq(Int, seq::len T (seq::drop T fst(snd(s)) (#cast_usize_int(k))), #cast_usize_int(#sub_usize(fst(s), k; h)));
+                 [-1, -1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0]),
+        linarith([slice::ok_bound T s : Eq(Bool, #le_int(#cast_usize_int(fst(s)), ISIZE_MAX), true)];
+                 Eq(Bool, #le_int(#cast_usize_int(#sub_usize(fst(s), k; h)), ISIZE_MAX), true); [1, 1, 0, 0, 1, 0]))
+
+-- `&s[a..b]`.
+def[prelude] slice::range : (T : Type) -> (s : Slice T) -> (a : Usize) -> (b : Usize)
+    -> (.h0 : Eq(Bool, #le_usize(a, b), true)) -> (.h1 : Eq(Bool, #le_usize(b, fst(s)), true)) -> Slice T :=
+  fun (T : Type) (s : Slice T) (a : Usize) (b : Usize) (.h0 : Eq(Bool, #le_usize(a, b), true)) (.h1 : Eq(Bool, #le_usize(b, fst(s)), true)) =>
+    let .p : Eq(Bool, #le_usize(a, fst(s)), true) =
+      linarith([h0 : Eq(Bool, #le_usize(a, b), true), h1 : Eq(Bool, #le_usize(b, fst(s)), true)];
+               Eq(Bool, #le_usize(a, fst(s)), true); [1, 1, 1, 0, 0, 0, 0, 0, 0]);
+    slice::prefix T (slice::suffix T s a .p) (#sub_usize(b, a; h0))
+      .linarith([h1 : Eq(Bool, #le_usize(b, fst(s)), true)];
+                Eq(Bool, #le_usize(#sub_usize(b, a; h0), #sub_usize(fst(s), a; p)), true); [1, 1, 0, 0, 0, 0, 0, 0])
+
+def[prelude] slice::split_at : (T : Type) -> (s : Slice T) -> (mid : Usize) -> (.h : Eq(Bool, #le_usize(mid, fst(s)), true))
+    -> Tuple2(Slice T, Slice T) :=
+  fun (T : Type) (s : Slice T) (mid : Usize) (.h : Eq(Bool, #le_usize(mid, fst(s)), true)) =>
+    tuple2[Slice T, Slice T](slice::prefix T s mid .h, slice::suffix T s mid .h)
+
+def[prelude] slice::split_at_checked : (T : Type) -> (s : Slice T) -> (mid : Usize) -> Option(Tuple2(Slice T, Slice T)) :=
+  fun (T : Type) (s : Slice T) (mid : Usize) =>
+    if #le_usize(mid, fst(s)) as .h return Option(Tuple2(Slice T, Slice T))
+    then Some[Tuple2(Slice T, Slice T)](slice::split_at T s mid .h)
+    else None[Tuple2(Slice T, Slice T)]
+
+def[prelude] slice::split_first : (T : Type) -> (s : Slice T) -> Option(Tuple2(T, Slice T)) :=
+  fun (T : Type) (s : Slice T) =>
+    if #lt_usize(0usize, fst(s)) as .h return Option(Tuple2(T, Slice T))
+    then Some[Tuple2(T, Slice T)](tuple2[T, Slice T](slice::index T s 0usize .h,
+           slice::suffix T s 1usize .linarith([h : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])))
+    else None[Tuple2(T, Slice T)]
+
+def[prelude] slice::first : (T : Type) -> (s : Slice T) -> Option(T) :=
+  fun (T : Type) (s : Slice T) => slice::get T s 0usize
+
+def[prelude] slice::last : (T : Type) -> (s : Slice T) -> Option(T) :=
+  fun (T : Type) (s : Slice T) =>
+    if #lt_usize(0usize, fst(s)) as .h return Option(T)
+    then
+      let .p : Eq(Bool, #le_usize(1usize, fst(s)), true) =
+        linarith([h : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0]);
+      Some[T](slice::index T s (#sub_usize(fst(s), 1usize; p))
+        .linarith([]; Eq(Bool, #lt_usize(#sub_usize(fst(s), 1usize; p), fst(s)), true); [1, 0, 0]))
+    else None[T]
+
+def[prelude] slice::split_last : (T : Type) -> (s : Slice T) -> Option(Tuple2(T, Slice T)) :=
+  fun (T : Type) (s : Slice T) =>
+    if #lt_usize(0usize, fst(s)) as .h return Option(Tuple2(T, Slice T))
+    then
+      let .p : Eq(Bool, #le_usize(1usize, fst(s)), true) =
+        linarith([h : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0]);
+      Some[Tuple2(T, Slice T)](tuple2[T, Slice T](
+        slice::index T s (#sub_usize(fst(s), 1usize; p))
+          .linarith([]; Eq(Bool, #lt_usize(#sub_usize(fst(s), 1usize; p), fst(s)), true); [1, 0, 0]),
+        slice::prefix T s (#sub_usize(fst(s), 1usize; p))
+          .linarith([]; Eq(Bool, #le_usize(#sub_usize(fst(s), 1usize; p), fst(s)), true); [1, 0, 0])))
+    else None[Tuple2(T, Slice T)]
+
+-- The first `N` elements of a slice of length ≥ N as an array.
+def[prelude] slice::prefix_array : (T : Type) -> (s : Slice T) -> (N : Usize) -> (.h : Eq(Bool, #le_usize(N, fst(s)), true)) -> Array T N :=
+  fun (T : Type) (s : Slice T) (N : Usize) (.h : Eq(Bool, #le_usize(N, fst(s)), true)) =>
+    pair(Array T N, seq::take T fst(snd(s)) (#cast_usize_int(N)),
+      seq::len_take T fst(snd(s)) (#cast_usize_int(N))
+        (linarith([]; Eq(Bool, #le_int(0int, #cast_usize_int(N)), true); [1, 1, 0]))
+        (linarith([h : Eq(Bool, #le_usize(N, fst(s)), true), slice::ok_len T s : Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s)))];
+                  Eq(Bool, #le_int(#cast_usize_int(N), seq::len T fst(snd(s))), true); [1, -1, 1, 0, 0, 0, 0, 0])))
+
+def[prelude] slice::split_first_chunk : (T : Type) -> (s : Slice T) -> (N : Usize) -> Option(Tuple2(Array T N, Slice T)) :=
+  fun (T : Type) (s : Slice T) (N : Usize) =>
+    if #le_usize(N, fst(s)) as .h return Option(Tuple2(Array T N, Slice T))
+    then Some[Tuple2(Array T N, Slice T)](tuple2[Array T N, Slice T](slice::prefix_array T s N .h, slice::suffix T s N .h))
+    else None[Tuple2(Array T N, Slice T)]
+
+def[prelude] slice::first_chunk : (T : Type) -> (s : Slice T) -> (N : Usize) -> Option(Array T N) :=
+  fun (T : Type) (s : Slice T) (N : Usize) =>
+    if #le_usize(N, fst(s)) as .h return Option(Array T N) then Some[Array T N](slice::prefix_array T s N .h) else None[Array T N]
+
+-- `as_chunks::<N>()`: the chunks (each an Array T N) and the remainder,
+-- computed with length certificates so that both results are slices.
+--
+-- The loops `seq::chunks_go` / `seq::chunks_rest_go` carry the length of
+-- the rest of the list as `n` (with its equation `hn`): each step tests `n`
+-- and drops one chunk, so chunking a list of length L takes O(L)
+-- evaluation steps (testing `seq::len T l` at every step made it O(L²/N),
+-- and §15.7 known-answer vectors of a few KiB took minutes). Each step
+-- refers to `hn` once: `p1` (N ≤ len l) and `pn` (the next step's `hn`)
+-- are both projected from one proof `q`, so the proofs in a result (the
+-- chunks' length certificates) form a chain whose read-back is linear in
+-- the number of chunks (quote memo, AUDIT.md §7), not exponential as when
+-- `p1` and `pn` each referred to `hn`.
+-- `seq::chunks_c` / `seq::chunks_rest_c` start them with `n = len l`; the
+-- result does not depend on `hn` (`seq::chunks_go_irrel`,
+-- `lemmas/chunks.core`).
+def[prelude] seq::chunks_go : (T : Type) -> (N : Usize) -> (.hN : Eq(Bool, #lt_usize(0usize, N), true)) -> (l : List(T))
+    -> (n : Int) -> (.hn : Eq(Int, n, seq::len T l)) -> Sigma (c : List(Array T N)), .Eq(Bool, #le_int(seq::len (Array T N) c, seq::len T l), true) :=
+  fun (T : Type) (N : Usize) (.hN : Eq(Bool, #lt_usize(0usize, N), true)) (l : List(T)) (n : Int) (.hn : Eq(Int, n, seq::len T l)) =>
+    if #lt_int(n, #cast_usize_int(N)) as .c
+      return Sigma (c : List(Array T N)), .Eq(Bool, #le_int(seq::len (Array T N) c, seq::len T l), true)
+    then pair(Sigma (c : List(Array T N)), .Eq(Bool, #le_int(seq::len (Array T N) c, seq::len T l), true),
+              Nil[Array T N], linarith([]; Eq(Bool, #le_int(0int, seq::len T l), true); [1, 1]))
+    else
+      let .p0 : Eq(Bool, #le_int(0int, #cast_usize_int(N)), true) =
+        linarith([]; Eq(Bool, #le_int(0int, #cast_usize_int(N)), true); [1, 1, 0]);
+      let .q : Sigma (_ : Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true)), Eq(Int, #isub(n, #cast_usize_int(N)), seq::len T (seq::drop T l (#cast_usize_int(N)))) =
+        (transport(Int, seq::len T l, n, eq::sym Int n (seq::len T l) hn,
+           z. (cz : Eq(Bool, #lt_int(z, #cast_usize_int(N)), false))
+                -> Sigma (_ : Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true)), Eq(Int, #isub(z, #cast_usize_int(N)), seq::len T (seq::drop T l (#cast_usize_int(N)))),
+           fun (cl : Eq(Bool, #lt_int(seq::len T l, #cast_usize_int(N)), false)) =>
+             let q1 : Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true) =
+               linarith([cl : Eq(Bool, #lt_int(seq::len T l, #cast_usize_int(N)), false)];
+                        Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true); [1, 1, 0, 0, 0]);
+             pair(Sigma (_ : Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true)), Eq(Int, #isub(seq::len T l, #cast_usize_int(N)), seq::len T (seq::drop T l (#cast_usize_int(N)))),
+                  q1,
+                  eq::sym Int (seq::len T (seq::drop T l (#cast_usize_int(N)))) (#isub(seq::len T l, #cast_usize_int(N))) (seq::len_drop T l (#cast_usize_int(N)) p0 q1)))) c;
+      let .p1 : Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true) = fst(q);
+      let .pn : Eq(Int, #isub(n, #cast_usize_int(N)), seq::len T (seq::drop T l (#cast_usize_int(N)))) = snd(q);
+      let r : Sigma (c : List(Array T N)), .Eq(Bool, #le_int(seq::len (Array T N) c, seq::len T (seq::drop T l (#cast_usize_int(N)))), true) =
+        rec(T, N, .hN, seq::drop T l (#cast_usize_int(N)), #isub(n, #cast_usize_int(N)), .pn;
+          pair(Sigma (_ : Eq(Bool, #le_int(0int, seq::len T (seq::drop T l (#cast_usize_int(N)))), true)),
+                 Eq(Bool, #lt_int(seq::len T (seq::drop T l (#cast_usize_int(N))), seq::len T l), true),
+               linarith([]; Eq(Bool, #le_int(0int, seq::len T (seq::drop T l (#cast_usize_int(N)))), true); [1, 1]),
+               linarith([seq::len_drop T l (#cast_usize_int(N)) p0 p1
+                           : Eq(Int, seq::len T (seq::drop T l (#cast_usize_int(N))), #isub(seq::len T l, #cast_usize_int(N))),
+                         hN : Eq(Bool, #lt_usize(0usize, N), true)];
+                        Eq(Bool, #lt_int(seq::len T (seq::drop T l (#cast_usize_int(N))), seq::len T l), true); [1, 1, 1, 0, 0, 0, 0])));
+      pair(Sigma (c : List(Array T N)), .Eq(Bool, #le_int(seq::len (Array T N) c, seq::len T l), true),
+           Cons[Array T N](pair(Array T N, seq::take T l (#cast_usize_int(N)), seq::len_take T l (#cast_usize_int(N)) p0 p1), fst(r)),
+           linarith([snd(r) : Eq(Bool, #le_int(seq::len (Array T N) fst(r), seq::len T (seq::drop T l (#cast_usize_int(N)))), true),
+                     seq::len_drop T l (#cast_usize_int(N)) p0 p1
+                       : Eq(Int, seq::len T (seq::drop T l (#cast_usize_int(N))), #isub(seq::len T l, #cast_usize_int(N))),
+                     hN : Eq(Bool, #lt_usize(0usize, N), true)];
+                    Eq(Bool, #le_int(#iadd(1int, seq::len (Array T N) fst(r)), seq::len T l), true); [1, 1, 1, 1, 0, 0, 0, 0, 0]))
+  measure (seq::len T l)
+
+def[prelude] seq::chunks_c : (T : Type) -> (N : Usize) -> (.hN : Eq(Bool, #lt_usize(0usize, N), true)) -> (l : List(T))
+    -> Sigma (c : List(Array T N)), .Eq(Bool, #le_int(seq::len (Array T N) c, seq::len T l), true) :=
+  fun (T : Type) (N : Usize) (.hN : Eq(Bool, #lt_usize(0usize, N), true)) (l : List(T)) =>
+    seq::chunks_go T N .hN l (seq::len T l) .refl(Int, seq::len T l)
+
+def[prelude] seq::chunks_rest_go : (T : Type) -> (N : Usize) -> (.hN : Eq(Bool, #lt_usize(0usize, N), true)) -> (l : List(T))
+    -> (n : Int) -> (.hn : Eq(Int, n, seq::len T l)) -> Sigma (r : List(T)), .Eq(Bool, #le_int(seq::len T r, seq::len T l), true) :=
+  fun (T : Type) (N : Usize) (.hN : Eq(Bool, #lt_usize(0usize, N), true)) (l : List(T)) (n : Int) (.hn : Eq(Int, n, seq::len T l)) =>
+    if #lt_int(n, #cast_usize_int(N)) as .c
+      return Sigma (r : List(T)), .Eq(Bool, #le_int(seq::len T r, seq::len T l), true)
+    then pair(Sigma (r : List(T)), .Eq(Bool, #le_int(seq::len T r, seq::len T l), true),
+              l, linarith([]; Eq(Bool, #le_int(seq::len T l, seq::len T l), true); [1, 0]))
+    else
+      let .p0 : Eq(Bool, #le_int(0int, #cast_usize_int(N)), true) =
+        linarith([]; Eq(Bool, #le_int(0int, #cast_usize_int(N)), true); [1, 1, 0]);
+      let .q : Sigma (_ : Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true)), Eq(Int, #isub(n, #cast_usize_int(N)), seq::len T (seq::drop T l (#cast_usize_int(N)))) =
+        (transport(Int, seq::len T l, n, eq::sym Int n (seq::len T l) hn,
+           z. (cz : Eq(Bool, #lt_int(z, #cast_usize_int(N)), false))
+                -> Sigma (_ : Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true)), Eq(Int, #isub(z, #cast_usize_int(N)), seq::len T (seq::drop T l (#cast_usize_int(N)))),
+           fun (cl : Eq(Bool, #lt_int(seq::len T l, #cast_usize_int(N)), false)) =>
+             let q1 : Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true) =
+               linarith([cl : Eq(Bool, #lt_int(seq::len T l, #cast_usize_int(N)), false)];
+                        Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true); [1, 1, 0, 0, 0]);
+             pair(Sigma (_ : Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true)), Eq(Int, #isub(seq::len T l, #cast_usize_int(N)), seq::len T (seq::drop T l (#cast_usize_int(N)))),
+                  q1,
+                  eq::sym Int (seq::len T (seq::drop T l (#cast_usize_int(N)))) (#isub(seq::len T l, #cast_usize_int(N))) (seq::len_drop T l (#cast_usize_int(N)) p0 q1)))) c;
+      let .p1 : Eq(Bool, #le_int(#cast_usize_int(N), seq::len T l), true) = fst(q);
+      let .pn : Eq(Int, #isub(n, #cast_usize_int(N)), seq::len T (seq::drop T l (#cast_usize_int(N)))) = snd(q);
+      let r : Sigma (r : List(T)), .Eq(Bool, #le_int(seq::len T r, seq::len T (seq::drop T l (#cast_usize_int(N)))), true) =
+        rec(T, N, .hN, seq::drop T l (#cast_usize_int(N)), #isub(n, #cast_usize_int(N)), .pn;
+          pair(Sigma (_ : Eq(Bool, #le_int(0int, seq::len T (seq::drop T l (#cast_usize_int(N)))), true)),
+                 Eq(Bool, #lt_int(seq::len T (seq::drop T l (#cast_usize_int(N))), seq::len T l), true),
+               linarith([]; Eq(Bool, #le_int(0int, seq::len T (seq::drop T l (#cast_usize_int(N)))), true); [1, 1]),
+               linarith([seq::len_drop T l (#cast_usize_int(N)) p0 p1
+                           : Eq(Int, seq::len T (seq::drop T l (#cast_usize_int(N))), #isub(seq::len T l, #cast_usize_int(N))),
+                         hN : Eq(Bool, #lt_usize(0usize, N), true)];
+                        Eq(Bool, #lt_int(seq::len T (seq::drop T l (#cast_usize_int(N))), seq::len T l), true); [1, 1, 1, 0, 0, 0, 0])));
+      pair(Sigma (r2 : List(T)), .Eq(Bool, #le_int(seq::len T r2, seq::len T l), true),
+           fst(r),
+           linarith([snd(r) : Eq(Bool, #le_int(seq::len T fst(r), seq::len T (seq::drop T l (#cast_usize_int(N)))), true),
+                     seq::len_drop T l (#cast_usize_int(N)) p0 p1
+                       : Eq(Int, seq::len T (seq::drop T l (#cast_usize_int(N))), #isub(seq::len T l, #cast_usize_int(N)))];
+                    Eq(Bool, #le_int(seq::len T fst(r), seq::len T l), true); [1, 1, 1, 0, 0, 0, 1, 0]))
+  measure (seq::len T l)
+
+def[prelude] seq::chunks_rest_c : (T : Type) -> (N : Usize) -> (.hN : Eq(Bool, #lt_usize(0usize, N), true)) -> (l : List(T))
+    -> Sigma (r : List(T)), .Eq(Bool, #le_int(seq::len T r, seq::len T l), true) :=
+  fun (T : Type) (N : Usize) (.hN : Eq(Bool, #lt_usize(0usize, N), true)) (l : List(T)) =>
+    seq::chunks_rest_go T N .hN l (seq::len T l) .refl(Int, seq::len T l)
+
+def[prelude] seq::chunks : (T : Type) -> (N : Usize) -> (.hN : Eq(Bool, #lt_usize(0usize, N), true)) -> (l : List(T)) -> List(Array T N) :=
+  fun (T : Type) (N : Usize) (.hN : Eq(Bool, #lt_usize(0usize, N), true)) (l : List(T)) => fst(seq::chunks_c T N .hN l)
+
+def[prelude] seq::chunks_rest : (T : Type) -> (N : Usize) -> (.hN : Eq(Bool, #lt_usize(0usize, N), true)) -> (l : List(T)) -> List(T) :=
+  fun (T : Type) (N : Usize) (.hN : Eq(Bool, #lt_usize(0usize, N), true)) (l : List(T)) => fst(seq::chunks_rest_c T N .hN l)
+
+def[prelude] seq::as_chunks : (T : Type) -> (N : Usize) -> (.hN : Eq(Bool, #lt_usize(0usize, N), true)) -> (l : List(T))
+    -> Tuple2(List(Array T N), List(T)) :=
+  fun (T : Type) (N : Usize) (.hN : Eq(Bool, #lt_usize(0usize, N), true)) (l : List(T)) =>
+    tuple2[List(Array T N), List(T)](seq::chunks T N .hN l, seq::chunks_rest T N .hN l)
+
+def[prelude] slice::as_chunks : (T : Type) -> (s : Slice T) -> (N : Usize) -> (.hN : Eq(Bool, #lt_usize(0usize, N), true))
+    -> Tuple2(Slice (Array T N), Slice T) :=
+  fun (T : Type) (s : Slice T) (N : Usize) (.hN : Eq(Bool, #lt_usize(0usize, N), true)) =>
+    let c : Sigma (c : List(Array T N)), .Eq(Bool, #le_int(seq::len (Array T N) c, seq::len T fst(snd(s))), true) =
+      seq::chunks_c T N .hN fst(snd(s));
+    let r : Sigma (r : List(T)), .Eq(Bool, #le_int(seq::len T r, seq::len T fst(snd(s))), true) =
+      seq::chunks_rest_c T N .hN fst(snd(s));
+    let .q0 : Eq(Bool, #le_int(0int, seq::len (Array T N) fst(c)), true) =
+      linarith([]; Eq(Bool, #le_int(0int, seq::len (Array T N) fst(c)), true); [1, 1]);
+    let .q1 : Eq(Bool, #le_int(seq::len (Array T N) fst(c), 18446744073709551615int), true) =
+      linarith([snd(c) : Eq(Bool, #le_int(seq::len (Array T N) fst(c), seq::len T fst(snd(s))), true),
+                slice::ok_len T s : Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s)))];
+               Eq(Bool, #le_int(seq::len (Array T N) fst(c), 18446744073709551615int), true); [1, 1, 1, 0, 0, 0, 1]);
+    let nc : Usize = #of_int_usize(seq::len (Array T N) fst(c); q0, q1);
+    let .q2 : Eq(Bool, #le_int(0int, seq::len T fst(r)), true) =
+      linarith([]; Eq(Bool, #le_int(0int, seq::len T fst(r)), true); [1, 1]);
+    let .q3 : Eq(Bool, #le_int(seq::len T fst(r), 18446744073709551615int), true) =
+      linarith([snd(r) : Eq(Bool, #le_int(seq::len T fst(r), seq::len T fst(snd(s))), true),
+                slice::ok_len T s : Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s)))];
+               Eq(Bool, #le_int(seq::len T fst(r), 18446744073709551615int), true); [1, 1, 1, 0, 0, 0, 1]);
+    let nr : Usize = #of_int_usize(seq::len T fst(r); q2, q3);
+    tuple2[Slice (Array T N), Slice T](
+      slice::mk (Array T N) nc fst(c)
+        .pair(SliceOk (Array T N) nc fst(c), refl(Int, seq::len (Array T N) fst(c)),
+          linarith([snd(c) : Eq(Bool, #le_int(seq::len (Array T N) fst(c), seq::len T fst(snd(s))), true),
+                    slice::ok_len T s : Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s))),
+                    slice::ok_bound T s : Eq(Bool, #le_int(#cast_usize_int(fst(s)), ISIZE_MAX), true)];
+                   Eq(Bool, #le_int(seq::len (Array T N) fst(c), ISIZE_MAX), true); [1, 1, 1, 1, 0, 0, 0, 0])),
+      slice::mk T nr fst(r)
+        .pair(SliceOk T nr fst(r), refl(Int, seq::len T fst(r)),
+          linarith([snd(r) : Eq(Bool, #le_int(seq::len T fst(r), seq::len T fst(snd(s))), true),
+                    slice::ok_len T s : Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s))),
+                    slice::ok_bound T s : Eq(Bool, #le_int(#cast_usize_int(fst(s)), ISIZE_MAX), true)];
+                   Eq(Bool, #le_int(seq::len T fst(r), ISIZE_MAX), true); [1, 1, 1, 1, 0, 0, 0, 0])))

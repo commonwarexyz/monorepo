@@ -1,0 +1,36 @@
+[package]
+name = "sandblaster-targets"
+description = "Executable reference models of hardware intrinsics (Arm ARM / Intel SDM transcriptions) with differential tests against real hardware, and their kernel core-text transcriptions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# Not published yet: the toolchain lives in the monorepo as a build tool.
+publish = false
+build = "build.rs"
+
+# No dependencies by default, on purpose: the models, the FIPS 180-4
+# reference, the PRNG, the evidence writer and the JSON reader are all
+# self-contained so that the trusted target-semantics library (DESIGN.md §1.1
+# item 4, §9.2) has no third-party code in it. The core-text models
+# (`core/*.core`) are embedded as text and need nothing either.
+#
+# The `kernel` feature adds the sandblaster kernel (a workspace crate) for the
+# kernel-side API (`kernel::load`, `kernel::apply`) and the K-style
+# cross-checks between the core-text models (evaluated by the kernel) and the
+# executable models.
+[dependencies]
+sandblaster-kernel = { workspace = true, optional = true }
+
+[features]
+default = []
+kernel = ["dep:sandblaster-kernel"]
+
+[[bin]]
+name = "sandblaster-targets-evidence"
+path = "src/bin/sandblaster-targets-evidence.rs"
+
+[[test]]
+name = "kernel_crosscheck"
+path = "tests/kernel_crosscheck.rs"
+required-features = ["kernel"]

@@ -1,7 +1,7 @@
-//! Verifies the MMR position and peak arithmetic in place: rustoleum reads
+//! Verifies the MMR position and peak arithmetic in place: sandblaster reads
 //! `src/merkle/position.rs`, `src/merkle/location.rs`,
 //! `src/merkle/mmr/mod.rs` and `src/merkle/mmr/iterator.rs` as written,
-//! proves `rustoleum/mmr/LAWS.rs` about them (and that they never panic
+//! proves `sandblaster/mmr/LAWS.rs` about them (and that they never panic
 //! within their stated preconditions). rustc compiles the same files; a
 //! failing proof fails this crate's build. The specification lock is not
 //! accepted yet, so this uses the development aid
@@ -11,8 +11,8 @@
 //! CHECKED, §15 GATES PENDING`) and a `NOT VERIFIED` stub as
 //! `OUT_DIR/mmr-verified.txt`. Once the lock is accepted this becomes
 //! `compile_lifted` (which also runs the lift conformance check; with the
-//! wip/augment toolchain that check does not support in-place modules yet,
+//! current sandblaster toolchain that check does not support in-place modules yet,
 //! so `compile_lifted` issues no verdict for this crate until it does).
 fn main() {
-    rustoleum::build::compile_lifted_pending_gates("rustoleum/mmr/mod.rs", "mmr");
+    sandblaster::build::compile_lifted_pending_gates("sandblaster/mmr/mod.rs", "mmr");
 }

@@ -1,0 +1,449 @@
+-- sandblaster prelude lemmas: lists and the ghost sequence functions
+-- (DESIGN.md §6: take_drop_append, index_update_same/other, list_ext,
+-- len_cons, list equality).
+--
+-- Checked, untrusted. Recursive prelude functions applied to symbolic data
+-- are stuck (§5.6), so proofs unfold them with `delta` and case-split on the
+-- exposed test.
+
+-- Computation rules (definitional; stated for use by name).
+def[lemma] seq::len_cons : (T : Type) -> (h : T) -> (t : List(T)) -> Eq(Int, seq::len T (Cons[T](h, t)), #iadd(1int, seq::len T t)) :=
+  fun (T : Type) (h : T) (t : List(T)) => refl(Int, #iadd(1int, seq::len T t))
+
+def[lemma] seq::append_cons : (T : Type) -> (h : T) -> (t : List(T)) -> (ys : List(T))
+    -> Eq(List(T), seq::append T (Cons[T](h, t)) ys, Cons[T](h, seq::append T t ys)) :=
+  fun (T : Type) (h : T) (t : List(T)) (ys : List(T)) => refl(List(T), Cons[T](h, seq::append T t ys))
+
+def[lemma] seq::drop_zero : (T : Type) -> (l : List(T)) -> Eq(List(T), seq::drop T l 0int, l) :=
+  fun (T : Type) (l : List(T)) =>
+    match l : List(T) as y return Eq(List(T), seq::drop T y 0int, y) with
+    | Nil => refl(List(T), Nil[T])
+    | Cons(x, t) => refl(List(T), Cons[T](x, t))
+    end
+
+def[lemma] seq::take_zero : (T : Type) -> (l : List(T)) -> Eq(List(T), seq::take T l 0int, Nil[T]) :=
+  fun (T : Type) (l : List(T)) =>
+    match l : List(T) as y return Eq(List(T), seq::take T y 0int, Nil[T]) with
+    | Nil => refl(List(T), Nil[T])
+    | Cons(x, t) => refl(List(T), Nil[T])
+    end
+
+def[lemma] seq::append_nil : (T : Type) -> (l : List(T)) -> Eq(List(T), seq::append T l Nil[T], l) :=
+  fun (T : Type) (l : List(T)) =>
+    match l : List(T) as y return Eq(List(T), seq::append T y Nil[T], y) with
+    | Nil => refl(List(T), Nil[T])
+    | Cons(x, t) => eq::cong (List(T)) (List(T)) (fun (r : List(T)) => Cons[T](x, r)) (seq::append T t Nil[T]) t (rec(T, t))
+    end
+  structural 1
+
+-- take ++ drop.
+def[lemma] seq::take_drop_append : (T : Type) -> (l : List(T)) -> (n : Int)
+    -> Eq(List(T), seq::append T (seq::take T l n) (seq::drop T l n), l) :=
+  fun (T : Type) (l : List(T)) (n : Int) =>
+    match l : List(T) as y return Eq(List(T), seq::append T (seq::take T y n) (seq::drop T y n), y) with
+    | Nil => refl(List(T), Nil[T])
+    | Cons(x, t) =>
+        transport(List(T),
+          match #le_int(n, 0int) : Bool as _ return List(T) with | false => Cons[T](x, seq::take T t (#isub(n, 1int))) | true => Nil[T] end,
+          seq::take T (Cons[T](x, t)) n,
+          eq::sym (List(T)) (seq::take T (Cons[T](x, t)) n)
+            (match #le_int(n, 0int) : Bool as _ return List(T) with | false => Cons[T](x, seq::take T t (#isub(n, 1int))) | true => Nil[T] end)
+            (delta(seq::take; T, Cons[T](x, t), n)),
+          z. Eq(List(T), seq::append T z (seq::drop T (Cons[T](x, t)) n), Cons[T](x, t)),
+          transport(List(T),
+            match #le_int(n, 0int) : Bool as _ return List(T) with | false => seq::drop T t (#isub(n, 1int)) | true => Cons[T](x, t) end,
+            seq::drop T (Cons[T](x, t)) n,
+            eq::sym (List(T)) (seq::drop T (Cons[T](x, t)) n)
+              (match #le_int(n, 0int) : Bool as _ return List(T) with | false => seq::drop T t (#isub(n, 1int)) | true => Cons[T](x, t) end)
+              (delta(seq::drop; T, Cons[T](x, t), n)),
+            z. Eq(List(T),
+                  seq::append T (match #le_int(n, 0int) : Bool as _ return List(T) with | false => Cons[T](x, seq::take T t (#isub(n, 1int))) | true => Nil[T] end) z,
+                  Cons[T](x, t)),
+            match #le_int(n, 0int) : Bool as b return Eq(List(T),
+                seq::append T (match b : Bool as _ return List(T) with | false => Cons[T](x, seq::take T t (#isub(n, 1int))) | true => Nil[T] end)
+                              (match b : Bool as _ return List(T) with | false => seq::drop T t (#isub(n, 1int)) | true => Cons[T](x, t) end),
+                Cons[T](x, t)) with
+            | false => eq::cong (List(T)) (List(T)) (fun (r : List(T)) => Cons[T](x, r))
+                         (seq::append T (seq::take T t (#isub(n, 1int))) (seq::drop T t (#isub(n, 1int)))) t (rec(T, t, #isub(n, 1int)))
+            | true => refl(List(T), Cons[T](x, t))
+            end))
+    end
+  structural 1
+
+-- Boolean list equality with a sound (complete) element equality.
+def[lemma] seq::eq_sound : (T : Type) -> (eq : T -> T -> Bool)
+    -> (sound : (a : T) -> (b : T) -> (.h : Eq(Bool, eq a b, true)) -> Eq(T, a, b))
+    -> (xs : List(T)) -> (ys : List(T)) -> (.h : Eq(Bool, seq::eq T eq xs ys, true)) -> Eq(List(T), xs, ys) :=
+  fun (T : Type) (eq : T -> T -> Bool) (sound : (a : T) -> (b : T) -> (.h : Eq(Bool, eq a b, true)) -> Eq(T, a, b))
+      (xs : List(T)) (ys : List(T)) (.h : Eq(Bool, seq::eq T eq xs ys, true)) =>
+    (match xs : List(T) as u return (w : List(T)) -> (.h2 : Eq(Bool, seq::eq T eq u w, true)) -> Eq(List(T), u, w) with
+     | Nil => fun (w : List(T)) =>
+         match w : List(T) as v return (.h2 : Eq(Bool, seq::eq T eq Nil[T] v, true)) -> Eq(List(T), Nil[T], v) with
+         | Nil => fun (.h2 : Eq(Bool, true, true)) => refl(List(T), Nil[T])
+         | Cons(y, v) => fun (.h2 : Eq(Bool, false, true)) => absurd(Eq(List(T), Nil[T], Cons[T](y, v)), bool::false_ne_true h2)
+         end
+     | Cons(x, t) => fun (w : List(T)) =>
+         match w : List(T) as v return (.h2 : Eq(Bool, seq::eq T eq (Cons[T](x, t)) v, true)) -> Eq(List(T), Cons[T](x, t), v) with
+         | Nil => fun (.h2 : Eq(Bool, false, true)) => absurd(Eq(List(T), Cons[T](x, t), Nil[T]), bool::false_ne_true h2)
+         | Cons(y, v) => fun (.h2 : Eq(Bool, seq::eq T eq (Cons[T](x, t)) (Cons[T](y, v)), true)) =>
+             let .h3 : Eq(Bool, bool::and (eq x y) (seq::eq T eq t v), true) =
+               eq::trans Bool (bool::and (eq x y) (seq::eq T eq t v)) (seq::eq T eq (Cons[T](x, t)) (Cons[T](y, v))) true
+                 (eq::sym Bool (seq::eq T eq (Cons[T](x, t)) (Cons[T](y, v))) (bool::and (eq x y) (seq::eq T eq t v))
+                   (delta(seq::eq; T, eq, Cons[T](x, t), Cons[T](y, v))))
+                 h2;
+             let .hx : Eq(T, x, y) = sound x y .(bool::and_left (eq x y) (seq::eq T eq t v) .h3);
+             let .ht : Eq(List(T), t, v) = rec(T, eq, sound, t, v, .(bool::and_right (eq x y) (seq::eq T eq t v) .h3));
+             transport(T, x, y, hx, z. Eq(List(T), Cons[T](x, t), Cons[T](z, v)),
+               transport(List(T), t, v, ht, z. Eq(List(T), Cons[T](x, t), Cons[T](x, z)), refl(List(T), Cons[T](x, t))))
+         end
+     end) ys .h
+  structural 3
+
+def[lemma] seq::eq_refl : (T : Type) -> (eq : T -> T -> Bool)
+    -> (complete : (a : T) -> Eq(Bool, eq a a, true))
+    -> (xs : List(T)) -> Eq(Bool, seq::eq T eq xs xs, true) :=
+  fun (T : Type) (eq : T -> T -> Bool) (complete : (a : T) -> Eq(Bool, eq a a, true)) (xs : List(T)) =>
+    match xs : List(T) as u return Eq(Bool, seq::eq T eq u u, true) with
+    | Nil => refl(Bool, true)
+    | Cons(x, t) =>
+        -- seq::eq (x :: t) (x :: t) = eq x x && seq::eq t t
+        transport(Bool, bool::and (eq x x) (seq::eq T eq t t), seq::eq T eq (Cons[T](x, t)) (Cons[T](x, t)),
+          eq::sym Bool (seq::eq T eq (Cons[T](x, t)) (Cons[T](x, t))) (bool::and (eq x x) (seq::eq T eq t t))
+            (delta(seq::eq; T, eq, Cons[T](x, t), Cons[T](x, t))),
+          z. Eq(Bool, z, true),
+          transport(Bool, true, eq x x, eq::sym Bool (eq x x) true (complete x),
+            z. Eq(Bool, bool::and z (seq::eq T eq t t), true),
+            rec(T, eq, complete, t)))
+    end
+  structural 3
+
+-- Boolean and propositional equality of sequences of machine integers (§15 S5): spec code
+-- compares sequences with the boolean `==`, laws and facts state equalities.
+%for W in u8 u16 u32 u64 usize
+def[lemma] seq::eq_sound_$w : (xs : List($W)) -> (ys : List($W))
+    -> (.h : Eq(Bool, seq::eq $W (fun (u : $W) (v : $W) => #eq_$w(u, v)) xs ys, true)) -> Eq(List($W), xs, ys) :=
+  fun (xs : List($W)) (ys : List($W)) (.h : Eq(Bool, seq::eq $W (fun (u : $W) (v : $W) => #eq_$w(u, v)) xs ys, true)) =>
+    seq::eq_sound $W (fun (u : $W) (v : $W) => #eq_$w(u, v)) (fun (a : $W) (b : $W) (.h2 : Eq(Bool, #eq_$w(a, b), true)) => $w::eq_sound a b .h2) xs ys .h
+
+def[lemma] seq::eq_complete_$w : (xs : List($W)) -> (ys : List($W))
+    -> (.e : Eq(List($W), xs, ys)) -> Eq(Bool, seq::eq $W (fun (u : $W) (v : $W) => #eq_$w(u, v)) xs ys, true) :=
+  fun (xs : List($W)) (ys : List($W)) (.e : Eq(List($W), xs, ys)) =>
+    transport(List($W), xs, ys, e, z. Eq(Bool, seq::eq $W (fun (u : $W) (v : $W) => #eq_$w(u, v)) xs z, true),
+      seq::eq_refl $W (fun (u : $W) (v : $W) => #eq_$w(u, v)) (fun (a : $W) => $w::eq_complete a a .(refl($W, a))) xs)
+
+%end
+-- ---------------------------------------------------------------------------
+-- Indexing: one step of `seq::index` on a cons, and index/update.
+-- ---------------------------------------------------------------------------
+
+-- `index (x :: t) i = x` for `i ≤ 0` (with `0 ≤ i`).
+def[lemma] seq::index_cons_zero : (T : Type) -> (x : T) -> (t : List(T)) -> (i : Int)
+    -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true))
+    -> (.hz : Eq(Bool, #le_int(i, 0int), true))
+    -> Eq(T, seq::index T (Cons[T](x, t)) i .h0 .h1, x) :=
+  fun (T : Type) (x : T) (t : List(T)) (i : Int)
+      (.h0 : Eq(Bool, #le_int(0int, i), true)) (.h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true))
+      (.hz : Eq(Bool, #le_int(i, 0int), true)) =>
+    transport(T,
+      (match #le_int(i, 0int) : Bool as b return (.c : Eq(Bool, #le_int(i, 0int), b)) -> T with
+       | false => fun (.c : Eq(Bool, #le_int(i, 0int), false)) =>
+           seq::index T t (#isub(i, 1int))
+             .linarith([c : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1])
+             .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])
+       | true => fun (.c : Eq(Bool, #le_int(i, 0int), true)) => x
+       end) .refl(Bool, #le_int(i, 0int)),
+      seq::index T (Cons[T](x, t)) i .h0 .h1,
+      eq::sym T (seq::index T (Cons[T](x, t)) i .h0 .h1)
+        ((match #le_int(i, 0int) : Bool as b return (.c : Eq(Bool, #le_int(i, 0int), b)) -> T with
+          | false => fun (.c : Eq(Bool, #le_int(i, 0int), false)) =>
+              seq::index T t (#isub(i, 1int))
+                .linarith([c : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1])
+                .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])
+          | true => fun (.c : Eq(Bool, #le_int(i, 0int), true)) => x
+          end) .refl(Bool, #le_int(i, 0int)))
+        (delta(seq::index; T, Cons[T](x, t), i, .h0, .h1)),
+      z. Eq(T, z, x),
+      (transport(Bool, true, #le_int(i, 0int), eq::sym Bool (#le_int(i, 0int)) true hz,
+         z. (.c : Eq(Bool, #le_int(i, 0int), z)) -> Eq(T,
+              (match z : Bool as b return (.c2 : Eq(Bool, #le_int(i, 0int), b)) -> T with
+               | false => fun (.c2 : Eq(Bool, #le_int(i, 0int), false)) =>
+                   seq::index T t (#isub(i, 1int))
+                     .linarith([c2 : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1])
+                     .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])
+               | true => fun (.c2 : Eq(Bool, #le_int(i, 0int), true)) => x
+               end) .c,
+              x),
+         fun (.c : Eq(Bool, #le_int(i, 0int), true)) => refl(T, x))) .refl(Bool, #le_int(i, 0int)))
+
+-- `index (x :: t) i = index t (i − 1)` for `0 < i`.
+def[lemma] seq::index_cons_succ : (T : Type) -> (x : T) -> (t : List(T)) -> (i : Int)
+    -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true))
+    -> (.hs : Eq(Bool, #le_int(i, 0int), false))
+    -> Eq(T, seq::index T (Cons[T](x, t)) i .h0 .h1,
+             seq::index T t (#isub(i, 1int))
+               .linarith([hs : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1])
+               .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])) :=
+  fun (T : Type) (x : T) (t : List(T)) (i : Int)
+      (.h0 : Eq(Bool, #le_int(0int, i), true)) (.h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true))
+      (.hs : Eq(Bool, #le_int(i, 0int), false)) =>
+    transport(T,
+      (match #le_int(i, 0int) : Bool as b return (.c : Eq(Bool, #le_int(i, 0int), b)) -> T with
+       | false => fun (.c : Eq(Bool, #le_int(i, 0int), false)) =>
+           seq::index T t (#isub(i, 1int))
+             .linarith([c : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1])
+             .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])
+       | true => fun (.c : Eq(Bool, #le_int(i, 0int), true)) => x
+       end) .refl(Bool, #le_int(i, 0int)),
+      seq::index T (Cons[T](x, t)) i .h0 .h1,
+      eq::sym T (seq::index T (Cons[T](x, t)) i .h0 .h1)
+        ((match #le_int(i, 0int) : Bool as b return (.c : Eq(Bool, #le_int(i, 0int), b)) -> T with
+          | false => fun (.c : Eq(Bool, #le_int(i, 0int), false)) =>
+              seq::index T t (#isub(i, 1int))
+                .linarith([c : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1])
+                .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])
+          | true => fun (.c : Eq(Bool, #le_int(i, 0int), true)) => x
+          end) .refl(Bool, #le_int(i, 0int)))
+        (delta(seq::index; T, Cons[T](x, t), i, .h0, .h1)),
+      z. Eq(T, z, seq::index T t (#isub(i, 1int))
+               .linarith([hs : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1])
+               .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])),
+      (transport(Bool, false, #le_int(i, 0int), eq::sym Bool (#le_int(i, 0int)) false hs,
+         z. (.c : Eq(Bool, #le_int(i, 0int), z)) -> Eq(T,
+              (match z : Bool as b return (.c2 : Eq(Bool, #le_int(i, 0int), b)) -> T with
+               | false => fun (.c2 : Eq(Bool, #le_int(i, 0int), false)) =>
+                   seq::index T t (#isub(i, 1int))
+                     .linarith([c2 : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1])
+                     .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])
+               | true => fun (.c2 : Eq(Bool, #le_int(i, 0int), true)) => x
+               end) .c,
+              seq::index T t (#isub(i, 1int))
+                .linarith([hs : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1])
+                .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])),
+         fun (.c : Eq(Bool, #le_int(i, 0int), false)) =>
+           refl(T, seq::index T t (#isub(i, 1int))
+                     .linarith([hs : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1])
+                     .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T (Cons[T](x, t))), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])))) .refl(Bool, #le_int(i, 0int)))
+
+-- The bound `j < len (update l i v)` from `j < len l`.
+def[lemma] seq::lt_len_update : (T : Type) -> (l : List(T)) -> (i : Int) -> (v : T) -> (j : Int)
+    -> (.h : Eq(Bool, #lt_int(j, seq::len T l), true)) -> Eq(Bool, #lt_int(j, seq::len T (seq::update T l i v)), true) :=
+  fun (T : Type) (l : List(T)) (i : Int) (v : T) (j : Int) (.h : Eq(Bool, #lt_int(j, seq::len T l), true)) =>
+    eq::promote Bool (#lt_int(j, seq::len T (seq::update T l i v))) true
+      .transport(Int, seq::len T l, seq::len T (seq::update T l i v),
+         eq::sym Int (seq::len T (seq::update T l i v)) (seq::len T l) (seq::len_update T l i v),
+         z. Eq(Bool, #lt_int(j, z), true), h)
+
+-- Reading the updated position.
+def[lemma] seq::index_update_same : (T : Type) -> (l : List(T)) -> (i : Int) -> (v : T)
+    -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, seq::len T l), true))
+    -> Eq(T, seq::index T (seq::update T l i v) i .h0 .(seq::lt_len_update T l i v i .h1), v) :=
+  fun (T : Type) (l : List(T)) (i : Int) (v : T) (.h0 : Eq(Bool, #le_int(0int, i), true)) (.h1 : Eq(Bool, #lt_int(i, seq::len T l), true)) =>
+    (match l : List(T) as y return (.hy : Eq(Bool, #lt_int(i, seq::len T y), true))
+         -> Eq(T, seq::index T (seq::update T y i v) i .h0 .(seq::lt_len_update T y i v i .hy), v) with
+     | Nil => fun (.hy : Eq(Bool, #lt_int(i, 0int), true)) =>
+         absurd(Eq(T, seq::index T (seq::update T Nil[T] i v) i .h0 .(seq::lt_len_update T Nil[T] i v i .hy), v),
+           linarith([h0 : Eq(Bool, #le_int(0int, i), true), hy : Eq(Bool, #lt_int(i, 0int), true)]; Empty; [1, 1]))
+     | Cons(x, t) => fun (.hy : Eq(Bool, #lt_int(i, #iadd(1int, seq::len T t)), true)) =>
+         if #le_int(i, 0int) as .c return Eq(T, seq::index T (seq::update T (Cons[T](x, t)) i v) i .h0 .(seq::lt_len_update T (Cons[T](x, t)) i v i .hy), v)
+         then
+           -- i = 0: the head of the update is `v`.
+           eq::trans T (seq::index T (seq::update T (Cons[T](x, t)) i v) i .h0 .(seq::lt_len_update T (Cons[T](x, t)) i v i .hy))
+             (match #eq_int(i, 0int) : Bool as _ return T with | false => x | true => v end) v
+             (seq::index_cons_zero T (match #eq_int(i, 0int) : Bool as _ return T with | false => x | true => v end)
+                (seq::update T t (#isub(i, 1int)) v) i .h0 .(seq::lt_len_update T (Cons[T](x, t)) i v i .hy) .c)
+             (transport(Bool, true, #eq_int(i, 0int),
+                eq::sym Bool (#eq_int(i, 0int)) true
+                  (linarith([h0 : Eq(Bool, #le_int(0int, i), true), c : Eq(Bool, #le_int(i, 0int), true)]; Eq(Bool, #eq_int(i, 0int), true); [1, 0, 1, 0, 1, 1])),
+                z. Eq(T, match z : Bool as _ return T with | false => x | true => v end, v),
+                refl(T, v)))
+         else
+           -- 0 < i: one step, then the induction hypothesis.
+           eq::trans T (seq::index T (seq::update T (Cons[T](x, t)) i v) i .h0 .(seq::lt_len_update T (Cons[T](x, t)) i v i .hy))
+             (seq::index T (seq::update T t (#isub(i, 1int)) v) (#isub(i, 1int))
+                .linarith([c : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1])
+                .(seq::lt_len_update T t (#isub(i, 1int)) v (#isub(i, 1int))
+                   .linarith([hy : Eq(Bool, #lt_int(i, #iadd(1int, seq::len T t)), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])))
+             v
+             (seq::index_cons_succ T (match #eq_int(i, 0int) : Bool as _ return T with | false => x | true => v end)
+                (seq::update T t (#isub(i, 1int)) v) i .h0 .(seq::lt_len_update T (Cons[T](x, t)) i v i .hy) .c)
+             (rec(T, t, #isub(i, 1int), v,
+                .linarith([c : Eq(Bool, #le_int(i, 0int), false)]; Eq(Bool, #le_int(0int, #isub(i, 1int)), true); [1, 1]),
+                .linarith([hy : Eq(Bool, #lt_int(i, #iadd(1int, seq::len T t)), true)]; Eq(Bool, #lt_int(#isub(i, 1int), seq::len T t), true); [1, 1, 0])))
+     end) .h1
+  structural 1
+
+-- Reading another position (`i != j` as the exec code tests it).
+def[lemma] seq::index_update_other : (T : Type) -> (l : List(T)) -> (i : Int) -> (j : Int) -> (v : T)
+    -> (.h0 : Eq(Bool, #le_int(0int, j), true)) -> (.h1 : Eq(Bool, #lt_int(j, seq::len T l), true))
+    -> (.hne : Eq(Bool, #eq_int(i, j), false))
+    -> Eq(T, seq::index T (seq::update T l i v) j .h0 .(seq::lt_len_update T l i v j .h1), seq::index T l j .h0 .h1) :=
+  fun (T : Type) (l : List(T)) (i : Int) (j : Int) (v : T)
+      (.h0 : Eq(Bool, #le_int(0int, j), true)) (.h1 : Eq(Bool, #lt_int(j, seq::len T l), true))
+      (.hne : Eq(Bool, #eq_int(i, j), false)) =>
+    (match l : List(T) as y return (.hy : Eq(Bool, #lt_int(j, seq::len T y), true))
+         -> Eq(T, seq::index T (seq::update T y i v) j .h0 .(seq::lt_len_update T y i v j .hy), seq::index T y j .h0 .hy) with
+     | Nil => fun (.hy : Eq(Bool, #lt_int(j, 0int), true)) =>
+         absurd(Eq(T, seq::index T (seq::update T Nil[T] i v) j .h0 .(seq::lt_len_update T Nil[T] i v j .hy), seq::index T Nil[T] j .h0 .hy),
+           linarith([h0 : Eq(Bool, #le_int(0int, j), true), hy : Eq(Bool, #lt_int(j, 0int), true)]; Empty; [1, 1]))
+     | Cons(x, t) => fun (.hy : Eq(Bool, #lt_int(j, #iadd(1int, seq::len T t)), true)) =>
+         if #le_int(j, 0int) as .c
+           return Eq(T, seq::index T (seq::update T (Cons[T](x, t)) i v) j .h0 .(seq::lt_len_update T (Cons[T](x, t)) i v j .hy),
+                        seq::index T (Cons[T](x, t)) j .h0 .hy)
+         then
+           -- j = 0 and i ≠ 0: both sides are the head `x`.
+           eq::trans T (seq::index T (seq::update T (Cons[T](x, t)) i v) j .h0 .(seq::lt_len_update T (Cons[T](x, t)) i v j .hy))
+             (match #eq_int(i, 0int) : Bool as _ return T with | false => x | true => v end)
+             (seq::index T (Cons[T](x, t)) j .h0 .hy)
+             (seq::index_cons_zero T (match #eq_int(i, 0int) : Bool as _ return T with | false => x | true => v end)
+                (seq::update T t (#isub(i, 1int)) v) j .h0 .(seq::lt_len_update T (Cons[T](x, t)) i v j .hy) .c)
+             (eq::trans T (match #eq_int(i, 0int) : Bool as _ return T with | false => x | true => v end) x (seq::index T (Cons[T](x, t)) j .h0 .hy)
+                (transport(Bool, false, #eq_int(i, 0int),
+                   eq::sym Bool (#eq_int(i, 0int)) false
+                     (transport(Int, j, 0int,
+                        linarith([h0 : Eq(Bool, #le_int(0int, j), true), c : Eq(Bool, #le_int(j, 0int), true)]; Eq(Int, j, 0int); [1, 0, 1, 0, 1, 1]),
+                        z. Eq(Bool, #eq_int(i, z), false), hne)),
+                   z. Eq(T, match z : Bool as _ return T with | false => x | true => v end, x),
+                   refl(T, x)))
+                (eq::sym T (seq::index T (Cons[T](x, t)) j .h0 .hy) x (seq::index_cons_zero T x t j .h0 .hy .c)))
+         else
+           -- 0 < j: one step on both sides, then the induction hypothesis.
+           eq::trans T (seq::index T (seq::update T (Cons[T](x, t)) i v) j .h0 .(seq::lt_len_update T (Cons[T](x, t)) i v j .hy))
+             (seq::index T (seq::update T t (#isub(i, 1int)) v) (#isub(j, 1int))
+                .linarith([c : Eq(Bool, #le_int(j, 0int), false)]; Eq(Bool, #le_int(0int, #isub(j, 1int)), true); [1, 1])
+                .(seq::lt_len_update T t (#isub(i, 1int)) v (#isub(j, 1int))
+                   .linarith([hy : Eq(Bool, #lt_int(j, #iadd(1int, seq::len T t)), true)]; Eq(Bool, #lt_int(#isub(j, 1int), seq::len T t), true); [1, 1, 0])))
+             (seq::index T (Cons[T](x, t)) j .h0 .hy)
+             (seq::index_cons_succ T (match #eq_int(i, 0int) : Bool as _ return T with | false => x | true => v end)
+                (seq::update T t (#isub(i, 1int)) v) j .h0 .(seq::lt_len_update T (Cons[T](x, t)) i v j .hy) .c)
+             (eq::trans T
+                (seq::index T (seq::update T t (#isub(i, 1int)) v) (#isub(j, 1int))
+                   .linarith([c : Eq(Bool, #le_int(j, 0int), false)]; Eq(Bool, #le_int(0int, #isub(j, 1int)), true); [1, 1])
+                   .(seq::lt_len_update T t (#isub(i, 1int)) v (#isub(j, 1int))
+                      .linarith([hy : Eq(Bool, #lt_int(j, #iadd(1int, seq::len T t)), true)]; Eq(Bool, #lt_int(#isub(j, 1int), seq::len T t), true); [1, 1, 0])))
+                (seq::index T t (#isub(j, 1int))
+                   .linarith([c : Eq(Bool, #le_int(j, 0int), false)]; Eq(Bool, #le_int(0int, #isub(j, 1int)), true); [1, 1])
+                   .linarith([hy : Eq(Bool, #lt_int(j, #iadd(1int, seq::len T t)), true)]; Eq(Bool, #lt_int(#isub(j, 1int), seq::len T t), true); [1, 1, 0]))
+                (seq::index T (Cons[T](x, t)) j .h0 .hy)
+                (rec(T, t, #isub(i, 1int), #isub(j, 1int), v,
+                   .linarith([c : Eq(Bool, #le_int(j, 0int), false)]; Eq(Bool, #le_int(0int, #isub(j, 1int)), true); [1, 1]),
+                   .linarith([hy : Eq(Bool, #lt_int(j, #iadd(1int, seq::len T t)), true)]; Eq(Bool, #lt_int(#isub(j, 1int), seq::len T t), true); [1, 1, 0]),
+                   .(if #eq_int(#isub(i, 1int), #isub(j, 1int)) as .ec return Eq(Bool, #eq_int(#isub(i, 1int), #isub(j, 1int)), false)
+                     then absurd(Eq(Bool, #eq_int(#isub(i, 1int), #isub(j, 1int)), false),
+                            bool::false_ne_true (eq::trans Bool false (#eq_int(i, j)) true (eq::sym Bool (#eq_int(i, j)) false hne)
+                              (linarith([ec : Eq(Bool, #eq_int(#isub(i, 1int), #isub(j, 1int)), true)]; Eq(Bool, #eq_int(i, j), true); [-1, 1, 1, 1]))))
+                     else eq::promote Bool (#eq_int(#isub(i, 1int), #isub(j, 1int))) false .ec)))
+                (eq::sym T (seq::index T (Cons[T](x, t)) j .h0 .hy)
+                   (seq::index T t (#isub(j, 1int))
+                      .linarith([c : Eq(Bool, #le_int(j, 0int), false)]; Eq(Bool, #le_int(0int, #isub(j, 1int)), true); [1, 1])
+                      .linarith([hy : Eq(Bool, #lt_int(j, #iadd(1int, seq::len T t)), true)]; Eq(Bool, #lt_int(#isub(j, 1int), seq::len T t), true); [1, 1, 0]))
+                   (seq::index_cons_succ T x t j .h0 .hy .c)))
+     end) .h1
+  structural 1
+
+-- Extensionality: equal lengths and equal elements.
+def[lemma] seq::list_ext : (T : Type) -> (xs : List(T)) -> (ys : List(T))
+    -> (.hl : Eq(Int, seq::len T xs, seq::len T ys))
+    -> (.hi : (i : Int) -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, seq::len T xs), true))
+              -> (.h2 : Eq(Bool, #lt_int(i, seq::len T ys), true)) -> Eq(T, seq::index T xs i .h0 .h1, seq::index T ys i .h0 .h2))
+    -> Eq(List(T), xs, ys) :=
+  fun (T : Type) (xs : List(T)) (ys : List(T)) (.hl : Eq(Int, seq::len T xs, seq::len T ys))
+      (.hi : (i : Int) -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, seq::len T xs), true))
+             -> (.h2 : Eq(Bool, #lt_int(i, seq::len T ys), true)) -> Eq(T, seq::index T xs i .h0 .h1, seq::index T ys i .h0 .h2)) =>
+    (match xs : List(T) as u return (w : List(T)) -> (.hl2 : Eq(Int, seq::len T u, seq::len T w))
+         -> (.hi2 : (i : Int) -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, seq::len T u), true))
+                   -> (.h2 : Eq(Bool, #lt_int(i, seq::len T w), true)) -> Eq(T, seq::index T u i .h0 .h1, seq::index T w i .h0 .h2))
+         -> Eq(List(T), u, w) with
+     | Nil => fun (w : List(T)) =>
+         match w : List(T) as v return (.hl2 : Eq(Int, 0int, seq::len T v))
+             -> (.hi2 : (i : Int) -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, 0int), true))
+                       -> (.h2 : Eq(Bool, #lt_int(i, seq::len T v), true)) -> Eq(T, seq::index T Nil[T] i .h0 .h1, seq::index T v i .h0 .h2))
+             -> Eq(List(T), Nil[T], v) with
+         | Nil => fun (.hl2 : Eq(Int, 0int, 0int))
+                      (.hi2 : (i : Int) -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, 0int), true))
+                              -> (.h2 : Eq(Bool, #lt_int(i, 0int), true)) -> Eq(T, seq::index T Nil[T] i .h0 .h1, seq::index T Nil[T] i .h0 .h2)) =>
+             refl(List(T), Nil[T])
+         | Cons(y, v) => fun (.hl2 : Eq(Int, 0int, #iadd(1int, seq::len T v)))
+                      (.hi2 : (i : Int) -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, 0int), true))
+                              -> (.h2 : Eq(Bool, #lt_int(i, #iadd(1int, seq::len T v)), true)) -> Eq(T, seq::index T Nil[T] i .h0 .h1, seq::index T (Cons[T](y, v)) i .h0 .h2)) =>
+             absurd(Eq(List(T), Nil[T], Cons[T](y, v)), linarith([hl2 : Eq(Int, 0int, #iadd(1int, seq::len T v))]; Empty; [-1, 1]))
+         end
+     | Cons(x, t) => fun (w : List(T)) =>
+         match w : List(T) as v return (.hl2 : Eq(Int, #iadd(1int, seq::len T t), seq::len T v))
+             -> (.hi2 : (i : Int) -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, #iadd(1int, seq::len T t)), true))
+                       -> (.h2 : Eq(Bool, #lt_int(i, seq::len T v), true)) -> Eq(T, seq::index T (Cons[T](x, t)) i .h0 .h1, seq::index T v i .h0 .h2))
+             -> Eq(List(T), Cons[T](x, t), v) with
+         | Nil => fun (.hl2 : Eq(Int, #iadd(1int, seq::len T t), 0int))
+                      (.hi2 : (i : Int) -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, #iadd(1int, seq::len T t)), true))
+                              -> (.h2 : Eq(Bool, #lt_int(i, 0int), true)) -> Eq(T, seq::index T (Cons[T](x, t)) i .h0 .h1, seq::index T Nil[T] i .h0 .h2)) =>
+             absurd(Eq(List(T), Cons[T](x, t), Nil[T]), linarith([hl2 : Eq(Int, #iadd(1int, seq::len T t), 0int)]; Empty; [1, 1]))
+         | Cons(y, v) => fun (.hl2 : Eq(Int, #iadd(1int, seq::len T t), #iadd(1int, seq::len T v)))
+                      (.hi2 : (i : Int) -> (.h0 : Eq(Bool, #le_int(0int, i), true)) -> (.h1 : Eq(Bool, #lt_int(i, #iadd(1int, seq::len T t)), true))
+                              -> (.h2 : Eq(Bool, #lt_int(i, #iadd(1int, seq::len T v)), true)) -> Eq(T, seq::index T (Cons[T](x, t)) i .h0 .h1, seq::index T (Cons[T](y, v)) i .h0 .h2)) =>
+             let .hx : Eq(T, x, y) =
+               hi2 0int .refl(Bool, true)
+                 .linarith([]; Eq(Bool, #lt_int(0int, #iadd(1int, seq::len T t)), true); [1, 1])
+                 .linarith([]; Eq(Bool, #lt_int(0int, #iadd(1int, seq::len T v)), true); [1, 1]);
+             let .ht : Eq(List(T), t, v) =
+               rec(T, t, v,
+                 .linarith([hl2 : Eq(Int, #iadd(1int, seq::len T t), #iadd(1int, seq::len T v))]; Eq(Int, seq::len T t, seq::len T v); [-1, 1, 0, 0, 1, 1, 0, 0]),
+                 .(fun (i : Int) (.h0 : Eq(Bool, #le_int(0int, i), true)) (.h1 : Eq(Bool, #lt_int(i, seq::len T t), true))
+                       (.h2 : Eq(Bool, #lt_int(i, seq::len T v), true)) =>
+                     eq::trans T (seq::index T t i .h0 .h1)
+                       (seq::index T (Cons[T](x, t)) (#iadd(i, 1int))
+                          .linarith([h0 : Eq(Bool, #le_int(0int, i), true)]; Eq(Bool, #le_int(0int, #iadd(i, 1int)), true); [1/2, 1/2])
+                          .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T t), true)]; Eq(Bool, #lt_int(#iadd(i, 1int), #iadd(1int, seq::len T t)), true); [1, 1, 0]))
+                       (seq::index T v i .h0 .h2)
+                       (eq::sym T
+                          (seq::index T (Cons[T](x, t)) (#iadd(i, 1int))
+                             .linarith([h0 : Eq(Bool, #le_int(0int, i), true)]; Eq(Bool, #le_int(0int, #iadd(i, 1int)), true); [1/2, 1/2])
+                             .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T t), true)]; Eq(Bool, #lt_int(#iadd(i, 1int), #iadd(1int, seq::len T t)), true); [1, 1, 0]))
+                          (seq::index T t i .h0 .h1)
+                          (seq::index_cons_succ T x t (#iadd(i, 1int))
+                             .linarith([h0 : Eq(Bool, #le_int(0int, i), true)]; Eq(Bool, #le_int(0int, #iadd(i, 1int)), true); [1/2, 1/2])
+                             .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T t), true)]; Eq(Bool, #lt_int(#iadd(i, 1int), #iadd(1int, seq::len T t)), true); [1, 1, 0])
+                             .linarith([h0 : Eq(Bool, #le_int(0int, i), true)]; Eq(Bool, #le_int(#iadd(i, 1int), 0int), false); [1, 1])))
+                       (eq::trans T
+                          (seq::index T (Cons[T](x, t)) (#iadd(i, 1int))
+                             .linarith([h0 : Eq(Bool, #le_int(0int, i), true)]; Eq(Bool, #le_int(0int, #iadd(i, 1int)), true); [1/2, 1/2])
+                             .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T t), true)]; Eq(Bool, #lt_int(#iadd(i, 1int), #iadd(1int, seq::len T t)), true); [1, 1, 0]))
+                          (seq::index T (Cons[T](y, v)) (#iadd(i, 1int))
+                             .linarith([h0 : Eq(Bool, #le_int(0int, i), true)]; Eq(Bool, #le_int(0int, #iadd(i, 1int)), true); [1/2, 1/2])
+                             .linarith([h2 : Eq(Bool, #lt_int(i, seq::len T v), true)]; Eq(Bool, #lt_int(#iadd(i, 1int), #iadd(1int, seq::len T v)), true); [1, 1, 0]))
+                          (seq::index T v i .h0 .h2)
+                          (hi2 (#iadd(i, 1int))
+                             .linarith([h0 : Eq(Bool, #le_int(0int, i), true)]; Eq(Bool, #le_int(0int, #iadd(i, 1int)), true); [1/2, 1/2])
+                             .linarith([h1 : Eq(Bool, #lt_int(i, seq::len T t), true)]; Eq(Bool, #lt_int(#iadd(i, 1int), #iadd(1int, seq::len T t)), true); [1, 1, 0])
+                             .linarith([h2 : Eq(Bool, #lt_int(i, seq::len T v), true)]; Eq(Bool, #lt_int(#iadd(i, 1int), #iadd(1int, seq::len T v)), true); [1, 1, 0]))
+                          (seq::index_cons_succ T y v (#iadd(i, 1int))
+                             .linarith([h0 : Eq(Bool, #le_int(0int, i), true)]; Eq(Bool, #le_int(0int, #iadd(i, 1int)), true); [1/2, 1/2])
+                             .linarith([h2 : Eq(Bool, #lt_int(i, seq::len T v), true)]; Eq(Bool, #lt_int(#iadd(i, 1int), #iadd(1int, seq::len T v)), true); [1, 1, 0])
+                             .linarith([h0 : Eq(Bool, #le_int(0int, i), true)]; Eq(Bool, #le_int(#iadd(i, 1int), 0int), false); [1, 1])))));
+             transport(T, x, y, hx, z. Eq(List(T), Cons[T](x, t), Cons[T](z, v)),
+               transport(List(T), t, v, ht, z. Eq(List(T), Cons[T](x, t), Cons[T](x, z)), refl(List(T), Cons[T](x, t))))
+         end
+     end) ys .hl .hi
+  structural 1
+
+-- Taking the whole list.
+def[lemma] seq::take_len : (T : Type) -> (l : List(T)) -> Eq(List(T), seq::take T l (seq::len T l), l) :=
+  fun (T : Type) (l : List(T)) =>
+    match l : List(T) as y return Eq(List(T), seq::take T y (seq::len T y), y) with
+    | Nil => refl(List(T), Nil[T])
+    | Cons(x, t) =>
+        transport(List(T),
+          match #le_int(#iadd(1int, seq::len T t), 0int) : Bool as _ return List(T) with
+          | false => Cons[T](x, seq::take T t (#isub(#iadd(1int, seq::len T t), 1int))) | true => Nil[T] end,
+          seq::take T (Cons[T](x, t)) (#iadd(1int, seq::len T t)),
+          eq::sym (List(T)) (seq::take T (Cons[T](x, t)) (#iadd(1int, seq::len T t)))
+            (match #le_int(#iadd(1int, seq::len T t), 0int) : Bool as _ return List(T) with
+             | false => Cons[T](x, seq::take T t (#isub(#iadd(1int, seq::len T t), 1int))) | true => Nil[T] end)
+            (delta(seq::take; T, Cons[T](x, t), #iadd(1int, seq::len T t))),
+          z. Eq(List(T), z, Cons[T](x, t)),
+          transport(Bool, false, #le_int(#iadd(1int, seq::len T t), 0int),
+            eq::sym Bool (#le_int(#iadd(1int, seq::len T t), 0int)) false
+              (linarith([]; Eq(Bool, #le_int(#iadd(1int, seq::len T t), 0int), false); [1, 1])),
+            z. Eq(List(T), match z : Bool as _ return List(T) with
+                           | false => Cons[T](x, seq::take T t (#isub(#iadd(1int, seq::len T t), 1int))) | true => Nil[T] end, Cons[T](x, t)),
+            eq::cong (List(T)) (List(T)) (fun (r : List(T)) => Cons[T](x, r)) (seq::take T t (seq::len T t)) t (rec(T, t))))
+    end
+  structural 1

@@ -1,0 +1,349 @@
+-- sandblaster prelude lemmas: the §3.4 method facts (DESIGN.md §3.4, §6).
+--
+-- The elaborator adds these as facts at call sites (`FactOrigin::MethodFact`,
+-- table `sandblaster_front::auto::lemmas::method_facts`): facts about an
+-- `Option`-returning method hold in the `Some(..)` / `None` arm of a match
+-- on the call's result and take the arm's path equation as their last
+-- argument. Lengths are stated in `usize`/`Int` form for linarith; list
+-- contents at the list level.
+--
+-- Checked, untrusted.
+
+-- ---------------------------------------------------------------------------
+-- Helpers: constructor clash and injectivity for Option and pairs, and the
+-- two outcomes of a method written `if c as .h then Some(f .h) else None`.
+-- ---------------------------------------------------------------------------
+
+def[lemma] option::none_ne_some : (T : Type) -> (y : T) -> (e : Eq(Option(T), None[T], Some[T](y))) -> Empty :=
+  fun (T : Type) (y : T) (e : Eq(Option(T), None[T], Some[T](y))) =>
+    transport(Option(T), None[T], Some[T](y), e, z. match z : Option(T) as _ return Type with | None => Unit | Some(v) => Empty end, tt)
+
+def[lemma] option::some_inj : (T : Type) -> (x : T) -> (y : T) -> (.e : Eq(Option(T), Some[T](x), Some[T](y))) -> Eq(T, x, y) :=
+  fun (T : Type) (x : T) (y : T) (.e : Eq(Option(T), Some[T](x), Some[T](y))) =>
+    transport(Option(T), Some[T](x), Some[T](y), e, z. Eq(T, x, option::unwrap_or T z x), refl(T, x))
+
+def[lemma] tuple2::inj0 : (A : Type) -> (B : Type) -> (a1 : A) -> (b1 : B) -> (a2 : A) -> (b2 : B)
+    -> (.e : Eq(Tuple2(A, B), tuple2[A, B](a1, b1), tuple2[A, B](a2, b2))) -> Eq(A, a1, a2) :=
+  fun (A : Type) (B : Type) (a1 : A) (b1 : B) (a2 : A) (b2 : B) (.e : Eq(Tuple2(A, B), tuple2[A, B](a1, b1), tuple2[A, B](a2, b2))) =>
+    transport(Tuple2(A, B), tuple2[A, B](a1, b1), tuple2[A, B](a2, b2), e,
+      z. Eq(A, a1, match z : Tuple2(A, B) as _ return A with | tuple2(u, v) => u end), refl(A, a1))
+
+def[lemma] tuple2::inj1 : (A : Type) -> (B : Type) -> (a1 : A) -> (b1 : B) -> (a2 : A) -> (b2 : B)
+    -> (.e : Eq(Tuple2(A, B), tuple2[A, B](a1, b1), tuple2[A, B](a2, b2))) -> Eq(B, b1, b2) :=
+  fun (A : Type) (B : Type) (a1 : A) (b1 : B) (a2 : A) (b2 : B) (.e : Eq(Tuple2(A, B), tuple2[A, B](a1, b1), tuple2[A, B](a2, b2))) =>
+    transport(Tuple2(A, B), tuple2[A, B](a1, b1), tuple2[A, B](a2, b2), e,
+      z. Eq(B, b1, match z : Tuple2(A, B) as _ return B with | tuple2(u, v) => v end), refl(B, b1))
+
+-- `(if c as .h then Some(f .h) else None) == Some(y)`: the test holds and
+-- the payload is `y`.
+def[lemma] option::if_some : (T : Type) -> (c : Bool) -> (f : (.h : Eq(Bool, c, true)) -> T) -> (y : T)
+    -> (.e : Eq(Option(T), if c as .h return Option(T) then Some[T](f .h) else None[T], Some[T](y)))
+    -> Sigma (hc : Eq(Bool, c, true)), Eq(T, f .hc, y) :=
+  fun (T : Type) (c : Bool) (f : (.h : Eq(Bool, c, true)) -> T) (y : T)
+      (.e : Eq(Option(T), if c as .h return Option(T) then Some[T](f .h) else None[T], Some[T](y))) =>
+    (match c : Bool as b return (.cb : Eq(Bool, c, b))
+         -> (.e2 : Eq(Option(T), (match b : Bool as b2 return (.h : Eq(Bool, c, b2)) -> Option(T) with
+                                   | false => fun (.h : Eq(Bool, c, false)) => None[T]
+                                   | true => fun (.h : Eq(Bool, c, true)) => Some[T](f .h)
+                                   end) .cb, Some[T](y)))
+         -> Sigma (hc : Eq(Bool, c, true)), Eq(T, f .hc, y) with
+     | false => fun (.cb : Eq(Bool, c, false)) (.e2 : Eq(Option(T), None[T], Some[T](y))) =>
+         absurd(Sigma (hc : Eq(Bool, c, true)), Eq(T, f .hc, y), option::none_ne_some T y e2)
+     | true => fun (.cb : Eq(Bool, c, true)) (.e2 : Eq(Option(T), Some[T](f .cb), Some[T](y))) =>
+         pair(Sigma (hc : Eq(Bool, c, true)), Eq(T, f .hc, y), eq::promote Bool c true .cb, option::some_inj T (f .cb) y .e2)
+     end) .refl(Bool, c) .e
+
+-- `(if c as .h then Some(f .h) else None) == None`: the test fails.
+def[lemma] option::if_none : (T : Type) -> (c : Bool) -> (f : (.h : Eq(Bool, c, true)) -> T)
+    -> (.e : Eq(Option(T), if c as .h return Option(T) then Some[T](f .h) else None[T], None[T]))
+    -> Eq(Bool, c, false) :=
+  fun (T : Type) (c : Bool) (f : (.h : Eq(Bool, c, true)) -> T)
+      (.e : Eq(Option(T), if c as .h return Option(T) then Some[T](f .h) else None[T], None[T])) =>
+    (match c : Bool as b return (.cb : Eq(Bool, c, b))
+         -> (.e2 : Eq(Option(T), (match b : Bool as b2 return (.h : Eq(Bool, c, b2)) -> Option(T) with
+                                   | false => fun (.h : Eq(Bool, c, false)) => None[T]
+                                   | true => fun (.h : Eq(Bool, c, true)) => Some[T](f .h)
+                                   end) .cb, None[T]))
+         -> Eq(Bool, c, false) with
+     | false => fun (.cb : Eq(Bool, c, false)) (.e2 : Eq(Option(T), None[T], None[T])) => eq::promote Bool c false .cb
+     | true => fun (.cb : Eq(Bool, c, true)) (.e2 : Eq(Option(T), Some[T](f .cb), None[T])) =>
+         absurd(Eq(Bool, c, false), option::none_ne_some T (f .cb) (eq::sym (Option(T)) (Some[T](f .cb)) None[T] e2))
+     end) .refl(Bool, c) .e
+
+-- A nonempty list is its first element followed by the rest.
+def[lemma] seq::cons_index_drop : (T : Type) -> (l : List(T)) -> (.h1 : Eq(Bool, #lt_int(0int, seq::len T l), true))
+    -> Eq(List(T), Cons[T](seq::index T l 0int .refl(Bool, true) .h1, seq::drop T l 1int), l) :=
+  fun (T : Type) (l : List(T)) (.h1 : Eq(Bool, #lt_int(0int, seq::len T l), true)) =>
+    (match l : List(T) as y return (.hy : Eq(Bool, #lt_int(0int, seq::len T y), true))
+         -> Eq(List(T), Cons[T](seq::index T y 0int .refl(Bool, true) .hy, seq::drop T y 1int), y) with
+     | Nil => fun (.hy : Eq(Bool, #lt_int(0int, 0int), true)) =>
+         absurd(Eq(List(T), Cons[T](seq::index T Nil[T] 0int .refl(Bool, true) .hy, seq::drop T Nil[T] 1int), Nil[T]), bool::false_ne_true hy)
+     | Cons(x, t) => fun (.hy : Eq(Bool, #lt_int(0int, #iadd(1int, seq::len T t)), true)) =>
+         eq::cong (List(T)) (List(T)) (fun (r : List(T)) => Cons[T](x, r)) (seq::drop T t 0int) t (seq::drop_zero T t)
+     end) .h1
+
+-- ---------------------------------------------------------------------------
+-- split_at / split_at_checked
+-- ---------------------------------------------------------------------------
+
+-- `s.split_at(mid)` (lengths are definitional): the halves append to `s`.
+def[lemma] slice::split_at_append : (T : Type) -> (s : Slice T) -> (mid : Usize) -> (.h : Eq(Bool, #le_usize(mid, fst(s)), true))
+    -> Eq(List(T), seq::append T fst(snd(slice::prefix T s mid .h)) fst(snd(slice::suffix T s mid .h)), fst(snd(s))) :=
+  fun (T : Type) (s : Slice T) (mid : Usize) (.h : Eq(Bool, #le_usize(mid, fst(s)), true)) =>
+    seq::take_drop_append T fst(snd(s)) (#cast_usize_int(mid))
+
+def[lemma] slice::split_at_checked_some : (T : Type) -> (s : Slice T) -> (mid : Usize) -> (a : Slice T) -> (b : Slice T)
+    -> (.e : Eq(Option(Tuple2(Slice T, Slice T)), slice::split_at_checked T s mid, Some[Tuple2(Slice T, Slice T)](tuple2[Slice T, Slice T](a, b))))
+    -> Sigma (h0 : Eq(Bool, #le_usize(mid, fst(s)), true)),
+       Sigma (h1 : Eq(Usize, fst(a), mid)),
+       Sigma (h2 : Eq(Int, #cast_usize_int(fst(b)), #isub(#cast_usize_int(fst(s)), #cast_usize_int(mid)))),
+       Eq(List(T), seq::append T fst(snd(a)) fst(snd(b)), fst(snd(s))) :=
+  fun (T : Type) (s : Slice T) (mid : Usize) (a : Slice T) (b : Slice T)
+      (.e : Eq(Option(Tuple2(Slice T, Slice T)), slice::split_at_checked T s mid, Some[Tuple2(Slice T, Slice T)](tuple2[Slice T, Slice T](a, b)))) =>
+    let r : Sigma (hc : Eq(Bool, #le_usize(mid, fst(s)), true)), Eq(Tuple2(Slice T, Slice T), slice::split_at T s mid .hc, tuple2[Slice T, Slice T](a, b)) =
+      option::if_some (Tuple2(Slice T, Slice T)) (#le_usize(mid, fst(s)))
+        (fun (.h : Eq(Bool, #le_usize(mid, fst(s)), true)) => slice::split_at T s mid .h) (tuple2[Slice T, Slice T](a, b)) .e;
+    let ea : Eq(Slice T, slice::prefix T s mid .fst(r), a) =
+      tuple2::inj0 (Slice T) (Slice T) (slice::prefix T s mid .fst(r)) (slice::suffix T s mid .fst(r)) a b .snd(r);
+    let eb : Eq(Slice T, slice::suffix T s mid .fst(r), b) =
+      tuple2::inj1 (Slice T) (Slice T) (slice::prefix T s mid .fst(r)) (slice::suffix T s mid .fst(r)) a b .snd(r);
+    pair(Sigma (h0 : Eq(Bool, #le_usize(mid, fst(s)), true)),
+         Sigma (h1 : Eq(Usize, fst(a), mid)),
+         Sigma (h2 : Eq(Int, #cast_usize_int(fst(b)), #isub(#cast_usize_int(fst(s)), #cast_usize_int(mid)))),
+         Eq(List(T), seq::append T fst(snd(a)) fst(snd(b)), fst(snd(s))),
+      fst(r),
+      pair(Sigma (h1 : Eq(Usize, fst(a), mid)),
+           Sigma (h2 : Eq(Int, #cast_usize_int(fst(b)), #isub(#cast_usize_int(fst(s)), #cast_usize_int(mid)))),
+           Eq(List(T), seq::append T fst(snd(a)) fst(snd(b)), fst(snd(s))),
+        transport(Slice T, slice::prefix T s mid .fst(r), a, ea, z. Eq(Usize, fst(z), mid), refl(Usize, mid)),
+        pair(Sigma (h2 : Eq(Int, #cast_usize_int(fst(b)), #isub(#cast_usize_int(fst(s)), #cast_usize_int(mid)))),
+             Eq(List(T), seq::append T fst(snd(a)) fst(snd(b)), fst(snd(s))),
+          transport(Slice T, slice::suffix T s mid .fst(r), b, eb,
+            z. Eq(Int, #cast_usize_int(fst(z)), #isub(#cast_usize_int(fst(s)), #cast_usize_int(mid))),
+            linarith([]; Eq(Int, #cast_usize_int(#sub_usize(fst(s), mid; fst(r))), #isub(#cast_usize_int(fst(s)), #cast_usize_int(mid)));
+                     [1, 0, 0, 0, 0, 1, 0, 0, 0, 0])),
+          transport(Slice T, slice::prefix T s mid .fst(r), a, ea,
+            z. Eq(List(T), seq::append T fst(snd(z)) fst(snd(b)), fst(snd(s))),
+            transport(Slice T, slice::suffix T s mid .fst(r), b, eb,
+              z. Eq(List(T), seq::append T fst(snd(slice::prefix T s mid .fst(r))) fst(snd(z)), fst(snd(s))),
+              seq::take_drop_append T fst(snd(s)) (#cast_usize_int(mid)))))))
+
+def[lemma] slice::split_at_checked_none : (T : Type) -> (s : Slice T) -> (mid : Usize)
+    -> (.e : Eq(Option(Tuple2(Slice T, Slice T)), slice::split_at_checked T s mid, None[Tuple2(Slice T, Slice T)]))
+    -> Eq(Bool, #lt_usize(fst(s), mid), true) :=
+  fun (T : Type) (s : Slice T) (mid : Usize)
+      (.e : Eq(Option(Tuple2(Slice T, Slice T)), slice::split_at_checked T s mid, None[Tuple2(Slice T, Slice T)])) =>
+    let c : Eq(Bool, #le_usize(mid, fst(s)), false) =
+      option::if_none (Tuple2(Slice T, Slice T)) (#le_usize(mid, fst(s))) (fun (.h : Eq(Bool, #le_usize(mid, fst(s)), true)) => slice::split_at T s mid .h) .e;
+    eq::promote Bool (#lt_usize(fst(s), mid)) true
+      .linarith([c : Eq(Bool, #le_usize(mid, fst(s)), false)]; Eq(Bool, #lt_usize(fst(s), mid), true); [1, 1, 0, 0, 0, 0])
+
+-- ---------------------------------------------------------------------------
+-- split_first / split_last / get
+-- ---------------------------------------------------------------------------
+
+def[lemma] slice::split_first_some : (T : Type) -> (s : Slice T) -> (x : T) -> (rest : Slice T)
+    -> (.e : Eq(Option(Tuple2(T, Slice T)), slice::split_first T s, Some[Tuple2(T, Slice T)](tuple2[T, Slice T](x, rest))))
+    -> Sigma (h0 : Eq(Bool, #lt_usize(0usize, fst(s)), true)),
+       Sigma (h1 : Eq(Int, #cast_usize_int(fst(rest)), #isub(#cast_usize_int(fst(s)), 1int))),
+       Eq(List(T), fst(snd(s)), Cons[T](x, fst(snd(rest)))) :=
+  fun (T : Type) (s : Slice T) (x : T) (rest : Slice T)
+      (.e : Eq(Option(Tuple2(T, Slice T)), slice::split_first T s, Some[Tuple2(T, Slice T)](tuple2[T, Slice T](x, rest)))) =>
+    let r : Sigma (hc : Eq(Bool, #lt_usize(0usize, fst(s)), true)),
+            Eq(Tuple2(T, Slice T),
+               tuple2[T, Slice T](slice::index T s 0usize .hc,
+                 slice::suffix T s 1usize .linarith([hc : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])),
+               tuple2[T, Slice T](x, rest)) =
+      option::if_some (Tuple2(T, Slice T)) (#lt_usize(0usize, fst(s)))
+        (fun (.h : Eq(Bool, #lt_usize(0usize, fst(s)), true)) =>
+           tuple2[T, Slice T](slice::index T s 0usize .h,
+             slice::suffix T s 1usize .linarith([h : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])))
+        (tuple2[T, Slice T](x, rest)) .e;
+    let ex : Eq(T, slice::index T s 0usize .fst(r), x) =
+      tuple2::inj0 T (Slice T) (slice::index T s 0usize .fst(r))
+        (slice::suffix T s 1usize .linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0]))
+        x rest .snd(r);
+    let er : Eq(Slice T, slice::suffix T s 1usize .linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0]), rest) =
+      tuple2::inj1 T (Slice T) (slice::index T s 0usize .fst(r))
+        (slice::suffix T s 1usize .linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0]))
+        x rest .snd(r);
+    pair(Sigma (h0 : Eq(Bool, #lt_usize(0usize, fst(s)), true)),
+         Sigma (h1 : Eq(Int, #cast_usize_int(fst(rest)), #isub(#cast_usize_int(fst(s)), 1int))),
+         Eq(List(T), fst(snd(s)), Cons[T](x, fst(snd(rest)))),
+      fst(r),
+      pair(Sigma (h1 : Eq(Int, #cast_usize_int(fst(rest)), #isub(#cast_usize_int(fst(s)), 1int))),
+           Eq(List(T), fst(snd(s)), Cons[T](x, fst(snd(rest)))),
+        transport(Slice T, slice::suffix T s 1usize .linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0]), rest, er,
+          z. Eq(Int, #cast_usize_int(fst(z)), #isub(#cast_usize_int(fst(s)), 1int)),
+          linarith([]; Eq(Int, #cast_usize_int(#sub_usize(fst(s), 1usize;
+                           linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0]))),
+                         #isub(#cast_usize_int(fst(s)), 1int)); [1, 0, 0, 1, 0, 0])),
+        transport(T, slice::index T s 0usize .fst(r), x, ex,
+          z. Eq(List(T), fst(snd(s)), Cons[T](z, fst(snd(rest)))),
+          transport(Slice T, slice::suffix T s 1usize .linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0]), rest, er,
+            z. Eq(List(T), fst(snd(s)), Cons[T](slice::index T s 0usize .fst(r), fst(snd(z)))),
+            eq::sym (List(T)) (Cons[T](seq::index T fst(snd(s)) 0int .refl(Bool, true)
+                                  .linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true), slice::ok_len T s : Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s)))];
+                                            Eq(Bool, #lt_int(0int, seq::len T fst(snd(s))), true); [1, -1, 1, 0, 0, 0]),
+                                  seq::drop T fst(snd(s)) 1int))
+              fst(snd(s))
+              (seq::cons_index_drop T fst(snd(s))
+                 .linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true), slice::ok_len T s : Eq(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s)))];
+                           Eq(Bool, #lt_int(0int, seq::len T fst(snd(s))), true); [1, -1, 1, 0, 0, 0]))))))
+
+def[lemma] slice::split_first_none : (T : Type) -> (s : Slice T)
+    -> (.e : Eq(Option(Tuple2(T, Slice T)), slice::split_first T s, None[Tuple2(T, Slice T)]))
+    -> Eq(Usize, fst(s), 0usize) :=
+  fun (T : Type) (s : Slice T) (.e : Eq(Option(Tuple2(T, Slice T)), slice::split_first T s, None[Tuple2(T, Slice T)])) =>
+    let c : Eq(Bool, #lt_usize(0usize, fst(s)), false) =
+      option::if_none (Tuple2(T, Slice T)) (#lt_usize(0usize, fst(s)))
+        (fun (.h : Eq(Bool, #lt_usize(0usize, fst(s)), true)) =>
+           tuple2[T, Slice T](slice::index T s 0usize .h,
+             slice::suffix T s 1usize .linarith([h : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0]))) .e;
+    eq::promote Usize fst(s) 0usize .linarith([c : Eq(Bool, #lt_usize(0usize, fst(s)), false)]; Eq(Usize, fst(s), 0usize); [0, 1, 1, 0, 1, 1, 0, 0])
+
+def[lemma] slice::split_last_some : (T : Type) -> (s : Slice T) -> (x : T) -> (init : Slice T)
+    -> (.e : Eq(Option(Tuple2(T, Slice T)), slice::split_last T s, Some[Tuple2(T, Slice T)](tuple2[T, Slice T](x, init))))
+    -> Sigma (h0 : Eq(Bool, #lt_usize(0usize, fst(s)), true)),
+       Eq(Int, #cast_usize_int(fst(init)), #isub(#cast_usize_int(fst(s)), 1int)) :=
+  fun (T : Type) (s : Slice T) (x : T) (init : Slice T)
+      (.e : Eq(Option(Tuple2(T, Slice T)), slice::split_last T s, Some[Tuple2(T, Slice T)](tuple2[T, Slice T](x, init)))) =>
+    let r : Sigma (hc : Eq(Bool, #lt_usize(0usize, fst(s)), true)),
+            Eq(Tuple2(T, Slice T),
+               tuple2[T, Slice T](
+                 slice::index T s (#sub_usize(fst(s), 1usize; linarith([hc : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])))
+                   .linarith([]; Eq(Bool, #lt_usize(#sub_usize(fst(s), 1usize; linarith([hc : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])), fst(s)), true); [1, 0, 0]),
+                 slice::prefix T s (#sub_usize(fst(s), 1usize; linarith([hc : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])))
+                   .linarith([]; Eq(Bool, #le_usize(#sub_usize(fst(s), 1usize; linarith([hc : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])), fst(s)), true); [1, 0, 0])),
+               tuple2[T, Slice T](x, init)) =
+      option::if_some (Tuple2(T, Slice T)) (#lt_usize(0usize, fst(s)))
+        (fun (.h : Eq(Bool, #lt_usize(0usize, fst(s)), true)) =>
+           tuple2[T, Slice T](
+             slice::index T s (#sub_usize(fst(s), 1usize; linarith([h : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])))
+               .linarith([]; Eq(Bool, #lt_usize(#sub_usize(fst(s), 1usize; linarith([h : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])), fst(s)), true); [1, 0, 0]),
+             slice::prefix T s (#sub_usize(fst(s), 1usize; linarith([h : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])))
+               .linarith([]; Eq(Bool, #le_usize(#sub_usize(fst(s), 1usize; linarith([h : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])), fst(s)), true); [1, 0, 0])))
+        (tuple2[T, Slice T](x, init)) .e;
+    let ei : Eq(Slice T,
+                slice::prefix T s (#sub_usize(fst(s), 1usize; linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])))
+                  .linarith([]; Eq(Bool, #le_usize(#sub_usize(fst(s), 1usize; linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])), fst(s)), true); [1, 0, 0]),
+                init) =
+      tuple2::inj1 T (Slice T)
+        (slice::index T s (#sub_usize(fst(s), 1usize; linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])))
+          .linarith([]; Eq(Bool, #lt_usize(#sub_usize(fst(s), 1usize; linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])), fst(s)), true); [1, 0, 0]))
+        (slice::prefix T s (#sub_usize(fst(s), 1usize; linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])))
+          .linarith([]; Eq(Bool, #le_usize(#sub_usize(fst(s), 1usize; linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])), fst(s)), true); [1, 0, 0]))
+        x init .snd(r);
+    pair(Sigma (h0 : Eq(Bool, #lt_usize(0usize, fst(s)), true)), Eq(Int, #cast_usize_int(fst(init)), #isub(#cast_usize_int(fst(s)), 1int)),
+      fst(r),
+      transport(Slice T,
+        slice::prefix T s (#sub_usize(fst(s), 1usize; linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])))
+          .linarith([]; Eq(Bool, #le_usize(#sub_usize(fst(s), 1usize; linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0])), fst(s)), true); [1, 0, 0]),
+        init, ei,
+        z. Eq(Int, #cast_usize_int(fst(z)), #isub(#cast_usize_int(fst(s)), 1int)),
+        linarith([]; Eq(Int, #cast_usize_int(#sub_usize(fst(s), 1usize;
+                         linarith([fst(r) : Eq(Bool, #lt_usize(0usize, fst(s)), true)]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 0, 0]))),
+                       #isub(#cast_usize_int(fst(s)), 1int)); [1, 0, 0, 1, 0, 0])))
+
+def[lemma] slice::get_some : (T : Type) -> (s : Slice T) -> (i : Usize) -> (x : T)
+    -> (.e : Eq(Option(T), slice::get T s i, Some[T](x)))
+    -> Sigma (h0 : Eq(Bool, #lt_usize(i, fst(s)), true)), Eq(T, x, slice::index T s i .h0) :=
+  fun (T : Type) (s : Slice T) (i : Usize) (x : T) (.e : Eq(Option(T), slice::get T s i, Some[T](x))) =>
+    let r : Sigma (hc : Eq(Bool, #lt_usize(i, fst(s)), true)), Eq(T, slice::index T s i .hc, x) =
+      option::if_some T (#lt_usize(i, fst(s))) (fun (.h : Eq(Bool, #lt_usize(i, fst(s)), true)) => slice::index T s i .h) x .e;
+    pair(Sigma (h0 : Eq(Bool, #lt_usize(i, fst(s)), true)), Eq(T, x, slice::index T s i .h0),
+      fst(r), eq::sym T (slice::index T s i .fst(r)) x snd(r))
+
+def[lemma] slice::get_none : (T : Type) -> (s : Slice T) -> (i : Usize)
+    -> (.e : Eq(Option(T), slice::get T s i, None[T])) -> Eq(Bool, #le_usize(fst(s), i), true) :=
+  fun (T : Type) (s : Slice T) (i : Usize) (.e : Eq(Option(T), slice::get T s i, None[T])) =>
+    let c : Eq(Bool, #lt_usize(i, fst(s)), false) =
+      option::if_none T (#lt_usize(i, fst(s))) (fun (.h : Eq(Bool, #lt_usize(i, fst(s)), true)) => slice::index T s i .h) .e;
+    eq::promote Bool (#le_usize(fst(s), i)) true
+      .linarith([c : Eq(Bool, #lt_usize(i, fst(s)), false)]; Eq(Bool, #le_usize(fst(s), i), true); [1, 1, 0, 0, 0, 0])
+
+-- ---------------------------------------------------------------------------
+-- first_chunk / split_first_chunk
+-- ---------------------------------------------------------------------------
+
+def[lemma] slice::first_chunk_some : (T : Type) -> (s : Slice T) -> (N : Usize) -> (a : Array T N)
+    -> (.e : Eq(Option(Array T N), slice::first_chunk T s N, Some[Array T N](a)))
+    -> Sigma (h0 : Eq(Bool, #le_usize(N, fst(s)), true)), Eq(List(T), fst(a), seq::take T fst(snd(s)) (#cast_usize_int(N))) :=
+  fun (T : Type) (s : Slice T) (N : Usize) (a : Array T N) (.e : Eq(Option(Array T N), slice::first_chunk T s N, Some[Array T N](a))) =>
+    let r : Sigma (hc : Eq(Bool, #le_usize(N, fst(s)), true)), Eq(Array T N, slice::prefix_array T s N .hc, a) =
+      option::if_some (Array T N) (#le_usize(N, fst(s))) (fun (.h : Eq(Bool, #le_usize(N, fst(s)), true)) => slice::prefix_array T s N .h) a .e;
+    pair(Sigma (h0 : Eq(Bool, #le_usize(N, fst(s)), true)), Eq(List(T), fst(a), seq::take T fst(snd(s)) (#cast_usize_int(N))),
+      fst(r),
+      transport(Array T N, slice::prefix_array T s N .fst(r), a, snd(r),
+        z. Eq(List(T), fst(z), seq::take T fst(snd(s)) (#cast_usize_int(N))),
+        refl(List(T), seq::take T fst(snd(s)) (#cast_usize_int(N)))))
+
+def[lemma] slice::first_chunk_none : (T : Type) -> (s : Slice T) -> (N : Usize)
+    -> (.e : Eq(Option(Array T N), slice::first_chunk T s N, None[Array T N])) -> Eq(Bool, #lt_usize(fst(s), N), true) :=
+  fun (T : Type) (s : Slice T) (N : Usize) (.e : Eq(Option(Array T N), slice::first_chunk T s N, None[Array T N])) =>
+    let c : Eq(Bool, #le_usize(N, fst(s)), false) =
+      option::if_none (Array T N) (#le_usize(N, fst(s))) (fun (.h : Eq(Bool, #le_usize(N, fst(s)), true)) => slice::prefix_array T s N .h) .e;
+    eq::promote Bool (#lt_usize(fst(s), N)) true
+      .linarith([c : Eq(Bool, #le_usize(N, fst(s)), false)]; Eq(Bool, #lt_usize(fst(s), N), true); [1, 1, 0, 0, 0, 0])
+
+-- `s.len() == N ∧ s.first_chunk::<N>() == Some(k) ⇒ s == &k[..]`
+-- (PROOF.rs `first_chunk_exact`).
+def[lemma] slice::first_chunk_exact : (T : Type) -> (s : Slice T) -> (N : Usize) -> (k : Array T N)
+    -> (.hn : Eq(Usize, fst(s), N))
+    -> (.e : Eq(Option(Array T N), slice::first_chunk T s N, Some[Array T N](k)))
+    -> Eq(List(T), fst(snd(s)), fst(k)) :=
+  fun (T : Type) (s : Slice T) (N : Usize) (k : Array T N) (.hn : Eq(Usize, fst(s), N))
+      (.e : Eq(Option(Array T N), slice::first_chunk T s N, Some[Array T N](k))) =>
+    let r : Sigma (h0 : Eq(Bool, #le_usize(N, fst(s)), true)), Eq(List(T), fst(k), seq::take T fst(snd(s)) (#cast_usize_int(N))) =
+      slice::first_chunk_some T s N k .e;
+    eq::trans (List(T)) fst(snd(s)) (seq::take T fst(snd(s)) (#cast_usize_int(N))) fst(k)
+      (eq::sym (List(T)) (seq::take T fst(snd(s)) (#cast_usize_int(N))) fst(snd(s))
+        (transport(Usize, fst(s), N, hn,
+           z. Eq(List(T), seq::take T fst(snd(s)) (#cast_usize_int(z)), fst(snd(s))),
+           transport(Int, seq::len T fst(snd(s)), #cast_usize_int(fst(s)), slice::ok_len T s,
+             z. Eq(List(T), seq::take T fst(snd(s)) z, fst(snd(s))),
+             seq::take_len T fst(snd(s))))))
+      (eq::sym (List(T)) fst(k) (seq::take T fst(snd(s)) (#cast_usize_int(N))) snd(r))
+
+def[lemma] slice::split_first_chunk_some : (T : Type) -> (s : Slice T) -> (N : Usize) -> (a : Array T N) -> (rest : Slice T)
+    -> (.e : Eq(Option(Tuple2(Array T N, Slice T)), slice::split_first_chunk T s N, Some[Tuple2(Array T N, Slice T)](tuple2[Array T N, Slice T](a, rest))))
+    -> Sigma (h0 : Eq(Bool, #le_usize(N, fst(s)), true)),
+       Sigma (h1 : Eq(Int, #cast_usize_int(fst(rest)), #isub(#cast_usize_int(fst(s)), #cast_usize_int(N)))),
+       Eq(List(T), seq::append T fst(a) fst(snd(rest)), fst(snd(s))) :=
+  fun (T : Type) (s : Slice T) (N : Usize) (a : Array T N) (rest : Slice T)
+      (.e : Eq(Option(Tuple2(Array T N, Slice T)), slice::split_first_chunk T s N, Some[Tuple2(Array T N, Slice T)](tuple2[Array T N, Slice T](a, rest)))) =>
+    let r : Sigma (hc : Eq(Bool, #le_usize(N, fst(s)), true)),
+            Eq(Tuple2(Array T N, Slice T), tuple2[Array T N, Slice T](slice::prefix_array T s N .hc, slice::suffix T s N .hc), tuple2[Array T N, Slice T](a, rest)) =
+      option::if_some (Tuple2(Array T N, Slice T)) (#le_usize(N, fst(s)))
+        (fun (.h : Eq(Bool, #le_usize(N, fst(s)), true)) => tuple2[Array T N, Slice T](slice::prefix_array T s N .h, slice::suffix T s N .h))
+        (tuple2[Array T N, Slice T](a, rest)) .e;
+    let ea : Eq(Array T N, slice::prefix_array T s N .fst(r), a) =
+      tuple2::inj0 (Array T N) (Slice T) (slice::prefix_array T s N .fst(r)) (slice::suffix T s N .fst(r)) a rest .snd(r);
+    let er : Eq(Slice T, slice::suffix T s N .fst(r), rest) =
+      tuple2::inj1 (Array T N) (Slice T) (slice::prefix_array T s N .fst(r)) (slice::suffix T s N .fst(r)) a rest .snd(r);
+    pair(Sigma (h0 : Eq(Bool, #le_usize(N, fst(s)), true)),
+         Sigma (h1 : Eq(Int, #cast_usize_int(fst(rest)), #isub(#cast_usize_int(fst(s)), #cast_usize_int(N)))),
+         Eq(List(T), seq::append T fst(a) fst(snd(rest)), fst(snd(s))),
+      fst(r),
+      pair(Sigma (h1 : Eq(Int, #cast_usize_int(fst(rest)), #isub(#cast_usize_int(fst(s)), #cast_usize_int(N)))),
+           Eq(List(T), seq::append T fst(a) fst(snd(rest)), fst(snd(s))),
+        transport(Slice T, slice::suffix T s N .fst(r), rest, er,
+          z. Eq(Int, #cast_usize_int(fst(z)), #isub(#cast_usize_int(fst(s)), #cast_usize_int(N))),
+          linarith([]; Eq(Int, #cast_usize_int(#sub_usize(fst(s), N; fst(r))), #isub(#cast_usize_int(fst(s)), #cast_usize_int(N)));
+                   [1, 0, 0, 0, 0, 1, 0, 0, 0, 0])),
+        transport(Array T N, slice::prefix_array T s N .fst(r), a, ea,
+          z. Eq(List(T), seq::append T fst(z) fst(snd(rest)), fst(snd(s))),
+          transport(Slice T, slice::suffix T s N .fst(r), rest, er,
+            z. Eq(List(T), seq::append T fst(slice::prefix_array T s N .fst(r)) fst(snd(z)), fst(snd(s))),
+            seq::take_drop_append T fst(snd(s)) (#cast_usize_int(N))))))
+
+def[lemma] slice::split_first_chunk_none : (T : Type) -> (s : Slice T) -> (N : Usize)
+    -> (.e : Eq(Option(Tuple2(Array T N, Slice T)), slice::split_first_chunk T s N, None[Tuple2(Array T N, Slice T)]))
+    -> Eq(Bool, #lt_usize(fst(s), N), true) :=
+  fun (T : Type) (s : Slice T) (N : Usize)
+      (.e : Eq(Option(Tuple2(Array T N, Slice T)), slice::split_first_chunk T s N, None[Tuple2(Array T N, Slice T)])) =>
+    let c : Eq(Bool, #le_usize(N, fst(s)), false) =
+      option::if_none (Tuple2(Array T N, Slice T)) (#le_usize(N, fst(s)))
+        (fun (.h : Eq(Bool, #le_usize(N, fst(s)), true)) => tuple2[Array T N, Slice T](slice::prefix_array T s N .h, slice::suffix T s N .h)) .e;
+    eq::promote Bool (#lt_usize(fst(s), N)) true
+      .linarith([c : Eq(Bool, #le_usize(N, fst(s)), false)]; Eq(Bool, #lt_usize(fst(s), N), true); [1, 1, 0, 0, 0, 0])

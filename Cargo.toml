@@ -34,6 +34,16 @@ members = [
     "examples/log",
     "examples/reshare",
 
+    # The sandblaster verification toolchain (build-dependency of codec and storage)
+    "sandblaster/cli",
+    "sandblaster/front",
+    "sandblaster/kernel",
+    "sandblaster/macros",
+    "sandblaster/memguard",
+    "sandblaster/rulegen",
+    "sandblaster/sandblaster",
+    "sandblaster/targets",
+
     # Fuzz builds
     "broadcast/fuzz",
     "codec/fuzz",
@@ -51,6 +61,8 @@ members = [
     "utils/fuzz"
 ]
 exclude = [
+    # sandblaster's optimizer corpus harness: a standalone workspace
+    "sandblaster/bench/opt-corpus",
     ".github/dylints/borrowed_child_context",
     ".github/dylints/child_attribute_name_conflict",
     ".github/dylints/span_name_style",
@@ -197,6 +209,12 @@ ratatui = "0.30.2"
 rayon = { version = "1.12.0", default-features = false }
 reqwest = "0.13.4"
 rstest = "0.26.1"
+sandblaster = { version = "2026.9.0", path = "sandblaster/sandblaster" }
+sandblaster-front = { version = "2026.9.0", path = "sandblaster/front" }
+sandblaster-kernel = { version = "2026.9.0", path = "sandblaster/kernel" }
+sandblaster-macros = { version = "2026.9.0", path = "sandblaster/macros" }
+sandblaster-memguard = { version = "2026.9.0", path = "sandblaster/memguard" }
+sandblaster-targets = { version = "2026.9.0", path = "sandblaster/targets" }
 serde = "1.0.228"
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
@@ -313,14 +331,17 @@ opt-level = 3
 [profile.test.package.x25519-dalek]
 opt-level = 3
 
-# The rustoleum verifier runs inside codec/build.rs: run it optimized.
+# The sandblaster verifier runs inside codec/build.rs and storage/build.rs:
+# run build scripts optimized. The kernel, front end and allocator are also
+# optimized in dev and test builds (their own test suites are several times
+# faster).
 [profile.dev.build-override]
 opt-level = 3
 [profile.release.build-override]
 opt-level = 3
-[profile.dev.package.rustoleum-kernel]
+[profile.dev.package.sandblaster-kernel]
 opt-level = 3
-[profile.dev.package.rustoleum-front]
+[profile.dev.package.sandblaster-front]
 opt-level = 2
-[profile.dev.package.rustoleum-memguard]
+[profile.dev.package.sandblaster-memguard]
 opt-level = 3

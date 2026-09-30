@@ -1,0 +1,150 @@
+-- sandblaster prelude lemmas: slices (DESIGN.md §6: slice_eta,
+-- is_empty(s) = true ↔ s = &[], len_cons in usize form, extensionality).
+--
+-- Checked, untrusted.
+
+-- The empty slice `&[]` (a named constant for the statements below; any
+-- other spelling of `slice::mk T 0usize Nil[T] ..` is convertible with it).
+def[spec] slice::empty : (T : Type) -> Slice T :=
+  fun (T : Type) => slice::mk T 0usize Nil[T] .pair(SliceOk T 0usize Nil[T], refl(Int, 0int), refl(Bool, true))
+
+-- Σ eta: a slice is its length, list and well-formedness proof.
+def[lemma] slice::eta : (T : Type) -> (s : Slice T) -> Eq(Slice T, s, slice::mk T fst(s) fst(snd(s)) .snd(snd(s))) :=
+  fun (T : Type) (s : Slice T) => refl(Slice T, s)
+
+-- Slices with equal lists are equal (the length is determined by the list).
+def[lemma] slice::ext : (T : Type) -> (a : Slice T) -> (b : Slice T) -> (.e : Eq(List(T), fst(snd(a)), fst(snd(b)))) -> Eq(Slice T, a, b) :=
+  fun (T : Type) (a : Slice T) (b : Slice T) (.e : Eq(List(T), fst(snd(a)), fst(snd(b)))) =>
+    let .en : Eq(Usize, fst(a), fst(b)) =
+      linarith([slice::ok_len T a : Eq(Int, seq::len T fst(snd(a)), #cast_usize_int(fst(a))),
+                slice::ok_len T b : Eq(Int, seq::len T fst(snd(b)), #cast_usize_int(fst(b))),
+                eq::cong (List(T)) Int (fun (l : List(T)) => seq::len T l) fst(snd(a)) fst(snd(b)) e
+                  : Eq(Int, seq::len T fst(snd(a)), seq::len T fst(snd(b)))];
+               Eq(Usize, fst(a), fst(b)); [1, -1, -1, 1, 0, 0, 0, 0, 0, 0, -1, 1, 1, 1, 0, 0, 0, 0, 0, 0]);
+    (transport(Usize, fst(a), fst(b), en,
+       zn. (zl : List(T)) -> (.q : SliceOk T zn zl) -> (.el : Eq(List(T), fst(snd(a)), zl)) -> Eq(Slice T, a, slice::mk T zn zl .q),
+       fun (zl : List(T)) (.q : SliceOk T fst(a) zl) (.el : Eq(List(T), fst(snd(a)), zl)) =>
+         (transport(List(T), fst(snd(a)), zl, el,
+            w. (.q2 : SliceOk T fst(a) w) -> Eq(Slice T, a, slice::mk T fst(a) w .q2),
+            fun (.q2 : SliceOk T fst(a) fst(snd(a))) => refl(Slice T, a))) .q)) fst(snd(b)) .snd(snd(b)) .e
+
+-- `s.is_empty()` iff `s == &[]`.
+def[lemma] slice::is_empty_nil : (T : Type) -> (s : Slice T) -> (.h : Eq(Bool, slice::is_empty T s, true)) -> Eq(Slice T, s, slice::empty T) :=
+  fun (T : Type) (s : Slice T) (.h : Eq(Bool, slice::is_empty T s, true)) =>
+    slice::ext T s (slice::empty T)
+      .((match fst(snd(s)) : List(T) as l return (.e : Eq(List(T), fst(snd(s)), l)) -> Eq(List(T), l, Nil[T]) with
+         | Nil => fun (.e : Eq(List(T), fst(snd(s)), Nil[T])) => refl(List(T), Nil[T])
+         | Cons(x, t) => fun (.e : Eq(List(T), fst(snd(s)), Cons[T](x, t))) =>
+             absurd(Eq(List(T), Cons[T](x, t), Nil[T]),
+               linarith([h : Eq(Bool, #eq_usize(fst(s), 0usize), true),
+                         transport(List(T), fst(snd(s)), Cons[T](x, t), e, z. Eq(Int, seq::len T z, #cast_usize_int(fst(s))), slice::ok_len T s)
+                           : Eq(Int, #iadd(1int, seq::len T t), #cast_usize_int(fst(s)))]; Empty; [1, 1, 0, 0, 1]))
+         end) .refl(List(T), fst(snd(s))))
+
+def[lemma] slice::is_empty_of_nil : (T : Type) -> (s : Slice T) -> (.h : Eq(Slice T, s, slice::empty T)) -> Eq(Bool, slice::is_empty T s, true) :=
+  fun (T : Type) (s : Slice T) (.h : Eq(Slice T, s, slice::empty T)) =>
+    transport(Slice T, slice::empty T, s, eq::sym (Slice T) s (slice::empty T) h, z. Eq(Bool, slice::is_empty T z, true), refl(Bool, true))
+
+-- The length of a slice whose list is a cons, in `usize` form.
+def[lemma] slice::len_cons : (T : Type) -> (s : Slice T) -> (x : T) -> (t : List(T)) -> (.e : Eq(List(T), fst(snd(s)), Cons[T](x, t)))
+    -> Eq(Int, #cast_usize_int(fst(s)), #iadd(1int, seq::len T t)) :=
+  fun (T : Type) (s : Slice T) (x : T) (t : List(T)) (.e : Eq(List(T), fst(snd(s)), Cons[T](x, t))) =>
+    eq::sym Int (seq::len T (Cons[T](x, t))) (#cast_usize_int(fst(s)))
+      (transport(List(T), fst(snd(s)), Cons[T](x, t), e, z. Eq(Int, seq::len T z, #cast_usize_int(fst(s))), slice::ok_len T s))
+
+-- The length of the empty slice.
+def[lemma] slice::len_nil : (T : Type) -> (s : Slice T) -> (.e : Eq(List(T), fst(snd(s)), Nil[T])) -> Eq(Usize, fst(s), 0usize) :=
+  fun (T : Type) (s : Slice T) (.e : Eq(List(T), fst(snd(s)), Nil[T])) =>
+    eq::promote Usize fst(s) 0usize
+      .linarith([transport(List(T), fst(snd(s)), Nil[T], e, z. Eq(Int, seq::len T z, #cast_usize_int(fst(s))), slice::ok_len T s)
+                   : Eq(Int, 0int, #cast_usize_int(fst(s)))]; Eq(Usize, fst(s), 0usize); [1, 1, 0, 0, -1, 1, 0, 0])
+
+-- ---------------------------------------------------------------------------
+-- Case analysis on slices (DESIGN.md §7.6, script `match` on a slice
+-- variable with the patterns `[]` / `[h, t @ ..]`).
+-- ---------------------------------------------------------------------------
+
+-- The slice `h :: t`, built exactly like the ghost `seq::cons(h, t)` (list
+-- `Cons(h, list t)`, length `of_int(len(Cons(h, list t)))`), so goals that
+-- mention `seq::cons` and refined goals meet by conversion.
+def[spec] slice::cons_of : (T : Type) -> (h : T) -> (t : Slice T) -> (.hb : Eq(Bool, #lt_int(#cast_usize_int(fst(t)), ISIZE_MAX), true)) -> Slice T :=
+  fun (T : Type) (h : T) (t : Slice T) (.hb : Eq(Bool, #lt_int(#cast_usize_int(fst(t)), ISIZE_MAX), true)) =>
+    slice::mk T
+      (#of_int_usize(seq::len T (Cons[T](h, fst(snd(t))));
+         linarith([]; Eq(Bool, #le_int(0int, #iadd(1int, seq::len T fst(snd(t)))), true); [1/2, 1/2]),
+         linarith([slice::ok_len T t : Eq(Int, seq::len T fst(snd(t)), #cast_usize_int(fst(t))),
+                   hb : Eq(Bool, #lt_int(#cast_usize_int(fst(t)), ISIZE_MAX), true)];
+                  Eq(Bool, #le_int(#iadd(1int, seq::len T fst(snd(t))), 18446744073709551615int), true); [1/9223372036854775809, 1/9223372036854775809, 1/9223372036854775809, 0, 0, 0])))
+      (Cons[T](h, fst(snd(t))))
+      .pair(SliceOk T (#of_int_usize(seq::len T (Cons[T](h, fst(snd(t))));
+                         linarith([]; Eq(Bool, #le_int(0int, #iadd(1int, seq::len T fst(snd(t)))), true); [1/2, 1/2]),
+                         linarith([slice::ok_len T t : Eq(Int, seq::len T fst(snd(t)), #cast_usize_int(fst(t))),
+                                   hb : Eq(Bool, #lt_int(#cast_usize_int(fst(t)), ISIZE_MAX), true)];
+                                  Eq(Bool, #le_int(#iadd(1int, seq::len T fst(snd(t))), 18446744073709551615int), true); [1/9223372036854775809, 1/9223372036854775809, 1/9223372036854775809, 0, 0, 0])))
+                      (Cons[T](h, fst(snd(t)))),
+            linarith([];
+                     Eq(Int, #iadd(1int, seq::len T fst(snd(t))),
+                        #cast_usize_int(#of_int_usize(#iadd(1int, seq::len T fst(snd(t)));
+                          linarith([]; Eq(Bool, #le_int(0int, #iadd(1int, seq::len T fst(snd(t)))), true); [1/2, 1/2]),
+                          linarith([slice::ok_len T t : Eq(Int, seq::len T fst(snd(t)), #cast_usize_int(fst(t))),
+                                    hb : Eq(Bool, #lt_int(#cast_usize_int(fst(t)), ISIZE_MAX), true)];
+                                   Eq(Bool, #le_int(#iadd(1int, seq::len T fst(snd(t))), 18446744073709551615int), true); [1/9223372036854775809, 1/9223372036854775809, 1/9223372036854775809, 0, 0, 0]))));
+                     [1, 0, 1, 0]),
+            linarith([slice::ok_len T t : Eq(Int, seq::len T fst(snd(t)), #cast_usize_int(fst(t))),
+                      hb : Eq(Bool, #lt_int(#cast_usize_int(fst(t)), ISIZE_MAX), true)];
+                     Eq(Bool, #le_int(#cast_usize_int(#of_int_usize(#iadd(1int, seq::len T fst(snd(t)));
+                          linarith([]; Eq(Bool, #le_int(0int, #iadd(1int, seq::len T fst(snd(t)))), true); [1/2, 1/2]),
+                          linarith([slice::ok_len T t : Eq(Int, seq::len T fst(snd(t)), #cast_usize_int(fst(t))),
+                                    hb : Eq(Bool, #lt_int(#cast_usize_int(fst(t)), ISIZE_MAX), true)];
+                                   Eq(Bool, #le_int(#iadd(1int, seq::len T fst(snd(t))), 18446744073709551615int), true); [1/9223372036854775809, 1/9223372036854775809, 1/9223372036854775809, 0, 0, 0]))),
+                        ISIZE_MAX), true);
+                     [1, 1, 1, 0, 0, 0]))
+
+-- Every slice is `&[]` or `h :: t` (the eliminator behind refining script
+-- matches on slice variables; `P` is the goal with the facts that mention
+-- the slice). Each case also gets the path equation and the length fact.
+def[lemma] slice::cases : (T : Type) -> (s : Slice T) -> (P : (s : Slice T) -> Type)
+    -> (nil : (.e : Eq(Slice T, s, slice::empty T)) -> (.hl : Eq(Usize, fst(s), 0usize)) -> P (slice::empty T))
+    -> (cons : (h : T) -> (t : Slice T) -> (.hb : Eq(Bool, #lt_int(#cast_usize_int(fst(t)), ISIZE_MAX), true))
+               -> (.e : Eq(Slice T, s, slice::cons_of T h t .hb)) -> (.hl : Eq(Int, #cast_usize_int(fst(s)), #iadd(1int, #cast_usize_int(fst(t)))))
+               -> P (slice::cons_of T h t .hb))
+    -> P s :=
+  fun (T : Type) (s : Slice T) (P : (s : Slice T) -> Type)
+      (nil : (.e : Eq(Slice T, s, slice::empty T)) -> (.hl : Eq(Usize, fst(s), 0usize)) -> P (slice::empty T))
+      (cons : (h : T) -> (t : Slice T) -> (.hb : Eq(Bool, #lt_int(#cast_usize_int(fst(t)), ISIZE_MAX), true))
+               -> (.e : Eq(Slice T, s, slice::cons_of T h t .hb)) -> (.hl : Eq(Int, #cast_usize_int(fst(s)), #iadd(1int, #cast_usize_int(fst(t)))))
+               -> P (slice::cons_of T h t .hb)) =>
+    (match fst(snd(s)) : List(T) as l return (.e : Eq(List(T), fst(snd(s)), l)) -> P s with
+     | Nil => fun (.e : Eq(List(T), fst(snd(s)), Nil[T])) =>
+         let .en : Eq(Slice T, slice::empty T, s) = slice::ext T (slice::empty T) s .(eq::sym (List(T)) (fst(snd(s))) Nil[T] e);
+         transport(Slice T, slice::empty T, s, en, z. P z,
+           nil .(eq::sym (Slice T) (slice::empty T) s en) .(slice::len_nil T s .e))
+     | Cons(h, l) => fun (.e : Eq(List(T), fst(snd(s)), Cons[T](h, l))) =>
+         let .hl : Eq(Int, #iadd(1int, seq::len T l), #cast_usize_int(fst(s))) =
+           transport(List(T), fst(snd(s)), Cons[T](h, l), e, z. Eq(Int, seq::len T z, #cast_usize_int(fst(s))), slice::ok_len T s);
+         let t : Slice T =
+           slice::mk T (#sub_usize(fst(s), 1usize;
+                          linarith([hl : Eq(Int, #iadd(1int, seq::len T l), #cast_usize_int(fst(s)))]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 1, 0, 0])))
+             l
+             .pair(SliceOk T (#sub_usize(fst(s), 1usize;
+                                linarith([hl : Eq(Int, #iadd(1int, seq::len T l), #cast_usize_int(fst(s)))]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 1, 0, 0]))) l,
+                   linarith([hl : Eq(Int, #iadd(1int, seq::len T l), #cast_usize_int(fst(s)))];
+                            Eq(Int, seq::len T l, #cast_usize_int(#sub_usize(fst(s), 1usize;
+                              linarith([hl : Eq(Int, #iadd(1int, seq::len T l), #cast_usize_int(fst(s)))]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 1, 0, 0]))));
+                            [-1, 1, 0, 0, 0, 1, 1, 0, 0, 0]),
+                   linarith([hl : Eq(Int, #iadd(1int, seq::len T l), #cast_usize_int(fst(s))),
+                             slice::ok_bound T s : Eq(Bool, #le_int(#cast_usize_int(fst(s)), ISIZE_MAX), true)];
+                            Eq(Bool, #le_int(#cast_usize_int(#sub_usize(fst(s), 1usize;
+                              linarith([hl : Eq(Int, #iadd(1int, seq::len T l), #cast_usize_int(fst(s)))]; Eq(Bool, #le_usize(1usize, fst(s)), true); [1, 1, 1, 0, 0]))), ISIZE_MAX), true);
+                            [0, 1/2, 1/2, 0, 0, 0]));
+         let .hb : Eq(Bool, #lt_int(#cast_usize_int(fst(t)), ISIZE_MAX), true) =
+           linarith([hl : Eq(Int, #iadd(1int, seq::len T l), #cast_usize_int(fst(s))),
+                     slice::ok_bound T s : Eq(Bool, #le_int(#cast_usize_int(fst(s)), ISIZE_MAX), true)];
+                    Eq(Bool, #lt_int(#cast_usize_int(fst(t)), ISIZE_MAX), true); [0, 1, 1, 0, 0, 0]);
+         let .ec : Eq(Slice T, slice::cons_of T h t .hb, s) =
+           slice::ext T (slice::cons_of T h t .hb) s .(eq::sym (List(T)) (fst(snd(s))) (Cons[T](h, l)) e);
+         transport(Slice T, slice::cons_of T h t .hb, s, ec, z. P z,
+           cons h t .hb .(eq::sym (Slice T) (slice::cons_of T h t .hb) s ec)
+             .(linarith([hl : Eq(Int, #iadd(1int, seq::len T l), #cast_usize_int(fst(s)))];
+                        Eq(Int, #cast_usize_int(fst(s)), #iadd(1int, #cast_usize_int(fst(t)))); [0, 1, 0, 0, 0, 0, 1, 0, 0, 0])))
+     end) .refl(List(T), fst(snd(s)))

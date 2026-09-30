@@ -1,0 +1,16 @@
+[package]
+name = "sandblaster-cli"
+description = "sandblaster command line: check, eval, emit, report."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# Not published yet: the toolchain lives in the monorepo as a build tool.
+publish = false
+
+[[bin]]
+name = "sandblaster"
+path = "src/main.rs"
+
+[dependencies]
+sandblaster-front.workspace = true

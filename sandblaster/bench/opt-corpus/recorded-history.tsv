@@ -1,0 +1,90 @@
+# ---- replaced on 2026-09-24 by composition 9977202fed3b9cd291c57f6d9881de98ace0b1d566c8a9f8e2803556f72ea50a
+# The recorded generated / ideal ns per call (aarch64, M5 Pro) that the bench's `recorded` column
+# shows. Read at run time by src/main.rs (never compiled in: re-recording does not change the
+# binary). Columns: program, input, generated ns, ideal ns, provenance (tab-separated).
+#
+# P1-P14: when the corpus was designed (research/optdesign/run_corpus1.txt, design §2.3); fixed.
+# P15-P20: the O1 emission (`cgen_o1`), recorded by `run.sh --record` in the harness
+# composition below. Code placement depends on everything linked into the binary, so these rows
+# are comparable only while the composition is unchanged: `run.sh` recomputes it and fails a run
+# whose composition differs (re-record with `run.sh --record`). Milestone gains never rely on
+# this file: they are `O1 / current` in one binary, in both layouts.
+# composition unrecorded (P15-P20 rows below: plan O1, bench/opt-corpus/run.sh 2026-09-24, before cgen_o1 was linked)
+P1	uniform bit length	9.96	0.97	design §2.3
+P1	x < 34	1.90	0.96	design §2.3
+P2	uniform bit length	4.24	0.59	design §2.3
+P2	x < 34	5.98	0.51	design §2.3
+P3	uniform bit length	4.59	0.51	design §2.3
+P4	n uniform bit length	32.98	1.73	design §2.3
+P4	n <= 33	28.63	1.81	design §2.3
+P5	1 byte	1.13	1.13	design §2.3
+P5	uniform bit length (1-10 B)	2.77	2.39	design §2.3
+P5	9-10 bytes	3.33	2.97	design §2.3
+P5b	4 x 1 byte	3.57	1.21	design §2.3
+P5b	4 x uniform bit length	9.77	7.98	design §2.3
+P6	uniform bit length	2.28	0.52	design §2.3
+P6	x < 34	0.71	0.52	design §2.3
+P7	segments 0-3 words	21.09	2.13	design §2.3
+P7	segments 0-60 words	84.82	38.43	design §2.3
+P8	k uniform 0..=64	11.77	10.57	design §2.3
+P9	16 words	1.47	1.49	design §2.3
+P10	16 words	4.96	1.57	design §2.3
+P9	4096 words	138.95	139.46	design §2.3
+P10	4096 words	1005.98	231.60	design §2.3
+P11	uniform ctz	10.41	0.51	design §2.3
+P12	16 B, stop at 0-9	2.45	1.27	design §2.3
+P12	256 B, stop uniform	28.82	4.12	design §2.3
+P13	uniform	9.01	0.68	design §2.3
+P14	n < 2^16	0.72	0.52	design §2.3
+P15	16 leaves	72.42	7.71	O1, before cgen_o1 (stale)
+P15	256 leaves	1550.66	161.47	O1, before cgen_o1 (stale)
+P16	K = 8, 20 levels	257.77	79.63	O1, before cgen_o1 (stale)
+P17	256 blocks (16 KiB), ns per 64 B block	145.62	10.56	O1, before cgen_o1 (stale)
+P18	256 inputs	3.38	3.49	O1, before cgen_o1 (stale)
+P18	256 inputs, overflow-checks = true	4.78	3.48	O1, before cgen_o1 (stale)
+P20	256 inputs	77.88	15.50	O1, before cgen_o1 (stale)
+# ---- replaced on 2026-09-25 by composition 294d6b84b213e9b4204b84071ad8d298d330c1e5c4707a840eadc000061c6305
+# The recorded generated / ideal ns per call (aarch64, M5 Pro) that the bench's `recorded` column
+# shows. Read at run time by src/main.rs (never compiled in: re-recording does not change the
+# binary). Columns: program, input, generated ns, ideal ns, provenance (tab-separated).
+#
+# P1-P14: when the corpus was designed (research/optdesign/run_corpus1.txt, design §2.3); fixed.
+# P15-P20: the O1 emission (`cgen_o1`), recorded by `run.sh --record` for the harness
+# composition named on the `# composition <sha256>` line below. Code placement depends on what is linked into the binary, so these rows
+# are comparable only while the composition is unchanged: `run.sh` recomputes it and fails a run
+# whose composition differs (re-record with `run.sh --record`). Milestone gains never rely on
+# this file: they are `O1 / current` in one binary, in both layouts.
+# composition 9977202fed3b9cd291c57f6d9881de98ace0b1d566c8a9f8e2803556f72ea50a (P15-P20 rows: the O1 emission, default layout, run.sh --record 2026-09-24, load 1.03 1.50 2.36)
+P1	uniform bit length	9.96	0.97	design §2.3
+P1	x < 34	1.90	0.96	design §2.3
+P2	uniform bit length	4.24	0.59	design §2.3
+P2	x < 34	5.98	0.51	design §2.3
+P3	uniform bit length	4.59	0.51	design §2.3
+P4	n uniform bit length	32.98	1.73	design §2.3
+P4	n <= 33	28.63	1.81	design §2.3
+P5	1 byte	1.13	1.13	design §2.3
+P5	uniform bit length (1-10 B)	2.77	2.39	design §2.3
+P5	9-10 bytes	3.33	2.97	design §2.3
+P5b	4 x 1 byte	3.57	1.21	design §2.3
+P5b	4 x uniform bit length	9.77	7.98	design §2.3
+P6	uniform bit length	2.28	0.52	design §2.3
+P6	x < 34	0.71	0.52	design §2.3
+P7	segments 0-3 words	21.09	2.13	design §2.3
+P7	segments 0-60 words	84.82	38.43	design §2.3
+P8	k uniform 0..=64	11.77	10.57	design §2.3
+P9	16 words	1.47	1.49	design §2.3
+P10	16 words	4.96	1.57	design §2.3
+P9	4096 words	138.95	139.46	design §2.3
+P10	4096 words	1005.98	231.60	design §2.3
+P11	uniform ctz	10.41	0.51	design §2.3
+P12	16 B, stop at 0-9	2.45	1.27	design §2.3
+P12	256 B, stop uniform	28.82	4.12	design §2.3
+P13	uniform	9.01	0.68	design §2.3
+P14	n < 2^16	0.72	0.52	design §2.3
+P15	16 leaves	72.44	7.77	O1 emission, composition 9977202fed3b, 2026-09-24
+P15	256 leaves	1549.01	161.24	O1 emission, composition 9977202fed3b, 2026-09-24
+P16	K = 8, 20 levels	258.56	79.99	O1 emission, composition 9977202fed3b, 2026-09-24
+P17	256 blocks (16 KiB), ns per 64 B block	145.98	10.66	O1 emission, composition 9977202fed3b, 2026-09-24
+P18	256 inputs	3.38	3.55	O1 emission, composition 9977202fed3b, 2026-09-24
+P18	256 inputs, overflow-checks = true	4.81	3.55	O1 emission, composition 9977202fed3b, 2026-09-24
+P20	256 inputs	77.98	15.55	O1 emission, composition 9977202fed3b, 2026-09-24

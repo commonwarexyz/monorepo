@@ -1,0 +1,711 @@
+-- sandblaster target semantics: aarch64 NEON + FEAT_SHA256 (DESIGN.md §9.2).
+--
+-- Kernel core text (CORE_SYNTAX.md) transcriptions of the executable models
+-- in `src/aarch64/` (the reference; hardware-validated) and of MODELS.md §2-§4
+-- (the normative math). TRUSTED: this file is part of TCB item 4 (§1.1).
+-- Load with `Env::load_core` after `Env::with_prelude()`.
+--
+-- Conventions (MODELS.md "Core text"):
+--   * A NEON vector is the prelude `Array` of its lanes, lane 0 first (lowest
+--     address): uint8x16_t = Array U8 16usize, uint8x8_t = Array U8 8usize,
+--     uint32x4_t = Array U32 4usize.
+--   * Every intrinsic is a `def[intrinsic] aarch64::<stdarch name>`: the
+--     kernel unfolds it only when all relevant arguments are closed values
+--     (§5.6); on symbolic data it is a neutral head.
+--   * Immediates (stdarch `const N: i32`) come FIRST, as relevant `U32`
+--     parameters, each followed by irrelevant range proofs
+--     `(.hN0 : Eq(Bool, #le_u32(lo, N), true))` (only if lo > 0) and
+--     `(.hN : Eq(Bool, #le_u32(N, hi), true))`. For a literal in range the
+--     caller passes `.refl(Bool, true)`; an out-of-range immediate is ill-typed.
+--   * Loads and stores are modelled on typed arrays like the generated helpers
+--     (`load_u8x16(a: &[u8; 16])`): a load returns the elements as lanes, a
+--     store returns the array written.
+--   * Helpers (`def[prelude] aarch64::...`) are ordinary transparent
+--     definitions (lane constructors, lane-wise maps, the Arm pseudocode
+--     functions SHAchoose, SHAmajority, SHAhashSIGMA0/1, SHA256hash).
+
+-- ---------------------------------------------------------------------------
+-- Lane constructors and lane-wise maps.
+-- ---------------------------------------------------------------------------
+
+def[prelude] aarch64::u8x4 : (x0 : U8) -> (x1 : U8) -> (x2 : U8) -> (x3 : U8) -> Array U8 4usize :=
+  fun (x0 : U8) (x1 : U8) (x2 : U8) (x3 : U8) =>
+    pair(Array U8 4usize, Cons[U8](x0, Cons[U8](x1, Cons[U8](x2, Cons[U8](x3, Nil[U8])))), refl(Int, 4int))
+
+def[prelude] aarch64::u8x8 : (x0 : U8) -> (x1 : U8) -> (x2 : U8) -> (x3 : U8) -> (x4 : U8) -> (x5 : U8) -> (x6 : U8) -> (x7 : U8)
+    -> Array U8 8usize :=
+  fun (x0 : U8) (x1 : U8) (x2 : U8) (x3 : U8) (x4 : U8) (x5 : U8) (x6 : U8) (x7 : U8) =>
+    pair(Array U8 8usize,
+      Cons[U8](x0, Cons[U8](x1, Cons[U8](x2, Cons[U8](x3, Cons[U8](x4, Cons[U8](x5, Cons[U8](x6, Cons[U8](x7, Nil[U8])))))))),
+      refl(Int, 8int))
+
+def[prelude] aarch64::u8x16 : (x0 : U8) -> (x1 : U8) -> (x2 : U8) -> (x3 : U8) -> (x4 : U8) -> (x5 : U8) -> (x6 : U8) -> (x7 : U8)
+    -> (x8 : U8) -> (x9 : U8) -> (x10 : U8) -> (x11 : U8) -> (x12 : U8) -> (x13 : U8) -> (x14 : U8) -> (x15 : U8)
+    -> Array U8 16usize :=
+  fun (x0 : U8) (x1 : U8) (x2 : U8) (x3 : U8) (x4 : U8) (x5 : U8) (x6 : U8) (x7 : U8)
+      (x8 : U8) (x9 : U8) (x10 : U8) (x11 : U8) (x12 : U8) (x13 : U8) (x14 : U8) (x15 : U8) =>
+    pair(Array U8 16usize,
+      Cons[U8](x0, Cons[U8](x1, Cons[U8](x2, Cons[U8](x3, Cons[U8](x4, Cons[U8](x5, Cons[U8](x6, Cons[U8](x7,
+      Cons[U8](x8, Cons[U8](x9, Cons[U8](x10, Cons[U8](x11, Cons[U8](x12, Cons[U8](x13, Cons[U8](x14, Cons[U8](x15,
+      Nil[U8])))))))))))))))),
+      refl(Int, 16int))
+
+def[prelude] aarch64::u32x4 : (x0 : U32) -> (x1 : U32) -> (x2 : U32) -> (x3 : U32) -> Array U32 4usize :=
+  fun (x0 : U32) (x1 : U32) (x2 : U32) (x3 : U32) =>
+    pair(Array U32 4usize, Cons[U32](x0, Cons[U32](x1, Cons[U32](x2, Cons[U32](x3, Nil[U32])))), refl(Int, 4int))
+
+-- The eight words of a 256-bit `Y : X`, low word first: [X0, X1, X2, X3, Y0, Y1, Y2, Y3].
+def[prelude] aarch64::u32x8 : (x0 : U32) -> (x1 : U32) -> (x2 : U32) -> (x3 : U32) -> (x4 : U32) -> (x5 : U32) -> (x6 : U32)
+    -> (x7 : U32) -> Array U32 8usize :=
+  fun (x0 : U32) (x1 : U32) (x2 : U32) (x3 : U32) (x4 : U32) (x5 : U32) (x6 : U32) (x7 : U32) =>
+    pair(Array U32 8usize,
+      Cons[U32](x0, Cons[U32](x1, Cons[U32](x2, Cons[U32](x3, Cons[U32](x4, Cons[U32](x5, Cons[U32](x6, Cons[U32](x7,
+      Nil[U32])))))))),
+      refl(Int, 8int))
+
+-- `a ++ b` (`a` in the low lanes).
+def[prelude] aarch64::concat_u32x4 : (a : Array U32 4usize) -> (b : Array U32 4usize) -> Array U32 8usize :=
+  fun (a : Array U32 4usize) (b : Array U32 4usize) =>
+    pair(Array U32 8usize, seq::append U32 fst(a) fst(b), refl(Int, 8int))
+
+-- `r[e] = f(a[e])` for e < 16.
+def[prelude] aarch64::map_u8x16 : (f : U8 -> U8) -> (a : Array U8 16usize) -> Array U8 16usize :=
+  fun (f : U8 -> U8) (a : Array U8 16usize) =>
+    aarch64::u8x16
+      (f (array::index U8 16usize a 0usize .refl(Bool, true))) (f (array::index U8 16usize a 1usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 2usize .refl(Bool, true))) (f (array::index U8 16usize a 3usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 4usize .refl(Bool, true))) (f (array::index U8 16usize a 5usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 6usize .refl(Bool, true))) (f (array::index U8 16usize a 7usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 8usize .refl(Bool, true))) (f (array::index U8 16usize a 9usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 10usize .refl(Bool, true))) (f (array::index U8 16usize a 11usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 12usize .refl(Bool, true))) (f (array::index U8 16usize a 13usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 14usize .refl(Bool, true))) (f (array::index U8 16usize a 15usize .refl(Bool, true)))
+
+-- `r[e] = f(a[e])` for e < 8.
+def[prelude] aarch64::map_u8x8 : (f : U8 -> U8) -> (a : Array U8 8usize) -> Array U8 8usize :=
+  fun (f : U8 -> U8) (a : Array U8 8usize) =>
+    aarch64::u8x8
+      (f (array::index U8 8usize a 0usize .refl(Bool, true))) (f (array::index U8 8usize a 1usize .refl(Bool, true)))
+      (f (array::index U8 8usize a 2usize .refl(Bool, true))) (f (array::index U8 8usize a 3usize .refl(Bool, true)))
+      (f (array::index U8 8usize a 4usize .refl(Bool, true))) (f (array::index U8 8usize a 5usize .refl(Bool, true)))
+      (f (array::index U8 8usize a 6usize .refl(Bool, true))) (f (array::index U8 8usize a 7usize .refl(Bool, true)))
+
+-- `r[e] = f(a[e])` for e < 4.
+def[prelude] aarch64::map_u32x4 : (f : U32 -> U32) -> (a : Array U32 4usize) -> Array U32 4usize :=
+  fun (f : U32 -> U32) (a : Array U32 4usize) =>
+    aarch64::u32x4
+      (f (array::index U32 4usize a 0usize .refl(Bool, true))) (f (array::index U32 4usize a 1usize .refl(Bool, true)))
+      (f (array::index U32 4usize a 2usize .refl(Bool, true))) (f (array::index U32 4usize a 3usize .refl(Bool, true)))
+
+-- `r[e] = f(a[e], b[e])` for e < 4.
+def[prelude] aarch64::map2_u32x4 : (f : U32 -> U32 -> U32) -> (a : Array U32 4usize) -> (b : Array U32 4usize) -> Array U32 4usize :=
+  fun (f : U32 -> U32 -> U32) (a : Array U32 4usize) (b : Array U32 4usize) =>
+    aarch64::u32x4
+      (f (array::index U32 4usize a 0usize .refl(Bool, true)) (array::index U32 4usize b 0usize .refl(Bool, true)))
+      (f (array::index U32 4usize a 1usize .refl(Bool, true)) (array::index U32 4usize b 1usize .refl(Bool, true)))
+      (f (array::index U32 4usize a 2usize .refl(Bool, true)) (array::index U32 4usize b 2usize .refl(Bool, true)))
+      (f (array::index U32 4usize a 3usize .refl(Bool, true)) (array::index U32 4usize b 3usize .refl(Bool, true)))
+
+-- ---------------------------------------------------------------------------
+-- NEON (MODELS.md §3; src/aarch64/neon.rs), feature `neon`.
+-- ---------------------------------------------------------------------------
+
+-- vld1q_u8 — LD1 {Vt.16B}, [Xn]: r[e] = mem[e].
+def[intrinsic] aarch64::vld1q_u8 : (mem : Array U8 16usize) -> Array U8 16usize :=
+  fun (mem : Array U8 16usize) => aarch64::map_u8x16 (fun (x : U8) => x) mem
+
+-- vld1q_u32 — LD1 {Vt.4S}, [Xn]: r[e] = mem[e] (little-endian: element e is word e).
+def[intrinsic] aarch64::vld1q_u32 : (mem : Array U32 4usize) -> Array U32 4usize :=
+  fun (mem : Array U32 4usize) => aarch64::map_u32x4 (fun (x : U32) => x) mem
+
+-- vld1_u8 — LD1 {Vt.8B}, [Xn]: r[e] = mem[e].
+def[intrinsic] aarch64::vld1_u8 : (mem : Array U8 8usize) -> Array U8 8usize :=
+  fun (mem : Array U8 8usize) => aarch64::map_u8x8 (fun (x : U8) => x) mem
+
+-- vst1q_u8 — ST1 {Vt.16B}, [Xn]: the bytes written, mem[e] = a[e].
+def[intrinsic] aarch64::vst1q_u8 : (a : Array U8 16usize) -> Array U8 16usize :=
+  fun (a : Array U8 16usize) => aarch64::map_u8x16 (fun (x : U8) => x) a
+
+-- vst1q_u32 — ST1 {Vt.4S}, [Xn]: the words written, mem[e] = a[e].
+def[intrinsic] aarch64::vst1q_u32 : (a : Array U32 4usize) -> Array U32 4usize :=
+  fun (a : Array U32 4usize) => aarch64::map_u32x4 (fun (x : U32) => x) a
+
+-- vrev32q_u8 — REV32 Vd.16B, Vn.16B: r[4c + 3 - j] = a[4c + j] (c, j < 4).
+def[intrinsic] aarch64::vrev32q_u8 : (a : Array U8 16usize) -> Array U8 16usize :=
+  fun (a : Array U8 16usize) =>
+    let a0 : U8 = array::index U8 16usize a 0usize .refl(Bool, true);
+    let a1 : U8 = array::index U8 16usize a 1usize .refl(Bool, true);
+    let a2 : U8 = array::index U8 16usize a 2usize .refl(Bool, true);
+    let a3 : U8 = array::index U8 16usize a 3usize .refl(Bool, true);
+    let a4 : U8 = array::index U8 16usize a 4usize .refl(Bool, true);
+    let a5 : U8 = array::index U8 16usize a 5usize .refl(Bool, true);
+    let a6 : U8 = array::index U8 16usize a 6usize .refl(Bool, true);
+    let a7 : U8 = array::index U8 16usize a 7usize .refl(Bool, true);
+    let a8 : U8 = array::index U8 16usize a 8usize .refl(Bool, true);
+    let a9 : U8 = array::index U8 16usize a 9usize .refl(Bool, true);
+    let a10 : U8 = array::index U8 16usize a 10usize .refl(Bool, true);
+    let a11 : U8 = array::index U8 16usize a 11usize .refl(Bool, true);
+    let a12 : U8 = array::index U8 16usize a 12usize .refl(Bool, true);
+    let a13 : U8 = array::index U8 16usize a 13usize .refl(Bool, true);
+    let a14 : U8 = array::index U8 16usize a 14usize .refl(Bool, true);
+    let a15 : U8 = array::index U8 16usize a 15usize .refl(Bool, true);
+    aarch64::u8x16 a3 a2 a1 a0 a7 a6 a5 a4 a11 a10 a9 a8 a15 a14 a13 a12
+
+-- vreinterpretq_u32_u8 — no instruction: r[i] = le32(a[4i], a[4i+1], a[4i+2], a[4i+3]).
+def[intrinsic] aarch64::vreinterpretq_u32_u8 : (a : Array U8 16usize) -> Array U32 4usize :=
+  fun (a : Array U8 16usize) =>
+    let a0 : U8 = array::index U8 16usize a 0usize .refl(Bool, true);
+    let a1 : U8 = array::index U8 16usize a 1usize .refl(Bool, true);
+    let a2 : U8 = array::index U8 16usize a 2usize .refl(Bool, true);
+    let a3 : U8 = array::index U8 16usize a 3usize .refl(Bool, true);
+    let a4 : U8 = array::index U8 16usize a 4usize .refl(Bool, true);
+    let a5 : U8 = array::index U8 16usize a 5usize .refl(Bool, true);
+    let a6 : U8 = array::index U8 16usize a 6usize .refl(Bool, true);
+    let a7 : U8 = array::index U8 16usize a 7usize .refl(Bool, true);
+    let a8 : U8 = array::index U8 16usize a 8usize .refl(Bool, true);
+    let a9 : U8 = array::index U8 16usize a 9usize .refl(Bool, true);
+    let a10 : U8 = array::index U8 16usize a 10usize .refl(Bool, true);
+    let a11 : U8 = array::index U8 16usize a 11usize .refl(Bool, true);
+    let a12 : U8 = array::index U8 16usize a 12usize .refl(Bool, true);
+    let a13 : U8 = array::index U8 16usize a 13usize .refl(Bool, true);
+    let a14 : U8 = array::index U8 16usize a 14usize .refl(Bool, true);
+    let a15 : U8 = array::index U8 16usize a 15usize .refl(Bool, true);
+    aarch64::u32x4
+      (u32::from_le_bytes (aarch64::u8x4 a0 a1 a2 a3))
+      (u32::from_le_bytes (aarch64::u8x4 a4 a5 a6 a7))
+      (u32::from_le_bytes (aarch64::u8x4 a8 a9 a10 a11))
+      (u32::from_le_bytes (aarch64::u8x4 a12 a13 a14 a15))
+
+-- vreinterpretq_u8_u32 — no instruction: r[4i + j] = (a[i] >> 8j) mod 2^8.
+def[intrinsic] aarch64::vreinterpretq_u8_u32 : (a : Array U32 4usize) -> Array U8 16usize :=
+  fun (a : Array U32 4usize) =>
+    let a0 : U32 = array::index U32 4usize a 0usize .refl(Bool, true);
+    let a1 : U32 = array::index U32 4usize a 1usize .refl(Bool, true);
+    let a2 : U32 = array::index U32 4usize a 2usize .refl(Bool, true);
+    let a3 : U32 = array::index U32 4usize a 3usize .refl(Bool, true);
+    aarch64::u8x16
+      (#cast_u32_u8(a0)) (#cast_u32_u8(#wshr_u32(a0, 8u32))) (#cast_u32_u8(#wshr_u32(a0, 16u32))) (#cast_u32_u8(#wshr_u32(a0, 24u32)))
+      (#cast_u32_u8(a1)) (#cast_u32_u8(#wshr_u32(a1, 8u32))) (#cast_u32_u8(#wshr_u32(a1, 16u32))) (#cast_u32_u8(#wshr_u32(a1, 24u32)))
+      (#cast_u32_u8(a2)) (#cast_u32_u8(#wshr_u32(a2, 8u32))) (#cast_u32_u8(#wshr_u32(a2, 16u32))) (#cast_u32_u8(#wshr_u32(a2, 24u32)))
+      (#cast_u32_u8(a3)) (#cast_u32_u8(#wshr_u32(a3, 8u32))) (#cast_u32_u8(#wshr_u32(a3, 16u32))) (#cast_u32_u8(#wshr_u32(a3, 24u32)))
+
+-- vaddq_u32 — ADD Vd.4S, Vn.4S, Vm.4S: r[e] = a[e] + b[e] mod 2^32.
+def[intrinsic] aarch64::vaddq_u32 : (a : Array U32 4usize) -> (b : Array U32 4usize) -> Array U32 4usize :=
+  fun (a : Array U32 4usize) (b : Array U32 4usize) => aarch64::map2_u32x4 (fun (x : U32) (y : U32) => #wadd_u32(x, y)) a b
+
+-- veorq_u32 — EOR Vd.16B, Vn.16B, Vm.16B: r[e] = a[e] xor b[e].
+def[intrinsic] aarch64::veorq_u32 : (a : Array U32 4usize) -> (b : Array U32 4usize) -> Array U32 4usize :=
+  fun (a : Array U32 4usize) (b : Array U32 4usize) => aarch64::map2_u32x4 (fun (x : U32) (y : U32) => #xor_u32(x, y)) a b
+
+-- vandq_u32 — AND Vd.16B, Vn.16B, Vm.16B: r[e] = a[e] and b[e].
+def[intrinsic] aarch64::vandq_u32 : (a : Array U32 4usize) -> (b : Array U32 4usize) -> Array U32 4usize :=
+  fun (a : Array U32 4usize) (b : Array U32 4usize) => aarch64::map2_u32x4 (fun (x : U32) (y : U32) => #and_u32(x, y)) a b
+
+-- vorrq_u32 — ORR Vd.16B, Vn.16B, Vm.16B: r[e] = a[e] or b[e].
+def[intrinsic] aarch64::vorrq_u32 : (a : Array U32 4usize) -> (b : Array U32 4usize) -> Array U32 4usize :=
+  fun (a : Array U32 4usize) (b : Array U32 4usize) => aarch64::map2_u32x4 (fun (x : U32) (y : U32) => #or_u32(x, y)) a b
+
+-- vshlq_n_u32::<N> — SHL Vd.4S, Vn.4S, #N, N in [0, 31]: r[e] = a[e] << N (bits shifted out dropped).
+def[intrinsic] aarch64::vshlq_n_u32 : (N : U32) -> (.hN : Eq(Bool, #le_u32(N, 31u32), true)) -> (a : Array U32 4usize)
+    -> Array U32 4usize :=
+  fun (N : U32) (.hN : Eq(Bool, #le_u32(N, 31u32), true)) (a : Array U32 4usize) =>
+    aarch64::map_u32x4 (fun (x : U32) => #wshl_u32(x, N)) a
+
+-- vshrq_n_u32::<N> — USHR Vd.4S, Vn.4S, #N, N in [1, 32]: r[e] = (N = 32) ? 0 : a[e] >> N.
+def[intrinsic] aarch64::vshrq_n_u32 : (N : U32) -> (.hN0 : Eq(Bool, #le_u32(1u32, N), true)) -> (.hN : Eq(Bool, #le_u32(N, 32u32), true))
+    -> (a : Array U32 4usize) -> Array U32 4usize :=
+  fun (N : U32) (.hN0 : Eq(Bool, #le_u32(1u32, N), true)) (.hN : Eq(Bool, #le_u32(N, 32u32), true)) (a : Array U32 4usize) =>
+    aarch64::map_u32x4 (fun (x : U32) => if #eq_u32(N, 32u32) return U32 then 0u32 else #wshr_u32(x, N)) a
+
+-- vextq_u32::<N> — EXT Vd.16B, Vn.16B, Vm.16B, #(4N), N in [0, 3]: r[i] = (a ++ b)[i + N]
+-- (concat = V[m] : V[n], the first argument in the low lanes; i + N <= 6, no wraparound).
+def[intrinsic] aarch64::vextq_u32 : (N : U32) -> (.hN : Eq(Bool, #le_u32(N, 3u32), true))
+    -> (a : Array U32 4usize) -> (b : Array U32 4usize) -> Array U32 4usize :=
+  fun (N : U32) (.hN : Eq(Bool, #le_u32(N, 3u32), true)) (a : Array U32 4usize) (b : Array U32 4usize) =>
+    let c : Array U32 8usize = aarch64::concat_u32x4 a b;
+    aarch64::u32x4
+      (array::index U32 8usize c (#cast_u32_usize(N))
+        .linarith([hN : Eq(Bool, #le_u32(N, 3u32), true)]; Eq(Bool, #lt_usize(#cast_u32_usize(N), 8usize), true); [1, 1, 0, 0]))
+      (array::index U32 8usize c (#cast_u32_usize(#wadd_u32(N, 1u32)))
+        .linarith([hN : Eq(Bool, #le_u32(N, 3u32), true)]; Eq(Bool, #lt_usize(#cast_u32_usize(#wadd_u32(N, 1u32)), 8usize), true);
+                  [1, 1, 0, 0, 0, 0, 1, 4294967296, 0]))
+      (array::index U32 8usize c (#cast_u32_usize(#wadd_u32(N, 2u32)))
+        .linarith([hN : Eq(Bool, #le_u32(N, 3u32), true)]; Eq(Bool, #lt_usize(#cast_u32_usize(#wadd_u32(N, 2u32)), 8usize), true);
+                  [1, 1, 0, 0, 0, 0, 1, 4294967296, 0]))
+      (array::index U32 8usize c (#cast_u32_usize(#wadd_u32(N, 3u32)))
+        .linarith([hN : Eq(Bool, #le_u32(N, 3u32), true)]; Eq(Bool, #lt_usize(#cast_u32_usize(#wadd_u32(N, 3u32)), 8usize), true);
+                  [1, 1, 0, 0, 0, 0, 1, 4294967296, 0]))
+
+-- vdupq_n_u32 — DUP Vd.4S, Wn: r[e] = value.
+def[intrinsic] aarch64::vdupq_n_u32 : (value : U32) -> Array U32 4usize :=
+  fun (value : U32) => aarch64::u32x4 value value value value
+
+-- vgetq_lane_u32::<LANE> — UMOV Wd, Vn.S[LANE], LANE in [0, 3]: v[LANE].
+def[intrinsic] aarch64::vgetq_lane_u32 : (LANE : U32) -> (.hLANE : Eq(Bool, #le_u32(LANE, 3u32), true)) -> (v : Array U32 4usize) -> U32 :=
+  fun (LANE : U32) (.hLANE : Eq(Bool, #le_u32(LANE, 3u32), true)) (v : Array U32 4usize) =>
+    array::index U32 4usize v (#cast_u32_usize(LANE))
+      .linarith([hLANE : Eq(Bool, #le_u32(LANE, 3u32), true)]; Eq(Bool, #lt_usize(#cast_u32_usize(LANE), 4usize), true); [1, 1, 0, 0])
+
+-- vsetq_lane_u32::<LANE> — INS Vd.S[LANE], Wn, LANE in [0, 3]: r = b with r[LANE] = a (scalar first).
+def[intrinsic] aarch64::vsetq_lane_u32 : (LANE : U32) -> (.hLANE : Eq(Bool, #le_u32(LANE, 3u32), true)) -> (a : U32)
+    -> (b : Array U32 4usize) -> Array U32 4usize :=
+  fun (LANE : U32) (.hLANE : Eq(Bool, #le_u32(LANE, 3u32), true)) (a : U32) (b : Array U32 4usize) =>
+    array::set U32 4usize b (#cast_u32_usize(LANE)) a
+      .linarith([hLANE : Eq(Bool, #le_u32(LANE, 3u32), true)]; Eq(Bool, #lt_usize(#cast_u32_usize(LANE), 4usize), true); [1, 1, 0, 0])
+
+-- vsetq_lane_u8::<LANE> — INS Vd.B[LANE], Wn, LANE in [0, 15]: r = b with r[LANE] = a.
+def[intrinsic] aarch64::vsetq_lane_u8 : (LANE : U32) -> (.hLANE : Eq(Bool, #le_u32(LANE, 15u32), true)) -> (a : U8)
+    -> (b : Array U8 16usize) -> Array U8 16usize :=
+  fun (LANE : U32) (.hLANE : Eq(Bool, #le_u32(LANE, 15u32), true)) (a : U8) (b : Array U8 16usize) =>
+    array::set U8 16usize b (#cast_u32_usize(LANE)) a
+      .linarith([hLANE : Eq(Bool, #le_u32(LANE, 15u32), true)]; Eq(Bool, #lt_usize(#cast_u32_usize(LANE), 16usize), true); [1, 1, 0, 0])
+
+-- ---------------------------------------------------------------------------
+-- SHA2 (MODELS.md §4; src/aarch64/sha2.rs), feature `sha2` (FEAT_SHA256).
+-- Arm ARM shared/functions/crypto, transcribed one-to-one.
+-- ---------------------------------------------------------------------------
+
+-- SHAchoose(x, y, z) = ((y EOR z) AND x) EOR z.
+def[prelude] aarch64::sha_choose : (x : U32) -> (y : U32) -> (z : U32) -> U32 :=
+  fun (x : U32) (y : U32) (z : U32) => #xor_u32(#and_u32(#xor_u32(y, z), x), z)
+
+-- SHAmajority(x, y, z) = (x AND y) OR ((x OR y) AND z).
+def[prelude] aarch64::sha_majority : (x : U32) -> (y : U32) -> (z : U32) -> U32 :=
+  fun (x : U32) (y : U32) (z : U32) => #or_u32(#and_u32(x, y), #and_u32(#or_u32(x, y), z))
+
+-- SHAhashSIGMA0(x) = ROR(x, 2) EOR ROR(x, 13) EOR ROR(x, 22).
+def[prelude] aarch64::sha_hash_sigma0 : (x : U32) -> U32 :=
+  fun (x : U32) => #xor_u32(#xor_u32(#rotr_u32(x, 2u32), #rotr_u32(x, 13u32)), #rotr_u32(x, 22u32))
+
+-- SHAhashSIGMA1(x) = ROR(x, 6) EOR ROR(x, 11) EOR ROR(x, 25).
+def[prelude] aarch64::sha_hash_sigma1 : (x : U32) -> U32 :=
+  fun (x : U32) => #xor_u32(#xor_u32(#rotr_u32(x, 6u32), #rotr_u32(x, 11u32)), #rotr_u32(x, 25u32))
+
+-- One iteration of the SHA256hash loop on `Y : X` = [X0, X1, X2, X3, Y0, Y1, Y2, Y3]:
+--   chs = SHAchoose(Y0, Y1, Y2); maj = SHAmajority(X0, X1, X2);
+--   t = Y3 + SHAhashSIGMA1(Y0) + chs + w; X3 := t + X3; Y3 := t + SHAhashSIGMA0(X0) + maj;
+--   Y : X := ROL(Y : X, 32), i.e. (X, Y) := ([Y3, X0, X1, X2], [X3, Y0, Y1, Y2]).
+def[prelude] aarch64::sha256hash_iter : (yx : Array U32 8usize) -> (w : U32) -> Array U32 8usize :=
+  fun (yx : Array U32 8usize) (w : U32) =>
+    let x0 : U32 = array::index U32 8usize yx 0usize .refl(Bool, true);
+    let x1 : U32 = array::index U32 8usize yx 1usize .refl(Bool, true);
+    let x2 : U32 = array::index U32 8usize yx 2usize .refl(Bool, true);
+    let x3 : U32 = array::index U32 8usize yx 3usize .refl(Bool, true);
+    let y0 : U32 = array::index U32 8usize yx 4usize .refl(Bool, true);
+    let y1 : U32 = array::index U32 8usize yx 5usize .refl(Bool, true);
+    let y2 : U32 = array::index U32 8usize yx 6usize .refl(Bool, true);
+    let y3 : U32 = array::index U32 8usize yx 7usize .refl(Bool, true);
+    let chs : U32 = aarch64::sha_choose y0 y1 y2;
+    let maj : U32 = aarch64::sha_majority x0 x1 x2;
+    let t : U32 = #wadd_u32(#wadd_u32(#wadd_u32(y3, aarch64::sha_hash_sigma1 y0), chs), w);
+    let x3' : U32 = #wadd_u32(t, x3);
+    let y3' : U32 = #wadd_u32(#wadd_u32(t, aarch64::sha_hash_sigma0 x0), maj);
+    aarch64::u32x8 y3' x0 x1 x2 x3' y0 y1 y2
+
+-- SHA256hash(X, Y, W, part1): four iterations with W[0..4], then X (part1) or Y.
+def[prelude] aarch64::sha256hash : (x : Array U32 4usize) -> (y : Array U32 4usize) -> (w : Array U32 4usize) -> (part1 : Bool)
+    -> Array U32 4usize :=
+  fun (x : Array U32 4usize) (y : Array U32 4usize) (w : Array U32 4usize) (part1 : Bool) =>
+    let yx0 : Array U32 8usize = aarch64::concat_u32x4 x y;
+    let yx1 : Array U32 8usize = aarch64::sha256hash_iter yx0 (array::index U32 4usize w 0usize .refl(Bool, true));
+    let yx2 : Array U32 8usize = aarch64::sha256hash_iter yx1 (array::index U32 4usize w 1usize .refl(Bool, true));
+    let yx3 : Array U32 8usize = aarch64::sha256hash_iter yx2 (array::index U32 4usize w 2usize .refl(Bool, true));
+    let yx4 : Array U32 8usize = aarch64::sha256hash_iter yx3 (array::index U32 4usize w 3usize .refl(Bool, true));
+    if part1 return Array U32 4usize
+    then aarch64::u32x4 (array::index U32 8usize yx4 0usize .refl(Bool, true)) (array::index U32 8usize yx4 1usize .refl(Bool, true))
+                        (array::index U32 8usize yx4 2usize .refl(Bool, true)) (array::index U32 8usize yx4 3usize .refl(Bool, true))
+    else aarch64::u32x4 (array::index U32 8usize yx4 4usize .refl(Bool, true)) (array::index U32 8usize yx4 5usize .refl(Bool, true))
+                        (array::index U32 8usize yx4 6usize .refl(Bool, true)) (array::index U32 8usize yx4 7usize .refl(Bool, true))
+
+-- vsha256hq_u32(hash_abcd, hash_efgh, wk) — SHA256H Qd, Qn, Vm.4S (Qd = abcd):
+-- SHA256hash(abcd, efgh, wk, TRUE), the abcd half after four rounds.
+def[intrinsic] aarch64::vsha256hq_u32 : (hash_abcd : Array U32 4usize) -> (hash_efgh : Array U32 4usize) -> (wk : Array U32 4usize)
+    -> Array U32 4usize :=
+  fun (hash_abcd : Array U32 4usize) (hash_efgh : Array U32 4usize) (wk : Array U32 4usize) =>
+    aarch64::sha256hash hash_abcd hash_efgh wk true
+
+-- vsha256h2q_u32(hash_efgh, hash_abcd, wk) — SHA256H2 Qd, Qn, Vm.4S (Qd = efgh, Qn = abcd):
+-- SHA256hash(abcd, efgh, wk, FALSE), the efgh half after four rounds. The FIRST argument is
+-- efgh (reverse of the pseudocode order), and abcd must be the PRE-update abcd.
+def[intrinsic] aarch64::vsha256h2q_u32 : (hash_efgh : Array U32 4usize) -> (hash_abcd : Array U32 4usize) -> (wk : Array U32 4usize)
+    -> Array U32 4usize :=
+  fun (hash_efgh : Array U32 4usize) (hash_abcd : Array U32 4usize) (wk : Array U32 4usize) =>
+    aarch64::sha256hash hash_abcd hash_efgh wk false
+
+-- The SHA256SU0 element function: ROR(elt, 7) EOR ROR(elt, 18) EOR LSR(elt, 3).
+def[prelude] aarch64::sha256su0_sigma : (elt : U32) -> U32 :=
+  fun (elt : U32) => #xor_u32(#xor_u32(#rotr_u32(elt, 7u32), #rotr_u32(elt, 18u32)), #wshr_u32(elt, 3u32))
+
+-- The SHA256SU1 element function: ROR(elt, 17) EOR ROR(elt, 19) EOR LSR(elt, 10).
+def[prelude] aarch64::sha256su1_sigma : (elt : U32) -> U32 :=
+  fun (elt : U32) => #xor_u32(#xor_u32(#rotr_u32(elt, 17u32), #rotr_u32(elt, 19u32)), #wshr_u32(elt, 10u32))
+
+-- vsha256su0q_u32(w0_3, w4_7) — SHA256SU0 Vd.4S, Vn.4S (Vd = w0_3, Vn = w4_7):
+-- T = operand2<31:0> : operand1<127:32> = [w0_3[1], w0_3[2], w0_3[3], w4_7[0]];
+-- r[e] = SU0sigma(T[e]) + w0_3[e].
+def[intrinsic] aarch64::vsha256su0q_u32 : (w0_3 : Array U32 4usize) -> (w4_7 : Array U32 4usize) -> Array U32 4usize :=
+  fun (w0_3 : Array U32 4usize) (w4_7 : Array U32 4usize) =>
+    let t : Array U32 4usize =
+      aarch64::u32x4 (array::index U32 4usize w0_3 1usize .refl(Bool, true)) (array::index U32 4usize w0_3 2usize .refl(Bool, true))
+                     (array::index U32 4usize w0_3 3usize .refl(Bool, true)) (array::index U32 4usize w4_7 0usize .refl(Bool, true));
+    aarch64::map2_u32x4 (fun (elt : U32) (op1 : U32) => #wadd_u32(aarch64::sha256su0_sigma elt, op1)) t w0_3
+
+-- vsha256su1q_u32(tw0_3, w8_11, w12_15) — SHA256SU1 Vd.4S, Vn.4S, Vm.4S:
+-- T0 = operand3<31:0> : operand2<127:32> = [w8_11[1], w8_11[2], w8_11[3], w12_15[0]];
+-- r[e] = SU1sigma(T1[e]) + tw0_3[e] + T0[e] with T1 = [w12_15[2], w12_15[3]] for e < 2
+-- and T1 = [r[0], r[1]] for e >= 2 (the upper half depends on the lower half).
+def[intrinsic] aarch64::vsha256su1q_u32 : (tw0_3 : Array U32 4usize) -> (w8_11 : Array U32 4usize) -> (w12_15 : Array U32 4usize)
+    -> Array U32 4usize :=
+  fun (tw0_3 : Array U32 4usize) (w8_11 : Array U32 4usize) (w12_15 : Array U32 4usize) =>
+    let t0_0 : U32 = array::index U32 4usize w8_11 1usize .refl(Bool, true);
+    let t0_1 : U32 = array::index U32 4usize w8_11 2usize .refl(Bool, true);
+    let t0_2 : U32 = array::index U32 4usize w8_11 3usize .refl(Bool, true);
+    let t0_3 : U32 = array::index U32 4usize w12_15 0usize .refl(Bool, true);
+    let r0 : U32 = #wadd_u32(#wadd_u32(aarch64::sha256su1_sigma (array::index U32 4usize w12_15 2usize .refl(Bool, true)),
+                                       array::index U32 4usize tw0_3 0usize .refl(Bool, true)), t0_0);
+    let r1 : U32 = #wadd_u32(#wadd_u32(aarch64::sha256su1_sigma (array::index U32 4usize w12_15 3usize .refl(Bool, true)),
+                                       array::index U32 4usize tw0_3 1usize .refl(Bool, true)), t0_1);
+    let r2 : U32 = #wadd_u32(#wadd_u32(aarch64::sha256su1_sigma r0, array::index U32 4usize tw0_3 2usize .refl(Bool, true)), t0_2);
+    let r3 : U32 = #wadd_u32(#wadd_u32(aarch64::sha256su1_sigma r1, array::index U32 4usize tw0_3 3usize .refl(Bool, true)), t0_3);
+    aarch64::u32x4 r0 r1 r2 r3
+
+-- ---------------------------------------------------------------------------
+-- Plan O10: NEON byte/halfword/doubleword lane operations (MODELS.md §3.1;
+-- src/aarch64/neon2.rs), feature `neon`, and FEAT_SHA3/FEAT_SHA512
+-- (MODELS.md §4.1; src/aarch64/sha3.rs), rustc feature `sha3`.
+-- Vectors: uint16x8_t = Array U16 8usize, uint64x2_t = Array U64 2usize,
+-- uint32x2_t = Array U32 2usize, lane 0 first.
+-- ---------------------------------------------------------------------------
+
+def[prelude] aarch64::u16x8 : (x0 : U16) -> (x1 : U16) -> (x2 : U16) -> (x3 : U16) -> (x4 : U16) -> (x5 : U16) -> (x6 : U16) -> (x7 : U16) -> Array U16 8usize :=
+  fun (x0 : U16) (x1 : U16) (x2 : U16) (x3 : U16) (x4 : U16) (x5 : U16) (x6 : U16) (x7 : U16) =>
+    pair(Array U16 8usize, Cons[U16](x0, Cons[U16](x1, Cons[U16](x2, Cons[U16](x3, Cons[U16](x4, Cons[U16](x5, Cons[U16](x6, Cons[U16](x7, Nil[U16])))))))), refl(Int, 8int))
+
+def[prelude] aarch64::u64x2 : (x0 : U64) -> (x1 : U64) -> Array U64 2usize :=
+  fun (x0 : U64) (x1 : U64) =>
+    pair(Array U64 2usize, Cons[U64](x0, Cons[U64](x1, Nil[U64])), refl(Int, 2int))
+
+def[prelude] aarch64::u32x2 : (x0 : U32) -> (x1 : U32) -> Array U32 2usize :=
+  fun (x0 : U32) (x1 : U32) =>
+    pair(Array U32 2usize, Cons[U32](x0, Cons[U32](x1, Nil[U32])), refl(Int, 2int))
+
+def[prelude] aarch64::u8x2 : (x0 : U8) -> (x1 : U8) -> Array U8 2usize :=
+  fun (x0 : U8) (x1 : U8) =>
+    pair(Array U8 2usize, Cons[U8](x0, Cons[U8](x1, Nil[U8])), refl(Int, 2int))
+
+-- r[e] = f(a[e], b[e]) for e < 16.
+def[prelude] aarch64::map2_u8x16 : (f : U8 -> U8 -> U8) -> (a : Array U8 16usize) -> (b : Array U8 16usize) -> Array U8 16usize :=
+  fun (f : U8 -> U8 -> U8) (a : Array U8 16usize) (b : Array U8 16usize) =>
+    aarch64::u8x16
+      (f (array::index U8 16usize a 0usize .refl(Bool, true)) (array::index U8 16usize b 0usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 1usize .refl(Bool, true)) (array::index U8 16usize b 1usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 2usize .refl(Bool, true)) (array::index U8 16usize b 2usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 3usize .refl(Bool, true)) (array::index U8 16usize b 3usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 4usize .refl(Bool, true)) (array::index U8 16usize b 4usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 5usize .refl(Bool, true)) (array::index U8 16usize b 5usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 6usize .refl(Bool, true)) (array::index U8 16usize b 6usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 7usize .refl(Bool, true)) (array::index U8 16usize b 7usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 8usize .refl(Bool, true)) (array::index U8 16usize b 8usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 9usize .refl(Bool, true)) (array::index U8 16usize b 9usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 10usize .refl(Bool, true)) (array::index U8 16usize b 10usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 11usize .refl(Bool, true)) (array::index U8 16usize b 11usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 12usize .refl(Bool, true)) (array::index U8 16usize b 12usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 13usize .refl(Bool, true)) (array::index U8 16usize b 13usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 14usize .refl(Bool, true)) (array::index U8 16usize b 14usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 15usize .refl(Bool, true)) (array::index U8 16usize b 15usize .refl(Bool, true)))
+
+-- r[e] = f(a[e], b[e], c[e]) for e < 16.
+def[prelude] aarch64::map3_u8x16 : (f : U8 -> U8 -> U8 -> U8) -> (a : Array U8 16usize) -> (b : Array U8 16usize) -> (c : Array U8 16usize) -> Array U8 16usize :=
+  fun (f : U8 -> U8 -> U8 -> U8) (a : Array U8 16usize) (b : Array U8 16usize) (c : Array U8 16usize) =>
+    aarch64::u8x16
+      (f (array::index U8 16usize a 0usize .refl(Bool, true)) (array::index U8 16usize b 0usize .refl(Bool, true)) (array::index U8 16usize c 0usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 1usize .refl(Bool, true)) (array::index U8 16usize b 1usize .refl(Bool, true)) (array::index U8 16usize c 1usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 2usize .refl(Bool, true)) (array::index U8 16usize b 2usize .refl(Bool, true)) (array::index U8 16usize c 2usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 3usize .refl(Bool, true)) (array::index U8 16usize b 3usize .refl(Bool, true)) (array::index U8 16usize c 3usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 4usize .refl(Bool, true)) (array::index U8 16usize b 4usize .refl(Bool, true)) (array::index U8 16usize c 4usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 5usize .refl(Bool, true)) (array::index U8 16usize b 5usize .refl(Bool, true)) (array::index U8 16usize c 5usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 6usize .refl(Bool, true)) (array::index U8 16usize b 6usize .refl(Bool, true)) (array::index U8 16usize c 6usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 7usize .refl(Bool, true)) (array::index U8 16usize b 7usize .refl(Bool, true)) (array::index U8 16usize c 7usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 8usize .refl(Bool, true)) (array::index U8 16usize b 8usize .refl(Bool, true)) (array::index U8 16usize c 8usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 9usize .refl(Bool, true)) (array::index U8 16usize b 9usize .refl(Bool, true)) (array::index U8 16usize c 9usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 10usize .refl(Bool, true)) (array::index U8 16usize b 10usize .refl(Bool, true)) (array::index U8 16usize c 10usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 11usize .refl(Bool, true)) (array::index U8 16usize b 11usize .refl(Bool, true)) (array::index U8 16usize c 11usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 12usize .refl(Bool, true)) (array::index U8 16usize b 12usize .refl(Bool, true)) (array::index U8 16usize c 12usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 13usize .refl(Bool, true)) (array::index U8 16usize b 13usize .refl(Bool, true)) (array::index U8 16usize c 13usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 14usize .refl(Bool, true)) (array::index U8 16usize b 14usize .refl(Bool, true)) (array::index U8 16usize c 14usize .refl(Bool, true)))
+      (f (array::index U8 16usize a 15usize .refl(Bool, true)) (array::index U8 16usize b 15usize .refl(Bool, true)) (array::index U8 16usize c 15usize .refl(Bool, true)))
+
+-- r[e] = f(a[e]) for e < 2.
+def[prelude] aarch64::map_u64x2 : (f : U64 -> U64) -> (a : Array U64 2usize) -> Array U64 2usize :=
+  fun (f : U64 -> U64) (a : Array U64 2usize) =>
+    aarch64::u64x2
+      (f (array::index U64 2usize a 0usize .refl(Bool, true)))
+      (f (array::index U64 2usize a 1usize .refl(Bool, true)))
+
+-- r[e] = f(a[e], b[e]) for e < 2.
+def[prelude] aarch64::map2_u64x2 : (f : U64 -> U64 -> U64) -> (a : Array U64 2usize) -> (b : Array U64 2usize) -> Array U64 2usize :=
+  fun (f : U64 -> U64 -> U64) (a : Array U64 2usize) (b : Array U64 2usize) =>
+    aarch64::u64x2
+      (f (array::index U64 2usize a 0usize .refl(Bool, true)) (array::index U64 2usize b 0usize .refl(Bool, true)))
+      (f (array::index U64 2usize a 1usize .refl(Bool, true)) (array::index U64 2usize b 1usize .refl(Bool, true)))
+
+-- r[e] = f(a[e], b[e], c[e]) for e < 2.
+def[prelude] aarch64::map3_u64x2 : (f : U64 -> U64 -> U64 -> U64) -> (a : Array U64 2usize) -> (b : Array U64 2usize) -> (c : Array U64 2usize) -> Array U64 2usize :=
+  fun (f : U64 -> U64 -> U64 -> U64) (a : Array U64 2usize) (b : Array U64 2usize) (c : Array U64 2usize) =>
+    aarch64::u64x2
+      (f (array::index U64 2usize a 0usize .refl(Bool, true)) (array::index U64 2usize b 0usize .refl(Bool, true)) (array::index U64 2usize c 0usize .refl(Bool, true)))
+      (f (array::index U64 2usize a 1usize .refl(Bool, true)) (array::index U64 2usize b 1usize .refl(Bool, true)) (array::index U64 2usize c 1usize .refl(Bool, true)))
+
+-- r[e] = f(a[e], b[e], c[e]) for e < 4.
+def[prelude] aarch64::map3_u32x4 : (f : U32 -> U32 -> U32 -> U32) -> (a : Array U32 4usize) -> (b : Array U32 4usize) -> (c : Array U32 4usize) -> Array U32 4usize :=
+  fun (f : U32 -> U32 -> U32 -> U32) (a : Array U32 4usize) (b : Array U32 4usize) (c : Array U32 4usize) =>
+    aarch64::u32x4
+      (f (array::index U32 4usize a 0usize .refl(Bool, true)) (array::index U32 4usize b 0usize .refl(Bool, true)) (array::index U32 4usize c 0usize .refl(Bool, true)))
+      (f (array::index U32 4usize a 1usize .refl(Bool, true)) (array::index U32 4usize b 1usize .refl(Bool, true)) (array::index U32 4usize c 1usize .refl(Bool, true)))
+      (f (array::index U32 4usize a 2usize .refl(Bool, true)) (array::index U32 4usize b 2usize .refl(Bool, true)) (array::index U32 4usize c 2usize .refl(Bool, true)))
+      (f (array::index U32 4usize a 3usize .refl(Bool, true)) (array::index U32 4usize b 3usize .refl(Bool, true)) (array::index U32 4usize c 3usize .refl(Bool, true)))
+
+-- vld1q_u64 — LD1 {Vt.2D}, [Xn]: r[e] = mem[e].
+def[intrinsic] aarch64::vld1q_u64 : (mem : Array U64 2usize) -> Array U64 2usize :=
+  fun (mem : Array U64 2usize) => aarch64::map_u64x2 (fun (x : U64) => x) mem
+
+-- vst1q_u64 — ST1 {Vt.2D}, [Xn]: the words written, mem[e] = a[e].
+def[intrinsic] aarch64::vst1q_u64 : (a : Array U64 2usize) -> Array U64 2usize :=
+  fun (a : Array U64 2usize) => aarch64::map_u64x2 (fun (x : U64) => x) a
+
+-- veorq_u8 — EOR Vd.16B, Vn.16B, Vm.16B: r[e] = a[e] xor b[e].
+def[intrinsic] aarch64::veorq_u8 : (a : Array U8 16usize) -> (b : Array U8 16usize) -> Array U8 16usize :=
+  fun (a : Array U8 16usize) (b : Array U8 16usize) => aarch64::map2_u8x16 (fun (x : U8) (y : U8) => #xor_u8(x, y)) a b
+
+-- vandq_u8 — AND Vd.16B, Vn.16B, Vm.16B: r[e] = a[e] and b[e].
+def[intrinsic] aarch64::vandq_u8 : (a : Array U8 16usize) -> (b : Array U8 16usize) -> Array U8 16usize :=
+  fun (a : Array U8 16usize) (b : Array U8 16usize) => aarch64::map2_u8x16 (fun (x : U8) (y : U8) => #and_u8(x, y)) a b
+
+-- vorrq_u8 — ORR Vd.16B, Vn.16B, Vm.16B: r[e] = a[e] or b[e].
+def[intrinsic] aarch64::vorrq_u8 : (a : Array U8 16usize) -> (b : Array U8 16usize) -> Array U8 16usize :=
+  fun (a : Array U8 16usize) (b : Array U8 16usize) => aarch64::map2_u8x16 (fun (x : U8) (y : U8) => #or_u8(x, y)) a b
+
+-- vdupq_n_u8 — DUP Vd.16B, Wn: r[e] = value.
+def[intrinsic] aarch64::vdupq_n_u8 : (value : U8) -> Array U8 16usize :=
+  fun (value : U8) =>
+    aarch64::u8x16 value value value value value value value value value value value value value value value value
+
+-- vshrq_n_u8::<N> — USHR Vd.16B, Vn.16B, #N, N in [1, 8]: r[e] = (N = 8) ? 0 : a[e] >> N.
+def[intrinsic] aarch64::vshrq_n_u8 : (N : U32) -> (.hN0 : Eq(Bool, #le_u32(1u32, N), true)) -> (.hN : Eq(Bool, #le_u32(N, 8u32), true))
+    -> (a : Array U8 16usize) -> Array U8 16usize :=
+  fun (N : U32) (.hN0 : Eq(Bool, #le_u32(1u32, N), true)) (.hN : Eq(Bool, #le_u32(N, 8u32), true)) (a : Array U8 16usize) =>
+    aarch64::map_u8x16 (fun (x : U8) => if #eq_u32(N, 8u32) return U8 then 0u8 else #wshr_u8(x, N)) a
+
+-- vcltq_u8 — CMHI Vd.16B, Vm.16B, Vn.16B (b > a): r[e] = a[e] < b[e] ? 0xff : 0 (unsigned).
+def[intrinsic] aarch64::vcltq_u8 : (a : Array U8 16usize) -> (b : Array U8 16usize) -> Array U8 16usize :=
+  fun (a : Array U8 16usize) (b : Array U8 16usize) =>
+    aarch64::map2_u8x16 (fun (x : U8) (y : U8) => if #lt_u8(x, y) return U8 then 255u8 else 0u8) a b
+
+-- vcgeq_u8 — CMHS Vd.16B, Vn.16B, Vm.16B: r[e] = a[e] >= b[e] ? 0xff : 0 (unsigned).
+def[intrinsic] aarch64::vcgeq_u8 : (a : Array U8 16usize) -> (b : Array U8 16usize) -> Array U8 16usize :=
+  fun (a : Array U8 16usize) (b : Array U8 16usize) =>
+    aarch64::map2_u8x16 (fun (x : U8) (y : U8) => if #le_u8(y, x) return U8 then 255u8 else 0u8) a b
+
+-- vceqq_u8 — CMEQ Vd.16B, Vn.16B, Vm.16B: r[e] = a[e] = b[e] ? 0xff : 0 (unsigned).
+def[intrinsic] aarch64::vceqq_u8 : (a : Array U8 16usize) -> (b : Array U8 16usize) -> Array U8 16usize :=
+  fun (a : Array U8 16usize) (b : Array U8 16usize) =>
+    aarch64::map2_u8x16 (fun (x : U8) (y : U8) => if #eq_u8(x, y) return U8 then 255u8 else 0u8) a b
+
+-- One TBL lane: t[k] if k < 16, else 0.
+def[prelude] aarch64::tbl1_byte : (t : Array U8 16usize) -> (k : U8) -> U8 :=
+  fun (t : Array U8 16usize) (k : U8) =>
+    if #lt_u8(k, 16u8) as .h return U8 then
+      array::index U8 16usize t (#cast_u8_usize(k))
+        .linarith([h : Eq(Bool, #lt_u8(k, 16u8), true)]; Eq(Bool, #lt_usize(#cast_u8_usize(k), 16usize), true); [])
+    else 0u8
+
+-- vqtbl1q_u8(t, idx) — TBL Vd.16B, {Vn.16B}, Vm.16B: r[i] = idx[i] < 16 ? t[idx[i]] : 0.
+def[intrinsic] aarch64::vqtbl1q_u8 : (t : Array U8 16usize) -> (idx : Array U8 16usize) -> Array U8 16usize :=
+  fun (t : Array U8 16usize) (idx : Array U8 16usize) => aarch64::map_u8x16 (fun (k : U8) => aarch64::tbl1_byte t k) idx
+
+-- vcntq_u8 — CNT Vd.16B, Vn.16B: r[e] = BitCount(a[e]).
+def[intrinsic] aarch64::vcntq_u8 : (a : Array U8 16usize) -> Array U8 16usize :=
+  fun (a : Array U8 16usize) => aarch64::map_u8x16 (fun (x : U8) => #cast_u32_u8(#count_ones_u8(x))) a
+
+-- vaddvq_u8 — ADDV Bd, Vn.16B: the sum of the lanes mod 2^8, lane 0 first.
+def[intrinsic] aarch64::vaddvq_u8 : (a : Array U8 16usize) -> U8 :=
+  fun (a : Array U8 16usize) =>
+    #wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(#wadd_u8(array::index U8 16usize a 0usize .refl(Bool, true), array::index U8 16usize a 1usize .refl(Bool, true)), array::index U8 16usize a 2usize .refl(Bool, true)), array::index U8 16usize a 3usize .refl(Bool, true)), array::index U8 16usize a 4usize .refl(Bool, true)), array::index U8 16usize a 5usize .refl(Bool, true)), array::index U8 16usize a 6usize .refl(Bool, true)), array::index U8 16usize a 7usize .refl(Bool, true)), array::index U8 16usize a 8usize .refl(Bool, true)), array::index U8 16usize a 9usize .refl(Bool, true)), array::index U8 16usize a 10usize .refl(Bool, true)), array::index U8 16usize a 11usize .refl(Bool, true)), array::index U8 16usize a 12usize .refl(Bool, true)), array::index U8 16usize a 13usize .refl(Bool, true)), array::index U8 16usize a 14usize .refl(Bool, true)), array::index U8 16usize a 15usize .refl(Bool, true))
+
+-- vmaxvq_u8 — UMAXV Bd, Vn.16B: the largest lane (Max folded from lane 0).
+def[intrinsic] aarch64::vmaxvq_u8 : (a : Array U8 16usize) -> U8 :=
+  fun (a : Array U8 16usize) =>
+    #max_u8(#max_u8(#max_u8(#max_u8(#max_u8(#max_u8(#max_u8(#max_u8(#max_u8(#max_u8(#max_u8(#max_u8(#max_u8(#max_u8(#max_u8(array::index U8 16usize a 0usize .refl(Bool, true), array::index U8 16usize a 1usize .refl(Bool, true)), array::index U8 16usize a 2usize .refl(Bool, true)), array::index U8 16usize a 3usize .refl(Bool, true)), array::index U8 16usize a 4usize .refl(Bool, true)), array::index U8 16usize a 5usize .refl(Bool, true)), array::index U8 16usize a 6usize .refl(Bool, true)), array::index U8 16usize a 7usize .refl(Bool, true)), array::index U8 16usize a 8usize .refl(Bool, true)), array::index U8 16usize a 9usize .refl(Bool, true)), array::index U8 16usize a 10usize .refl(Bool, true)), array::index U8 16usize a 11usize .refl(Bool, true)), array::index U8 16usize a 12usize .refl(Bool, true)), array::index U8 16usize a 13usize .refl(Bool, true)), array::index U8 16usize a 14usize .refl(Bool, true)), array::index U8 16usize a 15usize .refl(Bool, true))
+
+-- vreinterpretq_u16_u8 — no instruction: r[i] = le16(a[2i], a[2i+1]).
+def[intrinsic] aarch64::vreinterpretq_u16_u8 : (a : Array U8 16usize) -> Array U16 8usize :=
+  fun (a : Array U8 16usize) =>
+    aarch64::u16x8
+      (u16::from_le_bytes (aarch64::u8x2 (array::index U8 16usize a 0usize .refl(Bool, true)) (array::index U8 16usize a 1usize .refl(Bool, true))))
+      (u16::from_le_bytes (aarch64::u8x2 (array::index U8 16usize a 2usize .refl(Bool, true)) (array::index U8 16usize a 3usize .refl(Bool, true))))
+      (u16::from_le_bytes (aarch64::u8x2 (array::index U8 16usize a 4usize .refl(Bool, true)) (array::index U8 16usize a 5usize .refl(Bool, true))))
+      (u16::from_le_bytes (aarch64::u8x2 (array::index U8 16usize a 6usize .refl(Bool, true)) (array::index U8 16usize a 7usize .refl(Bool, true))))
+      (u16::from_le_bytes (aarch64::u8x2 (array::index U8 16usize a 8usize .refl(Bool, true)) (array::index U8 16usize a 9usize .refl(Bool, true))))
+      (u16::from_le_bytes (aarch64::u8x2 (array::index U8 16usize a 10usize .refl(Bool, true)) (array::index U8 16usize a 11usize .refl(Bool, true))))
+      (u16::from_le_bytes (aarch64::u8x2 (array::index U8 16usize a 12usize .refl(Bool, true)) (array::index U8 16usize a 13usize .refl(Bool, true))))
+      (u16::from_le_bytes (aarch64::u8x2 (array::index U8 16usize a 14usize .refl(Bool, true)) (array::index U8 16usize a 15usize .refl(Bool, true))))
+
+-- vreinterpretq_u64_u8 — no instruction: r[i] = le64(a[8i..8i+8]).
+def[intrinsic] aarch64::vreinterpretq_u64_u8 : (a : Array U8 16usize) -> Array U64 2usize :=
+  fun (a : Array U8 16usize) =>
+    aarch64::u64x2
+      (u64::from_le_bytes (aarch64::u8x8 (array::index U8 16usize a 0usize .refl(Bool, true)) (array::index U8 16usize a 1usize .refl(Bool, true)) (array::index U8 16usize a 2usize .refl(Bool, true)) (array::index U8 16usize a 3usize .refl(Bool, true)) (array::index U8 16usize a 4usize .refl(Bool, true)) (array::index U8 16usize a 5usize .refl(Bool, true)) (array::index U8 16usize a 6usize .refl(Bool, true)) (array::index U8 16usize a 7usize .refl(Bool, true))))
+      (u64::from_le_bytes (aarch64::u8x8 (array::index U8 16usize a 8usize .refl(Bool, true)) (array::index U8 16usize a 9usize .refl(Bool, true)) (array::index U8 16usize a 10usize .refl(Bool, true)) (array::index U8 16usize a 11usize .refl(Bool, true)) (array::index U8 16usize a 12usize .refl(Bool, true)) (array::index U8 16usize a 13usize .refl(Bool, true)) (array::index U8 16usize a 14usize .refl(Bool, true)) (array::index U8 16usize a 15usize .refl(Bool, true))))
+
+-- vcombine_u8(low, high) — high : low, low in lanes 0..8.
+def[intrinsic] aarch64::vcombine_u8 : (low : Array U8 8usize) -> (high : Array U8 8usize) -> Array U8 16usize :=
+  fun (low : Array U8 8usize) (high : Array U8 8usize) =>
+    aarch64::u8x16 (array::index U8 8usize low 0usize .refl(Bool, true)) (array::index U8 8usize low 1usize .refl(Bool, true)) (array::index U8 8usize low 2usize .refl(Bool, true)) (array::index U8 8usize low 3usize .refl(Bool, true)) (array::index U8 8usize low 4usize .refl(Bool, true)) (array::index U8 8usize low 5usize .refl(Bool, true)) (array::index U8 8usize low 6usize .refl(Bool, true)) (array::index U8 8usize low 7usize .refl(Bool, true))
+      (array::index U8 8usize high 0usize .refl(Bool, true)) (array::index U8 8usize high 1usize .refl(Bool, true)) (array::index U8 8usize high 2usize .refl(Bool, true)) (array::index U8 8usize high 3usize .refl(Bool, true)) (array::index U8 8usize high 4usize .refl(Bool, true)) (array::index U8 8usize high 5usize .refl(Bool, true)) (array::index U8 8usize high 6usize .refl(Bool, true)) (array::index U8 8usize high 7usize .refl(Bool, true))
+
+-- vgetq_lane_u64::<LANE> — UMOV Xd, Vn.D[LANE], LANE in [0, 1]: v[LANE].
+def[intrinsic] aarch64::vgetq_lane_u64 : (LANE : U32) -> (.hLANE : Eq(Bool, #le_u32(LANE, 1u32), true)) -> (v : Array U64 2usize) -> U64 :=
+  fun (LANE : U32) (.hLANE : Eq(Bool, #le_u32(LANE, 1u32), true)) (v : Array U64 2usize) =>
+    array::index U64 2usize v (#cast_u32_usize(LANE))
+      .linarith([hLANE : Eq(Bool, #le_u32(LANE, 1u32), true)]; Eq(Bool, #lt_usize(#cast_u32_usize(LANE), 2usize), true); [])
+
+-- vshrn_n_u16::<N> — SHRN Vd.8B, Vn.8H, #N, N in [1, 8]: r[e] = (a[e] >> N) mod 2^8.
+def[intrinsic] aarch64::vshrn_n_u16 : (N : U32) -> (.hN0 : Eq(Bool, #le_u32(1u32, N), true)) -> (.hN : Eq(Bool, #le_u32(N, 8u32), true))
+    -> (a : Array U16 8usize) -> Array U8 8usize :=
+  fun (N : U32) (.hN0 : Eq(Bool, #le_u32(1u32, N), true)) (.hN : Eq(Bool, #le_u32(N, 8u32), true)) (a : Array U16 8usize) =>
+    aarch64::u8x8
+      (#cast_u16_u8(#wshr_u16(array::index U16 8usize a 0usize .refl(Bool, true), N)))
+      (#cast_u16_u8(#wshr_u16(array::index U16 8usize a 1usize .refl(Bool, true), N)))
+      (#cast_u16_u8(#wshr_u16(array::index U16 8usize a 2usize .refl(Bool, true), N)))
+      (#cast_u16_u8(#wshr_u16(array::index U16 8usize a 3usize .refl(Bool, true), N)))
+      (#cast_u16_u8(#wshr_u16(array::index U16 8usize a 4usize .refl(Bool, true), N)))
+      (#cast_u16_u8(#wshr_u16(array::index U16 8usize a 5usize .refl(Bool, true), N)))
+      (#cast_u16_u8(#wshr_u16(array::index U16 8usize a 6usize .refl(Bool, true), N)))
+      (#cast_u16_u8(#wshr_u16(array::index U16 8usize a 7usize .refl(Bool, true), N)))
+
+-- vshrn_n_u64::<N> — SHRN Vd.2S, Vn.2D, #N, N in [1, 32]: r[e] = (a[e] >> N) mod 2^32.
+def[intrinsic] aarch64::vshrn_n_u64 : (N : U32) -> (.hN0 : Eq(Bool, #le_u32(1u32, N), true)) -> (.hN : Eq(Bool, #le_u32(N, 32u32), true))
+    -> (a : Array U64 2usize) -> Array U32 2usize :=
+  fun (N : U32) (.hN0 : Eq(Bool, #le_u32(1u32, N), true)) (.hN : Eq(Bool, #le_u32(N, 32u32), true)) (a : Array U64 2usize) =>
+    aarch64::u32x2
+      (#cast_u64_u32(#wshr_u64(array::index U64 2usize a 0usize .refl(Bool, true), N)))
+      (#cast_u64_u32(#wshr_u64(array::index U64 2usize a 1usize .refl(Bool, true), N)))
+
+-- vmovn_u64 — XTN Vd.2S, Vn.2D: r[e] = a[e] mod 2^32.
+def[intrinsic] aarch64::vmovn_u64 : (a : Array U64 2usize) -> Array U32 2usize :=
+  fun (a : Array U64 2usize) =>
+    aarch64::u32x2
+      (#cast_u64_u32(array::index U64 2usize a 0usize .refl(Bool, true)))
+      (#cast_u64_u32(array::index U64 2usize a 1usize .refl(Bool, true)))
+
+-- vaddq_u64 — ADD Vd.2D, Vn.2D, Vm.2D: r[e] = a[e] + b[e] mod 2^64.
+def[intrinsic] aarch64::vaddq_u64 : (a : Array U64 2usize) -> (b : Array U64 2usize) -> Array U64 2usize :=
+  fun (a : Array U64 2usize) (b : Array U64 2usize) => aarch64::map2_u64x2 (fun (x : U64) (y : U64) => #wadd_u64(x, y)) a b
+
+-- vsraq_n_u64::<N>(a, b) — USRA Vd.2D, Vn.2D, #N, N in [1, 64]: r[e] = a[e] + ((N = 64) ? 0 : b[e] >> N).
+def[intrinsic] aarch64::vsraq_n_u64 : (N : U32) -> (.hN0 : Eq(Bool, #le_u32(1u32, N), true)) -> (.hN : Eq(Bool, #le_u32(N, 64u32), true))
+    -> (a : Array U64 2usize) -> (b : Array U64 2usize) -> Array U64 2usize :=
+  fun (N : U32) (.hN0 : Eq(Bool, #le_u32(1u32, N), true)) (.hN : Eq(Bool, #le_u32(N, 64u32), true)) (a : Array U64 2usize) (b : Array U64 2usize) =>
+    aarch64::map2_u64x2 (fun (x : U64) (y : U64) => #wadd_u64(x, if #eq_u32(N, 64u32) return U64 then 0u64 else #wshr_u64(y, N))) a b
+
+-- vbslq_u64(a, b, c) — BSL (Vd = a, the mask): r[e] = c[e] EOR ((c[e] EOR b[e]) AND a[e]).
+def[intrinsic] aarch64::vbslq_u64 : (a : Array U64 2usize) -> (b : Array U64 2usize) -> (c : Array U64 2usize) -> Array U64 2usize :=
+  fun (a : Array U64 2usize) (b : Array U64 2usize) (c : Array U64 2usize) =>
+    aarch64::map3_u64x2 (fun (m : U64) (x : U64) (y : U64) => #xor_u64(y, #and_u64(#xor_u64(y, x), m))) a b c
+
+-- vbslq_u32(a, b, c) — BSL on the u32 view (Vd = a, the mask): r[e] = c[e] EOR ((c[e] EOR b[e]) AND a[e]).
+def[intrinsic] aarch64::vbslq_u32 : (a : Array U32 4usize) -> (b : Array U32 4usize) -> (c : Array U32 4usize) -> Array U32 4usize :=
+  fun (a : Array U32 4usize) (b : Array U32 4usize) (c : Array U32 4usize) =>
+    aarch64::map3_u32x4 (fun (m : U32) (x : U32) (y : U32) => #xor_u32(y, #and_u32(#xor_u32(y, x), m))) a b c
+
+-- vmull_u32(a, b) — UMULL Vd.2D, Vn.2S, Vm.2S: r[e] = a[e] * b[e] (exact; below 2^64).
+def[intrinsic] aarch64::vmull_u32 : (a : Array U32 2usize) -> (b : Array U32 2usize) -> Array U64 2usize :=
+  fun (a : Array U32 2usize) (b : Array U32 2usize) =>
+    aarch64::u64x2
+      (#wmul_u64(#cast_u32_u64(array::index U32 2usize a 0usize .refl(Bool, true)), #cast_u32_u64(array::index U32 2usize b 0usize .refl(Bool, true))))
+      (#wmul_u64(#cast_u32_u64(array::index U32 2usize a 1usize .refl(Bool, true)), #cast_u32_u64(array::index U32 2usize b 1usize .refl(Bool, true))))
+
+-- vmlal_u32(a, b, c) — UMLAL Vd.2D, Vn.2S, Vm.2S (Vd = a): r[e] = a[e] + b[e] * c[e] mod 2^64.
+def[intrinsic] aarch64::vmlal_u32 : (a : Array U64 2usize) -> (b : Array U32 2usize) -> (c : Array U32 2usize) -> Array U64 2usize :=
+  fun (a : Array U64 2usize) (b : Array U32 2usize) (c : Array U32 2usize) =>
+    aarch64::u64x2
+      (#wadd_u64(array::index U64 2usize a 0usize .refl(Bool, true), #wmul_u64(#cast_u32_u64(array::index U32 2usize b 0usize .refl(Bool, true)), #cast_u32_u64(array::index U32 2usize c 0usize .refl(Bool, true)))))
+      (#wadd_u64(array::index U64 2usize a 1usize .refl(Bool, true), #wmul_u64(#cast_u32_u64(array::index U32 2usize b 1usize .refl(Bool, true)), #cast_u32_u64(array::index U32 2usize c 1usize .refl(Bool, true)))))
+
+-- veor3q_u8(a, b, c) — EOR3 Vd.16B, Vn.16B, Vm.16B, Va.16B: r[e] = a[e] EOR b[e] EOR c[e].
+def[intrinsic] aarch64::veor3q_u8 : (a : Array U8 16usize) -> (b : Array U8 16usize) -> (c : Array U8 16usize) -> Array U8 16usize :=
+  fun (a : Array U8 16usize) (b : Array U8 16usize) (c : Array U8 16usize) =>
+    aarch64::map3_u8x16 (fun (x : U8) (y : U8) (z : U8) => #xor_u8(#xor_u8(x, y), z)) a b c
+
+-- vbcaxq_u8(a, b, c) — BCAX Vd.16B, Vn.16B, Vm.16B, Va.16B: r[e] = a[e] EOR (b[e] AND NOT c[e]).
+def[intrinsic] aarch64::vbcaxq_u8 : (a : Array U8 16usize) -> (b : Array U8 16usize) -> (c : Array U8 16usize) -> Array U8 16usize :=
+  fun (a : Array U8 16usize) (b : Array U8 16usize) (c : Array U8 16usize) =>
+    aarch64::map3_u8x16 (fun (x : U8) (y : U8) (z : U8) => #xor_u8(x, #and_u8(y, #not_u8(z)))) a b c
+
+-- vrax1q_u64(a, b) — RAX1 Vd.2D, Vn.2D, Vm.2D: r[e] = a[e] EOR ROL(b[e], 1).
+def[intrinsic] aarch64::vrax1q_u64 : (a : Array U64 2usize) -> (b : Array U64 2usize) -> Array U64 2usize :=
+  fun (a : Array U64 2usize) (b : Array U64 2usize) => aarch64::map2_u64x2 (fun (x : U64) (y : U64) => #xor_u64(x, #rotl_u64(y, 1u32))) a b
+
+-- vxarq_u64::<IMM6>(a, b) — XAR Vd.2D, Vn.2D, Vm.2D, #IMM6, IMM6 in [0, 63]: r[e] = ROR(a[e] EOR b[e], IMM6).
+def[intrinsic] aarch64::vxarq_u64 : (IMM6 : U32) -> (.hIMM6 : Eq(Bool, #le_u32(IMM6, 63u32), true)) -> (a : Array U64 2usize) -> (b : Array U64 2usize) -> Array U64 2usize :=
+  fun (IMM6 : U32) (.hIMM6 : Eq(Bool, #le_u32(IMM6, 63u32), true)) (a : Array U64 2usize) (b : Array U64 2usize) =>
+    aarch64::map2_u64x2 (fun (x : U64) (y : U64) => #rotr_u64(#xor_u64(x, y), IMM6)) a b
+
+-- SHA-512 Sigma1 (MSigma1 of SHA512H): ROR(x, 14) EOR ROR(x, 18) EOR ROR(x, 41).
+def[prelude] aarch64::sha512_sigma1 : (x : U64) -> U64 :=
+  fun (x : U64) => #xor_u64(#xor_u64(#rotr_u64(x, 14u32), #rotr_u64(x, 18u32)), #rotr_u64(x, 41u32))
+
+-- SHA-512 Sigma0 (NSigma0 of SHA512H2): ROR(x, 28) EOR ROR(x, 34) EOR ROR(x, 39).
+def[prelude] aarch64::sha512_sigma0 : (x : U64) -> U64 :=
+  fun (x : U64) => #xor_u64(#xor_u64(#rotr_u64(x, 28u32), #rotr_u64(x, 34u32)), #rotr_u64(x, 39u32))
+
+-- vsha512hq_u64(w, x, y) — SHA512H Qd, Qn, Vm.2D (Qd = W = hash_ed, Qn = X = hash_gf, Vm = Y = kwh_kwh2):
+-- hi = ((Y1 AND X0) EOR (NOT Y1 AND X1)) + MSigma1(Y1) + W1; tmp = hi + Y0;
+-- lo = ((tmp AND Y1) EOR (NOT tmp AND X0)) + MSigma1(tmp) + W0; r = [lo, hi].
+def[intrinsic] aarch64::vsha512hq_u64 : (hash_ed : Array U64 2usize) -> (hash_gf : Array U64 2usize) -> (kwh_kwh2 : Array U64 2usize) -> Array U64 2usize :=
+  fun (hash_ed : Array U64 2usize) (hash_gf : Array U64 2usize) (kwh_kwh2 : Array U64 2usize) =>
+    let w0 : U64 = array::index U64 2usize hash_ed 0usize .refl(Bool, true);
+    let w1 : U64 = array::index U64 2usize hash_ed 1usize .refl(Bool, true);
+    let x0 : U64 = array::index U64 2usize hash_gf 0usize .refl(Bool, true);
+    let x1 : U64 = array::index U64 2usize hash_gf 1usize .refl(Bool, true);
+    let y0 : U64 = array::index U64 2usize kwh_kwh2 0usize .refl(Bool, true);
+    let y1 : U64 = array::index U64 2usize kwh_kwh2 1usize .refl(Bool, true);
+    let hi : U64 = #wadd_u64(#wadd_u64(#xor_u64(#and_u64(y1, x0), #and_u64(#not_u64(y1), x1)), aarch64::sha512_sigma1 y1), w1);
+    let tmp : U64 = #wadd_u64(hi, y0);
+    let lo : U64 = #wadd_u64(#wadd_u64(#xor_u64(#and_u64(tmp, y1), #and_u64(#not_u64(tmp), x0)), aarch64::sha512_sigma1 tmp), w0);
+    aarch64::u64x2 lo hi
+
+-- vsha512h2q_u64(w, x, y) — SHA512H2 Qd, Qn, Vm.2D (Qd = W = sum_ab, Qn = X = hash_c_, Vm = Y = hash_ab):
+-- hi = ((X0 AND Y1) EOR (X0 AND Y0) EOR (Y1 AND Y0)) + NSigma0(Y0) + W1;
+-- lo = ((hi AND Y0) EOR (hi AND Y1) EOR (Y1 AND Y0)) + NSigma0(hi) + W0; r = [lo, hi].
+def[intrinsic] aarch64::vsha512h2q_u64 : (sum_ab : Array U64 2usize) -> (hash_c_ : Array U64 2usize) -> (hash_ab : Array U64 2usize) -> Array U64 2usize :=
+  fun (sum_ab : Array U64 2usize) (hash_c_ : Array U64 2usize) (hash_ab : Array U64 2usize) =>
+    let w0 : U64 = array::index U64 2usize sum_ab 0usize .refl(Bool, true);
+    let w1 : U64 = array::index U64 2usize sum_ab 1usize .refl(Bool, true);
+    let x0 : U64 = array::index U64 2usize hash_c_ 0usize .refl(Bool, true);
+    let y0 : U64 = array::index U64 2usize hash_ab 0usize .refl(Bool, true);
+    let y1 : U64 = array::index U64 2usize hash_ab 1usize .refl(Bool, true);
+    let hi : U64 = #wadd_u64(#wadd_u64(#xor_u64(#xor_u64(#and_u64(x0, y1), #and_u64(x0, y0)), #and_u64(y1, y0)), aarch64::sha512_sigma0 y0), w1);
+    let lo : U64 = #wadd_u64(#wadd_u64(#xor_u64(#xor_u64(#and_u64(hi, y0), #and_u64(hi, y1)), #and_u64(y1, y0)), aarch64::sha512_sigma0 hi), w0);
+    aarch64::u64x2 lo hi
+
+-- SHA-512 sigma0 of SHA512SU0: ROR(x, 1) EOR ROR(x, 8) EOR (x >> 7).
+def[prelude] aarch64::sha512su0_sigma : (x : U64) -> U64 :=
+  fun (x : U64) => #xor_u64(#xor_u64(#rotr_u64(x, 1u32), #rotr_u64(x, 8u32)), #wshr_u64(x, 7u32))
+
+-- SHA-512 sigma1 of SHA512SU1: ROR(x, 19) EOR ROR(x, 61) EOR (x >> 6).
+def[prelude] aarch64::sha512su1_sigma : (x : U64) -> U64 :=
+  fun (x : U64) => #xor_u64(#xor_u64(#rotr_u64(x, 19u32), #rotr_u64(x, 61u32)), #wshr_u64(x, 6u32))
+
+-- vsha512su0q_u64(w, x) — SHA512SU0 Vd.2D, Vn.2D (Vd = W = w0_1, Vn = X = w2_):
+-- r = [W0 + sig0(W1), W1 + sig0(X0)].
+def[intrinsic] aarch64::vsha512su0q_u64 : (w0_1 : Array U64 2usize) -> (w2_ : Array U64 2usize) -> Array U64 2usize :=
+  fun (w0_1 : Array U64 2usize) (w2_ : Array U64 2usize) =>
+    aarch64::u64x2 (#wadd_u64(array::index U64 2usize w0_1 0usize .refl(Bool, true), aarch64::sha512su0_sigma (array::index U64 2usize w0_1 1usize .refl(Bool, true))))
+                   (#wadd_u64(array::index U64 2usize w0_1 1usize .refl(Bool, true), aarch64::sha512su0_sigma (array::index U64 2usize w2_ 0usize .refl(Bool, true))))
+
+-- vsha512su1q_u64(w, x, y) — SHA512SU1 Vd.2D, Vn.2D, Vm.2D (Vd = W = s01_s02, Vn = X = w14_15, Vm = Y = w9_10):
+-- r[e] = W[e] + sig1(X[e]) + Y[e].
+def[intrinsic] aarch64::vsha512su1q_u64 : (s01_s02 : Array U64 2usize) -> (w14_15 : Array U64 2usize) -> (w9_10 : Array U64 2usize) -> Array U64 2usize :=
+  fun (s01_s02 : Array U64 2usize) (w14_15 : Array U64 2usize) (w9_10 : Array U64 2usize) =>
+    aarch64::map3_u64x2 (fun (w : U64) (x : U64) (y : U64) => #wadd_u64(#wadd_u64(w, aarch64::sha512su1_sigma x), y)) s01_s02 w14_15 w9_10

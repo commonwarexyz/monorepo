@@ -30,8 +30,8 @@ arbitrary = [
 ]
 
 [build-dependencies]
-# the rustoleum verifier (wip/augment toolchain), run by build.rs
-rustoleum = { path = "../../wt-aug/crates/rustoleum", features = ["build"] }
+# the sandblaster verifier (sandblaster/), run by build.rs
+sandblaster = { workspace = true, features = ["build"] }
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }

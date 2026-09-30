@@ -1,0 +1,9 @@
+# The sandblaster-generated corpus: `build.rs` takes the file named by
+# OPT_CORPUS_GENERATED_RS (written by ../run.sh with `sandblaster emit`) and
+# refuses anything that is not verified sandblaster output of the corpus root.
+[package]
+name = "cgen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"

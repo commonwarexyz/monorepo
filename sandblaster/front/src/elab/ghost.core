@@ -1,0 +1,94 @@
+-- sandblaster ghost-language library (DESIGN.md §4.1; SEMANTICS.md §13.5):
+-- the meanings of the `Seq<T>` operations the kernel prelude does not
+-- provide, of `seq_all` (the well-formedness of a `Seq` holding `Nat`s) and
+-- of the `Nat` functions `pow2`, `log2`, `popcount`. `Seq<T>` is the
+-- prelude `List(T)`, unbounded; `Nat` is `Int` with the bound `0 ≤ n`.
+--
+-- TRUSTED definitions (DESIGN.md §1.1 item 6, the elaboration of the ghost
+-- language). They are installed into every environment by
+-- `elab::semantics::install`, next to the elaboration semantics.
+
+-- `xs.get(i)`: the element at `i`, `None` when `i < 0` or `i ≥ len xs`.
+def[prelude] ghost::seq_get : (T : Type) -> (l : List(T)) -> (i : Int) -> Option(T) :=
+  fun (T : Type) (l : List(T)) (i : Int) =>
+    match l : List(T) as _ return Option(T) with
+    | Nil => None[T]
+    | Cons(x, t) =>
+        if #eq_int(i, 0int) return Option(T) then Some[T](x)
+        else if #lt_int(i, 0int) return Option(T) then None[T] else rec(T, t, #isub(i, 1int))
+    end
+  structural 1
+
+-- `map f xs` (the element view of a sequence, DESIGN.md §15.3).
+def[prelude] ghost::seq_map : (A : Type) -> (B : Type) -> (f : A -> B) -> (l : List(A)) -> List(B) :=
+  fun (A : Type) (B : Type) (f : A -> B) (l : List(A)) =>
+    match l : List(A) as _ return List(B) with
+    | Nil => Nil[B]
+    | Cons(x, t) => Cons[B](f x, rec(A, B, f, t))
+    end
+  structural 3
+
+-- `seq_all T p l`: every element of `l` satisfies `p`. The
+-- well-formedness of a sequence whose elements hold `Nat`s (their bound
+-- `0 ≤ n`): a hypothesis of quantified variables and of law parameters of
+-- such types (SEMANTICS.md §13.5), so the kernel statement quantifies over
+-- exactly the sequences the source type allows.
+def[prelude] ghost::seq_all : (T : Type) -> (p : T -> Type) -> (l : List(T)) -> Type :=
+  fun (T : Type) (p : T -> Type) (l : List(T)) =>
+    match l : List(T) as _ return Type with
+    | Nil => Unit
+    | Cons(x, t) => And (p x) (rec(T, p, t))
+    end
+  structural 2
+
+-- `xs.flatten()` on a `Seq<Seq<T>>`.
+def[prelude] ghost::seq_flatten : (T : Type) -> (l : List(List(T))) -> List(T) :=
+  fun (T : Type) (l : List(List(T))) =>
+    match l : List(List(T)) as _ return List(T) with
+    | Nil => Nil[T]
+    | Cons(x, t) => seq::append T x rec(T, t)
+    end
+  structural 1
+
+-- `xs.flatten()` on a `Seq<[T; N]>`.
+def[prelude] ghost::arrays_flatten : (T : Type) -> (N : Usize) -> (l : List(Array T N)) -> List(T) :=
+  fun (T : Type) (N : Usize) (l : List(Array T N)) =>
+    match l : List(Array T N) as _ return List(T) with
+    | Nil => Nil[T]
+    | Cons(a, t) => seq::append T fst(a) rec(T, N, t)
+    end
+  structural 2
+
+-- `pow2(n)`: 2^n, and 1 when `n ≤ 0` (§15 S5; SEMANTICS.md §13.10).
+-- Linear recursion: one step per unit of `n`, so `pow2(n + 1)` unfolds to
+-- `2 · pow2(n)` (the arguments are small: bit positions and heights).
+def[prelude] ghost::pow2 : (n : Int) -> Int :=
+  fun (n : Int) =>
+    if #le_int(n, 0int) as .c return Int then 1int else
+      #imul(2int, rec(#isub(n, 1int);
+        pair(Sigma (_ : Eq(Bool, #le_int(0int, #isub(n, 1int)), true)), Eq(Bool, #lt_int(#isub(n, 1int), n), true),
+             linarith([c : Eq(Bool, #le_int(n, 0int), false)]; Eq(Bool, #le_int(0int, #isub(n, 1int)), true); [1, 1]),
+             linarith([]; Eq(Bool, #lt_int(#isub(n, 1int), n), true); [1]))))
+  measure (n)
+
+-- `log2(n)`: the position of the highest set bit of `n` (`⌊log₂ n⌋`), and
+-- 0 when `n < 2`. Recursion by halving: 64 steps for a 64-bit value.
+def[prelude] ghost::log2 : (n : Int) -> Int :=
+  fun (n : Int) =>
+    if #lt_int(n, 2int) as .c return Int then 0int else
+      #iadd(1int, rec(#idiv(n, 2int);
+        pair(Sigma (_ : Eq(Bool, #le_int(0int, #idiv(n, 2int)), true)), Eq(Bool, #lt_int(#idiv(n, 2int), n), true),
+             linarith([c : Eq(Bool, #lt_int(n, 2int), false)]; Eq(Bool, #le_int(0int, #idiv(n, 2int)), true); []),
+             linarith([c : Eq(Bool, #lt_int(n, 2int), false)]; Eq(Bool, #lt_int(#idiv(n, 2int), n), true); []))))
+  measure (n)
+
+-- `popcount(n)`: the number of set bits of `n`, and 0 when `n ≤ 0`.
+-- Recursion by halving: the low bit, then the rest.
+def[prelude] ghost::popcount : (n : Int) -> Int :=
+  fun (n : Int) =>
+    if #le_int(n, 0int) as .c return Int then 0int else
+      #iadd(#imod(n, 2int), rec(#idiv(n, 2int);
+        pair(Sigma (_ : Eq(Bool, #le_int(0int, #idiv(n, 2int)), true)), Eq(Bool, #lt_int(#idiv(n, 2int), n), true),
+             linarith([c : Eq(Bool, #le_int(n, 0int), false)]; Eq(Bool, #le_int(0int, #idiv(n, 2int)), true); []),
+             linarith([c : Eq(Bool, #le_int(n, 0int), false)]; Eq(Bool, #lt_int(#idiv(n, 2int), n), true); []))))
+  measure (n)

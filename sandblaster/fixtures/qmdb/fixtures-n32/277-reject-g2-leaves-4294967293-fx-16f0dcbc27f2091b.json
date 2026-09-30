@@ -1,0 +1,13 @@
+{
+  "chunk_bytes": 32,
+  "expected": false,
+  "key": "00000000000000000000000000000000000000000000000000000007fffffff4",
+  "name": "277-reject-g2-leaves-4294967293-fx-16f0dcbc27f2091b",
+  "oracle_corpus": "corpus-instance",
+  "oracle_generator": "G2-synthetic",
+  "oracle_id": "fx-16f0dcbc27f2091b",
+  "oracle_mutation": "leaves",
+  "proof": "fcffffff1ffb3cdac1a55d9d119c15a6c008136d348869f24c3794fe478cc843a3e54deb1ffdffffff0f2001cef3ddba34c38dc208d360957b6eb6f96179ca1224682f2e13f99e278d3997fa013c9e18e9a5a7e56c1f1ccd59bbcfdb2cb57af7a804b58dcf37d386d1b83685e46473af453ba008816bf3cb384eb0d362c422fa1704d86712ea2dbbd6a15a9540",
+  "root": "abec58d138065aff3687595a3b41ff41e78263004de991bb6aee8a17edb7b27f",
+  "value": "1ab08fa9b1735bae8b262ff9b8ae1030046114bf2ac54cb4c77ce9fbb07e5d80"
+}

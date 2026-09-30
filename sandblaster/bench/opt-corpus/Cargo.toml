@@ -1,0 +1,28 @@
+# The general optimizer corpus harness (docs/optimizer-plan.md O1): the
+# sandblaster-generated corpus (`cgen`, emitted from
+# sandblaster/front/tests/opt_corpus/dsl) against hand-written ideal
+# outputs (`ideal`), differential checks first, then same-binary timings.
+# A standalone workspace (excluded from the root workspace); run it with
+# ./run.sh, which emits the generated code first.
+[workspace]
+members = [".", "cgen", "cgen_o1", "ideal"]
+
+[package]
+name = "opt-corpus"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cgen = { path = "cgen" }
+# the corpus as emitted at O1 (baselines/o1-gen.rs): the "O1 printing" subject of `e0` (plan O2)
+cgen_o1 = { path = "cgen_o1" }
+ideal = { path = "ideal" }
+
+[profile.release]
+debug = 1
+
+# Commonware's release profile keeps overflow checks: the E0 target (P18).
+[profile.release-oc]
+inherits = "release"
+overflow-checks = true

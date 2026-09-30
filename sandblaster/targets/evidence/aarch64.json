@@ -1,0 +1,2857 @@
+{
+  "schema": "sandblaster-targets-evidence/3",
+  "arch": "aarch64",
+  "target": "aarch64-apple-darwin",
+  "cpu_key": "legacy:Apple M5 Pro (native)",
+  "machine": {
+    "cpu_brand_string": "Apple M5 Pro",
+    "executor": "native",
+    "os": "macOS 26.5.1",
+    "detected_features": {
+      "neon": true,
+      "aes": true,
+      "sha2": true,
+      "sha3": true
+    },
+    "cpu": null
+  },
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "profile": "release",
+  "date": "2026-09-26",
+  "campaign": {
+    "random_cases_per_model": 10000000,
+    "base_seed": "0x5eed202609230001",
+    "corner_values": "per argument: 0, ~0, 0x8000_0000, 1, 0x7fff_ffff, every single-bit word, byte patterns; lanes drawn from corners with p = 1/8 in the random phase",
+    "required_random_cases_for_validated": 10000000
+  },
+  "models": [
+    {
+      "name": "vld1q_u8",
+      "rust_path": "core::arch::aarch64::vld1q_u8",
+      "instruction": "LD1 {Vt.16B}, [Xn]",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vld1q_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:f0f34cd7df22799c743e88efd90e41c2d84ae4e69ea70eb1f3909927cdccd8f1",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vld1q_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 54,
+        "mismatches": 0,
+        "seed": "0xad343065fc496ba0",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:f0f34cd7df22799c743e88efd90e41c2d84ae4e69ea70eb1f3909927cdccd8f1",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0xad343065fc496ba0"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vld1q_u8",
+        "core_items": ["aarch64::vld1q_u8", "aarch64::u8x16", "aarch64::map_u8x16"],
+        "core_hash": "sha256:9163cfaeebbf6849417aef37d6dd14b86a6010a8fbe29b8e681a2caa31d94f81",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vld1q_u8 vs the executable model vld1q_u8",
+          "random_cases": 1000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0xad343065fc4eab7f",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vld1q_u32",
+      "rust_path": "core::arch::aarch64::vld1q_u32",
+      "instruction": "LD1 {Vt.4S}, [Xn]",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vld1q_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:bb9858733881e80874464de9b908d4a785089e1c8bfec7ce5f62c06abed0b45c",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vld1q_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 77,
+        "mismatches": 0,
+        "seed": "0x9af1945c0a97d1a7",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:bb9858733881e80874464de9b908d4a785089e1c8bfec7ce5f62c06abed0b45c",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 77,
+          "mismatches": 0,
+          "seed": "0x9af1945c0a97d1a7"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vld1q_u32",
+        "core_items": ["aarch64::vld1q_u32", "aarch64::u32x4", "aarch64::map_u32x4"],
+        "core_hash": "sha256:b761cb12f205f1bd763f3ac890723b3bc24ff25430d5ccb8162fb5add5b29803",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vld1q_u32 vs the executable model vld1q_u32",
+          "random_cases": 1000,
+          "corner_cases": 77,
+          "mismatches": 0,
+          "seed": "0x9af1945c0a901178",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vld1_u8",
+      "rust_path": "core::arch::aarch64::vld1_u8",
+      "instruction": "LD1 {Vt.8B}, [Xn]",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vld1_u8", "src/aarch64/mod.rs::Uint8x8"],
+      "source_hash": "sha256:e81942340cf4653f02f1f702b1d0a73e9e898c29a9760249588d51f51072a1c6",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vld1_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 38,
+        "mismatches": 0,
+        "seed": "0x1cce172cf63ae121",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:e81942340cf4653f02f1f702b1d0a73e9e898c29a9760249588d51f51072a1c6",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 38,
+          "mismatches": 0,
+          "seed": "0x1cce172cf63ae121"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vld1_u8",
+        "core_items": ["aarch64::vld1_u8", "aarch64::u8x8", "aarch64::map_u8x8"],
+        "core_hash": "sha256:51e3214e9390774f9e7bdd9c825b2196b5d191545c3fe4c6f9bcb244b40b2702",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vld1_u8 vs the executable model vld1_u8",
+          "random_cases": 1000,
+          "corner_cases": 38,
+          "mismatches": 0,
+          "seed": "0x1cce172cf63d21fe",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vst1q_u8",
+      "rust_path": "core::arch::aarch64::vst1q_u8",
+      "instruction": "ST1 {Vt.16B}, [Xn]",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vst1q_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:1d3570f4df1f4aac9200d868704ee9992f7c944d9f3a82e7f4c14489abda115e",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vst1q_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 54,
+        "mismatches": 0,
+        "seed": "0xe097c98018a8e17d",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:1d3570f4df1f4aac9200d868704ee9992f7c944d9f3a82e7f4c14489abda115e",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0xe097c98018a8e17d"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vst1q_u8",
+        "core_items": ["aarch64::vst1q_u8", "aarch64::u8x16", "aarch64::map_u8x16"],
+        "core_hash": "sha256:1b1f78dcdcc3cc176339124fc23aa9cf38f66209239fe0432d075b622ad607f3",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vst1q_u8 vs the executable model vst1q_u8",
+          "random_cases": 1000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0xe097c98018af21a2",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vst1q_u32",
+      "rust_path": "core::arch::aarch64::vst1q_u32",
+      "instruction": "ST1 {Vt.4S}, [Xn]",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vst1q_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:463a13a7dd1402a217537b45741a00eccc67d358f0f0ffe8ecd78495038a69a1",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vst1q_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 77,
+        "mismatches": 0,
+        "seed": "0x680cf509d9ecd0ac",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:463a13a7dd1402a217537b45741a00eccc67d358f0f0ffe8ecd78495038a69a1",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 77,
+          "mismatches": 0,
+          "seed": "0x680cf509d9ecd0ac"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vst1q_u32",
+        "core_items": ["aarch64::vst1q_u32", "aarch64::u32x4", "aarch64::map_u32x4"],
+        "core_hash": "sha256:403b570b9f8f9f8e21ebaa1ad47a602cec57d0c498a0d6cb319dbe2fd33c3078",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vst1q_u32 vs the executable model vst1q_u32",
+          "random_cases": 1000,
+          "corner_cases": 77,
+          "mismatches": 0,
+          "seed": "0x680cf509d9eb1073",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vrev32q_u8",
+      "rust_path": "core::arch::aarch64::vrev32q_u8",
+      "instruction": "REV32 Vd.16B, Vn.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vrev32q_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:51a9093649852a9f03ed7da6fe73efbe8597c01bd06dd870bf1783ee4f497064",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vrev32q_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 54,
+        "mismatches": 0,
+        "seed": "0x3db250da4f797c73",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:51a9093649852a9f03ed7da6fe73efbe8597c01bd06dd870bf1783ee4f497064",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0x3db250da4f797c73"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vrev32q_u8",
+        "core_items": ["aarch64::vrev32q_u8", "aarch64::u8x16"],
+        "core_hash": "sha256:68a8819b4c8a955e8382b2bf9d2d8cb079b1e9edc4e282badf76b19b24b483dd",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vrev32q_u8 vs the executable model vrev32q_u8",
+          "random_cases": 1000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0x3db250da4f7ebcac",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vreinterpretq_u32_u8",
+      "rust_path": "core::arch::aarch64::vreinterpretq_u32_u8",
+      "instruction": "(none: register bit reinterpretation)",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vreinterpretq_u32_u8", "src/aarch64/mod.rs::Uint8x16", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:0bb3f40a95fa510eed33dad9ad289aed99aec432112c4c2b7374b13e8ae9ade2",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vreinterpretq_u32_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 54,
+        "mismatches": 0,
+        "seed": "0xb4e92ff086d14066",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:0bb3f40a95fa510eed33dad9ad289aed99aec432112c4c2b7374b13e8ae9ade2",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0xb4e92ff086d14066"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vreinterpretq_u32_u8",
+        "core_items": ["aarch64::vreinterpretq_u32_u8", "aarch64::u8x4", "aarch64::u32x4"],
+        "core_hash": "sha256:4cd99fc4860c2f97c69acd6f9020f8306d945578ff6a166a7934c9df77bc5e67",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vreinterpretq_u32_u8 vs the executable model vreinterpretq_u32_u8",
+          "random_cases": 1000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0xb4e92ff086d680b9",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vreinterpretq_u8_u32",
+      "rust_path": "core::arch::aarch64::vreinterpretq_u8_u32",
+      "instruction": "(none: register bit reinterpretation)",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vreinterpretq_u8_u32", "src/aarch64/mod.rs::Uint8x16", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:1a3a40382ffefedc3a4a6993455290010176b13e2337cfcc577c157bd93b35a8",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vreinterpretq_u8_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 77,
+        "mismatches": 0,
+        "seed": "0x1f7723a5d11be588",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:1a3a40382ffefedc3a4a6993455290010176b13e2337cfcc577c157bd93b35a8",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 77,
+          "mismatches": 0,
+          "seed": "0x1f7723a5d11be588"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vreinterpretq_u8_u32",
+        "core_items": ["aarch64::vreinterpretq_u8_u32", "aarch64::u8x16"],
+        "core_hash": "sha256:181ecccacac8f87914a4a465c36c05758dc2cbfded82a4b91f392130150d76a1",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vreinterpretq_u8_u32 vs the executable model vreinterpretq_u8_u32",
+          "random_cases": 1000,
+          "corner_cases": 77,
+          "mismatches": 0,
+          "seed": "0x1f7723a5d11c2557",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vaddq_u32",
+      "rust_path": "core::arch::aarch64::vaddq_u32",
+      "instruction": "ADD Vd.4S, Vn.4S, Vm.4S",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vaddq_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:ebc10ecbd2059a7a3a60462a216f8e9ff17acda9575ced2c425c3d4d2f7e8a63",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vaddq_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 5929,
+        "mismatches": 0,
+        "seed": "0x2cd2a6f611ea4ba7",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:ebc10ecbd2059a7a3a60462a216f8e9ff17acda9575ced2c425c3d4d2f7e8a63",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 5929,
+          "mismatches": 0,
+          "seed": "0x2cd2a6f611ea4ba7"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vaddq_u32",
+        "core_items": ["aarch64::vaddq_u32", "aarch64::u32x4", "aarch64::map2_u32x4"],
+        "core_hash": "sha256:0dd41d256abd3e7fadb1fc0d0322786f992ce515220e3c5c3ecbe758a364fb42",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vaddq_u32 vs the executable model vaddq_u32",
+          "random_cases": 1000,
+          "corner_cases": 5929,
+          "mismatches": 0,
+          "seed": "0x2cd2a6f611ed8b78",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "veorq_u32",
+      "rust_path": "core::arch::aarch64::veorq_u32",
+      "instruction": "EOR Vd.16B, Vn.16B, Vm.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::veorq_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:f385f6e1562b4bcb17586048643613d00b8a98e41550d7cd36e25924657c24c7",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::veorq_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 5929,
+        "mismatches": 0,
+        "seed": "0x061b81f79adce3d0",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:f385f6e1562b4bcb17586048643613d00b8a98e41550d7cd36e25924657c24c7",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 5929,
+          "mismatches": 0,
+          "seed": "0x061b81f79adce3d0"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::veorq_u32",
+        "core_items": ["aarch64::veorq_u32", "aarch64::u32x4", "aarch64::map2_u32x4"],
+        "core_hash": "sha256:ca2b2a6c13a5aa72c3ca3d836af1389249cd538f3bf71e0c1d7edabeb05a85fa",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::veorq_u32 vs the executable model veorq_u32",
+          "random_cases": 1000,
+          "corner_cases": 5929,
+          "mismatches": 0,
+          "seed": "0x061b81f79adb230f",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vandq_u32",
+      "rust_path": "core::arch::aarch64::vandq_u32",
+      "instruction": "AND Vd.16B, Vn.16B, Vm.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vandq_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:94ed3755a0917432c4b2a102e83fa37eed4d226f768997f504eeabf51339ea19",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vandq_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 5929,
+        "mismatches": 0,
+        "seed": "0x59dfafebb1c49e31",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:94ed3755a0917432c4b2a102e83fa37eed4d226f768997f504eeabf51339ea19",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 5929,
+          "mismatches": 0,
+          "seed": "0x59dfafebb1c49e31"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vandq_u32",
+        "core_items": ["aarch64::vandq_u32", "aarch64::u32x4", "aarch64::map2_u32x4"],
+        "core_hash": "sha256:9b47879419b5c530181b4f87748ef6fda5de5930f73e317768f86084c46a9b95",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vandq_u32 vs the executable model vandq_u32",
+          "random_cases": 1000,
+          "corner_cases": 5929,
+          "mismatches": 0,
+          "seed": "0x59dfafebb1c35eee",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vorrq_u32",
+      "rust_path": "core::arch::aarch64::vorrq_u32",
+      "instruction": "ORR Vd.16B, Vn.16B, Vm.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vorrq_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:a833d9276b6f2c38e0434f56bb9f7c7b2aefc9b14b899d39e2e34cf100fcb136",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vorrq_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 5929,
+        "mismatches": 0,
+        "seed": "0x685b91260dc1376d",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:a833d9276b6f2c38e0434f56bb9f7c7b2aefc9b14b899d39e2e34cf100fcb136",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 5929,
+          "mismatches": 0,
+          "seed": "0x685b91260dc1376d"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vorrq_u32",
+        "core_items": ["aarch64::vorrq_u32", "aarch64::u32x4", "aarch64::map2_u32x4"],
+        "core_hash": "sha256:ce8249c0b614a71b97c434461362b56b9cb53a5a5662d8255b92750385675a56",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vorrq_u32 vs the executable model vorrq_u32",
+          "random_cases": 1000,
+          "corner_cases": 5929,
+          "mismatches": 0,
+          "seed": "0x685b91260dc6f7b2",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vshlq_n_u32",
+      "rust_path": "core::arch::aarch64::vshlq_n_u32",
+      "instruction": "SHL Vd.4S, Vn.4S, #N",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vshlq_n_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:a571aeaa9d07fc814c483c4d92182c6b2ea5250a26c4bd2ef1d5be3cc0e0300c",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vshlq_n_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 2464,
+        "mismatches": 0,
+        "seed": "0x57961bb9cebbcf34",
+        "immediates": "0..=31 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:a571aeaa9d07fc814c483c4d92182c6b2ea5250a26c4bd2ef1d5be3cc0e0300c",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 2464,
+          "mismatches": 0,
+          "seed": "0x57961bb9cebbcf34"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vshlq_n_u32",
+        "core_items": ["aarch64::vshlq_n_u32", "aarch64::u32x4", "aarch64::map_u32x4"],
+        "core_hash": "sha256:cdc182719fe29416ac20f60e16dac6d2b594f806f9c15adb01dd4475540260de",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vshlq_n_u32 vs the executable model vshlq_n_u32",
+          "random_cases": 1024,
+          "corner_cases": 2464,
+          "mismatches": 0,
+          "seed": "0x57961bb9cebc0feb",
+          "immediates": "0..=31 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vshrq_n_u32",
+      "rust_path": "core::arch::aarch64::vshrq_n_u32",
+      "instruction": "USHR Vd.4S, Vn.4S, #N",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vshrq_n_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:70a577096e0418875e73de63ca6d67c3f4990ef929b8702ceccd6d7d5dc77ed3",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vshrq_n_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 2464,
+        "mismatches": 0,
+        "seed": "0xc43b068737b465c2",
+        "immediates": "1..=32 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:70a577096e0418875e73de63ca6d67c3f4990ef929b8702ceccd6d7d5dc77ed3",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 2464,
+          "mismatches": 0,
+          "seed": "0xc43b068737b465c2"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vshrq_n_u32",
+        "core_items": ["aarch64::vshrq_n_u32", "aarch64::u32x4", "aarch64::map_u32x4"],
+        "core_hash": "sha256:1050fa901b75008c1d6fdb000dc5ad38cb02466d736aaf5d75b2dcc553068159",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vshrq_n_u32 vs the executable model vshrq_n_u32",
+          "random_cases": 1024,
+          "corner_cases": 2464,
+          "mismatches": 0,
+          "seed": "0xc43b068737b3a51d",
+          "immediates": "1..=32 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vextq_u32",
+      "rust_path": "core::arch::aarch64::vextq_u32",
+      "instruction": "EXT Vd.16B, Vn.16B, Vm.16B, #(4N)",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vextq_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:700abee7ab0706436d514c10409953afd1421b1d7a3aa7d7dc1528d134cba9a8",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vextq_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 680,
+        "mismatches": 0,
+        "seed": "0xef6527249c8b4217",
+        "immediates": "0..=3 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:700abee7ab0706436d514c10409953afd1421b1d7a3aa7d7dc1528d134cba9a8",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 680,
+          "mismatches": 0,
+          "seed": "0xef6527249c8b4217"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vextq_u32",
+        "core_items": ["aarch64::vextq_u32", "aarch64::u32x4", "aarch64::concat_u32x4"],
+        "core_hash": "sha256:70405e7134349cceadbe4ac7fdbc72031124d1fa1c99e39b7d4f90ac7aaae410",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vextq_u32 vs the executable model vextq_u32",
+          "random_cases": 1000,
+          "corner_cases": 680,
+          "mismatches": 0,
+          "seed": "0xef6527249c8c82c8",
+          "immediates": "0..=3 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vdupq_n_u32",
+      "rust_path": "core::arch::aarch64::vdupq_n_u32",
+      "instruction": "DUP Vd.4S, Wn",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vdupq_n_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:b3928bc92baa60df877e089a8343b165c9bed8066288f1f8479d8a9ef865de93",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vdupq_n_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 42,
+        "mismatches": 0,
+        "seed": "0x9ada9305f622ae1c",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:b3928bc92baa60df877e089a8343b165c9bed8066288f1f8479d8a9ef865de93",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 42,
+          "mismatches": 0,
+          "seed": "0x9ada9305f622ae1c"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vdupq_n_u32",
+        "core_items": ["aarch64::vdupq_n_u32", "aarch64::u32x4"],
+        "core_hash": "sha256:cfa3f2757d7071caf6287bba61aa9e39653229d5dd91cbf17cea76f4ab9a830e",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vdupq_n_u32 vs the executable model vdupq_n_u32",
+          "random_cases": 1000,
+          "corner_cases": 42,
+          "mismatches": 0,
+          "seed": "0x9ada9305f6256ec3",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vgetq_lane_u32",
+      "rust_path": "core::arch::aarch64::vgetq_lane_u32",
+      "instruction": "UMOV Wd, Vn.S[LANE]",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vgetq_lane_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:c542380922a38120cfd9974f55e02648fa8590c797c88b4fe3376b3c8f2f3c16",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vgetq_lane_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 308,
+        "mismatches": 0,
+        "seed": "0x2667cb8545b01bb9",
+        "immediates": "0..=3 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:c542380922a38120cfd9974f55e02648fa8590c797c88b4fe3376b3c8f2f3c16",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 308,
+          "mismatches": 0,
+          "seed": "0x2667cb8545b01bb9"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vgetq_lane_u32",
+        "core_items": ["aarch64::vgetq_lane_u32"],
+        "core_hash": "sha256:e4c7fc58156dbbe9852a7ab6f8f078cc3358d32244f2d3966e7de3878ddd4bae",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vgetq_lane_u32 vs the executable model vgetq_lane_u32",
+          "random_cases": 1000,
+          "corner_cases": 308,
+          "mismatches": 0,
+          "seed": "0x2667cb8545b7db66",
+          "immediates": "0..=3 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vsetq_lane_u32",
+      "rust_path": "core::arch::aarch64::vsetq_lane_u32",
+      "instruction": "INS Vd.S[LANE], Wn",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vsetq_lane_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:93c43f497e2cb33e93c933473cb4578e89b8f788ca72e0bf3c6352ab170560a4",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vsetq_lane_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 540,
+        "mismatches": 0,
+        "seed": "0x5a9218fd416e5a1d",
+        "immediates": "0..=3 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:93c43f497e2cb33e93c933473cb4578e89b8f788ca72e0bf3c6352ab170560a4",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 540,
+          "mismatches": 0,
+          "seed": "0x5a9218fd416e5a1d"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vsetq_lane_u32",
+        "core_items": ["aarch64::vsetq_lane_u32"],
+        "core_hash": "sha256:53dbfc5a168d4c631c53a8220bb02880d5eeeda50ba7b151bf32e32bf2fe254c",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vsetq_lane_u32 vs the executable model vsetq_lane_u32",
+          "random_cases": 1000,
+          "corner_cases": 540,
+          "mismatches": 0,
+          "seed": "0x5a9218fd41699ac2",
+          "immediates": "0..=3 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vsetq_lane_u8",
+      "rust_path": "core::arch::aarch64::vsetq_lane_u8",
+      "instruction": "INS Vd.B[LANE], Wn",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon.rs::vsetq_lane_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:13f5828ad5b23fd2490f1cc14ba017ea6baf3b1c88573fadad1c5ceb5a2167d8",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vsetq_lane_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 1376,
+        "mismatches": 0,
+        "seed": "0x8fdb93c474a7a32a",
+        "immediates": "0..=15 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:13f5828ad5b23fd2490f1cc14ba017ea6baf3b1c88573fadad1c5ceb5a2167d8",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 1376,
+          "mismatches": 0,
+          "seed": "0x8fdb93c474a7a32a"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vsetq_lane_u8",
+        "core_items": ["aarch64::vsetq_lane_u8"],
+        "core_hash": "sha256:b7c0488c98cb97c26c7eb9a464bf11d422dea2dba42b337fe123f3020407e804",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vsetq_lane_u8 vs the executable model vsetq_lane_u8",
+          "random_cases": 1008,
+          "corner_cases": 1376,
+          "mismatches": 0,
+          "seed": "0x8fdb93c474a063f5",
+          "immediates": "0..=15 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vsha256hq_u32",
+      "rust_path": "core::arch::aarch64::vsha256hq_u32",
+      "instruction": "SHA256H Qd, Qn, Vm.4S",
+      "features": ["sha2"],
+      "source_items": ["src/aarch64/sha2.rs::vsha256hq_u32", "src/aarch64/sha2.rs::sha256hash", "src/aarch64/sha2.rs::sha_choose", "src/aarch64/sha2.rs::sha_majority", "src/aarch64/sha2.rs::sha_hash_sigma0", "src/aarch64/sha2.rs::sha_hash_sigma1", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:4963a175532088e6672afb0ee00de62043a972ead18dbbda329fba47f2a62671",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vsha256hq_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 988,
+        "mismatches": 0,
+        "seed": "0x701688e25023ffa1",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:4963a175532088e6672afb0ee00de62043a972ead18dbbda329fba47f2a62671",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 988,
+          "mismatches": 0,
+          "seed": "0x701688e25023ffa1"
+        }
+      ],
+      "fips180_4_consistency": {
+        "property": "vsha256hq_u32(abcd, efgh, wk) == abcd half of 4 FIPS 180-4 rounds with K+W = wk",
+        "random_cases": 10000000,
+        "corner_cases": 988,
+        "mismatches": 0,
+        "seed": "0xa533164032520b93"
+      },
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vsha256hq_u32",
+        "core_items": ["aarch64::vsha256hq_u32", "aarch64::u32x4", "aarch64::u32x8", "aarch64::concat_u32x4", "aarch64::sha_choose", "aarch64::sha_majority", "aarch64::sha_hash_sigma0", "aarch64::sha_hash_sigma1", "aarch64::sha256hash_iter", "aarch64::sha256hash"],
+        "core_hash": "sha256:b57dab93afef9ff79152f66a639693f002f83ae1a166db9c648707cb677f8f1f",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vsha256hq_u32 vs the executable model vsha256hq_u32",
+          "random_cases": 1000,
+          "corner_cases": 988,
+          "mismatches": 0,
+          "seed": "0x701688e250243f7e",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vsha256h2q_u32",
+      "rust_path": "core::arch::aarch64::vsha256h2q_u32",
+      "instruction": "SHA256H2 Qd, Qn, Vm.4S",
+      "features": ["sha2"],
+      "source_items": ["src/aarch64/sha2.rs::vsha256h2q_u32", "src/aarch64/sha2.rs::sha256hash", "src/aarch64/sha2.rs::sha_choose", "src/aarch64/sha2.rs::sha_majority", "src/aarch64/sha2.rs::sha_hash_sigma0", "src/aarch64/sha2.rs::sha_hash_sigma1", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:ce13b8c9d48caf25d0af66f7566f4c916863897dbdf13773e28e987bd32b1ad1",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vsha256h2q_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 988,
+        "mismatches": 0,
+        "seed": "0x33839a692ca20707",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:ce13b8c9d48caf25d0af66f7566f4c916863897dbdf13773e28e987bd32b1ad1",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 988,
+          "mismatches": 0,
+          "seed": "0x33839a692ca20707"
+        }
+      ],
+      "fips180_4_consistency": {
+        "property": "vsha256h2q_u32(efgh, abcd_pre, wk) == efgh half of the same 4 FIPS rounds",
+        "random_cases": 10000000,
+        "corner_cases": 988,
+        "mismatches": 0,
+        "seed": "0xfb5c43c246b7c9b1"
+      },
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vsha256h2q_u32",
+        "core_items": ["aarch64::vsha256h2q_u32", "aarch64::u32x4", "aarch64::u32x8", "aarch64::concat_u32x4", "aarch64::sha_choose", "aarch64::sha_majority", "aarch64::sha_hash_sigma0", "aarch64::sha_hash_sigma1", "aarch64::sha256hash_iter", "aarch64::sha256hash"],
+        "core_hash": "sha256:5ccf21a5f190a172b8a682fe1e9781d8202bcfcae11617bcc7acd9ed18d2fc00",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vsha256h2q_u32 vs the executable model vsha256h2q_u32",
+          "random_cases": 1000,
+          "corner_cases": 988,
+          "mismatches": 0,
+          "seed": "0x33839a692ca5c7d8",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vsha256su0q_u32",
+      "rust_path": "core::arch::aarch64::vsha256su0q_u32",
+      "instruction": "SHA256SU0 Vd.4S, Vn.4S",
+      "features": ["sha2"],
+      "source_items": ["src/aarch64/sha2.rs::vsha256su0q_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:95af1460ea19b366aefc36ee1c5db94df586203902fdf671085cd906fd93319f",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vsha256su0q_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 5929,
+        "mismatches": 0,
+        "seed": "0x0f54becd2624ae41",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:95af1460ea19b366aefc36ee1c5db94df586203902fdf671085cd906fd93319f",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 5929,
+          "mismatches": 0,
+          "seed": "0x0f54becd2624ae41"
+        }
+      ],
+      "fips180_4_consistency": {
+        "property": "vsha256su0q_u32(W0..3, W4..7)[i] == W_i + sigma0(W_{i+1})",
+        "random_cases": 10000000,
+        "corner_cases": 5929,
+        "mismatches": 0,
+        "seed": "0x1f64a8bdac81af77"
+      },
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vsha256su0q_u32",
+        "core_items": ["aarch64::vsha256su0q_u32", "aarch64::u32x4", "aarch64::map2_u32x4", "aarch64::sha256su0_sigma"],
+        "core_hash": "sha256:884380f6fc31e6c24064202ef9dd3999de9e1cbb758557933ed0594488211f87",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vsha256su0q_u32 vs the executable model vsha256su0q_u32",
+          "random_cases": 1000,
+          "corner_cases": 5929,
+          "mismatches": 0,
+          "seed": "0x0f54becd26236e9e",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vsha256su1q_u32",
+      "rust_path": "core::arch::aarch64::vsha256su1q_u32",
+      "instruction": "SHA256SU1 Vd.4S, Vn.4S, Vm.4S",
+      "features": ["sha2"],
+      "source_items": ["src/aarch64/sha2.rs::vsha256su1q_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:caaca45a6549d717240080644823952c11754b237abb8d12d3d0ceae92fa7bb1",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vsha256su1q_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 988,
+        "mismatches": 0,
+        "seed": "0x8aa9a2f3ad40f354",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:caaca45a6549d717240080644823952c11754b237abb8d12d3d0ceae92fa7bb1",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 988,
+          "mismatches": 0,
+          "seed": "0x8aa9a2f3ad40f354"
+        }
+      ],
+      "fips180_4_consistency": {
+        "property": "vsha256su1q_u32(x, W8..11, W12..15) == FIPS schedule tail (W16..W19 given x = su0 part)",
+        "random_cases": 10000000,
+        "corner_cases": 988,
+        "mismatches": 0,
+        "seed": "0xe76447259b9d01ea"
+      },
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vsha256su1q_u32",
+        "core_items": ["aarch64::vsha256su1q_u32", "aarch64::u32x4", "aarch64::sha256su1_sigma"],
+        "core_hash": "sha256:1cd2ea8955a97f1e5840dbd46f82fe1e54f8df53f790f587fcb8325f637882bc",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vsha256su1q_u32 vs the executable model vsha256su1q_u32",
+          "random_cases": 1000,
+          "corner_cases": 988,
+          "mismatches": 0,
+          "seed": "0x8aa9a2f3ad47338b",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vld1q_u64",
+      "rust_path": "core::arch::aarch64::vld1q_u64",
+      "instruction": "LD1 {Vt.2D}, [Xn]",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vld1q_u64", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:a6ac25cf2f447d17349aa304b3d944f8d35db8a5a63b85ceadcf04fecfe33100",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vld1q_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 87,
+        "mismatches": 0,
+        "seed": "0x9ac0ec5c0ae06da0",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:a6ac25cf2f447d17349aa304b3d944f8d35db8a5a63b85ceadcf04fecfe33100",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 87,
+          "mismatches": 0,
+          "seed": "0x9ac0ec5c0ae06da0"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vld1q_u64",
+        "core_items": ["aarch64::vld1q_u64", "aarch64::u64x2", "aarch64::map_u64x2"],
+        "core_hash": "sha256:b677d4fd8d38b2914ee5b611c911c632818b8e81aff0d7daa00701bbe156e3a0",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vld1q_u64 vs the executable model vld1q_u64",
+          "random_cases": 1000,
+          "corner_cases": 87,
+          "mismatches": 0,
+          "seed": "0x9ac0ec5c0ae7ad7f",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vst1q_u64",
+      "rust_path": "core::arch::aarch64::vst1q_u64",
+      "instruction": "ST1 {Vt.2D}, [Xn]",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vst1q_u64", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:caa9d41a9efb7d14f97d288de52c87ab423f4ac13241fbb48d842a8765a4ab6e",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vst1q_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 87,
+        "mismatches": 0,
+        "seed": "0x683df109d9e256af",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:caa9d41a9efb7d14f97d288de52c87ab423f4ac13241fbb48d842a8765a4ab6e",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 87,
+          "mismatches": 0,
+          "seed": "0x683df109d9e256af"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vst1q_u64",
+        "core_items": ["aarch64::vst1q_u64", "aarch64::u64x2", "aarch64::map_u64x2"],
+        "core_hash": "sha256:cfa3a24aae2b68ef5336127d54222540884b529512db74fab88aa4817ef329f7",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vst1q_u64 vs the executable model vst1q_u64",
+          "random_cases": 1000,
+          "corner_cases": 87,
+          "mismatches": 0,
+          "seed": "0x683df109d9e59670",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "veorq_u8",
+      "rust_path": "core::arch::aarch64::veorq_u8",
+      "instruction": "EOR Vd.16B, Vn.16B, Vm.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::veorq_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:ee16194faa4934b60bac9fd912f0b96efe623d987a48d3928624046691e1edbb",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::veorq_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 2916,
+        "mismatches": 0,
+        "seed": "0xa531805bdc4222d9",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:ee16194faa4934b60bac9fd912f0b96efe623d987a48d3928624046691e1edbb",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0xa531805bdc4222d9"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::veorq_u8",
+        "core_items": ["aarch64::veorq_u8", "aarch64::u8x16", "aarch64::map2_u8x16"],
+        "core_hash": "sha256:0be381775fe26ea370fa96c6cf3aff2a92ea71dcf1d8aa6d47ba62cd72f4aaf2",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::veorq_u8 vs the executable model veorq_u8",
+          "random_cases": 1000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0xa531805bdc45e206",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vandq_u8",
+      "rust_path": "core::arch::aarch64::vandq_u8",
+      "instruction": "AND Vd.16B, Vn.16B, Vm.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vandq_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:05fd59d7ce81e66b5dbe7d453d205591ef3257130217c91c26c950fe82e3a467",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vandq_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 2916,
+        "mismatches": 0,
+        "seed": "0x62b4815d7159fd06",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:05fd59d7ce81e66b5dbe7d453d205591ef3257130217c91c26c950fe82e3a467",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0x62b4815d7159fd06"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vandq_u8",
+        "core_items": ["aarch64::vandq_u8", "aarch64::u8x16", "aarch64::map2_u8x16"],
+        "core_hash": "sha256:5f1f0368e91a564ac3a86ea99fc6a62c19c2148ab3531c174e71d2e9fa9e7d3d",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vandq_u8 vs the executable model vandq_u8",
+          "random_cases": 1000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0x62b4815d715e3dd9",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vorrq_u8",
+      "rust_path": "core::arch::aarch64::vorrq_u8",
+      "instruction": "ORR Vd.16B, Vn.16B, Vm.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vorrq_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:9ecea4837adb2d023b9c8dacf92f779c9070230f9fcd4ea70146d7c068cbc371",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vorrq_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 2916,
+        "mismatches": 0,
+        "seed": "0x2d4cdff4119988ba",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:9ecea4837adb2d023b9c8dacf92f779c9070230f9fcd4ea70146d7c068cbc371",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0x2d4cdff4119988ba"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vorrq_u8",
+        "core_items": ["aarch64::vorrq_u8", "aarch64::u8x16", "aarch64::map2_u8x16"],
+        "core_hash": "sha256:c99a8829bc9dd8221358c5ad18b4114d693001c204cc37c509bbc92eac93369f",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vorrq_u8 vs the executable model vorrq_u8",
+          "random_cases": 1000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0x2d4cdff4119e4865",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vdupq_n_u8",
+      "rust_path": "core::arch::aarch64::vdupq_n_u8",
+      "instruction": "DUP Vd.16B, Wn",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vdupq_n_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:517035fca0cbe9ddac72ec284704b9d2c4ebb12bac86b2ee85e20d2b62131463",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vdupq_n_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 16,
+        "mismatches": 0,
+        "seed": "0xa2044813aa20762d",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:517035fca0cbe9ddac72ec284704b9d2c4ebb12bac86b2ee85e20d2b62131463",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 16,
+          "mismatches": 0,
+          "seed": "0xa2044813aa20762d"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vdupq_n_u8",
+        "core_items": ["aarch64::vdupq_n_u8", "aarch64::u8x16"],
+        "core_hash": "sha256:2b2cb69eab8e90f03caa3deefb489d740ba9804b12f0d32a51b16f8a0e2a788a",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vdupq_n_u8 vs the executable model vdupq_n_u8",
+          "random_cases": 1000,
+          "corner_cases": 16,
+          "mismatches": 0,
+          "seed": "0xa2044813aa27b6f2",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vshrq_n_u8",
+      "rust_path": "core::arch::aarch64::vshrq_n_u8",
+      "instruction": "USHR Vd.16B, Vn.16B, #N",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vshrq_n_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:fdf8a10ce6b7e3eb1aa2c51cde07205804178abb40cec183090b4b6556c21614",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vshrq_n_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 432,
+        "mismatches": 0,
+        "seed": "0xdf73bb1e4e7972cf",
+        "immediates": "1..=8 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:fdf8a10ce6b7e3eb1aa2c51cde07205804178abb40cec183090b4b6556c21614",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 432,
+          "mismatches": 0,
+          "seed": "0xdf73bb1e4e7972cf"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vshrq_n_u8",
+        "core_items": ["aarch64::vshrq_n_u8", "aarch64::u8x16", "aarch64::map_u8x16"],
+        "core_hash": "sha256:dd590e2541195ec28aec11a9127942fd3c3e0434ba06a9a05a0022f588495d74",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vshrq_n_u8 vs the executable model vshrq_n_u8",
+          "random_cases": 1000,
+          "corner_cases": 432,
+          "mismatches": 0,
+          "seed": "0xdf73bb1e4e7eb210",
+          "immediates": "1..=8 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vcltq_u8",
+      "rust_path": "core::arch::aarch64::vcltq_u8",
+      "instruction": "CMHI Vd.16B, Vm.16B, Vn.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vcltq_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:0a195016eb8c0709a5b2736ca980a0f7f04d0d03789bc041b13c75ff17e198fd",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vcltq_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 2916,
+        "mismatches": 0,
+        "seed": "0x559ddca02b4ca44a",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:0a195016eb8c0709a5b2736ca980a0f7f04d0d03789bc041b13c75ff17e198fd",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0x559ddca02b4ca44a"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vcltq_u8",
+        "core_items": ["aarch64::vcltq_u8", "aarch64::u8x16", "aarch64::map2_u8x16"],
+        "core_hash": "sha256:918cb5f59fc9420fa9c03144aa3d13aa223486131e36d6f5e1ee5f6a99888d76",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vcltq_u8 vs the executable model vcltq_u8",
+          "random_cases": 1000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0x559ddca02b4b6495",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vcgeq_u8",
+      "rust_path": "core::arch::aarch64::vcgeq_u8",
+      "instruction": "CMHS Vd.16B, Vn.16B, Vm.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vcgeq_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:271435e923828006b4b3ec9cb6f6fdc79ca47698f5a08df4e64a6fa88992e5dc",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vcgeq_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 2916,
+        "mismatches": 0,
+        "seed": "0xf7ed2640200e8f8e",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:271435e923828006b4b3ec9cb6f6fdc79ca47698f5a08df4e64a6fa88992e5dc",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0xf7ed2640200e8f8e"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vcgeq_u8",
+        "core_items": ["aarch64::vcgeq_u8", "aarch64::u8x16", "aarch64::map2_u8x16"],
+        "core_hash": "sha256:91ad9a9835aa8e371efd6119d0388edea0d2dcb327fe24fb9207963cd82a4835",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vcgeq_u8 vs the executable model vcgeq_u8",
+          "random_cases": 1000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0xf7ed264020094f51",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vceqq_u8",
+      "rust_path": "core::arch::aarch64::vceqq_u8",
+      "instruction": "CMEQ Vd.16B, Vn.16B, Vm.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vceqq_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:43740f0f08c33407607e3896689dade7b96acd9932a8de9df744e99b6bf31626",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vceqq_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 2916,
+        "mismatches": 0,
+        "seed": "0x7132048723cf8a60",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:43740f0f08c33407607e3896689dade7b96acd9932a8de9df744e99b6bf31626",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0x7132048723cf8a60"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vceqq_u8",
+        "core_items": ["aarch64::vceqq_u8", "aarch64::u8x16", "aarch64::map2_u8x16"],
+        "core_hash": "sha256:c0d0f621cbbc505fb0ca5ec058833c6ac04f0e00b934040b950cec3bd19afd49",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vceqq_u8 vs the executable model vceqq_u8",
+          "random_cases": 1000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0x7132048723c84abf",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vqtbl1q_u8",
+      "rust_path": "core::arch::aarch64::vqtbl1q_u8",
+      "instruction": "TBL Vd.16B, {Vn.16B}, Vm.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vqtbl1q_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:3500422f6656bf2e691a66c8f6abf53104f8cd9a3f947462b654fbc1b2221bbf",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vqtbl1q_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 2916,
+        "mismatches": 0,
+        "seed": "0xc8db08ecd26c73c1",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:3500422f6656bf2e691a66c8f6abf53104f8cd9a3f947462b654fbc1b2221bbf",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0xc8db08ecd26c73c1"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vqtbl1q_u8",
+        "core_items": ["aarch64::vqtbl1q_u8", "aarch64::u8x16", "aarch64::map_u8x16", "aarch64::tbl1_byte"],
+        "core_hash": "sha256:cf28d671e0e0a8bc73ca242d2f2b6fe9e6f684a1fc5c670b50facc374f970079",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vqtbl1q_u8 vs the executable model vqtbl1q_u8",
+          "random_cases": 1000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0xc8db08ecd26bb31e",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vcntq_u8",
+      "rust_path": "core::arch::aarch64::vcntq_u8",
+      "instruction": "CNT Vd.16B, Vn.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vcntq_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:811771a62cb6e4c4942beb34ddc478538751bd937645838c6ad25f27aa497054",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vcntq_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 54,
+        "mismatches": 0,
+        "seed": "0x88b326f1d40915ec",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:811771a62cb6e4c4942beb34ddc478538751bd937645838c6ad25f27aa497054",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0x88b326f1d40915ec"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vcntq_u8",
+        "core_items": ["aarch64::vcntq_u8", "aarch64::u8x16", "aarch64::map_u8x16"],
+        "core_hash": "sha256:24249243461aef860e354e80f0273f4ed2ff996afc51da6a7e4c6f75192ceb78",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vcntq_u8 vs the executable model vcntq_u8",
+          "random_cases": 1000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0x88b326f1d40ed533",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vaddvq_u8",
+      "rust_path": "core::arch::aarch64::vaddvq_u8",
+      "instruction": "ADDV Bd, Vn.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vaddvq_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:4e22239b3a95f59d582770bfb6a405c66c946574c5e9592108ec630fe472ba23",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vaddvq_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 54,
+        "mismatches": 0,
+        "seed": "0xec66cd4aa8ae0326",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:4e22239b3a95f59d582770bfb6a405c66c946574c5e9592108ec630fe472ba23",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0xec66cd4aa8ae0326"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vaddvq_u8",
+        "core_items": ["aarch64::vaddvq_u8"],
+        "core_hash": "sha256:aeb72929e42fa6eee6fc2a1d39b1067194632edb686c9a545b332618542dd872",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vaddvq_u8 vs the executable model vaddvq_u8",
+          "random_cases": 1000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0xec66cd4aa8a9c3f9",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vmaxvq_u8",
+      "rust_path": "core::arch::aarch64::vmaxvq_u8",
+      "instruction": "UMAXV Bd, Vn.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vmaxvq_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:927debb74fdffa07d58afb267c5129c9e5b8c62a6d64aa218b1ec93d7f899702",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vmaxvq_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 54,
+        "mismatches": 0,
+        "seed": "0x7cd10aee3f0de6f1",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:927debb74fdffa07d58afb267c5129c9e5b8c62a6d64aa218b1ec93d7f899702",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0x7cd10aee3f0de6f1"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vmaxvq_u8",
+        "core_items": ["aarch64::vmaxvq_u8"],
+        "core_hash": "sha256:73a0e75ccc834937c2cc223b764a71b63c2814cf424c9c5e3064632bdd0a26b1",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vmaxvq_u8 vs the executable model vmaxvq_u8",
+          "random_cases": 1000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0x7cd10aee3f0a262e",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vreinterpretq_u16_u8",
+      "rust_path": "core::arch::aarch64::vreinterpretq_u16_u8",
+      "instruction": "(none: register bit reinterpretation)",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vreinterpretq_u16_u8", "src/aarch64/mod.rs::Uint8x16", "src/aarch64/mod.rs::Uint16x8"],
+      "source_hash": "sha256:d381c869ec16128222c45efa6ba0a29f97fa98dc959177c6ff3892f3ef5bc571",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vreinterpretq_u16_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 54,
+        "mismatches": 0,
+        "seed": "0x55a8b451882a366c",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:d381c869ec16128222c45efa6ba0a29f97fa98dc959177c6ff3892f3ef5bc571",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0x55a8b451882a366c"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vreinterpretq_u16_u8",
+        "core_items": ["aarch64::vreinterpretq_u16_u8", "aarch64::u16x8", "aarch64::u8x2"],
+        "core_hash": "sha256:44f68e9223aeddf0af8db6deb0a578a52b99496476c0d392d62b63e6e0ec731e",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vreinterpretq_u16_u8 vs the executable model vreinterpretq_u16_u8",
+          "random_cases": 1000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0x55a8b451882df6b3",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vreinterpretq_u64_u8",
+      "rust_path": "core::arch::aarch64::vreinterpretq_u64_u8",
+      "instruction": "(none: register bit reinterpretation)",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vreinterpretq_u64_u8", "src/aarch64/mod.rs::Uint8x16", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:4cb786faf461412134a88f3ebae588c674641b884c76d6aa83b984fd431999df",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vreinterpretq_u64_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 54,
+        "mismatches": 0,
+        "seed": "0x1e034e7dec3bcc93",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:4cb786faf461412134a88f3ebae588c674641b884c76d6aa83b984fd431999df",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0x1e034e7dec3bcc93"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vreinterpretq_u64_u8",
+        "core_items": ["aarch64::vreinterpretq_u64_u8", "aarch64::u8x8", "aarch64::u64x2"],
+        "core_hash": "sha256:6a0a5668263f086c594e637e35045cd7d3c596ee4f9d42d364cf1ae3f5ad63af",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vreinterpretq_u64_u8 vs the executable model vreinterpretq_u64_u8",
+          "random_cases": 1000,
+          "corner_cases": 54,
+          "mismatches": 0,
+          "seed": "0x1e034e7dec3c0c4c",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vcombine_u8",
+      "rust_path": "core::arch::aarch64::vcombine_u8",
+      "instruction": "INS Vd.D[1], Vm.D[0] (high half)",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vcombine_u8", "src/aarch64/mod.rs::Uint8x8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:c23ba898527e4b3dea05b7c258d3646571d735134d790bd20e55ac08dbc28d7e",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vcombine_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 1444,
+        "mismatches": 0,
+        "seed": "0x14f642386845b987",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:c23ba898527e4b3dea05b7c258d3646571d735134d790bd20e55ac08dbc28d7e",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 1444,
+          "mismatches": 0,
+          "seed": "0x14f642386845b987"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vcombine_u8",
+        "core_items": ["aarch64::vcombine_u8", "aarch64::u8x16"],
+        "core_hash": "sha256:50710aada81f0e60995532219a12001ef1355300024b252937b52280f7b4f49b",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vcombine_u8 vs the executable model vcombine_u8",
+          "random_cases": 1000,
+          "corner_cases": 1444,
+          "mismatches": 0,
+          "seed": "0x14f6423868427958",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vgetq_lane_u64",
+      "rust_path": "core::arch::aarch64::vgetq_lane_u64",
+      "instruction": "UMOV Xd, Vn.D[LANE]",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vgetq_lane_u64", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:5524d9b189e4f20808a4a9610801d88376f0369c68948c0a229e2bc1488b2dab",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vgetq_lane_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 174,
+        "mismatches": 0,
+        "seed": "0x266dff8545a9b2ce",
+        "immediates": "0..=1 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:5524d9b189e4f20808a4a9610801d88376f0369c68948c0a229e2bc1488b2dab",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 174,
+          "mismatches": 0,
+          "seed": "0x266dff8545a9b2ce"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vgetq_lane_u64",
+        "core_items": ["aarch64::vgetq_lane_u64"],
+        "core_hash": "sha256:aa6a4b75f9cf9e96b4b4adf719514f6dc36c49c09ac7fa121186931c3aff7472",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vgetq_lane_u64 vs the executable model vgetq_lane_u64",
+          "random_cases": 1000,
+          "corner_cases": 174,
+          "mismatches": 0,
+          "seed": "0x266dff8545ae7211",
+          "immediates": "0..=1 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vshrn_n_u16",
+      "rust_path": "core::arch::aarch64::vshrn_n_u16",
+      "instruction": "SHRN Vd.8B, Vn.8H, #N",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vshrn_n_u16", "src/aarch64/mod.rs::Uint16x8", "src/aarch64/mod.rs::Uint8x8"],
+      "source_hash": "sha256:a4aea793c9e7695fea3e55fa6c6861909689df1328c8d1100c159621d3bae1f7",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vshrn_n_u16 on native",
+        "random_cases": 10000000,
+        "corner_cases": 528,
+        "mismatches": 0,
+        "seed": "0x9d344aa4ee6e3341",
+        "immediates": "1..=8 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:a4aea793c9e7695fea3e55fa6c6861909689df1328c8d1100c159621d3bae1f7",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 528,
+          "mismatches": 0,
+          "seed": "0x9d344aa4ee6e3341"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vshrn_n_u16",
+        "core_items": ["aarch64::vshrn_n_u16", "aarch64::u8x8"],
+        "core_hash": "sha256:56b596551d42e4f519fa28bbb381e0afe76839ee4edb82476ac0b6783704e459",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vshrn_n_u16 vs the executable model vshrn_n_u16",
+          "random_cases": 1000,
+          "corner_cases": 528,
+          "mismatches": 0,
+          "seed": "0x9d344aa4ee69f39e",
+          "immediates": "1..=8 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vshrn_n_u64",
+      "rust_path": "core::arch::aarch64::vshrn_n_u64",
+      "instruction": "SHRN Vd.2S, Vn.2D, #N",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vshrn_n_u64", "src/aarch64/mod.rs::Uint64x2", "src/aarch64/mod.rs::Uint32x2"],
+      "source_hash": "sha256:648affdb1c966fd4b1345abae0326e714f3f99f8a373bb8a5871ef52d43d1088",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vshrn_n_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 2784,
+        "mismatches": 0,
+        "seed": "0x9d0edea4ee758340",
+        "immediates": "1..=32 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:648affdb1c966fd4b1345abae0326e714f3f99f8a373bb8a5871ef52d43d1088",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 2784,
+          "mismatches": 0,
+          "seed": "0x9d0edea4ee758340"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vshrn_n_u64",
+        "core_items": ["aarch64::vshrn_n_u64", "aarch64::u32x2"],
+        "core_hash": "sha256:d03882ae876bde82a7cb90f1c9bf86929f34214f2c2b11691de00fce3da64ee3",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vshrn_n_u64 vs the executable model vshrn_n_u64",
+          "random_cases": 1024,
+          "corner_cases": 2784,
+          "mismatches": 0,
+          "seed": "0x9d0edea4ee72439f",
+          "immediates": "1..=32 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vmovn_u64",
+      "rust_path": "core::arch::aarch64::vmovn_u64",
+      "instruction": "XTN Vd.2S, Vn.2D",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vmovn_u64", "src/aarch64/mod.rs::Uint64x2", "src/aarch64/mod.rs::Uint32x2"],
+      "source_hash": "sha256:08b9c4ac4c985debb863b32e01906cfd0e24b756626e450321ad90d11e841e23",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vmovn_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 87,
+        "mismatches": 0,
+        "seed": "0xcb3ea018d91cd536",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:08b9c4ac4c985debb863b32e01906cfd0e24b756626e450321ad90d11e841e23",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 87,
+          "mismatches": 0,
+          "seed": "0xcb3ea018d91cd536"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vmovn_u64",
+        "core_items": ["aarch64::vmovn_u64", "aarch64::u32x2"],
+        "core_hash": "sha256:7002d3148ac5f8c0915f6d9e2c941d09099d9e222dd8a6e136822a49cb0d372c",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vmovn_u64 vs the executable model vmovn_u64",
+          "random_cases": 1000,
+          "corner_cases": 87,
+          "mismatches": 0,
+          "seed": "0xcb3ea018d91b15e9",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vaddq_u64",
+      "rust_path": "core::arch::aarch64::vaddq_u64",
+      "instruction": "ADD Vd.2D, Vn.2D, Vm.2D",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vaddq_u64", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:a910ac5e237a0fa10b2057d40490a33137f9b2532dcf51d31070054c266a48b2",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vaddq_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 7569,
+        "mismatches": 0,
+        "seed": "0x2cbdbef611f4e7a0",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:a910ac5e237a0fa10b2057d40490a33137f9b2532dcf51d31070054c266a48b2",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 7569,
+          "mismatches": 0,
+          "seed": "0x2cbdbef611f4e7a0"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vaddq_u64",
+        "core_items": ["aarch64::vaddq_u64", "aarch64::u64x2", "aarch64::map2_u64x2"],
+        "core_hash": "sha256:15571a1b643ef5f79413dc13d4d613e996e6106ca73e6a532688180df1a6a6ac",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vaddq_u64 vs the executable model vaddq_u64",
+          "random_cases": 1000,
+          "corner_cases": 7569,
+          "mismatches": 0,
+          "seed": "0x2cbdbef611f3277f",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vsraq_n_u64",
+      "rust_path": "core::arch::aarch64::vsraq_n_u64",
+      "instruction": "USRA Vd.2D, Vn.2D, #N",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vsraq_n_u64", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:0ee51eaa6316b06530575e3617b816c6861ea574ebcfbf9aa052cab66e7ccec7",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vsraq_n_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 12160,
+        "mismatches": 0,
+        "seed": "0x94d7c9a5845a3250",
+        "immediates": "1..=64 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:0ee51eaa6316b06530575e3617b816c6861ea574ebcfbf9aa052cab66e7ccec7",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 12160,
+          "mismatches": 0,
+          "seed": "0x94d7c9a5845a3250"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vsraq_n_u64",
+        "core_items": ["aarch64::vsraq_n_u64", "aarch64::u64x2", "aarch64::map2_u64x2"],
+        "core_hash": "sha256:e148d12b540b2754b820d14365a290fc9fa2790616234449af766d338ed912f3",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vsraq_n_u64 vs the executable model vsraq_n_u64",
+          "random_cases": 1024,
+          "corner_cases": 12160,
+          "mismatches": 0,
+          "seed": "0x94d7c9a5845df28f",
+          "immediates": "1..=64 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vbslq_u64",
+      "rust_path": "core::arch::aarch64::vbslq_u64",
+      "instruction": "BSL Vd.16B, Vn.16B, Vm.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vbslq_u64", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:57c499bdf4ad69b96575bb7d621ae176aed4518992a6d9b1918673c26bdec451",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vbslq_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 1108,
+        "mismatches": 0,
+        "seed": "0xbafb79e2b740719a",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:57c499bdf4ad69b96575bb7d621ae176aed4518992a6d9b1918673c26bdec451",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 1108,
+          "mismatches": 0,
+          "seed": "0xbafb79e2b740719a"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vbslq_u64",
+        "core_items": ["aarch64::vbslq_u64", "aarch64::u64x2", "aarch64::map3_u64x2"],
+        "core_hash": "sha256:0ea6ec8fe410871db6d299742724148ff3ab25750ef7f571dc74d26e0d8d0eb3",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vbslq_u64 vs the executable model vbslq_u64",
+          "random_cases": 1000,
+          "corner_cases": 1108,
+          "mismatches": 0,
+          "seed": "0xbafb79e2b747b145",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vbslq_u32",
+      "rust_path": "core::arch::aarch64::vbslq_u32",
+      "instruction": "BSL Vd.16B, Vn.16B, Vm.16B",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vbslq_u32", "src/aarch64/mod.rs::Uint32x4"],
+      "source_hash": "sha256:dec8c674929d0f8728a6c55516dec2393cc4de9d8f2108fec9c21434cade2dfb",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vbslq_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 988,
+        "mismatches": 0,
+        "seed": "0xbae87de2b7760535",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:dec8c674929d0f8728a6c55516dec2393cc4de9d8f2108fec9c21434cade2dfb",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 988,
+          "mismatches": 0,
+          "seed": "0xbae87de2b7760535"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vbslq_u32",
+        "core_items": ["aarch64::vbslq_u32", "aarch64::u32x4", "aarch64::map3_u32x4"],
+        "core_hash": "sha256:ebc327a611b2d9265d45c56b70f3cba8768b4bf88dbb658a783504dc376bb5e8",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vbslq_u32 vs the executable model vbslq_u32",
+          "random_cases": 1000,
+          "corner_cases": 988,
+          "mismatches": 0,
+          "seed": "0xbae87de2b771c5ea",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vmull_u32",
+      "rust_path": "core::arch::aarch64::vmull_u32",
+      "instruction": "UMULL Vd.2D, Vn.2S, Vm.2S",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vmull_u32", "src/aarch64/mod.rs::Uint32x2", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:d509b48dbfadef9c187178d9f6c149dd5b3418a7b89bd87071054d0b605904d7",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vmull_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 2916,
+        "mismatches": 0,
+        "seed": "0xdb7e305310c55b3f",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:d509b48dbfadef9c187178d9f6c149dd5b3418a7b89bd87071054d0b605904d7",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0xdb7e305310c55b3f"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vmull_u32",
+        "core_items": ["aarch64::vmull_u32", "aarch64::u64x2"],
+        "core_hash": "sha256:53018e1cc2ddbe29d9680d1098126eb72d1d07dc45ecb132ddf9969a7c6f2604",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vmull_u32 vs the executable model vmull_u32",
+          "random_cases": 1000,
+          "corner_cases": 2916,
+          "mismatches": 0,
+          "seed": "0xdb7e305310c29be0",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vmlal_u32",
+      "rust_path": "core::arch::aarch64::vmlal_u32",
+      "instruction": "UMLAL Vd.2D, Vn.2S, Vm.2S",
+      "features": ["neon"],
+      "source_items": ["src/aarch64/neon2.rs::vmlal_u32", "src/aarch64/mod.rs::Uint64x2", "src/aarch64/mod.rs::Uint32x2"],
+      "source_hash": "sha256:493e88998fbfe38f809cf1bcbc6139ec503411c8c80f4caf5d59dbab680dc9a3",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vmlal_u32 on native",
+        "random_cases": 10000000,
+        "corner_cases": 844,
+        "mismatches": 0,
+        "seed": "0x7c1a8439df1d9fe5",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:493e88998fbfe38f809cf1bcbc6139ec503411c8c80f4caf5d59dbab680dc9a3",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 844,
+          "mismatches": 0,
+          "seed": "0x7c1a8439df1d9fe5"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vmlal_u32",
+        "core_items": ["aarch64::vmlal_u32", "aarch64::u64x2"],
+        "core_hash": "sha256:2122745d74c7168a2fd80a80f2e7c2fbfffe7028a178d1d3d8bc6da4563915c4",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vmlal_u32 vs the executable model vmlal_u32",
+          "random_cases": 1000,
+          "corner_cases": 844,
+          "mismatches": 0,
+          "seed": "0x7c1a8439df1a5f3a",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "veor3q_u8",
+      "rust_path": "core::arch::aarch64::veor3q_u8",
+      "instruction": "EOR3 Vd.16B, Vn.16B, Vm.16B, Va.16B",
+      "features": ["sha3"],
+      "source_items": ["src/aarch64/sha3.rs::veor3q_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:f5cecb832f8b649cb15a1a469146e91315e6f5f590d545c47bc049b2d01044d7",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::veor3q_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 712,
+        "mismatches": 0,
+        "seed": "0xf25279eda55a9fa2",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:f5cecb832f8b649cb15a1a469146e91315e6f5f590d545c47bc049b2d01044d7",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 712,
+          "mismatches": 0,
+          "seed": "0xf25279eda55a9fa2"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::veor3q_u8",
+        "core_items": ["aarch64::veor3q_u8", "aarch64::u8x16", "aarch64::map3_u8x16"],
+        "core_hash": "sha256:b2f89d601be97a18e3b4240a1799c6f0fa3fef059c2f373216a3a72c23222b47",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::veor3q_u8 vs the executable model veor3q_u8",
+          "random_cases": 1000,
+          "corner_cases": 712,
+          "mismatches": 0,
+          "seed": "0xf25279eda55d5f7d",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vbcaxq_u8",
+      "rust_path": "core::arch::aarch64::vbcaxq_u8",
+      "instruction": "BCAX Vd.16B, Vn.16B, Vm.16B, Va.16B",
+      "features": ["sha3"],
+      "source_items": ["src/aarch64/sha3.rs::vbcaxq_u8", "src/aarch64/mod.rs::Uint8x16"],
+      "source_hash": "sha256:ccb389d6f7e5245b68606326bf969b994d5954ba4b12209b5360c52cf42d4895",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vbcaxq_u8 on native",
+        "random_cases": 10000000,
+        "corner_cases": 712,
+        "mismatches": 0,
+        "seed": "0xbc0b63d7961fc53b",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:ccb389d6f7e5245b68606326bf969b994d5954ba4b12209b5360c52cf42d4895",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 712,
+          "mismatches": 0,
+          "seed": "0xbc0b63d7961fc53b"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vbcaxq_u8",
+        "core_items": ["aarch64::vbcaxq_u8", "aarch64::u8x16", "aarch64::map3_u8x16"],
+        "core_hash": "sha256:f16f6e72ebac810b15aeed56280ea112e242a89166bd7ebec58d000fec986d57",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vbcaxq_u8 vs the executable model vbcaxq_u8",
+          "random_cases": 1000,
+          "corner_cases": 712,
+          "mismatches": 0,
+          "seed": "0xbc0b63d7961805e4",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vrax1q_u64",
+      "rust_path": "core::arch::aarch64::vrax1q_u64",
+      "instruction": "RAX1 Vd.2D, Vn.2D, Vm.2D",
+      "features": ["sha3"],
+      "source_items": ["src/aarch64/sha3.rs::vrax1q_u64", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:165b7bb48b99e8aa6cd1e3acf7ddcd03c5d75a28b80876672a061927d0339725",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vrax1q_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 7569,
+        "mismatches": 0,
+        "seed": "0x29c6296b7ce1c2a9",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:165b7bb48b99e8aa6cd1e3acf7ddcd03c5d75a28b80876672a061927d0339725",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 7569,
+          "mismatches": 0,
+          "seed": "0x29c6296b7ce1c2a9"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vrax1q_u64",
+        "core_items": ["aarch64::vrax1q_u64", "aarch64::u64x2", "aarch64::map2_u64x2"],
+        "core_hash": "sha256:33a32517b49fadd222ebf2d183529c15714ee16efeaa279aa8ba6166dfa0457a",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vrax1q_u64 vs the executable model vrax1q_u64",
+          "random_cases": 1000,
+          "corner_cases": 7569,
+          "mismatches": 0,
+          "seed": "0x29c6296b7ce60276",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vxarq_u64",
+      "rust_path": "core::arch::aarch64::vxarq_u64",
+      "instruction": "XAR Vd.2D, Vn.2D, Vm.2D, #IMM6",
+      "features": ["sha3"],
+      "source_items": ["src/aarch64/sha3.rs::vxarq_u64", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:96e5f150bd246c153b4444072d75eadf04fa015e92a5b6d6eaa85a829039b78b",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vxarq_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 12160,
+        "mismatches": 0,
+        "seed": "0x0d78afde7b889104",
+        "immediates": "0..=63 (exhaustive)"
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:96e5f150bd246c153b4444072d75eadf04fa015e92a5b6d6eaa85a829039b78b",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 12160,
+          "mismatches": 0,
+          "seed": "0x0d78afde7b889104"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vxarq_u64",
+        "core_items": ["aarch64::vxarq_u64", "aarch64::u64x2", "aarch64::map2_u64x2"],
+        "core_hash": "sha256:35f40d76d22fc7ebff71f19f245bdc4558ec9c5791ae1a4ee1a0ad64f0460c25",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vxarq_u64 vs the executable model vxarq_u64",
+          "random_cases": 1024,
+          "corner_cases": 12160,
+          "mismatches": 0,
+          "seed": "0x0d78afde7b8f51db",
+          "immediates": "0..=63 (exhaustive)"
+        }
+      }
+    },
+    {
+      "name": "vsha512hq_u64",
+      "rust_path": "core::arch::aarch64::vsha512hq_u64",
+      "instruction": "SHA512H Qd, Qn, Vm.2D",
+      "features": ["sha3"],
+      "source_items": ["src/aarch64/sha3.rs::vsha512hq_u64", "src/aarch64/sha3.rs::sha512_sigma1", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:3451901990813b1945af28f85d0b72a8c88c5729940936e7bc7cd80b722fe0f2",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vsha512hq_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 1108,
+        "mismatches": 0,
+        "seed": "0x64d30063651e6d8f",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:3451901990813b1945af28f85d0b72a8c88c5729940936e7bc7cd80b722fe0f2",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 1108,
+          "mismatches": 0,
+          "seed": "0x64d30063651e6d8f"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vsha512hq_u64",
+        "core_items": ["aarch64::vsha512hq_u64", "aarch64::u64x2", "aarch64::sha512_sigma1"],
+        "core_hash": "sha256:e7a59c5a495ead55c65fe069e955c110830391bacc1f15de14238de59aaf8b4f",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vsha512hq_u64 vs the executable model vsha512hq_u64",
+          "random_cases": 1000,
+          "corner_cases": 1108,
+          "mismatches": 0,
+          "seed": "0x64d300636519ad50",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vsha512h2q_u64",
+      "rust_path": "core::arch::aarch64::vsha512h2q_u64",
+      "instruction": "SHA512H2 Qd, Qn, Vm.2D",
+      "features": ["sha3"],
+      "source_items": ["src/aarch64/sha3.rs::vsha512h2q_u64", "src/aarch64/sha3.rs::sha512_sigma0", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:94b95e78f37ed965c3592f35d915f22cbd2e5af1c0d077248d7e18068031f119",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vsha512h2q_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 1108,
+        "mismatches": 0,
+        "seed": "0x71d90b997e1e3c0f",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:94b95e78f37ed965c3592f35d915f22cbd2e5af1c0d077248d7e18068031f119",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 1108,
+          "mismatches": 0,
+          "seed": "0x71d90b997e1e3c0f"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vsha512h2q_u64",
+        "core_items": ["aarch64::vsha512h2q_u64", "aarch64::u64x2", "aarch64::sha512_sigma0"],
+        "core_hash": "sha256:5dbfe991a1dd4e78cdcd62f4681fb36eebb0e2b6b08f09d156f35b272715faa4",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vsha512h2q_u64 vs the executable model vsha512h2q_u64",
+          "random_cases": 1000,
+          "corner_cases": 1108,
+          "mismatches": 0,
+          "seed": "0x71d90b997e19fcd0",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vsha512su0q_u64",
+      "rust_path": "core::arch::aarch64::vsha512su0q_u64",
+      "instruction": "SHA512SU0 Vd.2D, Vn.2D",
+      "features": ["sha3"],
+      "source_items": ["src/aarch64/sha3.rs::vsha512su0q_u64", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:db90cf88ce3521f0afd4cf040ccf571bf01aaeab33b73181316f02276f2be40a",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vsha512su0q_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 7569,
+        "mismatches": 0,
+        "seed": "0x002cf3f67aba404b",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:db90cf88ce3521f0afd4cf040ccf571bf01aaeab33b73181316f02276f2be40a",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 7569,
+          "mismatches": 0,
+          "seed": "0x002cf3f67aba404b"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vsha512su0q_u64",
+        "core_items": ["aarch64::vsha512su0q_u64", "aarch64::u64x2", "aarch64::sha512su0_sigma"],
+        "core_hash": "sha256:c228073c6c762313ae18586aa1b2937ebf2483a7fef99ce6db649f6cbbb3a9f9",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vsha512su0q_u64 vs the executable model vsha512su0q_u64",
+          "random_cases": 1000,
+          "corner_cases": 7569,
+          "mismatches": 0,
+          "seed": "0x002cf3f67abd8094",
+          "immediates": null
+        }
+      }
+    },
+    {
+      "name": "vsha512su1q_u64",
+      "rust_path": "core::arch::aarch64::vsha512su1q_u64",
+      "instruction": "SHA512SU1 Vd.2D, Vn.2D, Vm.2D",
+      "features": ["sha3"],
+      "source_items": ["src/aarch64/sha3.rs::vsha512su1q_u64", "src/aarch64/mod.rs::Uint64x2"],
+      "source_hash": "sha256:e099c74f43a535370a7a8540cb178a7afc6517a322d226993da883fb492cc9fe",
+      "status": "validated",
+      "hardware": {
+        "method": "differential vs core::arch::aarch64::vsha512su1q_u64 on native",
+        "random_cases": 10000000,
+        "corner_cases": 1108,
+        "mismatches": 0,
+        "seed": "0xc7bec3518215c25a",
+        "immediates": null
+      },
+      "hosts": [
+        {
+          "cpu_key": "legacy:Apple M5 Pro (native)",
+          "executor": "native",
+          "date": "2026-09-26",
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+          "source_hash": "sha256:e099c74f43a535370a7a8540cb178a7afc6517a322d226993da883fb492cc9fe",
+          "status": "validated",
+          "random_cases": 10000000,
+          "corner_cases": 1108,
+          "mismatches": 0,
+          "seed": "0xc7bec3518215c25a"
+        }
+      ],
+      "core": {
+        "file": "core/aarch64.core",
+        "global": "aarch64::vsha512su1q_u64",
+        "core_items": ["aarch64::vsha512su1q_u64", "aarch64::u64x2", "aarch64::map3_u64x2", "aarch64::sha512su1_sigma"],
+        "core_hash": "sha256:53b3e7ccb4ee568813fc636d070d06527002a28bfa81c5f71270312b56ba99d6",
+        "status": "cross-checked",
+        "kernel_crosscheck": {
+          "method": "kernel evaluation of aarch64::vsha512su1q_u64 vs the executable model vsha512su1q_u64",
+          "random_cases": 1000,
+          "corner_cases": 1108,
+          "mismatches": 0,
+          "seed": "0xc7bec35182120285",
+          "immediates": null
+        }
+      }
+    }
+  ],
+  "compositions": [
+    {
+      "name": "sha2_schedule4_vs_fips",
+      "kind": "model consistency (portable)",
+      "random_cases": 10000000,
+      "corner_cases": 1849,
+      "mismatches": 0,
+      "seed": "0xecc0bfacf1532703"
+    },
+    {
+      "name": "sha2_rounds4_vs_fips",
+      "kind": "model consistency (portable)",
+      "random_cases": 10000000,
+      "corner_cases": 988,
+      "mismatches": 0,
+      "seed": "0x2ca033139598cf57"
+    },
+    {
+      "name": "sha2_be_load_vs_from_be_bytes",
+      "kind": "model consistency (portable)",
+      "random_cases": 10000000,
+      "corner_cases": 54,
+      "mismatches": 0,
+      "seed": "0x7f17e40bf8f63f68"
+    },
+    {
+      "name": "compress_sha2_models_vs_fips",
+      "kind": "model consistency (portable)",
+      "random_cases": 1000000,
+      "corner_cases": 2623,
+      "mismatches": 0,
+      "seed": "0x4f0f382ebcbd21ab"
+    },
+    {
+      "name": "compress_sha2_intrinsics_vs_fips",
+      "kind": "real intrinsics (hardware)",
+      "random_cases": 1000000,
+      "corner_cases": 2623,
+      "mismatches": 0,
+      "seed": "0x4491982229a806c1"
+    },
+    {
+      "name": "compress_sha2_intrinsics_vs_models",
+      "kind": "real intrinsics (hardware)",
+      "random_cases": 1000000,
+      "corner_cases": 2623,
+      "mismatches": 0,
+      "seed": "0x37b1af3d68303aab"
+    }
+  ],
+  "hosts": [
+    {
+      "cpu_key": "legacy:Apple M5 Pro (native)",
+      "machine": {
+        "cpu_brand_string": "Apple M5 Pro",
+        "executor": "native",
+        "os": "macOS 26.5.1",
+        "detected_features": {
+          "neon": true,
+          "aes": true,
+          "sha2": true,
+          "sha3": true
+        },
+        "cpu": null
+      },
+      "target": "aarch64-apple-darwin",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "profile": "release",
+      "date": "2026-09-26",
+      "random_cases_per_model": 10000000,
+      "base_seed": "0x5eed202609230001"
+    }
+  ],
+  "kats": [],
+  "kernel_crosscheck": {
+    "method": "each core model (core/<arch>.core, loaded by Env::load_core after Env::with_prelude) evaluated by the sandblaster kernel on closed inputs and compared with the executable Rust model: corner phase + random phase of the diff harness, every immediate",
+    "core_file": "core/aarch64.core",
+    "core_file_hash": "sha256:2cf76a4e65e406b9e1ff92142d9e1c11c76c08088cd524878421e0718b012158",
+    "prelude_hash": "sha256:c670b5957a570bd84c4a79553a3c9ea2e0de04205d460e7b0ed69909426f8122",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "profile": "release",
+    "host": "Apple M5 Pro (native)",
+    "date": "2026-09-26",
+    "random_cases_per_model": 1000,
+    "base_seed": "0x5eed20260924c0de",
+    "required_random_cases": 1000,
+    "compositions": [
+      {
+        "name": "core_fips_vs_executable_fips",
+        "kind": "core-text compression (kernel evaluation)",
+        "random_cases": 256,
+        "corner_cases": 15,
+        "mismatches": 0,
+        "seed": "0x5682bb2cea74b149"
+      },
+      {
+        "name": "core_compress_sha2_vs_core_fips",
+        "kind": "core-text compression (kernel evaluation)",
+        "random_cases": 256,
+        "corner_cases": 15,
+        "mismatches": 0,
+        "seed": "0x5682bb2cea74b149"
+      },
+      {
+        "name": "core_compress_sha2_vs_executable_model",
+        "kind": "core-text compression (kernel evaluation)",
+        "random_cases": 256,
+        "corner_cases": 15,
+        "mismatches": 0,
+        "seed": "0x5682bb2cea74b149"
+      }
+    ]
+  },
+  "sets": [
+    {
+      "cpu_key": "legacy:Apple M5 Pro (native)",
+      "executor": "native",
+      "cpu_brand_string": "Apple M5 Pro",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "set": "lanes:neon_x4:c53f7fb16b23b45f09b7610030b8c910",
+      "features": ["neon"],
+      "set_hash": "sha256:0a0bb800ee32491dec5da9120332193fb1e8a79b716bee7342e1292b711eb6ff",
+      "suite": "lane-differential",
+      "cases": 1000000,
+      "mismatches": 0,
+      "status": "passed",
+      "unreported_features": [],
+      "target": "aarch64-apple-darwin",
+      "date": "2026-09-26",
+      "source": "host kit `lanes` stage harness (sandblaster/front/tests/host_lanes.rs, HOST_LANES_TARGET=aarch64-apple-darwin, the kernel called directly against its portable lane site; o10 fixer, native M5)"
+    }
+  ]
+}

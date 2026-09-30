@@ -1,0 +1,41 @@
+-- sandblaster prelude lemmas: fixed-length arrays (DESIGN.md §6: array_ext,
+-- array_eq_sound / array_eq_complete; §7.7 arrays use prelude list
+-- equality with its lemmas).
+--
+-- Checked, untrusted.
+
+-- Arrays with equal lists are equal (the length proof is irrelevant).
+def[lemma] array::ext : (T : Type) -> (N : Usize) -> (a : Array T N) -> (b : Array T N) -> (.e : Eq(List(T), fst(a), fst(b))) -> Eq(Array T N, a, b) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (b : Array T N) (.e : Eq(List(T), fst(a), fst(b))) =>
+    (transport(List(T), fst(a), fst(b), e,
+       z. (.q : Eq(Int, seq::len T z, #cast_usize_int(N))) -> Eq(Array T N, a, pair(Array T N, z, q)),
+       fun (.q : Eq(Int, seq::len T fst(a), #cast_usize_int(N))) => refl(Array T N, a))) .snd(b)
+
+-- `==` on arrays with a sound / complete element equality.
+def[lemma] array::eq_sound : (T : Type) -> (N : Usize) -> (eq : T -> T -> Bool)
+    -> (sound : (x : T) -> (y : T) -> (.h : Eq(Bool, eq x y, true)) -> Eq(T, x, y))
+    -> (a : Array T N) -> (b : Array T N) -> (.h : Eq(Bool, array::eq T N eq a b, true)) -> Eq(Array T N, a, b) :=
+  fun (T : Type) (N : Usize) (eq : T -> T -> Bool) (sound : (x : T) -> (y : T) -> (.h : Eq(Bool, eq x y, true)) -> Eq(T, x, y))
+      (a : Array T N) (b : Array T N) (.h : Eq(Bool, array::eq T N eq a b, true)) =>
+    array::ext T N a b .(seq::eq_sound T eq sound fst(a) fst(b) .h)
+
+def[lemma] array::eq_complete : (T : Type) -> (N : Usize) -> (eq : T -> T -> Bool)
+    -> (complete : (x : T) -> Eq(Bool, eq x x, true))
+    -> (a : Array T N) -> (b : Array T N) -> (.h : Eq(Array T N, a, b)) -> Eq(Bool, array::eq T N eq a b, true) :=
+  fun (T : Type) (N : Usize) (eq : T -> T -> Bool) (complete : (x : T) -> Eq(Bool, eq x x, true))
+      (a : Array T N) (b : Array T N) (.h : Eq(Array T N, a, b)) =>
+    transport(Array T N, a, b, h, z. Eq(Bool, array::eq T N eq a z, true), seq::eq_refl T eq complete fst(a))
+
+-- Instances for machine-integer elements (`[u8; 32] == [u8; 32]`), with the
+-- primitive comparison as the element equality.
+%for W in u8 u16 u32 u64 usize
+def[lemma] array::eq_sound_$w : (N : Usize) -> (a : Array $W N) -> (b : Array $W N)
+    -> (.h : Eq(Bool, array::eq $W N (fun (x : $W) (y : $W) => #eq_$w(x, y)) a b, true)) -> Eq(Array $W N, a, b) :=
+  fun (N : Usize) (a : Array $W N) (b : Array $W N) (.h : Eq(Bool, array::eq $W N (fun (x : $W) (y : $W) => #eq_$w(x, y)) a b, true)) =>
+    array::eq_sound $W N (fun (x : $W) (y : $W) => #eq_$w(x, y)) $w::eq_sound a b .h
+
+def[lemma] array::eq_complete_$w : (N : Usize) -> (a : Array $W N) -> (b : Array $W N)
+    -> (.h : Eq(Array $W N, a, b)) -> Eq(Bool, array::eq $W N (fun (x : $W) (y : $W) => #eq_$w(x, y)) a b, true) :=
+  fun (N : Usize) (a : Array $W N) (b : Array $W N) (.h : Eq(Array $W N, a, b)) =>
+    array::eq_complete $W N (fun (x : $W) (y : $W) => #eq_$w(x, y)) (fun (x : $W) => $w::eq_complete x x .refl($W, x)) a b .h
+%end

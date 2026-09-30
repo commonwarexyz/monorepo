@@ -1,0 +1,139 @@
+-- FIPS 180-4 SHA-256 compression in core text: the reference side of the
+-- core-text compression cross-checks (tests/kernel_crosscheck.rs). NOT part of
+-- the target semantics (not trusted): a test fixture written without any
+-- cleverness, like src/fips.rs (§4.1.2 functions, §4.2.2 constants, §6.2.2
+-- schedule and rounds). Load after the prelude.
+
+def[spec] checks::fips::ch : (x : U32) -> (y : U32) -> (z : U32) -> U32 :=
+  fun (x : U32) (y : U32) (z : U32) => #xor_u32(#and_u32(x, y), #and_u32(#not_u32(x), z))
+
+def[spec] checks::fips::maj : (x : U32) -> (y : U32) -> (z : U32) -> U32 :=
+  fun (x : U32) (y : U32) (z : U32) => #xor_u32(#xor_u32(#and_u32(x, y), #and_u32(x, z)), #and_u32(y, z))
+
+def[spec] checks::fips::big_sigma0 : (x : U32) -> U32 :=
+  fun (x : U32) => #xor_u32(#xor_u32(#rotr_u32(x, 2u32), #rotr_u32(x, 13u32)), #rotr_u32(x, 22u32))
+
+def[spec] checks::fips::big_sigma1 : (x : U32) -> U32 :=
+  fun (x : U32) => #xor_u32(#xor_u32(#rotr_u32(x, 6u32), #rotr_u32(x, 11u32)), #rotr_u32(x, 25u32))
+
+def[spec] checks::fips::small_sigma0 : (x : U32) -> U32 :=
+  fun (x : U32) => #xor_u32(#xor_u32(#rotr_u32(x, 7u32), #rotr_u32(x, 18u32)), #wshr_u32(x, 3u32))
+
+def[spec] checks::fips::small_sigma1 : (x : U32) -> U32 :=
+  fun (x : U32) => #xor_u32(#xor_u32(#rotr_u32(x, 17u32), #rotr_u32(x, 19u32)), #wshr_u32(x, 10u32))
+
+-- K_0 .. K_63 (§4.2.2).
+def[spec] checks::fips::K : List(U32) :=
+    Cons[U32](0x428a2f98u32, Cons[U32](0x71374491u32, Cons[U32](0xb5c0fbcfu32, Cons[U32](0xe9b5dba5u32, 
+    Cons[U32](0x3956c25bu32, Cons[U32](0x59f111f1u32, Cons[U32](0x923f82a4u32, Cons[U32](0xab1c5ed5u32, 
+    Cons[U32](0xd807aa98u32, Cons[U32](0x12835b01u32, Cons[U32](0x243185beu32, Cons[U32](0x550c7dc3u32, 
+    Cons[U32](0x72be5d74u32, Cons[U32](0x80deb1feu32, Cons[U32](0x9bdc06a7u32, Cons[U32](0xc19bf174u32, 
+    Cons[U32](0xe49b69c1u32, Cons[U32](0xefbe4786u32, Cons[U32](0x0fc19dc6u32, Cons[U32](0x240ca1ccu32, 
+    Cons[U32](0x2de92c6fu32, Cons[U32](0x4a7484aau32, Cons[U32](0x5cb0a9dcu32, Cons[U32](0x76f988dau32, 
+    Cons[U32](0x983e5152u32, Cons[U32](0xa831c66du32, Cons[U32](0xb00327c8u32, Cons[U32](0xbf597fc7u32, 
+    Cons[U32](0xc6e00bf3u32, Cons[U32](0xd5a79147u32, Cons[U32](0x06ca6351u32, Cons[U32](0x14292967u32, 
+    Cons[U32](0x27b70a85u32, Cons[U32](0x2e1b2138u32, Cons[U32](0x4d2c6dfcu32, Cons[U32](0x53380d13u32, 
+    Cons[U32](0x650a7354u32, Cons[U32](0x766a0abbu32, Cons[U32](0x81c2c92eu32, Cons[U32](0x92722c85u32, 
+    Cons[U32](0xa2bfe8a1u32, Cons[U32](0xa81a664bu32, Cons[U32](0xc24b8b70u32, Cons[U32](0xc76c51a3u32, 
+    Cons[U32](0xd192e819u32, Cons[U32](0xd6990624u32, Cons[U32](0xf40e3585u32, Cons[U32](0x106aa070u32, 
+    Cons[U32](0x19a4c116u32, Cons[U32](0x1e376c08u32, Cons[U32](0x2748774cu32, Cons[U32](0x34b0bcb5u32, 
+    Cons[U32](0x391c0cb3u32, Cons[U32](0x4ed8aa4au32, Cons[U32](0x5b9cca4fu32, Cons[U32](0x682e6ff3u32, 
+    Cons[U32](0x748f82eeu32, Cons[U32](0x78a5636fu32, Cons[U32](0x84c87814u32, Cons[U32](0x8cc70208u32, 
+    Cons[U32](0x90befffau32, Cons[U32](0xa4506cebu32, Cons[U32](0xbef9a3f7u32, Cons[U32](0xc67178f2u32, 
+    Nil[U32]))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+def[spec] checks::fips::u32x8 : (x0 : U32) -> (x1 : U32) -> (x2 : U32) -> (x3 : U32) -> (x4 : U32) -> (x5 : U32) -> (x6 : U32) -> (x7 : U32)
+    -> Array U32 8usize :=
+  fun (x0 : U32) (x1 : U32) (x2 : U32) (x3 : U32) (x4 : U32) (x5 : U32) (x6 : U32) (x7 : U32) =>
+    pair(Array U32 8usize, Cons[U32](x0, Cons[U32](x1, Cons[U32](x2, Cons[U32](x3, Cons[U32](x4, Cons[U32](x5, Cons[U32](x6, Cons[U32](x7, Nil[U32])))))))), refl(Int, 8int))
+
+def[spec] checks::fips::u32x16 : (x0 : U32) -> (x1 : U32) -> (x2 : U32) -> (x3 : U32) -> (x4 : U32) -> (x5 : U32) -> (x6 : U32) -> (x7 : U32) -> (x8 : U32) -> (x9 : U32) -> (x10 : U32) -> (x11 : U32) -> (x12 : U32) -> (x13 : U32) -> (x14 : U32) -> (x15 : U32)
+    -> Array U32 16usize :=
+  fun (x0 : U32) (x1 : U32) (x2 : U32) (x3 : U32) (x4 : U32) (x5 : U32) (x6 : U32) (x7 : U32) (x8 : U32) (x9 : U32) (x10 : U32) (x11 : U32) (x12 : U32) (x13 : U32) (x14 : U32) (x15 : U32) =>
+    pair(Array U32 16usize, Cons[U32](x0, Cons[U32](x1, Cons[U32](x2, Cons[U32](x3, Cons[U32](x4, Cons[U32](x5, Cons[U32](x6, Cons[U32](x7, Cons[U32](x8, Cons[U32](x9, Cons[U32](x10, Cons[U32](x11, Cons[U32](x12, Cons[U32](x13, Cons[U32](x14, Cons[U32](x15, Nil[U32])))))))))))))))), refl(Int, 16int))
+
+def[spec] checks::fips::u8x4 : (x0 : U8) -> (x1 : U8) -> (x2 : U8) -> (x3 : U8)
+    -> Array U8 4usize :=
+  fun (x0 : U8) (x1 : U8) (x2 : U8) (x3 : U8) =>
+    pair(Array U8 4usize, Cons[U8](x0, Cons[U8](x1, Cons[U8](x2, Cons[U8](x3, Nil[U8])))), refl(Int, 4int))
+
+-- One round (§6.2.2 step 3) on [a, b, c, d, e, f, g, h] with K_t and W_t.
+def[spec] checks::fips::round : (s : Array U32 8usize) -> (k : U32) -> (w : U32) -> Array U32 8usize :=
+  fun (s : Array U32 8usize) (k : U32) (w : U32) =>
+    let a : U32 = array::index U32 8usize s 0usize .refl(Bool, true);
+    let b : U32 = array::index U32 8usize s 1usize .refl(Bool, true);
+    let c : U32 = array::index U32 8usize s 2usize .refl(Bool, true);
+    let d : U32 = array::index U32 8usize s 3usize .refl(Bool, true);
+    let e : U32 = array::index U32 8usize s 4usize .refl(Bool, true);
+    let f : U32 = array::index U32 8usize s 5usize .refl(Bool, true);
+    let g : U32 = array::index U32 8usize s 6usize .refl(Bool, true);
+    let h : U32 = array::index U32 8usize s 7usize .refl(Bool, true);
+    let t1 : U32 = #wadd_u32(#wadd_u32(#wadd_u32(#wadd_u32(h, checks::fips::big_sigma1 e), checks::fips::ch e f g), k), w);
+    let t2 : U32 = #wadd_u32(checks::fips::big_sigma0 a, checks::fips::maj a b c);
+    checks::fips::u32x8 (#wadd_u32(t1, t2)) a b c (#wadd_u32(d, t1)) e f g
+
+-- The schedule window W_t .. W_(t+15) advanced by one: W_(t+16) = σ1(W_(t+14)) + W_(t+9) + σ0(W_(t+1)) + W_t.
+def[spec] checks::fips::next_window : (w : Array U32 16usize) -> Array U32 16usize :=
+  fun (w : Array U32 16usize) =>
+    let w0 : U32 = array::index U32 16usize w 0usize .refl(Bool, true);
+    let w1 : U32 = array::index U32 16usize w 1usize .refl(Bool, true);
+    let w2 : U32 = array::index U32 16usize w 2usize .refl(Bool, true);
+    let w3 : U32 = array::index U32 16usize w 3usize .refl(Bool, true);
+    let w4 : U32 = array::index U32 16usize w 4usize .refl(Bool, true);
+    let w5 : U32 = array::index U32 16usize w 5usize .refl(Bool, true);
+    let w6 : U32 = array::index U32 16usize w 6usize .refl(Bool, true);
+    let w7 : U32 = array::index U32 16usize w 7usize .refl(Bool, true);
+    let w8 : U32 = array::index U32 16usize w 8usize .refl(Bool, true);
+    let w9 : U32 = array::index U32 16usize w 9usize .refl(Bool, true);
+    let w10 : U32 = array::index U32 16usize w 10usize .refl(Bool, true);
+    let w11 : U32 = array::index U32 16usize w 11usize .refl(Bool, true);
+    let w12 : U32 = array::index U32 16usize w 12usize .refl(Bool, true);
+    let w13 : U32 = array::index U32 16usize w 13usize .refl(Bool, true);
+    let w14 : U32 = array::index U32 16usize w 14usize .refl(Bool, true);
+    let w15 : U32 = array::index U32 16usize w 15usize .refl(Bool, true);
+    checks::fips::u32x16 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15
+      (#wadd_u32(#wadd_u32(#wadd_u32(checks::fips::small_sigma1 w14, w9), checks::fips::small_sigma0 w1), w0))
+
+-- Rounds t = 64 - len(ks) .. 63: round t uses K_t = head(ks) and W_t = w[0].
+def[spec] checks::fips::rounds : (s : Array U32 8usize) -> (w : Array U32 16usize) -> (ks : List(U32)) -> Array U32 8usize :=
+  fun (s : Array U32 8usize) (w : Array U32 16usize) (ks : List(U32)) =>
+    match ks : List(U32) as _ return Array U32 8usize with
+    | Nil => s
+    | Cons(k, rest) => rec(checks::fips::round s k (array::index U32 16usize w 0usize .refl(Bool, true)), checks::fips::next_window w, rest)
+    end
+  structural 2
+
+-- The big-endian message words M_0 .. M_15 of a block (§5.2.1).
+def[spec] checks::fips::block_words : (block : Array U8 64usize) -> Array U32 16usize :=
+  fun (block : Array U8 64usize) =>
+    checks::fips::u32x16
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 0usize .refl(Bool, true)) (array::index U8 64usize block 1usize .refl(Bool, true)) (array::index U8 64usize block 2usize .refl(Bool, true)) (array::index U8 64usize block 3usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 4usize .refl(Bool, true)) (array::index U8 64usize block 5usize .refl(Bool, true)) (array::index U8 64usize block 6usize .refl(Bool, true)) (array::index U8 64usize block 7usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 8usize .refl(Bool, true)) (array::index U8 64usize block 9usize .refl(Bool, true)) (array::index U8 64usize block 10usize .refl(Bool, true)) (array::index U8 64usize block 11usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 12usize .refl(Bool, true)) (array::index U8 64usize block 13usize .refl(Bool, true)) (array::index U8 64usize block 14usize .refl(Bool, true)) (array::index U8 64usize block 15usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 16usize .refl(Bool, true)) (array::index U8 64usize block 17usize .refl(Bool, true)) (array::index U8 64usize block 18usize .refl(Bool, true)) (array::index U8 64usize block 19usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 20usize .refl(Bool, true)) (array::index U8 64usize block 21usize .refl(Bool, true)) (array::index U8 64usize block 22usize .refl(Bool, true)) (array::index U8 64usize block 23usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 24usize .refl(Bool, true)) (array::index U8 64usize block 25usize .refl(Bool, true)) (array::index U8 64usize block 26usize .refl(Bool, true)) (array::index U8 64usize block 27usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 28usize .refl(Bool, true)) (array::index U8 64usize block 29usize .refl(Bool, true)) (array::index U8 64usize block 30usize .refl(Bool, true)) (array::index U8 64usize block 31usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 32usize .refl(Bool, true)) (array::index U8 64usize block 33usize .refl(Bool, true)) (array::index U8 64usize block 34usize .refl(Bool, true)) (array::index U8 64usize block 35usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 36usize .refl(Bool, true)) (array::index U8 64usize block 37usize .refl(Bool, true)) (array::index U8 64usize block 38usize .refl(Bool, true)) (array::index U8 64usize block 39usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 40usize .refl(Bool, true)) (array::index U8 64usize block 41usize .refl(Bool, true)) (array::index U8 64usize block 42usize .refl(Bool, true)) (array::index U8 64usize block 43usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 44usize .refl(Bool, true)) (array::index U8 64usize block 45usize .refl(Bool, true)) (array::index U8 64usize block 46usize .refl(Bool, true)) (array::index U8 64usize block 47usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 48usize .refl(Bool, true)) (array::index U8 64usize block 49usize .refl(Bool, true)) (array::index U8 64usize block 50usize .refl(Bool, true)) (array::index U8 64usize block 51usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 52usize .refl(Bool, true)) (array::index U8 64usize block 53usize .refl(Bool, true)) (array::index U8 64usize block 54usize .refl(Bool, true)) (array::index U8 64usize block 55usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 56usize .refl(Bool, true)) (array::index U8 64usize block 57usize .refl(Bool, true)) (array::index U8 64usize block 58usize .refl(Bool, true)) (array::index U8 64usize block 59usize .refl(Bool, true))))
+      (u32::from_be_bytes (checks::fips::u8x4 (array::index U8 64usize block 60usize .refl(Bool, true)) (array::index U8 64usize block 61usize .refl(Bool, true)) (array::index U8 64usize block 62usize .refl(Bool, true)) (array::index U8 64usize block 63usize .refl(Bool, true))))
+
+-- SHA-256 compression of one block: H' = H + rounds(H, W).
+def[spec] checks::fips::compress : (state : Array U32 8usize) -> (block : Array U8 64usize) -> Array U32 8usize :=
+  fun (state : Array U32 8usize) (block : Array U8 64usize) =>
+    let s : Array U32 8usize = checks::fips::rounds state (checks::fips::block_words block) checks::fips::K;
+    checks::fips::u32x8
+      (#wadd_u32(array::index U32 8usize state 0usize .refl(Bool, true), array::index U32 8usize s 0usize .refl(Bool, true)))
+      (#wadd_u32(array::index U32 8usize state 1usize .refl(Bool, true), array::index U32 8usize s 1usize .refl(Bool, true)))
+      (#wadd_u32(array::index U32 8usize state 2usize .refl(Bool, true), array::index U32 8usize s 2usize .refl(Bool, true)))
+      (#wadd_u32(array::index U32 8usize state 3usize .refl(Bool, true), array::index U32 8usize s 3usize .refl(Bool, true)))
+      (#wadd_u32(array::index U32 8usize state 4usize .refl(Bool, true), array::index U32 8usize s 4usize .refl(Bool, true)))
+      (#wadd_u32(array::index U32 8usize state 5usize .refl(Bool, true), array::index U32 8usize s 5usize .refl(Bool, true)))
+      (#wadd_u32(array::index U32 8usize state 6usize .refl(Bool, true), array::index U32 8usize s 6usize .refl(Bool, true)))
+      (#wadd_u32(array::index U32 8usize state 7usize .refl(Bool, true), array::index U32 8usize s 7usize .refl(Bool, true)))

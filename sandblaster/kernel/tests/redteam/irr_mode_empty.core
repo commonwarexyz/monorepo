@@ -1,0 +1,11 @@
+-- Red-team: a closed proof of Empty via the irrelevant-mode relevance leak.
+-- Inside an irrelevant position (here `absurd`'s proof) the checker's single
+-- `irr` flag makes EVERY irrelevant binder usable relevantly, including
+-- binders introduced inside that position. So `fun (.h : Bool) => bool::not h`
+-- is accepted at type `(.h : Bool) -> Bool`, while conversion identifies
+-- `G .true` with `G .false` for neutral G (irrelevant spine args skipped).
+def[lemma] boom : Empty :=
+  absurd(Empty,
+    let L : (G : (.h : Bool) -> Bool) -> Eq(Bool, G .true, G .false) =
+      fun (G : (.h : Bool) -> Bool) => refl(Bool, G .true);
+    bool::false_ne_true (L (fun (.h : Bool) => bool::not h)))

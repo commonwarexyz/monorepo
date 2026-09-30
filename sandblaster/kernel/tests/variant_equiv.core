@@ -1,0 +1,288 @@
+-- VariantEquiv fixture (DESIGN.md §9.3): SHA-256 compression in the shapes
+-- the elaborator produces for sandblaster/fixtures/qmdb/sandblaster/sha256.rs (see
+-- tests/phase3.rs, `variant_equiv_*`).
+--
+-- * `ve::compress` is the portable reference: opaque (it contains loops, so
+--   the elaborator marks it opaque), its three `for` loops are
+--   measure-recursive, opaque loop helpers with irrelevant bound
+--   hypotheses, a dependent-match loop guard, `array::set`/`array::index`
+--   with bound proofs, and `u32::from_be_bytes`. Every arithmetic proof is a
+--   certificate-free `linarith` (the kernel finds the certificate, using
+--   the context's hypotheses — the loop bounds and guard equations).
+-- * `ve::compress_sha2` is the aarch64 variant, written against the
+--   hardware models of sandblaster/targets/core/aarch64.core in the
+--   `sha2` crate's instruction sequence (vld1q/vrev32q/vreinterpretq,
+--   vaddq with the constants, vsha256hq/vsha256h2q, vsha256su0q/su1q).
+-- Load after the prelude and aarch64.core.
+
+def[exec] ve::K : Array U32 64usize :=
+  pair(Array U32 64usize, Cons[U32](1116352408u32, Cons[U32](1899447441u32, Cons[U32](3049323471u32, Cons[U32](3921009573u32, Cons[U32](961987163u32, Cons[U32](1508970993u32, Cons[U32](2453635748u32, Cons[U32](2870763221u32, Cons[U32](3624381080u32, Cons[U32](310598401u32, Cons[U32](607225278u32, Cons[U32](1426881987u32, Cons[U32](1925078388u32, Cons[U32](2162078206u32, Cons[U32](2614888103u32, Cons[U32](3248222580u32, Cons[U32](3835390401u32, Cons[U32](4022224774u32, Cons[U32](264347078u32, Cons[U32](604807628u32, Cons[U32](770255983u32, Cons[U32](1249150122u32, Cons[U32](1555081692u32, Cons[U32](1996064986u32, Cons[U32](2554220882u32, Cons[U32](2821834349u32, Cons[U32](2952996808u32, Cons[U32](3210313671u32, Cons[U32](3336571891u32, Cons[U32](3584528711u32, Cons[U32](113926993u32, Cons[U32](338241895u32, Cons[U32](666307205u32, Cons[U32](773529912u32, Cons[U32](1294757372u32, Cons[U32](1396182291u32, Cons[U32](1695183700u32, Cons[U32](1986661051u32, Cons[U32](2177026350u32, Cons[U32](2456956037u32, Cons[U32](2730485921u32, Cons[U32](2820302411u32, Cons[U32](3259730800u32, Cons[U32](3345764771u32, Cons[U32](3516065817u32, Cons[U32](3600352804u32, Cons[U32](4094571909u32, Cons[U32](275423344u32, Cons[U32](430227734u32, Cons[U32](506948616u32, Cons[U32](659060556u32, Cons[U32](883997877u32, Cons[U32](958139571u32, Cons[U32](1322822218u32, Cons[U32](1537002063u32, Cons[U32](1747873779u32, Cons[U32](1955562222u32, Cons[U32](2024104815u32, Cons[U32](2227730452u32, Cons[U32](2361852424u32, Cons[U32](2428436474u32, Cons[U32](2756734187u32, Cons[U32](3204031479u32, Cons[U32](3329325298u32, Nil[U32])))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))), refl(Int, 64int))
+def[exec] ve::ssig0 : (x : U32) -> U32 := fun (x : U32) => #xor_u32(#xor_u32(#rotr_u32(x, 7u32), #rotr_u32(x, 18u32)), #wshr_u32(x, 3u32))
+def[exec] ve::ssig1 : (x : U32) -> U32 := fun (x : U32) => #xor_u32(#xor_u32(#rotr_u32(x, 17u32), #rotr_u32(x, 19u32)), #wshr_u32(x, 10u32))
+def[exec] ve::bsig0 : (x : U32) -> U32 := fun (x : U32) => #xor_u32(#xor_u32(#rotr_u32(x, 2u32), #rotr_u32(x, 13u32)), #rotr_u32(x, 22u32))
+def[exec] ve::bsig1 : (x : U32) -> U32 := fun (x : U32) => #xor_u32(#xor_u32(#rotr_u32(x, 6u32), #rotr_u32(x, 11u32)), #rotr_u32(x, 25u32))
+def[exec] ve::choose : (x : U32) -> (y : U32) -> (z : U32) -> U32 :=
+  fun (x : U32) (y : U32) (z : U32) => #xor_u32(#and_u32(x, y), #and_u32(#not_u32(x), z))
+def[exec] ve::majority : (x : U32) -> (y : U32) -> (z : U32) -> U32 :=
+  fun (x : U32) (y : U32) (z : U32) => #xor_u32(#xor_u32(#and_u32(x, y), #and_u32(x, z)), #and_u32(y, z))
+def[exec] ve::be_word : (a : U8) -> (b : U8) -> (c : U8) -> (d : U8) -> U32 :=
+  fun (a : U8) (b : U8) (c : U8) (d : U8) => u32::from_be_bytes pair(Array U8 4usize, Cons[U8](a, Cons[U8](b, Cons[U8](c, Cons[U8](d, Nil[U8])))), refl(Int, 4int))
+def[exec] ve::round : (work : Array U32 8usize) -> (k : U32) -> (w : U32) -> Array U32 8usize :=
+  fun (work : Array U32 8usize) (k : U32) (w : U32) =>
+    let a : U32 = array::index U32 8usize work 0usize .refl(Bool, true);
+    let b : U32 = array::index U32 8usize work 1usize .refl(Bool, true);
+    let c : U32 = array::index U32 8usize work 2usize .refl(Bool, true);
+    let d : U32 = array::index U32 8usize work 3usize .refl(Bool, true);
+    let e : U32 = array::index U32 8usize work 4usize .refl(Bool, true);
+    let f : U32 = array::index U32 8usize work 5usize .refl(Bool, true);
+    let g : U32 = array::index U32 8usize work 6usize .refl(Bool, true);
+    let h : U32 = array::index U32 8usize work 7usize .refl(Bool, true);
+    let t1 : U32 = #wadd_u32(#wadd_u32(#wadd_u32(#wadd_u32(h, ve::bsig1 e), ve::choose e f g), k), w);
+    let t2 : U32 = #wadd_u32(ve::bsig0 a, ve::majority a b c);
+    pair(Array U32 8usize, Cons[U32](#wadd_u32(t1, t2), Cons[U32](a, Cons[U32](b, Cons[U32](c, Cons[U32](#wadd_u32(d, t1), Cons[U32](e, Cons[U32](f, Cons[U32](g, Nil[U32])))))))), refl(Int, 8int))
+def[exec] ve::finish : (state : Array U32 8usize) (work : Array U32 8usize) -> Array U32 8usize :=
+  fun (state : Array U32 8usize) (work : Array U32 8usize) =>
+    pair(Array U32 8usize, Cons[U32](#wadd_u32(array::index U32 8usize state 0usize .refl(Bool, true), array::index U32 8usize work 0usize .refl(Bool, true)), Cons[U32](#wadd_u32(array::index U32 8usize state 1usize .refl(Bool, true), array::index U32 8usize work 1usize .refl(Bool, true)), Cons[U32](#wadd_u32(array::index U32 8usize state 2usize .refl(Bool, true), array::index U32 8usize work 2usize .refl(Bool, true)), Cons[U32](#wadd_u32(array::index U32 8usize state 3usize .refl(Bool, true), array::index U32 8usize work 3usize .refl(Bool, true)), Cons[U32](#wadd_u32(array::index U32 8usize state 4usize .refl(Bool, true), array::index U32 8usize work 4usize .refl(Bool, true)), Cons[U32](#wadd_u32(array::index U32 8usize state 5usize .refl(Bool, true), array::index U32 8usize work 5usize .refl(Bool, true)), Cons[U32](#wadd_u32(array::index U32 8usize state 6usize .refl(Bool, true), array::index U32 8usize work 6usize .refl(Bool, true)), Cons[U32](#wadd_u32(array::index U32 8usize state 7usize .refl(Bool, true), array::index U32 8usize work 7usize .refl(Bool, true)), Nil[U32])))))))), refl(Int, 8int))
+def[loop_helper, opaque] ve::compress::loop0 : (t : Usize) -> (w : Array U32 64usize) -> (block : Array U8 64usize) -> (.h_hi : Eq(Bool, #lt_usize(t, 16usize), true)) -> Array U32 64usize :=
+  fun (t : Usize) (w : Array U32 64usize) (block : Array U8 64usize) (.h_hi : Eq(Bool, #lt_usize(t, 16usize), true)) =>
+    let w1 : Array U32 64usize = array::set U32 64usize w t
+      (ve::be_word (array::index U8 64usize block #mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); [])) .linarith([]; Eq(Bool, #lt_usize(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); [])), 64usize), true); [])) (array::index U8 64usize block #add_usize(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); [])), 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); []))), #cast_usize_int(1usize)), 18446744073709551615int), true); [])) .linarith([]; Eq(Bool, #lt_usize(#add_usize(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); [])), 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); []))), #cast_usize_int(1usize)), 18446744073709551615int), true); [])), 64usize), true); [])) (array::index U8 64usize block #add_usize(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); [])), 2usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); []))), #cast_usize_int(2usize)), 18446744073709551615int), true); [])) .linarith([]; Eq(Bool, #lt_usize(#add_usize(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); [])), 2usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); []))), #cast_usize_int(2usize)), 18446744073709551615int), true); [])), 64usize), true); [])) (array::index U8 64usize block #add_usize(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); [])), 3usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); []))), #cast_usize_int(3usize)), 18446744073709551615int), true); [])) .linarith([]; Eq(Bool, #lt_usize(#add_usize(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); [])), 3usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(#mul_usize(4usize, t; linarith([]; Eq(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(t)), 18446744073709551615int), true); []))), #cast_usize_int(3usize)), 18446744073709551615int), true); [])), 64usize), true); [])))
+      .linarith([]; Eq(Bool, #lt_usize(t, 64usize), true); []);
+    if #lt_usize(#add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])), 16usize) as .e return Array U32 64usize
+    then rec(#add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])), w1, block, .e; linarith([]; Eq(Bool, #lt_usize(#sub_usize(16usize, #add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])); linarith([]; Eq(Bool, #le_usize(#add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])), 16usize), true); [])), #sub_usize(16usize, t; linarith([]; Eq(Bool, #le_usize(t, 16usize), true); []))), true); []))
+    else w1
+  measure (#sub_usize(16usize, t; linarith([]; Eq(Bool, #le_usize(t, 16usize), true); [])))
+def[loop_helper, opaque] ve::compress::loop1 : (t : Usize) -> (w : Array U32 64usize) -> (.h_lo : Eq(Bool, #le_usize(16usize, t), true)) -> (.h_hi : Eq(Bool, #lt_usize(t, 64usize), true)) -> Array U32 64usize :=
+  fun (t : Usize) (w : Array U32 64usize) (.h_lo : Eq(Bool, #le_usize(16usize, t), true)) (.h_hi : Eq(Bool, #lt_usize(t, 64usize), true)) =>
+    let w1 : Array U32 64usize = array::set U32 64usize w t
+      (#wadd_u32(#wadd_u32(#wadd_u32(ve::ssig1 (array::index U32 64usize w #sub_usize(t, 2usize; linarith([]; Eq(Bool, #le_usize(2usize, t), true); [])) .linarith([]; Eq(Bool, #lt_usize(#sub_usize(t, 2usize; linarith([]; Eq(Bool, #le_usize(2usize, t), true); [])), 64usize), true); [])), array::index U32 64usize w #sub_usize(t, 7usize; linarith([]; Eq(Bool, #le_usize(7usize, t), true); [])) .linarith([]; Eq(Bool, #lt_usize(#sub_usize(t, 7usize; linarith([]; Eq(Bool, #le_usize(7usize, t), true); [])), 64usize), true); [])), ve::ssig0 (array::index U32 64usize w #sub_usize(t, 15usize; linarith([]; Eq(Bool, #le_usize(15usize, t), true); [])) .linarith([]; Eq(Bool, #lt_usize(#sub_usize(t, 15usize; linarith([]; Eq(Bool, #le_usize(15usize, t), true); [])), 64usize), true); []))), array::index U32 64usize w #sub_usize(t, 16usize; linarith([]; Eq(Bool, #le_usize(16usize, t), true); [])) .linarith([]; Eq(Bool, #lt_usize(#sub_usize(t, 16usize; linarith([]; Eq(Bool, #le_usize(16usize, t), true); [])), 64usize), true); [])))
+      .linarith([]; Eq(Bool, #lt_usize(t, 64usize), true); []);
+    if #lt_usize(#add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])), 64usize) as .e return Array U32 64usize
+    then rec(#add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])), w1, .linarith([]; Eq(Bool, #le_usize(16usize, #add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); []))), true); []), .e; linarith([]; Eq(Bool, #lt_usize(#sub_usize(64usize, #add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])); linarith([]; Eq(Bool, #le_usize(#add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])), 64usize), true); [])), #sub_usize(64usize, t; linarith([]; Eq(Bool, #le_usize(t, 64usize), true); []))), true); []))
+    else w1
+  measure (#sub_usize(64usize, t; linarith([]; Eq(Bool, #le_usize(t, 64usize), true); [])))
+def[loop_helper, opaque] ve::compress::loop2 : (t : Usize) -> (work : Array U32 8usize) -> (w : Array U32 64usize) -> (.h_hi : Eq(Bool, #lt_usize(t, 64usize), true)) -> Array U32 8usize :=
+  fun (t : Usize) (work : Array U32 8usize) (w : Array U32 64usize) (.h_hi : Eq(Bool, #lt_usize(t, 64usize), true)) =>
+    let work1 : Array U32 8usize = ve::round work (array::index U32 64usize ve::K t .h_hi) (array::index U32 64usize w t .h_hi);
+    if #lt_usize(#add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])), 64usize) as .e return Array U32 8usize
+    then rec(#add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])), work1, w, .e; linarith([]; Eq(Bool, #lt_usize(#sub_usize(64usize, #add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])); linarith([]; Eq(Bool, #le_usize(#add_usize(t, 1usize; linarith([]; Eq(Bool, #le_int(#iadd(#cast_usize_int(t), #cast_usize_int(1usize)), 18446744073709551615int), true); [])), 64usize), true); [])), #sub_usize(64usize, t; linarith([]; Eq(Bool, #le_usize(t, 64usize), true); []))), true); []))
+    else work1
+  measure (#sub_usize(64usize, t; linarith([]; Eq(Bool, #le_usize(t, 64usize), true); [])))
+def[exec, opaque] ve::compress : (state : Array U32 8usize) -> (block : Array U8 64usize) -> Array U32 8usize :=
+  fun (state : Array U32 8usize) (block : Array U8 64usize) =>
+    let w : Array U32 64usize = array::repeat U32 64usize 0u32 .refl(Int, 64int);
+    let w0 : Array U32 64usize = ve::compress::loop0 0usize w block .refl(Bool, true);
+    let w1 : Array U32 64usize = ve::compress::loop1 16usize w0 .refl(Bool, true) .refl(Bool, true);
+    let work : Array U32 8usize = ve::compress::loop2 0usize state w1 .refl(Bool, true);
+    ve::finish state work
+def[exec] ve::be_words_sha2 : (chunk : Array U8 16usize) -> Array U32 4usize :=
+  fun (chunk : Array U8 16usize) => aarch64::vreinterpretq_u32_u8 (aarch64::vrev32q_u8 (aarch64::vld1q_u8 chunk))
+def[exec] ve::compress_sha2 : (state : Array U32 8usize) -> (block : Array U8 64usize) -> Array U32 8usize :=
+  fun (state : Array U32 8usize) (block : Array U8 64usize) =>
+    let abcd0 : Array U32 4usize = aarch64::vld1q_u32 (aarch64::u32x4 (array::index U32 8usize state 0usize .refl(Bool, true)) (array::index U32 8usize state 1usize .refl(Bool, true)) (array::index U32 8usize state 2usize .refl(Bool, true)) (array::index U32 8usize state 3usize .refl(Bool, true)));
+    let efgh0 : Array U32 4usize = aarch64::vld1q_u32 (aarch64::u32x4 (array::index U32 8usize state 4usize .refl(Bool, true)) (array::index U32 8usize state 5usize .refl(Bool, true)) (array::index U32 8usize state 6usize .refl(Bool, true)) (array::index U32 8usize state 7usize .refl(Bool, true)));
+    let w0 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 0usize .refl(Bool, true)) (array::index U8 64usize block 1usize .refl(Bool, true)) (array::index U8 64usize block 2usize .refl(Bool, true)) (array::index U8 64usize block 3usize .refl(Bool, true)) (array::index U8 64usize block 4usize .refl(Bool, true)) (array::index U8 64usize block 5usize .refl(Bool, true)) (array::index U8 64usize block 6usize .refl(Bool, true)) (array::index U8 64usize block 7usize .refl(Bool, true)) (array::index U8 64usize block 8usize .refl(Bool, true)) (array::index U8 64usize block 9usize .refl(Bool, true)) (array::index U8 64usize block 10usize .refl(Bool, true)) (array::index U8 64usize block 11usize .refl(Bool, true)) (array::index U8 64usize block 12usize .refl(Bool, true)) (array::index U8 64usize block 13usize .refl(Bool, true)) (array::index U8 64usize block 14usize .refl(Bool, true)) (array::index U8 64usize block 15usize .refl(Bool, true)));
+    let w1 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 16usize .refl(Bool, true)) (array::index U8 64usize block 17usize .refl(Bool, true)) (array::index U8 64usize block 18usize .refl(Bool, true)) (array::index U8 64usize block 19usize .refl(Bool, true)) (array::index U8 64usize block 20usize .refl(Bool, true)) (array::index U8 64usize block 21usize .refl(Bool, true)) (array::index U8 64usize block 22usize .refl(Bool, true)) (array::index U8 64usize block 23usize .refl(Bool, true)) (array::index U8 64usize block 24usize .refl(Bool, true)) (array::index U8 64usize block 25usize .refl(Bool, true)) (array::index U8 64usize block 26usize .refl(Bool, true)) (array::index U8 64usize block 27usize .refl(Bool, true)) (array::index U8 64usize block 28usize .refl(Bool, true)) (array::index U8 64usize block 29usize .refl(Bool, true)) (array::index U8 64usize block 30usize .refl(Bool, true)) (array::index U8 64usize block 31usize .refl(Bool, true)));
+    let w2 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 32usize .refl(Bool, true)) (array::index U8 64usize block 33usize .refl(Bool, true)) (array::index U8 64usize block 34usize .refl(Bool, true)) (array::index U8 64usize block 35usize .refl(Bool, true)) (array::index U8 64usize block 36usize .refl(Bool, true)) (array::index U8 64usize block 37usize .refl(Bool, true)) (array::index U8 64usize block 38usize .refl(Bool, true)) (array::index U8 64usize block 39usize .refl(Bool, true)) (array::index U8 64usize block 40usize .refl(Bool, true)) (array::index U8 64usize block 41usize .refl(Bool, true)) (array::index U8 64usize block 42usize .refl(Bool, true)) (array::index U8 64usize block 43usize .refl(Bool, true)) (array::index U8 64usize block 44usize .refl(Bool, true)) (array::index U8 64usize block 45usize .refl(Bool, true)) (array::index U8 64usize block 46usize .refl(Bool, true)) (array::index U8 64usize block 47usize .refl(Bool, true)));
+    let w3 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 48usize .refl(Bool, true)) (array::index U8 64usize block 49usize .refl(Bool, true)) (array::index U8 64usize block 50usize .refl(Bool, true)) (array::index U8 64usize block 51usize .refl(Bool, true)) (array::index U8 64usize block 52usize .refl(Bool, true)) (array::index U8 64usize block 53usize .refl(Bool, true)) (array::index U8 64usize block 54usize .refl(Bool, true)) (array::index U8 64usize block 55usize .refl(Bool, true)) (array::index U8 64usize block 56usize .refl(Bool, true)) (array::index U8 64usize block 57usize .refl(Bool, true)) (array::index U8 64usize block 58usize .refl(Bool, true)) (array::index U8 64usize block 59usize .refl(Bool, true)) (array::index U8 64usize block 60usize .refl(Bool, true)) (array::index U8 64usize block 61usize .refl(Bool, true)) (array::index U8 64usize block 62usize .refl(Bool, true)) (array::index U8 64usize block 63usize .refl(Bool, true)));
+    let wk0 : Array U32 4usize = aarch64::vaddq_u32 w0 (aarch64::vld1q_u32 (aarch64::u32x4 1116352408u32 1899447441u32 3049323471u32 3921009573u32));
+    let abcd1 : Array U32 4usize = aarch64::vsha256hq_u32 abcd0 efgh0 wk0;
+    let efgh1 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh0 abcd0 wk0;
+    let w4 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w0 w1) w2 w3;
+    let wk1 : Array U32 4usize = aarch64::vaddq_u32 w1 (aarch64::vld1q_u32 (aarch64::u32x4 961987163u32 1508970993u32 2453635748u32 2870763221u32));
+    let abcd2 : Array U32 4usize = aarch64::vsha256hq_u32 abcd1 efgh1 wk1;
+    let efgh2 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh1 abcd1 wk1;
+    let w5 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w1 w2) w3 w4;
+    let wk2 : Array U32 4usize = aarch64::vaddq_u32 w2 (aarch64::vld1q_u32 (aarch64::u32x4 3624381080u32 310598401u32 607225278u32 1426881987u32));
+    let abcd3 : Array U32 4usize = aarch64::vsha256hq_u32 abcd2 efgh2 wk2;
+    let efgh3 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh2 abcd2 wk2;
+    let w6 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w2 w3) w4 w5;
+    let wk3 : Array U32 4usize = aarch64::vaddq_u32 w3 (aarch64::vld1q_u32 (aarch64::u32x4 1925078388u32 2162078206u32 2614888103u32 3248222580u32));
+    let abcd4 : Array U32 4usize = aarch64::vsha256hq_u32 abcd3 efgh3 wk3;
+    let efgh4 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh3 abcd3 wk3;
+    let w7 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w3 w4) w5 w6;
+    let wk4 : Array U32 4usize = aarch64::vaddq_u32 w4 (aarch64::vld1q_u32 (aarch64::u32x4 3835390401u32 4022224774u32 264347078u32 604807628u32));
+    let abcd5 : Array U32 4usize = aarch64::vsha256hq_u32 abcd4 efgh4 wk4;
+    let efgh5 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh4 abcd4 wk4;
+    let w8 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w4 w5) w6 w7;
+    let wk5 : Array U32 4usize = aarch64::vaddq_u32 w5 (aarch64::vld1q_u32 (aarch64::u32x4 770255983u32 1249150122u32 1555081692u32 1996064986u32));
+    let abcd6 : Array U32 4usize = aarch64::vsha256hq_u32 abcd5 efgh5 wk5;
+    let efgh6 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh5 abcd5 wk5;
+    let w9 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w5 w6) w7 w8;
+    let wk6 : Array U32 4usize = aarch64::vaddq_u32 w6 (aarch64::vld1q_u32 (aarch64::u32x4 2554220882u32 2821834349u32 2952996808u32 3210313671u32));
+    let abcd7 : Array U32 4usize = aarch64::vsha256hq_u32 abcd6 efgh6 wk6;
+    let efgh7 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh6 abcd6 wk6;
+    let w10 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w6 w7) w8 w9;
+    let wk7 : Array U32 4usize = aarch64::vaddq_u32 w7 (aarch64::vld1q_u32 (aarch64::u32x4 3336571891u32 3584528711u32 113926993u32 338241895u32));
+    let abcd8 : Array U32 4usize = aarch64::vsha256hq_u32 abcd7 efgh7 wk7;
+    let efgh8 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh7 abcd7 wk7;
+    let w11 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w7 w8) w9 w10;
+    let wk8 : Array U32 4usize = aarch64::vaddq_u32 w8 (aarch64::vld1q_u32 (aarch64::u32x4 666307205u32 773529912u32 1294757372u32 1396182291u32));
+    let abcd9 : Array U32 4usize = aarch64::vsha256hq_u32 abcd8 efgh8 wk8;
+    let efgh9 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh8 abcd8 wk8;
+    let w12 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w8 w9) w10 w11;
+    let wk9 : Array U32 4usize = aarch64::vaddq_u32 w9 (aarch64::vld1q_u32 (aarch64::u32x4 1695183700u32 1986661051u32 2177026350u32 2456956037u32));
+    let abcd10 : Array U32 4usize = aarch64::vsha256hq_u32 abcd9 efgh9 wk9;
+    let efgh10 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh9 abcd9 wk9;
+    let w13 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w9 w10) w11 w12;
+    let wk10 : Array U32 4usize = aarch64::vaddq_u32 w10 (aarch64::vld1q_u32 (aarch64::u32x4 2730485921u32 2820302411u32 3259730800u32 3345764771u32));
+    let abcd11 : Array U32 4usize = aarch64::vsha256hq_u32 abcd10 efgh10 wk10;
+    let efgh11 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh10 abcd10 wk10;
+    let w14 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w10 w11) w12 w13;
+    let wk11 : Array U32 4usize = aarch64::vaddq_u32 w11 (aarch64::vld1q_u32 (aarch64::u32x4 3516065817u32 3600352804u32 4094571909u32 275423344u32));
+    let abcd12 : Array U32 4usize = aarch64::vsha256hq_u32 abcd11 efgh11 wk11;
+    let efgh12 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh11 abcd11 wk11;
+    let w15 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w11 w12) w13 w14;
+    let wk12 : Array U32 4usize = aarch64::vaddq_u32 w12 (aarch64::vld1q_u32 (aarch64::u32x4 430227734u32 506948616u32 659060556u32 883997877u32));
+    let abcd13 : Array U32 4usize = aarch64::vsha256hq_u32 abcd12 efgh12 wk12;
+    let efgh13 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh12 abcd12 wk12;
+    let wk13 : Array U32 4usize = aarch64::vaddq_u32 w13 (aarch64::vld1q_u32 (aarch64::u32x4 958139571u32 1322822218u32 1537002063u32 1747873779u32));
+    let abcd14 : Array U32 4usize = aarch64::vsha256hq_u32 abcd13 efgh13 wk13;
+    let efgh14 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh13 abcd13 wk13;
+    let wk14 : Array U32 4usize = aarch64::vaddq_u32 w14 (aarch64::vld1q_u32 (aarch64::u32x4 1955562222u32 2024104815u32 2227730452u32 2361852424u32));
+    let abcd15 : Array U32 4usize = aarch64::vsha256hq_u32 abcd14 efgh14 wk14;
+    let efgh15 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh14 abcd14 wk14;
+    let wk15 : Array U32 4usize = aarch64::vaddq_u32 w15 (aarch64::vld1q_u32 (aarch64::u32x4 2428436474u32 2756734187u32 3204031479u32 3329325298u32));
+    let abcd16 : Array U32 4usize = aarch64::vsha256hq_u32 abcd15 efgh15 wk15;
+    let efgh16 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh15 abcd15 wk15;
+    aarch64::concat_u32x4 (aarch64::vaddq_u32 abcd16 abcd0) (aarch64::vaddq_u32 efgh16 efgh0)
+-- Two wrong variants (must be rejected): a flipped bit in one round constant,
+-- and SHA256H2 given the updated abcd (the MODELS.md pitfall).
+def[exec] ve::compress_sha2_bad_k : (state : Array U32 8usize) -> (block : Array U8 64usize) -> Array U32 8usize :=
+  fun (state : Array U32 8usize) (block : Array U8 64usize) =>
+    let abcd0 : Array U32 4usize = aarch64::vld1q_u32 (aarch64::u32x4 (array::index U32 8usize state 0usize .refl(Bool, true)) (array::index U32 8usize state 1usize .refl(Bool, true)) (array::index U32 8usize state 2usize .refl(Bool, true)) (array::index U32 8usize state 3usize .refl(Bool, true)));
+    let efgh0 : Array U32 4usize = aarch64::vld1q_u32 (aarch64::u32x4 (array::index U32 8usize state 4usize .refl(Bool, true)) (array::index U32 8usize state 5usize .refl(Bool, true)) (array::index U32 8usize state 6usize .refl(Bool, true)) (array::index U32 8usize state 7usize .refl(Bool, true)));
+    let w0 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 0usize .refl(Bool, true)) (array::index U8 64usize block 1usize .refl(Bool, true)) (array::index U8 64usize block 2usize .refl(Bool, true)) (array::index U8 64usize block 3usize .refl(Bool, true)) (array::index U8 64usize block 4usize .refl(Bool, true)) (array::index U8 64usize block 5usize .refl(Bool, true)) (array::index U8 64usize block 6usize .refl(Bool, true)) (array::index U8 64usize block 7usize .refl(Bool, true)) (array::index U8 64usize block 8usize .refl(Bool, true)) (array::index U8 64usize block 9usize .refl(Bool, true)) (array::index U8 64usize block 10usize .refl(Bool, true)) (array::index U8 64usize block 11usize .refl(Bool, true)) (array::index U8 64usize block 12usize .refl(Bool, true)) (array::index U8 64usize block 13usize .refl(Bool, true)) (array::index U8 64usize block 14usize .refl(Bool, true)) (array::index U8 64usize block 15usize .refl(Bool, true)));
+    let w1 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 16usize .refl(Bool, true)) (array::index U8 64usize block 17usize .refl(Bool, true)) (array::index U8 64usize block 18usize .refl(Bool, true)) (array::index U8 64usize block 19usize .refl(Bool, true)) (array::index U8 64usize block 20usize .refl(Bool, true)) (array::index U8 64usize block 21usize .refl(Bool, true)) (array::index U8 64usize block 22usize .refl(Bool, true)) (array::index U8 64usize block 23usize .refl(Bool, true)) (array::index U8 64usize block 24usize .refl(Bool, true)) (array::index U8 64usize block 25usize .refl(Bool, true)) (array::index U8 64usize block 26usize .refl(Bool, true)) (array::index U8 64usize block 27usize .refl(Bool, true)) (array::index U8 64usize block 28usize .refl(Bool, true)) (array::index U8 64usize block 29usize .refl(Bool, true)) (array::index U8 64usize block 30usize .refl(Bool, true)) (array::index U8 64usize block 31usize .refl(Bool, true)));
+    let w2 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 32usize .refl(Bool, true)) (array::index U8 64usize block 33usize .refl(Bool, true)) (array::index U8 64usize block 34usize .refl(Bool, true)) (array::index U8 64usize block 35usize .refl(Bool, true)) (array::index U8 64usize block 36usize .refl(Bool, true)) (array::index U8 64usize block 37usize .refl(Bool, true)) (array::index U8 64usize block 38usize .refl(Bool, true)) (array::index U8 64usize block 39usize .refl(Bool, true)) (array::index U8 64usize block 40usize .refl(Bool, true)) (array::index U8 64usize block 41usize .refl(Bool, true)) (array::index U8 64usize block 42usize .refl(Bool, true)) (array::index U8 64usize block 43usize .refl(Bool, true)) (array::index U8 64usize block 44usize .refl(Bool, true)) (array::index U8 64usize block 45usize .refl(Bool, true)) (array::index U8 64usize block 46usize .refl(Bool, true)) (array::index U8 64usize block 47usize .refl(Bool, true)));
+    let w3 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 48usize .refl(Bool, true)) (array::index U8 64usize block 49usize .refl(Bool, true)) (array::index U8 64usize block 50usize .refl(Bool, true)) (array::index U8 64usize block 51usize .refl(Bool, true)) (array::index U8 64usize block 52usize .refl(Bool, true)) (array::index U8 64usize block 53usize .refl(Bool, true)) (array::index U8 64usize block 54usize .refl(Bool, true)) (array::index U8 64usize block 55usize .refl(Bool, true)) (array::index U8 64usize block 56usize .refl(Bool, true)) (array::index U8 64usize block 57usize .refl(Bool, true)) (array::index U8 64usize block 58usize .refl(Bool, true)) (array::index U8 64usize block 59usize .refl(Bool, true)) (array::index U8 64usize block 60usize .refl(Bool, true)) (array::index U8 64usize block 61usize .refl(Bool, true)) (array::index U8 64usize block 62usize .refl(Bool, true)) (array::index U8 64usize block 63usize .refl(Bool, true)));
+    let wk0 : Array U32 4usize = aarch64::vaddq_u32 w0 (aarch64::vld1q_u32 (aarch64::u32x4 1116352408u32 1899447441u32 3049323471u32 3921009573u32));
+    let abcd1 : Array U32 4usize = aarch64::vsha256hq_u32 abcd0 efgh0 wk0;
+    let efgh1 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh0 abcd0 wk0;
+    let w4 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w0 w1) w2 w3;
+    let wk1 : Array U32 4usize = aarch64::vaddq_u32 w1 (aarch64::vld1q_u32 (aarch64::u32x4 961987163u32 1508970993u32 2453635748u32 2870763221u32));
+    let abcd2 : Array U32 4usize = aarch64::vsha256hq_u32 abcd1 efgh1 wk1;
+    let efgh2 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh1 abcd1 wk1;
+    let w5 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w1 w2) w3 w4;
+    let wk2 : Array U32 4usize = aarch64::vaddq_u32 w2 (aarch64::vld1q_u32 (aarch64::u32x4 3624381080u32 310598401u32 607225278u32 1426881987u32));
+    let abcd3 : Array U32 4usize = aarch64::vsha256hq_u32 abcd2 efgh2 wk2;
+    let efgh3 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh2 abcd2 wk2;
+    let w6 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w2 w3) w4 w5;
+    let wk3 : Array U32 4usize = aarch64::vaddq_u32 w3 (aarch64::vld1q_u32 (aarch64::u32x4 1925078388u32 2162078206u32 2614888103u32 3248222580u32));
+    let abcd4 : Array U32 4usize = aarch64::vsha256hq_u32 abcd3 efgh3 wk3;
+    let efgh4 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh3 abcd3 wk3;
+    let w7 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w3 w4) w5 w6;
+    let wk4 : Array U32 4usize = aarch64::vaddq_u32 w4 (aarch64::vld1q_u32 (aarch64::u32x4 3835390401u32 4022224774u32 264347078u32 604807628u32));
+    let abcd5 : Array U32 4usize = aarch64::vsha256hq_u32 abcd4 efgh4 wk4;
+    let efgh5 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh4 abcd4 wk4;
+    let w8 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w4 w5) w6 w7;
+    let wk5 : Array U32 4usize = aarch64::vaddq_u32 w5 (aarch64::vld1q_u32 (aarch64::u32x4 770255983u32 1249150122u32 1555081692u32 1996064986u32));
+    let abcd6 : Array U32 4usize = aarch64::vsha256hq_u32 abcd5 efgh5 wk5;
+    let efgh6 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh5 abcd5 wk5;
+    let w9 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w5 w6) w7 w8;
+    let wk6 : Array U32 4usize = aarch64::vaddq_u32 w6 (aarch64::vld1q_u32 (aarch64::u32x4 2554220882u32 2821834349u32 2952996808u32 3210313671u32));
+    let abcd7 : Array U32 4usize = aarch64::vsha256hq_u32 abcd6 efgh6 wk6;
+    let efgh7 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh6 abcd6 wk6;
+    let w10 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w6 w7) w8 w9;
+    let wk7 : Array U32 4usize = aarch64::vaddq_u32 w7 (aarch64::vld1q_u32 (aarch64::u32x4 3336571891u32 3584528711u32 113926993u32 338241895u32));
+    let abcd8 : Array U32 4usize = aarch64::vsha256hq_u32 abcd7 efgh7 wk7;
+    let efgh8 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh7 abcd7 wk7;
+    let w11 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w7 w8) w9 w10;
+    let wk8 : Array U32 4usize = aarch64::vaddq_u32 w8 (aarch64::vld1q_u32 (aarch64::u32x4 666307205u32 773529912u32 1294757372u32 1396182291u32));
+    let abcd9 : Array U32 4usize = aarch64::vsha256hq_u32 abcd8 efgh8 wk8;
+    let efgh9 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh8 abcd8 wk8;
+    let w12 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w8 w9) w10 w11;
+    let wk9 : Array U32 4usize = aarch64::vaddq_u32 w9 (aarch64::vld1q_u32 (aarch64::u32x4 1695183700u32 1986661051u32 2177026351u32 2456956037u32));
+    let abcd10 : Array U32 4usize = aarch64::vsha256hq_u32 abcd9 efgh9 wk9;
+    let efgh10 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh9 abcd9 wk9;
+    let w13 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w9 w10) w11 w12;
+    let wk10 : Array U32 4usize = aarch64::vaddq_u32 w10 (aarch64::vld1q_u32 (aarch64::u32x4 2730485921u32 2820302411u32 3259730800u32 3345764771u32));
+    let abcd11 : Array U32 4usize = aarch64::vsha256hq_u32 abcd10 efgh10 wk10;
+    let efgh11 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh10 abcd10 wk10;
+    let w14 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w10 w11) w12 w13;
+    let wk11 : Array U32 4usize = aarch64::vaddq_u32 w11 (aarch64::vld1q_u32 (aarch64::u32x4 3516065817u32 3600352804u32 4094571909u32 275423344u32));
+    let abcd12 : Array U32 4usize = aarch64::vsha256hq_u32 abcd11 efgh11 wk11;
+    let efgh12 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh11 abcd11 wk11;
+    let w15 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w11 w12) w13 w14;
+    let wk12 : Array U32 4usize = aarch64::vaddq_u32 w12 (aarch64::vld1q_u32 (aarch64::u32x4 430227734u32 506948616u32 659060556u32 883997877u32));
+    let abcd13 : Array U32 4usize = aarch64::vsha256hq_u32 abcd12 efgh12 wk12;
+    let efgh13 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh12 abcd12 wk12;
+    let wk13 : Array U32 4usize = aarch64::vaddq_u32 w13 (aarch64::vld1q_u32 (aarch64::u32x4 958139571u32 1322822218u32 1537002063u32 1747873779u32));
+    let abcd14 : Array U32 4usize = aarch64::vsha256hq_u32 abcd13 efgh13 wk13;
+    let efgh14 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh13 abcd13 wk13;
+    let wk14 : Array U32 4usize = aarch64::vaddq_u32 w14 (aarch64::vld1q_u32 (aarch64::u32x4 1955562222u32 2024104815u32 2227730452u32 2361852424u32));
+    let abcd15 : Array U32 4usize = aarch64::vsha256hq_u32 abcd14 efgh14 wk14;
+    let efgh15 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh14 abcd14 wk14;
+    let wk15 : Array U32 4usize = aarch64::vaddq_u32 w15 (aarch64::vld1q_u32 (aarch64::u32x4 2428436474u32 2756734187u32 3204031479u32 3329325298u32));
+    let abcd16 : Array U32 4usize = aarch64::vsha256hq_u32 abcd15 efgh15 wk15;
+    let efgh16 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh15 abcd15 wk15;
+    aarch64::concat_u32x4 (aarch64::vaddq_u32 abcd16 abcd0) (aarch64::vaddq_u32 efgh16 efgh0)
+def[exec] ve::compress_sha2_bad_h2 : (state : Array U32 8usize) -> (block : Array U8 64usize) -> Array U32 8usize :=
+  fun (state : Array U32 8usize) (block : Array U8 64usize) =>
+    let abcd0 : Array U32 4usize = aarch64::vld1q_u32 (aarch64::u32x4 (array::index U32 8usize state 0usize .refl(Bool, true)) (array::index U32 8usize state 1usize .refl(Bool, true)) (array::index U32 8usize state 2usize .refl(Bool, true)) (array::index U32 8usize state 3usize .refl(Bool, true)));
+    let efgh0 : Array U32 4usize = aarch64::vld1q_u32 (aarch64::u32x4 (array::index U32 8usize state 4usize .refl(Bool, true)) (array::index U32 8usize state 5usize .refl(Bool, true)) (array::index U32 8usize state 6usize .refl(Bool, true)) (array::index U32 8usize state 7usize .refl(Bool, true)));
+    let w0 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 0usize .refl(Bool, true)) (array::index U8 64usize block 1usize .refl(Bool, true)) (array::index U8 64usize block 2usize .refl(Bool, true)) (array::index U8 64usize block 3usize .refl(Bool, true)) (array::index U8 64usize block 4usize .refl(Bool, true)) (array::index U8 64usize block 5usize .refl(Bool, true)) (array::index U8 64usize block 6usize .refl(Bool, true)) (array::index U8 64usize block 7usize .refl(Bool, true)) (array::index U8 64usize block 8usize .refl(Bool, true)) (array::index U8 64usize block 9usize .refl(Bool, true)) (array::index U8 64usize block 10usize .refl(Bool, true)) (array::index U8 64usize block 11usize .refl(Bool, true)) (array::index U8 64usize block 12usize .refl(Bool, true)) (array::index U8 64usize block 13usize .refl(Bool, true)) (array::index U8 64usize block 14usize .refl(Bool, true)) (array::index U8 64usize block 15usize .refl(Bool, true)));
+    let w1 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 16usize .refl(Bool, true)) (array::index U8 64usize block 17usize .refl(Bool, true)) (array::index U8 64usize block 18usize .refl(Bool, true)) (array::index U8 64usize block 19usize .refl(Bool, true)) (array::index U8 64usize block 20usize .refl(Bool, true)) (array::index U8 64usize block 21usize .refl(Bool, true)) (array::index U8 64usize block 22usize .refl(Bool, true)) (array::index U8 64usize block 23usize .refl(Bool, true)) (array::index U8 64usize block 24usize .refl(Bool, true)) (array::index U8 64usize block 25usize .refl(Bool, true)) (array::index U8 64usize block 26usize .refl(Bool, true)) (array::index U8 64usize block 27usize .refl(Bool, true)) (array::index U8 64usize block 28usize .refl(Bool, true)) (array::index U8 64usize block 29usize .refl(Bool, true)) (array::index U8 64usize block 30usize .refl(Bool, true)) (array::index U8 64usize block 31usize .refl(Bool, true)));
+    let w2 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 32usize .refl(Bool, true)) (array::index U8 64usize block 33usize .refl(Bool, true)) (array::index U8 64usize block 34usize .refl(Bool, true)) (array::index U8 64usize block 35usize .refl(Bool, true)) (array::index U8 64usize block 36usize .refl(Bool, true)) (array::index U8 64usize block 37usize .refl(Bool, true)) (array::index U8 64usize block 38usize .refl(Bool, true)) (array::index U8 64usize block 39usize .refl(Bool, true)) (array::index U8 64usize block 40usize .refl(Bool, true)) (array::index U8 64usize block 41usize .refl(Bool, true)) (array::index U8 64usize block 42usize .refl(Bool, true)) (array::index U8 64usize block 43usize .refl(Bool, true)) (array::index U8 64usize block 44usize .refl(Bool, true)) (array::index U8 64usize block 45usize .refl(Bool, true)) (array::index U8 64usize block 46usize .refl(Bool, true)) (array::index U8 64usize block 47usize .refl(Bool, true)));
+    let w3 : Array U32 4usize = ve::be_words_sha2 (aarch64::u8x16 (array::index U8 64usize block 48usize .refl(Bool, true)) (array::index U8 64usize block 49usize .refl(Bool, true)) (array::index U8 64usize block 50usize .refl(Bool, true)) (array::index U8 64usize block 51usize .refl(Bool, true)) (array::index U8 64usize block 52usize .refl(Bool, true)) (array::index U8 64usize block 53usize .refl(Bool, true)) (array::index U8 64usize block 54usize .refl(Bool, true)) (array::index U8 64usize block 55usize .refl(Bool, true)) (array::index U8 64usize block 56usize .refl(Bool, true)) (array::index U8 64usize block 57usize .refl(Bool, true)) (array::index U8 64usize block 58usize .refl(Bool, true)) (array::index U8 64usize block 59usize .refl(Bool, true)) (array::index U8 64usize block 60usize .refl(Bool, true)) (array::index U8 64usize block 61usize .refl(Bool, true)) (array::index U8 64usize block 62usize .refl(Bool, true)) (array::index U8 64usize block 63usize .refl(Bool, true)));
+    let wk0 : Array U32 4usize = aarch64::vaddq_u32 w0 (aarch64::vld1q_u32 (aarch64::u32x4 1116352408u32 1899447441u32 3049323471u32 3921009573u32));
+    let abcd1 : Array U32 4usize = aarch64::vsha256hq_u32 abcd0 efgh0 wk0;
+    let efgh1 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh0 abcd0 wk0;
+    let w4 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w0 w1) w2 w3;
+    let wk1 : Array U32 4usize = aarch64::vaddq_u32 w1 (aarch64::vld1q_u32 (aarch64::u32x4 961987163u32 1508970993u32 2453635748u32 2870763221u32));
+    let abcd2 : Array U32 4usize = aarch64::vsha256hq_u32 abcd1 efgh1 wk1;
+    let efgh2 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh1 abcd1 wk1;
+    let w5 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w1 w2) w3 w4;
+    let wk2 : Array U32 4usize = aarch64::vaddq_u32 w2 (aarch64::vld1q_u32 (aarch64::u32x4 3624381080u32 310598401u32 607225278u32 1426881987u32));
+    let abcd3 : Array U32 4usize = aarch64::vsha256hq_u32 abcd2 efgh2 wk2;
+    let efgh3 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh2 abcd2 wk2;
+    let w6 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w2 w3) w4 w5;
+    let wk3 : Array U32 4usize = aarch64::vaddq_u32 w3 (aarch64::vld1q_u32 (aarch64::u32x4 1925078388u32 2162078206u32 2614888103u32 3248222580u32));
+    let abcd4 : Array U32 4usize = aarch64::vsha256hq_u32 abcd3 efgh3 wk3;
+    let efgh4 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh3 abcd3 wk3;
+    let w7 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w3 w4) w5 w6;
+    let wk4 : Array U32 4usize = aarch64::vaddq_u32 w4 (aarch64::vld1q_u32 (aarch64::u32x4 3835390401u32 4022224774u32 264347078u32 604807628u32));
+    let abcd5 : Array U32 4usize = aarch64::vsha256hq_u32 abcd4 efgh4 wk4;
+    let efgh5 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh4 abcd4 wk4;
+    let w8 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w4 w5) w6 w7;
+    let wk5 : Array U32 4usize = aarch64::vaddq_u32 w5 (aarch64::vld1q_u32 (aarch64::u32x4 770255983u32 1249150122u32 1555081692u32 1996064986u32));
+    let abcd6 : Array U32 4usize = aarch64::vsha256hq_u32 abcd5 efgh5 wk5;
+    let efgh6 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh5 abcd6 wk5;
+    let w9 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w5 w6) w7 w8;
+    let wk6 : Array U32 4usize = aarch64::vaddq_u32 w6 (aarch64::vld1q_u32 (aarch64::u32x4 2554220882u32 2821834349u32 2952996808u32 3210313671u32));
+    let abcd7 : Array U32 4usize = aarch64::vsha256hq_u32 abcd6 efgh6 wk6;
+    let efgh7 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh6 abcd6 wk6;
+    let w10 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w6 w7) w8 w9;
+    let wk7 : Array U32 4usize = aarch64::vaddq_u32 w7 (aarch64::vld1q_u32 (aarch64::u32x4 3336571891u32 3584528711u32 113926993u32 338241895u32));
+    let abcd8 : Array U32 4usize = aarch64::vsha256hq_u32 abcd7 efgh7 wk7;
+    let efgh8 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh7 abcd7 wk7;
+    let w11 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w7 w8) w9 w10;
+    let wk8 : Array U32 4usize = aarch64::vaddq_u32 w8 (aarch64::vld1q_u32 (aarch64::u32x4 666307205u32 773529912u32 1294757372u32 1396182291u32));
+    let abcd9 : Array U32 4usize = aarch64::vsha256hq_u32 abcd8 efgh8 wk8;
+    let efgh9 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh8 abcd8 wk8;
+    let w12 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w8 w9) w10 w11;
+    let wk9 : Array U32 4usize = aarch64::vaddq_u32 w9 (aarch64::vld1q_u32 (aarch64::u32x4 1695183700u32 1986661051u32 2177026350u32 2456956037u32));
+    let abcd10 : Array U32 4usize = aarch64::vsha256hq_u32 abcd9 efgh9 wk9;
+    let efgh10 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh9 abcd9 wk9;
+    let w13 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w9 w10) w11 w12;
+    let wk10 : Array U32 4usize = aarch64::vaddq_u32 w10 (aarch64::vld1q_u32 (aarch64::u32x4 2730485921u32 2820302411u32 3259730800u32 3345764771u32));
+    let abcd11 : Array U32 4usize = aarch64::vsha256hq_u32 abcd10 efgh10 wk10;
+    let efgh11 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh10 abcd10 wk10;
+    let w14 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w10 w11) w12 w13;
+    let wk11 : Array U32 4usize = aarch64::vaddq_u32 w11 (aarch64::vld1q_u32 (aarch64::u32x4 3516065817u32 3600352804u32 4094571909u32 275423344u32));
+    let abcd12 : Array U32 4usize = aarch64::vsha256hq_u32 abcd11 efgh11 wk11;
+    let efgh12 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh11 abcd11 wk11;
+    let w15 : Array U32 4usize = aarch64::vsha256su1q_u32 (aarch64::vsha256su0q_u32 w11 w12) w13 w14;
+    let wk12 : Array U32 4usize = aarch64::vaddq_u32 w12 (aarch64::vld1q_u32 (aarch64::u32x4 430227734u32 506948616u32 659060556u32 883997877u32));
+    let abcd13 : Array U32 4usize = aarch64::vsha256hq_u32 abcd12 efgh12 wk12;
+    let efgh13 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh12 abcd12 wk12;
+    let wk13 : Array U32 4usize = aarch64::vaddq_u32 w13 (aarch64::vld1q_u32 (aarch64::u32x4 958139571u32 1322822218u32 1537002063u32 1747873779u32));
+    let abcd14 : Array U32 4usize = aarch64::vsha256hq_u32 abcd13 efgh13 wk13;
+    let efgh14 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh13 abcd13 wk13;
+    let wk14 : Array U32 4usize = aarch64::vaddq_u32 w14 (aarch64::vld1q_u32 (aarch64::u32x4 1955562222u32 2024104815u32 2227730452u32 2361852424u32));
+    let abcd15 : Array U32 4usize = aarch64::vsha256hq_u32 abcd14 efgh14 wk14;
+    let efgh15 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh14 abcd14 wk14;
+    let wk15 : Array U32 4usize = aarch64::vaddq_u32 w15 (aarch64::vld1q_u32 (aarch64::u32x4 2428436474u32 2756734187u32 3204031479u32 3329325298u32));
+    let abcd16 : Array U32 4usize = aarch64::vsha256hq_u32 abcd15 efgh15 wk15;
+    let efgh16 : Array U32 4usize = aarch64::vsha256h2q_u32 efgh15 abcd15 wk15;
+    aarch64::concat_u32x4 (aarch64::vaddq_u32 abcd16 abcd0) (aarch64::vaddq_u32 efgh16 efgh0)

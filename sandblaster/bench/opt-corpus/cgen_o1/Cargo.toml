@@ -1,0 +1,10 @@
+# The general corpus as emitted at plan O1 (baselines/o1-gen.rs, printed before
+# the checked-arithmetic helpers of O2), behind the same probes as `cgen`: the
+# "O1 emission" subject of every program in the same-binary timings, and the
+# "O1 printing" subject of `opt-corpus e0` (plan O2).
+[package]
+name = "cgen_o1"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"

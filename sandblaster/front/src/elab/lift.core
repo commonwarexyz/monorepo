@@ -1,0 +1,29 @@
+-- sandblaster lift semantics (SEMANTICS.md §19): meanings of integer
+-- methods that lifted code uses and the kernel prelude does not define yet.
+-- TRUSTED definitions (DESIGN.md §1.1 item 2), installed by
+-- `elab::semantics::install` next to the ghost-language library.
+--
+-- `uN::div_ceil(self, rhs)` (core/src/num/uint_macros.rs): `d = self / rhs`,
+-- `r = self % rhs`, `if r > 0 { d + 1 } else { d }`; it panics exactly when
+-- `rhs == 0` (the hypothesis). `d + 1` cannot wrap when `r > 0` (then
+-- `rhs >= 2`, so `d <= MAX / 2`), so the wrapping add is the exact sum.
+
+def[prelude] u8::div_ceil : (a : U8) -> (b : U8) -> (.h : Eq(Bool, #ne_u8(b, 0u8), true)) -> U8 :=
+  fun (a : U8) (b : U8) (.h : Eq(Bool, #ne_u8(b, 0u8), true)) =>
+    if #eq_u8(#rem_u8(a, b; h), 0u8) return U8 then #div_u8(a, b; h) else #wadd_u8(#div_u8(a, b; h), 1u8)
+
+def[prelude] u16::div_ceil : (a : U16) -> (b : U16) -> (.h : Eq(Bool, #ne_u16(b, 0u16), true)) -> U16 :=
+  fun (a : U16) (b : U16) (.h : Eq(Bool, #ne_u16(b, 0u16), true)) =>
+    if #eq_u16(#rem_u16(a, b; h), 0u16) return U16 then #div_u16(a, b; h) else #wadd_u16(#div_u16(a, b; h), 1u16)
+
+def[prelude] u32::div_ceil : (a : U32) -> (b : U32) -> (.h : Eq(Bool, #ne_u32(b, 0u32), true)) -> U32 :=
+  fun (a : U32) (b : U32) (.h : Eq(Bool, #ne_u32(b, 0u32), true)) =>
+    if #eq_u32(#rem_u32(a, b; h), 0u32) return U32 then #div_u32(a, b; h) else #wadd_u32(#div_u32(a, b; h), 1u32)
+
+def[prelude] u64::div_ceil : (a : U64) -> (b : U64) -> (.h : Eq(Bool, #ne_u64(b, 0u64), true)) -> U64 :=
+  fun (a : U64) (b : U64) (.h : Eq(Bool, #ne_u64(b, 0u64), true)) =>
+    if #eq_u64(#rem_u64(a, b; h), 0u64) return U64 then #div_u64(a, b; h) else #wadd_u64(#div_u64(a, b; h), 1u64)
+
+def[prelude] usize::div_ceil : (a : Usize) -> (b : Usize) -> (.h : Eq(Bool, #ne_usize(b, 0usize), true)) -> Usize :=
+  fun (a : Usize) (b : Usize) (.h : Eq(Bool, #ne_usize(b, 0usize), true)) =>
+    if #eq_usize(#rem_usize(a, b; h), 0usize) return Usize then #div_usize(a, b; h) else #wadd_usize(#div_usize(a, b; h), 1usize)

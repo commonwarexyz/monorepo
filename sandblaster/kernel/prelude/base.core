@@ -1,0 +1,77 @@
+-- sandblaster prelude: base types, logic and booleans (DESIGN.md §6).
+--
+-- TRUSTED definitions (their meaning is the semantics of the Rust subset);
+-- the `def[lemma]` items are checked, untrusted conveniences.
+-- `Bool` (ctors `false`, `true`) and `Empty` are kernel builtins.
+
+inductive Unit { | tt }
+inductive Option (T : Type) { | None | Some(value : T) }
+inductive Either (A : Type) (B : Type) { | Left(value : A) | Right(value : B) }
+
+-- Tuples: `(a, b, ..)` of the exec subset (up to 12 components).
+inductive Tuple2 (A0 : Type) (A1 : Type) { | tuple2(x0 : A0, x1 : A1) }
+inductive Tuple3 (A0 : Type) (A1 : Type) (A2 : Type) { | tuple3(x0 : A0, x1 : A1, x2 : A2) }
+inductive Tuple4 (A0 : Type) (A1 : Type) (A2 : Type) (A3 : Type) { | tuple4(x0 : A0, x1 : A1, x2 : A2, x3 : A3) }
+inductive Tuple5 (A0 : Type) (A1 : Type) (A2 : Type) (A3 : Type) (A4 : Type) { | tuple5(x0 : A0, x1 : A1, x2 : A2, x3 : A3, x4 : A4) }
+inductive Tuple6 (A0 : Type) (A1 : Type) (A2 : Type) (A3 : Type) (A4 : Type) (A5 : Type) { | tuple6(x0 : A0, x1 : A1, x2 : A2, x3 : A3, x4 : A4, x5 : A5) }
+inductive Tuple7 (A0 : Type) (A1 : Type) (A2 : Type) (A3 : Type) (A4 : Type) (A5 : Type) (A6 : Type) { | tuple7(x0 : A0, x1 : A1, x2 : A2, x3 : A3, x4 : A4, x5 : A5, x6 : A6) }
+inductive Tuple8 (A0 : Type) (A1 : Type) (A2 : Type) (A3 : Type) (A4 : Type) (A5 : Type) (A6 : Type) (A7 : Type) { | tuple8(x0 : A0, x1 : A1, x2 : A2, x3 : A3, x4 : A4, x5 : A5, x6 : A6, x7 : A7) }
+inductive Tuple9 (A0 : Type) (A1 : Type) (A2 : Type) (A3 : Type) (A4 : Type) (A5 : Type) (A6 : Type) (A7 : Type) (A8 : Type) { | tuple9(x0 : A0, x1 : A1, x2 : A2, x3 : A3, x4 : A4, x5 : A5, x6 : A6, x7 : A7, x8 : A8) }
+inductive Tuple10 (A0 : Type) (A1 : Type) (A2 : Type) (A3 : Type) (A4 : Type) (A5 : Type) (A6 : Type) (A7 : Type) (A8 : Type) (A9 : Type) { | tuple10(x0 : A0, x1 : A1, x2 : A2, x3 : A3, x4 : A4, x5 : A5, x6 : A6, x7 : A7, x8 : A8, x9 : A9) }
+inductive Tuple11 (A0 : Type) (A1 : Type) (A2 : Type) (A3 : Type) (A4 : Type) (A5 : Type) (A6 : Type) (A7 : Type) (A8 : Type) (A9 : Type) (A10 : Type) { | tuple11(x0 : A0, x1 : A1, x2 : A2, x3 : A3, x4 : A4, x5 : A5, x6 : A6, x7 : A7, x8 : A8, x9 : A9, x10 : A10) }
+inductive Tuple12 (A0 : Type) (A1 : Type) (A2 : Type) (A3 : Type) (A4 : Type) (A5 : Type) (A6 : Type) (A7 : Type) (A8 : Type) (A9 : Type) (A10 : Type) (A11 : Type) { | tuple12(x0 : A0, x1 : A1, x2 : A2, x3 : A3, x4 : A4, x5 : A5, x6 : A6, x7 : A7, x8 : A8, x9 : A9, x10 : A10, x11 : A11) }
+
+-- Logic: propositions are types; conjunction is a (non-dependent) Σ.
+def[prelude] Not : (P : Type) -> Type := fun (P : Type) => P -> Empty
+def[prelude] And : (P : Type) -> (Q : Type) -> Type := fun (P : Type) (Q : Type) => Sigma (_ : P), Q
+def[prelude] Or : (P : Type) -> (Q : Type) -> Type := fun (P : Type) (Q : Type) => Either(P, Q)
+def[prelude] Iff : (P : Type) -> (Q : Type) -> Type := fun (P : Type) (Q : Type) => And (P -> Q) (Q -> P)
+def[prelude] Exists : (A : Type) -> (P : A -> Type) -> Type := fun (A : Type) (P : A -> Type) => Sigma (x : A), P x
+
+-- Equality: symmetry, transitivity, congruence, substitution, and the
+-- promotion of an irrelevant equation to a relevant proof (transport with an
+-- irrelevant equation is allowed in any position).
+def[lemma] eq::sym : (A : Type) -> (a : A) -> (b : A) -> (e : Eq(A, a, b)) -> Eq(A, b, a) :=
+  fun (A : Type) (a : A) (b : A) (e : Eq(A, a, b)) => transport(A, a, b, e, y. Eq(A, y, a), refl(A, a))
+def[lemma] eq::trans : (A : Type) -> (a : A) -> (b : A) -> (c : A) -> (e1 : Eq(A, a, b)) -> (e2 : Eq(A, b, c)) -> Eq(A, a, c) :=
+  fun (A : Type) (a : A) (b : A) (c : A) (e1 : Eq(A, a, b)) (e2 : Eq(A, b, c)) => transport(A, b, c, e2, y. Eq(A, a, y), e1)
+def[lemma] eq::cong : (A : Type) -> (B : Type) -> (f : A -> B) -> (a : A) -> (b : A) -> (e : Eq(A, a, b)) -> Eq(B, f a, f b) :=
+  fun (A : Type) (B : Type) (f : A -> B) (a : A) (b : A) (e : Eq(A, a, b)) => transport(A, a, b, e, y. Eq(B, f a, f y), refl(B, f a))
+def[lemma] eq::subst : (A : Type) -> (P : A -> Type) -> (a : A) -> (b : A) -> (e : Eq(A, a, b)) -> (v : P a) -> P b :=
+  fun (A : Type) (P : A -> Type) (a : A) (b : A) (e : Eq(A, a, b)) (v : P a) => transport(A, a, b, e, y. P y, v)
+def[lemma] eq::promote : (A : Type) -> (a : A) -> (b : A) -> (.e : Eq(A, a, b)) -> Eq(A, a, b) :=
+  fun (A : Type) (a : A) (b : A) (.e : Eq(A, a, b)) => transport(A, a, b, e, y. Eq(A, a, y), refl(A, a))
+
+-- No-confusion for booleans.
+def[lemma] bool::false_ne_true : (e : Eq(Bool, false, true)) -> Empty :=
+  fun (e : Eq(Bool, false, true)) =>
+    transport(Bool, false, true, e, y. match y : Bool as _ return Type with | false => Unit | true => Empty end, tt)
+
+-- Boolean operators (`!`, `&`, `|`, `^`, `==` on bool; `&&`/`||` are
+-- elaborated to matches, DESIGN.md §3.3).
+def[prelude] bool::not : (a : Bool) -> Bool :=
+  fun (a : Bool) => match a : Bool as _ return Bool with | false => true | true => false end
+def[prelude] bool::and : (a : Bool) -> (b : Bool) -> Bool :=
+  fun (a : Bool) (b : Bool) => match a : Bool as _ return Bool with | false => false | true => b end
+def[prelude] bool::or : (a : Bool) -> (b : Bool) -> Bool :=
+  fun (a : Bool) (b : Bool) => match a : Bool as _ return Bool with | false => b | true => true end
+def[prelude] bool::xor : (a : Bool) -> (b : Bool) -> Bool :=
+  fun (a : Bool) (b : Bool) => match a : Bool as _ return Bool with | false => b | true => bool::not b end
+def[prelude] bool::eq : (a : Bool) -> (b : Bool) -> Bool :=
+  fun (a : Bool) (b : Bool) => match a : Bool as _ return Bool with | false => bool::not b | true => b end
+def[prelude] bool::ne : (a : Bool) -> (b : Bool) -> Bool :=
+  fun (a : Bool) (b : Bool) => bool::xor a b
+
+-- `b as uN`.
+%for W in u8 u16 u32 u64 usize
+def[prelude] bool::as_$w : (b : Bool) -> $W :=
+  fun (b : Bool) => match b : Bool as _ return $W with | false => 0$w | true => 1$w end
+%end
+
+-- `Option` methods (DESIGN.md §3.4).
+def[prelude] option::is_some : (T : Type) -> (o : Option(T)) -> Bool :=
+  fun (T : Type) (o : Option(T)) => match o : Option(T) as _ return Bool with | None => false | Some(x) => true end
+def[prelude] option::is_none : (T : Type) -> (o : Option(T)) -> Bool :=
+  fun (T : Type) (o : Option(T)) => match o : Option(T) as _ return Bool with | None => true | Some(x) => false end
+def[prelude] option::unwrap_or : (T : Type) -> (o : Option(T)) -> (d : T) -> T :=
+  fun (T : Type) (o : Option(T)) (d : T) => match o : Option(T) as _ return T with | None => d | Some(x) => x end

@@ -29,8 +29,8 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
-// The verified module (rustoleum module mode, DESIGN.md §2.1): the code of this
-// module is `rustoleum/varint/varint.rs` (this file's original body, as-is), which
-// build.rs verifies against `rustoleum/varint/LAWS.rs` and writes to OUT_DIR.
+// The verified module (sandblaster module mode, DESIGN.md §2.1): the code of this
+// module is `sandblaster/varint/varint.rs` (this file's original body, as-is), which
+// build.rs verifies against `sandblaster/varint/LAWS.rs` and writes to OUT_DIR.
 // build.rs checks that this file is exactly these docs and the include line.
 include!(concat!(env!("OUT_DIR"), "/varint.rs"));

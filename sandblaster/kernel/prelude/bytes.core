@@ -1,0 +1,46 @@
+-- sandblaster prelude: integer <-> byte-array conversions (DESIGN.md §3.4,
+-- §6, §9.2). `from_le_bytes` is folded (kind `intrinsic`: it unfolds only
+-- on closed arguments) so that the §5.7 byte rules
+--   from_le_bytes([cast_u8(x), cast_u8(x >> 8), ..]) → x
+--   cast_u8(wshr(from_le_bytes(bs), 8k)) → bs[k]
+-- apply; `from_be_bytes := from_le_bytes ∘ rev` and
+-- `to_be_bytes := rev ∘ to_le_bytes` by definition. TRUSTED definitions.
+
+def[intrinsic] u16::from_le_bytes : (b : Array U8 2usize) -> U16 :=
+  fun (b : Array U8 2usize) =>
+    #or_u16(#cast_u8_u16(array::index U8 2usize b 0usize .refl(Bool, true)), #wshl_u16(#cast_u8_u16(array::index U8 2usize b 1usize .refl(Bool, true)), 8u32))
+
+def[prelude] u16::to_le_bytes : (x : U16) -> Array U8 2usize :=
+  fun (x : U16) => pair(Array U8 2usize, Cons[U8](#cast_u16_u8(x), Cons[U8](#cast_u16_u8(#wshr_u16(x, 8u32)), Nil[U8])), refl(Int, 2int))
+
+def[prelude] u16::from_be_bytes : (b : Array U8 2usize) -> U16 :=
+  fun (b : Array U8 2usize) => u16::from_le_bytes (array::rev U8 2usize b)
+
+def[prelude] u16::to_be_bytes : (x : U16) -> Array U8 2usize :=
+  fun (x : U16) => array::rev U8 2usize (u16::to_le_bytes x)
+
+def[intrinsic] u32::from_le_bytes : (b : Array U8 4usize) -> U32 :=
+  fun (b : Array U8 4usize) =>
+    #or_u32(#or_u32(#or_u32(#cast_u8_u32(array::index U8 4usize b 0usize .refl(Bool, true)), #wshl_u32(#cast_u8_u32(array::index U8 4usize b 1usize .refl(Bool, true)), 8u32)), #wshl_u32(#cast_u8_u32(array::index U8 4usize b 2usize .refl(Bool, true)), 16u32)), #wshl_u32(#cast_u8_u32(array::index U8 4usize b 3usize .refl(Bool, true)), 24u32))
+
+def[prelude] u32::to_le_bytes : (x : U32) -> Array U8 4usize :=
+  fun (x : U32) => pair(Array U8 4usize, Cons[U8](#cast_u32_u8(x), Cons[U8](#cast_u32_u8(#wshr_u32(x, 8u32)), Cons[U8](#cast_u32_u8(#wshr_u32(x, 16u32)), Cons[U8](#cast_u32_u8(#wshr_u32(x, 24u32)), Nil[U8])))), refl(Int, 4int))
+
+def[prelude] u32::from_be_bytes : (b : Array U8 4usize) -> U32 :=
+  fun (b : Array U8 4usize) => u32::from_le_bytes (array::rev U8 4usize b)
+
+def[prelude] u32::to_be_bytes : (x : U32) -> Array U8 4usize :=
+  fun (x : U32) => array::rev U8 4usize (u32::to_le_bytes x)
+
+def[intrinsic] u64::from_le_bytes : (b : Array U8 8usize) -> U64 :=
+  fun (b : Array U8 8usize) =>
+    #or_u64(#or_u64(#or_u64(#or_u64(#or_u64(#or_u64(#or_u64(#cast_u8_u64(array::index U8 8usize b 0usize .refl(Bool, true)), #wshl_u64(#cast_u8_u64(array::index U8 8usize b 1usize .refl(Bool, true)), 8u32)), #wshl_u64(#cast_u8_u64(array::index U8 8usize b 2usize .refl(Bool, true)), 16u32)), #wshl_u64(#cast_u8_u64(array::index U8 8usize b 3usize .refl(Bool, true)), 24u32)), #wshl_u64(#cast_u8_u64(array::index U8 8usize b 4usize .refl(Bool, true)), 32u32)), #wshl_u64(#cast_u8_u64(array::index U8 8usize b 5usize .refl(Bool, true)), 40u32)), #wshl_u64(#cast_u8_u64(array::index U8 8usize b 6usize .refl(Bool, true)), 48u32)), #wshl_u64(#cast_u8_u64(array::index U8 8usize b 7usize .refl(Bool, true)), 56u32))
+
+def[prelude] u64::to_le_bytes : (x : U64) -> Array U8 8usize :=
+  fun (x : U64) => pair(Array U8 8usize, Cons[U8](#cast_u64_u8(x), Cons[U8](#cast_u64_u8(#wshr_u64(x, 8u32)), Cons[U8](#cast_u64_u8(#wshr_u64(x, 16u32)), Cons[U8](#cast_u64_u8(#wshr_u64(x, 24u32)), Cons[U8](#cast_u64_u8(#wshr_u64(x, 32u32)), Cons[U8](#cast_u64_u8(#wshr_u64(x, 40u32)), Cons[U8](#cast_u64_u8(#wshr_u64(x, 48u32)), Cons[U8](#cast_u64_u8(#wshr_u64(x, 56u32)), Nil[U8])))))))), refl(Int, 8int))
+
+def[prelude] u64::from_be_bytes : (b : Array U8 8usize) -> U64 :=
+  fun (b : Array U8 8usize) => u64::from_le_bytes (array::rev U8 8usize b)
+
+def[prelude] u64::to_be_bytes : (x : U64) -> Array U8 8usize :=
+  fun (x : U64) => array::rev U8 8usize (u64::to_le_bytes x)

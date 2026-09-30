@@ -1,0 +1,12 @@
+{
+  "chunk_bytes": 32,
+  "expected": true,
+  "key": "0000000000000000000000000000000000000000000000000ffffffffffffffc",
+  "name": "193-accept-g2-leaves-4611686018427387903-fx-59b5b123396c7357",
+  "oracle_corpus": "corpus-instance",
+  "oracle_generator": "G2-synthetic",
+  "oracle_id": "fx-59b5b123396c7357",
+  "proof": "feffffffffffffff3f730356867233a0a92e5029c9d9c94cef5a4fe3bd2a1050f8f9748e49f2ee1b46ffffffffffffffff3f3d0100d243b629078dc4487d6b9457cb0562f032d00cff9f3efb3a6c8c6d53f9e54901b4a96cfa6632e53c5c302e6536e49696226d6125bdbeb7097292b93f8009ed71ffdfdafe869da48c0280e9512fa076d13802ca9e8caa6c931636290f53dc5c8a",
+  "root": "e2c9b697032e04a905670533c6d5c7e071ffd8fba94ac750b9d083a7829a1a18",
+  "value": "def2c5a58e14ab809af49e486112bde74a6470c93fa6b4de14752b3ebc3e4f69"
+}

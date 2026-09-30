@@ -1,0 +1,33 @@
+[package]
+name = "sandblaster-front"
+description = "sandblaster front end: parsing, resolution, elaboration, automation, optimizer, codegen."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# Not published yet: the toolchain lives in the monorepo as a build tool.
+publish = false
+
+[dependencies]
+sandblaster-kernel.workspace = true
+sandblaster-memguard.workspace = true
+# hardware evidence of the intrinsic models: the dispatcher never selects a
+# variant whose models lack it (DESIGN.md §9.2, §9.3); dependency-free crate
+sandblaster-targets.workspace = true
+syn = { workspace = true, features = ["full", "extra-traits", "visit", "visit-mut", "parsing", "printing"] }
+quote.workspace = true
+proc-macro2 = { workspace = true, features = ["span-locations"] }
+num-bigint = { workspace = true, features = ["std"] }
+num-traits = { workspace = true, features = ["std"] }
+
+[features]
+# The optimizer's test hooks (`opt::hooks`, docs/optimizer-plan.md O1): inject
+# unsound candidates, proofs and cache entries for the must-reject suite
+# (`tests/opt_reject.rs`). Integration tests cannot see `cfg(test)` items, so
+# the dev-dependency below enables this feature for this crate's tests only.
+# Nothing else may enable it: `sandblaster`, `sandblaster-cli` and build scripts
+# link the front end without hooks (checked by tools/gates/g4.sh).
+opt-test-hooks = []
+
+[dev-dependencies]
+sandblaster-front = { path = ".", features = ["opt-test-hooks"] }

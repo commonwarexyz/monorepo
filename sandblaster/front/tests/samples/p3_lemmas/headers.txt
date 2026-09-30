@@ -1,0 +1,38 @@
+-- sandblaster prelude lemmas: the generic `Seq` library (pe P3, C1): `get`,
+-- `skip` (`seq::drop`), `take`, `++` (`seq::append`), cons and indexing,
+-- each against the others, and the `[init @ .., last]` view (`take_snoc`).
+-- A `Nat` parameter's bound `0 ≤ n` is the binder after the parameters.
+--
+-- Checked, untrusted. Machine-written: each proof is the kernel term the
+-- front end produced for the same statement proved in the DSL at an element
+-- type `E`, generalized to the type parameter `T`
+-- (sandblaster/front/tests/samples/p3_lemmas/seq.rs, generator
+-- `gen.py` there; `prover_ergonomics_p3::p3_lemmas_match_their_source` checks
+-- that the source still proves exactly these statements). `auto` uses them
+-- as conditional rewrite rules, each tried only on goals that mention its
+-- left side's head function (`auto::lemmas`, `auto::ematch`).
+%%
+-- sandblaster prelude lemmas: shifts against `pow2` (pe P3, C3). For a shift
+-- amount `s` below the width, `x >> s` is `x / 2^s` (in `Int`); linear
+-- arithmetic adds the instance for every `x >> s` atom with a non-literal
+-- `s` (`auto::arith`), so `(x >> s) & 1` and `(x / pow2(s)) % 2` meet.
+--
+-- Checked, untrusted. Machine-written from
+-- sandblaster/front/tests/samples/p3_lemmas/shift.rs (each proof
+-- enumerates the shift amount; a literal shift is linear for the kernel).
+%%
+-- More facts of `pow2` and `popcount` (pe P3, C5), machine-written from
+-- sandblaster/front/tests/samples/p3_lemmas/nat.rs like the part above.
+-- Linear arithmetic adds `pow2_step` and `pow2_mono` for pairs of `pow2`
+-- atoms and `popcount_step` for `popcount` atoms (`auto::arith`).
+%%
+-- ---------------------------------------------------------------------------
+-- Slices against their views (pe P3, C2): a fact `s == l` (the view of the
+-- slice `s` is the sequence `l`) gives `len l = s.len()` (a forward rule).
+-- ---------------------------------------------------------------------------
+%%
+-- ---------------------------------------------------------------------------
+-- Constructor congruence (pe P3, C2): `Some(x) == Some(y)` and
+-- `(a, b) == (c, d)` from equal components (backward rules), so a goal
+-- that compares an exec reading with a spec reading reaches its payloads.
+-- ---------------------------------------------------------------------------

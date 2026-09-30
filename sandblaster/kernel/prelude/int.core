@@ -1,0 +1,45 @@
+-- sandblaster prelude: integer methods of the exec subset (DESIGN.md §3.4).
+-- Arithmetic operators and `as` casts elaborate directly to primitives
+-- (§3.5); the methods below give each whitelisted method a definition.
+-- TRUSTED definitions.
+
+%for W in u8 u16 u32 u64 usize
+def[prelude] $w::MAX : $W := $MAX$w
+def[prelude] $w::BITS : U32 := $BITSu32
+def[prelude] $w::wrapping_add : (a : $W) -> (b : $W) -> $W := fun (a : $W) (b : $W) => #wadd_$w(a, b)
+def[prelude] $w::wrapping_sub : (a : $W) -> (b : $W) -> $W := fun (a : $W) (b : $W) => #wsub_$w(a, b)
+def[prelude] $w::wrapping_mul : (a : $W) -> (b : $W) -> $W := fun (a : $W) (b : $W) => #wmul_$w(a, b)
+def[prelude] $w::wrapping_neg : (a : $W) -> $W := fun (a : $W) => #wneg_$w(a)
+def[prelude] $w::wrapping_shl : (a : $W) -> (s : U32) -> $W := fun (a : $W) (s : U32) => #wshl_$w(a, s)
+def[prelude] $w::wrapping_shr : (a : $W) -> (s : U32) -> $W := fun (a : $W) (s : U32) => #wshr_$w(a, s)
+def[prelude] $w::rotate_left : (a : $W) -> (s : U32) -> $W := fun (a : $W) (s : U32) => #rotl_$w(a, s)
+def[prelude] $w::rotate_right : (a : $W) -> (s : U32) -> $W := fun (a : $W) (s : U32) => #rotr_$w(a, s)
+def[prelude] $w::count_ones : (a : $W) -> U32 := fun (a : $W) => #count_ones_$w(a)
+def[prelude] $w::leading_zeros : (a : $W) -> U32 := fun (a : $W) => #leading_zeros_$w(a)
+def[prelude] $w::trailing_zeros : (a : $W) -> U32 := fun (a : $W) => #trailing_zeros_$w(a)
+def[prelude] $w::swap_bytes : (a : $W) -> $W := fun (a : $W) => #swap_bytes_$w(a)
+def[prelude] $w::min : (a : $W) -> (b : $W) -> $W := fun (a : $W) (b : $W) => #min_$w(a, b)
+def[prelude] $w::max : (a : $W) -> (b : $W) -> $W := fun (a : $W) (b : $W) => #max_$w(a, b)
+def[prelude] $w::saturating_add : (a : $W) -> (b : $W) -> $W := fun (a : $W) (b : $W) => #sat_add_$w(a, b)
+def[prelude] $w::saturating_sub : (a : $W) -> (b : $W) -> $W := fun (a : $W) (b : $W) => #sat_sub_$w(a, b)
+def[prelude] $w::saturating_mul : (a : $W) -> (b : $W) -> $W := fun (a : $W) (b : $W) => #sat_mul_$w(a, b)
+def[prelude] $w::is_power_of_two : (a : $W) -> Bool := fun (a : $W) => #eq_u32(#count_ones_$w(a), 1u32)
+def[prelude] $w::checked_add : (a : $W) -> (b : $W) -> Option($W) :=
+  fun (a : $W) (b : $W) =>
+    if #le_int(#iadd(#cast_$w_int(a), #cast_$w_int(b)), $MAXint) as .h return Option($W)
+    then Some[$W](#add_$w(a, b; h)) else None[$W]
+def[prelude] $w::checked_sub : (a : $W) -> (b : $W) -> Option($W) :=
+  fun (a : $W) (b : $W) => if #le_$w(b, a) as .h return Option($W) then Some[$W](#sub_$w(a, b; h)) else None[$W]
+def[prelude] $w::checked_mul : (a : $W) -> (b : $W) -> Option($W) :=
+  fun (a : $W) (b : $W) =>
+    if #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint) as .h return Option($W)
+    then Some[$W](#mul_$w(a, b; h)) else None[$W]
+def[prelude] $w::checked_div : (a : $W) -> (b : $W) -> Option($W) :=
+  fun (a : $W) (b : $W) => if #ne_$w(b, 0$w) as .h return Option($W) then Some[$W](#div_$w(a, b; h)) else None[$W]
+def[prelude] $w::checked_rem : (a : $W) -> (b : $W) -> Option($W) :=
+  fun (a : $W) (b : $W) => if #ne_$w(b, 0$w) as .h return Option($W) then Some[$W](#rem_$w(a, b; h)) else None[$W]
+def[prelude] $w::abs_diff : (a : $W) -> (b : $W) -> $W :=
+  fun (a : $W) (b : $W) =>
+    if #le_$w(b, a) as .h return $W then #sub_$w(a, b; h)
+    else #sub_$w(b, a; linarith([h : Eq(Bool, #le_$w(b, a), false)]; Eq(Bool, #le_$w(a, b), true); [1, 1, 0, 0, 0, 0]))
+%end

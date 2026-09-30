@@ -1,0 +1,95 @@
+-- sandblaster prelude lemmas: booleans (DESIGN.md §6, "bool lemmas").
+--
+-- Checked, untrusted: a wrong lemma cannot be loaded. Hypotheses are
+-- irrelevant binders (they are only used in proofs). Loaded after the
+-- prelude definitions by `sandblaster_front::auto::lemmas::load`.
+
+def[lemma] bool::true_ne_false : (e : Eq(Bool, true, false)) -> Empty :=
+  fun (e : Eq(Bool, true, false)) => bool::false_ne_true (eq::sym Bool true false e)
+
+-- `a && b == true` gives both conjuncts.
+def[lemma] bool::and_left : (a : Bool) -> (b : Bool) -> (.h : Eq(Bool, bool::and a b, true)) -> Eq(Bool, a, true) :=
+  fun (a : Bool) (b : Bool) (.h : Eq(Bool, bool::and a b, true)) =>
+    (match a : Bool as y return (.e : Eq(Bool, bool::and y b, true)) -> Eq(Bool, y, true) with
+     | false => fun (.e : Eq(Bool, false, true)) => absurd(Eq(Bool, false, true), bool::false_ne_true e)
+     | true => fun (.e : Eq(Bool, b, true)) => refl(Bool, true)
+     end) .h
+
+def[lemma] bool::and_right : (a : Bool) -> (b : Bool) -> (.h : Eq(Bool, bool::and a b, true)) -> Eq(Bool, b, true) :=
+  fun (a : Bool) (b : Bool) (.h : Eq(Bool, bool::and a b, true)) =>
+    (match a : Bool as y return (.e : Eq(Bool, bool::and y b, true)) -> Eq(Bool, b, true) with
+     | false => fun (.e : Eq(Bool, false, true)) => absurd(Eq(Bool, b, true), bool::false_ne_true e)
+     | true => fun (.e : Eq(Bool, b, true)) => eq::promote Bool b true .e
+     end) .h
+
+-- `a || b == false` gives both disjuncts false.
+def[lemma] bool::or_false_left : (a : Bool) -> (b : Bool) -> (.h : Eq(Bool, bool::or a b, false)) -> Eq(Bool, a, false) :=
+  fun (a : Bool) (b : Bool) (.h : Eq(Bool, bool::or a b, false)) =>
+    (match a : Bool as y return (.e : Eq(Bool, bool::or y b, false)) -> Eq(Bool, y, false) with
+     | false => fun (.e : Eq(Bool, b, false)) => refl(Bool, false)
+     | true => fun (.e : Eq(Bool, true, false)) => absurd(Eq(Bool, true, false), bool::true_ne_false e)
+     end) .h
+
+def[lemma] bool::or_false_right : (a : Bool) -> (b : Bool) -> (.h : Eq(Bool, bool::or a b, false)) -> Eq(Bool, b, false) :=
+  fun (a : Bool) (b : Bool) (.h : Eq(Bool, bool::or a b, false)) =>
+    (match a : Bool as y return (.e : Eq(Bool, bool::or y b, false)) -> Eq(Bool, b, false) with
+     | false => fun (.e : Eq(Bool, b, false)) => eq::promote Bool b false .e
+     | true => fun (.e : Eq(Bool, true, false)) => absurd(Eq(Bool, b, false), bool::true_ne_false e)
+     end) .h
+
+-- `a || b == true` is a disjunction.
+def[lemma] bool::or_cases : (a : Bool) -> (b : Bool) -> (.h : Eq(Bool, bool::or a b, true)) -> Or (Eq(Bool, a, true)) (Eq(Bool, b, true)) :=
+  fun (a : Bool) (b : Bool) (.h : Eq(Bool, bool::or a b, true)) =>
+    (match a : Bool as y return (.e : Eq(Bool, bool::or y b, true)) -> Or (Eq(Bool, y, true)) (Eq(Bool, b, true)) with
+     | false => fun (.e : Eq(Bool, b, true)) =>
+         Right[Eq(Bool, false, true), Eq(Bool, b, true)](eq::promote Bool b true .e)
+     | true => fun (.e : Eq(Bool, true, true)) =>
+         Left[Eq(Bool, true, true), Eq(Bool, b, true)](refl(Bool, true))
+     end) .h
+
+-- `!b`.
+def[lemma] bool::not_true : (b : Bool) -> (.h : Eq(Bool, bool::not b, true)) -> Eq(Bool, b, false) :=
+  fun (b : Bool) (.h : Eq(Bool, bool::not b, true)) =>
+    (match b : Bool as y return (.e : Eq(Bool, bool::not y, true)) -> Eq(Bool, y, false) with
+     | false => fun (.e : Eq(Bool, true, true)) => refl(Bool, false)
+     | true => fun (.e : Eq(Bool, false, true)) => absurd(Eq(Bool, true, false), bool::false_ne_true e)
+     end) .h
+
+def[lemma] bool::not_false : (b : Bool) -> (.h : Eq(Bool, bool::not b, false)) -> Eq(Bool, b, true) :=
+  fun (b : Bool) (.h : Eq(Bool, bool::not b, false)) =>
+    (match b : Bool as y return (.e : Eq(Bool, bool::not y, false)) -> Eq(Bool, y, true) with
+     | false => fun (.e : Eq(Bool, true, false)) => absurd(Eq(Bool, false, true), bool::true_ne_false e)
+     | true => fun (.e : Eq(Bool, false, false)) => refl(Bool, true)
+     end) .h
+
+-- Boolean equality (`==` on bool, `eqb`) is sound and complete.
+def[lemma] bool::eq_sound : (a : Bool) -> (b : Bool) -> (.h : Eq(Bool, bool::eq a b, true)) -> Eq(Bool, a, b) :=
+  fun (a : Bool) (b : Bool) (.h : Eq(Bool, bool::eq a b, true)) =>
+    (match a : Bool as y return (.e : Eq(Bool, bool::eq y b, true)) -> Eq(Bool, y, b) with
+     | false => fun (.e : Eq(Bool, bool::not b, true)) => eq::sym Bool b false (bool::not_true b .e)
+     | true => fun (.e : Eq(Bool, b, true)) => eq::sym Bool b true (eq::promote Bool b true .e)
+     end) .h
+
+def[lemma] bool::eq_complete : (a : Bool) -> (b : Bool) -> (.h : Eq(Bool, a, b)) -> Eq(Bool, bool::eq a b, true) :=
+  fun (a : Bool) (b : Bool) (.h : Eq(Bool, a, b)) =>
+    transport(Bool, a, b, h, z. Eq(Bool, bool::eq a z, true),
+      match a : Bool as y return Eq(Bool, bool::eq y y, true) with
+      | false => refl(Bool, true)
+      | true => refl(Bool, true)
+      end)
+
+-- A boolean that is not `true` is `false`, and one that is not `false` is `true` (§15 S5: a
+-- `requires(!p)` states the proposition `Not(p == true)`; code and spec functions compute `p`).
+def[lemma] bool::false_of_not_true : (b : Bool) -> (h : (e : Eq(Bool, b, true)) -> Empty) -> Eq(Bool, b, false) :=
+  fun (b : Bool) (h : (e : Eq(Bool, b, true)) -> Empty) =>
+    (match b : Bool as y return (h2 : (e : Eq(Bool, y, true)) -> Empty) -> Eq(Bool, y, false) with
+     | false => fun (h2 : (e : Eq(Bool, false, true)) -> Empty) => refl(Bool, false)
+     | true => fun (h2 : (e : Eq(Bool, true, true)) -> Empty) => absurd(Eq(Bool, true, false), h2 refl(Bool, true))
+     end) h
+
+def[lemma] bool::true_of_not_false : (b : Bool) -> (h : (e : Eq(Bool, b, false)) -> Empty) -> Eq(Bool, b, true) :=
+  fun (b : Bool) (h : (e : Eq(Bool, b, false)) -> Empty) =>
+    (match b : Bool as y return (h2 : (e : Eq(Bool, y, false)) -> Empty) -> Eq(Bool, y, true) with
+     | false => fun (h2 : (e : Eq(Bool, false, false)) -> Empty) => absurd(Eq(Bool, false, true), h2 refl(Bool, false))
+     | true => fun (h2 : (e : Eq(Bool, true, false)) -> Empty) => refl(Bool, true)
+     end) h

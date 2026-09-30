@@ -1,0 +1,52 @@
+#  SHA-256 short messages of at most 55 bytes (one block), CAVP response layout.
+#  Digests computed independently with Python's hashlib (OpenSSL), not with
+#  sandblaster; messages are deterministic (byte i of message k is (37*k + 11*i) mod 256).
+[L = 32]
+
+Len = 0
+Msg = 00
+MD = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+Len = 8
+Msg = 25
+MD = bbf3f11cb5b43e700273a78d12de55e4a7eab741ed2abf13787a4d2dc832b8ec
+
+Len = 16
+Msg = 4a55
+MD = 55f6a56e9c7d99fa5dcc7cf70c114cbdf8a36dc4e272f63a1180c76c2516a5ff
+
+Len = 24
+Msg = 6f7a85
+MD = f39220f803e0d98b74f4ff103a7f70ffeeef238e8ae144edd8054475cc59905b
+
+Len = 40
+Msg = 949faab5c0
+MD = 946c32c18ef72e0cbb517f39f3496d61b50881fbba85ab7e4e64330ba04dcec1
+
+Len = 64
+Msg = b9c4cfdae5f0fb06
+MD = c7a1b06ab5e47ba6879a5f5397a2ab25fdbf31b4e9a28e418663236dff71155b
+
+Len = 104
+Msg = dee9f4ff0a15202b36414c5762
+MD = 09ca8b9ecd000a6e3d8b65fdbb8fb1eb727d292ad83e109a54175eba17765e09
+
+Len = 168
+Msg = 030e19242f3a45505b66717c87929da8b3bec9d4df
+MD = e57b84226ff5d4d299ff1de6767294b27bbbaeef99a5c0a5fe00a981359ac45b
+
+Len = 256
+Msg = 28333e49545f6a75808b96a1acb7c2cdd8e3eef9040f1a25303b46515c67727d
+MD = c6861dd9c6b6d3f15a10494fbd0f56b40d7d9878017921c95eed2303834fb3b2
+
+Len = 320
+Msg = 4d58636e79848f9aa5b0bbc6d1dce7f2fd08131e29343f4a55606b76818c97a2adb8c3ced9e4effa
+MD = 3018dd7f214e1d753e6dbf087e371119039bb2cfb4f0af43ff42c120ba7672af
+
+Len = 432
+Msg = 727d88939ea9b4bfcad5e0ebf6010c17222d38434e59646f7a85909ba6b1bcc7d2dde8f3fe09141f2a35404b56616c77828d98a3aeb9
+MD = b07f290bc3d8ce17cd429de58ed62e99a1cd3634ec97e6ee99a70f71e6d38ad9
+
+Len = 440
+Msg = 97a2adb8c3ced9e4effa05101b26313c47525d68737e89949faab5c0cbd6e1ecf7020d18232e39444f5a65707b86919ca7b2bdc8d3dee9
+MD = 767934034eebb577717c816545854ee89c612b3c6cc7efe530340997ae89ec9c

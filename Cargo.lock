@@ -1756,7 +1756,7 @@ dependencies = [
  "proptest",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
- "rustoleum",
+ "sandblaster",
  "thiserror 2.0.18",
 ]
 
@@ -2470,7 +2470,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_distr",
  "rstest",
- "rustoleum",
+ "sandblaster",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
@@ -6346,50 +6346,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustoleum"
-version = "0.1.0"
-dependencies = [
- "rustoleum-front",
- "rustoleum-macros",
-]
-
-[[package]]
-name = "rustoleum-front"
-version = "0.1.0"
-dependencies = [
- "num-bigint",
- "num-traits",
- "proc-macro2",
- "quote",
- "rustoleum-kernel",
- "rustoleum-memguard",
- "rustoleum-targets",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "rustoleum-kernel"
-version = "0.1.0"
-dependencies = [
- "num-bigint",
- "num-integer",
- "num-traits",
- "rustoleum-memguard",
-]
-
-[[package]]
-name = "rustoleum-macros"
-version = "0.1.0"
-
-[[package]]
-name = "rustoleum-memguard"
-version = "0.1.0"
-
-[[package]]
-name = "rustoleum-targets"
-version = "0.1.0"
-
-[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6420,6 +6376,70 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "sandblaster"
+version = "2026.9.0"
+dependencies = [
+ "sandblaster-front",
+ "sandblaster-macros",
+]
+
+[[package]]
+name = "sandblaster-cli"
+version = "2026.9.0"
+dependencies = [
+ "sandblaster-front",
+]
+
+[[package]]
+name = "sandblaster-front"
+version = "2026.9.0"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "proc-macro2",
+ "quote",
+ "sandblaster-front",
+ "sandblaster-kernel",
+ "sandblaster-memguard",
+ "sandblaster-targets",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "sandblaster-kernel"
+version = "2026.9.0"
+dependencies = [
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "sandblaster-memguard",
+]
+
+[[package]]
+name = "sandblaster-macros"
+version = "2026.9.0"
+
+[[package]]
+name = "sandblaster-memguard"
+version = "2026.9.0"
+
+[[package]]
+name = "sandblaster-rulegen"
+version = "2026.9.0"
+dependencies = [
+ "num-bigint",
+ "sandblaster-front",
+ "sandblaster-kernel",
+]
+
+[[package]]
+name = "sandblaster-targets"
+version = "2026.9.0"
+dependencies = [
+ "sandblaster-kernel",
 ]
 
 [[package]]

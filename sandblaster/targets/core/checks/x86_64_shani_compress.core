@@ -1,0 +1,120 @@
+-- SHA-256 compression of one block assembled in core text from the x86_64
+-- core models (core/x86_64.core), statement for statement the `sha2` crate's
+-- `x86_sha::compress` (as src/compress.rs::compress_x86_models). NOT trusted:
+-- a test fixture for the cross-check against checks::fips::compress
+-- (tests/kernel_crosscheck.rs). Load after the prelude and core/x86_64.core.
+
+-- `schedule(v0, v1, v2, v3)`: msg2(msg1(v0, v1) + alignr::<4>(v3, v2), v3).
+def[spec] checks::x86_64::schedule : (v0 : Array U8 16usize) -> (v1 : Array U8 16usize) -> (v2 : Array U8 16usize)
+    -> (v3 : Array U8 16usize) -> Array U8 16usize :=
+  fun (v0 : Array U8 16usize) (v1 : Array U8 16usize) (v2 : Array U8 16usize) (v3 : Array U8 16usize) =>
+    let t1 : Array U8 16usize = x86_64::_mm_sha256msg1_epu32 v0 v1;
+    let t2 : Array U8 16usize = x86_64::_mm_alignr_epi8 4u32 .refl(Bool, true) v3 v2;
+    let t3 : Array U8 16usize = x86_64::_mm_add_epi32 t1 t2;
+    x86_64::_mm_sha256msg2_epu32 t3 v3
+
+-- `rounds4!(abef, cdgh, rest, i)` with kv = _mm_set_epi32(K[4i+3], K[4i+2], K[4i+1], K[4i]):
+-- cdgh' = RNDS2(cdgh, abef, rest + kv); abef' = RNDS2(abef, cdgh', shuffle_epi32::<0x0E>(rest + kv)).
+-- Returns abef' ++ cdgh' (32 bytes).
+def[spec] checks::x86_64::rounds4 : (abef : Array U8 16usize) -> (cdgh : Array U8 16usize) -> (rest : Array U8 16usize)
+    -> (kv : Array U8 16usize) -> Array U8 32usize :=
+  fun (abef : Array U8 16usize) (cdgh : Array U8 16usize) (rest : Array U8 16usize) (kv : Array U8 16usize) =>
+    let t1 : Array U8 16usize = x86_64::_mm_add_epi32 rest kv;
+    let cdgh' : Array U8 16usize = x86_64::_mm_sha256rnds2_epu32 cdgh abef t1;
+    let t2 : Array U8 16usize = x86_64::_mm_shuffle_epi32 14u32 .refl(Bool, true) t1;
+    let abef' : Array U8 16usize = x86_64::_mm_sha256rnds2_epu32 abef cdgh' t2;
+    x86_64::concat_u8x16 abef' cdgh'
+
+-- The low / high 16 bytes of a 32-byte array.
+def[spec] checks::x86_64::lo : (x : Array U8 32usize) -> Array U8 16usize :=
+  fun (x : Array U8 32usize) =>
+    x86_64::u8x16 (array::index U8 32usize x 0usize .refl(Bool, true)) (array::index U8 32usize x 1usize .refl(Bool, true)) (array::index U8 32usize x 2usize .refl(Bool, true)) (array::index U8 32usize x 3usize .refl(Bool, true)) (array::index U8 32usize x 4usize .refl(Bool, true)) (array::index U8 32usize x 5usize .refl(Bool, true)) (array::index U8 32usize x 6usize .refl(Bool, true)) (array::index U8 32usize x 7usize .refl(Bool, true)) (array::index U8 32usize x 8usize .refl(Bool, true)) (array::index U8 32usize x 9usize .refl(Bool, true)) (array::index U8 32usize x 10usize .refl(Bool, true)) (array::index U8 32usize x 11usize .refl(Bool, true)) (array::index U8 32usize x 12usize .refl(Bool, true)) (array::index U8 32usize x 13usize .refl(Bool, true)) (array::index U8 32usize x 14usize .refl(Bool, true)) (array::index U8 32usize x 15usize .refl(Bool, true))
+
+def[spec] checks::x86_64::hi : (x : Array U8 32usize) -> Array U8 16usize :=
+  fun (x : Array U8 32usize) =>
+    x86_64::u8x16 (array::index U8 32usize x 16usize .refl(Bool, true)) (array::index U8 32usize x 17usize .refl(Bool, true)) (array::index U8 32usize x 18usize .refl(Bool, true)) (array::index U8 32usize x 19usize .refl(Bool, true)) (array::index U8 32usize x 20usize .refl(Bool, true)) (array::index U8 32usize x 21usize .refl(Bool, true)) (array::index U8 32usize x 22usize .refl(Bool, true)) (array::index U8 32usize x 23usize .refl(Bool, true)) (array::index U8 32usize x 24usize .refl(Bool, true)) (array::index U8 32usize x 25usize .refl(Bool, true)) (array::index U8 32usize x 26usize .refl(Bool, true)) (array::index U8 32usize x 27usize .refl(Bool, true)) (array::index U8 32usize x 28usize .refl(Bool, true)) (array::index U8 32usize x 29usize .refl(Bool, true)) (array::index U8 32usize x 30usize .refl(Bool, true)) (array::index U8 32usize x 31usize .refl(Bool, true))
+
+def[spec] checks::x86_64::compress_shani : (state : Array U32 8usize) -> (block : Array U8 64usize) -> Array U32 8usize :=
+  fun (state : Array U32 8usize) (block : Array U8 64usize) =>
+    let mask : Array U8 16usize = x86_64::_mm_set_epi64x 0x0c0d0e0f08090a0bu64 0x0405060700010203u64;
+    let dcba : Array U8 16usize = x86_64::_mm_loadu_si128 (x86_64::from_u32x4 (x86_64::u32x4 (array::index U32 8usize state 0usize .refl(Bool, true)) (array::index U32 8usize state 1usize .refl(Bool, true)) (array::index U32 8usize state 2usize .refl(Bool, true)) (array::index U32 8usize state 3usize .refl(Bool, true))));
+    let hgfe : Array U8 16usize = x86_64::_mm_loadu_si128 (x86_64::from_u32x4 (x86_64::u32x4 (array::index U32 8usize state 4usize .refl(Bool, true)) (array::index U32 8usize state 5usize .refl(Bool, true)) (array::index U32 8usize state 6usize .refl(Bool, true)) (array::index U32 8usize state 7usize .refl(Bool, true))));
+    let cdab : Array U8 16usize = x86_64::_mm_shuffle_epi32 177u32 .refl(Bool, true) dcba;
+    let efgh : Array U8 16usize = x86_64::_mm_shuffle_epi32 27u32 .refl(Bool, true) hgfe;
+    let abef0 : Array U8 16usize = x86_64::_mm_alignr_epi8 8u32 .refl(Bool, true) cdab efgh;
+    let cdgh0 : Array U8 16usize = x86_64::_mm_blend_epi16 240u32 .refl(Bool, true) efgh cdab;
+    let abef_save : Array U8 16usize = abef0;
+    let cdgh_save : Array U8 16usize = cdgh0;
+    let w0_0 : Array U8 16usize = x86_64::_mm_shuffle_epi8 (x86_64::_mm_loadu_si128 (x86_64::u8x16 (array::index U8 64usize block 0usize .refl(Bool, true)) (array::index U8 64usize block 1usize .refl(Bool, true)) (array::index U8 64usize block 2usize .refl(Bool, true)) (array::index U8 64usize block 3usize .refl(Bool, true)) (array::index U8 64usize block 4usize .refl(Bool, true)) (array::index U8 64usize block 5usize .refl(Bool, true)) (array::index U8 64usize block 6usize .refl(Bool, true)) (array::index U8 64usize block 7usize .refl(Bool, true)) (array::index U8 64usize block 8usize .refl(Bool, true)) (array::index U8 64usize block 9usize .refl(Bool, true)) (array::index U8 64usize block 10usize .refl(Bool, true)) (array::index U8 64usize block 11usize .refl(Bool, true)) (array::index U8 64usize block 12usize .refl(Bool, true)) (array::index U8 64usize block 13usize .refl(Bool, true)) (array::index U8 64usize block 14usize .refl(Bool, true)) (array::index U8 64usize block 15usize .refl(Bool, true)))) mask;
+    let w1_0 : Array U8 16usize = x86_64::_mm_shuffle_epi8 (x86_64::_mm_loadu_si128 (x86_64::u8x16 (array::index U8 64usize block 16usize .refl(Bool, true)) (array::index U8 64usize block 17usize .refl(Bool, true)) (array::index U8 64usize block 18usize .refl(Bool, true)) (array::index U8 64usize block 19usize .refl(Bool, true)) (array::index U8 64usize block 20usize .refl(Bool, true)) (array::index U8 64usize block 21usize .refl(Bool, true)) (array::index U8 64usize block 22usize .refl(Bool, true)) (array::index U8 64usize block 23usize .refl(Bool, true)) (array::index U8 64usize block 24usize .refl(Bool, true)) (array::index U8 64usize block 25usize .refl(Bool, true)) (array::index U8 64usize block 26usize .refl(Bool, true)) (array::index U8 64usize block 27usize .refl(Bool, true)) (array::index U8 64usize block 28usize .refl(Bool, true)) (array::index U8 64usize block 29usize .refl(Bool, true)) (array::index U8 64usize block 30usize .refl(Bool, true)) (array::index U8 64usize block 31usize .refl(Bool, true)))) mask;
+    let w2_0 : Array U8 16usize = x86_64::_mm_shuffle_epi8 (x86_64::_mm_loadu_si128 (x86_64::u8x16 (array::index U8 64usize block 32usize .refl(Bool, true)) (array::index U8 64usize block 33usize .refl(Bool, true)) (array::index U8 64usize block 34usize .refl(Bool, true)) (array::index U8 64usize block 35usize .refl(Bool, true)) (array::index U8 64usize block 36usize .refl(Bool, true)) (array::index U8 64usize block 37usize .refl(Bool, true)) (array::index U8 64usize block 38usize .refl(Bool, true)) (array::index U8 64usize block 39usize .refl(Bool, true)) (array::index U8 64usize block 40usize .refl(Bool, true)) (array::index U8 64usize block 41usize .refl(Bool, true)) (array::index U8 64usize block 42usize .refl(Bool, true)) (array::index U8 64usize block 43usize .refl(Bool, true)) (array::index U8 64usize block 44usize .refl(Bool, true)) (array::index U8 64usize block 45usize .refl(Bool, true)) (array::index U8 64usize block 46usize .refl(Bool, true)) (array::index U8 64usize block 47usize .refl(Bool, true)))) mask;
+    let w3_0 : Array U8 16usize = x86_64::_mm_shuffle_epi8 (x86_64::_mm_loadu_si128 (x86_64::u8x16 (array::index U8 64usize block 48usize .refl(Bool, true)) (array::index U8 64usize block 49usize .refl(Bool, true)) (array::index U8 64usize block 50usize .refl(Bool, true)) (array::index U8 64usize block 51usize .refl(Bool, true)) (array::index U8 64usize block 52usize .refl(Bool, true)) (array::index U8 64usize block 53usize .refl(Bool, true)) (array::index U8 64usize block 54usize .refl(Bool, true)) (array::index U8 64usize block 55usize .refl(Bool, true)) (array::index U8 64usize block 56usize .refl(Bool, true)) (array::index U8 64usize block 57usize .refl(Bool, true)) (array::index U8 64usize block 58usize .refl(Bool, true)) (array::index U8 64usize block 59usize .refl(Bool, true)) (array::index U8 64usize block 60usize .refl(Bool, true)) (array::index U8 64usize block 61usize .refl(Bool, true)) (array::index U8 64usize block 62usize .refl(Bool, true)) (array::index U8 64usize block 63usize .refl(Bool, true)))) mask;
+    let st1 : Array U8 32usize = checks::x86_64::rounds4 abef0 cdgh0 w0_0 (x86_64::_mm_set_epi32 0xe9b5dba5u32 0xb5c0fbcfu32 0x71374491u32 0x428a2f98u32);
+    let abef1 : Array U8 16usize = checks::x86_64::lo st1;
+    let cdgh1 : Array U8 16usize = checks::x86_64::hi st1;
+    let st2 : Array U8 32usize = checks::x86_64::rounds4 abef1 cdgh1 w1_0 (x86_64::_mm_set_epi32 0xab1c5ed5u32 0x923f82a4u32 0x59f111f1u32 0x3956c25bu32);
+    let abef2 : Array U8 16usize = checks::x86_64::lo st2;
+    let cdgh2 : Array U8 16usize = checks::x86_64::hi st2;
+    let st3 : Array U8 32usize = checks::x86_64::rounds4 abef2 cdgh2 w2_0 (x86_64::_mm_set_epi32 0x550c7dc3u32 0x243185beu32 0x12835b01u32 0xd807aa98u32);
+    let abef3 : Array U8 16usize = checks::x86_64::lo st3;
+    let cdgh3 : Array U8 16usize = checks::x86_64::hi st3;
+    let st4 : Array U8 32usize = checks::x86_64::rounds4 abef3 cdgh3 w3_0 (x86_64::_mm_set_epi32 0xc19bf174u32 0x9bdc06a7u32 0x80deb1feu32 0x72be5d74u32);
+    let abef4 : Array U8 16usize = checks::x86_64::lo st4;
+    let cdgh4 : Array U8 16usize = checks::x86_64::hi st4;
+    let w4_0 : Array U8 16usize = checks::x86_64::schedule w0_0 w1_0 w2_0 w3_0;
+    let st5 : Array U8 32usize = checks::x86_64::rounds4 abef4 cdgh4 w4_0 (x86_64::_mm_set_epi32 0x240ca1ccu32 0x0fc19dc6u32 0xefbe4786u32 0xe49b69c1u32);
+    let abef5 : Array U8 16usize = checks::x86_64::lo st5;
+    let cdgh5 : Array U8 16usize = checks::x86_64::hi st5;
+    let w0_1 : Array U8 16usize = checks::x86_64::schedule w1_0 w2_0 w3_0 w4_0;
+    let st6 : Array U8 32usize = checks::x86_64::rounds4 abef5 cdgh5 w0_1 (x86_64::_mm_set_epi32 0x76f988dau32 0x5cb0a9dcu32 0x4a7484aau32 0x2de92c6fu32);
+    let abef6 : Array U8 16usize = checks::x86_64::lo st6;
+    let cdgh6 : Array U8 16usize = checks::x86_64::hi st6;
+    let w1_1 : Array U8 16usize = checks::x86_64::schedule w2_0 w3_0 w4_0 w0_1;
+    let st7 : Array U8 32usize = checks::x86_64::rounds4 abef6 cdgh6 w1_1 (x86_64::_mm_set_epi32 0xbf597fc7u32 0xb00327c8u32 0xa831c66du32 0x983e5152u32);
+    let abef7 : Array U8 16usize = checks::x86_64::lo st7;
+    let cdgh7 : Array U8 16usize = checks::x86_64::hi st7;
+    let w2_1 : Array U8 16usize = checks::x86_64::schedule w3_0 w4_0 w0_1 w1_1;
+    let st8 : Array U8 32usize = checks::x86_64::rounds4 abef7 cdgh7 w2_1 (x86_64::_mm_set_epi32 0x14292967u32 0x06ca6351u32 0xd5a79147u32 0xc6e00bf3u32);
+    let abef8 : Array U8 16usize = checks::x86_64::lo st8;
+    let cdgh8 : Array U8 16usize = checks::x86_64::hi st8;
+    let w3_1 : Array U8 16usize = checks::x86_64::schedule w4_0 w0_1 w1_1 w2_1;
+    let st9 : Array U8 32usize = checks::x86_64::rounds4 abef8 cdgh8 w3_1 (x86_64::_mm_set_epi32 0x53380d13u32 0x4d2c6dfcu32 0x2e1b2138u32 0x27b70a85u32);
+    let abef9 : Array U8 16usize = checks::x86_64::lo st9;
+    let cdgh9 : Array U8 16usize = checks::x86_64::hi st9;
+    let w4_1 : Array U8 16usize = checks::x86_64::schedule w0_1 w1_1 w2_1 w3_1;
+    let st10 : Array U8 32usize = checks::x86_64::rounds4 abef9 cdgh9 w4_1 (x86_64::_mm_set_epi32 0x92722c85u32 0x81c2c92eu32 0x766a0abbu32 0x650a7354u32);
+    let abef10 : Array U8 16usize = checks::x86_64::lo st10;
+    let cdgh10 : Array U8 16usize = checks::x86_64::hi st10;
+    let w0_2 : Array U8 16usize = checks::x86_64::schedule w1_1 w2_1 w3_1 w4_1;
+    let st11 : Array U8 32usize = checks::x86_64::rounds4 abef10 cdgh10 w0_2 (x86_64::_mm_set_epi32 0xc76c51a3u32 0xc24b8b70u32 0xa81a664bu32 0xa2bfe8a1u32);
+    let abef11 : Array U8 16usize = checks::x86_64::lo st11;
+    let cdgh11 : Array U8 16usize = checks::x86_64::hi st11;
+    let w1_2 : Array U8 16usize = checks::x86_64::schedule w2_1 w3_1 w4_1 w0_2;
+    let st12 : Array U8 32usize = checks::x86_64::rounds4 abef11 cdgh11 w1_2 (x86_64::_mm_set_epi32 0x106aa070u32 0xf40e3585u32 0xd6990624u32 0xd192e819u32);
+    let abef12 : Array U8 16usize = checks::x86_64::lo st12;
+    let cdgh12 : Array U8 16usize = checks::x86_64::hi st12;
+    let w2_2 : Array U8 16usize = checks::x86_64::schedule w3_1 w4_1 w0_2 w1_2;
+    let st13 : Array U8 32usize = checks::x86_64::rounds4 abef12 cdgh12 w2_2 (x86_64::_mm_set_epi32 0x34b0bcb5u32 0x2748774cu32 0x1e376c08u32 0x19a4c116u32);
+    let abef13 : Array U8 16usize = checks::x86_64::lo st13;
+    let cdgh13 : Array U8 16usize = checks::x86_64::hi st13;
+    let w3_2 : Array U8 16usize = checks::x86_64::schedule w4_1 w0_2 w1_2 w2_2;
+    let st14 : Array U8 32usize = checks::x86_64::rounds4 abef13 cdgh13 w3_2 (x86_64::_mm_set_epi32 0x682e6ff3u32 0x5b9cca4fu32 0x4ed8aa4au32 0x391c0cb3u32);
+    let abef14 : Array U8 16usize = checks::x86_64::lo st14;
+    let cdgh14 : Array U8 16usize = checks::x86_64::hi st14;
+    let w4_2 : Array U8 16usize = checks::x86_64::schedule w0_2 w1_2 w2_2 w3_2;
+    let st15 : Array U8 32usize = checks::x86_64::rounds4 abef14 cdgh14 w4_2 (x86_64::_mm_set_epi32 0x8cc70208u32 0x84c87814u32 0x78a5636fu32 0x748f82eeu32);
+    let abef15 : Array U8 16usize = checks::x86_64::lo st15;
+    let cdgh15 : Array U8 16usize = checks::x86_64::hi st15;
+    let w0_3 : Array U8 16usize = checks::x86_64::schedule w1_2 w2_2 w3_2 w4_2;
+    let st16 : Array U8 32usize = checks::x86_64::rounds4 abef15 cdgh15 w0_3 (x86_64::_mm_set_epi32 0xc67178f2u32 0xbef9a3f7u32 0xa4506cebu32 0x90befffau32);
+    let abef16 : Array U8 16usize = checks::x86_64::lo st16;
+    let cdgh16 : Array U8 16usize = checks::x86_64::hi st16;
+    let abef_f : Array U8 16usize = x86_64::_mm_add_epi32 abef16 abef_save;
+    let cdgh_f : Array U8 16usize = x86_64::_mm_add_epi32 cdgh16 cdgh_save;
+    let feba : Array U8 16usize = x86_64::_mm_shuffle_epi32 27u32 .refl(Bool, true) abef_f;
+    let dchg : Array U8 16usize = x86_64::_mm_shuffle_epi32 177u32 .refl(Bool, true) cdgh_f;
+    let dcba_f : Array U8 16usize = x86_64::_mm_blend_epi16 240u32 .refl(Bool, true) feba dchg;
+    let hgef : Array U8 16usize = x86_64::_mm_alignr_epi8 8u32 .refl(Bool, true) dchg feba;
+    let lo : Array U32 4usize = x86_64::view_u32 (x86_64::_mm_storeu_si128 dcba_f);
+    let hi : Array U32 4usize = x86_64::view_u32 (x86_64::_mm_storeu_si128 hgef);
+    pair(Array U32 8usize, seq::append U32 fst(lo) fst(hi), refl(Int, 8int))
