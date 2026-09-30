@@ -73,8 +73,6 @@ commonware_macros::stability_scope!(ALPHA {
     }
 
     /// The configuration for decoding shard data.
-    ///
-    /// [`Scheme::bound`] derives it from a [`Config`] and a maximum data size.
     #[derive(Clone, Debug)]
     pub struct CodecConfig {
         /// The maximum number of bytes a shard is expected to contain.
