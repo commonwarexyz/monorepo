@@ -15,10 +15,10 @@ use crate::stateful::{
             mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
-        processor::{Processor, Pruning, Publication},
+        processor::{Processor, Pruning},
         syncer::{self, Artifact, SyncPlan},
     },
-    db::{Anchor, DatabaseSet as _, Publisher, SnapshotsOf},
+    db::{Anchor, Publisher, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -289,7 +289,7 @@ where
             plan,
             syncer,
             deferred_verifications,
-            mut snapshot_publisher,
+            snapshot_publisher,
             completion,
             pending_finalizations,
             pruning,
@@ -300,8 +300,14 @@ where
         let Artifact { databases, anchor } = artifact;
         let mut completed_height = anchor.height;
 
-        let mut processor =
-            Processor::new(application, databases, anchor, metrics.clone(), pruning);
+        let mut processor = Processor::new(
+            application,
+            databases,
+            anchor,
+            metrics.clone(),
+            pruning,
+            snapshot_publisher,
+        );
 
         // One signal for the whole handoff. Re-creating it per block would
         // record an extra auditor event on the deterministic runtime each time.
@@ -309,10 +315,7 @@ where
 
         // Serving must not wait for the next finalization, so the synced state
         // alone publishes first.
-        let Some(driven) = until_stopped(&mut shutdown, || {
-            processor.publish_snapshot(&mut snapshot_publisher)
-        })
-        .await
+        let Some(driven) = until_stopped(&mut shutdown, || processor.publish_snapshot()).await
         else {
             warn!(
                 height = completed_height.get(),
@@ -353,27 +356,10 @@ where
                             "no prune is due during the handoff"
                         );
 
-                        // Cheap members serve every replayed block, as in processing.
-                        match applied.publication {
-                            Publication::Snapshot(snapshots) => {
-                                snapshot_publisher.publish(height, snapshots);
-                            }
-                            Publication::None if A::Databases::ANY_CHEAP_SNAPSHOT => {
-                                let Some(driven) = until_stopped(&mut shutdown, || {
-                                    processor.refresh_snapshot(&mut snapshot_publisher)
-                                })
-                                .await
-                                else {
-                                    warn!(height = height.get(), "exiting mid-handoff on shutdown");
-                                    return;
-                                };
-                                processor = driven;
-                            }
-                            Publication::None => {}
-                            Publication::WithBarrier(..) => {
-                                unreachable!("the handoff requests no barrier per block")
-                            }
-                        }
+                        debug_assert!(
+                            applied.barrier.is_none(),
+                            "the handoff requests no barrier per block"
+                        );
                         completed_height = height;
                     }
                     pending_acknowledgements.push(acknowledgement);
@@ -384,8 +370,8 @@ where
         // Acknowledge applied handoffs only after one barrier makes the whole applied suffix
         // durable.
         if !pending_acknowledgements.is_empty() {
-            let Some((driven, snapshots, barrier)) =
-                until_stopped(&mut shutdown, || processor.sync()).await
+            let Some((driven, barrier)) =
+                until_stopped(&mut shutdown, || processor.start_sync()).await
             else {
                 warn!(
                     height = completed_height.get(),
@@ -395,9 +381,6 @@ where
             };
             processor = driven;
 
-            // The snapshots serve immediately; peers verify what they fetch
-            // against a finalized root, so serving safely runs ahead of disk.
-            snapshot_publisher.publish(completed_height, snapshots);
             let Some(durable) = until_stopped(&mut shutdown, || barrier.durable()).await else {
                 warn!(
                     height = completed_height.get(),
@@ -442,7 +425,6 @@ where
             mailbox,
             provider,
             marshal,
-            snapshot_publisher,
         }
         .run(processor, deferred_verifications)
         .await

@@ -7,13 +7,13 @@
 //! ([`ExecutionError::Stale`](crate::stateful::ExecutionError::Stale)) and
 //! answered from the canonical chain.
 //!
-//! Each finalized block is applied immediately. Snapshots are captured and
-//! published when a barrier starts, and one active barrier covers every
-//! block applied behind it (see [`Publisher`]). The block is acknowledged to
-//! marshal only once a barrier proves it durable. A due prune runs at the first
-//! mutation boundary with no barrier active and its target durable, while the
-//! loop keeps serving until then. It prunes and publishes fresh snapshots right
-//! away.
+//! Each finalized block is applied immediately. The processor publishes
+//! snapshots when a barrier starts and refreshes cheap members every block.
+//! Blocks applied after a barrier starts await a successor barrier, and marshal
+//! acknowledgements release only once their blocks are durable. A due prune runs
+//! at the first mutation boundary with no barrier active and its target durable,
+//! while the loop keeps serving until then. It prunes and publishes fresh
+//! snapshots right away.
 
 use crate::stateful::{
     Application, Input,
@@ -23,9 +23,9 @@ use crate::stateful::{
             mailbox::Message,
             verifications::{Handler as Verifications, Request as VerificationRequest},
         },
-        processor::{Applied, Processor, Prune, Publication, Verifier},
+        processor::{Applied, Processor, Prune, Verifier},
     },
-    db::{Barrier, DatabaseSet, Publisher, SnapshotsOf},
+    db::Barrier,
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -190,7 +190,6 @@ async fn start_barrier<E, A, S, V>(
     durability: &mut Durability,
     verifications: &mut Verifications<S, V>,
     processor: Processor<E, A>,
-    publisher: &mut Publisher<SnapshotsOf<A::Databases, E>>,
 ) -> Option<Processor<E, A>>
 where
     E: Rng + Spawner + Metrics + Clock + 'static,
@@ -205,13 +204,10 @@ where
     );
 
     let height = durability.applied();
-    let (processor, snapshots, barrier) = verifications
-        .until_stopped(shutdown, || processor.sync())
+    let (processor, barrier) = verifications
+        .until_stopped(shutdown, || processor.start_sync())
         .await?;
 
-    // The snapshots serve immediately; peers verify what they fetch against a
-    // finalized root, so serving safely runs ahead of disk.
-    publisher.publish(height, snapshots);
     durability.set_barrier(height, barrier);
     Some(processor)
 }
@@ -232,8 +228,6 @@ where
     pub(super) provider: A::Provider,
     /// Marshal mailbox used for lazy block lookup.
     pub(super) marshal: MarshalMailbox<S, V>,
-    /// Publishes the latest snapshots for serving.
-    pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 }
 
 impl<E, A, S, V> Processing<E, A, S, V>
@@ -298,7 +292,6 @@ where
                         &mut durability,
                         &mut verifications,
                         processor,
-                        &mut self.snapshot_publisher,
                     )
                     .await
                     else {
@@ -576,52 +569,22 @@ where
             return None;
         };
 
-        let Applied { publication, prune } = applied;
-        let refresh = {
-            // Keep the publication bookkeeping under the same span.
-            let _span = process.enter();
-            debug!(height = height.get(), "applied finalized database batch");
+        let Applied { barrier, prune } = applied;
+        let _span = process.enter();
+        debug!(height = height.get(), "applied finalized database batch");
 
-            // Acknowledge only once a barrier covers this height, so marshal's processed height
-            // never passes durable state and an unsynced suffix is replayed after restart.
-            durability.record(height, acknowledgement);
+        // Acknowledge only once a barrier covers this height, so marshal's processed height
+        // never passes durable state and an unsynced suffix is replayed after restart.
+        durability.record(height, acknowledgement);
 
-            // Defer pruning to the loop so it can settle durability at one database mutation
-            // boundary.
-            if let Some(prune) = prune {
-                *pending_prune = Some(prune);
-            }
-
-            // Snapshots serve immediately, ahead of the barrier that covers them.
-            match publication {
-                Publication::None => <A::Databases as DatabaseSet<E>>::ANY_CHEAP_SNAPSHOT,
-                Publication::Snapshot(snapshots) => {
-                    self.snapshot_publisher.publish(height, snapshots);
-                    false
-                }
-                Publication::WithBarrier(snapshots, barrier) => {
-                    self.snapshot_publisher.publish(height, snapshots);
-                    durability.set_barrier(height, barrier);
-                    false
-                }
-            }
-        };
-        if !refresh {
-            return Some(processor);
+        // Defer pruning to the loop so it can settle durability at one database mutation boundary.
+        if let Some(prune) = prune {
+            *pending_prune = Some(prune);
         }
-
-        // A compact member serves only the exact states it published, so a mixed set refreshes
-        // its cheap members every block.
-        let publisher = &mut self.snapshot_publisher;
-        let processor = verifications
-            .until_stopped(shutdown, || {
-                processor.refresh_snapshot(publisher).instrument(process)
-            })
-            .await;
-        if processor.is_none() {
-            warn!(height = height.get(), "exiting mid-refresh on shutdown");
+        if let Some(barrier) = barrier {
+            durability.set_barrier(height, barrier);
         }
-        processor
+        Some(processor)
     }
 
     /// Prunes to `prune`, whose target is durable with no barrier active, then publishes fresh
@@ -649,18 +612,10 @@ where
 
         // Starting the successor barrier also captures and publishes fresh snapshots.
         let processor = if durability.needs_barrier() {
-            start_barrier(
-                shutdown,
-                durability,
-                verifications,
-                processor,
-                &mut self.snapshot_publisher,
-            )
-            .await
+            start_barrier(shutdown, durability, verifications, processor).await
         } else {
-            let publisher = &mut self.snapshot_publisher;
             verifications
-                .until_stopped(shutdown, || processor.publish_snapshot(publisher))
+                .until_stopped(shutdown, || processor.publish_snapshot())
                 .await
         };
         if processor.is_none() {
@@ -1162,22 +1117,22 @@ mod tests {
                 apply_calls: apply_calls.clone(),
                 verify_calls: verify_calls.clone(),
             };
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -1259,22 +1214,22 @@ mod tests {
         app: GatedApp,
         marshal: fixtures::MarshalFixture,
     ) -> GatedApplication {
+        let publication_context = context.child("publication");
+        let (publisher, reader) = Publisher::new(&publication_context);
         let processor = Processor::new(
             app,
             test_databases(),
             anchor(0, 0),
             StatefulMetrics::new(context),
             None,
+            publisher,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-        let publication_context = context.child("publication");
-        let (publisher, reader) = Publisher::new(&publication_context);
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
-            snapshot_publisher: publisher,
         };
         let actor = context
             .child("loop")
@@ -1344,22 +1299,22 @@ mod tests {
             stale_verifies: Arc::default(),
             observed_contexts: Arc::default(),
         };
+        let (publisher, reader) = Publisher::new(context);
         let processor = Processor::new(
             app,
             databases,
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
+            publisher,
         );
-        let (mut publisher, reader) = Publisher::new(context);
-        let processor = processor.publish_snapshot(&mut publisher).await;
+        let processor = processor.publish_snapshot().await;
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
-            snapshot_publisher: publisher,
         };
         let actor = context
             .child("loop")
@@ -1412,22 +1367,22 @@ mod tests {
         };
         let pruning =
             prune_config.map(|config| Pruning::new(config, marshal.mailbox.max_pending_acks(), 0));
+        let (publisher, _subscriber) = Publisher::new(context);
         let processor = Processor::new(
             app,
             databases,
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
+            publisher,
         );
-        let (mut publisher, _subscriber) = Publisher::new(context);
-        let processor = processor.publish_snapshot(&mut publisher).await;
+        let processor = processor.publish_snapshot().await;
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
-            snapshot_publisher: publisher,
         };
         let actor = context
             .child("loop")
@@ -1917,23 +1872,23 @@ mod tests {
                 verify_calls: verify_calls.clone(),
                 applied_finalizations: Arc::default(),
             };
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -1994,22 +1949,22 @@ mod tests {
             true,
         )
         .await;
+        let publication_context = context.child("publication");
+        let (publisher, _subscriber) = Publisher::new(&publication_context);
         let processor = Processor::new(
             app,
             test_databases(),
             anchor(0, 0),
             StatefulMetrics::new(context),
             None,
+            publisher,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-        let publication_context = context.child("publication");
-        let (publisher, _subscriber) = Publisher::new(&publication_context);
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox.clone(),
-            snapshot_publisher: publisher,
         };
         let actor = context
             .child("loop")
@@ -2145,23 +2100,23 @@ mod tests {
                 verify_calls: verify_calls.clone(),
                 applied_finalizations: Arc::default(),
             };
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -2622,23 +2577,23 @@ mod tests {
                 verify_calls: Arc::new(AtomicUsize::new(0)),
                 applied_finalizations: applied_finalizations.clone(),
             };
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(1, 1),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -2708,23 +2663,23 @@ mod tests {
                 verify_calls: Arc::new(AtomicUsize::new(0)),
                 applied_finalizations: applied_finalizations.clone(),
             };
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -2765,12 +2720,15 @@ mod tests {
                 false,
             )
             .await;
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
 
             // Defer a verification as the syncing actor does before its
@@ -2806,14 +2764,11 @@ mod tests {
             };
 
             // Resume the deferred verification after state sync.
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -2869,23 +2824,23 @@ mod tests {
                 verify_calls: verify_calls.clone(),
                 applied_finalizations: Arc::default(),
             };
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -2985,23 +2940,23 @@ mod tests {
                 verify_calls: Arc::new(AtomicUsize::new(0)),
                 applied_finalizations: Arc::default(),
             };
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -3072,23 +3027,23 @@ mod tests {
                 verify_calls: Arc::new(AtomicUsize::new(0)),
                 applied_finalizations: Arc::default(),
             };
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -3158,23 +3113,23 @@ mod tests {
                 verify_calls: verify_calls.clone(),
                 applied_finalizations: Arc::default(),
             };
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -3254,23 +3209,23 @@ mod tests {
                 verify_calls: verify_calls.clone(),
                 applied_finalizations: Arc::default(),
             };
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -3373,23 +3328,23 @@ mod tests {
                 verify_calls: Arc::new(AtomicUsize::new(0)),
                 applied_finalizations: Arc::default(),
             };
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -3503,23 +3458,23 @@ mod tests {
                 1,
                 0,
             );
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 databases,
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 Some(pruning),
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox.clone(),
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -3987,23 +3942,23 @@ mod tests {
                 applied_finalizations: applied_finalizations.clone(),
             };
             let control = FlushControl::default();
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processor = Processor::new(
                 app,
                 Single::from(TestDb::gated(control.clone())),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                publisher,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(2));
             let mut mailbox = Mailbox::new(sender);
-            let publication_context = context.child("publication");
-            let (publisher, _subscriber) = Publisher::new(&publication_context);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
-                snapshot_publisher: publisher,
             };
             let actor = context
                 .child("loop")
@@ -4208,6 +4163,7 @@ mod tests {
             let control = FlushControl::default();
             let (verify_gate, verify_started, verify_release) = application_gate();
             let observed_contexts = Arc::default();
+            let publication_context = context.child("publication");
             let processor = Processor::new(
                 GatedApp {
                     verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
@@ -4220,14 +4176,13 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&publication_context).0,
             );
-            let publication_context = context.child("publication");
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox.clone(),
-                snapshot_publisher: Publisher::new(&publication_context).0,
             };
             let actor = context
                 .child("loop")
@@ -4407,13 +4362,13 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox.clone(),
-                snapshot_publisher: Publisher::new(&context).0,
             };
             let _actor = context
                 .child("loop")
@@ -5014,23 +4969,23 @@ mod tests {
             false,
         )
         .await;
+        let publication_context = context.child("publication");
+        let (publisher, _subscriber) = Publisher::new(&publication_context);
         let processor = Processor::new(
             app,
             test_databases(),
             anchor(0, 0),
             StatefulMetrics::new(context),
             None,
+            publisher,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let mut mailbox = Mailbox::new(sender);
-        let publication_context = context.child("publication");
-        let (publisher, _subscriber) = Publisher::new(&publication_context);
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
-            snapshot_publisher: publisher,
         };
         let actor = context
             .child("loop")
@@ -5259,6 +5214,8 @@ mod tests {
         marshal: fixtures::MarshalFixture,
     ) -> SpawnedParkedApplication {
         let (started_tx, started) = oneshot::channel();
+        let publication_context = context.child("publication");
+        let (publisher, _subscriber) = Publisher::new(&publication_context);
         let processor = Processor::new(
             ParkedApp {
                 started: Arc::new(Mutex::new(Some(started_tx))),
@@ -5267,16 +5224,14 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             None,
+            publisher,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-        let publication_context = context.child("publication");
-        let (publisher, _subscriber) = Publisher::new(&publication_context);
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
-            snapshot_publisher: publisher,
         };
         let actor = context
             .child("loop")

@@ -288,7 +288,7 @@ mod tests {
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        Signer,
+        ChaCha20Poly1305, Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
@@ -296,7 +296,10 @@ mod tests {
         telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::{
-        Handshake as _, encrypted::Handshake as StreamHandshake, utils::Timeout,
+        SakeCups, Upgrader as _,
+        cups::{self, Cups},
+        sake::{self, Sake},
+        utils::Timeout,
     };
     use commonware_utils::{NZU32, NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
@@ -327,15 +330,17 @@ mod tests {
         }
     }
 
-    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
-        Timeout::new(
-            StreamHandshake {
+    fn handshake<S: Signer>(signer: S) -> Timeout<SakeCups<S, ChaCha20Poly1305>> {
+        let handshake = Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
             },
-            Duration::from_secs(10),
-        )
+            cups::Version::V1,
+        );
+        Timeout::new(handshake, Duration::from_secs(10))
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {

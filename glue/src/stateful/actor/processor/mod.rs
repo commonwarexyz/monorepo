@@ -13,11 +13,10 @@
 //!   inserting each intermediate result into the pending map.
 //!
 //! - Finalization: apply the winning fork's merkleized batches to the
-//!   databases (durability is reported via [`Barrier`]), capture a snapshot
-//!   of the database set for publication when durability starts (returned in
-//!   [`Applied`]), then retain only pending descendants of the finalized
-//!   winner. The actor coordinates durability separately so multiple
-//!   finalizations can be covered by one storage sync.
+//!   databases, retain only pending descendants of the finalized winner, and
+//!   publish snapshots after the finalization hook completes. The actor
+//!   coordinates durability through the [`Barrier`] returned in [`Applied`],
+//!   so multiple finalizations can be covered by one storage sync.
 //!
 //! - Maintenance -- [`Processor::prune`] runs due prunes and
 //!   [`Processor::publish_snapshot`] publishes fresh snapshots afterwards.
@@ -412,24 +411,10 @@ impl Cancellation for Verification {
     }
 }
 
-/// What serving receives from one finalization.
-pub(super) enum Publication<S> {
-    /// Nothing new: no barrier was requested, and not every member's snapshot is cheap. The
-    /// caller refreshes the cheap members of a set that has some (see
-    /// [`Processor::refresh_snapshot`]).
-    None,
-    /// A snapshot of the applied state, captured without a barrier because the set's snapshots
-    /// are cheap (see [`DatabaseSet::CHEAP_SNAPSHOT`]).
-    Snapshot(S),
-    /// A snapshot of the applied state and the barrier started with it, which covers the block
-    /// and every earlier applied block.
-    WithBarrier(S, Barrier),
-}
-
 /// Result of applying a newly finalized block.
-pub(super) struct Applied<T, S> {
-    /// Snapshots to serve, with the barrier covering the block when the caller requested one.
-    pub(super) publication: Publication<S>,
+pub(super) struct Applied<T> {
+    /// Barrier covering the block and every earlier applied block, when requested by the caller.
+    pub(super) barrier: Option<Barrier>,
 
     /// Prune that became due with this finalization.
     pub(super) prune: Option<Prune<T>>,
@@ -548,6 +533,7 @@ where
     execution: Execution<E, A>,
     replays: ReplayFlights<BlockDigest<A, E>>,
     pruning: Option<Pruning<SyncTargets<A, E>>>,
+    publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 }
 
 impl<E, A> Processor<E, A>
@@ -562,7 +548,14 @@ where
         processed: Anchor<BlockDigest<A, E>>,
         metrics: StatefulMetrics,
         pruning: Option<Pruning<SyncTargets<A, E>>>,
+        publisher: Publisher<SnapshotsOf<A::Databases, E>>,
     ) -> Self {
+        const {
+            assert!(
+                !A::Databases::CHEAP_SNAPSHOT || A::Databases::ANY_CHEAP_SNAPSHOT,
+                "CHEAP_SNAPSHOT requires ANY_CHEAP_SNAPSHOT"
+            );
+        }
         Self {
             app,
             execution: Execution {
@@ -578,6 +571,7 @@ where
             databases,
             replays: ReplayFlights::default(),
             pruning,
+            publisher: publisher.with_merge(A::Databases::merge_snapshots),
         }
     }
 
@@ -616,42 +610,35 @@ where
 
     /// Capture a snapshot of the database set's applied state and publish it
     /// at the processed height.
-    pub(super) async fn publish_snapshot(
-        mut self,
-        publisher: &mut Publisher<SnapshotsOf<A::Databases, E>>,
-    ) -> Self {
+    pub(super) async fn publish_snapshot(mut self) -> Self {
         let snapshots;
         (self.databases, snapshots) = self.databases.snapshot().await;
-        publisher.publish(self.processed_height(), snapshots);
+        self.publisher.publish(self.processed_height(), snapshots);
         self
     }
 
-    /// Refresh the cheap members of the served snapshots with their applied state, at the
-    /// processed height (see [`DatabaseSet::refresh_cheap`]).
+    /// Capture and publish applied state, and start the barrier that makes it durable.
     ///
+    /// The caller must await the previous barrier before starting another.
+    pub(super) async fn start_sync(mut self) -> (Self, Barrier) {
+        let (snapshots, barrier);
+        (self.databases, snapshots, barrier) = self.databases.finalize().await;
+        self.publisher.publish(self.processed_height(), snapshots);
+        (self, barrier)
+    }
+
+    /// Refresh a mixed set's cheap members, retaining its other served snapshots.
     /// Does nothing before the first publish.
-    pub(super) async fn refresh_snapshot(
-        mut self,
-        publisher: &mut Publisher<SnapshotsOf<A::Databases, E>>,
-    ) -> Self {
-        let Some(served) = publisher.served() else {
+    async fn refresh_snapshot(mut self) -> Self {
+        let Some(served) = self.publisher.served() else {
             return self;
         };
         let snapshots;
         (self.databases, snapshots) = self.databases.refresh_cheap(&served).await;
-        // The publisher releases the replaced set outside its lock only if it holds the last
-        // reference.
+        // Drop our reference before replacement releases the old served set.
         drop(served);
-        publisher.refresh(self.processed_height(), snapshots);
+        self.publisher.refresh(self.processed_height(), snapshots);
         self
-    }
-
-    /// Capture snapshots of every applied batch and start one durability
-    /// barrier covering them.
-    pub(super) async fn sync(mut self) -> (Self, SnapshotsOf<A::Databases, E>, Barrier) {
-        let (snapshots, barrier);
-        (self.databases, snapshots, barrier) = self.databases.finalize().await;
-        (self, snapshots, barrier)
     }
 
     #[cfg(test)]
@@ -718,10 +705,9 @@ where
 
     /// Applies the next finalized `block` and discards cached state that does not descend from it.
     ///
-    /// Returns the processor, the prune that became due, if any, and the [`Publication`] for
-    /// serving, which carries a barrier covering `block` and every earlier applied block if
-    /// `start_barrier` is set. The processed anchor advances to `block` after the application's
-    /// `finalized` hook returns.
+    /// Publishes snapshots and returns the processor, the prune that became due, if any, and a
+    /// barrier covering `block` and every earlier applied block if `start_barrier` is set. The
+    /// processed anchor advances to `block` after the application's `finalized` hook returns.
     ///
     /// The block's state comes from its verification when that is cached, and
     /// a cached block stays reachable as a parent until the anchor moves. A
@@ -735,10 +721,7 @@ where
         context: &E,
         block: &A::Block,
         start_barrier: bool,
-    ) -> (
-        Self,
-        Applied<SyncTargets<A, E>, SnapshotsOf<A::Databases, E>>,
-    ) {
+    ) -> (Self, Applied<SyncTargets<A, E>>) {
         let (height, digest) = (block.height(), block.digest());
         let processed = self.execution.processed();
         assert_eq!(
@@ -816,16 +799,16 @@ where
             )
             .await;
         self.databases = self.databases.apply(batch).await;
-        let publication = if start_barrier {
+        let (snapshots, barrier) = if start_barrier {
             let (snapshots, barrier);
             (self.databases, snapshots, barrier) = self.databases.finalize().await;
-            Publication::WithBarrier(snapshots, barrier)
+            (Some(snapshots), Some(barrier))
         } else if A::Databases::CHEAP_SNAPSHOT {
             let snapshots;
             (self.databases, snapshots) = self.databases.snapshot().await;
-            Publication::Snapshot(snapshots)
+            (Some(snapshots), None)
         } else {
-            Publication::None
+            (None, None)
         };
         self.app
             .finalized(
@@ -846,7 +829,15 @@ where
         });
         timer.observe(context);
 
-        (self, Applied { publication, prune })
+        // Publish only after the hook completes. Compact members must serve every applied block,
+        // including blocks applied while a barrier is pending.
+        if let Some(snapshots) = snapshots {
+            self.publisher.publish(height, snapshots);
+        } else if A::Databases::ANY_CHEAP_SNAPSHOT {
+            self = self.refresh_snapshot().await;
+        }
+
+        (self, Applied { barrier, prune })
     }
 
     /// Prepare parent-relative batches and delegate to the application to
@@ -1570,8 +1561,8 @@ where
 mod tests {
     use super::{
         Applied, BlockDigest, Clock, Metrics, PendingBatches, PendingEntry, PrepareBatchesError,
-        Processor, Provenance, Prune, Pruning, Publication, ReplayClaim, ReplayFlights, Rng,
-        Spawner, fetch_ancestor,
+        Processor, Provenance, Prune, Pruning, Publisher, ReplayClaim, ReplayFlights, Rng, Spawner,
+        fetch_ancestor,
     };
 
     impl<D: Copy + Ord> ReplayFlights<D> {
@@ -1653,16 +1644,6 @@ mod tests {
         },
         time::Duration,
     };
-
-    impl<S> Publication<S> {
-        /// The barrier this publication started, if any.
-        fn into_barrier(self) -> Option<Barrier> {
-            match self {
-                Self::WithBarrier(_, barrier) => Some(barrier),
-                Self::None | Self::Snapshot(_) => None,
-            }
-        }
-    }
 
     async fn assert_durable(barrier: Option<Barrier>) {
         assert!(
@@ -2221,6 +2202,8 @@ mod tests {
             )
             .await;
             let metrics = StatefulMetrics::new(&context);
+            let publication_context = context.child("snapshots");
+            let (publisher, _) = Publisher::new(&publication_context);
             Self {
                 context_cell: ContextCell::new(context),
                 processor: Processor::new(
@@ -2233,6 +2216,7 @@ mod tests {
                     },
                     metrics,
                     prune_config.map(|config| Pruning::new(config, 1, 0)),
+                    publisher,
                 ),
                 provider,
                 db_config: config,
@@ -2322,7 +2306,7 @@ mod tests {
                 .processor
                 .finalize(self.context_cell.as_present(), &block, true)
                 .await;
-            assert_durable(applied.publication.into_barrier()).await;
+            assert_durable(applied.barrier).await;
             (self, true)
         }
 
@@ -2339,8 +2323,7 @@ mod tests {
                 .processor
                 .finalize(self.context_cell.as_present(), &block, true)
                 .await;
-            let Applied { publication, prune } = applied;
-            let barrier = publication.into_barrier();
+            let Applied { barrier, prune } = applied;
             assert_durable(barrier).await;
             (self, prune)
         }
@@ -2823,7 +2806,7 @@ mod tests {
             let (processor, applied) = finalize.await;
             assert_eq!(waiters(), 0);
             live.await;
-            assert_durable(applied.publication.into_barrier()).await;
+            assert_durable(applied.barrier).await;
             drop(processor);
         });
     }
@@ -2864,7 +2847,7 @@ mod tests {
 
             release.send(()).expect("finalize is parked");
             let (processor, applied) = finalize.await;
-            assert_durable(applied.publication.into_barrier()).await;
+            assert_durable(applied.barrier).await;
             drop(processor);
         });
     }
@@ -2880,6 +2863,7 @@ mod tests {
                 mocks::anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let genesis = mocks::TestBlock::new(0, 0);
             let child = mocks::TestBlock::child(&genesis, 1);
@@ -2928,6 +2912,7 @@ mod tests {
                 mocks::anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let genesis = mocks::TestBlock::new(0, 0);
             let child = mocks::TestBlock::child(&genesis, 1);
@@ -3161,7 +3146,7 @@ mod tests {
                 .send(())
                 .expect("finalized hook should remain active");
             let (_processor, applied) = finalize.await;
-            let barrier = applied.publication.into_barrier();
+            let barrier = applied.barrier;
             assert_durable(barrier).await;
         });
     }
@@ -3194,7 +3179,7 @@ mod tests {
                 .send(())
                 .expect("finalized hook should remain active");
             let (_processor, applied) = finalize.await;
-            let barrier = applied.publication.into_barrier();
+            let barrier = applied.barrier;
             assert_durable(barrier).await;
         });
     }

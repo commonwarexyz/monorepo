@@ -30,7 +30,9 @@ use commonware_consensus::{
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256};
+use commonware_cryptography::{
+    ChaCha20Poly1305, bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256,
+};
 use commonware_glue::{
     dkg::{
         SecretStore as _,
@@ -52,7 +54,10 @@ use commonware_p2p::authenticated::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{Handle, Spawner, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
 use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
 use rand_core::CryptoRng;
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
@@ -96,7 +101,15 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        Handshake::new(node.signer.clone()),
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer: node.signer.clone(),
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        ),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,
@@ -473,7 +486,9 @@ mod tests {
         simplex::types::{Finalization, Finalize, Proposal},
         types::{Round, View},
     };
-    use commonware_cryptography::{Hasher as _, Signer as _, bls12381::dkg::feldman_desmedt::deal};
+    use commonware_cryptography::{
+        ChaCha20Poly1305, Hasher as _, Signer as _, bls12381::dkg::feldman_desmedt::deal,
+    };
     use commonware_glue::dkg::types::EpochOutcome;
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{N3f1, TestRng, non_empty, ordered::Set};
@@ -589,7 +604,15 @@ mod tests {
             let (_, oracle) = discovery::Network::new(
                 context.child("network"),
                 discovery::Config::local(
-                    Handshake::new(signers[0].clone()),
+                    Cups::<_, ChaCha20Poly1305>::new(
+                        Sake {
+                            signer: signers[0].clone(),
+                            synchrony_bound: Duration::from_secs(5),
+                            max_handshake_age: Duration::from_secs(10),
+                            version: sake::Version::V1,
+                        },
+                        cups::Version::V1,
+                    ),
                     NAMESPACE,
                     address,
                     address,
