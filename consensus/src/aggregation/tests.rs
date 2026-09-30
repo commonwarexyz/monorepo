@@ -1526,9 +1526,8 @@ fn test_restart_after_completion_replays_without_proposing() {
     });
 }
 
-#[test_traced("INFO")]
-fn test_journal_replay_resumes_partial_mid_range() {
-    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+fn journal_replay_resumes_partial_mid_range(replay_window: u64) {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(move |mut context| async move {
         let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
         let participant = fixture.participants[0].clone();
         let epoch = Epoch::new(13);
@@ -1598,7 +1597,7 @@ fn test_journal_replay_resumes_partial_mid_range() {
                 epoch,
                 first,
                 last,
-                window: 6,
+                window: replay_window,
             },
         );
         replay_cfg.recoverer = replay_recoverer;
@@ -1620,10 +1619,12 @@ fn test_journal_replay_resumes_partial_mid_range() {
             .iter()
             .filter_map(|(fetch, key)| fetch.then_some(key.position))
             .collect();
-        assert_eq!(
-            recovered,
-            [120, 121, 124, 125].into_iter().map(Height::new).collect()
-        );
+        // Restart recovery covers only the uncertified positions in the initial window.
+        let initial_window: BTreeSet<_> = (first.get()..first.get() + replay_window)
+            .map(Height::new)
+            .filter(|position| *position <= last && !replayed.contains(position))
+            .collect();
+        assert_eq!(recovered, initial_window);
         let certified: BTreeSet<_> = replay_certificates
             .lock()
             .iter()
@@ -1634,57 +1635,11 @@ fn test_journal_replay_resumes_partial_mid_range() {
 }
 
 #[test_traced("INFO")]
-#[should_panic(expected = "aggregation journal identity mismatch")]
-fn test_journal_rejects_window_mismatch() {
-    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
-        let participant = fixture.participants[0].clone();
-        let epoch = Epoch::new(13);
-        let position = Height::new(100);
-        let partition = "aggregation_window_mismatch";
+fn test_journal_replay_resumes_partial_mid_range() {
+    journal_replay_resumes_partial_mid_range(6);
+}
 
-        let (first_oracle, mut first_registrations) =
-            simulation(context.child("first_simulation"), &fixture, false).await;
-        let first_cfg = config(
-            &context,
-            fixture.schemes[0].clone(),
-            ImmediateApplication::default(),
-            RecordingReporter::default(),
-            first_oracle.control(participant.clone()),
-            EngineScope {
-                partition: partition.into(),
-                epoch,
-                first: position,
-                last: position,
-                window: 1,
-            },
-        );
-        let (first_engine, _mailbox) = Engine::new(context.child("first_engine"), first_cfg);
-        first_engine
-            .start(first_registrations.remove(&participant).unwrap())
-            .await
-            .expect("first aggregation engine failed");
-
-        let (mismatch_oracle, mut mismatch_registrations) =
-            simulation(context.child("mismatch_simulation"), &fixture, false).await;
-        let mismatch_cfg = config(
-            &context,
-            fixture.schemes[0].clone(),
-            ImmediateApplication::default(),
-            RecordingReporter::default(),
-            mismatch_oracle.control(participant.clone()),
-            EngineScope {
-                partition: partition.into(),
-                epoch,
-                first: position,
-                last: position,
-                window: 2,
-            },
-        );
-        let (mismatch_engine, _mailbox) =
-            Engine::new(context.child("mismatch_engine"), mismatch_cfg);
-        let _ = mismatch_engine
-            .start(mismatch_registrations.remove(&participant).unwrap())
-            .await;
-    });
+#[test_traced("INFO")]
+fn test_journal_replay_resumes_with_smaller_window() {
+    journal_replay_resumes_partial_mid_range(1);
 }

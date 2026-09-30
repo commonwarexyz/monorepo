@@ -21,7 +21,7 @@ use commonware_utils::futures::rebind;
 use rand_core::CryptoRng;
 use std::num::{NonZeroU64, NonZeroUsize};
 
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 const COMMITTEE_DOMAIN: &[u8] = b"_COMMONWARE_CONSENSUS_AGGREGATION_JOURNAL_COMMITTEE_V1";
 
 /// Scope and identity durably bound to an aggregation journal.
@@ -32,7 +32,6 @@ struct Identity {
     epoch: Epoch,
     first: Height,
     last: Height,
-    window: NonZeroU64,
 }
 
 impl Identity {
@@ -44,7 +43,6 @@ impl Identity {
             epoch: config.epoch,
             first: config.first,
             last: config.last,
-            window: config.window,
         }
     }
 }
@@ -56,7 +54,6 @@ impl Write for Identity {
         self.epoch.write(writer);
         self.first.write(writer);
         self.last.write(writer);
-        self.window.get().write(writer);
     }
 }
 
@@ -70,10 +67,6 @@ impl Read for Identity {
             epoch: Epoch::read(reader)?,
             first: Height::read(reader)?,
             last: Height::read(reader)?,
-            window: NonZeroU64::new(u64::read(reader)?).ok_or(CodecError::Invalid(
-                "consensus::aggregation::journal::Identity",
-                "zero window",
-            ))?,
         })
     }
 }
@@ -85,7 +78,6 @@ impl EncodeSize for Identity {
             + self.epoch.encode_size()
             + self.first.encode_size()
             + self.last.encode_size()
-            + self.window.get().encode_size()
     }
 }
 
@@ -100,8 +92,6 @@ pub(crate) struct JournalConfig {
     pub first: Height,
     /// Last mandatory position, inclusive.
     pub last: Height,
-    /// Maximum number of live positions.
-    pub window: NonZeroU64,
     /// Write-buffer size.
     pub write_buffer: NonZeroUsize,
     /// Replay-buffer size.
@@ -129,7 +119,7 @@ pub(crate) enum JournalError {
     /// The format version differs.
     #[error("aggregation journal version mismatch")]
     VersionMismatch,
-    /// The namespace, committee, epoch, range, or window differs.
+    /// The namespace, committee, epoch, or range differs.
     #[error("aggregation journal identity mismatch")]
     IdentityMismatch,
     /// A certificate does not belong to the configured scope or fails verification.
@@ -313,7 +303,6 @@ mod tests {
             epoch: EPOCH,
             first: FIRST,
             last: LAST,
-            window: NonZeroU64::new(2).unwrap(),
             write_buffer: NZUsize!(4096),
             replay_buffer: NZUsize!(4096),
             heights_per_section: NonZeroU64::new(2).unwrap(),
@@ -458,13 +447,6 @@ mod tests {
                     "last",
                     JournalConfig {
                         last: LAST.next(),
-                        ..config.clone()
-                    },
-                ),
-                (
-                    "window",
-                    JournalConfig {
-                        window: config.window.checked_add(1).unwrap(),
                         ..config.clone()
                     },
                 ),

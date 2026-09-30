@@ -7,9 +7,12 @@
 //! same digest for a position across clones and restarts. Shares are not durable; after restart, a
 //! signing engine requests the canonical digest and signs it again. Certificates are journaled and
 //! synced before reporting.
+//! A position is an application-defined sequence number. It need not be a block height. For
+//! example, an application that checkpoints every 1000 blocks can assign position `k` to its
+//! `k`-th checkpoint.
 //! The engine keeps a bounded window anchored at the lowest uncertified position. It returns
 //! `Completed` only after the entire range is certified; shutdown returns `Stopped`. A durable
-//! header binds the journal to its committee, epoch, range, and window. Replay revalidates each
+//! header binds the journal to its committee, epoch, and range. Replay revalidates each
 //! certificate because the header cannot fingerprint all scheme verification material.
 //!
 //! ## Epoch-independent signatures

@@ -48,7 +48,7 @@ pub struct Config<
     pub recoverer: R,
     /// Maximum number of live positions.
     ///
-    /// This value must remain unchanged while retaining the engine's journal.
+    /// Changing `window` across restarts is safe.
     pub window: NonZeroU64,
     /// Journal partition.
     pub journal_partition: String,
