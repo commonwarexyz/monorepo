@@ -4,7 +4,7 @@
 
 use super::{
     Update,
-    core::{CommitmentFallback, Mailbox, Variant},
+    core::{Mailbox, Variant},
 };
 use crate::{
     Heightable as _,
@@ -13,7 +13,7 @@ use crate::{
     types::{Height, OutputIndex},
 };
 use commonware_utils::Acknowledgement;
-use std::num::NonZeroUsize;
+use std::{convert::Infallible, num::NonZeroUsize};
 
 impl<B: crate::Block, A: Acknowledgement> Delivery for Update<B, A> {
     type Block = B;
@@ -38,20 +38,23 @@ where
 {
     type Block = V::ApplicationBlock;
 
+    /// Marshal serves every request, and answers none once it stops.
+    type Error = Infallible;
+
     /// Keeps the floor at `below`, the newest finalization at or below the block after it, and the
     /// block it finalizes, so the floor stays servable.
-    async fn prune(&self, below: OutputIndex) {
+    async fn prune(&self, below: OutputIndex) -> Result<(), Infallible> {
         let below = Height::new(below.get());
         let keep = self
             .get_finalization_at_or_below(Height::new(below.get().saturating_add(1)))
             .await
             .map_or(below, |(height, _)| height.min(below));
         Self::prune(self, keep);
+        Ok(())
     }
 
     fn ack_window(&self) -> NonZeroUsize {
-        NonZeroUsize::new(self.max_pending_acks())
-            .expect("marshal allows a pending acknowledgement")
+        self.max_pending_acks
     }
 }
 
@@ -64,35 +67,29 @@ where
 {
     type Floor = Finalization<S, V::Commitment>;
 
-    async fn floor_at(&self, at: OutputIndex) -> Option<(OutputIndex, Self::Floor)> {
-        let (height, finalization) = self
+    async fn floor_at(
+        &self,
+        at: OutputIndex,
+    ) -> Result<Option<(OutputIndex, Self::Floor)>, Infallible> {
+        let Some((height, finalization)) = self
             .get_finalization_at_or_below(Height::new(at.get().saturating_add(1)))
-            .await?;
-        Some((OutputIndex::new(height.previous()?.get()), finalization))
+            .await
+        else {
+            return Ok(None);
+        };
+        Ok(height
+            .previous()
+            .map(|previous| (OutputIndex::new(previous.get()), finalization)))
     }
 
     /// Marshal fetches the block the floor finalizes, which states the floor's height.
-    async fn install(&self, floor: Self::Floor) -> Option<OutputIndex> {
-        // Marshal ignores a floor of a round it already processed, whose block it may have pruned.
-        // Its round floor comes from the finalization at or below the block it resumes at.
-        if let Some(processed) = self.get_processed().await
-            && let Some((_, finalization)) = self
-                .get_finalization_at_or_below(Height::new(
-                    processed.height().get().saturating_add(1),
-                ))
-                .await
-            && floor.round() <= finalization.round()
-        {
-            return None;
-        }
-        let commitment = floor.proposal.payload;
-        self.set_floor(floor);
-        let block = self
-            .subscribe_by_commitment(commitment, CommitmentFallback::Wait)
-            .await
-            .ok()?;
+    async fn install(&self, floor: Self::Floor) -> Result<Option<OutputIndex>, Infallible> {
         // Marshal redelivers the floor's block.
-        Some(OutputIndex::new(block.height().previous()?.get()))
+        Ok(self
+            .install_floor(floor)
+            .await
+            .and_then(|height| height.previous())
+            .map(|previous| OutputIndex::new(previous.get())))
     }
 }
 
