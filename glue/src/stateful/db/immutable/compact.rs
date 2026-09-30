@@ -576,6 +576,49 @@ mod tests {
         assert_state_sync_db::<VariableDb, Arc<VariableDb>>();
     }
 
+    /// Snapshots merged across finalizations keep serving the earlier tip.
+    #[test]
+    fn merged_snapshots_serve_earlier_tips() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "merged-tips");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let mut snapshots = Vec::new();
+            for value in [1u8, 2] {
+                let batch = db
+                    .new_batch_for_test::<_>()
+                    .await
+                    .set(Sha256::hash(&[&[value]]), Sha256::hash(&[&[value, 1]]));
+                let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                    .await
+                    .unwrap();
+                let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
+                    .await
+                    .unwrap();
+                let (database, snapshot, sync) =
+                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
+                slot.put(database);
+                sync.await.expect("database sync failed");
+                snapshots.push(snapshot);
+            }
+            let second = snapshots.pop().unwrap();
+            let first = snapshots.pop().unwrap();
+            let first_size = first.latest().size();
+            let merged = <FixedDb as ManagedDb<_>>::merge_snapshot(&first, second.clone());
+
+            let request = sync::Request::Boundary {
+                size: first_size,
+                start: first_size - 1,
+            };
+            assert!(sync::Source::serve(&second, request).await.is_err());
+            assert!(sync::Source::serve(&merged, request).await.is_ok());
+        });
+    }
+
     /// Batches that leave the floor unset carry it forward instead of regressing it to zero.
     #[test]
     fn unset_floor_carries_forward_across_commits() {

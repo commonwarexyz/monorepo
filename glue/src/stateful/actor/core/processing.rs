@@ -464,7 +464,7 @@ where
 
                             // Snapshots serve immediately, ahead of the barrier that covers them.
                             match publication {
-                                // A compact member serves only the exact state it published,
+                                // A compact member serves only the exact states it published,
                                 // so a mixed set refreshes its cheap members every block.
                                 Publication::None if A::Databases::ANY_CHEAP_SNAPSHOT => {
                                     verifications
@@ -3049,6 +3049,65 @@ mod tests {
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
             assert_eq!(publications(&context), 3);
+        });
+    }
+
+    /// A prune whose applied state is already durable publishes fresh snapshots itself.
+    #[test]
+    fn durable_prune_publishes_fresh_snapshots() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, subscriber, _marshal, _actor) = spawn_processing(
+                &context,
+                "gated-durable-prune",
+                Some(PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                }),
+            )
+            .await;
+
+            // Block 1 applies and becomes durable.
+            let (acknowledgement, waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Ok(()));
+            waiter1.await.expect("block 1 acknowledgement");
+
+            // Block 2 fills the retention window, scheduling a prune at block 1, and starts its
+            // own flush. Startup, block 1's sync, and block 2's sync have published.
+            let (acknowledgement, waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::child(&TestBlock::new(1, 1), 2)),
+                acknowledgement,
+            ));
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(publications(&context), 3);
+            assert!(
+                control.pruned.lock().is_empty(),
+                "the prune waits for the active flush"
+            );
+
+            // Once block 2 is durable, the prune runs and publishes on its own.
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Ok(()));
+            waiter2.await.expect("block 2 acknowledgement");
+            while control.pruned.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(control.pruned.lock().clone(), vec![1]);
+            while publications(&context) < 4 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(subscriber.latest(), Some(2));
         });
     }
 

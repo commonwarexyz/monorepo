@@ -44,8 +44,8 @@ struct Cell<S> {
 struct Metrics {
     /// Height at which every member was last published.
     height: Registered<Gauge>,
-    /// Height at which the cheap members of a mixed set were last captured, by a refresh or a
-    /// full publication.
+    /// Height at which cheap members were last captured, by a refresh or a full publication.
+    /// Tracks `height` for sets without a refresh.
     refreshed: Registered<Gauge>,
     /// Publications and refreshes since startup.
     published: Registered<Counter>,
@@ -121,15 +121,16 @@ impl<S> Publisher<S> {
         self
     }
 
-    /// Replace the served set with `snapshots`, every member taken at `height`.
+    /// Serve `snapshots`, every member taken at `height`, merged into the served set (see
+    /// [`Self::with_merge`]).
     pub(crate) fn publish(&mut self, height: Height, snapshots: S) {
         self.replace(height, snapshots);
         let _ = self.cell.metrics.height.try_set(height.get());
         let _ = self.cell.metrics.refreshed.try_set(height.get());
     }
 
-    /// Replace the served set with `snapshots`, whose cheap members were taken at `height` and
-    /// whose other members come from an earlier publication (see
+    /// Serve `snapshots`, merged into the served set, whose cheap members were taken at `height`
+    /// and whose other members come from an earlier publication (see
     /// [`DatabaseSet::refresh_cheap`](super::DatabaseSet::refresh_cheap)).
     pub(crate) fn refresh(&mut self, height: Height, snapshots: S) {
         self.replace(height, snapshots);

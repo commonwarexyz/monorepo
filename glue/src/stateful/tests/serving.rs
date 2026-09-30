@@ -53,6 +53,7 @@ use commonware_cryptography::{
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
+use commonware_macros::test_group;
 use commonware_p2p::utils::mux::Muxer;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -101,15 +102,17 @@ pub(super) struct Events {
     compact_size: BTreeMap<u64, u64>,
     /// Served-state checks made at a finalized hook.
     served_checks: usize,
+    /// Of those, the checks the joiner made (in its state-sync handoff and after it).
+    joiner_checks: usize,
     /// Checks whose served compact size lagged the previous block: (node, height, served,
     /// expected).
     served_lags: Vec<(usize, u64, u64, u64)>,
     /// Joiner fetch starts: (member, requested size).
     requests: Vec<(usize, u64)>,
-    /// Joiner fetches answered: (member, requested size).
-    served: Vec<(usize, u64)>,
-    /// State sync start: (ms, anchor height).
-    sync_start: Option<(u64, u64)>,
+    /// Members of the joiner's answered fetches.
+    served: Vec<usize>,
+    /// State sync start: anchor height.
+    sync_start: Option<u64>,
     /// State sync result: (ms, converged anchor height).
     synced: Option<(u64, u64)>,
 }
@@ -430,8 +433,7 @@ where
         sync_config: SyncEngineConfig,
     ) -> Result<(Self, Anchor<sha256::Digest>), Self::Error> {
         let clock = Arc::new(context.child("slow_set"));
-        let started = now_ms(&*clock);
-        slow.log.0.lock().sync_start = Some((started, anchor.height.get()));
+        slow.log.0.lock().sync_start = Some(anchor.height.get());
         let (inner, anchor) = L::Set::sync(
             context,
             config,
@@ -467,7 +469,7 @@ impl<R: QmdbSource> QmdbSource for Recorded<R> {
         self.log.0.lock().requests.push((self.member, size));
         let result = self.inner.serve(request).await;
         if result.is_ok() {
-            self.log.0.lock().served.push((self.member, size));
+            self.log.0.lock().served.push(self.member);
         }
         result
     }
@@ -579,6 +581,9 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
             return;
         };
         events.served_checks += 1;
+        if self.node == JOINER {
+            events.joiner_checks += 1;
+        }
         if served != expected {
             events
                 .served_lags
@@ -950,7 +955,7 @@ impl<S: Send + Sync> ExitCondition<ed25519::PublicKey, S> for SyncedOrBound {
             };
             Ok(match (synced, started) {
                 (Some((_, synced)), _) => height >= synced + 3,
-                (None, Some((_, started))) => height >= started + self.bound,
+                (None, Some(started)) => height >= started + self.bound,
                 (None, None) => false,
             })
         })
@@ -968,6 +973,8 @@ struct Outcome {
     served: [usize; 2],
     /// Served-state checks made at finalized hooks.
     served_checks: usize,
+    /// Of those, the checks the joiner made.
+    joiner_checks: usize,
     /// Checks whose served compact size lagged the previous block.
     served_lags: Vec<(usize, u64, u64, u64)>,
 }
@@ -981,7 +988,7 @@ fn summarize(log: &Log) -> Outcome {
         .map(|(_, size)| *size)
         .collect();
     let mut served = [0; 2];
-    for (member, _) in &events.served {
+    for member in &events.served {
         served[*member] += 1;
     }
     Outcome {
@@ -989,9 +996,13 @@ fn summarize(log: &Log) -> Outcome {
         compact_targets: compact_targets.len(),
         served,
         served_checks: events.served_checks,
+        joiner_checks: events.joiner_checks,
         served_lags: events.served_lags.clone(),
     }
 }
+
+/// The validator that joins late and state-syncs.
+const JOINER: usize = 0;
 
 /// Runs one late-joiner simulation and summarizes it.
 fn run<L>(delay: Duration, max_pending_acks: usize, seed: u64, bound: u64) -> Outcome
@@ -1004,14 +1015,14 @@ where
 {
     let log = Log::default();
     let engine = ServingEngine::<L>::new(delay, max_pending_acks, log.clone());
-    let joiner = 0;
     let delay_round = delay_first(&engine.participants(), 40);
     PlanBuilder::new(engine)
         .seed(seed)
         .crash(delay_round)
+        .timeout(Duration::from_secs(120))
         .exit_condition(SyncedOrBound {
             log: log.clone(),
-            joiner,
+            joiner: JOINER,
             bound,
         })
         .run()
@@ -1027,9 +1038,11 @@ where
 /// barrier and an acknowledgement window of 4 the servers' barrier starts phase-lock against a
 /// joiner's retargets so none of its compact targets is ever published. Checks cover servers and a
 /// joiner's state-sync handoff alike.
+#[test_group("slow")]
 #[test]
 fn cheap_members_serve_every_finalized_block() {
     let delay = Duration::from_millis(250);
+    let mut joiner_checks = 0;
     for seed in [3u64, 4] {
         for (layout, outcome) in [
             ("all-compact", run::<AllCompact>(delay, 4, seed, BOUND)),
@@ -1043,8 +1056,10 @@ fn cheap_members_serve_every_finalized_block() {
                 outcome.served_lags.is_empty(),
                 "{layout} served a stale compact state (seed {seed}): {outcome:?}"
             );
+            joiner_checks += outcome.joiner_checks;
         }
     }
+    assert!(joiner_checks > 0, "no joiner reached its handoff");
 }
 
 /// Blocks servers may finalize past a joiner's sync start before it must have converged.
@@ -1058,6 +1073,7 @@ const BOUND: u64 = 60;
 /// a barrier lasts about that many block intervals every server trails a joiner's targets and it
 /// converges only by chance, for any layout (a 250 ms barrier with a window of 4 is at that edge
 /// here). The combinations stay clear of it.
+#[test_group("slow")]
 #[test]
 fn late_joiner_converges() {
     for (delay_ms, max_pending_acks) in [(0, 2), (100, 4), (250, 8)] {

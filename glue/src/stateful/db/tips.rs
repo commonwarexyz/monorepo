@@ -16,19 +16,26 @@ use commonware_storage::{
 use std::{collections::VecDeque, sync::Arc};
 
 /// How many of its latest published tips a compact database keeps serving.
+///
+/// Compact tips are published every finalized block, so this covers the last 128 blocks. A
+/// joiner whose compact target is older retries with a newer one. Each tip holds its commit
+/// operation, its proof, and its pinned nodes (a few KiB), so a compact database's history costs
+/// at most this many of them in memory, and none of its storage. The history starts empty after a
+/// restart.
 pub const RETAINED_TIPS: usize = 128;
 
 /// The latest published tips of a compact database, oldest first.
 ///
 /// As a [`Source`], it serves each request from the tip whose size matches, and otherwise from
-/// the latest tip, which refuses the request the way a pruned log would.
+/// the latest tip, which refuses it (a smaller size the way a pruned log would, a larger one as
+/// out of range).
 pub struct CompactTips<F: Family, Op, D: Digest> {
     tips: Arc<VecDeque<compact::Snapshot<F, Op, D>>>,
 }
 
 impl<F: Family, Op, D: Digest> CompactTips<F, Op, D> {
     /// Serve only `tip`.
-    pub(crate) fn new(tip: compact::Snapshot<F, Op, D>) -> Self {
+    pub fn new(tip: compact::Snapshot<F, Op, D>) -> Self {
         Self {
             tips: Arc::new(VecDeque::from([tip])),
         }
@@ -44,7 +51,7 @@ impl<F: Family, Op, D: Digest> CompactTips<F, Op, D> {
     ///
     /// A `fresh` tip no larger than `served`'s latest is the same state published again, so
     /// `served` is returned as is.
-    pub(crate) fn merge(served: &Self, fresh: Self) -> Self {
+    pub fn merge(served: &Self, fresh: Self) -> Self {
         let latest = fresh.latest();
         if latest.size() <= served.latest().size() {
             return served.clone();
