@@ -76,7 +76,6 @@ use commonware_storage::archive;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 
 mod config;
-pub use crate::ancestry;
 pub use config::{Config, Start};
 pub mod core;
 pub mod resolver;

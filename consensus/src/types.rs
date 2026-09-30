@@ -2547,7 +2547,7 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<Epoch>,
             CodecConformance<Height>,
-            CodecConformance<OutputIndex>,
+            CodecConformance<OutputIndex> => 1024,
             CodecConformance<View>,
             CodecConformance<Round>,
             CodecConformance<TestCommitment>,
