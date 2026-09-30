@@ -49,6 +49,7 @@ pub mod intrinsics;
 pub mod json;
 pub mod lift;
 pub mod loader;
+pub mod mir;
 pub mod lower;
 pub mod lock;
 pub mod mutate;

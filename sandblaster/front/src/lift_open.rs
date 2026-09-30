@@ -81,6 +81,10 @@ pub struct LiftOpts {
     /// aliases, and the impls whose self type is named; every other item is
     /// unverified host code, listed. Empty: every item.
     pub items: Vec<String>,
+    /// `mir = "varint.sbmir"`: the bodies of the module's functions are read
+    /// from rustc's MIR in that file (relative to the declaring file),
+    /// [`crate::mir`], `docs/mir-lift.md` §20.
+    pub mir: Option<String>,
 }
 
 impl LiftOpts {
@@ -95,6 +99,9 @@ impl LiftOpts {
         self.unverified_impls.extend(o.unverified_impls);
         self.unverified_fns.extend(o.unverified_fns);
         self.items.extend(o.items);
+        if o.mir.is_some() {
+            self.mir = o.mir;
+        }
     }
 }
 
@@ -113,7 +120,7 @@ fn split_pairs(s: &str) -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
-const LIFT_USAGE: &str = "expected `#[lift]`, `#[lift(host)]`, `#[lift(opt)]` or `#[lift(unverified = \"T, ..\")]`, and for the host's own files `#[lift(in_place, children = \"m\", instance = \"Trait: path::Type\", unverified_instances = \"Trait: path::Type\", unverified_impls = \"Trait, ..\", unverified_fns = \"Type::method, ..\", items = \"Item, ..\")]`";
+const LIFT_USAGE: &str = "expected `#[lift]`, `#[lift(host)]`, `#[lift(opt)]` or `#[lift(unverified = \"T, ..\")]`, and for the host's own files `#[lift(in_place, children = \"m\", instance = \"Trait: path::Type\", unverified_instances = \"Trait: path::Type\", unverified_impls = \"Trait, ..\", unverified_fns = \"Type::method, ..\", items = \"Item, ..\")]`; `mir = \"file.sbmir\"` on either reads the bodies from rustc's MIR";
 
 /// Parses one `#[lift]` / `#[lift(..)]` attribute.
 pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
@@ -137,6 +144,7 @@ pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
                     "unverified_impls" => o.unverified_impls.extend(split_list(&v)),
                     "unverified_fns" => o.unverified_fns.extend(split_list(&v)),
                     "items" => o.items.extend(split_list(&v)),
+                    "mir" => o.mir = Some(v),
                     _ => return Err(LIFT_USAGE.into()),
                 }
             }

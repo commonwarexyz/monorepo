@@ -701,6 +701,12 @@ impl Loader<'_> {
             let child_file = parsed.0;
             let mut copts = opts.clone();
             copts.children = vec![];
+            // a child reads the same MIR file (found next to the declaration)
+            if let Some(rel) = &opts.mir {
+                let decl_dir = self.sm.path(self.modules[parent].file).parent().map(Path::to_path_buf).unwrap_or_default();
+                let full = decl_dir.join(rel);
+                copts.mir = Some(std::path::absolute(&full).unwrap_or(full).display().to_string());
+            }
             let cvis = m.vis.clone();
             let cc = self.add_lifted(want.clone(), c, parsed, cpath, cmodrs, ghost, cvis, span, vec![], cfg.clone(), copts);
             if let Some(li) = self.lifted_info.iter_mut().rev().find(|l| l.file == child_file) {
@@ -717,7 +723,24 @@ impl Loader<'_> {
         }
         segs.reverse();
         let module_path = segs.join("::");
-        self.lift_sources.push(crate::lift::LiftSource { module_index: c, file: cfile, ast: cast, ghost, name, unverified: opts.unverified.clone(), decl_span: span, host: opts.host, opts, children, module_path });
+        // `mir = "x.sbmir"`: rustc's MIR of the bodies, next to the declaring file
+        let mir = opts.mir.as_ref().and_then(|rel| {
+            let decl_dir = self.sm.path(self.modules[parent].file).parent().map(Path::to_path_buf).unwrap_or_default();
+            let full = decl_dir.join(rel);
+            match self.fs.read(&full) {
+                Ok(t) => {
+                    self.sm.add(full.clone(), t.clone());
+                    Some(t)
+                }
+                Err(e) => {
+                    self.diags.error(DiagKind::Load, span, format!("cannot read the MIR file `{}` (`mir = \"{rel}\"`): {e}", full.display()));
+                    None
+                }
+            }
+        });
+        let path_display = self.sm.path(cfile).display().to_string();
+        let text = self.sm.get(cfile).map(|f| f.text.clone()).unwrap_or_default();
+        self.lift_sources.push(crate::lift::LiftSource { module_index: c, file: cfile, ast: cast, ghost, name, unverified: opts.unverified.clone(), decl_span: span, host: opts.host, opts, children, module_path, mir, path_display, text });
         c
     }
 

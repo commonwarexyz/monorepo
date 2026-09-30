@@ -1,0 +1,18 @@
+[package]
+name = "sandblaster-mirx"
+description = "sandblaster's MIR extractor: a rustc driver (rustc_public) that writes the monomorphized MIR of a lifted module to a checked-in .sbmir file."
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Built with the pinned nightly of rust-toolchain.toml (rustc-dev): not a
+# member of the monorepo's workspace, which builds on stable.
+[workspace]
+
+[[bin]]
+name = "sandblaster-mirx"
+path = "src/main.rs"
+
+[package.metadata.rust-analyzer]
+rustc_private = true
