@@ -1817,25 +1817,17 @@ where
         let mut location = batch.manual_floor.expect("manual floor selected");
         let tip = batch.base.base_state().size;
         let db_size = db.log.size();
-        let mut remaining = quota.map(NonZeroUsize::get);
-        while location < tip {
+        // Every operation passed before returning an active update consumes one skip.
+        let scan_end = Location::new(quota.map_or(*tip, |quota| {
+            (*location).saturating_add(quota.get() as u64).min(*tip)
+        }));
+        while location < scan_end {
             if location < db_size {
-                let end = remaining
-                    .map_or(*tip, |remaining| {
-                        (*location).saturating_add(remaining as u64).min(*tip)
-                    })
-                    .min(*db_size);
+                let end = *scan_end.min(db_size);
                 // The final commit has a set bit but is not a live update.
                 let candidate = db.bitmap.first_one(*location, end.min(*db_size - 1));
-                let next = candidate.unwrap_or(end);
-                if let Some(remaining) = &mut remaining {
-                    *remaining -= (next - *location) as usize;
-                }
-                location = Location::new(next);
+                location = Location::new(candidate.unwrap_or(end));
                 batch.manual_floor = Some(location);
-                if remaining == Some(0) || location >= tip {
-                    break;
-                }
                 if candidate.is_none() {
                     continue;
                 }
@@ -1858,12 +1850,6 @@ where
                         unreachable!("active operation is an update");
                     };
                     return Ok((batch, Some(ActiveEntry { location, update })));
-                }
-            }
-            if let Some(remaining) = &mut remaining {
-                *remaining -= 1;
-                if *remaining == 0 {
-                    break;
                 }
             }
             location += 1;
@@ -3603,7 +3589,10 @@ mod tests {
             let (child, popped) = child.pop_active(&db, None).await.unwrap();
             assert_eq!(*update::Update::key(&popped.unwrap().update), second);
             assert_eq!(clones.load(AtomicOrdering::Relaxed), 1);
-            let (_, popped) = child.pop_active(&db, None).await.unwrap();
+            let (_, popped) = child
+                .pop_active(&db, Some(NonZeroUsize::MAX))
+                .await
+                .unwrap();
             assert!(popped.is_none());
             assert_eq!(clones.load(AtomicOrdering::Relaxed), 1);
             drop(parent);
