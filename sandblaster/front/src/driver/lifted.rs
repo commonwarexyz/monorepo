@@ -162,8 +162,10 @@ pub fn module_code_with(source_text: &str, info: &LiftedInfo, facts: &LiftFacts,
     s.push_str(&format!("//   {}\n", h.summary));
     match rewritten {
         None => s.push_str(&format!(
-            "// The code below is `{}` byte for byte after its leading `//!` lines, which are the docs of the host's\n// module file `{}` (checked equal). The proofs are about the lift's reading of it (SEMANTICS.md §19).\n",
-            h.source_display, h.module_file
+            "// The code below is `{}` byte for byte after its leading `//!` lines, which are the docs of the host's\n// module file `{}` (checked equal). The proofs are about {}.\n",
+            h.source_display,
+            h.module_file,
+            if facts.mir_read.is_empty() { "the lift's reading of it (SEMANTICS.md §19)" } else { "rustc's MIR of it, read as `docs/mir-lift.md` §20 says" }
         )),
         Some(l) => {
             s.push_str(&format!(
@@ -177,6 +179,13 @@ pub fn module_code_with(source_text: &str, info: &LiftedInfo, facts: &LiftFacts,
                 }
             }
         }
+    }
+    if !facts.mir_read.is_empty() {
+        s.push_str(&format!(
+            "// Its function bodies were read from rustc's MIR (`docs/mir-lift.md` §20: {} instances, extracted by {}), not from the surface syntax.\n",
+            facts.mir_read.len(),
+            facts.mir_rustc.as_deref().unwrap_or("rustc")
+        ));
     }
     s.push_str(&format!("// Verified (the DSL root's boundary, lifted instances as `Item<T>`): {}.\n", h.boundary.iter().map(|b| pretty_instance(b)).collect::<Vec<_>>().join(", ")));
     if info.unverified.is_empty() && facts.dropped.is_empty() {

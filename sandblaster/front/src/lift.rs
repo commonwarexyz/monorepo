@@ -98,6 +98,12 @@ pub struct LiftSource {
     pub children: Vec<(String, usize)>,
     /// The module's DSL path (`crate::merkle::mmr`).
     pub module_path: String,
+    /// `#[lift(mir = "..")]`: the `.sbmir` file's text ([`crate::mir`]).
+    pub mir: Option<String>,
+    /// The source file's path and text (the `.sbmir` names its sources by
+    /// their SHA-256).
+    pub path_display: String,
+    pub text: String,
 }
 
 /// What a lifted module is, for module-mode emission (`driver::gates`,
@@ -160,6 +166,11 @@ pub struct LiftFacts {
     /// why (loop helpers, `impl Trait` returns, constant functions): the
     /// check reports each one ([`crate::conform`]).
     pub conform_skipped: Vec<ConformSkip>,
+    /// Functions whose bodies were read from rustc's MIR ([`crate::mir`]):
+    /// `(lifted function, MIR instance, loops as (number, form))`.
+    pub mir_read: Vec<(String, String, Vec<(usize, String)>)>,
+    /// The compiler the MIR was extracted with (`rustc 1.98.0-nightly (..)`).
+    pub mir_rustc: Option<String>,
 }
 
 /// How the original function takes one parameter (receiver included), for
@@ -380,6 +391,16 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     // 1. preprocess: drop host-only items, expand macros, flatten modules
     let mut pre: Vec<(usize, FileId, bool, String, Vec<syn::Item>)> = Vec::new();
     let mut in_place: HashSet<usize> = HashSet::new();
+    // `#[lift(mir = ..)]` modules (name, DSL path without `crate::`, text,
+    // declaration) and the lifted source files the MIR must match
+    let mut mir_texts: Vec<(String, String, String, Span)> = Vec::new();
+    let dsl_modules: Vec<String> = sources.iter().filter(|s| !s.ghost && !s.host).map(|s| s.module_path.clone()).collect();
+    let mir_files: Vec<(String, Vec<u8>)> = sources.iter().filter(|s| !s.ghost && !s.host).map(|s| (s.path_display.clone(), s.text.clone().into_bytes())).collect();
+    for s in &sources {
+        if let Some(t) = &s.mir {
+            mir_texts.push((s.name.clone(), s.module_path.trim_start_matches("crate::").to_string(), t.clone(), s.decl_span));
+        }
+    }
     for s in sources {
         cx.file = s.file;
         cx.pre_ghost = s.ghost || s.host;
@@ -412,12 +433,40 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
             cx.take_attachments(items);
         }
     }
+    // 3b. `#[lift(mir = ..)]`: rustc's MIR of the module's bodies
+    {
+        let sealed: std::collections::BTreeSet<String> = cx.traits.iter().filter(|(_, t)| t.sealed).map(|(n, _)| n.clone()).collect();
+        let mut host_enums: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (_, _, _, _, items) in &pre {
+            for it in items {
+                if let syn::Item::Enum(e) = it {
+                    host_enums.entry(e.ident.to_string()).or_insert_with(|| e.variants.iter().map(|v| v.ident.to_string()).collect());
+                }
+            }
+        }
+        let files: Vec<(String, Vec<u8>)> = mir_files.clone();
+        for (modname, suffix, text, span) in &mir_texts {
+            let requires: std::collections::BTreeSet<String> = cx.attach_fn.iter().filter(|(_, a)| a.stmts.iter().any(|st| attach_call(st, "requires").is_some())).map(|(n, _)| n.clone()).collect();
+            let open: BTreeMap<String, String> = cx.open.instances.iter().map(|(t, p)| (t.clone(), path_key(p).trim_start_matches("crate::").to_string())).collect();
+            let names = crate::mir::ModuleNames { module: String::new(), sealed: sealed.clone(), host_enums: host_enums.clone(), requires, open, dsl_modules: dsl_modules.clone(), current: Default::default() };
+            let lookup = |p: &str| -> Option<Vec<u8>> { files.iter().find(|(f, _)| f.ends_with(&format!("/{p}")) || f == p).map(|(_, b)| b.clone()) };
+            match crate::mir::load(text, &lookup, names, suffix) {
+                Ok(l) => {
+                    facts.mir_rustc = Some(l.m.rustc.clone());
+                    cx.mir_modules.insert(modname.clone(), std::rc::Rc::new(l));
+                }
+                Err(e) => diags.push(Diagnostic::error(DiagKind::Unsupported, *span, format!("lift: `mir = ..`: {e}"))),
+            }
+        }
+    }
     // 4. emit
     let mut out = Vec::new();
     for (idx, file, ghost, modname, items) in pre {
         cx.file = file;
         cx.open.cur_in_place = in_place.contains(&idx);
+        cx.cur_mir = if ghost { None } else { cx.mir_modules.get(&modname).cloned() };
         let mut lifted = cx.emit_module(&modname, ghost, items);
+        cx.cur_mir = None;
         cx.open.cur_in_place = false;
         if in_place.contains(&idx) {
             cx.prune_unused(&mut lifted);
@@ -467,6 +516,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     facts.sizes = std::mem::take(&mut cx.sizes);
     facts.dropped = std::mem::take(&mut cx.dropped);
     facts.conform = std::mem::take(&mut cx.conform);
+    facts.mir_read = std::mem::take(&mut cx.mir_read);
     facts.instances = std::mem::take(&mut cx.instances);
     facts.sealed_impls = std::mem::take(&mut cx.sealed_impl_types);
     facts.test_hook = test_hook::get();
@@ -633,6 +683,12 @@ struct Ctx {
     struct_mods: HashMap<String, Vec<String>>,
     /// The tables of [`open`].
     open: open::OpenCtx,
+    /// `#[lift(mir = ..)]` modules: module name → rustc's MIR ([`crate::mir`]).
+    mir_modules: HashMap<String, std::rc::Rc<crate::mir::Loaded>>,
+    /// The MIR of the module being emitted.
+    cur_mir: Option<std::rc::Rc<crate::mir::Loaded>>,
+    /// [`LiftFacts::mir_read`].
+    mir_read: Vec<(String, String, Vec<(usize, String)>)>,
 }
 
 impl Ctx {
@@ -1642,10 +1698,15 @@ impl Ctx {
         } else if let Some(r) = &ret_ty {
             f.sig.output = syn::parse_quote!(-> #r);
         }
-        // body
+        // body (a `#[lift(mir = ..)]` module reads it from rustc's MIR below)
+        let use_mir = !ghost && rw.cx.cur_mir.is_some();
+        let state_names: Vec<String> = rw.states.iter().map(|(n, _)| n.clone()).collect();
+        let state_tys: Vec<(String, syn::Type)> = rw.states.clone();
         let mut block = (*f.block).clone();
-        annotate_index_literals(&mut block);
-        rw.fn_body(&mut block);
+        if !use_mir {
+            annotate_index_literals(&mut block);
+            rw.fn_body(&mut block);
+        }
         // a ghost instance's expression attributes (`#[example(..)]`,
         // `#[decreases(..)]`) name the generic parameters too: rewrite them
         // like the body (else `T` would be unbound in every instance)
@@ -1668,10 +1729,14 @@ impl Ctx {
         }
         rw.pop_scope();
         f.block = Box::new(block);
-        let helpers = std::mem::take(&mut rw.helpers);
+        let mut helpers = std::mem::take(&mut rw.helpers);
         let rename_self = rw.rename_self;
         drop(rw);
-        if rename_self {
+        if use_mir {
+            let (b, h) = self.mir_body(&mut f, &orig_name, self_ty.as_ref(), &state_names, &state_tys);
+            f.block = Box::new(b);
+            helpers = h;
+        } else if rename_self {
             let mut rs = RenameSelf;
             rs.visit_block_mut(&mut f.block);
         }
@@ -1790,6 +1855,152 @@ impl Ctx {
     /// `crate::merkle::mmr` for an in-place module).
     fn conform_module_path(&self) -> String {
         self.open.module_paths.get(&self.cur_module).cloned().unwrap_or_else(|| format!("crate::{}", self.cur_module))
+    }
+
+    /// The body of a lifted function of a `#[lift(mir = ..)]` module, read
+    /// from rustc's MIR ([`crate::mir::read`]), with its loop helpers. `f` has
+    /// the lifted signature; parameters bound by `_` get a name.
+    fn mir_body(&mut self, f: &mut syn::ItemFn, orig_name: &str, self_ty: Option<&syn::Type>, state_names: &[String], state_tys: &[(String, syn::Type)]) -> (syn::Block, Vec<syn::Item>) {
+        let empty: syn::Block = syn::parse_quote!({ unreachable!() });
+        let Some(ld) = self.cur_mir.clone() else { return (empty, vec![]) };
+        let lifted = match self_ty.and_then(type_name) {
+            Some(st) if !is_prim(&st) => format!("{st}::{}", f.sig.ident),
+            _ => f.sig.ident.to_string(),
+        };
+        let Some(key) = ld.by_lifted.get(&lifted).cloned() else {
+            self.err(f.sig.ident.span(), format!("MIR: rustc's MIR has no instance for the lifted function `{lifted}` (re-run the extraction, or the item is not extracted)"));
+            return (empty, vec![]);
+        };
+        let mut params: Vec<String> = Vec::new();
+        let mut states: Vec<usize> = Vec::new();
+        for (i, a) in f.sig.inputs.iter_mut().enumerate() {
+            match a {
+                syn::FnArg::Receiver(_) => {
+                    if state_names.iter().any(|n| n == "self") {
+                        states.push(i);
+                    }
+                    params.push("self".into());
+                }
+                syn::FnArg::Typed(pt) => {
+                    // a parameter bound by `_` keeps its pattern (the reading
+                    // refuses to read it unless it is zero-sized)
+                    let n = pat_ident(&pt.pat).unwrap_or_else(|| "_".to_string());
+                    if state_names.contains(&n) {
+                        states.push(i);
+                    }
+                    params.push(n);
+                }
+            }
+        }
+        let has_ret = {
+            let out_parts = match &f.sig.output {
+                syn::ReturnType::Default => 0,
+                syn::ReturnType::Type(_, t) => match &**t {
+                    syn::Type::Tuple(tt) if tt.elems.is_empty() => 0,
+                    syn::Type::Tuple(tt) if !states.is_empty() => tt.elems.len(),
+                    _ => 1,
+                },
+            };
+            out_parts > states.len()
+        };
+        let out_ty: syn::Type = match &f.sig.output {
+            syn::ReturnType::Default => syn::parse_quote!(()),
+            syn::ReturnType::Type(_, t) => (**t).clone(),
+        };
+        // loop attachments, read by the lift's ghost reading with the MIR's locals typed
+        ld.names.current.replace(self.conform_module_path());
+        let locals = match crate::mir::read::root_locals(&ld.m, &ld.names, &key, &params) {
+            Ok(l) => l,
+            Err(e) => {
+                self.err(f.sig.ident.span(), format!("MIR: {e}"));
+                return (empty, vec![]);
+            }
+        };
+        let mut loops: HashMap<usize, crate::mir::read::LoopAttach> = HashMap::new();
+        let keys: Vec<usize> = self.attach_loop.keys().filter(|(fnm, _)| fnm == orig_name).map(|(_, k)| *k).collect();
+        for k in keys {
+            let at = self.attach_loop[&(orig_name.to_string(), k)].clone();
+            self.attach_used.insert(format!("loop {orig_name}#{k}"));
+            let la = self.mir_loop_attach(&at, &locals, self_ty, state_tys);
+            loops.insert(k, la);
+        }
+        let ref_params: Vec<usize> = f.sig.inputs.iter().enumerate().filter(|(_, a)| matches!(a, syn::FnArg::Typed(pt) if matches!(&*pt.ty, syn::Type::Reference(_)))).map(|(i, _)| i).collect();
+        let spec = crate::mir::read::Spec { key: &key, lifted_name: &lifted, params: params.clone(), states, has_ret, out_ty, loops, ref_params };
+        match crate::mir::read::read(&ld.m, &ld.names, &spec) {
+            Ok(o) => {
+                // a parameter the body assigns is `mut` (it changes no meaning)
+                for i in &o.assigned_params {
+                    if let Some(syn::FnArg::Typed(pt)) = f.sig.inputs.iter_mut().nth(*i)
+                        && let syn::Pat::Ident(pi) = &mut *pt.pat
+                    {
+                        pi.mutability = Some(Default::default());
+                    }
+                }
+                self.mir_read.push((lifted, key, o.loops.clone()));
+                (o.body, o.helpers)
+            }
+            Err(e) => {
+                self.err(f.sig.ident.span(), e);
+                (empty, vec![])
+            }
+        }
+    }
+
+    /// A loop attachment read by the lift's ghost reading (monomorphized
+    /// like the function), for the MIR reading to place.
+    fn mir_loop_attach(&mut self, at: &Attach, locals: &[(String, Option<syn::Type>)], self_ty: Option<&syn::Type>, state_tys: &[(String, syn::Type)]) -> crate::mir::read::LoopAttach {
+        let sigma2 = self.attach_sigma.clone();
+        let ab = self.attach_bounds.clone();
+        let mut rw = FnRw::new(self, sigma2, true);
+        rw.bounds = ab;
+        rw.self_ty = self_ty.cloned();
+        rw.push_scope();
+        for (n, t) in locals {
+            if let Some(t) = t {
+                rw.bind(n, t.clone());
+            }
+        }
+        for (n, t) in state_tys {
+            let t2: syn::Type = if n == "self" { t.clone() } else { syn::parse_quote!(Seq<u8>) };
+            rw.bind(n, t2);
+        }
+        let mut la = crate::mir::read::LoopAttach::default();
+        for st in &at.stmts {
+            if let Some(mut e) = attach_call(st, "decreases") {
+                rw.expr(&mut e, None);
+                la.decreases = Some(e);
+            } else if let Some(mut e) = attach_call(st, "invariant") {
+                rw.expr(&mut e, None);
+                la.invariants.push(e);
+            } else if let Some(mut e) = attach_call(st, "ensures") {
+                rw.expr(&mut e, None);
+                la.ensures.push(e);
+            } else if let syn::Stmt::Macro(m) = st
+                && (m.mac.path.is_ident("at_start") || m.mac.path.is_ident("at_end") || m.mac.path.is_ident("after_loop"))
+            {
+                match m.mac.parse_body_with(syn::Block::parse_within) {
+                    Ok(mut v) => {
+                        for s2 in v.iter_mut() {
+                            rw.ghost_stmt(s2);
+                        }
+                        if m.mac.path.is_ident("at_start") {
+                            la.at_start.extend(v);
+                        } else if m.mac.path.is_ident("at_end") {
+                            la.at_end.extend(v);
+                        } else {
+                            la.after.extend(v);
+                        }
+                    }
+                    Err(e) => rw.cx.err(m.span(), format!("malformed `{}!`: {e}", m.mac.path.to_token_stream())),
+                }
+            } else {
+                let mut s2 = st.clone();
+                rw.ghost_stmt(&mut s2);
+                la.steps.push(s2);
+            }
+        }
+        rw.pop_scope();
+        la
     }
 
     /// Records how the conformance harness calls the original of a lifted

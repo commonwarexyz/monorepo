@@ -9,7 +9,13 @@
 // `i128` instances are declared unverified here: the lift reports them and
 // does not check them. (Signed integers are read as their two's complement
 // bits, SEMANTICS.md §19.3.)
-#[lift(unverified = "u128, i128")]
+//
+// The bodies are read from rustc's MIR (`varint.sbmir`, written by
+// `sandblaster/mirx/extract.sh` with the nightly of the stable release this
+// crate builds with; `docs/mir-lift.md` §20), not from the surface syntax: the
+// lift keeps only the items' names and signatures. A changed `varint.rs`
+// refuses the stale MIR until it is extracted again.
+#[lift(mir = "varint.sbmir", unverified = "u128, i128")]
 mod varint;
 
 // a model of the host's `crate::Error` (the variants varint builds): proven

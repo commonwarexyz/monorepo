@@ -63,6 +63,9 @@ members = [
 exclude = [
     # sandblaster's optimizer corpus harness: a standalone workspace
     "sandblaster/bench/opt-corpus",
+    # sandblaster's MIR extractor: a rustc driver on a pinned nightly
+    # (rustc-dev), a standalone workspace (sandblaster/mirx/README.md)
+    "sandblaster/mirx",
     ".github/dylints/borrowed_child_context",
     ".github/dylints/child_attribute_name_conflict",
     ".github/dylints/span_name_style",

@@ -267,6 +267,20 @@ green, speed of the result and the human review load.
    model 54, `lift.core` 24): **over the 4k budget** since the in-place
    extension (the MMR track) — named here as new trust; shrinking it (or
    moving readings into checked templates) is open work.
+   **The MIR path** (`#[lift(mir = "m.sbmir")]`, `docs/mir-lift.md` §20,
+   `sandblaster/front/src/mir`) replaces the reading of *bodies*: rustc's
+   own monomorphized MIR (macros expanded, `?`, closures, operators,
+   iterators and constants already lowered by the compiler) is read by a
+   translation over a fixed set of MIR constructs that does not grow with
+   surface features — `mir/read.rs` and the names in `mir/mod.rs` (≈ 2.2k
+   code lines) plus the printer `sandblaster/mirx` (≈ 0.9k: a rustc driver
+   on the pinned nightly of the stable release, whose output is checked in
+   with the sources' SHA-256). For such a module the source lift keeps only
+   the item skeleton (names, signatures and state passing, sealed
+   families, attachments) and the ghost language; its body rewrites are not
+   used. commonware-codec's varint is verified this way with its laws and
+   proofs unchanged. The plan to retire the source lift's body reading is
+   in `docs/mir-lift.md`.
    **Mitigation: the lift conformance check** (`sandblaster/front/src/conform.rs`;
    its module docs are the full description), which every module-mode build of a lifted module
    (and every `compile_lifted` build of an in-place one, §2.1)
@@ -500,6 +514,15 @@ host/
   are `#[lift(host)]` models); a source with an inner attribute after its
   docs is refused; crate mode (`compile`) refuses a lifted crate (the source
   names host items through `crate::`). `driver::lifted` has the details.
+* **Bodies from rustc's MIR** (`#[lift(mir = "m.sbmir", ..)]`, SEMANTICS.md
+  §20). The module's function bodies are read from rustc's MIR, extracted
+  by `sandblaster/mirx/extract.sh` (a rustc driver on the nightly of the
+  stable release the workspace builds with) into a checked-in `.sbmir`
+  file that names its sources by SHA-256; the build refuses a stale file,
+  a file extracted without overflow checks, and MIR of another rustc
+  release. The emitted file (still the source byte for byte) says so in
+  its header. The lift conformance check compares the read functions with
+  the build's rustc exactly as for the source lift.
 * **The optimizer on lifted modules** (`driver::lowered`, `crate::lower`).
   The optimizer is always on here too: it runs on the lifted meaning like on
   any crate (summaries, Σ2 loop summaries, facts from proven laws, the
