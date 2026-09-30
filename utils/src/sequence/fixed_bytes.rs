@@ -3,7 +3,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use core::{
-    cmp::{Ord, PartialOrd},
+    cmp::{Ord, Ordering, PartialOrd},
     fmt::{Debug, Display},
     hash::Hash,
     ops::Deref,
@@ -19,7 +19,7 @@ pub enum Error {
 }
 
 /// An `Array` implementation for fixed-length byte arrays.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, FixedArray)]
+#[derive(Clone, Eq, PartialEq, Hash, Debug, FixedArray)]
 #[fixed_array(infallible, bytes([u8; N]))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
@@ -29,6 +29,40 @@ impl<const N: usize> FixedBytes<N> {
     /// Creates a new `FixedBytes` instance from an array of length `N`.
     pub const fn new(value: [u8; N]) -> Self {
         Self(value)
+    }
+}
+
+impl<const N: usize> Ord for FixedBytes<N> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        let (a, b) = (&self.0, &other.0);
+
+        // Up to 16 bytes the derived compare is faster. Past 64 bytes, unrolling bloats call sites.
+        if N <= 16 || N > 64 {
+            return a.cmp(b);
+        }
+        let (a_words, _) = a.as_chunks::<8>();
+        let (b_words, _) = b.as_chunks::<8>();
+        for (a, b) in a_words.iter().zip(b_words) {
+            let (a, b) = (u64::from_be_bytes(*a), u64::from_be_bytes(*b));
+            if a != b {
+                return a.cmp(&b);
+            }
+        }
+        if N.is_multiple_of(8) {
+            return Ordering::Equal;
+        }
+
+        // Every earlier byte is equal, so the last 8 bytes (overlapping the last whole word) decide.
+        let last = |x: &[u8; N]| u64::from_be_bytes(*x.last_chunk::<8>().expect("N > 16"));
+        last(a).cmp(&last(b))
+    }
+}
+
+impl<const N: usize> PartialOrd for FixedBytes<N> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -82,9 +116,10 @@ impl<const N: usize> Zeroize for FixedBytes<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixed_bytes;
+    use crate::{fixed_bytes, test_rng};
     use bytes::{Buf as _, BytesMut};
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use rand::RngExt as _;
 
     #[test]
     fn test_codec() {
@@ -159,6 +194,68 @@ mod tests {
 
         let c = FixedBytes::new([1, 2, 3, 4]);
         assert_eq!(a, c);
+    }
+
+    fn assert_matches<const N: usize>(a: &[u8; N], b: &[u8; N]) {
+        let (left, right) = (FixedBytes::new(*a), FixedBytes::new(*b));
+        assert_eq!(left.cmp(&right), a.cmp(b));
+        assert_eq!(right.cmp(&left), b.cmp(a));
+        assert_eq!(left.partial_cmp(&right), Some(a.cmp(b)));
+    }
+
+    fn check<const N: usize>() {
+        const BOUNDARIES: [u8; 4] = [0x00, 0x7f, 0x80, 0xff];
+        let mut rng = test_rng();
+        for _ in 0..8 {
+            let a: [u8; N] = rng.random();
+            assert_matches(&a, &a);
+
+            // Make every position the first difference.
+            for k in 0..N {
+                let mut b = a;
+                b[k] = a[k] ^ rng.random_range(1..=u8::MAX);
+                for byte in &mut b[k + 1..] {
+                    *byte = rng.random();
+                }
+                assert_matches(&a, &b);
+
+                // Boundary bytes at `k`, with suffixes that order the other way for some pairs.
+                for x in BOUNDARIES {
+                    for y in BOUNDARIES {
+                        let (mut a, mut b) = (a, a);
+                        a[k] = x;
+                        b[k] = y;
+                        a[k + 1..].fill(0xff);
+                        b[k + 1..].fill(0x00);
+                        assert_matches(&a, &b);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Checks `FixedBytes` ordering against `[u8; N]` at every first-difference position, on both
+    /// sides of each size cutoff and at every remainder length.
+    #[test]
+    fn test_ord_matches_byte_order() {
+        check::<0>();
+        check::<5>();
+        check::<16>();
+        check::<17>();
+        check::<18>();
+        check::<19>();
+        check::<20>();
+        check::<21>();
+        check::<22>();
+        check::<23>();
+        check::<24>();
+        check::<31>();
+        check::<32>();
+        check::<33>();
+        check::<40>();
+        check::<63>();
+        check::<64>();
+        check::<65>();
     }
 
     #[cfg(feature = "arbitrary")]
