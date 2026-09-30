@@ -3,14 +3,15 @@
 //! # Design
 //!
 //! The proposed design separates instruction semantics, algorithm implementations, and
-//! execution. The crate currently contains no implementation; the names and signatures below
-//! are sketches for a prototype.
+//! execution. [`Portable`] defines the initial instruction interface. The remaining names
+//! and signatures below are sketches for a prototype.
 //!
 //! ## Instruction profiles
 //!
 //! Operations expose a fixed set of algorithm paths: portable, AVX-512, and NEON. Each path is
-//! generic over a trait describing the instructions it may use. `Simd` provides the portable
-//! baseline; the accelerated profiles extend it and target the following deployment platforms:
+//! generic over a trait describing the instructions it may use. [`Portable`] provides the
+//! portable baseline. The proposed `Simd` trait combines it with execution; accelerated
+//! profiles extend `Simd` and target the following deployment platforms:
 //!
 //! - `Avx512`: 512-bit AVX-512F operations, GFNI byte arithmetic, and AVX-512 IFMA's 52-bit
 //!   multiply-accumulates. This is a crate-defined bundle; AVX-512F alone does not imply GFNI
@@ -29,15 +30,15 @@
 //!
 //! ## Concrete backends
 //!
-//! The prototype uses concrete backend types: `Portable`, `NativeAvx512`, `EmulatedAvx512`,
+//! The prototype uses concrete backend types: `Scalar`, `NativeAvx512`, `EmulatedAvx512`,
 //! `NativeNeon`, and `EmulatedNeon`. Each type acts as an execution token and implements its
 //! instruction capabilities. `Avx512` and `Neon` are capability traits; `NativeAvx512` and
 //! `EmulatedAvx512` both implement `Avx512`, so a generic AVX-512 algorithm can run with either.
 //! Vector and mask representations are associated types of the instruction traits. Native and
 //! emulated backends can use different representations while preserving the same lane semantics.
 //!
-//! `Portable` exposes platform-independent vector operations through `Simd`. Its implementation
-//! may use compiler vectorization or scalar lanes; portability does not promise that every
+//! `Scalar` implements platform-independent vector operations through [`Portable`]. It may use
+//! compiler vectorization or scalar lanes; portability does not promise that every
 //! operation maps to one hardware instruction, even for small vectors. The architecture emulators
 //! instead model the exact instructions and vector shapes used by the accelerated algorithms.
 //! Comparing algorithms and checking native instructions against their emulators are distinct tests.
@@ -50,8 +51,8 @@
 //! ## Execution and composition
 //!
 //! A concrete backend token implements `Executor` and its instruction traits. `Simd` extends
-//! `Executor`; `Avx512` and `Neon` extend `Simd`. Native tokens have private construction and are
-//! obtained only after establishing the required CPU features. Their execution methods invoke
+//! `Executor` and [`Portable`]; `Avx512` and `Neon` extend `Simd`. Native tokens have private
+//! construction and are obtained only after establishing the required CPU features. Their execution methods invoke
 //! the corresponding operation path through crate-owned target-feature wrappers. Portable and
 //! emulated tokens invoke their paths without requiring those hardware features.
 //!
@@ -89,7 +90,7 @@
 //! }
 //! ```
 //!
-//! `Executor::execute` selects a path statically for its concrete token: `Portable` invokes
+//! `Executor::execute` selects a path statically for its concrete token: `Scalar` invokes
 //! `portable`, both AVX-512 tokens invoke `avx512`, and both NEON tokens invoke `neon`. Generic
 //! composition only needs `Simd`, which provides instruction access and execution of child operations:
 //!
@@ -107,7 +108,7 @@
 //! without specializations use their portable defaults. This requires neither trait-implementation
 //! discovery nor overlapping fallback implementations.
 //!
-//! A crate-owned dispatcher selects an available native token or `Portable` at the outer boundary
+//! A crate-owned dispatcher selects an available native token or `Scalar` at the outer boundary
 //! and executes the root operation. The concrete token threads through the tree. Child calls to
 //! `execute` repeat neither feature detection nor runtime backend selection and use static dispatch.
 //! Passing a runtime enum through the tree and matching it at every child would lose this property.
@@ -133,7 +134,7 @@
 //!
 //! ## Consistency testing
 //!
-//! A differential helper takes an operation factory and compares execution through `Portable`,
+//! A differential helper takes an operation factory and compares execution through `Scalar`,
 //! `EmulatedAvx512`, and `EmulatedNeon` without requiring native hardware. It exercises the same
 //! execution entry points as production, including specialized children and portable defaults
 //! throughout composed operations:
@@ -168,12 +169,12 @@
 //!
 //! 1. Define the `Avx512` (including GFNI and IFMA) and `Neon` profiles and precise primitive
 //!    semantics, starting with operations needed by existing erasure-coding or curve-arithmetic
-//!    kernels. Retain `Simd` as the portable fallback and consistency reference.
-//! 2. Implement the concrete `Portable`, `NativeAvx512`, `EmulatedAvx512`, `NativeNeon`, and
+//!    kernels. Extend [`Portable`] as needed for the common instruction interface.
+//! 2. Implement the concrete `Scalar`, `NativeAvx512`, `EmulatedAvx512`, `NativeNeon`, and
 //!    `EmulatedNeon` backends, with associated vector types and instruction-level hardware tests.
 //! 3. Prototype the fixed-profile `Operation` methods and defaults, `Executor`, and the instruction
-//!    hierarchy `Simd: Executor`, `Avx512: Simd`, and `Neon: Simd`. Add opaque operation constructors
-//!    and a crate-owned outer dispatcher. Validate generic composition with specialized leaves
+//!    hierarchy `Simd: Portable + Executor`, `Avx512: Simd`, and `Neon: Simd`. Add opaque operation
+//!    constructors and a crate-owned outer dispatcher. Validate generic composition with specialized leaves
 //!    under a parent that only implements portable orchestration, without consumer-side macros.
 //! 4. Add the fixed-profile consistency helper and differential fuzz coverage for both leaves and
 //!    composed operations, including observable mutable state. Keep hardware primitive validation
@@ -234,3 +235,8 @@
 // requirements when introducing new instructions. Field reduction, GF16 multiplication,
 // butterflies, and curve formulas remain algorithms built from these primitives. Scaling by
 // 19 can use shifts and additions, with native code generation checked against existing kernels.
+
+commonware_macros::stability_scope!(ALPHA {
+    mod core;
+    pub use core::Portable;
+});
