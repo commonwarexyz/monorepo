@@ -390,9 +390,8 @@ enum PrepareBatchesError {
     Incomplete,
     /// The request future was dropped while waiting.
     Cancelled,
-    /// A finalization of a non-ancestor (possibly the candidate itself) landed
-    /// mid-preparation. The caller re-checks
-    /// against the new canonical state.
+    /// A finalization of a non-ancestor (possibly the candidate itself) landed or is in flight
+    /// during preparation. The caller re-checks against the new canonical state.
     Stale,
 }
 

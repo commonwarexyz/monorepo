@@ -190,9 +190,9 @@ pub struct Input<Upstream, Provider> {
 /// Implementors execute blocks against [`DatabaseSet::Unmerkleized`] batches and return
 /// [`DatabaseSet::Merkleized`] batches (see the [module docs](crate::stateful)). Every execution
 /// method reads through `batches`, the only database access execution is given (`capture` and
-/// `finalized` also receive readers, for observation only). A
-/// batch overlays speculative ancestor state and falls back to applied state for anything it does
-/// not cover, so it is always the complete view for its branch.
+/// `finalized` also receive readers, for observation only). A batch overlays speculative ancestor
+/// state and falls back to applied state for anything it does not cover, so it is always the
+/// complete view for its branch.
 ///
 /// Methods may run concurrently on different clones. Given the same inputs and database state,
 /// every clone must produce the same state transition. Mutable state that affects execution
@@ -290,9 +290,9 @@ where
     /// it with everything else.
     ///
     /// Once a block that is not an ancestor of `batches` is finalized, every batch read and
-    /// merkleization refuses with [`ExecutionError::Stale`] (writes never refuse). That block may be a competitor or the candidate
-    /// itself, finalized from a separate replay. [`Stateful`] then re-checks the block against the
-    /// new canonical state and retries or answers from it.
+    /// merkleization refuses with [`ExecutionError::Stale`] (writes never refuse). That block may
+    /// be a competitor or the candidate itself, finalized from a separate replay. [`Stateful`] then
+    /// re-checks the block against the new canonical state and retries or answers from it.
     fn verify(
         &mut self,
         context: (E, Self::Context),

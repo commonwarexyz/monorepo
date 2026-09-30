@@ -273,8 +273,8 @@ where
 
     /// Hands the converged state to [`Processing`].
     ///
-    /// Returns without recording completion if shutdown interrupts the handoff or its barrier is
-    /// not durable.
+    /// Returns without recording completion if shutdown interrupts the handoff. Panics if its
+    /// barrier ends without durability while the actor runs.
     async fn transition(
         self,
         artifact: Artifact<E, A>,

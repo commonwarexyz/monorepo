@@ -126,7 +126,7 @@ where
     }
 
     /// Awaits `operation` while continuing to complete verification attempts.
-    pub(super) async fn drive<T>(&mut self, operation: impl Future<Output = T>) -> T {
+    async fn drive<T>(&mut self, operation: impl Future<Output = T>) -> T {
         futures::pin_mut!(operation);
         loop {
             select! {

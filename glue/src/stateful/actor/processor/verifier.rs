@@ -43,9 +43,8 @@ enum PrepareFailure {
     Invalid,
     /// Preparation ended without a verdict because its request was cancelled.
     Cancelled,
-    /// A finalization of a non-ancestor (possibly the candidate itself) landed
-    /// mid-preparation. Re-check the candidate
-    /// against the new canonical state.
+    /// A finalization of a non-ancestor (possibly the candidate itself) landed or is in flight
+    /// during preparation. Re-check the candidate against the new canonical state.
     Stale,
 }
 

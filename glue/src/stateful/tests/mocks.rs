@@ -125,8 +125,8 @@ thread_local! {
     static SNAPSHOT_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
     /// Single-use gate consumed by the next [`TestDb`] batch fork, which holds no read guard.
     static NEW_BATCH_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
-    /// Single-use gate consumed by the next [`TestApp`] finalized hook, which runs inside the
-    /// finalizing window.
+    /// Single-use gate consumed by the next finalized hook of any test application that calls
+    /// [`pass_finalized_gate`] (such as [`TestApp`]), which runs inside the finalizing window.
     static FINALIZED_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
     /// Single-use gate consumed by the next [`TestDb`] finalize, before it starts its flush.
     static FINALIZE_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };

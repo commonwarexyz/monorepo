@@ -249,8 +249,8 @@ where
     /// `deferred` holds verification requests that arrived during state sync and have not started
     /// yet. At most one barrier is active, and blocks finalized while it runs are covered by a
     /// later barrier. A marshal acknowledgement is released only once its block is durable.
-    /// Processing stops on shutdown, when the mailbox closes, or when a barrier ends without
-    /// durability, and every pending acknowledgement is then cancelled.
+    /// Processing stops on shutdown or when the mailbox closes, and every pending acknowledgement
+    /// is then cancelled. A barrier that ends without durability while the actor runs panics.
     ///
     /// Each step builds its large futures in a helper that boxes them (see
     /// [`Verifications::until_stopped`]), so this loop's own future and stack frame stay small.
@@ -614,7 +614,9 @@ where
         // its cheap members every block.
         let publisher = &mut self.snapshot_publisher;
         let processor = verifications
-            .until_stopped(shutdown, || processor.refresh_snapshot(publisher))
+            .until_stopped(shutdown, || {
+                processor.refresh_snapshot(publisher).instrument(process)
+            })
             .await;
         if processor.is_none() {
             warn!(height = height.get(), "exiting mid-refresh on shutdown");
@@ -1280,10 +1282,6 @@ mod tests {
         (Mailbox::new(sender), reader, marshal.guards, actor)
     }
 
-    /// Spawn a [`Processing`] loop over a gated [`TestDb`], returning its
-    /// mailbox, flush controls, the snapshot subscriber, a guard keeping the
-    /// (never-started) marshal actor's mailbox open, and the processing actor
-    /// handle.
     /// A timed runner whose spawned tasks' panics resolve their handles with an error.
     fn panicking_runner() -> deterministic::Runner {
         deterministic::Runner::new(
@@ -1293,6 +1291,10 @@ mod tests {
         )
     }
 
+    /// Spawn a [`Processing`] loop over a gated [`TestDb`], returning its
+    /// mailbox, flush controls, the snapshot subscriber, a guard keeping the
+    /// (never-started) marshal actor's mailbox open, and the processing actor
+    /// handle.
     async fn spawn_processing(
         context: &deterministic::Context,
         prefix: &str,
@@ -1304,7 +1306,7 @@ mod tests {
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {
-        spawn_processing_with_gates(context, prefix, prune_config, VecDeque::new()).await
+        spawn_processing_with_gates(context, prefix, prune_config, VecDeque::new(), None).await
     }
 
     async fn spawn_processing_with_gates(
@@ -1312,6 +1314,7 @@ mod tests {
         prefix: &str,
         prune_config: Option<PruneConfig>,
         verify_gates: VecDeque<ApplicationGate>,
+        proposal_gate: Option<ApplicationGate>,
     ) -> (
         Mailbox<deterministic::Context, GatedApp>,
         FlushControl,
@@ -1336,7 +1339,7 @@ mod tests {
             prune_config.map(|config| Pruning::new(config, marshal.mailbox.max_pending_acks(), 0));
         let app = GatedApp {
             verify_gates: Arc::new(Mutex::new(verify_gates)),
-            proposal_gate: Arc::new(Mutex::new(None)),
+            proposal_gate: Arc::new(Mutex::new(proposal_gate)),
             verify_valid: true,
             stale_verifies: Arc::default(),
             observed_contexts: Arc::default(),
@@ -3606,6 +3609,7 @@ mod tests {
                     retained_qmdb_blocks: 0,
                 }),
                 VecDeque::from([verify_gate]),
+                None,
             )
             .await;
 
@@ -3751,6 +3755,7 @@ mod tests {
                     retained_qmdb_blocks: 0,
                 }),
                 VecDeque::from([verify_gate]),
+                None,
             )
             .await;
 
@@ -3788,8 +3793,8 @@ mod tests {
             assert_eq!(control.flushes.lock().len(), 1);
 
             // Releasing block 1's flush leaves durability (1) short of the
-            // prune target (2), so the prune starts the covering sync inline
-            // and waits on its parked flush.
+            // prune target (2), so the loop starts the covering sync and the
+            // prune waits for its parked flush.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter1.await.expect("block 1 acknowledgement");
@@ -5356,6 +5361,114 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
             drop(guards);
+        });
+    }
+
+    /// A block finalized while a due prune waits on an active barrier applies at once, since the
+    /// prune's wait for durability does not block the mailbox.
+    #[test]
+    fn due_prune_does_not_hold_up_finalizations() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, _subscriber, _marshal, _actor) = spawn_processing(
+                &context,
+                "prune-open-mailbox",
+                Some(PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                }),
+            )
+            .await;
+
+            // Block 1's flush stays parked, and block 2 makes a prune due.
+            let genesis = TestBlock::new(0, 0);
+            let first = TestBlock::child(&genesis, 1);
+            let second = TestBlock::child(&first, 2);
+            let third = TestBlock::child(&second, 3);
+            for block in [first, second] {
+                let (acknowledgement, _waiter) = Exact::handle();
+                let _ = mailbox.report(Update::Block(Arc::new(block), acknowledgement));
+            }
+            while control.applied.load(Ordering::Relaxed) < 2 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            context.sleep(Duration::from_millis(50)).await;
+
+            // The prune waits for block 1's flush, but block 3 still applies.
+            let (acknowledgement, _waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(third), acknowledgement));
+            context.sleep(Duration::from_millis(50)).await;
+            assert_eq!(control.applied.load(Ordering::Relaxed), 3);
+            assert!(
+                control.pruned.lock().is_empty(),
+                "the prune waits for durability"
+            );
+
+            // Release each flush until one covers the prune target, which block 3 moved to 2.
+            while control.pruned.lock().is_empty() {
+                let release = control.flushes.lock().pop();
+                if let Some(release) = release {
+                    let _ = release.send(Ok(()));
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(control.pruned.lock().clone(), vec![2]);
+        });
+    }
+
+    /// A barrier that completes while a proposal is parked releases its acknowledgements without
+    /// waiting for the proposal.
+    #[test]
+    fn barrier_completes_during_parked_proposal() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (proposal_gate, proposal_started, proposal_release) = application_gate();
+            let (mut mailbox, control, _subscriber, _marshal, _actor) =
+                spawn_processing_with_gates(
+                    &context,
+                    "barrier-during-proposal",
+                    None,
+                    VecDeque::new(),
+                    Some(proposal_gate),
+                )
+                .await;
+
+            // Block 1 applies with its flush parked.
+            let genesis = TestBlock::new(0, 0);
+            let first = TestBlock::child(&genesis, 1);
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(first.clone()), acknowledgement));
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Park a proposal on block 1.
+            let mut proposer = mailbox.clone();
+            let mut proposal = Box::pin(proposer.propose(
+                (
+                    context.child("propose"),
+                    TestBlock::child(&first, 2).context(),
+                ),
+                ancestry::from_iter([Arc::new(first)]),
+                (),
+            ));
+            assert!(poll!(&mut proposal).is_pending());
+            proposal_started.await.expect("proposal should start");
+
+            // The flush completes and releases block 1's acknowledgement while the proposal waits.
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Ok(()));
+            select! {
+                result = waiter => result.expect("block 1 acknowledgement"),
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("the acknowledgement waited for the proposal");
+                },
+            }
+            assert!(poll!(&mut proposal).is_pending());
+
+            proposal_release
+                .send(())
+                .expect("proposal should remain active");
+            assert!(proposal.await.is_none());
         });
     }
 
