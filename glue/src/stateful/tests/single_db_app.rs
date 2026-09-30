@@ -55,11 +55,11 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sync::Mutex, test_rng,
+    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
 };
 use futures::StreamExt;
 use rand_core::Rng;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 /// The QMDB database type used by the single-db e2e tests.
 pub(super) type Qmdb<E> =
@@ -298,29 +298,13 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
 }
 
 /// Engine definition implementing `EngineDefinition` for the simulation harness.
+#[derive(Clone)]
 pub(crate) struct SingleDbEngine {
     participants: Vec<ed25519::PublicKey>,
     schemes: Vec<MockScheme<ed25519::PublicKey>>,
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
     retained_marshal_blocks: usize,
-    sync_entries: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
-    sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
-}
-
-// Clones start with empty sync observations so each run records only its own.
-impl Clone for SingleDbEngine {
-    fn clone(&self) -> Self {
-        Self {
-            participants: self.participants.clone(),
-            schemes: self.schemes.clone(),
-            enable_state_sync: self.enable_state_sync,
-            sync_config: self.sync_config,
-            retained_marshal_blocks: self.retained_marshal_blocks,
-            sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
-            sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
-        }
-    }
 }
 
 impl SingleDbEngine {
@@ -344,8 +328,6 @@ impl SingleDbEngine {
                 max_retained_roots: 8,
             },
             retained_marshal_blocks: 10,
-            sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
-            sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -474,7 +456,12 @@ impl EngineDefinition for SingleDbEngine {
             partition_prefix.clone(),
         )
         .await;
-        let should_state_sync = plan.should_sync(self.enable_state_sync && delayed);
+        let requested = self.enable_state_sync && delayed;
+        let should_state_sync = plan.should_sync(requested);
+
+        // A floor persisted by an earlier startup means its state sync was interrupted.
+        let state_sync_resumed = plan.floor().is_some();
+
         let provider = ConstantProvider::new(scheme.clone());
 
         let (probe, probe_mailbox) = Probe::new(ProbeConfig {
@@ -491,8 +478,10 @@ impl EngineDefinition for SingleDbEngine {
             let finalization = probe_mailbox.subscribe().await.expect("probe stopped");
             plan = plan.set_floor(finalization).await;
             None
+        } else if requested {
+            plan.completed().map(|height| height.get())
         } else {
-            self.sync_heights.lock().get(public_key).copied()
+            None
         };
 
         // Marshal actor
@@ -600,16 +589,7 @@ impl EngineDefinition for SingleDbEngine {
                 .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
                 .await
                 .expect("sync floor block must be available");
-            let height = block.height();
-            *self
-                .sync_entries
-                .lock()
-                .entry(public_key.clone())
-                .or_insert(0) += 1;
-            self.sync_heights
-                .lock()
-                .insert(public_key.clone(), height.get());
-            state_sync_height = Some(height.get());
+            state_sync_height = Some(block.height().get());
         }
 
         // Initialize stateful from marshal's processed frontier.
@@ -651,12 +631,7 @@ impl EngineDefinition for SingleDbEngine {
             handle,
             MockValidatorState {
                 marshal: marshal_mailbox,
-                state_sync_entries: self
-                    .sync_entries
-                    .lock()
-                    .get(public_key)
-                    .copied()
-                    .unwrap_or(0),
+                state_sync_resumed,
                 state_sync_height,
                 oldest_retained,
             },
