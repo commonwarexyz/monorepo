@@ -177,7 +177,8 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
     let code_path = out_dir.join(&out);
     let key_path = out_dir.join(format!("{name}-verdict.key"));
     // (a pending-gates build never reuses a verdict: it has none)
-    let key = if gates == GateUse::Enforce { context.map(|ctx| verdict_key(ctx, env, fs, &root_path, &format!("in-place\nout {name}"), &checked)) } else { None };
+    let conform = crate::conform::Config::for_build(env, fs, &manifest, &out_dir, name, context);
+    let key = if gates == GateUse::Enforce { context.map(|ctx| verdict_key(ctx, env, fs, &root_path, &format!("in-place\nout {name}\nedition {}", conform.edition), &checked)) } else { None };
     if let Some(k) = &key
         && let (Ok(kt), Ok(code)) = (fs.read(&key_path), fs.read(&code_path))
         && kt == key_text(k, &hex(&sha256(code.as_bytes())))
@@ -187,7 +188,6 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
         return o;
     }
     let root_display = root_path.display().to_string();
-    let conform = crate::conform::Config::for_build(env, fs, &manifest, &out_dir, name, context);
     let b = build_crate_emitting(&checked, LockUse::Enforce, &root_display, &Emission::InPlace { out: out.clone(), conform });
     if gates == GateUse::Pending {
         return pending_outcome(o, &b, &checked, name, root, &root_display, &out_dir, &code_path, &key_path);

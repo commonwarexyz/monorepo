@@ -411,7 +411,8 @@ fn module_mode_without_a_cheaper_residual_emits_the_source_as_is() {
     assert!(o.ok, "the build failed:\n{}", o.stderr);
     let code = o.outputs.iter().find(|(p, _)| p.file_name().is_some_and(|f| f == "bits.rs")).map(|(_, c)| c.clone()).expect("bits.rs");
     assert!(code.contains("// STATUS: VERIFIED + LIFTED AS-IS (module mode):"), "{code}");
-    assert!(code.contains("optimized: no residual of the 2 lifted function(s) is cheaper and printable, the source is emitted as-is"), "{code}");
+    // the summary says why each function kept its source text
+    assert!(code.contains("optimized: none of the 2 source function(s) rewritten, the source is emitted as-is; source kept: "), "{code}");
     let (_, body) = driver::lifted::split_docs(&bits);
     assert!(code.contains(body), "{code}");
     assert!(!code.contains("__sandblaster_opt_"), "{code}");

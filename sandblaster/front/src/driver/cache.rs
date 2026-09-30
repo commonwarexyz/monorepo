@@ -12,13 +12,33 @@
 //!
 //! * `verdict` — a whole crate verdict (the emitted file, the report and
 //!   the timing) of `sandblaster::build::compile_module` / `compile`. The key
-//!   ([`super::module`]'s verdict key) covers the toolchain (the SHA-256 of
-//!   the build-script binary, which embeds the whole toolchain and every
-//!   dependency), every `SANDBLASTER_*` variable that can change a result,
-//!   the target (`CARGO_CFG_TARGET_*`), the root, the module file, and the
-//!   content of every file the front end read (sources, data files, the
-//!   lock, the profile). Only verdicts are stored: a failed build leaves no
-//!   entry.
+//!   ([`super::module`]'s verdict key) covers the verifier context
+//!   ([`verifier_context`]: the toolchain identity, the toolchain's
+//!   overflow checks and test hooks, the build's `rustc -vV`, every
+//!   `SANDBLASTER_*` variable that can change a result), the target
+//!   (`CARGO_CFG_TARGET_*`), the root, the module file, the host edition,
+//!   and the content of every file the front end read (sources, data
+//!   files, the lock, the profile). Only verdicts are stored: a failed
+//!   build leaves no entry.
+//!
+//! # The toolchain identity
+//!
+//! A content hash of the toolchain (the facade's `toolchain_id.rs`,
+//! computed by its `build.rs`): the files of every sandblaster crate the
+//! build script links (sources, embedded data and the data read at run
+//! time), the lock entries of every third-party crate, and the `rustc`,
+//! host and `RUSTFLAGS` that compiled them. It does **not** depend on the
+//! host crate, its features, the profile or the target directory, so
+//! `cargo build`, `cargo test`, a release build and a dependent crate's
+//! build of the same module share one verdict. (It replaced the hash of
+//! the build-script binary, which differed in each of those contexts.)
+//! What does not enter it, and why that cannot change a stored verdict:
+//! the optimization level (the toolchain is deterministic integer code)
+//! and `debug_assertions` (the toolchain's `debug_assert!`s are pure and
+//! it never branches on `cfg(debug_assertions)` — checked by
+//! `tests/build_loop.rs` —, so they can only add a panic, and a failed
+//! build stores nothing). Overflow checks and the optimizer's test hooks
+//! can change a result, so they are part of the context.
 //! * `mutant` — one spec mutant's verdict of the spec-mutation gate
 //!   (`crate::mutate`, *Gate mode*). The key covers the toolchain, the
 //!   target, the mutant (item, operator, site, diff), its plan (closure,
@@ -348,9 +368,8 @@ fn key_file(file: &Path) -> Result<Hash, String> {
     }
 }
 
-/// A store plus the toolchain identity every key starts with (the facade's
-/// verifier context: the build-script binary's hash and the relevant
-/// `SANDBLASTER_*` variables).
+/// A store plus the toolchain identity every key starts with (the hash of
+/// the facade's verifier context, [`verifier_context`]).
 #[derive(Clone, Debug)]
 pub struct VerdictCache {
     pub store: Store,
@@ -362,4 +381,50 @@ impl VerdictCache {
     pub fn new(store: Store, context: &str) -> VerdictCache {
         VerdictCache { store, toolchain: hex(&sha256(context.as_bytes())) }
     }
+}
+
+/// Resource and cache settings: they never change a result, so they are
+/// not part of the verifier context (a build with another memory limit,
+/// worker count or cache directory reuses the same verdicts).
+pub const NOT_IDENTITY: &[&str] = &["SANDBLASTER_MEM_LIMIT_GB", "SANDBLASTER_GATE_WORKERS", "SANDBLASTER_CACHE", "SANDBLASTER_CACHE_DIR", "SANDBLASTER_CACHE_KEY", "SANDBLASTER_CACHE_KEY_FILE", "SANDBLASTER_CACHE_MAX_MB"];
+
+/// The context format (part of every verdict, mutant and conformance key).
+pub const CONTEXT_FORMAT: &str = "sandblaster-verifier/2";
+
+/// Whether this build of the front end has overflow checks (a probe: an
+/// overflowing addition panics or wraps). An unchecked toolchain could
+/// wrap where a checked one fails, so the setting is part of the context.
+pub fn overflow_checks() -> bool {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let wrapped = std::panic::catch_unwind(|| std::hint::black_box(255u8) + std::hint::black_box(1u8));
+    std::panic::set_hook(prev);
+    wrapped.is_err()
+}
+
+/// The verifier context: what, besides the verified inputs, determines a
+/// result (module docs, *The toolchain identity*). `toolchain_id` is the
+/// facade's content hash of the toolchain (empty when it could not be
+/// computed: `None`, nothing is reused); `rustc_vv` the `rustc -vV` of the
+/// build's `RUSTC` (the lift conformance check compiles the source with
+/// it); `vars` the process environment, of which every `SANDBLASTER_*`
+/// variable but the [`NOT_IDENTITY`] ones enters (sorted). Nothing here
+/// depends on the build-script binary, the host crate's features, the
+/// profile or the target directory.
+pub fn verifier_context(toolchain_id: &str, rustc_vv: Option<&str>, vars: &[(String, String)]) -> Option<String> {
+    let id = toolchain_id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let mut ctx = format!("{CONTEXT_FORMAT}\ntoolchain {id}\n");
+    ctx.push_str(&format!("overflow-checks {}\n", if overflow_checks() { "on" } else { "off" }));
+    ctx.push_str(&format!("opt-test-hooks {}\n", if cfg!(feature = "opt-test-hooks") { "on" } else { "off" }));
+    ctx.push_str(&format!("rustc {}\n", rustc_vv.map(|v| hex(&sha256(v.as_bytes()))).unwrap_or_else(|| "unavailable".into())));
+    let mut vs: Vec<&(String, String)> = vars.iter().filter(|(k, _)| k.starts_with("SANDBLASTER_") && !NOT_IDENTITY.contains(&k.as_str())).collect();
+    vs.sort();
+    vs.dedup();
+    for (k, v) in vs {
+        ctx.push_str(&format!("{k}={v}\n"));
+    }
+    Some(ctx)
 }

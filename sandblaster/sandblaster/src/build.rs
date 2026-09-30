@@ -59,7 +59,6 @@ extern crate std;
 use std::io::Write as _;
 use std::string::String;
 use std::vec::Vec;
-use std::format;
 
 use sandblaster_front::driver;
 use sandblaster_front::loader::RealFs;
@@ -156,28 +155,25 @@ pub fn compile_lifted_pending_gates(root: &str, name: &str) {
     finish(driver::build_lifted_with(root, name, context.as_deref(), &env, &RealFs, driver::GateUse::Pending));
 }
 
-/// Resource and cache settings: they never change a result, so they are
-/// not part of the verifier's identity (a build with another memory limit
-/// or cache directory reuses the same verdicts).
-const NOT_IDENTITY: &[&str] = &["SANDBLASTER_MEM_LIMIT_GB", "SANDBLASTER_GATE_WORKERS", "SANDBLASTER_CACHE", "SANDBLASTER_CACHE_DIR", "SANDBLASTER_CACHE_KEY", "SANDBLASTER_CACHE_KEY_FILE", "SANDBLASTER_CACHE_MAX_MB"];
+/// The toolchain identity: a content hash of the toolchain this build
+/// script links (the facade's `build.rs`, `toolchain_id.rs`), empty when it
+/// could not be computed (then no verdict is reused).
+const TOOLCHAIN_ID: &str = env!("SANDBLASTER_TOOLCHAIN_ID");
 
 /// The verifier's identity for verdict reuse (the local key file in
-/// `OUT_DIR` and the shared verdict cache, `sandblaster_front::driver::cache`):
-/// the SHA-256 of this build-script binary (it embeds the whole toolchain
-/// and its dependencies, so any toolchain change re-verifies; it does not
-/// depend on the target directory) and every `SANDBLASTER_*` variable but the
-/// resource and cache settings (the others may steer the optimizer).
-/// `None` (never reuse) when the binary cannot be read.
+/// `OUT_DIR`, the shared verdict cache and the lift conformance key;
+/// [`sandblaster_front::driver::cache::verifier_context`]): the toolchain's
+/// content hash, its overflow checks and test hooks, the build's `rustc
+/// -vV` and every `SANDBLASTER_*` variable but the resource and cache
+/// settings. It does not depend on this binary, the host crate's features,
+/// the profile or the target directory, so `cargo build`, `cargo test`, a
+/// release build and a dependent crate's build share one verdict. `None`
+/// (never reuse) without a toolchain identity.
 fn verifier_context() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let bytes = std::fs::read(exe).ok()?;
-    let mut ctx = format!("exe {}\n", sandblaster_front::surface::hex(&sandblaster_front::surface::sha256(&bytes)));
-    let mut vars: Vec<(String, String)> = std::env::vars().filter(|(k, _)| k.starts_with("SANDBLASTER_") && !NOT_IDENTITY.contains(&k.as_str())).collect();
-    vars.sort();
-    for (k, v) in vars {
-        ctx.push_str(&format!("{k}={v}\n"));
-    }
-    Some(ctx)
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let vv = std::process::Command::new(&rustc).arg("-vV").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    let vars: Vec<(String, String)> = std::env::vars().collect();
+    sandblaster_front::driver::cache::verifier_context(TOOLCHAIN_ID, vv.as_deref(), &vars)
 }
 
 fn finish(outcome: driver::BuildOutcome) {
