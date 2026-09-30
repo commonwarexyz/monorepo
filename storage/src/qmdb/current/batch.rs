@@ -607,7 +607,7 @@ where
             .merkleize_with_floor_scan(
                 metadata,
                 staged_updates,
-                Some(prefetched),
+                prefetched,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;

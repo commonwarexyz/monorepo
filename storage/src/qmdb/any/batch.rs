@@ -285,10 +285,9 @@ where
 
 /// An active update evicted by [`UnmerkleizedBatch::pop_active`].
 pub struct ActiveEntry<F: Family, U: update::Update> {
-    /// The update's original location.
+    /// The update's location prior to eviction.
     pub location: Location<F>,
-    /// The evicted update. Write its key and value back to preserve it at the tip.
-    /// Ordered databases regenerate its successor link from the final key set.
+    /// The evicted update.
     pub update: U,
 }
 
@@ -1598,7 +1597,7 @@ where
             .merkleize_with_floor_scan(
                 metadata,
                 staged_updates,
-                Some(prefetched),
+                prefetched,
                 |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
             )
             .await?;
@@ -1608,7 +1607,8 @@ where
     /// Resolve the caller's updates on the strategy pool while gathering and reading the
     /// committed prefix of the floor-raise candidates, overlapping the two. Returns the
     /// prepared batch, the staged updates, and the prefetched candidates to seed its floor scan
-    /// with. Preparation validates and retains the live chain before any supplied-database read.
+    /// with. Manual-floor batches skip prefetching and return `None`. Preparation validates and
+    /// retains the live chain before any supplied-database read.
     ///
     /// `fill_candidates` must be the same candidate source the subsequent floor raise
     /// scans, so the prefetched prefix continues seamlessly into the live scan (see
@@ -1632,7 +1632,7 @@ where
         (
             Prepared<'a, F, E, C, I, H, update::Unordered<K, V>, N, S>,
             StagedUpdates<F, update::Unordered<K, V>>,
-            PrefetchedCandidates<F, update::Unordered<K, V>>,
+            Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
         ),
         crate::qmdb::Error<F>,
     >
@@ -1648,30 +1648,30 @@ where
         } = self;
         let mut prepared = batch.prepare(db)?;
 
-        // Bound the steps the floor raise can take: only emitted ops consume steps, and an
-        // op is emitted per location-resolved update plus per upsert or prior mutation on a
-        // key alive in the committed snapshot. Fresh-key creates never consume a step, so
-        // unresolved update slots and writes missing from the snapshot are excluded (one
-        // in-memory probe per key). The bound is approximate in both directions. Surplus
-        // candidates (a translated-key collision, or a key an ancestor already deleted) are
-        // dropped by the raise once it moves enough ops, and a shortfall (a write resolving
-        // only through an ancestor diff) makes the raise fall back to the live scan when
-        // the prefetched prefix runs out.
-        let resolved_updates = updates
-            .iter()
-            .filter(|(slot, _)| resolutions.get(*slot).is_some_and(Option::is_some))
-            .count()
-            .min(keys.len());
-        let existing_writes = upserts
-            .iter()
-            .map(|(key, _)| key)
-            .chain(prepared.mutations.keys())
-            .filter(|&key| db.snapshot.get(key).next().is_some())
-            .count();
         let steps_bound = if prepared.merkleizer.manual_floor.is_some() {
-            0
+            None
         } else {
-            resolved_updates + existing_writes + 1
+            // Bound the steps the floor raise can take: only emitted ops consume steps, and an
+            // op is emitted per location-resolved update plus per upsert or prior mutation on a
+            // key alive in the committed snapshot. Fresh-key creates never consume a step, so
+            // unresolved update slots and writes missing from the snapshot are excluded (one
+            // in-memory probe per key). The bound is approximate in both directions. Surplus
+            // candidates (a translated-key collision, or a key an ancestor already deleted) are
+            // dropped by the raise once it moves enough ops, and a shortfall (a write resolving
+            // only through an ancestor diff) makes the raise fall back to the live scan when
+            // the prefetched prefix runs out.
+            let resolved_updates = updates
+                .iter()
+                .filter(|(slot, _)| resolutions.get(*slot).is_some_and(Option::is_some))
+                .count()
+                .min(keys.len());
+            let existing_writes = upserts
+                .iter()
+                .map(|(key, _)| key)
+                .chain(prepared.mutations.keys())
+                .filter(|&key| db.snapshot.get(key).next().is_some())
+                .count();
+            Some(resolved_updates + existing_writes + 1)
         };
 
         // Overlap the serial update resolution with the candidate prefetch: the
@@ -1687,20 +1687,26 @@ where
 
         // Gather the committed-prefix candidates and read their operations, sharded, while
         // the resolution job runs.
-        let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
-        let mut locs: Vec<Location<F>> = Vec::with_capacity(steps_bound);
-        let next_scan = fill_candidates(scan_from, committed_tip, steps_bound, &mut locs);
-        let raw: Vec<u64> = locs.iter().map(|loc| **loc).collect();
-        let read = db.log.read_many_sharded(&raw).await;
+        let prefetch = if let Some(steps_bound) = steps_bound {
+            let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
+            let mut locs: Vec<Location<F>> = Vec::with_capacity(steps_bound);
+            let next_scan = fill_candidates(scan_from, committed_tip, steps_bound, &mut locs);
+            let raw: Vec<u64> = locs.iter().map(|loc| **loc).collect();
+            db.log.read_many_sharded(&raw).await.map(|shards| {
+                Some(PrefetchedCandidates {
+                    locs,
+                    shards,
+                    next_scan,
+                })
+            })
+        } else {
+            Ok(None)
+        };
 
         // Join the resolution and surface any read failure.
         let (mutations, staged_updates) = resolve.await;
         prepared.mutations = mutations;
-        let prefetched = PrefetchedCandidates {
-            locs,
-            shards: read?,
-            next_scan,
-        };
+        let prefetched = prefetch?;
         Ok((prepared, staged_updates, prefetched))
     }
 }
@@ -1784,23 +1790,23 @@ where
 
     /// Evict the next active update, skipping inactive operations.
     ///
-    /// `quota` limits the number of inactive operations skipped in this call; `None` is
-    /// unlimited. Reaching the quota returns `None` immediately, retaining the advanced floor
-    /// so a subsequent call resumes there. Also returns `None` at the batch's original tip.
-    /// New writes and reinserts are outside the scan. Pending writes and deletions make old
-    /// updates inactive; deletes and commits are always inactive for floor raising.
+    /// `quota` limits the number of inactive operations skipped in this call; `None` is unlimited.
+    /// Reaching the quota returns `None` immediately, retaining the advanced floor so a subsequent
+    /// call resumes there. Also returns `None` at the batch's original tip. New writes and
+    /// reinserts are outside the scan. Pending writes and deletions make old updates inactive;
+    /// deletes and commits are always inactive for floor raising.
     ///
     /// Calling this method selects [`Self::with_manual_floor`], even when it returns `None`.
-    /// Merkleization performs no additional automatic moves; an empty final state sets the floor
-    /// to the new commit location. Eviction records a deletion; write the returned update's key
-    /// and value back to preserve it, or write a replacement value. Changes remain speculative
-    /// until the batch is applied.
+    /// Merkleization performs no additional automatic moves; an empty final state sets the floor to
+    /// the new commit location. Eviction records a deletion; write the returned update's key and
+    /// value back to preserve it, or write a replacement value. Changes remain speculative until
+    /// the batch is applied.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
-    /// Reading an operation can also return a journal error. Cancellation or an error consumes
-    /// the batch without modifying `db`.
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain. Reading
+    /// an operation can also return a journal error. Cancellation or an error consumes the batch
+    /// without modifying `db`.
     #[allow(clippy::type_complexity)]
     pub async fn pop_active<E, C, I, const N: usize>(
         self,
@@ -1817,6 +1823,7 @@ where
         let mut location = batch.manual_floor.expect("manual floor selected");
         let tip = batch.base.base_state().size;
         let db_size = db.log.size();
+
         // Every operation passed before returning an active update consumes one skip.
         let scan_end = Location::new(quota.map_or(*tip, |quota| {
             (*location).saturating_add(quota.get() as u64).min(*tip)
@@ -1840,6 +1847,7 @@ where
             batch.manual_floor = Some(location + 1);
             if let Operation::Update(update) = operation.as_ref() {
                 let key = update::Update::key(update);
+
                 // A committed candidate's set bit already proves snapshot activity.
                 let active = !batch.mutations.contains_key(key)
                     && resolve_in_ancestors(&ancestors, key)
@@ -1854,6 +1862,7 @@ where
             }
             location += 1;
         }
+
         // Ancestors must remain alive until every operation read has completed.
         drop(ancestors);
         Ok((batch, None))
