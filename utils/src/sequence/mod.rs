@@ -8,8 +8,6 @@ use core::{
 };
 use thiserror::Error;
 
-mod cmp;
-pub use cmp::cmp_bytes;
 pub mod fixed_bytes;
 pub use fixed_bytes::FixedBytes;
 pub mod u64;

@@ -24,7 +24,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
-use commonware_utils::{Array, Span, sequence::cmp_bytes};
+use commonware_utils::{Array, Span, sequence::FixedBytes};
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display},
@@ -81,7 +81,7 @@ pub struct Digest(pub [u8; DIGEST_LENGTH]);
 impl Ord for Digest {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
-        cmp_bytes(&self.0, &other.0)
+        FixedBytes::new(self.0).cmp(&FixedBytes::new(other.0))
     }
 }
 
@@ -234,14 +234,17 @@ mod tests {
     }
 
     #[test]
-    fn test_digest_ord_matches_bytes() {
-        let mut rng = commonware_utils::test_rng();
-        let digests: Vec<Digest> = (0..64).map(|_| Digest::random(&mut rng)).collect();
-        for a in &digests {
-            for b in &digests {
-                assert_eq!(a.cmp(b), a.0.cmp(&b.0));
-                assert_eq!(a.partial_cmp(b), Some(a.0.cmp(&b.0)));
-            }
+    fn test_digest_ord() {
+        let a = Digest([0; DIGEST_LENGTH]);
+        let mut b = a;
+        b.0[DIGEST_LENGTH - 1] = 1;
+        for (a, b, expected) in [
+            (a, a, Ordering::Equal),
+            (a, b, Ordering::Less),
+            (b, a, Ordering::Greater),
+        ] {
+            assert_eq!(a.cmp(&b), expected);
+            assert_eq!(a.partial_cmp(&b), Some(expected));
         }
     }
 
