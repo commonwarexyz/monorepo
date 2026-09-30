@@ -369,7 +369,7 @@ fn main() {
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = CurrentDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = CurrentDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(
                     db,
                     args,
@@ -387,7 +387,9 @@ fn main() {
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = CurrentOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = CurrentOrderedDb::init(ctx.child("db"), cfg, None)
+                    .await
+                    .unwrap();
                 run_pipeline!(
                     db,
                     args,
@@ -404,7 +406,9 @@ fn main() {
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = AnyOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = AnyOrderedDb::init(ctx.child("db"), cfg, None)
+                    .await
+                    .unwrap();
                 run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
             }
             "any::unordered::variable::mmb" => {
@@ -424,7 +428,7 @@ fn main() {
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = AnyVarDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = AnyVarDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
             }
             _ => {
@@ -436,7 +440,7 @@ fn main() {
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = AnyDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = AnyDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::fixed::mmb", AnyMerkleized)
             }
         }

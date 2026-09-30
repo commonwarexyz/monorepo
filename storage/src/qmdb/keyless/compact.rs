@@ -9,12 +9,12 @@
 //!
 //! # Witness journal
 //!
-//! The witness journal holds a complete snapshot of every applied batch, so [`Db::rewind`] can
-//! restore any retained applied state (history is bounded only by [`Db::prune`]). Reopen
-//! and rewind restore the db's in-memory state from an entry. The Merkle is rebuilt from the
-//! stored pinned nodes and operation, and the commit fields are decoded from the operation. An
-//! entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. The witness is also what lets
-//! compact nodes serve compact sync without retaining historical operations.
+//! The witness journal holds a complete snapshot of every applied batch. [`Db::init`]
+//! restores a retained applied state within its operation cap. [`Db::prune`] bounds the retained
+//! history. Initialization restores the db's in-memory state from an entry. The Merkle is rebuilt
+//! from the stored pinned nodes and operation, and the commit fields are decoded from the
+//! operation. An entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. The witness is
+//! also what lets compact nodes serve compact sync without retaining historical operations.
 //!
 //! # Inactivity floor
 //!
@@ -28,16 +28,12 @@ use super::operation::Operation;
 pub use crate::qmdb::compact::Config;
 use crate::{
     Context,
-    journal::contiguous::variable::{self, Config as JournalConfig},
     merkle::{Family, Location, Proof, batch, compact as compact_merkle},
     qmdb::{
         self, Error,
         any::value::ValueEncoding,
         chain::{self, Bounds, Commitment},
-        compact::{
-            batch as compact_batch,
-            witness::{self, VerifiedWitness},
-        },
+        compact::{batch as compact_batch, witness},
         sync::{CompactTarget, Request, Source, source},
     },
 };
@@ -61,8 +57,6 @@ where
     C: Clone + Send + Sync + 'static,
 {
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
-    root: H::Digest,
-    last_commit_loc: Location<F>,
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
     commit_codec_config: C,
@@ -86,6 +80,9 @@ where
             .finish_non_exhaustive()
     }
 }
+
+/// Result of merkleizing a batch.
+type MerkleizeResult<F, D, V, S> = Result<Arc<MerkleizedBatch<F, D, V, S>>, Error<F>>;
 
 /// A speculative batch for a compact keyless db.
 #[allow(clippy::type_complexity)]
@@ -167,15 +164,13 @@ where
     {
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         let hasher = qmdb::hasher::<H>();
-        db.merkle
-            .with_mem(|base| {
-                self.merkle_batch.range_proof(
-                    base,
-                    &hasher,
-                    self.bounds.base.size..self.bounds.tip.size,
-                    inactive_peaks,
-                )
-            })
+        self.merkle_batch
+            .range_proof(
+                db.merkle.mem(),
+                &hasher,
+                self.bounds.base.size..self.bounds.tip.size,
+                inactive_peaks,
+            )
             .map_err(Into::into)
     }
 
@@ -200,21 +195,22 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
-        db.merkle
-            .with_mem(|base| {
-                F::nodes_to_pin(self.bounds.base.size)
-                    .map(|pos| {
-                        self.merkle_batch
-                            .get_node(pos)
-                            .or_else(|| base.get_node(pos))
-                            .ok_or(crate::merkle::Error::ElementPruned(pos))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
+        let base = db.merkle.mem();
+        F::nodes_to_pin(self.bounds.base.size)
+            .map(|pos| {
+                self.merkle_batch
+                    .get_node(pos)
+                    .or_else(|| base.get_node(pos))
+                    .ok_or(crate::merkle::Error::ElementPruned(pos))
             })
+            .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 
     /// Create a new speculative batch with this one as its parent.
+    ///
+    /// All unapplied ancestors in the chain must be kept alive until the child (or any
+    /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S>
     where
         H: Hasher<Digest = D>,
@@ -267,13 +263,18 @@ where
         self
     }
 
-    /// Resolve appends into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve appends into operations, merkleize, and return the batch.
     ///
     /// `inactivity_floor` is threaded through the commit operation for wire-format parity with
     /// [`crate::qmdb::keyless::Keyless`]. It must be >= the database's current floor
     /// (monotonically non-decreasing) and at most the batch's commit location
     /// (`total_size - 1`); these bounds are validated, but the floor does not drive any local
     /// pruning or retention in this variant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or a
+    /// live ancestor commitment (both size and root).
     #[tracing::instrument(
         name = "qmdb.keyless.compact.batch.merkleize",
         level = "info",
@@ -284,7 +285,7 @@ where
         db: &Db<F, E, V, H, C, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
+    ) -> MerkleizeResult<F, H::Digest, V, S>
     where
         F: Family,
         E: Context,
@@ -298,6 +299,17 @@ where
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
+
+        let ancestors = chain::collect_ancestor_bounds(
+            live_ancestors.iter().cloned(),
+            |batch| batch.bounds.inactivity_floor,
+            |batch| batch.commitment(),
+        );
+        chain::validate_batch_applicable(
+            db.commitment(),
+            boundary,
+            ancestors.iter().map(|ancestor| ancestor.state),
+        )?;
 
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
         for value in self.appends {
@@ -317,13 +329,10 @@ where
         .await
         .expect("inactive_peaks computed from batch size");
 
-        let ancestors = chain::collect_ancestor_bounds(
-            live_ancestors,
-            |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commitment(),
-        );
+        // Keep ancestor batches alive until their operations and nodes have been captured.
+        drop(live_ancestors);
 
-        Arc::new(MerkleizedBatch {
+        Ok(Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
             operations,
             commit_metadata: metadata,
@@ -335,7 +344,7 @@ where
                 ancestors,
                 inactivity_floor,
             },
-        })
+        }))
     }
 }
 
@@ -350,6 +359,50 @@ where
     Operation<F, V>: Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
+    /// Initialize from a retained witness.
+    /// `Some(max_size)` selects the latest retained witness for at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    ///
+    /// Fresh storage receives a durable bootstrap commit and witness.
+    #[boxed]
+    pub async fn init(
+        context: E,
+        cfg: Config<C, S>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        let Config {
+            strategy,
+            witness: witness_config,
+            commit_codec_config,
+        } = cfg;
+
+        // Reconstruct and verify the selected witness before exposing any state derived from it.
+        let mut merkle = compact_merkle::Merkle::new(strategy);
+        let (witness, last_commit_op) = witness::init::<E, F, H, S, Operation<F, V>>(
+            context.child("witness"),
+            witness_config,
+            max_size,
+            &mut merkle,
+            &commit_codec_config,
+            Operation::<F, V>::Commit(None, Location::new(0))
+                .encode()
+                .to_vec(),
+        )
+        .await?;
+
+        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
+            return Err(Error::DataCorrupted("last operation was not a commit"));
+        };
+
+        Ok(Self {
+            merkle,
+            last_commit_metadata,
+            inactivity_floor_loc,
+            commit_codec_config,
+            witness,
+        })
+    }
+
     fn encode_commit_op(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Vec<u8> {
         Operation::<F, V>::Commit(metadata, inactivity_floor_loc)
             .encode()
@@ -360,8 +413,8 @@ where
     ///
     /// The imported witness lives only in memory until the first [`Self::apply_batch`],
     /// [`Self::commit`], [`Self::sync`], or [`Self::start_sync`]. Applying a batch replaces it with
-    /// the newly applied journal checkpoint; a durability method journals it directly. Until one
-    /// of those operations succeeds, rewind and prune are rejected.
+    /// the newly applied journal checkpoint. A durability method journals it directly. Until one of
+    /// those operations succeeds, prune is rejected.
     pub(crate) fn init_from_sync(
         strategy: S,
         journal: witness::Journal<E, F, H::Digest>,
@@ -376,7 +429,7 @@ where
         witness::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
 
         let op_bytes = Self::encode_commit_op(last_commit_metadata.clone(), inactivity_floor_loc);
-        let merkle =
+        let mut merkle =
             compact_merkle::Merkle::from_compact_state(strategy, last_commit_loc, pinned_nodes)?;
         let hasher = qmdb::hasher::<H>();
         merkle.append_leaf(&hasher, &op_bytes)?;
@@ -384,55 +437,8 @@ where
         merkle.prune_to_frontier();
 
         let witness = witness::Store::from_import(journal, imported);
-        let root = witness.with(|w| w.root);
         Ok(Self {
             merkle,
-            root,
-            last_commit_loc,
-            last_commit_metadata,
-            inactivity_floor_loc,
-            commit_codec_config,
-            witness,
-        })
-    }
-
-    /// Open a compact db from persisted compact state and rebuild its witness store.
-    ///
-    /// On first open, this bootstraps the initial commit and its witness so every later reopen and
-    /// rewind can assume the journal tip is a complete compact witness.
-    #[boxed]
-    pub(crate) async fn init_from_merkle(
-        mut merkle: compact_merkle::Merkle<F, H::Digest, S>,
-        witness_context: E,
-        witness_config: JournalConfig<()>,
-        commit_codec_config: C,
-    ) -> Result<Self, Error<F>>
-    where
-        F: Family,
-        Operation<F, V>: Read<Cfg = C>,
-    {
-        // Bootstrap: append an initial Commit(None, 0) on first open.
-        let journal: witness::Journal<E, F, H::Digest> =
-            variable::Journal::init(witness_context, witness_config).await?;
-        let (witness, last_commit_op) = witness::init::<E, F, H, S, Operation<F, V>>(
-            journal,
-            &mut merkle,
-            &commit_codec_config,
-            Operation::<F, V>::Commit(None, Location::new(0))
-                .encode()
-                .to_vec(),
-        )
-        .await?;
-        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
-            return Err(Error::DataCorrupted("last operation was not a commit"));
-        };
-        let last_commit_loc = witness.with(|w| w.size()) - 1;
-        let root = witness.with(|w| w.root);
-
-        Ok(Self {
-            merkle,
-            root,
-            last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
@@ -442,17 +448,7 @@ where
 
     /// Return the root of the db.
     pub const fn root(&self) -> H::Digest {
-        self.root
-    }
-
-    /// Return a reference to the merkleization strategy.
-    pub const fn strategy(&self) -> &S {
-        self.merkle.strategy()
-    }
-
-    /// Return the location of the last commit.
-    pub const fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
+        self.witness.tip().root
     }
 
     /// Return the inactivity floor declared by the last committed batch.
@@ -461,8 +457,8 @@ where
     }
 
     /// Return the location of the next operation appended to this db.
-    pub fn size(&self) -> Location<F> {
-        self.last_commit_loc + 1
+    pub const fn size(&self) -> Location<F> {
+        self.witness.tip().size()
     }
 
     /// Get the metadata associated with the last commit.
@@ -474,13 +470,13 @@ where
     ///
     /// This reflects the most recently applied batch. The target remains non-durable until a
     /// covering [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] completes.
-    pub fn target(&self) -> CompactTarget<F, H::Digest> {
-        self.witness.with(VerifiedWitness::target)
+    pub const fn target(&self) -> CompactTarget<F, H::Digest> {
+        self.witness.tip().target()
     }
 
     /// The [`Commitment`] for the database's current state.
-    pub(crate) fn commitment(&self) -> chain::Commitment<F, H::Digest> {
-        chain::Commitment::new(self.last_commit_loc + 1, self.root())
+    pub(crate) const fn commitment(&self) -> chain::Commitment<F, H::Digest> {
+        chain::Commitment::new(self.size(), self.root())
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -537,20 +533,19 @@ where
     ) -> Result<(Self, core::ops::Range<Location<F>>), Error<F>> {
         self.validate_batch(&batch)?;
 
-        let start_loc = self.last_commit_loc + 1;
+        let start_loc = self.size();
         self.merkle.apply_batch(&batch.merkle_batch)?;
-        self.root = batch.root();
-        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.last_commit_metadata = batch.commit_metadata.clone();
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         let last_commit_metadata = self.last_commit_metadata.clone();
         let inactivity_floor_loc = self.inactivity_floor_loc;
         self.witness = self
             .witness
-            .apply::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .apply::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
+        assert_eq!(self.commitment(), batch.bounds.tip);
         Ok((self, start_loc..batch.bounds.tip.size))
     }
 
@@ -568,7 +563,7 @@ where
         let handle;
         (self.witness, handle) = self
             .witness
-            .start_sync::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .start_sync::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
@@ -583,7 +578,7 @@ where
         let inactivity_floor_loc = self.inactivity_floor_loc;
         self.witness = self
             .witness
-            .commit::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .commit::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
@@ -598,55 +593,17 @@ where
         let inactivity_floor_loc = self.inactivity_floor_loc;
         self.witness = self
             .witness
-            .sync::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .sync::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
         Ok(self)
     }
 
-    /// Rewind the db to the applied state with exactly `target` operations, discarding any
-    /// uncommitted batches and any later states. The rewind is made durable before this
-    /// method returns.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
-    /// no retained applied state has exactly `target` operations (never applied, or pruned).
-    #[tracing::instrument(name = "qmdb.keyless.compact.db.rewind", level = "info", skip_all)]
-    pub async fn rewind(mut self, target: Location<F>) -> Result<Self, Error<F>>
-    where
-        F: Family,
-    {
-        // A clean current target only needs to settle its pipelined sync. An uncommitted target
-        // takes the regular rewind path so the witness journal becomes durable before return.
-        if self.size() == target
-            && self.witness.with(|w| w.size()) == target
-            && !self.witness.has_uncommitted_state()
-        {
-            self.witness.wait_for_sync().await?;
-            return Ok(self);
-        }
-
-        let last_commit_op;
-        (self.witness, last_commit_op) = self
-            .witness
-            .rewind::<H, S, Operation<F, V>>(&self.merkle, target, &self.commit_codec_config)
-            .await?;
-        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
-            return Err(Error::DataCorrupted("last operation was not a commit"));
-        };
-        self.last_commit_metadata = last_commit_metadata;
-        self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit_loc = target - 1;
-        self.root = self.witness.with(|w| w.root);
-        Ok(self)
-    }
-
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
     /// below the boundary may survive.
     ///
-    /// Pruning bounds how far back [`Self::rewind`] can reach; the current commit's witness
+    /// Pruning bounds how far back bounded initialization can reach. The current commit's witness
     /// always survives. The prune is made durable before this method returns.
     ///
     /// # Errors
@@ -693,7 +650,9 @@ where
 mod tests {
     use super::*;
     use crate::{
+        journal::contiguous::variable::Config as JournalConfig,
         merkle::{mmb, mmr},
+        metadata::{Config as MetadataConfig, Metadata},
         qmdb::{
             any::value::FixedEncoding, compact::witness, sync::Response, verify_proof,
             verify_proof_and_pinned_nodes,
@@ -709,7 +668,10 @@ mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
+    use commonware_utils::{
+        NZU16, NZU64, NZUsize,
+        sequence::{U64, VecU64},
+    };
     use core::future::Future;
     use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -731,12 +693,196 @@ mod tests {
         }
     }
 
+    async fn open_bounded<F: Family>(
+        context: deterministic::Context,
+        witness_cfg: JournalConfig<()>,
+        cap: Location<F>,
+    ) -> Result<TestDb<F>, Error<F>> {
+        let cfg = Config {
+            strategy: Sequential,
+            witness: witness_cfg,
+            commit_codec_config: (),
+        };
+        Db::init(context, cfg, Some(cap)).await
+    }
+
     async fn open_db<F: Family>(context: deterministic::Context, partition: &str) -> TestDb<F> {
         let witness_cfg = witness_config(partition, &context);
-        let merkle = crate::merkle::compact::Merkle::new(Sequential);
-        Db::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())
+        let cfg = Config {
+            strategy: Sequential,
+            witness: witness_cfg,
+            commit_codec_config: (),
+        };
+        Db::init(context, cfg, None).await.unwrap()
+    }
+
+    async fn compact_merkleize_foreign_db_inner<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "keyless-merkleize-foreign-db").await;
+        let foreign = open_db::<F>(
+            context.child("foreign"),
+            "keyless-merkleize-foreign-db-foreign",
+        )
+        .await;
+
+        let batch = db
+            .new_batch()
+            .append(U64::new(11))
+            .merkleize(&db, None, Location::new(0))
             .await
-            .unwrap()
+            .unwrap();
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let batch = foreign
+            .new_batch()
+            .append(U64::new(99))
+            .merkleize(&foreign, None, Location::new(0))
+            .await
+            .unwrap();
+        let (foreign, _) = foreign.apply_batch(batch).await.unwrap();
+        assert_eq!(db.size(), foreign.size());
+        assert_ne!(db.root(), foreign.root());
+
+        let batch = db.new_batch().append(U64::new(22));
+        assert!(matches!(
+            batch.merkleize(&foreign, None, Location::new(0)).await,
+            Err(Error::StaleBatch)
+        ));
+
+        let parent = db
+            .new_batch()
+            .append(U64::new(33))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let child = parent.new_batch::<Sha256>().append(U64::new(44));
+        assert!(matches!(
+            child.merkleize(&foreign, None, Location::new(0)).await,
+            Err(Error::StaleBatch)
+        ));
+        db.destroy().await.unwrap();
+        foreign.destroy().await.unwrap();
+    }
+
+    async fn compact_merkleize_stale_sibling_inner<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "keyless-merkleize-stale-sibling").await;
+
+        let direct = db.new_batch().append(U64::new(11));
+        let sibling = db
+            .new_batch()
+            .append(U64::new(22))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        assert!(matches!(
+            direct.merkleize(&db, None, Location::new(0)).await,
+            Err(Error::StaleBatch)
+        ));
+
+        let parent = db
+            .new_batch()
+            .append(U64::new(33))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let child = parent.new_batch::<Sha256>().append(U64::new(44));
+        let sibling = db
+            .new_batch()
+            .append(U64::new(55))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        assert!(matches!(
+            child.merkleize(&db, None, Location::new(0)).await,
+            Err(Error::StaleBatch)
+        ));
+
+        db.destroy().await.unwrap();
+    }
+
+    async fn compact_merkleize_ancestor_states_inner<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "keyless-merkleize-ancestor-states").await;
+
+        let grandparent = db
+            .new_batch()
+            .append(U64::new(1))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let parent = grandparent
+            .new_batch::<Sha256>()
+            .append(U64::new(2))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let pending = parent
+            .new_batch::<Sha256>()
+            .append(U64::new(3))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+
+        let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+        let applied = parent
+            .new_batch::<Sha256>()
+            .append(U64::new(3))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        assert_eq!(pending.root(), applied.root());
+
+        drop(grandparent);
+        let retired = parent
+            .new_batch::<Sha256>()
+            .append(U64::new(3))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        assert_eq!(retired.bounds().db, db.commitment());
+        assert_eq!(pending.root(), retired.root());
+
+        let child = parent.new_batch::<Sha256>().append(U64::new(3));
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let child = child.merkleize(&db, None, Location::new(0)).await.unwrap();
+        assert_eq!(pending.root(), child.root());
+        let expected_root = child.root();
+        let (db, _) = db.apply_batch(child).await.unwrap();
+        assert_eq!(db.root(), expected_root);
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_foreign_db_mmr() {
+        deterministic::Runner::default().start(compact_merkleize_foreign_db_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_foreign_db_mmb() {
+        deterministic::Runner::default().start(compact_merkleize_foreign_db_inner::<mmb::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_stale_sibling_mmr() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_stale_sibling_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_stale_sibling_mmb() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_stale_sibling_inner::<mmb::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_ancestor_states_mmr() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_ancestor_states_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_ancestor_states_mmb() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_ancestor_states_inner::<mmb::Family>);
     }
 
     /// Batch artifacts (operations, range proof, pinned frontier) verify against the batch root,
@@ -752,7 +898,8 @@ mod tests {
         }
         let seed = seed
             .merkleize(&db, Some(U64::new(7)), Location::new(0))
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(seed).await.unwrap();
         let db = db.sync().await.unwrap();
         let floor = db.size();
@@ -770,12 +917,16 @@ mod tests {
         for value in 8u64..=12 {
             parent = parent.append(U64::new(value));
         }
-        let parent = parent.merkleize(&db, Some(U64::new(13)), floor).await;
+        let parent = parent
+            .merkleize(&db, Some(U64::new(13)), floor)
+            .await
+            .unwrap();
         let child = parent
             .new_batch::<Sha256>()
             .append(U64::new(14))
             .merkleize(&db, Some(U64::new(15)), floor)
-            .await;
+            .await
+            .unwrap();
 
         // The operation suffix is the batch's own appends plus its commit, handed out zero-copy.
         let (child_start, child_ops) = child.operations();
@@ -849,7 +1000,8 @@ mod tests {
         let commit_only = db
             .new_batch()
             .merkleize(&db, Some(U64::new(16)), commit_floor)
-            .await;
+            .await
+            .unwrap();
         let (commit_start, commit_ops) = commit_only.operations();
         let commit_end = commit_only.bounds().tip.size;
         let commit_root = commit_only.root();
@@ -885,12 +1037,14 @@ mod tests {
             .new_batch()
             .append(U64::new(17))
             .merkleize(&db, Some(U64::new(18)), db.size())
-            .await;
+            .await
+            .unwrap();
         let late = late_parent
             .new_batch::<Sha256>()
             .append(U64::new(19))
             .merkleize(&db, Some(U64::new(20)), db.size())
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(Arc::clone(&late_parent)).await.unwrap();
         assert!(matches!(
             late_parent.proof(&db),
@@ -948,7 +1102,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let n = db.target().size;
@@ -1020,18 +1175,21 @@ mod tests {
     /// Init durably persists the bootstrap witness, so while syncs park the returned future
     /// must be driven with [drive_pending_syncs] (or the mock unblocked first).
     fn open_delayed_db(
-        context: &deterministic::Context,
-        label: &'static str,
+        context: deterministic::Context,
         partition: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let witness_cfg = witness_config(partition, context);
-        let merkle = crate::merkle::compact::Merkle::new(Sequential);
+        let witness_cfg = witness_config(partition, &context);
+        let cfg = Config {
+            strategy: Sequential,
+            witness: witness_cfg,
+            commit_codec_config: (),
+        };
         let context = DelayedSyncContext {
-            inner: context.child(label),
+            inner: context,
             pending: pending.clone(),
         };
-        DelayedDb::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())
+        DelayedDb::init(context, cfg, None)
     }
 
     /// Apply a single-append batch carrying `seed` as both value and metadata.
@@ -1041,7 +1199,8 @@ mod tests {
             .new_batch()
             .append(U64::new(seed))
             .merkleize(&db, Some(U64::new(seed)), floor)
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(batch).await.unwrap();
         db
     }
@@ -1071,7 +1230,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "keyless-start-sync-overlap";
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let open = open_delayed_db(ctx.child("delayed"), partition, &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1110,13 +1269,11 @@ mod tests {
             handle.await.unwrap();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.target(), second_target);
             assert_eq!(db.get_metadata(), Some(U64::new(2)));
-            let db = db.rewind(first_target.size).await.unwrap();
-            assert_eq!(db.target(), first_target);
             db.destroy().await.unwrap();
         });
     }
@@ -1128,7 +1285,7 @@ mod tests {
             let partition = "keyless-start-sync-recovery";
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", partition, &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), partition, &pending)
                 .await
                 .unwrap();
             db = apply_append(db, 1).await;
@@ -1139,7 +1296,7 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -1156,7 +1313,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "keyless-start-sync-fail", &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), "keyless-start-sync-fail", &pending)
                 .await
                 .unwrap();
             db = apply_append(db, 1).await;
@@ -1193,7 +1350,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "keyless-start-sync-noop-drain";
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let open = open_delayed_db(ctx.child("delayed"), partition, &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1218,7 +1375,7 @@ mod tests {
             assert!(pending.completions() > completions_before);
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -1232,8 +1389,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open = open_delayed_db(
-                &ctx,
-                "delayed",
+                ctx.child("delayed"),
                 "keyless-start-sync-noop-sync-fail",
                 &pending,
             );
@@ -1261,7 +1417,11 @@ mod tests {
     fn test_compact_start_sync_then_noop_commit_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "keyless-start-sync-noop-commit", &pending);
+            let open = open_delayed_db(
+                ctx.child("delayed"),
+                "keyless-start-sync-noop-commit",
+                &pending,
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1295,7 +1455,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "keyless-start-sync-noop-second";
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let open = open_delayed_db(ctx.child("delayed"), partition, &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1317,80 +1477,11 @@ mod tests {
             assert_eq!(journal.size(), 2);
             drop(journal);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
             db.destroy().await.unwrap();
-        });
-    }
-
-    /// A rewind to the current size waits for the in-flight sync and adopts its proof of
-    /// durability instead of starting new journal work.
-    #[test_traced]
-    fn test_compact_start_sync_rewind_fast_path_drains() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let partition = "keyless-start-sync-rewind-drain";
-            let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
-            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            db = apply_append(db, 1).await;
-
-            let handle;
-            (db, handle) = db.start_sync().await.unwrap();
-            let root = db.root();
-            let size = db.size();
-
-            let starts_before = pending.starts();
-            let db = {
-                let mut rewind = std::pin::pin!(db.rewind(size));
-                assert!(
-                    rewind.as_mut().now_or_never().is_none(),
-                    "rewind proceeded while the started sync was pending"
-                );
-                pending.unblock();
-                rewind.await.unwrap()
-            };
-            handle.await.unwrap();
-            assert_eq!(
-                pending.starts(),
-                starts_before,
-                "the fast path started journal work instead of adopting the proven sync"
-            );
-            assert_eq!(db.root(), root);
-            drop(db);
-
-            // The awaited pipelined sync made the witness entry durable.
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
-                .await
-                .unwrap();
-            assert_eq!(db.root(), root);
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// A rewind to the current size fails when the sync started for the tip witness has
-    /// already failed, rather than reporting the unproven tip as durable.
-    #[test_traced]
-    fn test_compact_start_sync_rewind_fast_path_fails() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let pending = PendingSyncs::default();
-            pending.unblock();
-            let mut db =
-                open_delayed_db(&ctx, "delayed", "keyless-start-sync-rewind-fail", &pending)
-                    .await
-                    .unwrap();
-            db = apply_append(db, 1).await;
-
-            pending.arm_fail();
-            let handle;
-            (db, handle) = db.start_sync().await.unwrap();
-            assert!(handle.await.is_err());
-            let size = db.size();
-            assert!(
-                db.rewind(size).await.is_err(),
-                "rewind reported an unproven tip as durable"
-            );
         });
     }
 
@@ -1400,7 +1491,11 @@ mod tests {
     fn test_compact_start_sync_metadata_failure_resurfaces_on_commit() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "keyless-start-sync-meta-fail", &pending);
+            let open = open_delayed_db(
+                ctx.child("delayed"),
+                "keyless-start-sync-meta-fail",
+                &pending,
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1450,8 +1545,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open = open_delayed_db(
-                &ctx,
-                "delayed",
+                ctx.child("delayed"),
                 "keyless-start-sync-dropped-meta-fail",
                 &pending,
             );
@@ -1472,16 +1566,17 @@ mod tests {
         });
     }
 
-    /// Once a start_sync handle completes successfully, a commit and a rewind to the current
-    /// size have nothing left to prove and touch no storage.
+    /// Once a start_sync handle completes successfully, a commit has nothing left
+    /// to prove and touches no storage.
     #[test_traced]
     fn test_compact_start_sync_proven_skips_journal() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "keyless-start-sync-proven", &pending)
-                .await
-                .unwrap();
+            let mut db =
+                open_delayed_db(ctx.child("delayed"), "keyless-start-sync-proven", &pending)
+                    .await
+                    .unwrap();
             db = apply_append(db, 1).await;
 
             let handle;
@@ -1490,8 +1585,6 @@ mod tests {
 
             let starts_before = pending.starts();
             let db = db.commit().await.unwrap();
-            let size = db.size();
-            let db = db.rewind(size).await.unwrap();
             assert_eq!(
                 pending.starts(),
                 starts_before,
@@ -1518,13 +1611,14 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .merkleize(&source, Some(meta_b.clone()), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (source, _) = source.apply_batch(batch).await.unwrap();
                 let source = source.sync().await.unwrap();
                 source.target()
             };
             let (_, size_b, pinned_b) = {
-                let journal = open_witness_journal(context.child("src_tip"), src).await;
+                let journal = open_witness_journal(context.child("tip"), src).await;
                 witness::tests::tip(&journal).await
             };
             assert_eq!(size_b, target_b.size);
@@ -1536,7 +1630,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&seeded, Some(meta_a), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
                 let seeded = seeded.sync().await.unwrap();
                 assert_ne!(seeded.target(), target_b);
@@ -1578,12 +1673,14 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let batch_b = db
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(22)), floor)
-                .await;
+                .await
+                .unwrap();
 
             let expected_root = batch_a.root();
             let (db, _) = db.apply_batch(batch_a).await.unwrap();
@@ -1605,16 +1702,18 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, floor)
-                .await;
+                .await
+                .unwrap();
             let b = a
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .merkleize(&db, None, floor)
-                .await;
+                .await
+                .unwrap();
             let c = b.new_batch::<Sha256>().append(U64::new(3));
 
             let (db, _) = db.apply_batch(a).await.unwrap();
-            let c = c.merkleize(&db, None, floor).await;
+            let c = c.merkleize(&db, None, floor).await.unwrap();
             let expected_root = c.root();
             let (db, _) = db.apply_batch(c).await.unwrap();
 
@@ -1641,7 +1740,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
 
             // Observe the applied state before making it durable.
@@ -1672,17 +1772,20 @@ mod tests {
                 .new_batch()
                 .append(U64::new(10))
                 .merkleize(&db, Some(U64::new(110)), floor)
-                .await;
+                .await
+                .unwrap();
             let sibling_a = common_parent
                 .new_batch::<Sha256>()
                 .append(U64::new(11))
                 .merkleize(&db, Some(U64::new(111)), floor)
-                .await;
+                .await
+                .unwrap();
             let sibling_b = common_parent
                 .new_batch::<Sha256>()
                 .append(U64::new(12))
                 .merkleize(&db, Some(U64::new(112)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(sibling_a).await.unwrap();
             assert!(matches!(
                 db.validate_batch(&sibling_b),
@@ -1693,17 +1796,20 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let parent_b = db
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(22)), floor)
-                .await;
+                .await
+                .unwrap();
             let child_b = parent_b
                 .new_batch::<Sha256>()
                 .append(U64::new(3))
                 .merkleize(&db, Some(U64::new(33)), floor)
-                .await;
+                .await
+                .unwrap();
 
             let (db, _) = db.apply_batch(parent_a).await.unwrap();
             assert!(matches!(
@@ -1725,12 +1831,14 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(22)), floor)
-                .await;
+                .await
+                .unwrap();
 
             let (db, _) = db.apply_batch(child).await.unwrap();
             assert!(matches!(
@@ -1750,12 +1858,14 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(22)), floor)
-                .await;
+                .await
+                .unwrap();
             let expected_root = child.root();
 
             let (db, _) = db.apply_batch(parent).await.unwrap();
@@ -1774,7 +1884,10 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-floor-regressed").await;
 
             let advance_floor = db.new_batch().append(U64::new(1));
-            let advance_floor = advance_floor.merkleize(&db, None, Location::new(1)).await;
+            let advance_floor = advance_floor
+                .merkleize(&db, None, Location::new(1))
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(advance_floor).await.unwrap();
             let db = db.sync().await.unwrap();
             let target = db.target();
@@ -1783,7 +1896,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(regressed).await,
@@ -1813,13 +1927,15 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, Location::new(2))
-                .await;
+                .await
+                .unwrap();
             // child: append + commit at loc 4 with floor=1 (regressed from parent's floor=2).
             let child = parent
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
 
             let target = db.target();
             assert!(matches!(
@@ -1837,7 +1953,7 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_compact_rewind_restores_commit_metadata_and_floor() {
+    fn test_compact_bounded_initialization_restores_commit_metadata_and_floor() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-rewind-meta").await;
 
@@ -1848,7 +1964,8 @@ mod tests {
                 .new_batch()
                 .append(v1)
                 .merkleize(&db, Some(meta1.clone()), floor1)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -1861,13 +1978,23 @@ mod tests {
                 .new_batch()
                 .append(v2)
                 .merkleize(&db, Some(meta2.clone()), floor2)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             assert_eq!(db.get_metadata(), Some(meta2));
             assert_eq!(db.inactivity_floor_loc(), floor2);
 
-            let db = db.rewind(size_after_first).await.unwrap();
+            let db = {
+                _ = db.sync().await.unwrap();
+                open_bounded::<mmr::Family>(
+                    context.child("cap"),
+                    witness_config("keyless-rewind-meta", &context),
+                    size_after_first,
+                )
+                .await
+            }
+            .unwrap();
             assert_eq!(db.root(), root_after_first);
             assert_eq!(db.get_metadata(), Some(meta1));
             assert_eq!(db.inactivity_floor_loc(), floor1);
@@ -1877,7 +2004,7 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_compact_rewind_persists_across_reopen() {
+    fn test_compact_bounded_initialization_persists_across_reopen() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-rewind-reopen";
             let meta1 = U64::new(11);
@@ -1891,7 +2018,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&db, Some(meta1.clone()), floor1)
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
                 let root = db.root();
@@ -1901,11 +2029,21 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .merkleize(&db, Some(meta2), floor2)
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
 
-                let _db = db.rewind(size_after_first).await.unwrap();
+                let _db = {
+                    _ = db.sync().await.unwrap();
+                    open_bounded::<mmr::Family>(
+                        context.child("cap"),
+                        witness_config(partition, &context),
+                        size_after_first,
+                    )
+                    .await
+                }
+                .unwrap();
                 root
             };
 
@@ -1931,7 +2069,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&db, Some(meta1), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -1939,7 +2078,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .merkleize(&db, Some(meta2.clone()), Location::new(1))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 db.root()
@@ -1955,7 +2095,7 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_compact_rewind_to_committed_entry_after_reopen() {
+    fn test_compact_bounded_initialization_to_committed_entry_after_reopen() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-commit-rewind-reopen";
             let meta1 = U64::new(11);
@@ -1967,7 +2107,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&db, Some(meta1.clone()), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 let root_a = db.root();
@@ -1977,16 +2118,26 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .merkleize(&db, Some(meta2), Location::new(1))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let _db = db.commit().await.unwrap();
                 (root_a, size_a)
             };
 
-            // Both committed witnesses survive the crash: reopen recovers the tip, and the
-            // earlier commit remains a valid rewind target.
+            // Both committed witnesses survive the crash. Reopen recovers the tip, and the earlier
+            // commit remains a valid initialization target.
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
-            let db = db.rewind(size_a).await.unwrap();
+            let db = {
+                _ = db.sync().await.unwrap();
+                open_bounded::<mmr::Family>(
+                    context.child("cap"),
+                    witness_config(partition, &context),
+                    size_a,
+                )
+                .await
+            }
+            .unwrap();
             assert_eq!(db.root(), root_a);
             assert_eq!(db.get_metadata(), Some(meta1));
             db.destroy().await.unwrap();
@@ -2005,13 +2156,30 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&db, Some(meta.clone()), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
+
+                // Commit persists witness data. Sync must also persist recovery metadata.
                 let db = db.commit().await.unwrap();
-                // The commit already made the state durable, so this is a no-op.
                 let db = db.sync().await.unwrap();
                 db.root()
             };
+
+            // Check the watermark before reopening can rebuild the offsets journal.
+            let metadata = Metadata::<_, u64, VecU64>::init(
+                context.child("checkpoint"),
+                MetadataConfig {
+                    partition: format!("{partition}-witness_offsets-metadata"),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
+
+            // Key 3 records the durable prefix: the bootstrap witness and the applied batch.
+            assert_eq!(metadata.get(&3).copied().map(u64::from), Some(2));
+            drop(metadata);
 
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             assert_eq!(db.root(), root);
@@ -2036,7 +2204,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .merkleize(&source, Some(meta_b.clone()), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (source, _) = source.apply_batch(batch).await.unwrap();
                 let source = source.sync().await.unwrap();
                 let target = source.target();
@@ -2061,7 +2230,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&seeded, Some(meta_a), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
                 let seeded = seeded.sync().await.unwrap();
                 assert_ne!(seeded.target(), target_b);
@@ -2102,7 +2272,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(7))
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -2113,20 +2284,19 @@ mod tests {
             pinned_nodes.push(Sha256::fill(0xff));
             witness::tests::overwrite_tip(journal, op_bytes, size, pinned_nodes).await;
 
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen_witness"),
-                witness_config(partition, &context),
-                (),
-            )
-            .await;
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened =
+                TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None).await;
             assert!(matches!(reopened, Err(Error::DataCorrupted(_))));
         });
     }
 
     #[test_traced("INFO")]
-    fn test_compact_rewind_rejects_corrupt_target_entry() {
+    fn test_compact_bounded_initialization_rejects_corrupt_target_entry() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-corrupt-rewind-target";
             let db = open_db::<mmr::Family>(context.child("db"), partition).await;
@@ -2134,21 +2304,23 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
-            let rewind_target = db.target().size;
+            let initialization_bound = db.target().size;
             let batch = db
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let tip_target = db.target();
             drop(db);
 
-            // Corrupt the rewind target's entry (the journal holds bootstrap, target, tip).
+            // Corrupt the initialization target's entry (the journal holds bootstrap, target, tip).
             let mut journal = open_witness_journal(context.child("corrupt"), partition).await;
             journal = witness::tests::corrupt_entry(journal, 1, |entry| {
                 entry.pinned_nodes.push(Sha256::fill(0xff));
@@ -2157,33 +2329,39 @@ mod tests {
             drop(journal);
 
             // The tip entry is intact, so reopen succeeds.
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen"),
-                witness_config(partition, &context),
-                (),
-            )
-            .await
-            .unwrap();
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened = TestDb::<mmr::Family>::init(context.child("reopen"), cfg, None)
+                .await
+                .unwrap();
             assert_eq!(reopened.target(), tip_target);
 
-            // The corrupt entry fails the rewind before any truncation.
+            // The corrupt entry fails the recovery before any truncation.
             assert!(matches!(
-                reopened.rewind(rewind_target).await,
+                {
+                    drop(reopened);
+                    open_bounded::<mmr::Family>(
+                        context.child("cap"),
+                        witness_config(partition, &context),
+                        initialization_bound,
+                    )
+                    .await
+                },
                 Err(Error::DataCorrupted(_))
             ));
 
             // The newer history survives: reopen still lands on the original tip.
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen2"),
-                witness_config(partition, &context),
-                (),
-            )
-            .await
-            .unwrap();
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened = TestDb::<mmr::Family>::init(context.child("reopen2"), cfg, None)
+                .await
+                .unwrap();
             assert_eq!(reopened.target(), tip_target);
             reopened.destroy().await.unwrap();
         });
@@ -2198,7 +2376,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(7))
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -2211,15 +2390,17 @@ mod tests {
             drop(journal);
 
             // Reopen must fail rather than bootstrap a fresh db.
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen_witness"),
-                witness_config(partition, &context),
-                (),
-            )
-            .await;
-            assert!(matches!(reopened, Err(Error::Journal(_))));
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened =
+                TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None).await;
+            assert!(matches!(
+                reopened,
+                Err(Error::DataCorrupted("witness journal has no tip"))
+            ));
         });
     }
 
@@ -2232,7 +2413,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(7))
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -2249,14 +2431,13 @@ mod tests {
             .to_vec();
             witness::tests::overwrite_tip(journal, bad_op, size, pinned_nodes).await;
 
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen_witness"),
-                witness_config(partition, &context),
-                (),
-            )
-            .await;
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened =
+                TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None).await;
             assert!(matches!(
                 reopened,
                 Err(Error::DataCorrupted("invalid compact witness"))
@@ -2273,7 +2454,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(7))
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let tampered_target = db.target();
@@ -2287,35 +2469,44 @@ mod tests {
             pinned_nodes[0] = Sha256::fill(0xff);
             witness::tests::overwrite_tip(journal, op_bytes, size, pinned_nodes).await;
 
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen_witness"),
-                witness_config(partition, &context),
-                (),
-            )
-            .await
-            .unwrap();
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened = TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None)
+                .await
+                .unwrap();
             assert_ne!(reopened.target(), tampered_target);
             reopened.destroy().await.unwrap();
         });
     }
 
     #[test_traced("INFO")]
-    fn test_compact_rewind_to_current_is_noop() {
+    fn test_compact_bounded_initialization_preserves_current_state() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-rewind-noop").await;
             let batch = db
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root = db.root();
             let size = db.size();
 
-            let db = db.rewind(size).await.unwrap();
+            let db = {
+                _ = db.sync().await.unwrap();
+                open_bounded::<mmr::Family>(
+                    context.child("cap"),
+                    witness_config("keyless-rewind-noop", &context),
+                    size,
+                )
+                .await
+            }
+            .unwrap();
             assert_eq!(db.root(), root);
             assert_eq!(db.size(), size);
             db.destroy().await.unwrap();
@@ -2331,7 +2522,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let target = db.target();
@@ -2349,31 +2541,38 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_compact_rewind_beyond_history() {
+    fn test_compact_initialization_zero_and_above_end() {
         deterministic::Runner::default().start(|context| async move {
-            let db = open_db::<mmr::Family>(context.child("db"), "keyless-rewind-beyond").await;
-            // The bootstrap commit is the oldest retained state (one leaf); no commit with zero
-            // operations exists to rewind to.
+            let cfg = witness_config("keyless-caps", &context);
             assert!(matches!(
-                db.rewind(Location::new(0)).await,
-                Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
+                open_bounded::<mmr::Family>(context.child("zero"), cfg.clone(), Location::new(0))
+                    .await,
+                Err(Error::InvalidInitializationBound)
             ));
-
-            let db = open_db::<mmr::Family>(context.child("reopen"), "keyless-rewind-beyond").await;
-            // A target past the tip is not a commit either.
-            let beyond_tip = db.size() + 100;
-            assert!(matches!(
-                db.rewind(beyond_tip).await,
-                Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
-            ));
+            let db = open_bounded::<mmr::Family>(
+                context.child("fresh"),
+                cfg.clone(),
+                Location::new(100),
+            )
+            .await
+            .unwrap();
+            let root = db.root();
+            assert_eq!(db.size(), Location::new(1));
+            drop(db);
+            let db = open_bounded::<mmr::Family>(context.child("above"), cfg, Location::new(100))
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.size(), Location::new(1));
         });
     }
 
     #[test_traced("INFO")]
-    fn test_compact_rewind_between_commits() {
+    fn test_compact_bounded_initialization_between_commits() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-rewind-between").await;
             let floor = db.inactivity_floor_loc();
+            let initial_root = db.root();
 
             // A multi-op commit jumps the committed size from 1 (bootstrap) to 4.
             let batch = db
@@ -2381,7 +2580,8 @@ mod tests {
                 .append(U64::new(1))
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_a = db.root();
@@ -2393,32 +2593,28 @@ mod tests {
                 .new_batch()
                 .append(U64::new(3))
                 .merkleize(&db, Some(U64::new(22)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
-            let root_b = db.root();
-
-            // Targets inside a commit's span match no entry, even though entries exist on
-            // both sides.
-            let mut db = db;
-            for target in [2u64, 3, 5] {
-                assert!(matches!(
-                    db.rewind(Location::new(target)).await,
-                    Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
-                ));
-                db = open_db::<mmr::Family>(
-                    context.child("reopen").with_attribute("target", target),
-                    "keyless-rewind-between",
+            let cfg = witness_config("keyless-rewind-between", &context);
+            drop(db);
+            for (target, size, root) in [(5, 4, root_a), (3, 1, initial_root), (2, 1, initial_root)]
+            {
+                let db = open_bounded::<mmr::Family>(
+                    context.child("cap"),
+                    cfg.clone(),
+                    Location::new(target),
                 )
-                .await;
+                .await
+                .unwrap();
+                assert_eq!(db.size(), Location::new(size));
+                assert_eq!(db.root(), root);
+                drop(db);
+                let db = open_db::<mmr::Family>(context.child("restart"), "keyless-rewind-between")
+                    .await;
+                assert_eq!(db.root(), root);
             }
-            assert_eq!(db.root(), root_b);
-
-            // The exact commit boundary remains a valid target.
-            let db = db.rewind(size_a).await.unwrap();
-            assert_eq!(db.root(), root_a);
-            assert_eq!(db.get_metadata(), Some(U64::new(11)));
-            db.destroy().await.unwrap();
         });
     }
 
@@ -2435,7 +2631,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let target_a = db.target();
@@ -2456,7 +2653,7 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_compact_rewind_multiple_commits() {
+    fn test_compact_bounded_initialization_multiple_commits() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "keyless-rewind-multi";
             let db = open_db::<mmr::Family>(context.child("db"), partition).await;
@@ -2466,7 +2663,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_a = db.root();
@@ -2479,21 +2677,31 @@ mod tests {
                     .new_batch()
                     .append(U64::new(i))
                     .merkleize(&db, Some(U64::new(i * 11)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
             }
             assert_ne!(db.root(), root_a);
 
-            // Rewind two commits in one call.
-            let db = db.rewind(size_a).await.unwrap();
+            // Reopen two commits earlier.
+            let db = {
+                _ = db.sync().await.unwrap();
+                open_bounded::<mmr::Family>(
+                    context.child("cap"),
+                    witness_config(partition, &context),
+                    size_a,
+                )
+                .await
+            }
+            .unwrap();
             assert_eq!(db.root(), root_a);
             assert_eq!(db.size(), size_a);
             assert_eq!(db.get_metadata(), Some(U64::new(11)));
             assert_eq!(db.target(), target_a);
             drop(db);
 
-            // The rewind is durable: reopen recovers state A.
+            // The recovery is durable: reopen recovers state A.
             let db = open_db::<mmr::Family>(context.child("reopen"), partition).await;
             assert_eq!(db.root(), root_a);
             assert_eq!(db.target(), target_a);
@@ -2502,17 +2710,19 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_compact_prune_then_rewind() {
+    fn test_compact_prune_then_bounded_initialization() {
         deterministic::Runner::default().start(|context| async move {
             // One entry per section so pruning takes effect at entry granularity (pruning is
             // section-aligned and never drops a partial section).
             let mut witness_cfg = witness_config("keyless-prune-rewind", &context);
             witness_cfg.items_per_section = NZU64!(1);
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_cfg.clone(),
+                commit_codec_config: (),
+            };
             let mut db: TestDb<mmr::Family> =
-                Db::init_from_merkle(merkle, context.child("witness"), witness_cfg.clone(), ())
-                    .await
-                    .unwrap();
+                Db::init(context.child("db"), cfg, None).await.unwrap();
 
             // Commit A, B, C.
             let mut sizes = Vec::new();
@@ -2521,39 +2731,36 @@ mod tests {
                     .new_batch()
                     .append(U64::new(i))
                     .merkleize(&db, Some(U64::new(i * 11)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
                 sizes.push(db.size());
             }
 
-            // Prune history below B: rewinding to B still works, rewinding to A does not.
-            let db = db.prune(sizes[1]).await.unwrap();
-            assert!(matches!(
-                db.rewind(sizes[0]).await,
-                Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
-            ));
-
-            // The prune was durable, so reopen and rewind to B.
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let db: TestDb<mmr::Family> = Db::init_from_merkle(
-                merkle,
-                context.child("witness").with_attribute("index", 2),
-                witness_cfg,
-                (),
+            // Reopen retained state B before the terminal check that pruned state A is unavailable.
+            let db = db.prune(sizes[1]).await.unwrap().sync().await.unwrap();
+            drop(db);
+            let db = open_bounded::<mmr::Family>(
+                context.child("retained"),
+                witness_cfg.clone(),
+                sizes[1],
             )
             .await
             .unwrap();
-            let db = db.rewind(sizes[1]).await.unwrap();
             assert_eq!(db.size(), sizes[1]);
             assert_eq!(db.get_metadata(), Some(U64::new(22)));
+            drop(db);
 
-            db.destroy().await.unwrap();
+            assert!(matches!(
+                open_bounded::<mmr::Family>(context.child("pruned"), witness_cfg, sizes[0]).await,
+                Err(Error::HistoricalFloorPruned(_))
+            ));
         });
     }
 
     #[test_traced("INFO")]
-    fn test_compact_rewind_preserves_pre_advance_batch() {
+    fn test_compact_bounded_initialization_preserves_pre_advance_batch() {
         deterministic::Runner::default().start(|context| async move {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "keyless-rewind-preserves-pre-advance")
@@ -2563,7 +2770,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let size_after_first = db.size();
@@ -2573,19 +2781,30 @@ mod tests {
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
-            // Advance past that state and commit, then rewind back to it.
+            // Advance past that state and commit, then reopen at that state.
             let batch = db
                 .new_batch()
                 .append(U64::new(3))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
-            let db = db.rewind(size_after_first).await.unwrap();
+            let db = {
+                _ = db.sync().await.unwrap();
+                open_bounded::<mmr::Family>(
+                    context.child("cap"),
+                    witness_config("keyless-rewind-preserves-pre-advance", &context),
+                    size_after_first,
+                )
+                .await
+            }
+            .unwrap();
 
-            // The rewind restored the state that `held` was merkleized against, so it still
+            // The recovery restored the state that `held` was merkleized against, so it still
             // matches the Merkle size and applies cleanly.
             let (db, _) = db.apply_batch(held).await.unwrap();
 
@@ -2603,7 +2822,8 @@ mod tests {
                 .append(U64::new(1))
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -2612,7 +2832,6 @@ mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), Location::new(4));
             assert_eq!(db.root(), root_after_first);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
@@ -2630,7 +2849,8 @@ mod tests {
                     .append(U64::new(1))
                     .append(U64::new(2))
                     .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
                 let root = db.root();
@@ -2645,14 +2865,13 @@ mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), Location::new(4));
             assert_eq!(db.root(), root_before_drop);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
     }
 
     #[test_traced("INFO")]
-    fn test_compact_noop_commit_after_rewind() {
+    fn test_compact_noop_commit_after_bounded_initialization() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-noop-after-rewind").await;
 
@@ -2661,7 +2880,8 @@ mod tests {
                 .append(U64::new(1))
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -2670,25 +2890,34 @@ mod tests {
                 .new_batch()
                 .append(U64::new(3))
                 .merkleize(&db, Some(U64::new(22)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
 
-            let db = db.rewind(Location::new(4)).await.unwrap();
+            let db = {
+                _ = db.sync().await.unwrap();
+                open_bounded::<mmr::Family>(
+                    context.child("cap"),
+                    witness_config("keyless-noop-after-rewind", &context),
+                    Location::new(4),
+                )
+                .await
+            }
+            .unwrap();
             assert_eq!(db.size(), Location::new(4));
             assert_eq!(db.root(), root_after_first);
 
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), Location::new(4));
             assert_eq!(db.root(), root_after_first);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
     }
 
     #[test_traced("INFO")]
-    fn test_compact_rewind_makes_post_advance_batch_stale() {
+    fn test_compact_bounded_initialization_makes_post_advance_batch_stale() {
         deterministic::Runner::default().start(|context| async move {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "keyless-rewind-makes-stale").await;
@@ -2697,7 +2926,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let size_after_first = db.size();
@@ -2706,20 +2936,31 @@ mod tests {
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
 
-            // Merkleize a batch against the post-commit-B state, which the rewind will discard.
+            // Merkleize a batch against the post-commit-B state, which the recovery will discard.
             let held = db
                 .new_batch()
                 .append(U64::new(3))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
-            let db = db.rewind(size_after_first).await.unwrap();
+            let db = {
+                _ = db.sync().await.unwrap();
+                open_bounded::<mmr::Family>(
+                    context.child("cap"),
+                    witness_config("keyless-rewind-makes-stale", &context),
+                    size_after_first,
+                )
+                .await
+            }
+            .unwrap();
 
-            // After rewind, mem.size reflects post-commit-A, but the held batch starts after
+            // After recovery, mem.size reflects post-commit-A, but the held batch starts after
             // post-commit-B. Apply must be rejected with StaleBatch.
             assert!(matches!(db.apply_batch(held).await, Err(Error::StaleBatch)));
         });
@@ -2730,7 +2971,11 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-floor-beyond").await;
 
-            let batch = db.new_batch().merkleize(&db, None, Location::new(2)).await;
+            let batch = db
+                .new_batch()
+                .merkleize(&db, None, Location::new(2))
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(batch).await,
@@ -2753,13 +2998,15 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, Location::new(3))
-                .await;
+                .await
+                .unwrap();
             // child: valid on its own (floor=0), but parent's floor is bad.
             let child = parent
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(child).await,

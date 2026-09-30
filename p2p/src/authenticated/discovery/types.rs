@@ -187,7 +187,7 @@ impl Read for BitVec {
 
     fn read_cfg(buf: &mut impl Buf, max_bits: &u64) -> Result<Self, CodecError> {
         let index = UInt::read(buf)?.into();
-        let bits = BitMap::read_cfg(buf, max_bits)?;
+        let bits = BitMap::read_cfg(buf, &(..=*max_bits).into())?;
         Ok(Self { index, bits })
     }
 }
