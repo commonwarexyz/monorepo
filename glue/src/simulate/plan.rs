@@ -885,8 +885,11 @@ mod tests {
 
     #[derive(Clone)]
     struct FinalizingEngine {
+        /// Participant public keys in index order.
         participants: Vec<ed25519::PublicKey>,
+        /// Delay before a node emits any report.
         finalize_after: Duration,
+        /// Number of ordinary finalizations each node reports, one per view.
         finalizations: u64,
         /// Delay after each ordinary finalization. Zero emits a burst.
         period: Duration,
@@ -898,15 +901,20 @@ mod tests {
     }
 
     struct FinalizingNode {
+        /// Runtime context for the reporting task.
         context: deterministic::Context,
+        /// Channel for reporting finalizations to the harness.
         monitor: mpsc::UnboundedSender<FinalizationUpdate<ed25519::PublicKey>>,
+        /// Validator reported for ordinary finalizations.
         pk: ed25519::PublicKey,
+        /// Delay before emitting any report.
         finalize_after: Duration,
+        /// Number of ordinary finalizations to report, one per view.
         finalizations: u64,
         /// Delay after each ordinary finalization. Zero emits a burst.
         period: Duration,
-        /// Ordered (validator, view and height, digest byte) reports emitted before
-        /// ordinary finalizations.
+        /// Scripted (validator, view and height, digest byte) reports emitted
+        /// before ordinary finalizations.
         script: Vec<(ed25519::PublicKey, u64, u8)>,
     }
 
