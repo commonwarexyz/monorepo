@@ -579,6 +579,29 @@ fn a_crash_before_recording_genesis_resumes_from_it() {
 }
 
 #[test]
+fn a_crash_before_recording_genesis_resumes_from_it_even_with_a_checkpoint_start() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (executor, _inbox, _) = parts.start(&context).await;
+        executor.abort();
+        let _ = executor.await;
+
+        // A chain holding only genesis started from it, so a checkpoint start does not sync.
+        context.remove("executor_applied", None).await.unwrap();
+        let parts = Parts {
+            checkpoint: true,
+            ..parts
+        };
+        let restarted_context = context.child("restarted");
+        let (_executor, mut inbox, _) = parts.start(&restarted_context).await;
+        assert_eq!(*parts.adder.resumed.lock(), vec![0, 0]);
+        report(&mut inbox, &[(1, 5)]);
+        until(&context, || parts.consumer.heights() == vec![1]).await;
+        assert!(parts.adder.synced.lock().is_empty());
+    });
+}
+
+#[test]
 fn restart_redelivers_unapplied_blocks_and_acknowledges_applied_inputs() {
     deterministic::Runner::default().start(|context| async move {
         let parts = Parts::default();
@@ -969,7 +992,7 @@ fn sync_follows_newer_targets_and_resumes_after_a_crash() {
         executor.abort();
         let _ = executor.await;
 
-        // The recorded target restarts the sync, and only newer targets reach it.
+        // The persisted target restarts the sync, and only newer targets reach it.
         let restarted_context = context.child("restarted");
         let (_executor, mut inbox, mailbox) = parts.start(&restarted_context).await;
         until(&context, || *parts.adder.synced.lock() == vec![3, 3]).await;
@@ -1147,6 +1170,95 @@ fn a_target_that_executed_another_input_halts_once_the_input_arrives() {
         mailbox.sync_to(child(&child(&base, 1), 1)).await;
         report(&mut inbox, &[(3, 2), (4, 1), (5, 7)]);
         let _ = executor.await;
+    });
+}
+
+#[test]
+fn a_target_below_the_inputs_marshal_delivers_is_ignored() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+
+        // Marshal already passed the input after block 3, so a base there would miss inputs.
+        let mut waiters = report(&mut inbox, &[(10, 1), (11, 2)]);
+        assert!(mailbox.sync_to(certified(3, 2, 100)).await);
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(parts.adder.synced.lock().is_empty());
+        assert!(!acknowledged(&mut waiters[0]));
+
+        // A target the inputs continue from starts the sync.
+        let base = certified(10, 1, 100);
+        assert!(mailbox.sync_to(Arc::clone(&base)).await);
+        until_acknowledged(&context, &mut waiters[0]).await;
+        until(&context, || parts.consumer.heights() == vec![11]).await;
+        assert_eq!(parts.consumer.totals(), vec![102]);
+    });
+}
+
+#[test]
+fn a_floor_jump_after_the_base_redelivers_the_inputs_it_holds() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+
+        // The sync reaches its target at once, before marshal's jump to the floor installed for
+        // it, so the inputs held from marshal's old floor are admitted after the base.
+        let mut stale = report(&mut inbox, &[(11, 2), (12, 3)]);
+        let base = certified(10, 1, 100);
+        assert!(mailbox.sync_to(Arc::clone(&base)).await);
+        until(&context, || parts.consumer.heights() == vec![11, 12]).await;
+
+        // Marshal jumps back and delivers the same inputs again. They are not executed again,
+        // and only their new acknowledgements wait on the consumer.
+        let mut waiters = report(&mut inbox, &[(10, 1), (11, 2), (12, 3), (13, 4)]);
+        until_acknowledged(&context, &mut waiters[0]).await;
+        until_acknowledged(&context, &mut stale[0]).await;
+        until_acknowledged(&context, &mut stale[1]).await;
+        until(&context, || parts.consumer.heights() == vec![11, 12, 13]).await;
+        assert!(!acknowledged(&mut waiters[1]));
+        for height in 11..=13 {
+            parts.consumer.apply(height);
+        }
+        for waiter in &mut waiters[1..] {
+            until_acknowledged(&context, waiter).await;
+        }
+        assert_eq!(parts.consumer.totals(), vec![102, 105, 109]);
+    });
+}
+
+#[test]
+fn a_replayed_checkpoint_below_the_synced_base_is_ignored_after_restart() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (executor, mut inbox, mailbox) = parts.start(&context).await;
+        let base = certified(10, 1, 100);
+        assert!(mailbox.sync_to(Arc::clone(&base)).await);
+        let mut waiters = report(&mut inbox, &[(10, 1), (11, 2)]);
+        until(&context, || parts.consumer.heights() == vec![11]).await;
+        parts.consumer.apply(11);
+        until_acknowledged(&context, &mut waiters[1]).await;
+        executor.abort();
+        let _ = executor.await;
+
+        // Aggregation replays a checkpoint of a block this node never executed, then the base's.
+        let restarted_context = context.child("restarted");
+        let (executor, _inbox, mailbox) = parts.start(&restarted_context).await;
+        mailbox.certified(Height::new(5), Sha256::hash(&[b"never executed"]));
+        mailbox.certified(Height::new(10), base.digest());
+        assert_eq!(
+            mailbox.block_at(Height::new(10)).await,
+            Some(Arc::clone(&base))
+        );
+        assert!(executor.now_or_never().is_none());
     });
 }
 
