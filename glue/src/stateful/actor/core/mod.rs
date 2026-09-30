@@ -388,9 +388,10 @@ mod tests {
                 true,
             )
             .await;
-            let plan = SyncPlan::init(&context, "stateful-handoff-policy-stateful").await;
+            let plan =
+                SyncPlan::init(context.child("plan"), "stateful-handoff-policy-stateful").await;
             let publication = HandoffPublication::AllowBeforeCertification;
-            let (_stateful, mailbox) = Stateful::init(
+            let (_stateful, mailbox) = Stateful::new(
                 context.child("stateful"),
                 Config {
                     application: TestApp::with_handoff_policy(HandoffPolicy::Prepare(publication)),

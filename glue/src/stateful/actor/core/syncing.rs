@@ -885,7 +885,7 @@ mod tests {
             let fixture =
                 scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_SYNCING_LIVE_FLOOR", 1);
             let (sender, mut reports) = actor_mailbox::new(context.child("reports"), NZUsize!(8));
-            let reporter = StatefulMailbox::<_, TestApp>::new(sender);
+            let reporter = StatefulMailbox::<_, TestApp>::new(sender, TestApp::default());
             let marshal = fixtures::marshal_fixture_with_reporter(
                 context.child("marshal"),
                 "syncing-live-floor",

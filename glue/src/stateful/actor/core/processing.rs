@@ -3100,7 +3100,15 @@ mod tests {
                 .map(|block| block.height())
                 .collect();
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mailbox = Mailbox::<_, GatedApp>::new(sender);
+            let (verify_gate, verify_started, verify_release) = application_gate();
+            let observed_contexts = Arc::default();
+            let application = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
+                proposal_gate: Arc::default(),
+                verify_valid: true,
+                observed_contexts: Arc::clone(&observed_contexts),
+            };
+            let mailbox = Mailbox::new(sender, application.clone());
 
             // The fanout observer keeps Marshal behind the durable application anchor.
             let observer = fixtures::FixtureReporter::new(false);
@@ -3113,22 +3121,15 @@ mod tests {
             )
             .await;
 
-            // Gate every database flush and the first verification.
+            // Gate every database flush.
             let control = FlushControl::default();
-            let (verify_gate, verify_started, verify_release) = application_gate();
-            let observed_contexts = Arc::default();
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox.clone(),
                 processor: Processor::new(
-                    GatedApp {
-                        verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
-                        proposal_gate: Arc::default(),
-                        verify_valid: true,
-                        observed_contexts: Arc::clone(&observed_contexts),
-                    },
+                    application,
                     Shared::new("test", TestDb::gated(control.clone())),
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
@@ -3291,7 +3292,13 @@ mod tests {
 
             // Marshal delivers finalized blocks to processing anchored at genesis.
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mailbox = Mailbox::<_, GatedApp>::new(sender);
+            let application = GatedApp {
+                verify_gates: Arc::default(),
+                proposal_gate: Arc::default(),
+                verify_valid: true,
+                observed_contexts: Arc::default(),
+            };
+            let mailbox = Mailbox::new(sender, application.clone());
             let marshal = fixtures::marshal_fixture_with_reporter(
                 context.child("marshal"),
                 "live-floor-skip",
@@ -3306,12 +3313,7 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox.clone(),
                 processor: Processor::new(
-                    GatedApp {
-                        verify_gates: Arc::default(),
-                        proposal_gate: Arc::default(),
-                        verify_valid: true,
-                        observed_contexts: Arc::default(),
-                    },
+                    application,
                     test_databases(),
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
