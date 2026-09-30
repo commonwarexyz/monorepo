@@ -88,6 +88,8 @@ where
             &candidate.emitted,
             self.codec,
         )?;
+        let floor_index = frontier_index(&candidate.emitted)
+            .ok_or(Error::Invalid("floor frontier overflows the output index"))?;
         self.verifier
             .verify(&candidate.anchor)
             .await
@@ -108,8 +110,7 @@ where
             history,
             history_index,
             ordered,
-            floor_index: frontier_index(&candidate.emitted)
-                .ok_or(Error::Invalid("floor frontier overflows the output index"))?,
+            floor_index,
             emitted: candidate.emitted.clone(),
         })
         .map_err(|_| Error::Invalid("floor checkpoint is not canonical"))?;

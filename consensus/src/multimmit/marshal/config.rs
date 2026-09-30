@@ -383,37 +383,51 @@ impl<T: Translator, V: Variant, B: Codec + Digestible> Config<T, V, B> {
     /// Sets [`Limits::max_block_bytes`], lets one resolver response carry 16 such blocks (see
     /// [`Limits::sized_resolver_max_value_bytes`]) and backfill hold 128 responses at once, and
     /// sizes each pending-block segment near 128 MiB with an admission cut no larger than one
-    /// segment or the default cut. Other bounds keep their values. Call it before the setters of
-    /// the bounds it sizes, which it overwrites.
+    /// segment or the default cut. A sized bound that no longer has its default value keeps it, so
+    /// this composes with the other setters in any order.
     pub fn with_max_block_bytes(mut self, max_block_bytes: NonZeroUsize) -> Self {
-        let resolver_max_value_bytes = Limits::sized_resolver_max_value_bytes(max_block_bytes);
+        let limits = Limits::default();
+        let capacities = Capacities::default();
         self.limits.max_block_bytes = max_block_bytes;
-        self.limits.resolver_max_value_bytes = resolver_max_value_bytes;
-        self.limits.max_backfill_bytes =
-            resolver_max_value_bytes.saturating_mul(NZUsize!(SIZED_CONCURRENT_RESPONSES));
-        let segment_items = (SIZED_PENDING_SEGMENT_BYTES / max_block_bytes).max(1);
-        self.capacities.pending_segment_items =
-            NonZeroU64::new(u64::try_from(segment_items).unwrap_or(u64::MAX))
-                .expect("a segment holds at least one block");
-        self.capacities.admission_cut_capacity =
-            NonZeroUsize::new(segment_items.min(DEFAULT_ADMISSION_CUT_CAPACITY.get()))
-                .expect("an admission cut holds at least one block");
+        if self.limits.resolver_max_value_bytes == limits.resolver_max_value_bytes {
+            self.limits.resolver_max_value_bytes =
+                Limits::sized_resolver_max_value_bytes(max_block_bytes);
+        }
+        if self.limits.max_backfill_bytes == limits.max_backfill_bytes {
+            self.limits.max_backfill_bytes = self
+                .limits
+                .resolver_max_value_bytes
+                .saturating_mul(NZUsize!(SIZED_CONCURRENT_RESPONSES));
+        }
+        if self.capacities.pending_segment_items == capacities.pending_segment_items {
+            let segment_items = (SIZED_PENDING_SEGMENT_BYTES / max_block_bytes).max(1);
+            self.capacities.pending_segment_items =
+                NonZeroU64::new(u64::try_from(segment_items).unwrap_or(u64::MAX))
+                    .expect("a segment holds at least one block");
+        }
+        if self.capacities.admission_cut_capacity == capacities.admission_cut_capacity {
+            let segment_items =
+                usize::try_from(self.capacities.pending_segment_items.get()).unwrap_or(usize::MAX);
+            self.capacities.admission_cut_capacity =
+                NonZeroUsize::new(segment_items.min(DEFAULT_ADMISSION_CUT_CAPACITY.get()))
+                    .expect("an admission cut holds at least one block");
+        }
         self
     }
 
-    /// Sets [`Self::retention`], the backend of each finalized artifact family.
+    /// Sets [`Self::retention`].
     pub const fn with_retention(mut self, retention: Retention) -> Self {
         self.retention = retention;
         self
     }
 
-    /// Sets [`Capacities::catalog_mailbox_size`], the capacity of the catalog's mailboxes.
+    /// Sets [`Capacities::catalog_mailbox_size`].
     pub const fn with_catalog_mailbox_size(mut self, catalog_mailbox_size: NonZeroUsize) -> Self {
         self.capacities.catalog_mailbox_size = catalog_mailbox_size;
         self
     }
 
-    /// Sets [`Capacities::admission_cut_capacity`], the most items in one pending-custody admission cut.
+    /// Sets [`Capacities::admission_cut_capacity`].
     pub const fn with_admission_cut_capacity(
         mut self,
         admission_cut_capacity: NonZeroUsize,
@@ -422,43 +436,43 @@ impl<T: Translator, V: Variant, B: Codec + Digestible> Config<T, V, B> {
         self
     }
 
-    /// Sets [`Capacities::pending_segment_items`], the items in each pending-block segment.
+    /// Sets [`Capacities::pending_segment_items`].
     pub const fn with_pending_segment_items(mut self, pending_segment_items: NonZeroU64) -> Self {
         self.capacities.pending_segment_items = pending_segment_items;
         self
     }
 
-    /// Sets [`Capacities::resolver_mailbox_size`], the capacity bounding resolver deliveries and validation work.
+    /// Sets [`Capacities::resolver_mailbox_size`].
     pub const fn with_resolver_mailbox_size(mut self, resolver_mailbox_size: NonZeroUsize) -> Self {
         self.capacities.resolver_mailbox_size = resolver_mailbox_size;
         self
     }
 
-    /// Sets [`Capacities::max_commit_outputs`], the most outputs in one catalog commit.
+    /// Sets [`Capacities::max_commit_outputs`].
     pub const fn with_max_commit_outputs(mut self, max_commit_outputs: NonZeroUsize) -> Self {
         self.capacities.max_commit_outputs = max_commit_outputs;
         self
     }
 
-    /// Sets [`Capacities::max_pending_acks`], the most delivered outputs awaiting acknowledgement.
+    /// Sets [`Capacities::max_pending_acks`].
     pub const fn with_max_pending_acks(mut self, max_pending_acks: NonZeroUsize) -> Self {
         self.capacities.max_pending_acks = max_pending_acks;
         self
     }
 
-    /// Sets [`Capacities::backfill_concurrency`], the most ancestry or finalized-body fetches in flight.
+    /// Sets [`Capacities::backfill_concurrency`].
     pub const fn with_backfill_concurrency(mut self, backfill_concurrency: NonZeroUsize) -> Self {
         self.capacities.backfill_concurrency = backfill_concurrency;
         self
     }
 
-    /// Sets [`Capacities::header_cache_capacity`], the capacity of each producer ancestry hint cache.
+    /// Sets [`Capacities::header_cache_capacity`].
     pub const fn with_header_cache_capacity(mut self, header_cache_capacity: NonZeroUsize) -> Self {
         self.capacities.header_cache_capacity = header_cache_capacity;
         self
     }
 
-    /// Sets [`Limits::resolver_max_value_bytes`], the most encoded bytes in one resolved artifact or peer response.
+    /// Sets [`Limits::resolver_max_value_bytes`].
     pub const fn with_resolver_max_value_bytes(
         mut self,
         resolver_max_value_bytes: NonZeroUsize,
@@ -467,7 +481,7 @@ impl<T: Translator, V: Variant, B: Codec + Digestible> Config<T, V, B> {
         self
     }
 
-    /// Sets [`Limits::max_commit_block_bytes`], the target encoded bytes of the blocks in one catalog commit.
+    /// Sets [`Limits::max_commit_block_bytes`].
     pub const fn with_max_commit_block_bytes(
         mut self,
         max_commit_block_bytes: NonZeroUsize,
@@ -476,19 +490,19 @@ impl<T: Translator, V: Variant, B: Codec + Digestible> Config<T, V, B> {
         self
     }
 
-    /// Sets [`Limits::max_delivery_bytes`], the target encoded bytes of one delivery read from custody.
+    /// Sets [`Limits::max_delivery_bytes`].
     pub const fn with_max_delivery_bytes(mut self, max_delivery_bytes: NonZeroUsize) -> Self {
         self.limits.max_delivery_bytes = max_delivery_bytes;
         self
     }
 
-    /// Sets [`Limits::max_hot_block_bytes`], the encoded bytes of recently admitted blocks kept in memory.
+    /// Sets [`Limits::max_hot_block_bytes`].
     pub const fn with_max_hot_block_bytes(mut self, max_hot_block_bytes: NonZeroUsize) -> Self {
         self.limits.max_hot_block_bytes = max_hot_block_bytes;
         self
     }
 
-    /// Sets [`Limits::max_materialized_block_bytes`], the encoded bytes of blocks read back from custody kept in memory.
+    /// Sets [`Limits::max_materialized_block_bytes`].
     pub const fn with_max_materialized_block_bytes(
         mut self,
         max_materialized_block_bytes: NonZeroUsize,
@@ -497,13 +511,13 @@ impl<T: Translator, V: Variant, B: Codec + Digestible> Config<T, V, B> {
         self
     }
 
-    /// Sets [`Limits::max_backfill_bytes`], the target encoded bytes of concurrent backfill fetches.
+    /// Sets [`Limits::max_backfill_bytes`].
     pub const fn with_max_backfill_bytes(mut self, max_backfill_bytes: NonZeroUsize) -> Self {
         self.limits.max_backfill_bytes = max_backfill_bytes;
         self
     }
 
-    /// Sets [`Limits::max_checkpoint_bytes`], the most encoded bytes read from one checkpoint, floor installation, or custody manifest.
+    /// Sets [`Limits::max_checkpoint_bytes`].
     pub const fn with_max_checkpoint_bytes(mut self, max_checkpoint_bytes: NonZeroUsize) -> Self {
         self.limits.max_checkpoint_bytes = max_checkpoint_bytes;
         self
@@ -865,6 +879,37 @@ mod tests {
                 );
                 config.validate().expect("sized configuration is valid");
             }
+        });
+    }
+
+    #[test]
+    fn max_block_bytes_keeps_explicit_bounds_in_either_order() {
+        deterministic::Runner::default().start(|context| async move {
+            let max_block_bytes = NZUsize!(1_024);
+            let segment_items = NZU64!(8);
+            let resolver_max_value_bytes = NZUsize!(1_000_000);
+            let before = config(&context, Epoch::new(3), 2)
+                .with_pending_segment_items(segment_items)
+                .with_resolver_max_value_bytes(resolver_max_value_bytes)
+                .with_max_block_bytes(max_block_bytes);
+            let after = config(&context, Epoch::new(3), 2)
+                .with_max_block_bytes(max_block_bytes)
+                .with_pending_segment_items(segment_items)
+                .with_resolver_max_value_bytes(resolver_max_value_bytes);
+            for config in [&before, &after] {
+                assert_eq!(config.limits.max_block_bytes, max_block_bytes);
+                assert_eq!(config.capacities.pending_segment_items, segment_items);
+                assert_eq!(
+                    config.limits.resolver_max_value_bytes,
+                    resolver_max_value_bytes
+                );
+            }
+            // Bounds derived from an explicit one follow it.
+            assert_eq!(before.capacities.admission_cut_capacity.get(), 8);
+            assert_eq!(
+                before.limits.max_backfill_bytes.get(),
+                resolver_max_value_bytes.get() * SIZED_CONCURRENT_RESPONSES
+            );
         });
     }
 }

@@ -597,8 +597,8 @@ where
                 reply.send_lossy(outcome(self.stores.history(commitment).await)?);
             }
             Command::FloorAt { at, reply } => {
-                // A buffered commit's floor is not served until its checkpoint is durable.
-                let at = at.min(self.commits.durable().committed());
+                // Reading only through the durable L-QC ordinal keeps a buffered commit's floor
+                // unserved until its checkpoint is durable.
                 let floor = self.stores.floor_at(at, self.commits.durable_lqc()).await;
                 reply.send_lossy(outcome(floor)?);
             }

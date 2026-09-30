@@ -10,14 +10,15 @@ use crate::{
             open::{Opened, storage as open_storage},
             storage::{
                 commit::{Commit, CustodyRef, HistoryOpening, OutputRow, SelectedLqc},
+                floors::FloorRecord,
                 record::blob_size,
             },
         },
         mocks::Committee,
         testing::TestBody,
-        types::{ChainId, PathLimits},
+        types::{BlockRef, ChainId, Frontier, PathLimits},
     },
-    types::Participant,
+    types::{Height, Participant},
 };
 use commonware_cryptography::{
     Digestible as _, Hasher as _, Sha256, bls12381::primitives::variant::MinPk,
@@ -658,5 +659,80 @@ fn restart_with_a_pending_install_seeds_the_delivery_cursor_at_the_install(
         drop(cursor);
         drop(client);
         assert!(handle.await.is_ok());
+    });
+}
+
+/// Returns the finalized ordinal of the floor [`CatalogStore::floor_record_at`] finds.
+async fn floor_ordinal(store: &TestStore, at: u64, through: Option<u64>) -> Option<u64> {
+    store
+        .floor_record_at(OutputIndex::new(at), through)
+        .await
+        .unwrap()
+        .map(|floor| floor.ordinal)
+}
+
+#[test]
+fn floor_lookup_searches_sparse_and_pruned_ordinals() {
+    deterministic::Runner::default().start(|context| async move {
+        let committee = committee(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_FLOOR_ORDINALS");
+        let config = config(&context, &committee, "floor_ordinals");
+        let mut store = open(&context, "store", &config).await;
+
+        // Floors are recorded at their L-QC's ordinal, which skips views without one.
+        let floor = |index: u64| {
+            let emitted = (0..4u32)
+                .map(|chain| {
+                    let height = if chain == 0 { index } else { 0 };
+                    BlockRef::new(
+                        ChainId::new(chain),
+                        Height::new(height),
+                        Sha256::hash(&[&[chain as u8]]),
+                    )
+                })
+                .collect();
+            FloorRecord::new(0, Frontier::new(emitted).unwrap()).unwrap()
+        };
+        let mut floors = store.final_floors.take().unwrap();
+        for (ordinal, index) in [(3u64, 2), (9, 5), (10, 7), (40, 12)] {
+            floors = floors
+                .put(
+                    ordinal,
+                    Sha256::hash(&[&ordinal.to_be_bytes()]),
+                    floor(index),
+                )
+                .await
+                .unwrap();
+        }
+        store.final_floors.restore(floors);
+
+        // Only floors at or below the published ordinal count, and none without one.
+        assert_eq!(floor_ordinal(&store, 12, None).await, None);
+        for (at, expected) in [
+            (0, None),
+            (1, None),
+            (2, Some(3)),
+            (4, Some(3)),
+            (5, Some(9)),
+            (6, Some(9)),
+            (7, Some(10)),
+            (11, Some(10)),
+            (12, Some(10)),
+            (100, Some(10)),
+        ] {
+            assert_eq!(
+                floor_ordinal(&store, at, Some(20)).await,
+                expected,
+                "at {at}"
+            );
+        }
+        assert_eq!(floor_ordinal(&store, 12, Some(40)).await, Some(40));
+
+        // Pruned ordinals no longer resolve, and the search resumes at the first retained one.
+        let floors = store.final_floors.take().unwrap();
+        let floors = floors.prune(9).await.unwrap();
+        store.final_floors.restore(floors);
+        assert_eq!(floor_ordinal(&store, 4, Some(20)).await, None);
+        assert_eq!(floor_ordinal(&store, 5, Some(20)).await, Some(9));
+        assert_eq!(floor_ordinal(&store, 8, Some(20)).await, Some(10));
     });
 }

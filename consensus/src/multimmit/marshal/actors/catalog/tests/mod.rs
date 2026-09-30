@@ -212,14 +212,15 @@ pub(super) fn config(
         committee.codec(),
         (),
         archive,
-    );
-    set_capacity(&mut config, 16);
-    config.capacities.max_commit_outputs = NZUsize!(1);
-    config.with_retention(Retention {
+    )
+    .with_max_commit_outputs(NZUsize!(1))
+    .with_retention(Retention {
         lqc: ArchiveMode::Prunable,
         history: ArchiveMode::Immutable,
         blocks: ArchiveMode::Prunable,
-    })
+    });
+    set_capacity(&mut config, 16);
+    config
 }
 
 /// Returns the next committed batch sent to delivery.
