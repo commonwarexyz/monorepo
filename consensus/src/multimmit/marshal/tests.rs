@@ -3329,9 +3329,10 @@ fn ledger_prunes_to_the_floors_it_serves() {
             .await;
 
         // Pruning below index three keeps the floor at index two and every output after it.
-        Ledger::prune(&mailbox, OutputIndex::new(3)).await;
+        Ledger::prune(&mailbox, OutputIndex::new(3)).await.unwrap();
         let (index, floor) = Floors::floor_at(&mailbox, OutputIndex::new(3))
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(index, OutputIndex::new(2));
         assert_eq!(floor.anchor().id::<Sha256>(), first.id());
@@ -3340,15 +3341,22 @@ fn ledger_prunes_to_the_floors_it_serves() {
             assert_eq!(block.as_deref(), Some(update.block.as_ref()));
         }
 
-        // A fresh node installs the served floor and resumes after the same index.
+        // A fresh node installs the served floor and resumes after the same index, then rejects
+        // it once installed, as stale.
         harness.start(1).await;
         assert_eq!(
-            Floors::install(&harness.mailbox(1), floor).await,
+            Floors::install(&harness.mailbox(1), floor.clone())
+                .await
+                .unwrap(),
             Some(index)
         );
         harness
             .wait_progress(1, |progress| progress.committed == index)
             .await;
+        assert_eq!(
+            Floors::install(&harness.mailbox(1), floor).await.unwrap(),
+            None
+        );
         harness.shutdown().await;
     });
 }

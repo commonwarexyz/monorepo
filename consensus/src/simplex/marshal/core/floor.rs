@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Resolver, TargetedResolver};
-use commonware_utils::{futures::Aborter, vec::NonEmptyVec};
+use commonware_utils::{channel::oneshot, futures::Aborter, vec::NonEmptyVec};
 
 /// Marshal's durable processed height and the stored block that backs it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,11 +63,16 @@ impl Floor {
     }
 }
 
+/// Receives a floor's anchor height once the floor is applied.
+pub(super) type Installed = oneshot::Sender<Height>;
+
 /// A floor finalization awaiting its anchor block.
 ///
-/// Dropping the pending floor aborts its buffer waiter, if one exists.
+/// Dropping the pending floor aborts its buffer waiter, if one exists, and closes its installer's
+/// reply, if any, so the installer learns the floor was not applied.
 struct Pending<S: Scheme, C: Digest> {
     finalization: Finalization<S, C>,
+    installed: Option<Installed>,
     _aborter: Option<Aborter>,
 }
 
@@ -145,25 +150,30 @@ impl<S: Scheme, C: Digest> State<S, C> {
 
     /// Records a verified floor finalization whose block anchor still needs to arrive.
     ///
-    /// Taking or replacing the pending floor drops `aborter`, which aborts its
-    /// buffer waiter.
+    /// `installed` receives the anchor's height once the floor is applied. Taking or replacing
+    /// the pending floor drops `aborter`, which aborts its buffer waiter.
     pub(super) fn set_pending(
         &mut self,
         finalization: Finalization<S, C>,
+        installed: Option<Installed>,
         aborter: Option<Aborter>,
     ) {
         self.pending = Some(Pending {
             finalization,
+            installed,
             _aborter: aborter,
         });
     }
 
-    /// Takes the pending floor if `commitment` is its payload.
+    /// Takes the pending floor, with its installer's reply, if `commitment` is its payload.
     #[must_use]
-    pub(super) fn take_matching(&mut self, commitment: C) -> Option<Finalization<S, C>> {
+    pub(super) fn take_matching(
+        &mut self,
+        commitment: C,
+    ) -> Option<(Finalization<S, C>, Option<Installed>)> {
         self.pending
             .take_if(|pending| pending.finalization.proposal.payload == commitment)
-            .map(|pending| pending.finalization)
+            .map(|pending| (pending.finalization, pending.installed))
     }
 
     /// Takes the pending floor if the processed round floor now covers its round.

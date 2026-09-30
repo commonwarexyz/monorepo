@@ -1931,7 +1931,7 @@ mod tests {
                     .await
             });
             let response = mailbox
-                .epoch_info(marshal::ancestry::from_iter([blocks[2].clone()]))
+                .epoch_info(ancestry::from_iter([blocks[2].clone()]))
                 .await;
             assert!(matches!(response, EpochInfoResponse::Available(_)));
         });

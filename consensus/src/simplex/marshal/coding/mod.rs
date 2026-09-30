@@ -1291,6 +1291,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_finalization_floors_survive_pruning() {
+        harness::finalization_floors_survive_pruning::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_hint_finalized_triggers_fetch() {
         harness::hint_finalized_triggers_fetch::<CodingHarness>();
     }
