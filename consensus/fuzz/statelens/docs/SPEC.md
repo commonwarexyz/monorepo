@@ -349,9 +349,28 @@ set positional-arguments := true
 extract *args:
     python3 scripts/statelens.py extract "$@"
 
-# Run a campaign (instrument, build the StateLens targets, test): just fuzz [--agent A] [--profile P]
-fuzz *args:
+# Instrument this checkout and build the StateLens targets: just campaign [--agent A] [--profile P]
+campaign *args:
     python3 scripts/statelens.py campaign "$@"
+
+# Fuzz a target a campaign built: just run <target> [-- -fork=8 -max_total_time=600]
+run target *args:
+    cd .. && just run "$@"
+
+# Campaign, then fuzz one of its targets: just fuzz <target> [-- -fork=8]
+fuzz target *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The target names its profile: only the `simplex` profile builds `simplex_statelens`.
+    target="$1"
+    shift
+    if [ "$target" = "simplex_statelens" ]; then profile=simplex; else profile=marshal; fi
+    just campaign --profile "$profile"
+    just run "$target" "$@"
+
+# Undo what a campaign wrote to this checkout: just clean [--yes]
+clean *args:
+    python3 scripts/statelens.py clean "$@"
 
 # Check invariant files: just check-invariants [path...]
 check-invariants *args:
@@ -369,6 +388,7 @@ prefixed with `statelens:`.
 | `lint` | `lint [PATH...]` | 0 clean, 3 problems |
 | `extract` | `extract [--agent A] [--registry R] KIND SOURCE...`, where `R` is `simplex` (default) or `marshal` | 0 done (including zero files), 1 usage, 2 agent failed, 3 lint problems |
 | `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, or a section that is not state-bearing, 2 no readable corpus root |
+| `clean` | `clean [--yes]`; prints what it would undo and acts only with `--yes` | 0 done or nothing to undo, 1 no `--yes` given |
 | `campaign` | `campaign [--agent A] [--profile P] [--stop-after STEP]`, where `P` is `simplex` (default) or `marshal` | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
 
 `--stop-after` accepts `materialize`, `instrument` or `build`. It exists for
@@ -972,8 +992,8 @@ participant, and it is checked without ghost state.
 
 | AC | Procedure | Pass condition |
 |---|---|---|
-| AC-9 | With at least one marshal invariant: `just fuzz --profile marshal`, then each printed `run` command. | Materialize (12 variants), instrument, plan, build and the test gate complete, the result is `READY` with one `run` line per variant, and each `run` command starts its variant. |
-| AC-10 | `STATELENS_FALSE_INVARIANTS=1 just fuzz --profile marshal`. | Result `PANIC (tests)`. `SL/campaign/logs/test.log` contains both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. |
+| AC-9 | With at least one marshal invariant: `just campaign --profile marshal`, then each printed `run` command. | Materialize (12 variants), instrument, plan, build and the test gate complete, the result is `READY` with one `run` line per variant, and each `run` command starts its variant. |
+| AC-10 | `STATELENS_FALSE_INVARIANTS=1 just campaign --profile marshal`. | Result `PANIC (tests)`. `SL/campaign/logs/test.log` contains both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. |
 | AC-11 | In an instrumented checkout, for each variant: `STATELENS_BYZANTINE=panic just run <variant> -- -max_total_time=120`, then the same without the variable. | With the variable, the four Twins variants and the wedge-scenario variant panic with `[statelens][BYZANTINE]`, and no other variant does. Without it, none does. `[statelens] participant index mismatch` never appears. Verified for the Simplex sites of the stock standard Twins target (section 8.1). |
 | AC-12 | `just run <variant> <artifact>` in the checkout of a crashing Phase 3 run, with that run's `STATELENS_BYZANTINE` value. | The same `[statelens][...]` line as in that run. |
 | AC-13 | Two 10-minute runs of `marshal_e2e_standard_app_cert_mock_twins_statelens` on empty corpora, one with `STATELENS_FEEDBACK=0` and one without. | `ft:` on the `DONE` line is higher with feedback. |
@@ -1763,9 +1783,9 @@ Last lines of its output:
 | AC-1 | For each agent: `just extract issue <URL of a real Simplex bug>`. | At least one new `invariants/simplex/INV-*.md`; `just check-invariants` reports no problem for it. |
 | AC-2 | On `main` with the subproject committed: `git ls-files consensus/fuzz/statelens` contains no `Cargo.toml`; `just check-fmt`; `just lint`; `just test -p commonware-consensus`; the CI fuzz target listings for `consensus/fuzz/simplex` and `consensus/fuzz/marshal`. | All behave exactly as without the subproject. |
 | AC-3 | `just check-invariants`; `git ls-files consensus/fuzz/statelens/invariants consensus/fuzz/statelens/false-invariants`; then `just extract --registry marshal comment consensus/src/marshal/mod.rs`. | No lint problem. Every invariant file is in a subsystem directory. The new files are in `invariants/marshal/`, numbered from the next global ID. |
-| AC-4 | With at least one simplex invariant: `just fuzz`, then the printed `run` command. | Materialize, instrument, plan, build and test gate complete, the result is `READY`, and the `run` command starts the fuzzer. |
+| AC-4 | With at least one simplex invariant: `just campaign`, then the printed `run` command. | Materialize, instrument, plan, build and test gate complete, the result is `READY`, and the `run` command starts the fuzzer. |
 | AC-5 | In an instrumented checkout, two 10-minute runs on empty corpora: `STATELENS_FEEDBACK=0 just run simplex_statelens <empty dir A> -- -max_total_time=600` and the same without the variable on `<empty dir B>`. | The `ft:` value on the `DONE` line is higher with feedback. Compare `ft:`, not `cov:` (section 9.3). |
-| AC-6 | `STATELENS_FALSE_INVARIANTS=1 just fuzz`; if the result is `READY`, a short run of the printed `run` command. | Result `PANIC (tests)` with `[statelens][FALSE-0001]`, or a panic with it in the short run. |
+| AC-6 | `STATELENS_FALSE_INVARIANTS=1 just campaign`; if the result is `READY`, a short run of the printed `run` command. | Result `PANIC (tests)` with `[statelens][FALSE-0001]`, or a panic with it in the short run. |
 | AC-7 | In an instrumented checkout: `STATELENS_BYZANTINE=panic just run simplex_statelens -- -max_total_time=120`, then the same without the variable. | The first run panics with `[statelens][BYZANTINE]`; the second does not; `[statelens] participant index mismatch` never appears. Verified at the reference commit (section 1.2). |
 | AC-8 | `just run simplex_statelens <artifact>` in the checkout of a crashing Phase 3 run, with that run's `STATELENS_BYZANTINE` value. | The same `[statelens][...]` line as in that run. Verified for `BYZANTINE` (section 1.2). |
 | AC-14 | With `STATELENS_KB` set to a findings corpus, run the queries of section 5.6 by hand for each registry: `kb modules`, `kb find`, `kb cites <a component directory>`, `kb grep`, `kb show`. | Every command answers from the index; `find` and `cites` return only findings whose `module` is in that subsystem's filter; `cites` returns the findings that name files under the directory, with those files listed; `show` refuses a section that is not state-bearing and an identifier out of scope. |
@@ -1796,8 +1816,8 @@ variants.
 4. Write `README.md` (Appendix D).
 5. Validate:
    - `just check-invariants`;
-   - `STATELENS_FALSE_INVARIANTS=1 just fuzz --stop-after build`, then AC-1 to AC-8;
-   - `STATELENS_FALSE_INVARIANTS=1 just fuzz --profile marshal --stop-after build`, then
+   - `STATELENS_FALSE_INVARIANTS=1 just campaign --stop-after build`, then AC-1 to AC-8;
+   - `STATELENS_FALSE_INVARIANTS=1 just campaign --profile marshal --stop-after build`, then
      AC-9 to AC-13;
    - with `STATELENS_KB` set to a findings corpus, the queries of section 5.6, then AC-14
      and AC-15.
@@ -2490,10 +2510,10 @@ Workflow test, see SPEC.md section 14.
    it; edit or delete drafts; `just check-invariants`.
 5. The knowledge base: what `STATELENS_KB` points at, that a campaign's beacon step queries
    it while instrumenting, and the `kb` commands an operator can run by hand.
-6. Phase 2: `just fuzz`, `just fuzz --profile marshal`, `just fuzz --agent codex`,
-   `--stop-after`. The campaign builds the StateLens targets and does not fuzz. Note that
-   `just fuzz` in `consensus/fuzz/` or at the repository root is the existing recipe that
-   runs a package's fuzz targets.
+6. Phase 2: `just campaign`, `just campaign --profile marshal`, `just campaign --agent codex`,
+   `--stop-after`. A campaign builds the StateLens targets and does not fuzz; `just fuzz
+   <target>` is the convenience that runs a campaign and then fuzzes one of its targets, and
+   `just clean` undoes what a campaign wrote so a checkout can be reused.
 7. Phase 3: run the printed `run` commands, adding libFuzzer arguments such as `-fork=8`
    (section 7.10); which marshal variants have an adversary that runs Simplex or marshal code.
 8. Results: the summary lines, exit codes, and `campaign/` (plan, diff, logs, prompts).

@@ -112,14 +112,20 @@ finding is committed to this repository.
 
 ```
 git clone <repository> && cd <repository>/consensus/fuzz/statelens
-just fuzz                          # simplex profile, agent from config.env
-just fuzz --profile marshal        # marshal profile
-just fuzz --agent codex            # another agent (or STATELENS_AGENT=codex just fuzz)
-just fuzz --stop-after build       # stop after materialize, instrument or build
+export STATELENS_KB=<the findings repository>   # optional; see The knowledge base
+just campaign                          # simplex profile, agent from config.env
+just campaign --profile marshal        # marshal profile
+just campaign --agent codex            # another agent (or STATELENS_AGENT=codex just campaign)
+just campaign --stop-after build       # stop after materialize, instrument or build
 ```
 
-In this directory `just fuzz` runs a StateLens campaign. In `consensus/fuzz/` and at the
-repository root, `just fuzz` is the existing recipe that runs a package's fuzz targets.
+**`just campaign` starts an agent with full access to this machine.** Run it in a fresh
+clone on a dedicated machine or container, and throw the clone away afterwards.
+
+Two conveniences: `just fuzz <target>` runs a campaign and then fuzzes one of its targets,
+inferring the profile from the target name; and `just clean` undoes what a campaign wrote,
+so a checkout can be reused. Note that in `consensus/fuzz/` and at the repository root,
+`just fuzz` is a different, pre-existing recipe that runs a package's fuzz targets.
 
 A campaign adds the runtime module, the fuzz targets and the harness and runtime hooks to
 the tree, lets the agent bind every invariant of the profile's registries and add beacon
@@ -145,11 +151,14 @@ instrumented the checkout. Uncommitted registry edits are used.
 
 ## Phase 3: run fuzz targets
 
-StateLens has no command for this phase. In the instrumented checkout, run the `run`
-commands of a `READY` summary for the targets you choose, and add libFuzzer arguments as
-needed, such as `-fork=<N>` to use N cores or `-max_total_time=<s>` to bound the run:
+In the instrumented checkout, run the `run` commands of a `READY` summary for the targets
+you choose, adding libFuzzer arguments as needed, such as `-fork=<N>` to use N cores or
+`-max_total_time=<s>` to bound the run. From this directory `just run <target>` does the
+same, and `just fuzz <target>` runs the campaign first:
 
 ```
+just run simplex_statelens -- -rss_limit_mb=4000 -print_final_stats=1 -fork=8
+
 cd <repo>/consensus/fuzz
 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- \
   -rss_limit_mb=4000 -print_final_stats=1 -fork=8
@@ -247,15 +256,15 @@ recreates it.
 
 | Variable | Use |
 |---|---|
-| `STATELENS_FALSE_INVARIANTS=1` | Set on `just fuzz`. Also binds the deliberately false invariants in `false-invariants/<subsystem>/`: FALSE-0001 with the `simplex` profile, FALSE-0001 and FALSE-0002 with the `marshal` profile. A `simplex` campaign must end with `PANIC (tests)` and `[statelens][FALSE-0001]`, or, if it reports `READY`, a short run of its `run` command must panic with it. A `marshal` campaign must end with `PANIC (tests)`, and `campaign/logs/test.log` must contain both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. |
+| `STATELENS_FALSE_INVARIANTS=1` | Set on `just campaign`. Also binds the deliberately false invariants in `false-invariants/<subsystem>/`: FALSE-0001 with the `simplex` profile, FALSE-0001 and FALSE-0002 with the `marshal` profile. A `simplex` campaign must end with `PANIC (tests)` and `[statelens][FALSE-0001]`, or, if it reports `READY`, a short run of its `run` command must panic with it. A `marshal` campaign must end with `PANIC (tests)`, and `campaign/logs/test.log` must contain both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. |
 | `STATELENS_BYZANTINE=panic` | Set on a `run` command. Panics when a compromised replica reaches an instrumented site, which shows the Byzantine guard is needed and wired: `simplex_statelens`, the four marshal Twins variants and the wedge-scenario variant must panic with `[statelens][BYZANTINE]`, and no other variant may; `[statelens] participant index mismatch` must never appear. `skip` is the default, `check` checks compromised replicas too. |
 | `STATELENS_FEEDBACK=0` | Set on a `run` command. Leaves the StateLens counters unregistered. Run a target for the same time on two empty corpora, with and without it: `ft:` on the `DONE` line should be higher with feedback. Compare `ft:`, not `cov:`, which libFuzzer stops printing once the counters are registered. |
 
 Each false-invariant campaign in a fresh clone of its own:
 
 ```
-STATELENS_FALSE_INVARIANTS=1 just fuzz
-STATELENS_FALSE_INVARIANTS=1 just fuzz --profile marshal
+STATELENS_FALSE_INVARIANTS=1 just campaign
+STATELENS_FALSE_INVARIANTS=1 just campaign --profile marshal
 ```
 
 In the checkout of a `READY` simplex campaign (for a `READY` marshal campaign, use a Twins

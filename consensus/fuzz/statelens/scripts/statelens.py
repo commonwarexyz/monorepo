@@ -105,6 +105,19 @@ MARSHAL_TARGETS = "consensus/fuzz/marshal/fuzz_targets"
 MARSHAL_MANIFEST = "consensus/fuzz/marshal/Cargo.toml"
 MARSHAL_SRC = "consensus/fuzz/marshal/src"
 PLAN = "consensus/fuzz/statelens/campaign/plan.md"
+# Everything a campaign creates (deleted by `clean`) or edits (restored by `clean`).
+# The marshal variants are found by glob, because their names come from the targets.
+CREATED_PATHS = (STATELENS_RS, TARGET_RS)
+EDITED_PATHS = (
+    "consensus/src/simplex/mod.rs",
+    "consensus/Cargo.toml",
+    "Cargo.lock",
+    "consensus/fuzz/core/src/lib.rs",
+    "runtime/src/deterministic.rs",
+    FUZZ_MANIFEST,
+    MARSHAL_MANIFEST,
+    "consensus/fuzz/marshal/src/marshal/end_to_end/scenario.rs",
+)
 SIMPLEX_TEST_FILTER = (
     "(test(/^simplex::tests::/) & not test(/::test_twins/)) | test(/^simplex::statelens::/)"
 )
@@ -1205,6 +1218,50 @@ def kb_query_help(registry):
     )
 
 
+def campaign_artifacts(repo):
+    """(created paths that exist, tracked paths a campaign edits) (SPEC section 7.13)."""
+    variants = sorted((repo / MARSHAL_TARGETS).glob("*_statelens.rs"))
+    created = [path for path in CREATED_PATHS if (repo / path).exists()]
+    created += [str(path.relative_to(repo)) for path in variants]
+    edited = [path for path in EDITED_PATHS if (repo / path).exists()]
+    return created, edited
+
+
+def cmd_clean(args):
+    """Undo what a campaign wrote, so a checkout can be reused (SPEC section 7.13)."""
+    repo = repo_root()
+    created, edited = campaign_artifacts(repo)
+    roots = sorted({root for profile in PROFILES.values() for root in profile["roots"]})
+    dirty = porcelain_paths(git(repo, "status", "--porcelain", "-z", "--", *roots))
+    touched = porcelain_paths(git(repo, "status", "--porcelain", "-z", "--", *edited))
+    if not created and not dirty and not touched:
+        say("clean: nothing to undo; this checkout has no campaign artifacts")
+        return 0
+    say("clean: this restores the paths below to HEAD, losing any edit of your own in them")
+    for path in created:
+        print(f"  delete   {path}")
+    # A created file is deleted, not restored: after `git rm --cached` its pathspec is
+    # unknown to git, and one unknown pathspec fails the whole `git checkout`.
+    restore = sorted((set(touched) | set(dirty)) - set(created))
+    for path in restore:
+        print(f"  restore  {path}")
+    if not args.yes:
+        say("clean: nothing done; pass --yes to proceed")
+        return 1
+    # Restore first: a failure then leaves every generated file in place, so the
+    # checkout is still recoverable. Only pathspecs git can resolve are passed, because
+    # one unknown pathspec aborts the whole checkout.
+    targets = sorted(set(restore) | {root for root in roots if (repo / root).is_dir()})
+    if targets:
+        git(repo, "checkout", "--", *targets)
+    for path in created:
+        git(repo, "rm", "--cached", "--quiet", "--ignore-unmatch", path)
+        (repo / path).unlink()
+    say(f"clean: restored {len(targets)} path(s) and deleted {len(created)} file(s)")
+    say("clean: campaign/ and extract/ were left alone; delete them by hand if you want to")
+    return 0
+
+
 def read_edit_file(repo, relative, hint="update the paths and anchors in scripts/statelens.py"):
     """Text of a file the materialize step reads; a missing file aborts with exit code 2."""
     try:
@@ -2026,6 +2083,16 @@ def main(argv):
     )
     extract.add_argument("kind", choices=KINDS, help="source kind")
     extract.add_argument("sources", nargs="+", metavar="SOURCE", help="a source (SPEC section 6.1)")
+    clean = commands.add_parser(
+        "clean",
+        help="undo what a campaign wrote to this checkout",
+        description=(
+            "Delete the files a campaign created and restore the paths it edits to HEAD, "
+            "so a checkout can be reused (SPEC section 7.13). Prints what it would do and "
+            "needs --yes to act."
+        ),
+    )
+    clean.add_argument("--yes", action="store_true", help="actually do it")
     kb = commands.add_parser(
         "kb",
         help="query the knowledge base (the instrumenter uses it too)",
@@ -2080,6 +2147,8 @@ def main(argv):
             return cmd_extract(args)
         if args.command == "kb":
             return cmd_kb(args)
+        if args.command == "clean":
+            return cmd_clean(args)
         return Campaign(args).run()
     except Abort as error:
         say(f"error: {error}")
