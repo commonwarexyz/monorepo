@@ -1,5 +1,5 @@
 use super::{
-    CertificateOutcome, Config, Engine, EngineOutcome, Recoverer,
+    CertificateOutcome, Config, Engine, EngineOutcome, Mailbox, Recoverer,
     scheme::{self, Scheme},
     types::{Ack, Certificate, Item, RecoveryKey, RecoveryNamespace},
 };
@@ -348,6 +348,28 @@ where
         journal_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
     }
+}
+
+/// Returns the recovery key answered by `certificate`.
+fn key_for<S: Scheme<Sha256Digest>>(
+    fixture: &Fixture<S>,
+    certificate: &Certificate<S, Sha256Digest>,
+) -> RecoveryKey {
+    RecoveryKey {
+        namespace: fixture.schemes[0].recovery_namespace(),
+        epoch: certificate.epoch,
+        position: certificate.item.position,
+    }
+}
+
+/// Submits `certificate` under the recovery key it answers.
+async fn submit<S: Scheme<Sha256Digest>>(
+    mailbox: &mut Mailbox<S, Sha256Digest>,
+    fixture: &Fixture<S>,
+    certificate: Certificate<S, Sha256Digest>,
+) -> CertificateOutcome {
+    let key = key_for(fixture, &certificate);
+    mailbox.submit(key, certificate).await
 }
 
 fn certificate<S>(
@@ -746,7 +768,12 @@ fn test_ack_validation_blocks_peer_mismatch_and_invalid_signature() {
         }
 
         assert_eq!(
-            mailbox.submit(certificate(&fixture, epoch, position)).await,
+            submit(
+                &mut mailbox,
+                &fixture,
+                certificate(&fixture, epoch, position)
+            )
+            .await,
             CertificateOutcome::Accepted
         );
         assert_eq!(
@@ -816,19 +843,25 @@ where
         let mut wrong_epoch = certificate.clone();
         wrong_epoch.epoch = epoch.next();
         assert_eq!(
-            mailbox.submit(wrong_epoch).await,
+            submit(&mut mailbox, &fixture, wrong_epoch).await,
             CertificateOutcome::Invalid
         );
 
         let mut outside = certificate.clone();
         outside.item.position = position.next();
-        assert_eq!(mailbox.submit(outside).await, CertificateOutcome::Invalid);
+        assert_eq!(
+            submit(&mut mailbox, &fixture, outside).await,
+            CertificateOutcome::Invalid
+        );
 
         let mut invalid = certificate.clone();
         invalid.item.digest = Sha256::hash(&[b"invalid"]);
-        assert_eq!(mailbox.submit(invalid).await, CertificateOutcome::Invalid);
         assert_eq!(
-            mailbox.submit(certificate).await,
+            submit(&mut mailbox, &fixture, invalid).await,
+            CertificateOutcome::Invalid
+        );
+        assert_eq!(
+            submit(&mut mailbox, &fixture, certificate).await,
             CertificateOutcome::Accepted
         );
         assert_eq!(
@@ -884,45 +917,6 @@ fn test_external_certificate_outcomes_and_recovery_window() {
         while events.lock().iter().filter(|(fetch, _)| *fetch).count() < 2 {
             context.sleep(Duration::from_millis(1)).await;
         }
-
-        let mut wrong_epoch = certificate(&fixture, epoch, second);
-        wrong_epoch.epoch = epoch.next();
-        assert_eq!(
-            mailbox.submit(wrong_epoch).await,
-            CertificateOutcome::Invalid
-        );
-        assert_eq!(
-            mailbox
-                .submit(certificate(&fixture, epoch, Height::new(first.get() - 1)))
-                .await,
-            CertificateOutcome::Invalid
-        );
-        assert_eq!(
-            mailbox
-                .submit(certificate(&fixture, epoch, third.next()))
-                .await,
-            CertificateOutcome::Invalid
-        );
-
-        let mut invalid_signature = certificate(&fixture, epoch, second);
-        invalid_signature.item.digest = Sha256::hash(&[b"invalid certificate"]);
-        assert_eq!(
-            mailbox.submit(invalid_signature).await,
-            CertificateOutcome::Invalid
-        );
-        assert_eq!(
-            mailbox.submit(certificate(&fixture, epoch, third)).await,
-            CertificateOutcome::Ignored
-        );
-        assert_eq!(
-            mailbox.submit(certificate(&fixture, epoch, second)).await,
-            CertificateOutcome::Accepted
-        );
-        assert_eq!(
-            mailbox.submit(certificate(&fixture, epoch, second)).await,
-            CertificateOutcome::Ignored
-        );
-
         let first_key = RecoveryKey {
             namespace: RecoveryNamespace::derive(NAMESPACE),
             epoch,
@@ -932,23 +926,93 @@ fn test_external_certificate_outcomes_and_recovery_window() {
             position: second,
             ..first_key
         };
-        assert!(events.lock().contains(&(false, second_key)));
-        assert!(!events.lock().contains(&(false, first_key)));
-
-        assert_eq!(
-            mailbox.submit(certificate(&fixture, epoch, first)).await,
-            CertificateOutcome::Accepted
-        );
         let third_key = RecoveryKey {
             position: third,
             ..first_key
         };
+
+        // A response must answer the requested key, even when it names another active or
+        // inactive position.
+        assert_eq!(
+            mailbox
+                .submit(first_key, certificate(&fixture, epoch, second))
+                .await,
+            CertificateOutcome::Invalid
+        );
+        let mut inactive = certificate(&fixture, epoch, third);
+        inactive.item.digest = Sha256::hash(&[b"inactive certificate"]);
+        assert_eq!(
+            mailbox.submit(second_key, inactive).await,
+            CertificateOutcome::Invalid
+        );
+        let renamespaced = RecoveryKey {
+            namespace: RecoveryNamespace::derive(b"other namespace"),
+            ..second_key
+        };
+        assert_eq!(
+            mailbox
+                .submit(renamespaced, certificate(&fixture, epoch, second))
+                .await,
+            CertificateOutcome::Invalid
+        );
+
+        let mut wrong_epoch = certificate(&fixture, epoch, second);
+        wrong_epoch.epoch = epoch.next();
+        assert_eq!(
+            submit(&mut mailbox, &fixture, wrong_epoch).await,
+            CertificateOutcome::Invalid
+        );
+        assert_eq!(
+            submit(
+                &mut mailbox,
+                &fixture,
+                certificate(&fixture, epoch, Height::new(first.get() - 1))
+            )
+            .await,
+            CertificateOutcome::Invalid
+        );
+        assert_eq!(
+            submit(
+                &mut mailbox,
+                &fixture,
+                certificate(&fixture, epoch, third.next())
+            )
+            .await,
+            CertificateOutcome::Invalid
+        );
+
+        let mut invalid_signature = certificate(&fixture, epoch, second);
+        invalid_signature.item.digest = Sha256::hash(&[b"invalid certificate"]);
+        assert_eq!(
+            submit(&mut mailbox, &fixture, invalid_signature).await,
+            CertificateOutcome::Invalid
+        );
+        assert_eq!(
+            submit(&mut mailbox, &fixture, certificate(&fixture, epoch, third)).await,
+            CertificateOutcome::Ignored
+        );
+        assert_eq!(
+            submit(&mut mailbox, &fixture, certificate(&fixture, epoch, second)).await,
+            CertificateOutcome::Accepted
+        );
+        assert_eq!(
+            submit(&mut mailbox, &fixture, certificate(&fixture, epoch, second)).await,
+            CertificateOutcome::Ignored
+        );
+
+        assert!(events.lock().contains(&(false, second_key)));
+        assert!(!events.lock().contains(&(false, first_key)));
+
+        assert_eq!(
+            submit(&mut mailbox, &fixture, certificate(&fixture, epoch, first)).await,
+            CertificateOutcome::Accepted
+        );
         while !events.lock().contains(&(true, third_key)) {
             context.sleep(Duration::from_millis(1)).await;
         }
         assert!(events.lock().contains(&(false, first_key)));
         assert_eq!(
-            mailbox.submit(certificate(&fixture, epoch, third)).await,
+            submit(&mut mailbox, &fixture, certificate(&fixture, epoch, third)).await,
             CertificateOutcome::Accepted
         );
         assert_eq!(
@@ -1023,7 +1087,7 @@ fn test_recovery_threshold_cancellation_and_window_bound() {
         );
 
         assert_eq!(
-            mailbox.submit(certificate(&fixture, epoch, first)).await,
+            submit(&mut mailbox, &fixture, certificate(&fixture, epoch, first)).await,
             CertificateOutcome::Accepted
         );
         while requested.lock().len() < 3 {
@@ -1035,7 +1099,12 @@ fn test_recovery_threshold_cancellation_and_window_bound() {
 
         for position in [second, third] {
             assert_eq!(
-                mailbox.submit(certificate(&fixture, epoch, position)).await,
+                submit(
+                    &mut mailbox,
+                    &fixture,
+                    certificate(&fixture, epoch, position)
+                )
+                .await,
                 CertificateOutcome::Accepted
             );
         }
@@ -1083,7 +1152,12 @@ fn test_recovery_retries_rejected_admission() {
             context.sleep(Duration::from_millis(1)).await;
         }
         assert_eq!(
-            mailbox.submit(certificate(&fixture, epoch, position)).await,
+            submit(
+                &mut mailbox,
+                &fixture,
+                certificate(&fixture, epoch, position)
+            )
+            .await,
             CertificateOutcome::Accepted
         );
         assert_eq!(
@@ -1188,7 +1262,12 @@ fn test_closed_proposal_response_is_terminal() {
         assert_eq!(requested.lock().as_slice(), &[position]);
 
         assert_eq!(
-            mailbox.submit(certificate(&fixture, epoch, position)).await,
+            submit(
+                &mut mailbox,
+                &fixture,
+                certificate(&fixture, epoch, position)
+            )
+            .await,
             CertificateOutcome::Accepted
         );
         assert_eq!(
@@ -1249,12 +1328,13 @@ fn test_certificate_ingress_is_bounded() {
 
         let mut first_mailbox = mailbox.clone();
         let first_certificate = certificate.clone();
+        let first_key = key_for(&fixture, &first_certificate);
         let first = context.child("first_submit").spawn(move |_| async move {
-            first_mailbox.submit(first_certificate).await
+            first_mailbox.submit(first_key, first_certificate).await
         });
         context.sleep(Duration::from_millis(1)).await;
         assert_eq!(
-            mailbox.submit(certificate).await,
+            submit(&mut mailbox, &fixture, certificate).await,
             CertificateOutcome::Backpressured
         );
 
@@ -1337,7 +1417,12 @@ fn test_stop_cancels_recovery_and_closes_mailbox() {
             assert_eq!((key.epoch, key.position), (epoch, position));
             assert_eq!(*events.lock(), [(true, key), (false, key)], "{trigger:?}");
             assert_eq!(
-                mailbox.submit(certificate(&fixture, epoch, position)).await,
+                submit(
+                    &mut mailbox,
+                    &fixture,
+                    certificate(&fixture, epoch, position)
+                )
+                .await,
                 CertificateOutcome::Ignored,
                 "{trigger:?}"
             );
@@ -1563,9 +1648,12 @@ fn journal_replay_resumes_partial_mid_range(replay_window: u64) {
         }
         for position in replayed {
             assert_eq!(
-                first_mailbox
-                    .submit(certificate(&fixture, epoch, position))
-                    .await,
+                submit(
+                    &mut first_mailbox,
+                    &fixture,
+                    certificate(&fixture, epoch, position)
+                )
+                .await,
                 CertificateOutcome::Accepted
             );
         }

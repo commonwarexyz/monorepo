@@ -72,13 +72,14 @@ struct DigestRequest<D: Digest> {
 ///
 /// A resolver consumer should answer with the converted [`commonware_resolver::Outcome`].
 /// Other mappings can penalize honest peers or retire a key the engine still needs.
+/// The outcome applies to the key passed to [`Mailbox::submit`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CertificateOutcome {
     /// The certificate was valid and advanced local state.
     Accepted,
     /// The position was already certified or is no longer active.
     Ignored,
-    /// The epoch, range, or signature was invalid.
+    /// The key, epoch, range, or signature was invalid.
     Invalid,
     /// The bounded ingress queue was full; the caller should retry later.
     Backpressured,
@@ -105,6 +106,7 @@ pub enum EngineOutcome {
 }
 
 struct CertificateMessage<S: commonware_cryptography::certificate::Scheme, D: Digest> {
+    key: RecoveryKey,
     certificate: Certificate<S, D>,
     response: oneshot::Sender<CertificateOutcome>,
 }
@@ -139,10 +141,18 @@ impl Stopper {
 }
 
 impl<S: commonware_cryptography::certificate::Scheme, D: Digest> Mailbox<S, D> {
-    /// Validates and applies a recovered certificate.
-    pub async fn submit(&mut self, certificate: Certificate<S, D>) -> CertificateOutcome {
+    /// Validates and applies a certificate recovered for `key`.
+    ///
+    /// Returns [`CertificateOutcome::Invalid`] if `key` does not name the certificate's
+    /// namespace, epoch, and position.
+    pub async fn submit(
+        &mut self,
+        key: RecoveryKey,
+        certificate: Certificate<S, D>,
+    ) -> CertificateOutcome {
         let (response, receiver) = oneshot::channel();
         match self.sender.enqueue(CertificateMessage {
+            key,
             certificate,
             response,
         }) {
@@ -420,13 +430,14 @@ where
                 }
                 Either::Right(Either::Right(Either::Right(message))) => {
                     let Some(CertificateMessage {
+                        key,
                         certificate,
                         response,
                     }) = message
                     else {
                         unreachable!("engine retains a certificate mailbox sender");
                     };
-                    let outcome = self.handle_external_certificate(certificate).await;
+                    let outcome = self.handle_external_certificate(key, certificate).await;
                     response.send_lossy(outcome);
                 }
             }
@@ -593,10 +604,15 @@ where
 
     async fn handle_external_certificate(
         &mut self,
+        key: RecoveryKey,
         certificate: Certificate<S, D>,
     ) -> CertificateOutcome {
         let position = certificate.item.position;
-        if certificate.epoch != self.epoch || position < self.first || position > self.last {
+        if key != self.recovery_key(position)
+            || certificate.epoch != self.epoch
+            || position < self.first
+            || position > self.last
+        {
             return CertificateOutcome::Invalid;
         }
         if !self.pending.contains_key(&position) {
