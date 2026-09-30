@@ -1895,10 +1895,9 @@ mod tests {
             // Verification of the final block asks for epoch info before dealing has applied
             // any block.
             let mut requester = mailbox.clone();
-            let mut request = Box::pin(requester.epoch_info(marshal::ancestry::from_iter([
-                blocks[3].clone(),
-                blocks[2].clone(),
-            ])));
+            let mut request = Box::pin(
+                requester.epoch_info(ancestry::from_iter([blocks[3].clone(), blocks[2].clone()])),
+            );
             assert!(request.as_mut().now_or_never().is_none());
 
             // Dealing applies every block before the midpoint without answering the request.
