@@ -733,6 +733,7 @@ macro_rules! serving_engine {
                 let mut plan =
                     SyncPlan::init(startup.child("plan"), partition_prefix.clone()).await;
                 let should_state_sync = plan.should_sync(delayed);
+                let state_sync_resumed = plan.floor().is_some();
                 let provider = ConstantProvider::new(scheme.clone());
                 let (probe, probe_mailbox) = Probe::new(ProbeConfig {
                     context: context.child("probe"),
@@ -906,7 +907,7 @@ macro_rules! serving_engine {
                     handle,
                     MockValidatorState {
                         marshal: marshal_mailbox,
-                        state_sync_entries: u64::from(should_state_sync),
+                        state_sync_resumed,
                         state_sync_height,
                         oldest_retained: Arc::new(|| None),
                     },

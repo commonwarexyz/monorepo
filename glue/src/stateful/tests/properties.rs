@@ -232,15 +232,15 @@ where
             for state in states {
                 let processed_height = state.processed_height().await;
                 observed.push(format!(
-                    "entries={} sync_height={:?} processed_height={processed_height}",
-                    state.state_sync_entries(),
+                    "resumed={} sync_height={:?} processed_height={processed_height}",
+                    state.state_sync_resumed(),
                     state.state_sync_height(),
                 ));
 
                 let Some(sync_height) = state.state_sync_height() else {
                     continue;
                 };
-                if state.state_sync_entries() < 2 {
+                if !state.state_sync_resumed() {
                     continue;
                 }
                 if processed_height > sync_height {
@@ -249,7 +249,7 @@ where
             }
 
             Err(format!(
-                "no validator re-entered state sync after a crash and then advanced beyond the synced height; observed [{}]",
+                "no validator re-entered state sync after a crash and then advanced beyond the synced height (observed [{}])",
                 observed.join(", "),
             ))
         })
