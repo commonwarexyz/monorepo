@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/29/26): Payments continue in epoch $e+1$ while epoch $e$'s close is built, certified, and admitted. Each payment signature also covers the root of the payer's final vector in the previous epoch, so a payment that misses the cut settles at most once.*
+*Update (9/29/26): Payments continue in epoch $e+1$ while epoch $e$'s close is built, certified, and admitted. Each payment signature also covers the root of the payer's final vector in the previous epoch, so a payment that arrives too late for $e$ can be retried in $e+1$ without being paid twice.*
 
 *Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 

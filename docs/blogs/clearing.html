@@ -106,7 +106,9 @@ O’Grady</a></div>
         class="math inline">e</span>’s close is built, certified, and
         admitted. Each payment signature also covers the root of the
         payer’s final vector in the previous epoch, so a payment that
-        misses the cut settles at most once.</em></p>
+        arrives too late for <span class="math inline">e</span> can be
+        retried in <span class="math inline">e+1</span> without being
+        paid twice.</em></p>
         <p><em>Update (9/18/26): Settlement certificates require at
         least <span class="math inline">f+1</span> signatures: every
         signer validates and retains the complete close. The settlement
