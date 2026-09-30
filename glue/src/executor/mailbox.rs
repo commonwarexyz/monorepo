@@ -50,7 +50,8 @@ pub(super) enum Message<B: Digestible> {
     Prune { below: Height },
     /// A checkpoint certified `digest` as the block at `height`.
     Certified { height: Height, digest: B::Digest },
-    /// Honest validators certified a block other than the executed one at `height`.
+    /// More validators than can be faulty signed a block other than the executed one at
+    /// `height`.
     Diverged { height: Height },
 }
 
@@ -97,6 +98,11 @@ impl<U: Delivery> Reporter for Inbox<U> {
         }
     }
 }
+
+/// The executor stopped, so the executed chain no longer serves requests.
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("executor stopped")]
+pub struct Stopped;
 
 /// The executed chain, for its consumers.
 ///
@@ -152,23 +158,27 @@ impl<B: Block> Mailbox<B> {
     }
 
     /// Reports that a checkpoint certified `digest` as the block at `height`.
-    pub(super) fn certified(&self, height: Height, digest: B::Digest) {
-        let _ = self.sender.enqueue(Message::Certified { height, digest });
+    pub(super) fn certified(&self, height: Height, digest: B::Digest) -> Feedback {
+        self.sender.enqueue(Message::Certified { height, digest })
     }
 
-    /// Reports that honest validators certified another block at `height`.
-    pub(super) fn diverged(&self, height: Height) {
-        let _ = self.sender.enqueue(Message::Diverged { height });
+    /// Reports that more validators than can be faulty signed another block at `height`.
+    pub(super) fn diverged(&self, height: Height) -> Feedback {
+        self.sender.enqueue(Message::Diverged { height })
     }
 }
 
 impl<B: Block> Ledger for Mailbox<B> {
     type Block = B;
+    type Error = Stopped;
 
-    async fn prune(&self, below: OutputIndex) {
-        let _ = self.sender.enqueue(Message::Prune {
-            below: Height::new(below.get()),
-        });
+    async fn prune(&self, below: OutputIndex) -> Result<(), Stopped> {
+        let below = Height::new(below.get());
+        if self.sender.enqueue(Message::Prune { below }).accepted() {
+            Ok(())
+        } else {
+            Err(Stopped)
+        }
     }
 
     fn ack_window(&self) -> NonZeroUsize {
