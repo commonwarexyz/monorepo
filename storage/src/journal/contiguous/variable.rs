@@ -2510,6 +2510,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// boundary takes effect when this returns: later snapshots observe [Error::ItemPruned] below
     /// it, while readers holding earlier snapshots keep reading the freed blobs through their own
     /// handles. Use [Self::prune] to prune data that is not yet durable.
+    ///
+    /// A later [Self::sync] completes any pending removal before persisting the new boundary.
     #[commonware_macros::stability(ALPHA)]
     pub async fn start_prune(
         mut self,
@@ -3530,6 +3532,39 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(journal.bounds(), 10..15);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A journal starting mid-section keeps its boundary hint until the section holding that
+    /// start is removed, so a `sync` after `start_prune` followed by a crash reopens cleanly.
+    #[test_traced]
+    fn test_variable_start_prune_sync_keeps_mid_section_hint() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = start_prune_cfg(&context, "variable-start-prune-mid");
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+            for i in 7..20u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            let (journal, handle) = journal.start_prune(15).await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(handle);
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            let bounds = journal.bounds();
+            assert_eq!(bounds.end, 20);
+            for i in bounds {
+                assert_eq!(journal.read(i).await.unwrap(), i, "position {i}");
+            }
             journal.destroy().await.unwrap();
         });
     }

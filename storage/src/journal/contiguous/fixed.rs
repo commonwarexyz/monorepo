@@ -1222,9 +1222,23 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let handle = self.blobs.start_sync().await;
         handle.await?;
         self.barrier.mark_durable(size);
+
+        // The persisted boundary must describe the blobs on disk: recovery reads the oldest blob
+        // at the boundary it finds. Finish any deferred removal first, and if it left blobs
+        // behind, keep the boundary they need rather than the advanced one.
+        self.blobs.drain_pending_prune().await;
+        let on_disk_oldest = self.blobs.on_disk_oldest();
+        let boundary = if on_disk_oldest < self.blobs.oldest_blob_index() {
+            match self.checkpoint.boundary_hint() {
+                Some(hint) => hint,
+                None => super::blob_first_position(on_disk_oldest, self.items_per_blob.get())?,
+            }
+        } else {
+            self.bounds.start
+        };
         self.checkpoint = self
             .checkpoint
-            .persist(self.items_per_blob.get(), self.bounds.start, size)
+            .persist(self.items_per_blob.get(), boundary, size)
             .await?;
         Ok(self)
     }
@@ -1737,11 +1751,13 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// [super::PruneHandle].
     ///
     /// The boundary is clamped to the journal's proven-durable size (the size at the last
-    /// completed [Self::sync] or [Self::start_sync]) before rounding down to a blob boundary, so
-    /// only already-durable data is pruned and no fsync is needed. The new boundary takes effect
-    /// when this returns: later snapshots observe [Error::ItemPruned] below it, while readers
-    /// holding earlier snapshots keep reading the freed blobs through their own handles. Use
-    /// [Self::prune] to prune data that is not yet durable.
+    /// completed [Self::commit], [Self::sync], or [Self::start_sync]) before rounding down to a
+    /// blob boundary, so only already-durable data is pruned and no fsync is needed. The new
+    /// boundary takes effect when this returns: later snapshots observe [Error::ItemPruned] below
+    /// it, while readers holding earlier snapshots keep reading the freed blobs through their own
+    /// handles. Use [Self::prune] to prune data that is not yet durable.
+    ///
+    /// A later [Self::sync] completes any pending removal before persisting the new boundary.
     #[commonware_macros::stability(ALPHA)]
     pub async fn start_prune(
         mut self,
@@ -4707,6 +4723,88 @@ mod tests {
             }
             assert!(matches!(journal.read(5).await, Err(Error::ItemPruned(5))));
             drop(snapshot);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A journal starting mid-blob keeps its boundary hint until the blob holding that start is
+    /// removed: a `sync` after `start_prune` must not persist the aligned boundary while the old
+    /// oldest blob may still be on disk, or recovery would read that blob from its natural origin.
+    #[test_traced]
+    fn test_fixed_start_prune_sync_keeps_mid_blob_hint() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+            for i in 7..20u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Leave the removal pending, sync, then crash before the handle is driven.
+            let (journal, handle) = journal.start_prune(15).await.unwrap();
+            assert_eq!(journal.bounds(), 15..20);
+            let journal = journal.sync().await.unwrap();
+            drop(handle);
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            let bounds = journal.bounds();
+            assert_eq!(bounds.end, 20);
+            for i in bounds {
+                assert_eq!(
+                    journal.read(i).await.unwrap(),
+                    test_digest(i),
+                    "position {i}"
+                );
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// When the removal of a mid-blob oldest blob fails, `sync` keeps the hint for the blob that
+    /// is still on disk.
+    #[test_traced]
+    fn test_fixed_start_prune_failed_removal_keeps_mid_blob_hint() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let faults = RemoveFaults::default();
+            let ctx = RemoveFaultContext {
+                inner: context.child("first"),
+                faults: faults.clone(),
+            };
+            let mut journal = Journal::<_, Digest>::init_at_size(ctx, cfg.clone(), 7)
+                .await
+                .unwrap();
+            for i in 7..20u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            faults.arm();
+            let (journal, handle) = journal.start_prune(15).await.unwrap();
+            assert!(handle.await.is_err());
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+            faults.disarm();
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 7..20);
+            for i in 7..20u64 {
+                assert_eq!(
+                    journal.read(i).await.unwrap(),
+                    test_digest(i),
+                    "position {i}"
+                );
+            }
             journal.destroy().await.unwrap();
         });
     }

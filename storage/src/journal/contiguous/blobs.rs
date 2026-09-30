@@ -307,6 +307,12 @@ impl<E: Context> Writable<E> {
         self.oldest_blob_index
     }
 
+    /// The lowest blob index that may remain on disk. Below [Self::oldest_blob_index] only while
+    /// a deferred removal has not yet run or after one failed partway.
+    pub(super) fn on_disk_oldest(&self) -> u64 {
+        self.on_disk_oldest.load(Ordering::Acquire)
+    }
+
     /// Index of the newest blob.
     pub(super) const fn tail_blob_index(&self) -> u64 {
         self.oldest_blob_index + self.sealed.len() as u64
@@ -469,7 +475,7 @@ impl<E: Context> Writable<E> {
     /// Wait for any removal started by [Self::start_prune]. A failed removal was logged where it
     /// failed and leaves its blobs on disk, which recovery retains, so it does not fail this
     /// journal's later operations.
-    async fn drain_pending_prune(&mut self) {
+    pub(super) async fn drain_pending_prune(&mut self) {
         if let Some(pending) = self.pending_prune.take() {
             let _ = pending.await;
         }
