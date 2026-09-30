@@ -7,7 +7,7 @@ use bytes::Bytes;
 use commonware_cryptography::certificate::{Scheme as CertificateScheme, Scoped};
 use commonware_utils::channel::oneshot;
 
-/// A parsed-but-unverified resolver delivery awaiting batch certificate verification.
+/// A resolver delivery whose certificate is parsed and awaits batch verification.
 ///
 /// Each item carries the scope it was admitted under so verification does not
 /// depend on the provider still serving that epoch.

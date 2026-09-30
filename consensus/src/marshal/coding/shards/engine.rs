@@ -227,7 +227,7 @@ enum Outcome<B, C: CodingScheme> {
 
 /// A finished reconstruction job.
 struct Reconstructed<P, B, C: CodingScheme, H> {
-    /// The reconstructed commitment.
+    /// The commitment whose block the job reconstructs.
     commitment: Commitment<B, C, H>,
     /// When the job was submitted.
     start: SystemTime,
@@ -655,7 +655,6 @@ where
 
     /// Reconstruction jobs. Each job's [`Aborter`] is held by the reconstruction state of its
     /// commitment.
-    #[allow(clippy::type_complexity)]
     jobs: AbortablePool<'static, Reconstructed<P, B, C, H>>,
 
     /// Metrics for the shard engine.
@@ -995,7 +994,7 @@ where
             }
             Outcome::Decoded(Ok(inner)) => {
                 self.metrics
-                    .erasure_decode_duration
+                    .reconstruction_duration
                     .observe_between(start, self.context.current());
 
                 // Decoding verified the blob against the commitment, so shards can be lazily
@@ -2177,7 +2176,6 @@ mod tests {
     }
 
     /// Signals that [`Gated::decode`] started and waits for its release.
-    #[allow(clippy::type_complexity)]
     static GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = Mutex::new(None);
 
     /// Reed-Solomon coding whose decode holds while [`GATE`] is armed.
@@ -5233,7 +5231,7 @@ mod tests {
                 let receiver = peers[3].public_key.clone();
 
                 // Before discovery, peer 1 sends a shard of another block under this commitment
-                // and peers 2, 4, 5, and 6 send valid shards, one more than the minimum needs.
+                // and peers 2, 4, 5, and 6 send the four valid shards the minimum needs.
                 let mut invalid = other
                     .shard(peers[1].index.get() as u16)
                     .expect("missing shard");
@@ -5863,7 +5861,7 @@ mod tests {
     fn test_failed_reconstruction_digest_mismatch_then_recovery() {
         // Byzantine scenario: all shards pass coding verification (correct root) but the
         // decoded blob has a different digest than what the commitment claims. This triggers
-        // Error::DigestMismatch in try_reconstruct. Verify that:
+        // Error::DigestMismatch in the reconstruction job. Verify that:
         //   1. The failed commitment's state is cleaned up
         //   2. The exact commitment subscription closes
         //   3. The digest subscription survives the invalid candidate
@@ -5887,7 +5885,8 @@ mod tests {
                 // This is an invalid claim, not a second accepted commitment for block1.
                 // Build it from block1's digest and block2's coding root/context/config.
                 // Shards from block2 will verify against block2's root (present in the fake
-                // commitment), but try_reconstruct will decode block2 and find its digest != D1.
+                // commitment), but the reconstruction job will decode block2 and find its
+                // digest != D1.
                 let fake_commitment = Commitment::from((
                     coded_block1.digest(),
                     real_commitment2.root(),

@@ -2310,7 +2310,7 @@ mod tests {
         let total = 12u16;
         let min = 4u16;
 
-        // Force the striped path with enough complete blocks for at least two stripes.
+        // Force the multi-stripe path with enough complete blocks for at least two stripes.
         let data = vec![0xABu8; 64 * 1024];
         let shard_len = canonical_shard_len(data.len(), min as usize);
         let rayon = Rayon::new(NZUsize!(4)).unwrap().manual();
@@ -2324,7 +2324,7 @@ mod tests {
         assert_adversarial_rejected(total, min, &data, &rayon);
 
         // Sanity: an untampered mixed (some originals + a recovery) set still decodes via the
-        // striped path, forcing striped::decode_reveal to reconstruct an original.
+        // multi-stripe path, forcing striped::decode_reveal to reconstruct an original.
         let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &Sequential).unwrap();
         let mixed = [0u16, 1, 2, 4]
             .into_iter()
@@ -2897,7 +2897,7 @@ mod tests {
         let shard_len = canonical_shard_len(data.len(), min as usize);
         assert!(
             shard_len >= 2 * MIN_STRIPE_BYTES,
-            "test must exercise the striped path (shard_len={shard_len})"
+            "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
         // Provide originals 0,1 and recoveries 4,5,6 (5 > k=4, originals 2,3 missing). The
