@@ -6,7 +6,7 @@
 use crate::multimmit::marshal::{OutputIndex, storage::catalog_state::Checkpoint};
 use commonware_cryptography::Digest;
 
-/// The highest output delivery durably acknowledged in the current floor generation.
+/// The highest output delivery durably acknowledged.
 pub(super) struct CursorMirror {
     acknowledged: OutputIndex,
 }
