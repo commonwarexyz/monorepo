@@ -1457,8 +1457,9 @@ pub mod tests {
     }
 
     /// A chain applied under different apply, drop, and prune schedules must leave the root,
-    /// bounds, floor, activity bits, and grafted tree that applying its batches one at a time
-    /// leaves. A follow-on batch checks the live grafted tree, which a reopen rebuilds.
+    /// size, floor, activity bits, and grafted tree that applying its batches one at a time
+    /// leaves, and the same bounds when the schedule does not prune. A follow-on batch checks
+    /// the live grafted tree, which a reopen rebuilds.
     pub async fn test_chained_schedules_match_sequential<M, U, const N: usize, S, C, F, Fut>(
         context: Context,
         mut open_db: F,
@@ -1608,7 +1609,8 @@ pub mod tests {
                 _ => unreachable!("five schedules"),
             };
 
-            // D leaves the reference's root, bounds, floor, and bits.
+            // D leaves the reference's root, size, floor, and bits, and its bounds unless the
+            // schedule pruned.
             let label = format!("S{schedule}");
             let observed = Observed::capture(&db);
             assert_eq!(observed.root, expected.root, "{label}: root diverged");

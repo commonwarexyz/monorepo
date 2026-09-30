@@ -625,7 +625,7 @@ impl crate::Spawner for Context {
             Arc::clone(&parent),
         );
 
-        // Destroying a finished or canceled future, or an undelivered output, can
+        // Destroying a finished or cancelled future, or an undelivered output, can
         // unwind outside the user-poll boundary. Report it before releasing the tracker.
         let panicker = executor.panicker.clone();
         let f = async move {

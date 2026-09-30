@@ -1641,10 +1641,10 @@ mod tests {
         });
     }
 
-    /// A canceled [Writer::sync] must not advance the durable checksum slot. After a sync drops
+    /// A cancelled [Writer::sync] must not advance the durable checksum slot. After a sync drops
     /// between its page write and its barrier, an unsynced rewrite must still preserve the last
     /// synced checksum. A crash keeping the synced payload and the rewrite's footer then recovers
-    /// the synced prefix. `dirty` stages an unsynced rewrite first, making the canceled sync issue
+    /// the synced prefix. `dirty` stages an unsynced rewrite first, making the cancelled sync issue
     /// a full barrier.
     #[rstest::rstest]
     #[case::clean(false)]
@@ -1666,7 +1666,7 @@ mod tests {
             writer.append(synced).await.unwrap();
             writer.sync().await.unwrap();
 
-            // Leave an unsynced rewrite so the canceled sync issues a full barrier.
+            // Leave an unsynced rewrite so the cancelled sync issues a full barrier.
             if dirty {
                 writer.append(b"klmno").await.unwrap();
                 drop(writer.snapshot().await.unwrap());

@@ -159,7 +159,7 @@ where
     /// Wraps `f` as a task supervised by `tree`.
     ///
     /// The task's cancellation is registered on `tree` before this returns, so a closed `tree`
-    /// cancels the task before it can be polled.
+    /// cancels the task before `f` can be polled.
     #[inline(always)]
     pub(crate) fn init<F>(
         f: F,
