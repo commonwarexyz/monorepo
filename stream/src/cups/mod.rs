@@ -13,9 +13,9 @@
 //! `Cipher::random(T.noise(b"cipher_d2l"))` derives the reverse direction. CUPS wraps these
 //! ciphers in [Sender] and [Receiver] halves.
 //!
-//! Both peers must configure the same [Version] and cipher out of band. These settings are not
-//! included in SAKE signatures or confirmations. The caller sets a plaintext message limit no
-//! greater than [Cups::MAX_SIZE].
+//! Both peers must configure the same [Version] and cipher out of band. The handshake contract
+//! does not require authentication of these settings. The caller sets a plaintext message limit
+//! no greater than [Cups::MAX_SIZE].
 //!
 //! # Records
 //!
@@ -49,7 +49,7 @@
 //! records. Callers must discard the connection after an I/O error or cancellation, as required
 //! by [crate::Sender] and [crate::Receiver], and after any receive error.
 //!
-//! V0 exposes record lengths; V1 encrypts the length field. Transport sizes and timing still
+//! V0 exposes record lengths. V1 encrypts the length field. Transport sizes and timing still
 //! reveal traffic patterns. CUPS adds no padding or authenticated end-of-stream marker, so it
 //! does not establish whether a closed connection delivered every intended message.
 //!

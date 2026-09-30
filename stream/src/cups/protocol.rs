@@ -95,7 +95,7 @@ impl From<FrameError> for Error {
     }
 }
 
-/// Record format used by [Cups].
+/// Key derivation and record format used by [Cups].
 ///
 /// Both peers must use the same version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,7 +120,7 @@ pub struct Cups<H, C> {
     /// Handshake used to authenticate peers and agree on a secret transcript.
     pub handshake: H,
 
-    /// Record format of the streams.
+    /// Version used for key derivation and record framing.
     version: Version,
 
     // `fn() -> C` keeps `Cups` `Send` and `Sync` for any `C`.
@@ -196,7 +196,7 @@ impl<H, C: Cipher> Cups<H, C> {
             .expect("record size exceeds usize")
     }
 
-    /// Splits the negotiated ciphers into the sender and receiver halves of a connection.
+    /// Splits the derived ciphers into the sender and receiver halves of a connection.
     fn split<I: Stream, O: Sink>(
         version: Version,
         send: C,
@@ -604,7 +604,6 @@ impl<C: Cipher, I: Stream> Receiver<C, I> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use commonware_codec::Encode;
     use commonware_cryptography::{ChaCha20Poly1305, transcript::Version as TranscriptVersion};
     use commonware_math::algebra::Random;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
@@ -683,12 +682,13 @@ mod test {
     fn test_cipher_derivation() {
         for framing in [TranscriptVersion::V0, TranscriptVersion::V1] {
             for version in [Version::V0, Version::V1] {
+                // Derive the traffic ciphers through the CUPS setup path.
                 let transcript = TestHandshake(Some(framing))
                     .transcript(b"application")
                     .unwrap();
-                let (actual_l2d, actual_d2l) =
-                    Cups::<(), RecordCipher>::ciphers(transcript, version);
+                let (actual_l2d, actual_d2l) = TestCups::ciphers(transcript, version);
 
+                // Build an oracle from the specified namespace, mode, and direction labels.
                 let mut expected = TestHandshake(Some(framing))
                     .transcript(b"application")
                     .unwrap();
@@ -698,6 +698,8 @@ mod test {
                 }
                 let expected_l2d = RecordCipher::random(expected.noise(b"cipher_l2d"));
                 let expected_d2l = RecordCipher::random(expected.noise(b"cipher_d2l"));
+
+                // Each directional key must produce the oracle's ciphertext and authentication tag.
                 for (actual, expected) in [(actual_l2d, expected_l2d), (actual_d2l, expected_d2l)] {
                     let mut actual = Some(actual);
                     let mut expected = Some(expected);
@@ -713,12 +715,13 @@ mod test {
         }
     }
 
-    /// A custom handshake supplies matching transcripts to both CUPS roles.
+    /// Checks that CUPS uses a custom handshake's transcript to exchange records in both directions.
     #[test]
     fn test_custom_handshake_round_trip() {
         for framing in [TranscriptVersion::V0, TranscriptVersion::V1] {
             for version in [Version::V0, Version::V1] {
                 deterministic::Runner::default().start(|context| async move {
+                    // Establish both CUPS roles from the same handshake transcript.
                     let (dial_sink, listen_stream) = mocks::Channel::init();
                     let (listen_sink, dial_stream) = mocks::Channel::init();
                     let cups = Cups::<_, RecordCipher>::new(TestHandshake(Some(framing)), version);
@@ -745,6 +748,8 @@ mod test {
                         )
                         .await
                         .unwrap();
+
+                    // Exchange records in both directions to check the send/receive key assignment.
                     dial_sender.send(b"dial".as_slice()).await.unwrap();
                     assert_eq!(listen_receiver.recv().await.unwrap().coalesce(), b"dial");
                     listen_sender.send(b"listen".as_slice()).await.unwrap();

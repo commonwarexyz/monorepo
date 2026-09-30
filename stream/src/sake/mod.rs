@@ -1,9 +1,8 @@
 //! Run [Simple Authenticated Key Exchange (SAKE)](commonware_cryptography::handshake::sake) over
 //! an ordered byte stream.
 //!
-//! [Sake] implements [crate::Handshake], returning a confirmed secret transcript.
-//! The core SAKE documentation specifies the transcript, authentication checks, and security
-//! properties.
+//! [Sake] implements [crate::Handshake], returning a confirmed secret transcript. The core SAKE
+//! documentation specifies the transcript, authentication checks, and security properties.
 //!
 //! # Protocol
 //!
@@ -29,8 +28,8 @@
 //! `[now - max_handshake_age, now + synchrony_bound)`, with arithmetic saturated at the u64
 //! bounds. The dialer checks `SynAck` against its original window.
 //!
-//! Callers must enforce a deadline covering the whole attempt, including the bouncer.
-//! Discard the connection after handshake failure or cancellation.
+//! Callers must enforce a deadline covering the whole attempt, including the bouncer. Discard
+//! the connection after handshake failure or cancellation.
 
 mod protocol;
 pub use commonware_cryptography::handshake::sake::Version;

@@ -32,7 +32,7 @@
 //! # Transcript
 //!
 //! The transcript commits the application namespace as one packet, then forks it with the
-//! version's protocol namespace. V1 then commits a single-byte mode packet containing `1`; V0
+//! version's protocol namespace. V1 then commits a single-byte mode packet containing `1`. V0
 //! omits it. Each field below is committed as a separate encoded packet, in order. Signatures
 //! authenticate the transcript at the indicated point and are not themselves committed.
 //!
@@ -70,10 +70,11 @@
 //!
 //! Fresh ephemeral secrets provide forward secrecy against later compromise of the identity
 //! signing keys, provided the ephemeral secrets and secret transcript state have been erased.
-//! Protecting application messages requires a record protocol using keys derived from the transcript.
+//! Protecting application messages requires a record protocol using keys derived from the
+//! transcript.
 //!
 //! The construction does not hide identities or provide 0-RTT data or resumption. The transcript
-//! does not bind the selected cipher or a record format. Peers must agree on them out of band.
+//! does not bind a cipher or record format. Peers must agree on them out of band.
 //! Callers must enforce a handshake deadline separately from the accepted timestamp range.
 //!
 //! [EAP-SAKE]: https://www.rfc-editor.org/rfc/rfc4763

@@ -457,8 +457,8 @@ mod test {
         Ok(())
     }
 
-    /// Connects peers configured with the given SAKE and CUPS versions. Exchanges messages only
-    /// when their record formats agree.
+    /// Connects peers with the given SAKE and CUPS versions. Checks bidirectional delivery for
+    /// matching CUPS versions and V1 rejection of V0 records after a successful handshake.
     fn connect_with(
         dialer: (Version, cups::Version),
         listener: (Version, cups::Version),
@@ -505,18 +505,32 @@ mod test {
             assert_eq!(peer, dialer_signer.public_key());
             let (mut dialer_sender, mut dialer_receiver) = dialer_handle.await.unwrap()?;
 
-            // Check delivery in both directions when the record formats match.
+            // Check delivery for matching record formats and rejection for mismatched formats.
             if dialer.1 == listener.1 {
+                // Verify that each sender's key matches the peer's receive key.
                 dialer_sender.send(&b"hello"[..]).await.unwrap();
                 assert_eq!(listener_receiver.recv().await.unwrap().coalesce(), b"hello");
                 listener_sender.send(&b"world"[..]).await.unwrap();
                 assert_eq!(dialer_receiver.recv().await.unwrap().coalesce(), b"world");
+            } else {
+                // Send enough V0 bytes to reach V1 header authentication.
+                let (sender, receiver) = if dialer.1 == cups::Version::V0 {
+                    (&mut dialer_sender, &mut listener_receiver)
+                } else {
+                    (&mut listener_sender, &mut dialer_receiver)
+                };
+                sender.send(&b"hello"[..]).await.unwrap();
+                assert!(matches!(
+                    receiver.recv().await,
+                    Err(cups::Error::OpenFailed)
+                ));
             }
             Ok(())
         })
     }
 
-    /// Checks that SAKE versions authenticate and matching CUPS formats exchange both directions.
+    /// Checks that mismatched SAKE versions fail with `InvalidSignature`, while matching versions
+    /// establish streams that accept matching CUPS records and reject V0 records at V1 receivers.
     #[test]
     fn test_versions() {
         let versions = [
