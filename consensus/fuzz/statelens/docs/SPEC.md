@@ -127,9 +127,9 @@ consensus/fuzz/statelens/
   false-invariants/
     simplex/FALSE-0001.md        deliberately false invariant for AC-6 (Appendix C)
     marshal/FALSE-0002.md        deliberately false invariant for AC-10 (Appendix E)
-  examples/
-    statelens_commonware_voter_example.md   worked analysis of the Simplex voter,
-                                 referenced by the Phase 2 prompts (sections 13.8, 13.9)
+  examples/                      worked analyses the Phase 2 prompts point agents at
+    statelens_commonware_voter_example.md     the Simplex voter (sections 13.8, 13.9)
+    statelens_commonware_marshal_example.md   marshal's deferred verification path
   templates/
     invariant.md                 reference format (section 4.5)
   prompts/
@@ -1568,17 +1568,22 @@ below:
    nothing for it and set Status to `unbound` with the reason.
 7. Add the invariant's section to the plan.
 
-A worked example of this reasoning is
-`consensus/fuzz/statelens/examples/statelens_commonware_voter_example.md`, on the Simplex
-voter. Sections 9 to 25 take a comment such as "nullification does not cancel pending
-certification work" and turn it into a relation over named state, which is what steps 1 and 2
-above ask of you; section 24 ranks the results by how much they actually say, and section 25
-lists readings that look right and are too strong. That last one is rule 6: a Statement bound
-more strictly than it is written produces false alarms that cost someone a day.
+Two worked examples of this reasoning live in `consensus/fuzz/statelens/examples/`:
+`statelens_commonware_voter_example.md` on the Simplex voter, and
+`statelens_commonware_marshal_example.md` on marshal's deferred verification path. Read the one
+whose subsystem you are binding in.
 
-Read it for how the reasoning goes, not for what to add. The example *derives* invariants,
-which is Phase 1 work; your job is to bind the ones below, and its local labels (`INV-A1` and
-so on) are not registry ids. Section 0 gives the rest of the mapping.
+Sections 9 to 25 of the voter example take a comment such as "nullification does not cancel
+pending certification work" and turn it into a relation over named state, which is what steps 1
+and 2 above ask of you; section 24 ranks the results by how much they actually say, and section
+25 lists readings that look right and are too strong. That last one is rule 6: a Statement
+bound more strictly than it is written produces false alarms that cost someone a day. The
+marshal example does the same across a state machine that spans several functions, a restart and
+a crash-recovery path, which is the harder case for step 2.
+
+Read them for how the reasoning goes, not for what to add. They *derive* invariants, which is
+Phase 1 work; your job is to bind the ones below, and their local labels (`INV-A1`, `M1` and so
+on) are not registry ids. Section 0 of each gives the rest of the mapping.
 
 Invariants:
 
@@ -1647,21 +1652,28 @@ finding is evidence, not a property, and this task adds probes only.
 
 ### A worked example
 
-`consensus/fuzz/statelens/examples/statelens_commonware_voter_example.md` works this task
-through on the Simplex voter, end to end. The parts that match what you are doing:
+Two documents in `consensus/fuzz/statelens/examples/` work this task through end to end:
+`statelens_commonware_voter_example.md` on the Simplex voter, and
+`statelens_commonware_marshal_example.md` on marshal's deferred verification path. Read the one
+whose subsystem matches this component. The parts that match what you are doing:
 
 - section 0, how the example's vocabulary maps onto this workflow;
 - sections 3 to 8, reading a comment, noticing what the source cannot answer, and querying the
   knowledge base at exactly that point rather than up front;
-- section 26, turning a finding into a coverage dimension, and choosing which cells of it are
-  worth telling apart;
-- section 27, the probe shapes, including how four booleans become one packed side of the pair,
-  and how to observe two rules that live at different call sites;
-- section 28, why reading a short-circuited condition eagerly changes what the program does.
+- section 26 of the voter example, or 32 of the marshal one, turning a finding into a coverage
+  dimension and choosing which cells of it are worth telling apart;
+- section 27, or 33 of the marshal one, the probe shapes: how several booleans become one packed
+  side of the pair, how to observe two rules that live at different call sites, and when to
+  split a wide dimension into several probes that a round relates;
+- section 28 of the voter example, why reading a short-circuited condition eagerly changes what
+  the program does;
+- section 35 of the marshal example, a trace of observe, hypothesise, act, which is the shape
+  your own reasoning should take.
 
-Two things in it are not your job. It derives invariants, which belongs to Phase 1: you add
-probes only. And it names artifacts from the StateLens paper, a Beacon Summary and a State
-Report, which do not exist here -- your output is the probes and the plan rows.
+Two things in them are not your job. They derive invariants, which belongs to Phase 1: you add
+probes only. And they name artifacts from the StateLens paper, a Beacon Summary and a State
+Report, which do not exist here -- your output is the probes and the plan rows. Section 0 of
+each gives the rest of the mapping.
 ~~~
 
 ### 13.10 `prompts/repair.md`

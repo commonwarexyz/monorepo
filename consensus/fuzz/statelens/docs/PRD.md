@@ -221,6 +221,7 @@ consensus/fuzz/statelens/
       FALSE-0002.md
   examples/                   worked analyses the Phase 2 prompts point agents at
     statelens_commonware_voter_example.md
+    statelens_commonware_marshal_example.md
   templates/
     invariant.md              reference format for invariant entries
   prompts/

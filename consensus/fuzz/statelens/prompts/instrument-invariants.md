@@ -29,17 +29,22 @@ below:
    nothing for it and set Status to `unbound` with the reason.
 7. Add the invariant's section to the plan.
 
-A worked example of this reasoning is
-`consensus/fuzz/statelens/examples/statelens_commonware_voter_example.md`, on the Simplex
-voter. Sections 9 to 25 take a comment such as "nullification does not cancel pending
-certification work" and turn it into a relation over named state, which is what steps 1 and 2
-above ask of you; section 24 ranks the results by how much they actually say, and section 25
-lists readings that look right and are too strong. That last one is rule 6: a Statement bound
-more strictly than it is written produces false alarms that cost someone a day.
+Two worked examples of this reasoning live in `consensus/fuzz/statelens/examples/`:
+`statelens_commonware_voter_example.md` on the Simplex voter, and
+`statelens_commonware_marshal_example.md` on marshal's deferred verification path. Read the one
+whose subsystem you are binding in.
 
-Read it for how the reasoning goes, not for what to add. The example *derives* invariants,
-which is Phase 1 work; your job is to bind the ones below, and its local labels (`INV-A1` and
-so on) are not registry ids. Section 0 gives the rest of the mapping.
+Sections 9 to 25 of the voter example take a comment such as "nullification does not cancel
+pending certification work" and turn it into a relation over named state, which is what steps 1
+and 2 above ask of you; section 24 ranks the results by how much they actually say, and section
+25 lists readings that look right and are too strong. That last one is rule 6: a Statement
+bound more strictly than it is written produces false alarms that cost someone a day. The
+marshal example does the same across a state machine that spans several functions, a restart and
+a crash-recovery path, which is the harder case for step 2.
+
+Read them for how the reasoning goes, not for what to add. They *derive* invariants, which is
+Phase 1 work; your job is to bind the ones below, and their local labels (`INV-A1`, `M1` and so
+on) are not registry ids. Section 0 of each gives the rest of the mapping.
 
 Invariants:
 

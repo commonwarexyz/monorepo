@@ -57,18 +57,25 @@ finding is evidence, not a property, and this task adds probes only.
 
 ### A worked example
 
-`consensus/fuzz/statelens/examples/statelens_commonware_voter_example.md` works this task
-through on the Simplex voter, end to end. The parts that match what you are doing:
+Two documents in `consensus/fuzz/statelens/examples/` work this task through end to end:
+`statelens_commonware_voter_example.md` on the Simplex voter, and
+`statelens_commonware_marshal_example.md` on marshal's deferred verification path. Read the one
+whose subsystem matches this component. The parts that match what you are doing:
 
 - section 0, how the example's vocabulary maps onto this workflow;
 - sections 3 to 8, reading a comment, noticing what the source cannot answer, and querying the
   knowledge base at exactly that point rather than up front;
-- section 26, turning a finding into a coverage dimension, and choosing which cells of it are
-  worth telling apart;
-- section 27, the probe shapes, including how four booleans become one packed side of the pair,
-  and how to observe two rules that live at different call sites;
-- section 28, why reading a short-circuited condition eagerly changes what the program does.
+- section 26 of the voter example, or 32 of the marshal one, turning a finding into a coverage
+  dimension and choosing which cells of it are worth telling apart;
+- section 27, or 33 of the marshal one, the probe shapes: how several booleans become one packed
+  side of the pair, how to observe two rules that live at different call sites, and when to
+  split a wide dimension into several probes that a round relates;
+- section 28 of the voter example, why reading a short-circuited condition eagerly changes what
+  the program does;
+- section 35 of the marshal example, a trace of observe, hypothesise, act, which is the shape
+  your own reasoning should take.
 
-Two things in it are not your job. It derives invariants, which belongs to Phase 1: you add
-probes only. And it names artifacts from the StateLens paper, a Beacon Summary and a State
-Report, which do not exist here -- your output is the probes and the plan rows.
+Two things in them are not your job. They derive invariants, which belongs to Phase 1: you add
+probes only. And they name artifacts from the StateLens paper, a Beacon Summary and a State
+Report, which do not exist here -- your output is the probes and the plan rows. Section 0 of
+each gives the rest of the mapping.
