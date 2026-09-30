@@ -35,14 +35,19 @@
 //! `OUT_DIR/<out>-timing.json`.
 //!
 //! **Re-runs.** Check 2 reads the whole of `src/`, so the build script
-//! re-runs on any host edit (`cargo::rerun-if-changed=src`). So that a host
+//! re-runs on any host edit (`cargo::rerun-if-changed=src`). Only paths
+//! that exist are watched ([`super::watch_existing`]): cargo re-runs a
+//! build script on every invocation while a watched path is missing, and
+//! the lift prelude's source-map paths are virtual. So that a host
 //! edit does not re-verify an unchanged module, a verdict is reused when
 //! the **verdict key** matches — a SHA-256 over the verifier's identity
-//! (`context`: the facade passes the hash of the build-script binary, which
-//! embeds the toolchain, and every `SANDBLASTER_*` variable), the target, the
-//! root, the module file and the content of every file the front end read
-//! (sources, data files, the lock, the profile) — and `OUT_DIR/<out>.rs`
-//! still has the SHA-256 recorded with the key. Checks 1–3 and the front
+//! (`context`: the facade passes [`super::cache::verifier_context`], a
+//! content hash of the toolchain plus what else can change a result, never
+//! the build-script binary), the target, the root, the module file, the
+//! host edition (the lift conformance check compiles with it) and the
+//! content of every file the front end read (sources, data files, the
+//! lock, the profile) — and `OUT_DIR/<out>.rs` still has the SHA-256
+//! recorded with the key. Checks 1–3 and the front
 //! end run on every build; the proofs, gates, optimizer, round trip and
 //! relocation are skipped only for a byte-identical input set. The key file
 //! lives in `OUT_DIR`, which only the build script writes (the same trust
@@ -120,7 +125,7 @@ pub fn module_out_name(module_file: &str) -> Result<String, String> {
 /// emission: `module <file>\nout <name>` in module mode, `crate` in crate
 /// mode).
 pub(crate) fn verdict_key(context: &str, env: &dyn Fn(&str) -> Option<String>, fs: &dyn FileProvider, root: &Path, what: &str, c: &super::Checked) -> String {
-    let mut t = String::from("sandblaster-module-verdict/1\n");
+    let mut t = String::from("sandblaster-module-verdict/2\n");
     t.push_str(&format!("context {}\n", hex(&sha256(context.as_bytes()))));
     for k in ["CARGO_CFG_TARGET_ARCH", "CARGO_CFG_TARGET_FEATURE", "CARGO_CFG_TARGET_ENDIAN", "CARGO_CFG_TARGET_POINTER_WIDTH"] {
         t.push_str(&format!("env {k}={}\n", env(k).unwrap_or_default()));
@@ -187,7 +192,7 @@ pub(crate) fn store_cached(vc: &VerdictCache, key: &str, code: &str, report: &st
 
 /// The key file's text.
 pub(super) fn key_text(key: &str, code_sha: &str) -> String {
-    format!("sandblaster-module-verdict/1\nkey {key}\nsha256 {code_sha}\n")
+    format!("sandblaster-module-verdict/2\nkey {key}\nsha256 {code_sha}\n")
 }
 
 /// The build logic of `sandblaster::build::compile_module` (module docs):
@@ -255,10 +260,7 @@ pub fn build_module(root: &str, module_file: &str, context: Option<&str>, env: &
         o.cargo.push(format!("cargo::rerun-if-changed={}", dir.display()));
     }
     let mut checked = check(&root_path, fs, &target);
-    for (_, f) in checked.sm.files() {
-        o.cargo.push(format!("cargo::rerun-if-changed={}", f.path.display()));
-    }
-    o.cargo.push(format!("cargo::rerun-if-changed={}", checked.lock_path.display()));
+    super::watch_existing(&mut o, fs, checked.sm.files().map(|(_, f)| f.path.as_path()).chain([checked.lock_path.as_path()]));
     let rendered = checked.render();
     if !checked.ok() {
         o.stderr.push_str(&rendered);
@@ -283,7 +285,7 @@ pub fn build_module(root: &str, module_file: &str, context: Option<&str>, env: &
         Ok(None) => {}
     }
     if let Some(p) = &checked.profile {
-        o.cargo.push(format!("cargo::rerun-if-changed={}", p.path.display()));
+        super::watch_existing(&mut o, fs, [p.path.as_path()]);
         if let Err(e) = &p.parsed {
             o.cargo.push(format!("cargo::warning=sandblaster: profile `{}` ignored: {}", p.path.display(), e.replace('\n', " ")));
         }
@@ -293,7 +295,9 @@ pub fn build_module(root: &str, module_file: &str, context: Option<&str>, env: &
     o.cargo.push("cargo::rerun-if-env-changed=RUSTC".into());
     let code_path = out_dir.join(format!("{out}.rs"));
     let key_path = out_dir.join(format!("{out}-verdict.key"));
-    let key = context.map(|ctx| verdict_key(ctx, env, fs, &root_path, &format!("module {module_file}\nout {out}"), &checked));
+    let root_display = root_path.display().to_string();
+    let conform = crate::conform::Config::for_build(env, fs, &manifest, &out_dir, &out, context);
+    let key = context.map(|ctx| verdict_key(ctx, env, fs, &root_path, &format!("module {module_file}\nout {out}\nedition {}", conform.edition), &checked));
     // verdict reuse: the same inputs, and the emitted file unchanged
     if let Some(k) = &key
         && let (Ok(kt), Ok(code)) = (fs.read(&key_path), fs.read(&code_path))
@@ -316,8 +320,6 @@ pub fn build_module(root: &str, module_file: &str, context: Option<&str>, env: &
             None => checked.cache = Some(std::sync::Arc::new(vc.clone())),
         }
     }
-    let root_display = root_path.display().to_string();
-    let conform = crate::conform::Config::for_build(env, fs, &manifest, &out_dir, &out, context);
     let b = build_crate_emitting(&checked, LockUse::Enforce, &root_display, &Emission::Module { module_file: module_file.to_string(), out: format!("{out}.rs"), conform });
     for w in b.optimizer_warnings() {
         o.cargo.push(format!("cargo::warning=sandblaster optimizer: {}", w.replace('\n', " ")));

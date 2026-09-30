@@ -234,6 +234,19 @@ fn a_pass_is_cached_by_its_key() {
     let r2 = conformance(&c, &cfg);
     assert!(r2.passed() && r2.cached && r2.key == r1.key, "{}", r2.summary());
     assert_eq!(r1.header_line(), r2.header_line(), "the emitted header must not depend on the cache");
+    // the replayed report is the report of the run: the build's report and
+    // summary do not depend on the cache either
+    assert_eq!(r1.summary(), r2.summary());
+    assert_eq!(r1.json().render(), r2.json().render());
+    // twin: a malformed or foreign record is a miss (the check runs again)
+    let key_file = cfg.work_dir.join("conformance.key");
+    let good = std::fs::read_to_string(&key_file).unwrap();
+    for bad in [good.replacen("\ncases ", "\ncases x", 1), good.replacen(&r1.key, &"0".repeat(64), 1), good.replace("sandblaster-lift-conformance/3", "sandblaster-lift-conformance/2"), format!("{good}garbage\n")] {
+        std::fs::write(&key_file, &bad).unwrap();
+        let r = conformance(&c, &cfg);
+        assert!(r.passed() && !r.cached, "{bad}");
+        assert_eq!(r.json().render(), r1.json().render());
+    }
     // a changed source changes the key: checked again
     let mut fs2 = files();
     fs2[1].1 = W.replace("if a < 128 { 1 } else { 2 }", "if a < 64 { 1 } else { 2 }");

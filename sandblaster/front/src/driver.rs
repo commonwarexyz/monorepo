@@ -334,6 +334,21 @@ pub fn summary(c: &Checked) -> String {
     s
 }
 
+/// Pushes `cargo::rerun-if-changed` for each of `paths` that exists.
+/// Cargo re-runs a build script on **every** invocation while a watched
+/// path is missing, so a virtual source-map path (the lift prelude's
+/// `<sandblaster lift prelude>/…`) or a lock not accepted yet would rebuild
+/// the host crate and all its dependents each time; a missing lock is
+/// still noticed when it appears, because the DSL root's directory is
+/// watched.
+pub fn watch_existing<'p>(o: &mut BuildOutcome, fs: &dyn FileProvider, paths: impl IntoIterator<Item = &'p Path>) {
+    for p in paths {
+        if fs.exists(p) {
+            o.cargo.push(format!("cargo::rerun-if-changed={}", p.display()));
+        }
+    }
+}
+
 /// The single line `src/lib.rs` must consist of (plus comments), §2.
 pub const LIB_RS_LINE: &str = "include!(concat!(env!(\"OUT_DIR\"), \"/sandblaster.rs\"));";
 
@@ -1374,8 +1389,8 @@ pub fn build_verified(root: &str, env: &dyn Fn(&str) -> Option<String>, fs: &dyn
 }
 
 /// [`build_verified`] with the verifier's identity `context` (the facade
-/// passes the build-script binary's hash and the relevant `SANDBLASTER_*`
-/// variables): the verdict is looked up in, and stored to, the shared
+/// passes [`cache::verifier_context`]: the toolchain's content hash and
+/// what else can change a result): the verdict is looked up in, and stored to, the shared
 /// verdict cache ([`cache`]) under the verdict key of module mode
 /// (`crate` as the emission), and the spec-mutation gate reuses the
 /// per-mutant verdicts whose inputs did not change. `None`: nothing is
@@ -1410,14 +1425,13 @@ pub fn build_verified_with(root: &str, context: Option<&str>, env: &dyn Fn(&str)
         o.cargo.push(format!("cargo::rerun-if-changed={}", dir.display()));
     }
     let mut checked = check(&root_path, fs, &target);
-    for (_, f) in checked.sm.files() {
-        o.cargo.push(format!("cargo::rerun-if-changed={}", f.path.display()));
-    }
+    watch_existing(&mut o, fs, checked.sm.files().map(|(_, f)| f.path.as_path()));
     if checked.lifted.iter().any(|l| !l.ghost) {
         return fail(o, format!("`{}` lifts existing Rust (`#[lift]`): lifted code names host items through `crate::`, so it is emitted in module mode (`sandblaster::build::compile_module`), never as a whole crate (DESIGN.md §2.1)", root_path.display()));
     }
-    // the lock is an input whether or not it exists yet
-    o.cargo.push(format!("cargo::rerun-if-changed={}", checked.lock_path.display()));
+    // the lock is an input whether or not it exists yet (a missing lock is
+    // noticed through the watched root directory)
+    watch_existing(&mut o, fs, [checked.lock_path.as_path()]);
     let rendered = checked.render();
     if !checked.ok() {
         o.stderr.push_str(&rendered);
@@ -1431,7 +1445,7 @@ pub fn build_verified_with(root: &str, context: Option<&str>, env: &dyn Fn(&str)
     // the checked-in profile is an input of the checked crate (optimizer
     // design §10.4): `build_crate` hands it to the optimizer
     if let Some(p) = &checked.profile {
-        o.cargo.push(format!("cargo::rerun-if-changed={}", p.path.display()));
+        watch_existing(&mut o, fs, [p.path.as_path()]);
         if let Err(e) = &p.parsed {
             o.cargo.push(format!("cargo::warning=sandblaster: profile `{}` ignored: {}", p.path.display(), e.replace('\n', " ")));
         }

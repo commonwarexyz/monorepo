@@ -30,7 +30,7 @@
 //! the checked crate, and it only decides whether the lock is compared
 //! (a build) or written (`sandblaster spec --accept`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use crate::canon;
@@ -596,11 +596,7 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
                     return b;
                 }
                 let st = b.v.stats();
-                let opt_note = if low.lowered() == 0 {
-                    format!("optimized: no residual of the {} lifted function(s) is cheaper and printable, the source is emitted as-is", low.records.len())
-                } else {
-                    format!("optimized: {} of {} source function(s) rewritten to their residuals (lifted round trip: {} definition(s) compared)", low.lowered(), low.records.len(), low.compared)
-                };
+                let opt_note = lowering_note(&low);
                 let summary = format!(
                     "{} obligation(s) proven, {} definition(s) kernel-checked; every §15 gate passed (spec mutants: {}); {conf_summary}; {opt_note}; SPEC.lock: {}",
                     st.proven,
@@ -756,6 +752,69 @@ fn run_gates(out: &elab::Output, krate: &crate::hir::Crate, c: &Checked, spec: &
     let note = format!("{} mutant(s), {} killed by the specification, {} possibly equivalent", m.mutants.len(), m.count(crate::mutate::Verdict::KilledBySpec) + m.count(crate::mutate::Verdict::KilledBySafety), m.count(crate::mutate::Verdict::PossiblyEquivalent));
     record(rep, "mutation", d, note);
     rep.mutation = Some(m);
+}
+
+/// The optimizer's part of a lifted module's summary (the emitted header,
+/// the build's warning line): how many source functions were rewritten
+/// and, for every other one, **why it kept its source text**, grouped by
+/// reason ([`kept_reason_class`]) and counted, most frequent first; the
+/// report's `lifted_optimizer` lists each function with its full reason.
+/// (It used to say "no residual … is cheaper and printable" whatever the
+/// reason, although most functions of a real module are never candidates:
+/// generic functions and `Buf` readers are not lowered yet.)
+pub fn lowering_note(low: &super::lowered::LoweredModule) -> String {
+    let n = low.records.len();
+    let mut s = if low.lowered() == 0 {
+        format!("optimized: none of the {n} source function(s) rewritten, the source is emitted as-is")
+    } else {
+        format!("optimized: {} of {n} source function(s) rewritten to their residuals (lifted round trip: {} definition(s) compared)", low.lowered(), low.compared)
+    };
+    let mut groups: BTreeMap<String, usize> = BTreeMap::new();
+    for r in &low.records {
+        if let super::lowered::LowerOutcome::Kept(why) = &r.outcome {
+            *groups.entry(kept_reason_class(why)).or_default() += 1;
+        }
+    }
+    let mut groups: Vec<(String, usize)> = groups.into_iter().collect();
+    groups.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    if !groups.is_empty() {
+        let listed: Vec<String> = groups.iter().map(|(c, k)| format!("{k} {c}")).collect();
+        s.push_str(&format!("; source kept: {}", listed.join(", ")));
+    }
+    if let Some(note) = &low.note {
+        s.push_str(&format!("; nothing lowered: {}", note.replace('\n', " ")));
+    }
+    s
+}
+
+/// The reason class of a kept function's reason (`driver::lowered`): the
+/// known reasons in a few words that still say what is missing, the
+/// optimizer's own reason for an unspecialized function, and any other
+/// reason up to its details (the first `: ` or ` (`).
+pub fn kept_reason_class(why: &str) -> String {
+    let known: &[(&str, &str)] = &[
+        ("a generic source function", "generic (lowering generic functions needs a per-type dispatch the lift reads; not built yet)"),
+        ("a parameter with state other than", "other state passing (`&mut self`, `impl Buf` readers, a result beside the state; lowering not built yet)"),
+        ("a method", "methods (receivers are not lowered yet)"),
+        ("the residual is not 3% cheaper", "residual not 3% cheaper"),
+        ("the residual cannot be printed", "residual not printable as Rust"),
+        ("the residual calls", "residual calls an item the lowered code cannot name"),
+        ("the lifted round trip", "rejected by the lifted round trip"),
+        ("no lifted item of this name", "dropped by the lift"),
+    ];
+    let head = |t: &str| -> String {
+        let cut = [": ", " ("].iter().filter_map(|p| t.find(p)).min().unwrap_or(t.len());
+        t[..cut].to_string()
+    };
+    if let Some(r) = why.strip_prefix("not specialized: ") {
+        return format!("not specialized ({})", head(r));
+    }
+    for (prefix, class) in known {
+        if why.starts_with(prefix) {
+            return class.to_string();
+        }
+    }
+    head(why)
 }
 
 /// The emission-chain cross-check (DESIGN.md §15.2, §15.8): a read-only

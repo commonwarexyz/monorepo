@@ -47,7 +47,10 @@
 //! pilot's 64 functions) and cached: a pass is recorded in the work
 //! directory under a key over this check's version, the toolchain identity,
 //! the source, the host models, both shims, the entries, the edition and
-//! `rustc -vV`; the same key skips the check.
+//! `rustc -vV`; the same key skips the check and replays the recorded
+//! report ([`Record`]), so the report, its summary and the emitted header
+//! are the same bytes whether the check ran or was cached (the wall-clock
+//! time is not part of any of them).
 //!
 //! What it does not show: that the host's real `Buf`/`BufMut` behave as
 //! the buffer model (the shim is compared with the real `bytes` crate by
@@ -74,7 +77,7 @@ use crate::mutate::eval::{self as meval, Hints, Rng, Val};
 use crate::surface::{hex, sha256};
 
 /// This check's version (part of the cache key).
-pub const VERSION: &str = "sandblaster-lift-conformance/2";
+pub const VERSION: &str = "sandblaster-lift-conformance/3";
 /// The buffer model in Rust (the harness's crate `bytes`).
 pub const BYTES_SHIM: &str = include_str!("../lift/conform_bytes.rs");
 /// The host traits the lift knows (the harness root).
@@ -102,7 +105,8 @@ pub struct Config {
     pub work_dir: PathBuf,
     /// The host crate's edition.
     pub edition: String,
-    /// The toolchain identity (the build script's hash): part of the key.
+    /// The verifier context (`driver::cache::verifier_context`: the
+    /// toolchain's content hash, never the build script's): part of the key.
     pub toolchain_id: String,
 }
 
@@ -171,7 +175,7 @@ fn manifest_value(text: &str, table: &str, key: &str) -> Option<String> {
 }
 
 /// One function's part of the check.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EntryReport {
     pub lifted: String,
     /// The original, as the harness calls it.
@@ -243,21 +247,11 @@ impl Report {
         self.mismatches.is_empty() && self.errors.is_empty()
     }
 
-    /// One line for the build summary.
+    /// One line for the build summary (deterministic: no time, and the
+    /// same whether the check ran or its recorded pass was replayed).
     pub fn summary(&self) -> String {
-        if self.cached {
-            return format!("lift conformance: passed (cached, key {})", &self.key[..16.min(self.key.len())]);
-        }
         let checked = self.entries.iter().filter(|e| e.skipped.is_none()).count();
-        format!(
-            "lift conformance: {} input(s) on {checked} function(s) ({} skipped), {} mismatch(es), rustc {} edition {} ({:.1}s)",
-            self.cases,
-            self.entries.len() - checked,
-            self.mismatches.len(),
-            self.rustc,
-            self.edition,
-            self.elapsed.as_secs_f64()
-        )
+        format!("lift conformance: {} input(s) on {checked} function(s) ({} skipped), {} mismatch(es), rustc {} edition {}", self.cases, self.entries.len() - checked, self.mismatches.len(), self.rustc, self.edition)
     }
 
     /// The line the emitted module's header carries (deterministic: the
@@ -282,7 +276,6 @@ impl Report {
     pub fn json(&self) -> Json {
         let mut j = Json::obj();
         j.bool("passed", self.passed());
-        j.bool("cached", self.cached);
         j.str("key", &self.key);
         j.str("rustc", &self.rustc);
         j.str("edition", &self.edition);
@@ -377,7 +370,8 @@ pub fn check(out: &elab::Output, krate: &Crate, c: &Checked, info: &LiftedInfo, 
     k.push_str(&format!("budget {INITIAL} {EVALS} {ROUNDS} {STEPS} {SEED}\n"));
     rep.key = hex(&sha256(k.as_bytes()));
     let key_path = cfg.work_dir.join("conformance.key");
-    if std::fs::read_to_string(&key_path).is_ok_and(|t| t == format!("{VERSION}\npassed {}\n", rep.key)) {
+    if let Some(r) = std::fs::read_to_string(&key_path).ok().and_then(|t| Record::parse(&t, &rep.key)) {
+        r.replay(&mut rep);
         rep.cached = true;
         rep.elapsed = t0.elapsed();
         return rep;
@@ -399,9 +393,97 @@ pub fn check(out: &elab::Output, krate: &Crate, c: &Checked, info: &LiftedInfo, 
     }
     rep.elapsed = t0.elapsed();
     if rep.passed() {
-        let _ = std::fs::write(&key_path, format!("{VERSION}\npassed {}\n", rep.key));
+        let _ = std::fs::write(&key_path, Record::of(&rep).render());
     }
     rep
+}
+
+/// A recorded pass (`conformance.key` in the work directory): the key and
+/// the deterministic part of the report, replayed on a cache hit so that
+/// the report does not depend on whether the check ran.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Record {
+    pub key: String,
+    pub rustc: String,
+    pub cases: usize,
+    pub notes: Vec<String>,
+    pub entries: Vec<EntryReport>,
+}
+
+fn esc(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\n', "\\n").replace('\t', "\\t")
+}
+
+fn unesc(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            match it.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(o) => out.push(o),
+                None => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+impl Record {
+    /// The record of a passing report.
+    pub fn of(r: &Report) -> Record {
+        Record { key: r.key.clone(), rustc: r.rustc.clone(), cases: r.cases, notes: r.notes.clone(), entries: r.entries.clone() }
+    }
+
+    /// The file text: the version and the key first (a record of another
+    /// version or key is a miss), then one line per field.
+    pub fn render(&self) -> String {
+        let mut t = format!("{VERSION}\npassed {}\nrustc {}\ncases {}\n", self.key, esc(&self.rustc), self.cases);
+        for n in &self.notes {
+            t.push_str(&format!("note {}\n", esc(n)));
+        }
+        for e in &self.entries {
+            t.push_str(&format!("entry {}\t{}\t{}\t{}\t{}\t{}\t{}\n", esc(&e.lifted), esc(&e.callee), e.cases, e.classes, e.rejected, e.reference, e.skipped.as_deref().map(|s| format!("+{}", esc(s))).unwrap_or_else(|| "-".into())));
+        }
+        t
+    }
+
+    /// The record of `key` in `text`; `None` (a miss: the check runs) for
+    /// another version or key or a malformed record.
+    pub fn parse(text: &str, key: &str) -> Option<Record> {
+        let mut lines = text.lines();
+        if lines.next()? != VERSION || lines.next()? != format!("passed {key}") {
+            return None;
+        }
+        let rustc = unesc(lines.next()?.strip_prefix("rustc ")?);
+        let cases = lines.next()?.strip_prefix("cases ")?.parse().ok()?;
+        let mut r = Record { key: key.to_string(), rustc, cases, notes: Vec::new(), entries: Vec::new() };
+        for l in lines {
+            if let Some(n) = l.strip_prefix("note ") {
+                r.notes.push(unesc(n));
+            } else {
+                let f: Vec<&str> = l.strip_prefix("entry ")?.split('\t').collect();
+                let [lifted, callee, cases, classes, rejected, reference, skipped]: [&str; 7] = f.try_into().ok()?;
+                let skipped = match skipped {
+                    "-" => None,
+                    s => Some(unesc(s.strip_prefix('+')?)),
+                };
+                r.entries.push(EntryReport { lifted: unesc(lifted), callee: unesc(callee), cases: cases.parse().ok()?, classes: classes.parse().ok()?, rejected: rejected.parse().ok()?, reference: reference.parse().ok()?, skipped });
+            }
+        }
+        Some(r)
+    }
+
+    /// Fills a report with the recorded pass.
+    pub fn replay(self, rep: &mut Report) {
+        rep.rustc = self.rustc;
+        rep.cases = self.cases;
+        rep.notes = self.notes;
+        rep.entries = self.entries;
+    }
 }
 
 // ---------------------------------------------------------------------------

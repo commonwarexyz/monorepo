@@ -435,13 +435,32 @@ host/
   crate's `Cargo.toml` names them). A host `#![forbid(unsafe_code)]` rejects
   modules with proven unchecked operations (use `deny`).
 * **Re-runs.** The `src/` scan makes the build script re-run on any host
-  edit; a verdict is reused when the verdict key matches — the SHA-256 of
-  the build-script binary (the toolchain and all its dependencies; it does
-  not depend on the target directory) and every `SANDBLASTER_*` variable but
-  the resource and cache settings, the target, the root, the module file
-  and the content of every file the front end read (sources, data files,
-  the lock, the profile) — and `OUT_DIR/<out>.rs` still has the recorded
-  hash. The module checks and the front end run on every build.
+  edit. Only paths that exist are watched: cargo re-runs a build script on
+  every invocation while a watched path is missing (the lift prelude's
+  source-map paths are virtual; a lock not accepted yet is noticed through
+  the watched root directory), so an unchanged host crate and its
+  dependents do not rebuild. A verdict is reused when the verdict key
+  matches — the **verifier context** (`driver::cache::verifier_context`:
+  the **toolchain identity**, a content hash computed by the facade's
+  `build.rs` over the files of every sandblaster crate the build script
+  links, including the data read at run time such as `targets/core` and
+  `targets/evidence`, the lock entries of every third-party crate, and the
+  `rustc`, host and `RUSTFLAGS` that compiled them; the toolchain's
+  overflow checks and test hooks; the build's `rustc -vV`; every
+  `SANDBLASTER_*` variable but the resource and cache settings), the
+  target, the root, the module file, the host edition and the content of
+  every file the front end read (sources, data files, the lock, the
+  profile) — and `OUT_DIR/<out>.rs` still has the recorded hash. The key
+  does not depend on the build-script binary, the host crate's features,
+  the profile or the target directory, so `cargo build`, `cargo test`, a
+  release build and a dependent crate's build of the same module share one
+  verdict (the optimization level and `debug_assertions` cannot change a
+  stored verdict: the toolchain is deterministic integer code and never
+  branches on `cfg(debug_assertions)`, so they can only add a failure,
+  which stores nothing). Verification output is deterministic: identical
+  inputs give byte-identical emitted code, report and lift conformance key
+  (no paths of `OUT_DIR`, no times; a replayed conformance pass reproduces
+  its report). The module checks and the front end run on every build.
 * **The verdict cache** (`driver::cache`; crate mode too). Without a
   matching key in `OUT_DIR` (a new target directory, `cargo clean`, an
   undone edit) the verdict is looked up under the same key in a
@@ -466,7 +485,8 @@ host/
   never emitted. After every proof and every §15.8 gate passed (the same
   seal as the printed verdict) **and the lift conformance check passed** (§1.1
   item 8: the lifted model against `rustc`'s build of the source on generated
-  inputs; `OUT_DIR/<out>-conformance/`, cached by content hash) the emitted file is a header (status
+  inputs; `OUT_DIR/<out>-conformance/`, cached by content hash, a cached
+  pass replaying its recorded report) the emitted file is a header (status
   `VERIFIED + LIFTED AS-IS`, or `VERIFIED + LIFTED + OPTIMIZED` with the
   rewritten functions listed,
   the boundary, what is not verified — `#[lift(unverified = ..)]`
@@ -508,7 +528,10 @@ host/
   to `f`. A function that fails keeps its source text (the rest is checked
   again; a second failure lowers nothing), and with no cheaper printable
   residual the file is the source as-is, so the optimizer never makes a
-  lifted module slower. The lowered text gets its meaning exactly like the
+  lifted module slower. The build summary (header and warning line) counts the
+  functions that kept their source text by reason (generic, other state
+  passing, not specialized, residual not 3% cheaper, …); the report lists
+  each function's full reason. The lowered text gets its meaning exactly like the
   source, by the lift (SEMANTICS.md §19); nothing new is trusted: the
   printer writes only what the lift already reads (suffixed literals, locals
   `l<k>_<name>`, plain operators — a checked operator of the residual prints
@@ -1676,7 +1699,8 @@ function over an expression AST with `eval(norm e) = eval e`), making
 (`driver::build_crate`: proofs, law audit, every §15.8 gate, optimizer,
 printer, round trip, emission-chain check), writes `OUT_DIR/sandblaster.rs`
 only for a crate verdict (always the report), prints
-`cargo::rerun-if-changed` for every file read and for the root's lock, and
+`cargo::rerun-if-changed` for every file read that exists (and the root's
+lock once it exists; its directory is watched), and
 exits 1 with diagnostics on failure. It takes no options.
 
 `sandblaster::build::compile_module(root, module_file)` (module mode, §2.1) is
