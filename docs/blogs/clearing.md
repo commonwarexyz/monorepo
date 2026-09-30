@@ -3,13 +3,15 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-09-18T00:00:00Z"
+modified-time: "2026-09-29T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
 image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
+
+*Update (9/29/26): Payments continue in epoch $e+1$ while epoch $e$'s close is built, certified, and admitted, and each registration takes a prefix of an ordered inbox of deposits and onchain withdrawal requests. When $e$ is admitted, the settlement chain binds $e+1$ to $e$'s state root and liability and starts $e+1$'s deadlines. Each payment also signs where the payer's vector ended in the previous epoch, so a payment that misses the cut can be signed again in the next epoch without settling twice.*
 
 *Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 
@@ -103,10 +105,10 @@ Payments are grouped into settlement periods called **epochs**. Every signature 
 
 The payer tracks a balance $B_a$ and an epoch's total debit $D_a$, initially zero. It keeps a vector $V_a$ ordered by recipient, with one entry $(G,J)$ recording the cumulative amount and payment count for each. These entries form the leaves of a binary Merkle tree (BMT). Before the example payment, $B_a=100$, $D_a=0$, and $V_a$ is empty.
 
-To send $x>0$, $a$ updates $b$'s entry and signs the updated sequence number $n_a$ for the epoch, cumulative debit, and vector's Merkle root. The operator countersigns this updated payer state:
+To send $x>0$, $a$ updates $b$'s entry and signs the updated sequence number $n_a$ for the epoch, cumulative debit, and vector's Merkle root. It also signs the root of its final vector in the previous epoch, $V_a^{e-1}$, which is empty if it paid no one there. The operator countersigns this updated payer state:
 
 $$
-S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with }b:(G+x,\,J+1))\bigr),
+S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with }b:(G+x,\,J+1)),\;\mathsf{root}(V_a^{e-1})\bigr),
 \qquad
 R=\mathsf{CounterSign}_{\mathsf{op}}(S).
 $$
@@ -263,7 +265,7 @@ Suppose $b$ has already served the API response, but the operator leaves $a$'s p
 
 ## A Deadline to Exit
 
-A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request when registering the next epoch. A censored user can instead queue it directly onchain, even during an active epoch. The next registration must include it.
+A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request when registering the next epoch. A censored user can instead queue it directly onchain, even during an active epoch. The request waits in the settlement chain's inbox, and the registration that takes it must include it, unless an earlier registration included it or included another request the user signed, which replaces it.
 
 Once a withdrawal request is queued onchain or included in an admitted close, the close that carries it must finalize before the signed deadline $T_w$ to avoid a hard fault. With challenge deadline $\Delta_e$,
 
@@ -297,11 +299,15 @@ Even if the operator disappears, recovery depends on a correct, live settlement 
 
 ## Streamlined Epoch Transitions
 
-A payment reaches finality through an admitted close, after the challenge deadline fixed at epoch registration. Shorter epochs with earlier deadlines can reduce that wait, but require more frequent preparation and certification.
+A payment reaches finality through an admitted close, after its challenge deadline. Shorter epochs with earlier deadlines can reduce that wait, but require more frequent preparation and certification.
 
-Once epoch $e$'s close is admitted, the operator can register $e+1$ against its state root and start payments before $e$ finalizes. Registration fixes deposits and signed withdrawal authorizations before the first payment is acknowledged.
+Closing an epoch does not pause payments. The operator acknowledges $e+1$ payments once $e+1$'s registration is included onchain. Registering $e+1$ requires only that $e$ is registered. It does not wait for $e$'s close to be built, certified, or admitted. The $e+1$ anchor commits its deposits, signed withdrawal authorizations, limits, and committee. It commits nothing about $e$'s result.
 
-Accounts without deposits or withdrawals can start paying in the new epoch while the operator is still adding incoming credits from the previous one. At the transition, the starting spendable balance $\widetilde B_a$ is the previous epoch's starting balance minus accepted outgoing payments, plus incoming credits already added. Let $\rho_a$ be the remaining credit from that epoch:
+When $e$'s close is admitted, the settlement chain binds $e+1$ to $e$'s exact state root, log heads, and closing liability from its own admitted history. The operator never states them. Admission and finality stay first-in, first-out, so $e+1$ can only be admitted on top of $e$. Each registration's admission deadline starts when its predecessor is admitted, or at its own registration if the predecessor was already admitted. If $e$ misses its deadline, the deployment permanently faults and drops every later registration. Payments under those registrations never change the balances that recovery uses, and their unadmitted deposits are refunded.
+
+The operator can cut and register later epochs behind $e$ with no fixed limit. Deposits and withdrawal requests queued onchain wait in an inbox ordered by arrival. Each registration takes the inbox from where the previous one stopped up to a position the operator names. Its anchor commits exactly the deposits in that range and the withdrawal requests the registration carries. The position cannot pass the end of the inbox before the registration's block, so a deposit or request that arrives later, even just ahead of the registration in the same block, stays in the inbox for a later epoch. A registered boundary never changes, and admitting it removes only its own deposits. A deposit must be taken within a fixed number of settlement-chain blocks after it arrives. Afterward it follows that epoch, however many registrations wait ahead. It settles with that epoch's admitted close, or it is refunded if the deployment faults before that admission. The registration that takes a queued withdrawal request must carry it, unless an earlier registration already carried it or replaced it. A registration replaces a request waiting in the inbox beyond its position when it carries a different request from the same account that the operator received directly. A replaced request is taken without being carried, and no later registration can carry a request that was carried or replaced.
+
+Accounts without deposits or withdrawals can start paying in the new epoch while the operator is still adding incoming credits from the previous one. When $e$ is cut, the starting spendable balance $\widetilde B_a$ is the previous epoch's starting balance minus accepted outgoing payments, plus incoming credits already added. Let $\rho_a$ be the remaining credit from that epoch:
 
 $$
 \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
@@ -316,8 +322,8 @@ $$
 $$
 
 ```{=html}
-<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated balance update for account a after epoch e's close is admitted and epoch e+1 is registered. A payment in epoch e leaves a spendable balance of 80. Two connected rails branch from that balance. The admitted balance for epoch e is 85. The spendable balance in epoch e+1 falls to 60 after a payment of 20, rises to 65 when the remaining credit is added, and falls to 50 after a payment of 15. One vertical marker identifies the same incoming credit of 5 in both calculations. The admitted balance of 85 never replaces the spendable balance.">
-  <noscript>After epoch e's close is admitted and epoch e+1 is registered, the admitted balance is 80 plus 5, or 85. The spendable balance is 80 minus 20 plus the same 5 minus 15, or 50. Adding the remaining credit preserves the new payments instead of replacing the spendable balance with 85.</noscript>
+<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated balance update for account a after epoch e is cut and epoch e+1 is registered, while epoch e's close is still being built. A payment in epoch e leaves a spendable balance of 80. Two connected rails branch from that balance. The closing balance for epoch e is 85. The spendable balance in epoch e+1 falls to 60 after a payment of 20, rises to 65 when the remaining credit is added, and falls to 50 after a payment of 15. One vertical marker identifies the same incoming credit of 5 in both calculations. The closing balance of 85 never replaces the spendable balance.">
+  <noscript>After epoch e is cut and epoch e+1 is registered, while epoch e's close is still being built, the closing balance is 80 plus 5, or 85. The spendable balance is 80 minus 20 plus the same 5 minus 15, or 50. Adding the remaining credit preserves the new payments instead of replacing the spendable balance with 85.</noscript>
 </div>
 ```
 
@@ -325,7 +331,25 @@ $$
 Figure 6: Both calculations include the same incoming credit. Adding it to the spendable balance preserves payments already accepted in the new epoch.
 :::
 
-Deposits fixed at registration are available immediately. A new account funded only by incoming credit must wait for that close to be admitted before spending. A payer with an outstanding withdrawal authorization waits until its signed deadline before signing another payment.
+A wallet checks affordability from the latest finalized or admitted balance it can authenticate, plus the incoming credits it holds, minus its own payments since then. It never needs $e$'s unfinished result. A send signed under an epoch the operator has already cut is refused as stale. Deposits fixed at registration are available immediately. A new account funded only by incoming credit waits for the close that created it to be admitted before spending. A payer with an outstanding withdrawal authorization waits until its signed deadline before signing another payment.
+
+### Retrying Across the Boundary
+
+Payments in $e+1$ can begin before the close for $e$ is built. A request sent just before the cut can reach the operator too late, or its reply can be lost. The payer then cannot tell whether $e$ will include it. Signing the payment again in $e+1$ would pay it twice if the operator also included the original.
+
+Each state signed in $e+1$ therefore also covers where the payer's vector ended in $e$:
+
+$$
+S=\mathsf{Sign}_a\bigl(\mathcal A_{e+1},\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with }b:(G+x,\,J+1)),\;\mathsf{root}(V_a^e)\bigr).
+$$
+
+Here $V_a^e$ is the payer's vector at the end of $e$. A payer that paid no one in $e$ uses the empty root. The root fixes exactly what $e$ paid on the payer's behalf, including how the debit was split across recipients.
+
+The operator countersigns a request only if this root matches its frozen record of $e$. The close for $e+1$ does not repeat it, because $e$'s close already records it: each account row holds the payer's final outgoing root. Validators check $e+1$ only after $e$ is admitted and read the root from $e$'s rows in their own replica. Receipts carry it so recipients can verify both signatures, and challenges built from them include it.
+
+When a request from $e$ arrives after the cut, the operator refuses it as stale and replies with the payer's final state in $e$. The operator keeps that state until $e+1$ finalizes. The payer obtains receipts up to that state and signs the remaining payments again in $e+1$ against its root. If the operator includes one of those requests in $e$ anyway, $e$ ends at a different root. Honest validators then reject any close for $e+1$ that carries the new state. Every certificate includes an honest signer, so each payment settles once. If the operator acknowledged the new state, the payer keeps that receipt until $e+1$ finalizes, and it proves a debit mismatch against $e+1$.
+
+The signature reaches back only one epoch. If the new request also misses $e+1$, the payer waits until $e$ is admitted, which decides whether the original was paid, before signing the payment again. The settlement chain keeps $e$'s admission, and validators keep its rows, until $e+2$ finalizes. A payer that returns after $e+1$ finalizes can still decide every copy it signed. A request that gets no response is never treated as excluded. The payer resends the same bytes and waits.
 
 ## Atomic Batches and Collecting Fees
 
@@ -336,11 +360,11 @@ The operator checks the requested payments and the fee for the batch before coun
 The operator can price each transfer type or payer independently, including volume discounts or negotiated rates. Validators net the fee entry like any other payment, and settlement uses the same commitments and proofs. The fee schedule stays with the operator, so changing it requires no protocol change.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="Payer a signs one batch paying 20 to b, 7 to c, and the operator's quoted fee of 2 to its designated fee recipient. The signed state binds the epoch, sequence 1, cumulative debit 29, and payment root. Recipient b's receipt contains the operator-countersigned payer state and an opening for b's entry, with amount 20 and payment count 1.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="Payer a signs one batch paying 20 to b, 7 to c, and the operator's quoted fee of 2 to its designated fee recipient. The payer signs the epoch anchor, sequence 1, cumulative debit 29, the payment root, and the predecessor root, which is empty because the payer paid no one in the previous epoch. Recipient b's receipt contains the operator-countersigned payer state and an opening for b's entry, with amount 20 and payment count 1.">
 ```
 
 ::: {.image-caption}
-Figure 7: The fee shares the same signed payment root as the recipient payments. Recipient $b$ receives the countersigned payer state and an opening for its own entry.
+Figure 7: The fee shares the same signed payment root as the recipient payments. The payer also signs the epoch anchor, its sequence, its cumulative debit, and its predecessor root. Recipient $b$ receives the countersigned payer state and an opening for its own entry.
 :::
 
 ## The Cost of Settlement
@@ -409,16 +433,16 @@ Complete challenges include the signed receipts and any required Merkle openings
     </tr>
   </thead>
   <tbody>
-    <tr><td>Debit mismatch</td><td style="text-align:right;">622 B <small>present</small><br>657 B <small>omitted</small></td><td style="text-align:right;">751 B <small>present</small><br>786 B <small>omitted</small></td><td style="text-align:right;">847 B <small>present</small><br>882 B <small>omitted</small></td><td style="text-align:right;">943 B <small>present</small><br>978 B <small>omitted</small></td></tr>
-    <tr><td>Entry mismatch</td><td style="text-align:right;">673 B</td><td style="text-align:right;">802 B</td><td style="text-align:right;">898 B</td><td style="text-align:right;">994 B</td></tr>
-    <tr><td>Acknowledgment fork</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td></tr>
+    <tr><td>Debit mismatch</td><td style="text-align:right;">654 B <small>present</small><br>689 B <small>omitted</small></td><td style="text-align:right;">783 B <small>present</small><br>818 B <small>omitted</small></td><td style="text-align:right;">879 B <small>present</small><br>914 B <small>omitted</small></td><td style="text-align:right;">975 B <small>present</small><br>1,010 B <small>omitted</small></td></tr>
+    <tr><td>Entry mismatch</td><td style="text-align:right;">705 B</td><td style="text-align:right;">834 B</td><td style="text-align:right;">930 B</td><td style="text-align:right;">1,026 B</td></tr>
+    <tr><td>Acknowledgment fork</td><td style="text-align:right;">481 B</td><td style="text-align:right;">481 B</td><td style="text-align:right;">481 B</td><td style="text-align:right;">481 B</td></tr>
   </tbody>
 </table>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 10: All measured challenges fit in 1 KB. An omitted payer is the absence case of debit mismatch.
+Figure 10: All measured challenges fit in 1.1 KB. An omitted payer is the absence case of debit mismatch.
 :::
 
 A payout proof shows that a withdrawal output is included under the current finalized root.
