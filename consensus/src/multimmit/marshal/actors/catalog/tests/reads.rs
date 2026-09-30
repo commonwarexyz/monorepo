@@ -1201,7 +1201,8 @@ fn application_prune_preserves_queued_cold_materialization() {
         let block_bytes = candidates[0].encode_size();
         let configure = |context: &DeterministicContext| {
             let mut config = config(context, &committee);
-            set_capacity(&mut config, 1);
+            // Room to admit an L-QC with its opening in one cut.
+            set_capacity(&mut config, 2);
             config.limits.max_hot_block_bytes =
                 NonZeroUsize::new(block_bytes * BODY_READ_CONCURRENCY.get()).unwrap();
             config
@@ -1209,34 +1210,97 @@ fn application_prune_preserves_queued_cold_materialization() {
 
         let (client, handle, _delivery) =
             spawn_catalog(configure(&context), context.child("first")).await;
-        for block in candidates.iter().chain(std::iter::once(&current)) {
+        // A child of the newest candidate lets a floor move chain 0 past the candidates' height.
+        let finalized = candidates.last().unwrap();
+        let child = {
+            let body = TestBody::new(Sha256::hash(&[b"application parent"]), Height::new(10), 300);
+            let header = TransactionBlockHeader::new(
+                committee.config.epoch(),
+                ChainId::new(0),
+                Height::new(2),
+                finalized.reference().digest(),
+                body.digest(),
+            )
+            .unwrap();
+            Arc::new(TransactionBlock::new(header, body).unwrap())
+        };
+        for block in candidates
+            .iter()
+            .chain([&current, &child])
+        {
             client
                 .admit_block(block.reference(), Arc::clone(block))
                 .await
                 .unwrap();
         }
-        let checkpoint = client.checkpoint().await.unwrap();
-        let finalized = candidates.last().unwrap();
-        let mut emitted = checkpoint.emitted().to_vec();
-        emitted[0] = finalized.reference();
+        // Commit the newest candidate and its child, then select an L-QC whose frontier names the
+        // child, so a floor ends at index 2.
+        let genesis = committee.config.genesis();
+        let record = Arc::new(
+            TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
+                .unwrap(),
+        );
+        let history = record.commitment::<Sha256>();
+        let proof = Arc::new(committee.lqc(View::new(3)));
+        client
+            .admit_finality(
+                proof.view(),
+                proof.id::<Sha256>(),
+                proof.clone(),
+                record.clone(),
+            )
+            .await
+            .unwrap();
+        let frontier = |block: &Arc<TransactionBlock<Sha256, TestBody>>| {
+            let mut emitted = genesis.tips().to_vec();
+            emitted[0] = block.reference();
+            emitted
+        };
+        let genesis_floor = |emitted| {
+            checkpoint(
+                &committee,
+                0,
+                genesis.lqc(),
+                history,
+                0,
+                emitted,
+                OutputIndex::zero(),
+            )
+        };
+        client
+            .commit(Commit {
+                selected: Vec::new(),
+                history: vec![HistoryOpening {
+                    commitment: history,
+                    record,
+                }],
+                outputs: vec![output_row(OutputIndex::new(1), finalized)],
+                checkpoint: genesis_floor(frontier(finalized)),
+            })
+            .await
+            .unwrap();
         client
             .commit(Commit {
                 selected: Vec::new(),
                 history: Vec::new(),
-                outputs: vec![output_row(OutputIndex::new(1), finalized)],
-                checkpoint: Checkpoint::try_from(CheckpointParts {
-                    epoch: checkpoint.epoch(),
-                    floor_generation: checkpoint.floor_generation(),
-                    archive_layout: checkpoint.archive_layout(),
-                    floor: checkpoint.floor(),
-                    history: checkpoint.history(),
-                    history_index: checkpoint.history_index(),
-                    ordered: checkpoint.ordered().to_vec(),
-                    emitted,
-                    floor_index: checkpoint.floor_index(),
-                })
-                .unwrap(),
+                outputs: vec![output_row(OutputIndex::new(2), &child)],
+                checkpoint: genesis_floor(frontier(&child)),
             })
+            .await
+            .unwrap();
+        client
+            .commit(selected_commit(
+                proof.clone(),
+                checkpoint(
+                    &committee,
+                    0,
+                    proof.id::<Sha256>(),
+                    history,
+                    0,
+                    frontier(&child),
+                    OutputIndex::zero(),
+                ),
+            ))
             .await
             .unwrap();
         drop(client);
@@ -1250,10 +1314,10 @@ fn application_prune_preserves_queued_cold_materialization() {
         let (client, handle, _delivery) =
             spawn_catalog(configure(&context), delayed.child("reopened")).await;
         assert_eq!(
-            client.delivery_cursor(0, OutputIndex::new(1)),
+            client.delivery_cursor(0, OutputIndex::new(2)),
             Feedback::Ok
         );
-        while client.progress().await.unwrap().acknowledged != OutputIndex::new(1) {
+        while client.progress().await.unwrap().acknowledged != OutputIndex::new(2) {
             context.sleep(std::time::Duration::from_millis(1)).await;
         }
         let (releases, blocked): (Vec<_>, Vec<_>) = (0..BODY_READ_CONCURRENCY.get())
@@ -1276,7 +1340,13 @@ fn application_prune_preserves_queued_cold_materialization() {
             },
         }
 
-        client.prune(OutputIndex::zero()).await.unwrap();
+        // The engine no longer verifies chain 0 at or below the child, so pruning at the floor may
+        // reclaim every candidate, but not while a read holds it.
+        let child_reference = child.reference();
+        assert!(client
+            .release(child_reference.chain(), child_reference.height())
+            .accepted());
+        client.prune(OutputIndex::new(2)).await.unwrap();
         for release in releases {
             release.send(()).expect("blocked read was dropped");
         }
@@ -1288,7 +1358,14 @@ fn application_prune_preserves_queued_cold_materialization() {
                 .collect::<Vec<_>>(),
             expected
         );
-        client.prune(OutputIndex::zero()).await.unwrap();
+
+        // Once the reads finish, the next prune reclaims the candidates and keeps the block the
+        // floor's frontier names.
+        client.prune(OutputIndex::new(2)).await.unwrap();
+        for candidate in &candidates {
+            assert!(client.block(candidate.reference()).await.unwrap().is_none());
+        }
+        assert!(client.block(child_reference).await.unwrap().is_some());
 
         drop(client);
         assert!(handle.await.is_ok());
