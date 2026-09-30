@@ -130,7 +130,9 @@ pub struct Mailbox<S: commonware_cryptography::certificate::Scheme, D: Digest> {
 /// Gracefully stops one aggregation engine.
 ///
 /// Dropping this handle also requests shutdown. The engine finishes its current operation,
-/// cancels recovery, and returns [`EngineOutcome::Stopped`].
+/// cancels recovery, and returns [`EngineOutcome::Stopped`]. Keep it for as long as the engine
+/// should run: `let (handle, _) = engine.start_stoppable(network)` stops the engine immediately.
+#[must_use = "dropping a Stopper stops its engine"]
 pub struct Stopper(oneshot::Sender<()>);
 
 impl Stopper {
@@ -271,6 +273,9 @@ where
     }
 
     /// Starts the engine and reports whether it completed or was stopped.
+    ///
+    /// `network` must carry only this engine's epoch, for example through a per-epoch mux
+    /// subchannel.
     pub fn start(
         self,
         network: (

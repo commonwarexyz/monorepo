@@ -21,8 +21,8 @@ use commonware_cryptography::{Digest, certificate};
 /// Marker trait for signing schemes compatible with `aggregation`.
 ///
 /// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type while
-/// retaining the certificate scheme's fault model. It is automatically implemented
-/// for any compatible scheme.
+/// retaining the certificate scheme's fault model. A custom scheme must implement
+/// [`Self::recovery_namespace`].
 pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>> {
     /// Returns the recovery identity derived from this scheme's signing namespace.
     fn recovery_namespace(&self) -> RecoveryNamespace;

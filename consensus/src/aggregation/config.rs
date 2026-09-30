@@ -31,10 +31,13 @@ pub struct Config<
     /// Provides the canonical digest for each position.
     ///
     /// Every successful response for a position must return the same digest across clones and
-    /// restarts. Closing a response declines the position for this engine instance. The position
-    /// can still complete from a learned certificate or after restart.
+    /// restarts. Closing a response declines the position for this engine instance. The engine
+    /// then starts recovery for the position without waiting for acknowledgments.
     pub automaton: A,
     /// Receives certificates after the engine syncs them to its journal.
+    ///
+    /// Certificates can arrive out of order. After a restart, every journaled certificate is
+    /// reported again. Feedback is ignored.
     pub reporter: Z,
     /// Blocker for invalid network messages.
     pub blocker: B,
@@ -42,13 +45,14 @@ pub struct Config<
     pub priority_acks: bool,
     /// How often an acknowledgment is rebroadcast until certification.
     pub rebroadcast_timeout: NonZeroDuration,
-    /// Number of acknowledgment rebroadcast ticks before resolver recovery starts.
+    /// Number of rebroadcast ticks after a position enters the window before resolver recovery
+    /// starts.
     pub recovery_after_rebroadcasts: NonZeroU64,
     /// Shared resolver recovery coordinator.
     pub recoverer: R,
     /// Maximum number of live positions.
     ///
-    /// Changing `window` across restarts is safe.
+    /// Also bounds the certificate mailbox. Changing `window` across restarts is safe.
     pub window: NonZeroU64,
     /// Journal partition.
     pub journal_partition: String,

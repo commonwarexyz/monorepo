@@ -8,8 +8,9 @@
 //! signing engine requests the canonical digest and signs it again. Certificates are journaled and
 //! synced before reporting.
 //! A position is an application-defined sequence number. It need not be a block height. For
-//! example, an application that checkpoints every 1000 blocks can assign position `k` to its
-//! `k`-th checkpoint.
+//! example, an application that checkpoints every 1000 blocks can assign position `k` to the
+//! checkpoint at height `1000k + 999`. Each epoch's length is then a multiple of 1000, so the
+//! epoch's last block is a checkpoint. Discovering the newest certificate is the application's responsibility.
 //! The engine keeps a bounded window anchored at the lowest uncertified position. It returns
 //! `Completed` only after the entire range is certified; shutdown returns `Stopped`. A durable
 //! header binds the journal to its committee, epoch, and range. Replay revalidates each
@@ -26,11 +27,19 @@
 //!
 //! Active engines can schedule missing certificates through a shared [`RecoveryCoordinator`]. The
 //! coordinator bounds and deduplicates logical resolver requests across engine scopes; it does not
-//! decode, verify, archive, or route certificates. Resolver consumers deliver recovered
-//! certificates through [`Mailbox`], which applies the engine's range and signature checks.
-//! Archiving the complete range and retiring the engine remain application/orchestrator
-//! responsibilities. Every certificate is reported before the engine completes, so an
-//! orchestrator retires a completed engine's journal by removing its configured partition.
+//! decode, verify, archive, or route certificates. A resolver consumer decodes each response and
+//! passes it to [`Mailbox::submit`] with the requested key. The engine checks the key, range, and
+//! signature. The engine does not serve certificates to peers. A resolver producer serves them
+//! from the application's archive.
+//!
+//! ## Retirement
+//!
+//! `Completed` means every certificate in the range is journaled and was passed to the reporter.
+//! It does not mean the application archived them, because reporter feedback is ignored. Delete
+//! the journal partition or release signing keys only after the application's archive durably
+//! holds the complete range. A new engine with a deleted partition starts from an empty journal,
+//! so the application must track retired epochs itself. Await an engine's handle before starting
+//! another engine for the same namespace and epoch.
 
 pub mod scheme;
 pub mod types;
