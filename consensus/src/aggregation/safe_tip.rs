@@ -252,7 +252,7 @@ mod tests {
         Signer,
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_utils::{N3f1, TryCollect};
+    use commonware_utils::{N3f1, N5f1, TryCollect};
     use rstest::rstest;
 
     fn key(i: u64) -> PublicKey {
@@ -287,6 +287,24 @@ mod tests {
         let (safe_tip, _) = setup_safe_tip(4);
         assert_eq!(safe_tip.tips.len(), 4);
         assert_eq!(safe_tip.get(), Height::zero());
+    }
+
+    #[test]
+    fn test_fault_model_sets_safe_rank() {
+        // Of eleven validators, `N3f1` tolerates three faults and `N5f1` two, so the safe tip is
+        // the fourth or the third highest.
+        let validators = (1..=11).map(key).try_collect::<Set<_>>().unwrap();
+        let mut n3f1 = SafeTip::<PublicKey>::default();
+        n3f1.init::<N3f1>(&validators);
+        let mut n5f1 = SafeTip::<PublicKey>::default();
+        n5f1.init::<N5f1>(&validators);
+        for (i, validator) in validators.iter().enumerate() {
+            let tip = Height::new(10 * (i as u64 + 1));
+            n3f1.update(validator.clone(), tip);
+            n5f1.update(validator.clone(), tip);
+        }
+        assert_eq!(n3f1.get(), Height::new(80));
+        assert_eq!(n5f1.get(), Height::new(90));
     }
 
     #[test]
