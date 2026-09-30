@@ -569,8 +569,10 @@ where
     B: Body<H>,
     B::Cfg: Clone,
 {
+    // Pruning always keeps the row at its bound when rows above the floor index exist, so an
+    // empty row archive leaves every missing committed row above the floor index inconsistent.
     let retained = match outcome(stores.first_output_row())? {
-        Ok(first) => first.unwrap_or(u64::MAX),
+        Ok(first) => first.unwrap_or(0),
         Err(error) => {
             reply.send_lossy(Err(error));
             return Ok(());
