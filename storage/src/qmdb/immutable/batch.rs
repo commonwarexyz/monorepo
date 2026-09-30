@@ -132,8 +132,7 @@ where
 
     /// Set a key to a value.
     ///
-    /// If the key already exists in the database or an ancestor batch, reads
-    /// of it may return any of its written values.
+    /// The key must not already be set in the database history or in any ancestor batch.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.mutations.insert(key, value);
         self

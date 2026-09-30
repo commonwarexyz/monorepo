@@ -1395,6 +1395,10 @@ mod trait_impls {
             self.new_batch()
         }
 
+        fn new_child(&self, parent: &Self::Merkleized) -> Self::Batch {
+            parent.new_batch::<H>()
+        }
+
         fn apply_batch(
             self,
             batch: Self::Merkleized,
@@ -1424,6 +1428,10 @@ mod trait_impls {
 
         fn new_batch(&self) -> Self::Batch {
             self.new_batch()
+        }
+
+        fn new_child(&self, parent: &Self::Merkleized) -> Self::Batch {
+            parent.new_batch::<H>()
         }
 
         fn apply_batch(

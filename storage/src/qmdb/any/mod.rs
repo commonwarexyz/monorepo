@@ -255,8 +255,10 @@ where
 pub(crate) mod test {
     use super::*;
     use crate::{
-        journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-        qmdb::any::{FixedConfig, MerkleConfig, VariableConfig},
+        index::Unordered as UnorderedIndex,
+        journal::contiguous::{Mutable, fixed::Config as FConfig, variable::Config as VConfig},
+        merkle::Location as GenericLocation,
+        qmdb::any::{FixedConfig, MerkleConfig, VariableConfig, db::Db},
         translator::OneCap,
     };
     use commonware_codec::{Codec, CodecShared};
@@ -264,10 +266,13 @@ pub(crate) mod test {
     use commonware_runtime::{
         BufferPooler, Supervisor as _, buffer::paged::CacheRef, deterministic::Context,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
-    use core::{future::Future, pin::Pin};
+    use commonware_utils::{
+        NZU16, NZU64, NZUsize,
+        bitmap::{Prunable, Readable as _},
+    };
+    use core::{fmt::Debug, future::Future, pin::Pin};
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, BTreeSet, HashMap},
         num::{NonZeroU16, NonZeroUsize},
     };
 
@@ -1332,6 +1337,482 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// State of an `any` db that a rebuild from the log must reproduce.
+    struct Observed<F: Family, D, V> {
+        /// Number of active keys.
+        active_keys: usize,
+        /// Sorted snapshot locations in the translated bucket of each observed key.
+        locs: Vec<Vec<GenericLocation<F>>>,
+        /// Active locations of the bitmap in `[pruned_bits, len)`.
+        bits: Vec<u64>,
+        /// Length of the bitmap.
+        len: u64,
+        /// Inactivity floor.
+        floor: GenericLocation<F>,
+        /// Root.
+        root: D,
+        /// Value of each observed key.
+        values: Vec<Option<V>>,
+    }
+
+    /// Observe the state of `db` for `keys`.
+    async fn observe<F, C, I, H, U, const N: usize, S>(
+        db: &Db<F, Context, C, I, H, U, N, S>,
+        keys: &[U::Key],
+    ) -> Observed<F, H::Digest, U::Value>
+    where
+        F: Family,
+        C: Mutable<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = GenericLocation<F>>,
+        H: Hasher,
+        U: Update,
+        S: Strategy,
+        Operation<F, U>: Codec,
+    {
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys {
+            values.push(db.get(key).await.unwrap());
+        }
+        let bitmap = &db.bitmap;
+        Observed {
+            active_keys: db.active_keys,
+            locs: keys
+                .iter()
+                .map(|key| {
+                    let mut locs: Vec<_> = db.snapshot.get(key).copied().collect();
+                    locs.sort();
+                    locs
+                })
+                .collect(),
+            bits: (bitmap.pruned_bits()..bitmap.len())
+                .filter(|loc| bitmap.get_bit(*loc))
+                .collect(),
+            len: bitmap.len(),
+            floor: db.inactivity_floor_loc(),
+            root: db.root(),
+            values,
+        }
+    }
+
+    /// Commit and drop `db`, await `reopen` to rebuild it from the log, and assert the rebuilt
+    /// snapshot locations, bitmap, inactivity floor, root, and values of `keys` equal the live
+    /// ones. The live snapshot must also hold as many entries as active keys. Returns the rebuilt
+    /// db.
+    ///
+    /// The rebuilt pruned prefix is the retained log start rounded down to a chunk boundary, so it
+    /// lies below the live prefix after a prune whose chunk floor exceeds the retained start.
+    #[boxed]
+    pub(crate) async fn assert_rebuild_matches<F, C, I, H, U, const N: usize, S>(
+        db: Db<F, Context, C, I, H, U, N, S>,
+        reopen: impl Future<Output = Db<F, Context, C, I, H, U, N, S>>,
+        keys: &[U::Key],
+    ) -> Db<F, Context, C, I, H, U, N, S>
+    where
+        F: Family,
+        C: Mutable<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = GenericLocation<F>>,
+        H: Hasher,
+        U: Update<Value: PartialEq + Debug>,
+        S: Strategy,
+        Operation<F, U>: Codec,
+    {
+        assert_eq!(
+            db.snapshot.items(),
+            db.active_keys,
+            "live snapshot entries diverged from active keys",
+        );
+
+        // Capture the live state, then commit, drop, and rebuild from the log.
+        let live = observe(&db, keys).await;
+        let pruned = db.bitmap.pruned_bits();
+        let start = *db.bounds().start;
+        db.commit().await.unwrap();
+        let db = reopen.await;
+
+        // The rebuilt pruned prefix derives from the retained start.
+        let chunk_bits = Prunable::<N>::CHUNK_SIZE_BITS;
+        assert_eq!(
+            db.bitmap.pruned_bits(),
+            start / chunk_bits * chunk_bits,
+            "pruned_bits diverged from the retained start on reopen",
+        );
+        assert!(
+            db.bitmap.pruned_bits() <= pruned,
+            "pruned_bits exceeds the live prefix on reopen",
+        );
+
+        // Every captured value must survive the rebuild.
+        let rebuilt = observe(&db, keys).await;
+        assert_eq!(
+            rebuilt.active_keys, live.active_keys,
+            "active keys diverged on reopen",
+        );
+        assert_eq!(
+            rebuilt.locs, live.locs,
+            "snapshot locations diverged on reopen",
+        );
+        assert_eq!(rebuilt.len, live.len, "bitmap len diverged on reopen");
+        assert_eq!(
+            rebuilt.bits, live.bits,
+            "active locations diverged on reopen",
+        );
+        assert_eq!(
+            rebuilt.floor, live.floor,
+            "inactivity floor diverged on reopen",
+        );
+        assert_eq!(rebuilt.root, live.root, "root diverged on reopen");
+        assert_eq!(rebuilt.values, live.values, "values diverged on reopen");
+        db
+    }
+
+    /// Siblings seeded by each chained-rebuild shape.
+    const SIBLINGS: u64 = 48;
+
+    /// Colliding sibling `i`. Every key the chained-rebuild shapes write shares one translated
+    /// bucket.
+    fn sibling(i: u64) -> Digest {
+        colliding_digest(0xA0, i)
+    }
+
+    /// Expected value of every key written by applied batches.
+    #[derive(Default)]
+    struct Model {
+        /// Value of each active key.
+        values: BTreeMap<Digest, Digest>,
+        /// Every key ever written.
+        keys: BTreeSet<Digest>,
+    }
+
+    impl Model {
+        /// Record `writes` as applied.
+        fn apply(&mut self, writes: &[(Digest, Option<Digest>)]) {
+            for &(key, value) in writes {
+                self.keys.insert(key);
+                match value {
+                    Some(value) => self.values.insert(key, value),
+                    None => self.values.remove(&key),
+                };
+            }
+        }
+    }
+
+    /// Merkleize `writes` on top of `batch`.
+    pub(crate) async fn build<F: Family, D>(
+        db: &D,
+        batch: D::Batch,
+        writes: &[(Digest, Option<Digest>)],
+    ) -> D::Merkleized
+    where
+        D: DbAny<F, Key = Digest, Value = Digest>,
+    {
+        writes
+            .iter()
+            .fold(batch, |batch, &(key, value)| batch.write(key, value))
+            .merkleize(db, None)
+            .await
+            .unwrap()
+    }
+
+    /// Apply and commit `writes` as one batch, recording them in `model`.
+    async fn write_all<F: Family, D>(
+        db: D,
+        model: &mut Model,
+        writes: &[(Digest, Option<Digest>)],
+    ) -> D
+    where
+        D: DbAny<F, Key = Digest, Value = Digest>,
+    {
+        let batch = build(&db, db.new_batch(), writes).await;
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        model.apply(writes);
+        db.commit().await.unwrap()
+    }
+
+    /// Commit siblings `0..SIBLINGS`.
+    async fn seed_siblings<F: Family, D>(
+        db: D,
+        model: &mut Model,
+        make_value: &impl Fn(u64) -> Digest,
+    ) -> D
+    where
+        D: DbAny<F, Key = Digest, Value = Digest>,
+    {
+        let writes: Vec<_> = (0..SIBLINGS)
+            .map(|i| (sibling(i), Some(make_value(i))))
+            .collect();
+        write_all(db, model, &writes).await
+    }
+
+    /// Apply the chain A <- B <- C. A is applied and dropped before C is merkleized on B, so C
+    /// resolves the keys A created through the base locations of the dropped prefix. B and C
+    /// touch only keys A created, so a lost base location duplicates them silently.
+    #[boxed]
+    async fn apply_dropped_chain<F: Family, D>(
+        db: D,
+        model: &mut Model,
+        make_value: &impl Fn(u64) -> Digest,
+    ) -> D
+    where
+        D: DbAny<F, Key = Digest, Value = Digest>,
+    {
+        // A updates and deletes siblings and creates new ones.
+        let a = vec![
+            (sibling(5), Some(make_value(100))),
+            (sibling(6), Some(make_value(101))),
+            (sibling(7), None),
+            (sibling(1000), Some(make_value(102))),
+            (sibling(1001), Some(make_value(103))),
+        ];
+
+        // B and C update the keys A created.
+        let b = vec![
+            (sibling(1000), Some(make_value(104))),
+            (sibling(1001), Some(make_value(105))),
+        ];
+        let c = vec![
+            (sibling(1000), Some(make_value(106))),
+            (sibling(1001), Some(make_value(107))),
+        ];
+
+        // Build A <- B, apply A and drop it, then merkleize C on B and apply it.
+        let a_batch = build(&db, db.new_batch(), &a).await;
+        let b_batch = build(&db, db.new_child(&a_batch), &b).await;
+        let (db, _) = db.apply_batch(a_batch).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let c_batch = build(&db, db.new_child(&b_batch), &c).await;
+        let (db, _) = db.apply_batch(c_batch).await.unwrap();
+        for writes in [&a, &b, &c] {
+            model.apply(writes);
+        }
+        db
+    }
+
+    /// Apply the chain A <- B <- C by applying A, then C over pending B, so the applied and
+    /// pending ancestors are both non-empty. On a db without active keys, every key in A's diff
+    /// is created by A, so a key misresolved through either partition is duplicated silently.
+    #[boxed]
+    async fn apply_mixed_chain<F: Family, D>(
+        db: D,
+        model: &mut Model,
+        make_value: &impl Fn(u64) -> Digest,
+    ) -> D
+    where
+        D: DbAny<F, Key = Digest, Value = Digest>,
+    {
+        // A recreates deleted siblings and creates new ones.
+        let a = vec![
+            (sibling(0), Some(make_value(200))),
+            (sibling(1), Some(make_value(201))),
+            (sibling(1000), Some(make_value(202))),
+            (sibling(1001), Some(make_value(203))),
+        ];
+
+        // B updates a key A created and creates a sibling. C updates keys A and B created.
+        let b = vec![
+            (sibling(1001), Some(make_value(204))),
+            (sibling(2000), Some(make_value(205))),
+        ];
+        let c = vec![
+            (sibling(1000), Some(make_value(206))),
+            (sibling(2000), Some(make_value(207))),
+        ];
+
+        // Build A <- B <- C, then apply A and C.
+        let a_batch = build(&db, db.new_batch(), &a).await;
+        let b_batch = build(&db, db.new_child(&a_batch), &b).await;
+        let c_batch = build(&db, db.new_child(&b_batch), &c).await;
+        let (db, _) = db.apply_batch(a_batch).await.unwrap();
+        let (db, _) = db.apply_batch(c_batch).await.unwrap();
+        for writes in [&a, &b, &c] {
+            model.apply(writes);
+        }
+        db
+    }
+
+    /// Apply the chain A <- B <- C <- D. A is applied and dropped before D is merkleized, and B
+    /// is applied before D. D then resolves B's keys through the applied ancestor and the keys A
+    /// shares with C through the base locations of the dropped prefix.
+    #[boxed]
+    async fn apply_crossed_chain<F: Family, D>(
+        db: D,
+        model: &mut Model,
+        make_value: &impl Fn(u64) -> Digest,
+    ) -> D
+    where
+        D: DbAny<F, Key = Digest, Value = Digest>,
+    {
+        // A updates and deletes siblings and creates new ones.
+        let a = vec![
+            (sibling(5), Some(make_value(300))),
+            (sibling(6), Some(make_value(301))),
+            (sibling(7), None),
+            (sibling(1000), Some(make_value(302))),
+            (sibling(1001), Some(make_value(303))),
+            (sibling(1002), Some(make_value(304))),
+        ];
+
+        // B updates keys A updated and created, and creates a sibling.
+        let b = vec![
+            (sibling(5), Some(make_value(305))),
+            (sibling(1000), Some(make_value(306))),
+            (sibling(2000), Some(make_value(307))),
+        ];
+
+        // C updates keys A updated and created and recreates the key A deleted. B touches none
+        // of them.
+        let c = vec![
+            (sibling(6), Some(make_value(308))),
+            (sibling(7), Some(make_value(309))),
+            (sibling(1001), Some(make_value(310))),
+        ];
+
+        // D updates keys written by A, B, and C.
+        let d = vec![
+            (sibling(5), Some(make_value(311))),
+            (sibling(1001), Some(make_value(312))),
+            (sibling(1002), Some(make_value(313))),
+            (sibling(2000), Some(make_value(314))),
+        ];
+
+        // Build A <- B <- C, then apply A and drop it before D is merkleized on C.
+        let a_batch = build(&db, db.new_batch(), &a).await;
+        let b_batch = build(&db, db.new_child(&a_batch), &b).await;
+        let c_batch = build(&db, db.new_child(&b_batch), &c).await;
+        let (db, _) = db.apply_batch(a_batch).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+
+        // Apply B, then D over pending C.
+        let (db, _) = db.apply_batch(b_batch).await.unwrap();
+        let (db, _) = db.apply_batch(d_batch).await.unwrap();
+        for writes in [&a, &b, &c, &d] {
+            model.apply(writes);
+        }
+        db
+    }
+
+    /// Assert `db` serves `model` for every written key, then that a rebuild from the log matches
+    /// the live state. Returns the rebuilt db.
+    #[boxed]
+    async fn assert_model_rebuild<F, C, I, U, const N: usize, S>(
+        db: Db<F, Context, C, I, Sha256, U, N, S>,
+        model: &Model,
+        reopen: impl Future<Output = Db<F, Context, C, I, Sha256, U, N, S>>,
+    ) -> Db<F, Context, C, I, Sha256, U, N, S>
+    where
+        F: Family,
+        C: Mutable<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = GenericLocation<F>>,
+        U: Update<Key = Digest, Value = Digest>,
+        S: Strategy,
+        Operation<F, U>: Codec,
+    {
+        assert_eq!(
+            db.active_keys,
+            model.values.len(),
+            "active keys diverged from the model",
+        );
+        let keys: Vec<_> = model.keys.iter().copied().collect();
+        for key in &keys {
+            assert_eq!(
+                db.get(key).await.unwrap(),
+                model.values.get(key).copied(),
+                "value of {key} diverged from the model",
+            );
+        }
+        assert_rebuild_matches(db, reopen, &keys).await
+    }
+
+    /// Batches applied across dropped, applied, and pending ancestors must leave a live snapshot,
+    /// bitmap, floor, root, and values equal to a rebuild from the log. A superseded location
+    /// misresolved to `None` leaves a duplicate snapshot entry and a stale bitmap bit.
+    pub(crate) async fn test_any_db_chained_rebuild<F, C, I, U, const N: usize, S, Fut>(
+        context: Context,
+        db: Db<F, Context, C, I, Sha256, U, N, S>,
+        reopen: impl Fn(Context) -> Fut,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        F: Family,
+        C: Mutable<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = GenericLocation<F>>,
+        U: Update<Key = Digest, Value = Digest>,
+        S: Strategy,
+        Operation<F, U>: Codec,
+        Db<F, Context, C, I, Sha256, U, N, S>:
+            DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+        Fut: Future<Output = Db<F, Context, C, I, Sha256, U, N, S>>,
+    {
+        // Shape 1: A is applied and dropped before C is merkleized on B.
+        let mut model = Model::default();
+        let db = seed_siblings(db, &mut model, &make_value).await;
+        let db = apply_dropped_chain(db, &mut model, &make_value).await;
+        let db = assert_model_rebuild(
+            db,
+            &model,
+            reopen(context.child("rebuild").with_attribute("index", 1)),
+        )
+        .await;
+        db.destroy().await.unwrap();
+
+        // Shape 2: A is applied, then C is applied over pending B. The seed is deleted first, so
+        // the chain starts without active keys.
+        let db = reopen(context.child("shape").with_attribute("index", 2)).await;
+        let mut model = Model::default();
+        let db = seed_siblings(db, &mut model, &make_value).await;
+        let clear: Vec<_> = (0..SIBLINGS).map(|i| (sibling(i), None)).collect();
+        let db = write_all(db, &mut model, &clear).await;
+        let db = apply_mixed_chain(db, &mut model, &make_value).await;
+        let db = assert_model_rebuild(
+            db,
+            &model,
+            reopen(context.child("rebuild").with_attribute("index", 2)),
+        )
+        .await;
+        db.destroy().await.unwrap();
+
+        // Shape 3: the applied ancestor and the dropped prefix both resolve keys in one apply.
+        let db = reopen(context.child("shape").with_attribute("index", 3)).await;
+        let mut model = Model::default();
+        let db = seed_siblings(db, &mut model, &make_value).await;
+        let db = apply_crossed_chain(db, &mut model, &make_value).await;
+        let db = assert_model_rebuild(
+            db,
+            &model,
+            reopen(context.child("rebuild").with_attribute("index", 3)),
+        )
+        .await;
+        db.destroy().await.unwrap();
+
+        // Shape 4: rewrite the seed eight times so the floor passes a bitmap chunk, then prune to
+        // the sync boundary and reopen. Shape 3 then runs over a rebuilt snapshot and a pruned
+        // bitmap.
+        let db = reopen(context.child("shape").with_attribute("index", 4)).await;
+        let mut model = Model::default();
+        let mut db = seed_siblings(db, &mut model, &make_value).await;
+        for round in 1..=8 {
+            let writes: Vec<_> = (0..SIBLINGS)
+                .map(|i| (sibling(i), Some(make_value(round * 1000 + i))))
+                .collect();
+            db = write_all(db, &mut model, &writes).await;
+        }
+        let boundary = db.sync_boundary();
+        let db = db.prune(boundary).await.unwrap();
+        db.commit().await.unwrap();
+        let db = reopen(context.child("pruned")).await;
+        assert!(
+            db.bitmap.pruned_bits() > 0,
+            "setup must prune a bitmap chunk",
+        );
+        let db = apply_crossed_chain(db, &mut model, &make_value).await;
+        let db = assert_model_rebuild(
+            db,
+            &model,
+            reopen(context.child("rebuild").with_attribute("index", 4)),
+        )
+        .await;
+        db.destroy().await.unwrap();
+    }
+
     use crate::qmdb::any::{
         ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
         unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
@@ -1671,6 +2152,7 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_start_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
+    test_for_all_variants!(with_reopen: test_any_db_chained_rebuild, "WARN");
     with_mmr_variants!(
         test_for_variant!(with_cap: test_any_db_bounded_initialization_recovery, "WARN")
     );
@@ -3064,11 +3546,12 @@ mod bitmap_tests {
         merkle::Location,
         qmdb::any::{
             BITMAP_CHUNK_BYTES,
+            test::assert_rebuild_matches,
             unordered::variable::test::{AnyTest, create_test_config},
         },
     };
     use commonware_cryptography::{Hasher as _, Sha256};
-    use commonware_macros::{boxed, test_traced};
+    use commonware_macros::test_traced;
     use commonware_runtime::{
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
@@ -3084,47 +3567,6 @@ mod bitmap_tests {
         AnyTest::init(context, cfg, None).await.unwrap()
     }
 
-    /// Active locations (bit=1) in `[pruned_bits, len)` of `db.bitmap`.
-    fn bitmap_active_locs(db: &AnyTest) -> Vec<u64> {
-        let b = &db.bitmap;
-        (b.pruned_bits()..b.len())
-            .filter(|loc| b.get_bit(*loc))
-            .collect()
-    }
-
-    /// Commit, drop, reopen, and assert the rebuilt bitmap matches the in-memory bitmap above the
-    /// pruned prefix. The rebuilt pruned prefix is the retained log start rounded down to a chunk
-    /// boundary, so it lies below the live prefix after a prune whose chunk floor exceeds the
-    /// retained start.
-    #[boxed]
-    async fn assert_oracle_round_trip(db: AnyTest, context: Context, label: &str) -> AnyTest {
-        let pre_active = bitmap_active_locs(&db);
-        let pre_len = db.bitmap.len();
-        let pre_pruned = db.bitmap.pruned_bits();
-        let pre_start = *db.bounds().start;
-
-        db.commit().await.unwrap();
-
-        let db = open_db(context.child("reopen").with_attribute("case", label)).await;
-
-        assert_eq!(
-            db.bitmap.pruned_bits(),
-            pre_start / CHUNK_BITS * CHUNK_BITS,
-            "pruned_bits diverged from the retained start on reopen",
-        );
-        assert!(
-            db.bitmap.pruned_bits() <= pre_pruned,
-            "pruned_bits exceeds the live prefix on reopen",
-        );
-        assert_eq!(db.bitmap.len(), pre_len, "bitmap len diverged on reopen");
-        assert_eq!(
-            bitmap_active_locs(&db),
-            pre_active,
-            "active locations diverged on reopen",
-        );
-        db
-    }
-
     /// CommitFloor convention: only the *current* last commit carries bit=1; every earlier
     /// (now intermediate) commit boundary carries bit=0.
     ///
@@ -3136,12 +3578,14 @@ mod bitmap_tests {
             let mut db = open_db(context.child("db")).await;
 
             // Apply three single-write batches; each produces one CommitFloor op.
+            let keys: Vec<_> = (0..3u64)
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .collect();
             let mut commit_locs = Vec::new();
-            for i in 0..3u64 {
-                let key = Sha256::hash(&[&i.to_be_bytes()]);
+            for (i, key) in keys.iter().enumerate() {
                 let batch = db
                     .new_batch()
-                    .write(key, Some(vec![i as u8]))
+                    .write(*key, Some(vec![i as u8]))
                     .merkleize(&db, None)
                     .await
                     .unwrap();
@@ -3162,7 +3606,12 @@ mod bitmap_tests {
             // Most recent commit is current -> bit=1.
             assert!(db.bitmap.get_bit(*commit_locs[2]));
 
-            let db = assert_oracle_round_trip(db, context, "commit_floor").await;
+            let reopen = open_db(
+                context
+                    .child("reopen")
+                    .with_attribute("case", "commit_floor"),
+            );
+            let db = assert_rebuild_matches(db, reopen, &keys).await;
             db.destroy().await.unwrap();
         });
     }
@@ -3217,7 +3666,8 @@ mod bitmap_tests {
             assert_eq!(db.get(&k1).await.unwrap(), Some(vec![10]));
             assert!(db.get(&k2).await.unwrap().is_none());
 
-            let db = assert_oracle_round_trip(db, context, "rewind").await;
+            let reopen = open_db(context.child("reopen").with_attribute("case", "rewind"));
+            let db = assert_rebuild_matches(db, reopen, &[k1, k2]).await;
             db.destroy().await.unwrap();
         });
     }
@@ -3275,11 +3725,13 @@ mod bitmap_tests {
             // Uncommitted child: supersede anchor + add 16 more writes. The extra user_steps
             // ensure `total_steps` exceeds active bits in the committed region, forcing the
             // floor-raise scan into the uncommitted tail.
+            let others: Vec<_> = (0..16u64)
+                .map(|i| Sha256::hash(&[&(1000 + i).to_be_bytes()]))
+                .collect();
             let mut child_batch = parent.new_batch::<Sha256>();
             child_batch = child_batch.write(anchor, Some(vec![3]));
-            for i in 0..16u64 {
-                let k = Sha256::hash(&[&(1000 + i).to_be_bytes()]);
-                child_batch = child_batch.write(k, Some(vec![i as u8]));
+            for (i, k) in others.iter().enumerate() {
+                child_batch = child_batch.write(*k, Some(vec![i as u8]));
             }
             let child = child_batch.merkleize(&db, None).await.unwrap();
             assert!(
@@ -3294,7 +3746,9 @@ mod bitmap_tests {
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![3]));
 
-            let db = assert_oracle_round_trip(db, context, "tail").await;
+            let keys: Vec<_> = [anchor].into_iter().chain(others).collect();
+            let reopen = open_db(context.child("reopen").with_attribute("case", "tail"));
+            let db = assert_rebuild_matches(db, reopen, &keys).await;
             db.destroy().await.unwrap();
         });
     }
@@ -3307,11 +3761,13 @@ mod bitmap_tests {
             let mut db = open_db(context.child("db")).await;
 
             // Write the same 700 keys in three commits so the inactivity floor passes two chunks.
+            let keys: Vec<_> = (0..700u64)
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .collect();
             for round in 0..3u8 {
                 let mut batch = db.new_batch();
-                for i in 0..700u64 {
-                    let key = Sha256::hash(&[&i.to_be_bytes()]);
-                    batch = batch.write(key, Some(vec![round, i as u8]));
+                for (i, key) in keys.iter().enumerate() {
+                    batch = batch.write(*key, Some(vec![round, i as u8]));
                 }
                 let batch = batch.merkleize(&db, None).await.unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
@@ -3331,7 +3787,8 @@ mod bitmap_tests {
             assert_eq!(db.bitmap.pruned_bits(), 2 * CHUNK_BITS);
 
             // Reopen. The rebuilt prefix keeps the second chunk.
-            let db = assert_oracle_round_trip(db, context, "coarse").await;
+            let reopen = open_db(context.child("reopen").with_attribute("case", "coarse"));
+            let db = assert_rebuild_matches(db, reopen, &keys).await;
             assert_eq!(db.bitmap.pruned_bits(), CHUNK_BITS);
             db.destroy().await.unwrap();
         });

@@ -517,7 +517,7 @@ pub mod tests {
         merkle::{self, mmb, mmr, storage::Storage as _},
         qmdb::{
             any::{
-                test::colliding_digest,
+                test::{build, colliding_digest},
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
@@ -537,6 +537,7 @@ pub mod tests {
     use rand::Rng;
     use std::{
         num::{NonZeroU16, NonZeroUsize},
+        ops::Range,
         sync::Arc,
     };
     use tracing::warn;
@@ -1401,6 +1402,243 @@ pub mod tests {
         db.destroy().await.unwrap();
     }
 
+    /// Root, bounds, floor, and activity bits of a current db.
+    struct Observed<M: merkle::Family> {
+        /// Root.
+        root: Digest,
+        /// Retained operation range.
+        bounds: Range<Location<M>>,
+        /// Inactivity floor.
+        floor: Location<M>,
+        /// Bits pruned from the bitmap.
+        pruned: u64,
+        /// Activity bits in `[pruned, bounds.end)`.
+        bits: Vec<bool>,
+    }
+
+    impl<M: merkle::Family> Observed<M> {
+        /// Observe `db`.
+        fn capture<C>(db: &C) -> Self
+        where
+            C: DbAny<M, Digest = Digest> + BitmapPrunedBits,
+        {
+            let bounds = db.bounds();
+            let pruned = db.pruned_bits();
+            Self {
+                root: db.root(),
+                floor: db.inactivity_floor_loc(),
+                bits: (pruned..*bounds.end).map(|i| db.get_bit(i)).collect(),
+                pruned,
+                bounds,
+            }
+        }
+
+        /// Assert the bits of `self` equal those of `expected` above both pruned prefixes.
+        fn assert_bits(&self, expected: &Self, label: &str) {
+            assert_eq!(
+                self.bounds.end, expected.bounds.end,
+                "{label}: size diverged",
+            );
+            let from = self.pruned.max(expected.pruned);
+            assert_eq!(
+                self.bits[(from - self.pruned) as usize..],
+                expected.bits[(from - expected.pruned) as usize..],
+                "{label}: activity bits diverged",
+            );
+        }
+    }
+
+    /// Key `i` of [test_chained_schedules_match_sequential], for `i < 1024`. Keys sort by index,
+    /// so a batch writes them in index order, and four consecutive indices share a translated
+    /// bucket.
+    fn indexed(i: u64) -> Digest {
+        colliding_digest((i / 4) as u8, i)
+    }
+
+    /// A chain applied under different apply, drop, and prune schedules must leave the root,
+    /// bounds, floor, activity bits, and grafted tree that applying its batches one at a time
+    /// leaves. A follow-on batch checks the live grafted tree, which a reopen rebuilds.
+    pub async fn test_chained_schedules_match_sequential<M, C, F, Fut>(
+        context: Context,
+        mut open_db: F,
+    ) where
+        M: merkle::Graftable,
+        C: DbAny<M, Key = Digest, Value = Digest, Digest = Digest> + BitmapPrunedBits,
+        F: FnMut(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        const SEED: u64 = 2 * CHUNK_BITS + 50;
+        let k0 = indexed(0);
+        let k1 = indexed(2 * CHUNK_BITS + 10);
+        let kx = indexed(SEED);
+        let c1 = indexed(CHUNK_BITS + 50);
+        let fresh = SEED + 1;
+        let keys: Vec<_> = (0..=fresh + CHUNK_BITS).map(indexed).collect();
+
+        // The seed places `c1` in chunk 1. A's floor raise moves it into A's tail, in a complete
+        // chunk that F leaves untouched. F's root then reads C's overwrite of that grafted leaf
+        // from the live grafted tree.
+        let seed: WriteVec<M, C> = (0..SEED).map(|i| (indexed(i), Some(val(i)))).collect();
+
+        // A overwrites keys `0..CHUNK_BITS`, deletes k1, and creates kx.
+        let mut a: WriteVec<M, C> = (0..CHUNK_BITS)
+            .map(|i| (indexed(i), Some(val(SEED + i))))
+            .collect();
+        a.extend([(k1, None), (kx, Some(val(5000)))]);
+
+        // B updates k0, recreates k1, deletes kx, and creates enough keys to complete a chunk.
+        let mut b: WriteVec<M, C> = vec![(k0, Some(val(5001))), (k1, Some(val(5002))), (kx, None)];
+        b.extend((fresh..fresh + CHUNK_BITS).map(|i| (indexed(i), Some(val(i)))));
+
+        // E is empty. C updates k0, deletes k1, and updates c1. D updates k0 and recreates kx.
+        let e: WriteVec<M, C> = Vec::new();
+        let c: WriteVec<M, C> = vec![(k0, Some(val(5003))), (k1, None), (c1, Some(val(5004)))];
+        let d: WriteVec<M, C> = vec![(k0, Some(val(5005))), (kx, Some(val(5006)))];
+
+        // F follows D: it updates k0 and c1 and creates one key.
+        let f: WriteVec<M, C> = vec![
+            (k0, Some(val(5007))),
+            (c1, Some(val(5008))),
+            (indexed(fresh + CHUNK_BITS), Some(val(5009))),
+        ];
+
+        // Reference: apply A, B, E, C, and D one at a time.
+        let reference: C =
+            Box::pin(open_db(context.child("reference"), "chained-ref".into())).await;
+        let reference = commit_writes(reference, seed.clone()).await.unwrap();
+        let reference = commit_writes(reference, a.clone()).await.unwrap();
+        let size_a = *reference.size();
+        let reference = commit_writes(reference, b.clone()).await.unwrap();
+        let size_b = *reference.size();
+        let reference = commit_writes(reference, e.clone()).await.unwrap();
+        let reference = commit_writes(reference, c.clone()).await.unwrap();
+        let size_c = *reference.size();
+        let reference = commit_writes(reference, d.clone()).await.unwrap();
+
+        // B appends a grafted leaf, while E and C only overwrite leaves.
+        assert!(
+            size_b / CHUNK_BITS > size_a / CHUNK_BITS,
+            "B must complete a chunk",
+        );
+        assert_eq!(
+            size_c / CHUNK_BITS,
+            size_b / CHUNK_BITS,
+            "E and C must not complete a chunk",
+        );
+        let expected = Observed::capture(&reference);
+
+        // Merkleize and apply F on the reference, then record every value.
+        let f_batch = build(&reference, reference.new_batch(), &f).await;
+        let f_root = f_batch.root();
+        let (reference, _) = reference.apply_batch(f_batch).await.unwrap();
+        let expected_f = Observed::capture(&reference);
+        let mut values = Vec::with_capacity(keys.len());
+        for key in &keys {
+            values.push(reference.get(key).await.unwrap());
+        }
+        reference.destroy().await.unwrap();
+
+        for schedule in 1..=5u64 {
+            let partition = format!("chained-{schedule}");
+            let db: C = Box::pin(open_db(
+                context.child("schedule").with_attribute("index", schedule),
+                partition.clone(),
+            ))
+            .await;
+            let db = commit_writes(db, seed.clone()).await.unwrap();
+
+            // Build A <- B <- E <- C on the seeded db.
+            let a_batch = build(&db, db.new_batch(), &a).await;
+            let b_batch = build(&db, db.new_child(&a_batch), &b).await;
+            let e_batch = build(&db, db.new_child(&b_batch), &e).await;
+            let c_batch = build(&db, db.new_child(&e_batch), &c).await;
+
+            // Apply D under the schedule. Only S5 prunes, which moves the retained start.
+            let (db, pruned) = match schedule {
+                // S1: apply D over all-pending ancestors.
+                1 => {
+                    let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                }
+
+                // S2: apply A, then a D built before A was applied.
+                2 => {
+                    let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
+                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                }
+
+                // S3: apply A and drop it, then merkleize D on C and apply it.
+                3 => {
+                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
+                    let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                }
+
+                // S4: as S3, but apply B before D.
+                4 => {
+                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
+                    let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+                    let (db, _) = db.apply_batch(b_batch).await.unwrap();
+                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                }
+
+                // S5: apply A and prune to the sync boundary, then apply a D built before the
+                // prune.
+                5 => {
+                    let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
+                    let db = db.commit().await.unwrap();
+                    let boundary = db.sync_boundary();
+                    let db = db.prune(boundary).await.unwrap();
+                    assert!(db.pruned_bits() > 0, "S5 must prune bitmap bits");
+                    (db.apply_batch(d_batch).await.unwrap().0, true)
+                }
+                _ => unreachable!("five schedules"),
+            };
+
+            // D leaves the reference's root, bounds, floor, and bits.
+            let label = format!("S{schedule}");
+            let observed = Observed::capture(&db);
+            assert_eq!(observed.root, expected.root, "{label}: root diverged");
+            if !pruned {
+                assert_eq!(observed.bounds, expected.bounds, "{label}: bounds diverged");
+            }
+            assert_eq!(observed.floor, expected.floor, "{label}: floor diverged");
+            observed.assert_bits(&expected, &label);
+
+            // F merkleizes to the reference's root only if the live grafted tree matches.
+            let f_batch = build(&db, db.new_batch(), &f).await;
+            assert_eq!(f_batch.root(), f_root, "{label}: follow-on root diverged");
+            let (db, _) = db.apply_batch(f_batch).await.unwrap();
+            let observed_f = Observed::capture(&db);
+            observed_f.assert_bits(&expected_f, &format!("{label} after F"));
+
+            // Sync, drop, and reopen. The root and bits survive, and every value matches the
+            // reference.
+            db.sync().await.unwrap();
+            let db: C = Box::pin(open_db(
+                context.child("reopen").with_attribute("index", schedule),
+                partition,
+            ))
+            .await;
+            let reopened = Observed::capture(&db);
+            assert_eq!(
+                reopened.root, observed_f.root,
+                "{label}: root diverged on reopen",
+            );
+            reopened.assert_bits(&observed_f, &format!("{label} on reopen"));
+            for (key, value) in keys.iter().zip(&values) {
+                assert_eq!(
+                    &db.get(key).await.unwrap(),
+                    value,
+                    "{label}: value of {key} diverged on reopen",
+                );
+            }
+            db.destroy().await.unwrap();
+        }
+    }
+
     use crate::translator::OneCap;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::{boxed, test_group, test_traced};
@@ -1964,6 +2202,7 @@ pub mod tests {
     test_for_all_variants!(test_sync_persists_bitmap_pruning_boundary, "WARN");
     test_for_all_variants!(test_commit_after_sync_recovery, "WARN");
     test_for_all_variants!(test_stale_batch_side_effect_free, "WARN");
+    test_for_all_variants!(test_chained_schedules_match_sequential, "WARN");
 
     test_for_ordered_variants!(test_ordered_build_big, "WARN");
     test_for_ordered_variants!(test_ordered_build_small_close_reopen, "DEBUG");

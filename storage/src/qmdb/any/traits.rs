@@ -59,6 +59,9 @@ pub trait BatchableDb: Sized {
     /// Create a new speculative batch of operations with this database as its parent.
     fn new_batch(&self) -> Self::Batch;
 
+    /// Create a new speculative batch of operations with `parent` as its parent.
+    fn new_child(&self, parent: &Self::Merkleized) -> Self::Batch;
+
     /// Apply a merkleized batch, returning the range of written operations.
     fn apply_batch(self, batch: Self::Merkleized) -> impl Future<Output = ApplyBatchResult<Self>>;
 }
