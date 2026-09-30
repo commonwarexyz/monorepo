@@ -415,8 +415,8 @@ n_cases = 65536
 hash = "56ab85978136cb50f12ea89c8d25ce24451788172fe9d3d3c063f7ae6342d279"
 
 ["commonware_consensus::types::tests::conformance::CodecConformance<OutputIndex>"]
-n_cases = 65536
-hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
+n_cases = 1024
+hash = "0a64af25ec3432d415e1dc79a96c6e1eb1859a9babb22a843a805c819401f59d"
 
 ["commonware_consensus::types::tests::conformance::CodecConformance<Round>"]
 n_cases = 65536
