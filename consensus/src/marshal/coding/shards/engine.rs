@@ -1973,7 +1973,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_codec::Encode;
-    use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon};
+    use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
         Committable, Digest, Sha256, Signer,
         certificate::{Scoped, Subject},
@@ -2141,10 +2141,6 @@ mod tests {
             C::encode(config, data, strategy)
         }
 
-        fn bound(config: &CodingConfig, maximum_data: usize) -> CodecConfig {
-            C::bound(config, maximum_data)
-        }
-
         fn check(
             config: &CodingConfig,
             commitment: &Self::Commitment,
@@ -2194,10 +2190,6 @@ mod tests {
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
             C::encode(config, data, strategy)
-        }
-
-        fn bound(config: &CodingConfig, maximum_data: usize) -> CodecConfig {
-            C::bound(config, maximum_data)
         }
 
         fn check(
@@ -4740,49 +4732,47 @@ mod tests {
     /// are no wider than a block of the maximum size produces.
     #[test_traced]
     fn test_oversized_reconstruction_rejected() {
-        let coding_config = coding_config_for_participants(4);
         let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
-        let width =
-            |size: usize| C::bound(&coding_config, size + CodingConfig::SIZE).maximum_shard_size;
         let size = inner.encode_size();
+        let coded_block =
+            CodedBlock::<B, C, H>::new(inner, coding_config_for_participants(4), &STRATEGY);
+        let shard = coded_block.shard(0).expect("missing shard").encode();
         let max = (1..size)
             .rev()
-            .find(|&max| width(max) == width(size))
+            .find(|&max| {
+                Shard::<B, C, H>::decode_cfg(shard.clone(), &NonZeroUsize::new(max).unwrap())
+                    .is_ok()
+            })
             .expect("shard widths round up");
         let fixture: Fixture<C> = Fixture {
             max_block_size: NonZeroUsize::new(max).unwrap(),
             ..Default::default()
         };
-        fixture.start(
-            |config, context, oracle, mut peers, _, coding_config| async move {
-                // The leader delivers peer 3's shard and peer 1 gossips its own, reaching the
-                // minimum for a block over the maximum whose shards share the maximum's width.
-                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
-                let commitment = coded_block.commitment();
-                let receiver = peers[3].public_key.clone();
-                peers[3].mailbox.discovered(
-                    commitment,
-                    peers[0].public_key.clone(),
-                    Round::new(Epoch::zero(), View::new(1)),
-                );
-                let mut subscription = peers[3].mailbox.subscribe(commitment);
-                for (from, index) in [(0, 3), (1, 1)] {
-                    let shard = coded_block.shard(index).expect("missing shard");
-                    peers[from].sender.send(
-                        Recipients::One(receiver.clone()),
-                        shard.encode(),
-                        true,
-                    );
-                }
-                context.sleep(config.link.latency * 2).await;
+        fixture.start(|config, context, oracle, mut peers, _, _| async move {
+            // The leader delivers peer 3's shard and peer 1 gossips its own, reaching the
+            // minimum for a block over the maximum whose shards share the maximum's width.
+            let commitment = coded_block.commitment();
+            let receiver = peers[3].public_key.clone();
+            peers[3].mailbox.discovered(
+                commitment,
+                peers[0].public_key.clone(),
+                Round::new(Epoch::zero(), View::new(1)),
+            );
+            let mut subscription = peers[3].mailbox.subscribe(commitment);
+            for (from, index) in [(0, 3), (1, 1)] {
+                let shard = coded_block.shard(index).expect("missing shard");
+                peers[from]
+                    .sender
+                    .send(Recipients::One(receiver.clone()), shard.encode(), true);
+            }
+            context.sleep(config.link.latency * 2).await;
 
-                // Reconstruction rejects the block and retires the commitment without blocking
-                // anyone.
-                assert!(matches!(subscription.try_recv(), Err(TryRecvError::Closed)));
-                assert!(peers[3].mailbox.get(commitment).await.is_none());
-                assert!(oracle.blocked().await.unwrap().is_empty());
-            },
-        );
+            // Reconstruction rejects the block and retires the commitment without blocking
+            // anyone.
+            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Closed)));
+            assert!(peers[3].mailbox.get(commitment).await.is_none());
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
     }
 
     /// A local proposal larger than the maximum block size is not broadcast, so peers never

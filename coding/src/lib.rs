@@ -72,16 +72,6 @@ commonware_macros::stability_scope!(ALPHA {
         }
     }
 
-    /// The configuration for decoding shard data.
-    #[derive(Clone, Debug)]
-    pub struct CodecConfig {
-        /// The maximum number of bytes a shard is expected to contain.
-        ///
-        /// This can be an upper bound, and only constrains the non-fixed-size portion
-        /// of shard data.
-        pub maximum_shard_size: usize,
-    }
-
     /// A scheme for encoding data into pieces, and recovering the data from those pieces.
     ///
     /// # Example
@@ -156,7 +146,10 @@ commonware_macros::stability_scope!(ALPHA {
         /// A commitment attesting to the shards of data.
         type Commitment: Digest;
         /// A shard of data, to be received by a participant.
-        type Shard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        ///
+        /// Shards decode with a [`Config`] and the maximum number of data bytes, and reject any
+        /// shard wider than [`Self::encode`] produces for that much data.
+        type Shard: Clone + Debug + Eq + Codec<Cfg = (Config, usize)> + Send + Sync + 'static;
         /// A shard that has been checked for inclusion in the commitment.
         ///
         /// This allows excluding invalid shards from the function signature of [`Self::decode`].
@@ -176,10 +169,6 @@ commonware_macros::stability_scope!(ALPHA {
             data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
-
-        /// Returns the [`CodecConfig`] that bounds every shard [`Self::encode`] produces for
-        /// `config` and at most `maximum_data` bytes of data.
-        fn bound(config: &Config, maximum_data: usize) -> CodecConfig;
 
         /// Check the integrity of a shard, producing a checked shard.
         ///
@@ -283,7 +272,7 @@ mod test {
 
         fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
             let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
-            let read_cfg = S::bound(config, data.len().max(MAX_DATA));
+            let read_cfg = (*config, data.len().max(MAX_DATA));
             for shard in &shards {
                 let decoded_shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
                 assert_eq!(decoded_shard, *shard);

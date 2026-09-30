@@ -106,11 +106,8 @@ impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
         let index = u16::read(buf)?;
 
         // A coded payload is the block followed by its coding config.
-        let cfg = C::bound(
-            &commitment.config(),
-            max_block_size.get().saturating_add(CodingConfig::SIZE),
-        );
-        let inner = C::Shard::read_cfg(buf, &cfg)?;
+        let maximum_data = max_block_size.get().saturating_add(CodingConfig::SIZE);
+        let inner = C::Shard::read_cfg(buf, &(commitment.config(), maximum_data))?;
 
         Ok(Self {
             commitment,

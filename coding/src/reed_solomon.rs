@@ -1,4 +1,4 @@
-use crate::{CodecConfig, Config, Scheme};
+use crate::{Config, Scheme};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
@@ -206,11 +206,20 @@ impl<D: Digest> Write for Chunk<D> {
 }
 
 impl<D: Digest> Read for Chunk<D> {
-    /// The maximum size of the shard.
-    type Cfg = crate::CodecConfig;
+    /// The coding config and the maximum number of data bytes.
+    type Cfg = (Config, usize);
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let shard = Bytes::read_cfg(reader, &RangeCfg::new(..=cfg.maximum_shard_size))?;
+    fn read_cfg(
+        reader: &mut impl Buf,
+        (config, maximum_data): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        // Encoding rejects longer data, and the width grows with the data length, so the widest
+        // shard encodes the most data.
+        let width = canonical_shard_len(
+            (*maximum_data).min(u32::MAX as usize),
+            usize::from(config.minimum_shards.get()),
+        );
+        let shard = Bytes::read_cfg(reader, &RangeCfg::new(..=width))?;
         let index = u16::read(reader)?;
         let proof = bmt::Proof::<D>::read_cfg(reader, &1)?;
         Ok(Self {
@@ -1221,15 +1230,6 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
             data,
             strategy,
         )
-    }
-
-    fn bound(config: &Config, maximum_data: usize) -> CodecConfig {
-        // Encoding rejects longer data, and the width grows with the data length, so the widest
-        // shard encodes the most data.
-        let data = maximum_data.min(u32::MAX as usize);
-        CodecConfig {
-            maximum_shard_size: canonical_shard_len(data, usize::from(config.minimum_shards.get())),
-        }
     }
 
     fn check(
@@ -2455,45 +2455,36 @@ mod tests {
         assert_eq!(cached_decoder_width(), tile);
     }
 
-    /// The codec config for a data bound admits the widest shard that much data produces and
-    /// rejects the next width.
+    /// A chunk decodes when it is no wider than the maximum data produces, and a wider chunk is
+    /// rejected.
     #[test]
-    fn test_bound_admits_widest_shard() {
+    fn test_read_cfg_bounds_chunk_width() {
+        type TestChunk = Chunk<<Sha256 as Hasher>::Digest>;
         for (min, extra) in [(1u16, 1u16), (2, 2), (4, 6), (34, 66)] {
             let config = Config {
                 minimum_shards: NZU16!(min),
                 extra_shards: NZU16!(extra),
             };
             for data_len in [0, 1, 2 * usize::from(min), 1000, 4099] {
-                // Encoding exactly the bound produces the widest admitted shard.
-                let cfg = RS::bound(&config, data_len);
+                // Encoding exactly the maximum data produces a chunk that decodes.
+                let cfg = (config, data_len);
                 let (_, chunks) =
                     RS::encode(&config, vec![0; data_len].as_slice(), &STRATEGY).unwrap();
-                assert_eq!(chunks[0].shard.len(), cfg.maximum_shard_size);
-                assert!(
-                    Chunk::<<Sha256 as Hasher>::Digest>::decode_cfg(chunks[0].encode(), &cfg)
-                        .is_ok()
-                );
+                assert!(TestChunk::decode_cfg(chunks[0].encode(), &cfg).is_ok());
 
-                // Enough extra data to widen the shard is rejected.
+                // Enough extra data to widen the chunk is rejected.
+                let width = chunks[0].shard.len();
                 let wider = (data_len..)
-                    .find(|&len| {
-                        canonical_shard_len(len, usize::from(min)) > cfg.maximum_shard_size
-                    })
+                    .find(|&len| canonical_shard_len(len, usize::from(min)) > width)
                     .unwrap();
                 let (_, chunks) =
                     RS::encode(&config, vec![0; wider].as_slice(), &STRATEGY).unwrap();
-                assert!(
-                    Chunk::<<Sha256 as Hasher>::Digest>::decode_cfg(chunks[0].encode(), &cfg)
-                        .is_err()
-                );
+                assert!(TestChunk::decode_cfg(chunks[0].encode(), &cfg).is_err());
             }
 
-            // Encoding rejects data longer than a u32 can describe, so it does not widen the bound.
-            assert_eq!(
-                RS::bound(&config, usize::MAX).maximum_shard_size,
-                RS::bound(&config, u32::MAX as usize).maximum_shard_size
-            );
+            // A maximum beyond what encoding accepts decodes without overflow.
+            let (_, chunks) = RS::encode(&config, [0u8; 8].as_slice(), &STRATEGY).unwrap();
+            assert!(TestChunk::decode_cfg(chunks[0].encode(), &(config, usize::MAX)).is_ok());
         }
     }
 
