@@ -143,11 +143,6 @@ where
         self.applied
     }
 
-    /// Returns the highest archived height, which may be buffered and above the applied cursor.
-    pub(super) fn executed(&self) -> Option<Height> {
-        self.archive().last_index().map(Height::new)
-    }
-
     /// Returns the archived block at `height`, if retained.
     pub(super) async fn get(&self, height: Height) -> Option<B> {
         self.archive()
