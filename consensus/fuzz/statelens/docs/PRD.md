@@ -60,7 +60,7 @@ Sections 8.2 and 9.2 describe where each subsystem stands today, with examples.
 - G1. Persistent, maintained, and reused registries of English invariants in `consensus/fuzz/statelens/invariants/`, one per subsystem (`simplex`, `marshal`), each invariant with its source recorded and an ID unique across registries.
 - G2. A simple, agent-agnostic way to turn the specified set of sources (GitHub issues, design documents, code comments from specified files, crates, modules, formal specifications, papers) into invariant entries in a fixed format (as simple as possible), in the registry of the subsystem the operator names.
 - G3. A campaign workflow, with one profile per subsystem, in which an LLM agent (`claude code` or `codex`) instruments a fresh clone with assertions, invariant probes, beacon probes, and ghost variables in the state. The workflow builds the StateLens fuzz targets and runs the tests (Phase 2); the operator then runs the targets (Phase 3).
-- G4. A `TwinsMutator` fuzz target, `simplex_statelens`, added during a campaign to the existing `consensus/fuzz/simplex` package and running on `consensus/fuzz/core`. It uses only the `cert_mock` certificate scheme (R-P2-4) and adds the StateLens counter table to libFuzzer's normal edge coverage (chapter 8).
+- G4. StateLens fuzz targets, added during a campaign to the existing `consensus/fuzz/simplex` package and running on `consensus/fuzz/core`. Each is derived from an existing `cert_mock` target of that package rather than written by hand, so it inherits that target's driver and features: `simplex_cert_mock_statelens`, `simplex_cert_mock_twins_campaign_statelens` and `simplex_cert_mock_twins_mutator_statelens`. It uses only the `cert_mock` certificate scheme (R-P2-4) and adds the StateLens counter table to libFuzzer's normal edge coverage (chapter 8).
 - G5. Byzantine replicas are never checked and never feed coverage, in either subsystem.
 - G6. The committed subproject does not affect normal builds, lints, or CI of the workspace.
 - G7. Fuzz marshal. The `marshal` profile binds the Simplex and marshal registries, instruments both subsystems, and builds a StateLens variant of every existing marshal fuzz target, using only the `cert_mock` scheme (chapter 9).
@@ -243,9 +243,9 @@ consensus/fuzz/statelens/
       marshal-instrument.md   Phase 2: rules for instrumenting marshal code
   runtime/                    source templates copied into the source tree during Phase 2
     statelens.rs              guard, counter table, probe/assert macros, ghost state
-    target.rs                 fuzz target (cert_mock scheme only)
   scripts/
-    statelens.py              lint, lint-examples, extract, kb, campaign, clean
+    statelens.py              lint, lint-examples, extract, kb, code, ast, campaign, clean
+    test_statelens.py         tests for the paths that fail quietly
 ```
 
 R-LAYOUT-2. Files under `runtime/` are templates. No committed crate compiles them, and committed code does not include them as a module. A cargo-fuzz package (a `Cargo.toml` with `cargo-fuzz = true`) must not exist under `consensus/fuzz/statelens/` on the main branch. The existing `just fuzz` / `just build` recipes discover packages by grepping `*/Cargo.toml` for `cargo-fuzz = true`, and would otherwise pick it up in CI (G6). The templates must stay `rustfmt`-clean, because CI's `just check-fmt` formats every `*.rs` file in the tree.
@@ -352,7 +352,7 @@ R-P1-3. Supported sources:
 
 R-P1-4. For `issue`, the agent writes the invariant(s) that the issue's bug violated or could have violated, generalized from the specific bug.
 
-R-P1-5. Phase 1 does no deduplication, scoring, or approval. Its files are active as soon as they are written; humans review, edit, maintain, or delete them before the next campaign. The script lints the new files and reports any change the agent made to existing files.
+R-P1-5. Phase 1 does no deduplication, scoring, or approval. Its files are active as soon as they are written; humans review, edit, maintain, or delete them before the next campaign. The script lints the new files and reports any change the agent made to existing files. Because a Phase 1 agent can write anywhere in the tree it runs in, and that tree is the operator's own rather than a discarded checkout, the script also compares the whole worktree before and after the run and reports any path the agent changed outside the invariant tree, its own logs excepted. Such a change is a problem, not a warning: the run reports it and exits nonzero.
 
 ### 7.5 Phase 2: instrument the code and generate fuzz targets
 
@@ -373,7 +373,7 @@ R-P2-4. **Cryptography (decision).** StateLens fuzz targets use only the `cert_m
 
 R-P2-6. **Worked analyses.** `examples/` holds one worked analysis per subsystem, written against real code. The Phase 2 prompts carry the transferable craft themselves -- what makes a state worth probing, how a wide dimension becomes one probe pair, and the readings of a Statement that are too strong -- and name the examples only as reference material an agent may open. A prompt does not inline them: each is tens of thousands of tokens, several times the prompt, and a worked analysis of one component should not decide what another component's states are. Because they name real functions and fields, `just check-examples` fails when a name they cite no longer exists.
 
-R-P2-5. **Recipes.** `just campaign` runs a campaign and no fuzzer, as R-P2-2 step 7 says. `just run <target>` fuzzes a target a campaign built, and `just fuzz <target>` is a convenience that does both in order, inferring the profile from the target name. `just clean` undoes what a campaign wrote to a checkout: it deletes the files a campaign created and restores the paths it edits to `HEAD`, printing what it would do and acting only with `--yes`. It leaves `campaign/` and `extract/` alone, and it restores whole paths, so an edit of the operator's own inside them is lost.
+R-P2-5. **Recipes.** `just campaign` runs a campaign and no fuzzer, as R-P2-2 step 7 says. `just run <target>` fuzzes a target a campaign built, and `just fuzz <target>` is a convenience that does both in order, inferring the profile from the target's prefix and refusing a name that is neither profile's. Given a profile name instead of a target, `just fuzz` runs every target that profile builds: one after another by default, together with `--parallel`, or one tmux window each with `--tmux`. No time limit is imposed, so a target runs until it stops unless `-max_total_time` is passed; the sequential form says so, because there the first target would be the only one to run. `just clean` undoes what a campaign wrote to a checkout: it deletes the files a campaign or an instrumenter added and restores the paths it edits to `HEAD`, printing what it would do and acting only with `--yes`, and afterwards it checks that nothing in scope still differs from `HEAD` rather than reporting success on trust. It leaves `campaign/` and `extract/` alone, and it restores whole paths, so an edit of the operator's own inside them is lost.
 
 ### 7.6 Phase 3: run fuzz targets
 
@@ -455,7 +455,7 @@ R-OR-3. Any test failure in step 6 stops the campaign, and any crash stops the f
 ### 7.10 Crash artifacts
 
 R-ART-1. Reuse the existing consensus fuzz artifacts unchanged:
-- libFuzzer writes the crashing input to the artifact directory of the target's package: `consensus/fuzz/simplex/artifacts/simplex_statelens/`, or `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant;
+- libFuzzer writes the crashing input to the artifact directory of the target's package: `consensus/fuzz/simplex/artifacts/simplex_cert_mock_twins_mutator_statelens/`, or `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant;
 - `just run <target> <crash_file>` replays it, with the `STATELENS_BYZANTINE` value of the run that found it: a guard-test crash (`STATELENS_BYZANTINE=panic`) exists only in that mode;
 - for the Simplex target, `CONSENSUS_FUZZ_LOG=1` also prints the decoded `FuzzInput` (`print_fuzz_input`); the marshal harnesses print only their existing logs;
 - the panic message carries the `INV-NNNN` ID.
@@ -470,9 +470,9 @@ R-AG-2. Phase 2 agents use the tools their CLI provides: file reading, text sear
 
 R-AG-3. Phase 1 agents run restricted in the operator's working tree: file edits, read-only tools, `gh`, and `curl`. Phase 2 agents run with full permissions in the checkout, so campaigns must run on a dedicated machine or container.
 
-R-AG-4. StateLens identifies entities in the code it instruments: where a name is defined, every reference to it, the call sites outside its definition with the enclosing function, and what a definition calls. Text search cannot do this here, because the names collide: `proposal` is five different methods of this crate and `broadcast_notarize` is both a field and a method of the same type. A campaign builds the index before it instruments, since inserting a probe adds lines but does not change which function calls which, so an index of the pristine tree stays correct for the whole sweep. Sites in test code are hidden unless asked for, because two thirds of the crate is test code and it shares files with the code it exercises. A missing index degrades a sweep to search and reading; it does not fail it.
+R-AG-4. StateLens identifies entities in the code it instruments: where a name is defined, every reference to it, the call sites outside its definition with the enclosing function, and what a definition calls. Text search cannot do this here, because the names collide: `proposal` is five different methods of this crate and `broadcast_notarize` is both a field and a method of the same type. A campaign builds the index before it instruments, and instrumentation then edits the files the index describes. Which function calls which survives that, but line numbers do not: a probe inserted above a reference moves it. Since a line number is the whole answer, a stale one is not a degraded answer but a wrong one, so the build records the sources it indexed and every query rebases its hits onto the files as they now stand. A hit that cannot be placed is reported as lost rather than guessed, and an entity added after the build is absent from the index however well hits are rebased, so a query states what it cannot answer: which indexed files have changed, which are gone, and which source files have appeared since. It states this before choosing any result, so that an answer of `nothing matches` carries the warning too. Sites in test code are hidden unless asked for, because nearly three quarters of the crate is test code and it shares files with the code it exercises, and the boundary is read from the file as it now stands. A missing index degrades a sweep to search and reading; it does not fail it.
 
-R-AG-5. StateLens reads the syntax tree of a file to answer what the index cannot: whether a site writes an entity or only reads it, and which item a comment documents. The first matters because a probe belongs where state changes, and the index records that a line mentions an entity without recording which it does. The second matters because a comment about an ordering, a race or a case that cannot happen names the state it concerns, and a comment is a token in the tree, so it can be told from the same words in code or in a string. A tree carries no types, so it gives shape where the index gives identity, and the two are used together.
+R-AG-5. StateLens reads the syntax tree of a file to answer what the index cannot: whether a site writes an entity or only reads it, and which item a comment documents. The first matters because a probe belongs where state changes, and the index records that a line mentions an entity without recording which it does. The second matters because a comment about an ordering, a race or a case that cannot happen names the state it concerns, and a comment is a token in the tree, so it can be told from the same words in code or in a string. A tree carries no types, so it gives shape where the index gives identity, and the two are used together. Where shape cannot decide, the answer says so: parsing does not expand macros, so a site inside a macro body is reported as unknown rather than dropped or guessed, and in this crate that is common because much of the concurrency sits inside `select!`.
 
 ### 7.12 Non-functional
 
@@ -509,7 +509,7 @@ subsystem. A `simplex` campaign:
 - binds the simplex registry;
 - adds beacon probes to the voter, batcher and resolver;
 - runs the engine-level Simplex tests;
-- builds one fuzz target, `simplex_statelens` (G4), which the operator runs in Phase 3.
+- builds one StateLens fuzz target per target named in R-S-P2-2 (G4), which the operator runs in Phase 3.
 
 The runtime module lives in this subsystem, at `consensus/src/simplex/statelens.rs`, and
 serves marshal too (G8).
@@ -542,18 +542,18 @@ serves marshal too (G8).
 #### Phase 2
 
 R-S-P2-1. For the `simplex` profile, the steps of R-P2-2 do the following:
-1. **Materialize.** Add the fuzz target `simplex_statelens`, from `runtime/target.rs`, to
+1. **Materialize.** Add one StateLens variant per simplex target of R-S-P2-2 to
    the existing `consensus/fuzz/simplex` package.
 2. **Instrument invariants.** Bind the simplex registry.
 3. **Instrument beacons.** Once for each of the voter, batcher and resolver.
 4. **Write the plan and check scope,** with `consensus/src/simplex/` allowed (R-INS-7).
-5. **Build.** The sanitizer build of `simplex_statelens`.
+5. **Build.** The sanitizer build of every variant.
 6. **Test.** The test gate is the engine-level Simplex tests of `commonware-consensus`
    (`simplex::tests`, including the `slow` group), together with the tests of the
    StateLens runtime module. The Twins tests are excluded, because they run two live
    engines under one replica identity. The gate is about 240 tests and takes about 2
    minutes on 16 cores.
-7. **Hand over.** The summary gives the command that runs `simplex_statelens`.
+7. **Hand over.** The summary gives one run command per variant.
 
 #### Instrumentation
 
@@ -579,10 +579,16 @@ Priority goes to:
 
 #### Non-functional
 
-R-S-NF-1. The original target of `simplex_statelens` is `simplex_cert_mock_twins_mutator`
-(plain `CodeCoverage`), against which R-NF-3 measures overhead. With minimal
-instrumentation both run at about 13 executions per second per process, so the operator
-runs `simplex_statelens` with libFuzzer's `-fork=N`.
+R-S-NF-2. The simplex profile derives a StateLens variant from each of
+`simplex_cert_mock`, `simplex_cert_mock_twins_campaign` and
+`simplex_cert_mock_twins_mutator`. The list is curated rather than every target of the
+package, because simplex has twenty-one and most drive inputs StateLens has no interest in;
+adding a name to it is how a further one is covered.
+
+R-S-NF-1. The original target of a variant is the target it was derived from, against which
+R-NF-3 measures overhead. With minimal instrumentation
+`simplex_cert_mock_twins_mutator_statelens` and its original both run at about 13 executions
+per second per process, so the operator runs a variant with libFuzzer's `-fork=N`.
 
 ### 8.4 Fuzz harness
 
@@ -592,10 +598,10 @@ here.
 #### Shape
 
 ```
-libFuzzer   (started by the operator: just run simplex_statelens)
+libFuzzer   (started by the operator: just run simplex_cert_mock_twins_mutator_statelens)
   |  bytes -> FuzzInput (existing Arbitrary impl in consensus/fuzz/core)
   v
-simplex_statelens fuzz target  (consensus/fuzz/simplex, from runtime/target.rs)
+a StateLens variant  (consensus/fuzz/simplex, derived from the target it is named after)
   |  statelens::reset()            zero counters, clear compromised set and ghost state
   |  fuzz::<SimplexCertificateMock, TwinsMutator, CodeCoverage>(input)
   |                                cert_mock certificate scheme only (R-P2-4)
@@ -654,7 +660,7 @@ AC-6. **False-invariant test.** A campaign run with `STATELENS_FALSE_INVARIANTS=
 
 AC-7. **Guard test.** With `STATELENS_BYZANTINE=panic`, a short run of the StateLens target panics with `[statelens][BYZANTINE]` as soon as a compromised replica reaches an instrumented site. With the default (`skip`), no such panic occurs, and the participant index check in the runner never fails.
 
-AC-8. **Determinism test.** Replaying a crashing input with `just run simplex_statelens <crash_file>` on the same instrumented tree, with the `STATELENS_BYZANTINE` value of the run that found it, reproduces the same panic.
+AC-8. **Determinism test.** Replaying a crashing input with `just run simplex_cert_mock_twins_mutator_statelens <crash_file>` on the same instrumented tree, with the `STATELENS_BYZANTINE` value of the run that found it, reproduces the same panic.
 
 ### 8.6 Risks and Open Points
 
@@ -727,7 +733,8 @@ application".
 R-M-P2-1. For the `marshal` profile, the steps of R-P2-2 do the following:
 1. **Materialize.** Add one StateLens variant per existing marshal fuzz target to
    `consensus/fuzz/marshal`, and a hook to the marshal wedge scenario that publishes its
-   Byzantine role (9.4). The `simplex_statelens` target is not added.
+   Byzantine role (9.4). No simplex variant is added; the marshal profile derives only from
+   the targets of `consensus/fuzz/marshal`.
 2. **Instrument invariants.** Bind the simplex registry, then the marshal registry.
 3. **Instrument beacons.** Once for each of the Simplex voter, batcher and resolver, then
    for marshal's core, standard and coding components.

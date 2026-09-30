@@ -66,7 +66,9 @@ just extract --agent codex issue https://github.com/commonwarexyz/monorepo/issue
 passed at once. The agent writes new files to `invariants/<registry>/` in the format of
 [templates/invariant.md](templates/invariant.md), numbered from the next free ID; IDs are
 unique across registries. The script lints the new files, and reports an existing
-invariant that the agent changed and a new file outside `invariants/<registry>/`. Logs,
+invariant that the agent changed and a new file outside `invariants/<registry>/`. Because
+Phase 1 runs in your own working tree, it also compares the whole worktree before and after
+the run and reports anything the agent changed elsewhere; any of these makes it exit 3. Logs,
 rendered prompts and paper text go to `extract/`.
 
 **Every file in a registry is used by the next campaign that binds it** (the `simplex`
@@ -139,7 +141,7 @@ development and ends the campaign with `STOPPED after <step>`.
 |---|---|---|
 | Registries | `simplex` | `simplex`, then `marshal` |
 | Beacon probes | voter, batcher, resolver | the same, and marshal core, standard, coding |
-| Fuzz targets | `simplex_statelens` | `<target>_statelens` for each of the 12 marshal targets |
+| Fuzz targets | `<target>_statelens` for `simplex_cert_mock`, `simplex_cert_mock_twins_campaign` and `simplex_cert_mock_twins_mutator` | `<target>_statelens` for each of the 12 marshal targets |
 | Test gate | `simplex::tests` without Twins, `simplex::statelens` | the same, and `marshal::` |
 
 The simplex test gate is about 240 tests and 2 minutes on 16 cores; marshal adds 421
@@ -154,13 +156,25 @@ instrumented the checkout. Uncommitted registry edits are used.
 In the instrumented checkout, run the `run` commands of a `READY` summary for the targets
 you choose, adding libFuzzer arguments as needed, such as `-fork=<N>` to use N cores or
 `-max_total_time=<s>` to bound the run. From this directory `just run <target>` does the
-same, and `just fuzz <target>` runs the campaign first:
+same, and `just fuzz <target>` runs the campaign first.
+
+`just fuzz <profile>` runs every target the profile builds. It campaigns once, then runs
+them one after another; `--parallel` runs them together and writes each one's output to
+`campaign/logs/<target>.run.log`; `--tmux` runs them together in one tmux window each, so
+their output stays live and separate. Nothing bounds a run unless you pass
+`-max_total_time`, so a target runs until it stops. The sequential form warns about that,
+because there the first target would be the only one to run. With several targets at once,
+divide `-fork` between them rather than giving each the whole machine:
 
 ```
-just run simplex_statelens -- -rss_limit_mb=4000 -print_final_stats=1 -fork=8
+just fuzz simplex --tmux -- -fork=5
+just fuzz simplex --parallel -- -max_total_time=600 -fork=5
+STATELENS_JOBS=4 just fuzz marshal --parallel -- -max_total_time=600
+
+just run simplex_cert_mock_twins_mutator_statelens -- -rss_limit_mb=4000 -print_final_stats=1 -fork=8
 
 cd <repo>/consensus/fuzz
-NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- \
+NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statelens -- \
   -rss_limit_mb=4000 -print_final_stats=1 -fork=8
 NIGHTLY_VERSION=<fuzz toolchain> just run \
   marshal_e2e_standard_app_cert_mock_twins_statelens -- \
@@ -168,14 +182,14 @@ NIGHTLY_VERSION=<fuzz toolchain> just run \
 ```
 
 A run ends when the target panics or you stop it; libFuzzer, fork mode included, stops at
-the first crash. `simplex_statelens` runs at about 13 inputs per second per process, so
+the first crash. A variant runs at about 13 inputs per second per process, so
 use `-fork` on a many-core machine. For marshal only the stock standard Twins target was
 measured, at about 15 inputs per second and 0.6 GB per process; size the other runs
 yourself.
 
 Do not pass `-artifact_prefix` or `-exact_artifact_path`, which move the crash file
 elsewhere, or any `-handle_*` switch, which can stop libFuzzer from reporting a crash and
-saving its input. Crashes land in `consensus/fuzz/simplex/artifacts/simplex_statelens/`,
+saving its input. Crashes land in `consensus/fuzz/simplex/artifacts/simplex_cert_mock_twins_mutator_statelens/`,
 or in `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant.
 
 A `marshal` campaign builds 12 variants, one per target in
@@ -206,8 +220,8 @@ statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
 statelens: result     READY | STOPPED after <step> | PANIC (tests) | BUILD FAILED | SETUP FAILED
 statelens: reason     <why the campaign stopped, for PANIC (tests), BUILD FAILED or SETUP FAILED>
 statelens: panic      <first [statelens][...] line, or the first panic message>
-statelens: run        cd <repo>/consensus/fuzz && NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- -rss_limit_mb=4000 -print_final_stats=1
-statelens: replay     cd <repo>/consensus/fuzz && CONSENSUS_FUZZ_LOG=1 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens simplex/artifacts/simplex_statelens/<crash file>
+statelens: run        cd <repo>/consensus/fuzz && NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statelens -- -rss_limit_mb=4000 -print_final_stats=1
+statelens: replay     cd <repo>/consensus/fuzz && CONSENSUS_FUZZ_LOG=1 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statelens simplex/artifacts/simplex_cert_mock_twins_mutator_statelens/<crash file>
 ```
 
 The `run` and `replay` lines appear only with `READY`, one pair per target; the `marshal`
@@ -257,7 +271,7 @@ recreates it.
 | Variable | Use |
 |---|---|
 | `STATELENS_FALSE_INVARIANTS=1` | Set on `just campaign`. Also binds the deliberately false invariants in `false-invariants/<subsystem>/`: FALSE-0001 with the `simplex` profile, FALSE-0001 and FALSE-0002 with the `marshal` profile. A `simplex` campaign must end with `PANIC (tests)` and `[statelens][FALSE-0001]`, or, if it reports `READY`, a short run of its `run` command must panic with it. A `marshal` campaign must end with `PANIC (tests)`, and `campaign/logs/test.log` must contain both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. |
-| `STATELENS_BYZANTINE=panic` | Set on a `run` command. Panics when a compromised replica reaches an instrumented site, which shows the Byzantine guard is needed and wired: `simplex_statelens`, the four marshal Twins variants and the wedge-scenario variant must panic with `[statelens][BYZANTINE]`, and no other variant may; `[statelens] participant index mismatch` must never appear. `skip` is the default, `check` checks compromised replicas too. |
+| `STATELENS_BYZANTINE=panic` | Set on a `run` command. Panics when a compromised replica reaches an instrumented site, which shows the Byzantine guard is needed and wired: `simplex_cert_mock_twins_campaign_statelens`, `simplex_cert_mock_twins_mutator_statelens`, the four marshal Twins variants and the wedge-scenario variant must panic with `[statelens][BYZANTINE]`, and no other variant may; `[statelens] participant index mismatch` must never appear. `skip` is the default, `check` checks compromised replicas too. |
 | `STATELENS_FEEDBACK=0` | Set on a `run` command. Leaves the StateLens counters unregistered. Run a target for the same time on two empty corpora, with and without it: `ft:` on the `DONE` line should be higher with feedback. Compare `ft:`, not `cov:`, which libFuzzer stops printing once the counters are registered. |
 
 Each false-invariant campaign in a fresh clone of its own:
@@ -272,8 +286,8 @@ variant such as `marshal_e2e_standard_app_cert_mock_twins_statelens`):
 
 ```
 cd <repo>/consensus/fuzz
-STATELENS_BYZANTINE=panic NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- \
+STATELENS_BYZANTINE=panic NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statelens -- \
   -max_total_time=120
-STATELENS_FEEDBACK=0 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens \
+STATELENS_FEEDBACK=0 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statelens \
   <empty dir> -- -max_total_time=600
 ```

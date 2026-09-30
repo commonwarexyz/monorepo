@@ -35,31 +35,37 @@ finding is evidence, not a property, and this task adds probes only.
 
 ### The code index
 
-    python3 scripts/statelens.py code defs|refs|callers|callees <NAME> [--tests]
+You run from the root of the repository, so bind the script once:
+
+    SL=consensus/fuzz/statelens/scripts/statelens.py
+
+    python3 $SL code defs|refs|callers|callees <NAME> [--tests]
 
 Names in this crate collide: `proposal` is five different methods, and `broadcast_notarize` is
 both a field and a method of the same type. So when a name turns up in more places than you
 expect, it is probably several entities, and `refs` separates them. Before you probe a field,
 ask `refs` for every place that touches it, because the site you would miss by reading one
 function is the one worth probing. To learn which actor sends a mailbox message, ask for the
-`callers` of the mailbox method. Two thirds of this crate is test code and the index hides it
+`callers` of the mailbox method. Nearly three quarters of this crate is test code and the index hides it
 unless you pass `--tests`.
 
 If the index is missing the campaign said so, and search and reading are the fallback.
 
 ### The syntax tree
 
-    python3 scripts/statelens.py ast sites <NAME>    # written here, read there
-    python3 scripts/statelens.py ast notes [PATH]    # comments about races and recovery
+    python3 $SL ast sites <NAME>    # written here, read there
+    python3 $SL ast notes [PATH]    # comments about races and recovery
 
 The index says a line mentions a field; it does not say whether the line changes it. Before
 you probe a transition, ask `ast sites` for the write sites, because those are the
-transitions and the rest are decisions. `ast notes` is the fastest way to do step 1 below:
+transitions and the rest are decisions. A site it marks `macro` sits inside a macro body,
+which the tree does not structure, so read that one yourself; much of this crate's
+concurrency is inside `select!`. `ast notes` is the fastest way to do step 1 below:
 it finds the comments about orderings, races, recovery and cases that cannot happen, and
 names the item each one documents.
 
 When a candidate needs state followed across functions, actors or a restart, work through
-`prompts/discover-flow.md`. There is no data-flow tool here, so you are the one simulating
+`consensus/fuzz/statelens/prompts/discover-flow.md`. There is no data-flow tool here, so you are the one simulating
 the flow, and that method says how to propose a step and then make the tools confirm or
 reject it.
 

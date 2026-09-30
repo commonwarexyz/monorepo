@@ -15,18 +15,22 @@ reasoned your way to and did not check is a guess, and must be labelled one.
 
 ### Your tools
 
-    python3 scripts/statelens.py code refs <NAME>      # every occurrence, by symbol
-    python3 scripts/statelens.py code callers <NAME>   # call sites, with the enclosing function
-    python3 scripts/statelens.py code callees <NAME>   # what a definition calls
-    python3 scripts/statelens.py code defs <NAME>      # definitions and their extents
+You run from the root of the repository, so bind the script once:
 
-    python3 scripts/statelens.py ast sites <NAME>      # write / init / read, per site
-    python3 scripts/statelens.py ast notes [PATH]      # comments on races and recovery
+    SL=consensus/fuzz/statelens/scripts/statelens.py
 
-    python3 scripts/statelens.py kb find|cites|grep|show
+    python3 $SL code refs <NAME>      # every occurrence, by symbol
+    python3 $SL code callers <NAME>   # call sites, with the enclosing function
+    python3 $SL code callees <NAME>   # what a definition calls
+    python3 $SL code defs <NAME>      # definitions and their extents
+
+    python3 $SL ast sites <NAME>      # write / init / read, per site
+    python3 $SL ast notes [PATH]      # comments on races and recovery
+
+    python3 $SL kb find|cites|grep|show
 
 plus reading files and `rg`. All of `code` and `ast` hide test code unless given `--tests`,
-because two thirds of this crate is test code sharing files with the code it exercises.
+because nearly three quarters of this crate is test code sharing files with the code it exercises.
 
 The index knows identity, the tree knows shape, and they answer different halves of one
 question. `code refs broadcast_notarize` gives six sites and will not confuse the field with

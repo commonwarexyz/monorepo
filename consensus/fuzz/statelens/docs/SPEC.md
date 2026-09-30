@@ -81,7 +81,7 @@ them; the last column names the PRD requirement.
 | D2 | The test gate runs the engine-level tests `simplex::tests::*` including the `slow` group, minus the Twins tests, plus the `simplex::statelens` self-tests. Only 7 of the 247 engine-level tests are outside the `slow` group, so a non-slow gate would check almost nothing. Twins tests run two live engines with one identity, which breaks per-replica ghost state. | R-S-P2-1 step 6 |
 | D3 | Probes record presence: a counter is set to 1, never incremented. | R-FB-2 |
 | D4 | Phase 2 agents run with full permissions in the checkout. Phase 1 agents run restricted. Campaigns MUST run on a dedicated machine or container. | R-AG-3 |
-| D5 | The fuzz target `simplex_statelens` is added during a campaign to the existing `consensus/fuzz/simplex` package; no new package is created. `just run simplex_statelens` works unchanged. | G4, R-S-P2-1 step 1 |
+| D5 | StateLens fuzz targets are added during a campaign to the existing `consensus/fuzz/simplex` package; no new package is created, and `just run <variant>` works unchanged. Each is derived from an existing target of that package rather than written, so there is no hand-written target to keep in step with the one it imitates, and it inherits its original's driver and `required-features`. | G4, R-S-P2-1 step 1 |
 | D6 | The macros are `macro_rules!` items re-exported with `pub(crate) use` and invoked by path: `crate::simplex::statelens::sl_implies!(...)`. `#[macro_export]` cannot work: `simplex` is declared inside `stability_scope!`, and macro-expanded `macro_export` macros cannot be called by absolute path from their own crate. | R-INS-4 |
 | D7 | The Byzantine guard is built into the macros and into the ghost accessors, so no call site can forget it. The fuzz target calls `clear_compromised()` after `fuzz()` returns, not inside the runner, so compromised replicas stay guarded while the runtime shuts down. | R-INS-2, PRD section 8.4 |
 | D8 | The runner hook also asserts that every scheme's own index equals its position in the participant list. | PRD section 8.4, AC-7 |
@@ -105,10 +105,11 @@ them; the last column names the PRD requirement.
 | D33 | Retrieval is a structured index over the findings' claim fields plus full-text search of their prose sections. No vector store and no embedding service. | R-KB-4 |
 | D37 | A finding's state and remediation status are shown to the instrumenter, not used to filter findings out. Weak evidence costs coverage, not correctness. | R-KB-8 |
 | D42 | The beacon step is an agent loop over actions (read code, the five `kb` queries, add a probe), not a fixed procedure. Reading code leads, and a query is what the agent does when its hypothesis needs developer context. How long to spend on a candidate is the agent's judgment; there is no step budget. | R-FB-4 |
-| D43 | Entities are identified from a SCIP index built once before instrumentation, not from a language server queried during it. Startup is paid for one campaign rather than one query, and inserting a probe does not change which function calls which, so the index stays correct while the agent edits. | R-AG-4 |
+| D43 | Entities are identified from a SCIP index built once before instrumentation, not from a language server queried during it, and startup is paid for one campaign rather than one query. Instrumentation moves the lines the index names, so the build snapshots the sources it indexed and each query rebases its hits through a diff instead of rebuilding: a diff of a file of this crate's median size costs a few milliseconds, against about eight minutes for an index. | R-AG-4 |
 | D44 | The SCIP protobuf is decoded with the standard library, not a protobuf package, so the subproject keeps its stdlib-only rule. Only the five fields the four queries need are read. | R-AG-4, R-LAYOUT-2 |
-| D45 | Sites in test code are hidden unless asked for. Two thirds of the crate is test code sharing files with the code it exercises, so the unfiltered answer is mostly noise. | R-AG-4 |
+| D45 | Sites in test code are hidden unless asked for. Nearly three quarters of the crate is test code sharing files with the code it exercises, so the unfiltered answer is mostly noise. | R-AG-4 |
 | D46 | Read and write polarity comes from the syntax tree, not from a language server. The tree needs no project and costs a tenth of a second for a file, against a server's startup on every query, and it classifies a struct literal field as an initial value where the server calls it a read. | R-AG-5 |
+| D47 | A name inside a macro body is reported as `macro`, not silently dropped and not guessed. Parsing does not expand macros, so the body is an unstructured token tree; dropping such sites would hide much of this crate's concurrency, which lives inside `select!`. | R-AG-5 |
 
 D24 to D30 concern marshal only; they are in section 8.2.
 
@@ -155,9 +156,9 @@ consensus/fuzz/statelens/
       marshal-instrument.md      Phase 2, marshal rules (section 13.14)
   runtime/
     statelens.rs                 runtime support module (Appendix A)
-    target.rs                    fuzz target, cert_mock scheme only (Appendix B.1, D15)
   scripts/
-    statelens.py                 lint, extract, kb, campaign (sections 5 to 7)
+    statelens.py                 lint, extract, kb, code, ast, campaign (sections 5 to 7)
+    test_statelens.py            tests for the quiet failures (section 5.9)
 ```
 
 Constraints on committed files:
@@ -370,16 +371,142 @@ campaign *args:
 run target *args:
     cd .. && just run "$@"
 
-# Campaign, then fuzz one of its targets: just fuzz <target> [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal> [--parallel] [--tmux] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    # The target names its profile: only the `simplex` profile builds `simplex_statelens`.
+    # A profile name runs every target the profile builds; a target name runs
+    # that one. Every StateLens variant is derived from a target of its own
+    # package, so it keeps that package's prefix, and a name that is neither is
+    # refused rather than sent to the marshal profile by default.
     target="$1"
     shift
-    if [ "$target" = "simplex_statelens" ]; then profile=simplex; else profile=marshal; fi
+    # Leading flags are ours; everything after them, or after `--`, is libFuzzer's.
+    parallel=no
+    windows=no
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --parallel|--parallels) parallel=yes; shift ;;
+        --tmux)                 parallel=yes; windows=yes; shift ;;
+        --)                     shift; break ;;
+        *)                      break ;;
+      esac
+    done
+    case "$target" in
+      simplex|marshal)   profile="$target"; every=yes ;;
+      simplex_*)         profile=simplex;   every=no ;;
+      marshal_*)         profile=marshal;   every=no ;;
+      *) echo "just fuzz: $target is not a profile or a simplex_/marshal_ target" >&2
+         exit 1 ;;
+    esac
     just campaign --profile "$profile"
-    just run "$target" "$@"
+    if [ "$every" = no ]; then
+        just run "$target" "$@"
+        exit 0
+    fi
+    # A read loop, not `mapfile`: that is bash 4, and macOS ships bash 3.2.
+    names=()
+    while IFS= read -r name; do
+        [ -n "$name" ] && names+=("$name")
+    done < <(python3 scripts/statelens.py targets --profile "$profile")
+    here="$(pwd)"
+    cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+
+    if [ "$windows" = yes ]; then
+        command -v tmux >/dev/null 2>&1 || {
+            echo "just fuzz: --tmux needs tmux on PATH" >&2; exit 1; }
+        session="statelens-$profile"
+        tmux has-session -t "$session" 2>/dev/null && {
+            echo "just fuzz: tmux session $session already exists; kill it first with" >&2
+            echo "           tmux kill-session -t $session" >&2; exit 1; }
+        echo "just fuzz: ${#names[@]} target(s), one tmux window each, ${cores} core(s)" >&2
+        for at in $(seq 0 $(( ${#names[@]} - 1 ))); do
+            name="${names[$at]}"
+            # The window stays open after the run so its result can be read.
+            body="cd '$here' && just run '$name' $*; echo; echo '[$name finished; enter closes this window]'; read _"
+            # Named after the target it was derived from, which is what
+            # distinguishes the windows from each other.
+            window="${name%_statelens}"
+            if [ "$at" -eq 0 ]; then
+                tmux new-session -d -s "$session" -n "$window" "bash -lc \"$body\""
+            else
+                tmux new-window -t "$session" -n "$window" "bash -lc \"$body\""
+            fi
+        done
+        if [ -n "${TMUX:-}" ]; then
+            tmux switch-client -t "$session"
+        else
+            echo "just fuzz: attaching; detach with ctrl-b d, and return with" >&2
+            echo "           tmux attach -t $session" >&2
+            tmux attach -t "$session"
+        fi
+        exit 0
+    fi
+
+    if [ "$parallel" = no ]; then
+        # Sequential and unbounded means the first target never ends and the
+        # rest never start, so say so rather than quietly imposing a limit.
+        if [[ "$*" != *-max_total_time=* ]]; then
+            echo "just fuzz: no -max_total_time, so target 1 of ${#names[@]} runs until it" >&2
+            echo "           stops and the rest wait. Use --parallel, --tmux, or pass" >&2
+            echo "           -- -max_total_time=<seconds>." >&2
+        fi
+        echo "just fuzz: ${#names[@]} $profile target(s), in turn" >&2
+        for name in "${names[@]}"; do
+            echo "just fuzz: === $name ===" >&2
+            just run "$name" "$@"
+        done
+        exit 0
+    fi
+
+    # Batches, because a pool that waits for one process at a time needs
+    # `wait -n`, which is bash 4.3. libFuzzer's own `-fork=N` also takes cores,
+    # so a whole profile at once would oversubscribe badly.
+    jobs=${STATELENS_JOBS:-$(( cores / 4 > 0 ? cores / 4 : 1 ))}
+    [ "$jobs" -gt "${#names[@]}" ] && jobs=${#names[@]}
+    logs="campaign/logs"
+    mkdir -p "$logs"
+    echo "just fuzz: ${#names[@]} $profile target(s), $jobs at a time, ${cores} core(s)" >&2
+    echo "just fuzz: output goes to $logs/<target>.run.log" >&2
+    failed=()
+    index=0
+    while [ "$index" -lt "${#names[@]}" ]; do
+        pids=()
+        batch=()
+        while [ "${#batch[@]}" -lt "$jobs" ] && [ "$index" -lt "${#names[@]}" ]; do
+            name="${names[$index]}"
+            batch+=("$name")
+            index=$(( index + 1 ))
+            echo "just fuzz: starting $name" >&2
+            ( just run "$name" "$@" ) > "$logs/$name.run.log" 2>&1 &
+            pids+=("$!")
+        done
+        for at in $(seq 0 $(( ${#pids[@]} - 1 ))); do
+            if ! wait "${pids[$at]}"; then
+                failed+=("${batch[$at]}")
+            fi
+        done
+    done
+    for name in "${names[@]}"; do
+        printf 'just fuzz: %-58s %s\n' "$name" \
+            "$(printf '%s\n' "${failed[@]:-}" | grep -qxF "$name" && echo FAILED || echo ok)" >&2
+    done
+    if [ "${#failed[@]}" -gt 0 ]; then
+        echo "just fuzz: ${#failed[@]} target(s) failed; see $logs/<target>.run.log" >&2
+        exit 1
+    fi
+
+# Build the code index a campaign and the agents query: just code-index [--subsystem S]
+code-index *args:
+    python3 scripts/statelens.py code build "$@"
+
+# Identify an entity in the code: just code <defs|refs|callers|callees> <NAME>
+code query name *args:
+    python3 scripts/statelens.py code "$@"
+
+# Read the syntax tree: just ast <sites|notes> [NAME] [path...]
+ast query *args:
+    python3 scripts/statelens.py ast "$@"
 
 # Undo what a campaign wrote to this checkout: just clean [--yes]
 clean *args:
@@ -388,6 +515,10 @@ clean *args:
 # Check the worked analyses: just check-examples [path...]
 check-examples *args:
     python3 scripts/statelens.py lint-examples "$@"
+
+# Check the scripts: just check-scripts [TestClass]
+check-scripts *args:
+    python3 scripts/test_statelens.py "$@"
 
 # Check invariant files: just check-invariants [path...]
 check-invariants *args:
@@ -403,10 +534,13 @@ prefixed with `statelens:`.
 | Subcommand | Usage | Exit codes |
 |---|---|---|
 | `lint` | `lint [PATH...]` | 0 clean, 3 problems |
-| `extract` | `extract [--agent A] [--registry R] KIND SOURCE...`, where `R` is `simplex` (default) or `marshal` | 0 done (including zero files), 1 usage, 2 agent failed, 3 lint problems |
-| `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, or a section that is not state-bearing, 2 no readable corpus root |
+| `extract` | `extract [--agent A] [--registry R] KIND SOURCE...`, where `R` is `simplex` (default) or `marshal` | 0 done (including zero files), 1 usage, 2 agent failed, 3 problems: a lint problem, an existing invariant modified, a write outside the registry, or a change anywhere else in the worktree |
+| `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, a section that is not state-bearing, or a section asked of a document, 2 no readable corpus root |
 | `lint-examples` | `lint-examples [PATH...]`; with no path it checks every `*.md` in `examples/` | 0 clean, 3 problems |
-| `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing | 0 in every case; a preview is not a failure |
+| `code` | `code build [--subsystem S]`, and `code defs|refs|callers|callees NAME [--tests] [--all]` (section 5.7) | 0 done, 1 usage, no index, or no symbol matching NAME |
+| `targets` | `targets [--profile P]`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary | 0 done |
+| `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]` (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
+| `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing. Files a campaign or an instrumenter added are deleted and paths that exist in `HEAD` are restored from it, the two told apart by asking `git ls-tree` rather than by reading a status code. Status is asked with `--untracked-files=all`, so a wholly untracked directory is named as its files rather than collapsed to one entry that is not a file to delete, and a directory that is left empty is removed while nothing in it is deleted unseen. With `--yes` it checks afterwards that nothing in scope still differs from `HEAD` | 0 done, including a preview, which is not a failure; 1 something in scope still differs from `HEAD`, so the checkout is not reusable |
 | `campaign` | `campaign [--agent A] [--profile P] [--stop-after STEP]`, where `P` is `simplex` (default) or `marshal` | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
 
 `--stop-after` accepts `materialize`, `instrument` or `build`. It exists for
@@ -432,7 +566,7 @@ are data in `statelens.py`:
 | Materialize edits | Section 7.2, edits 1 to 8 | Section 7.2, edits 1 to 3 and 6 to 8, and edits M1 to M3 (section 8.3) |
 | Cryptography check | D15 (section 7.2) | Section 8.4 |
 | Fuzz package | `consensus/fuzz/simplex` | `consensus/fuzz/marshal` |
-| Fuzz targets it builds | `simplex_statelens` | One StateLens variant per target in `consensus/fuzz/marshal/fuzz_targets/` |
+| Fuzz targets it builds | One StateLens variant per target named in `SIMPLEX_VARIANTS`: `simplex_cert_mock`, `simplex_cert_mock_twins_campaign`, `simplex_cert_mock_twins_mutator` | One StateLens variant per target in `consensus/fuzz/marshal/fuzz_targets/` |
 | Test filter | Section 7.7 | Section 8.3, step 6 |
 
 ### 5.6 Knowledge base
@@ -487,7 +621,7 @@ repository root, and gets back only what they print (D33):
 | `kb find TERM...` | Up to 20 findings whose `summary` or `tags` match, ranked; per hit the identifier, state, `module`, severity, remediation status, `summary`, and the files and symbols it cites |
 | `kb grep TEXT` | Up to 40 snippets from the state-bearing sections and the documents, each with its identifier or path, the section name, and three lines of context |
 | `kb cites PATH` | Up to 20 findings that cite a file under `PATH`, most citations first; per hit the identifier, state, how many citations, remediation status, `summary`, which of its files fall under `PATH`, and its symbols |
-| `kb show IDENTIFIER [SECTION]` | One finding's claim block, the files and symbols it cites and the names of its state-bearing sections, or one of those sections |
+| `kb show IDENTIFIER [SECTION]` | One finding's claim block, the files and symbols it cites and the names of its state-bearing sections, or one of those sections. For a document, whose identifier is its path and which has neither, the whole text; a section asked of a document is refused |
 
 Each is `python3 consensus/fuzz/statelens/scripts/statelens.py kb <subcommand>`. The
 `--registry` flag defaults to `simplex`, so the command lines rendered into the prompt pass
@@ -560,11 +694,35 @@ that tells a field from a same-named method. `statelens.py code` answers four qu
 it -- `defs`, `refs`, `callers`, `callees` -- and `just code-index` builds it.
 
 **Why an index and not a language server.** A server charges its startup on every invocation,
-and the instrumenter edits the files it is querying. An index is paid for once, before the
-campaign instruments anything, and stays correct across the sweep: inserting a probe adds
-lines, but it does not change which function calls which (D43). The campaign builds it in a
-step between materialize and instrument, and a failure there warns and continues, because the
-sweep worked without one before it existed.
+where an index is paid for once, before the campaign instruments anything (D43). The campaign
+builds it in a step between materialize and instrument, and a failure there warns and
+continues, because the sweep worked without one before it existed.
+
+**Staying correct while the tree is edited.** Instrumentation edits the files the index
+describes. Which function calls which survives that; line numbers do not, and a line number
+is the whole answer, so a stale one is wrong rather than merely old. The build therefore
+records the text of every file it indexed, in `extract/code-index-sources.json`, and a query
+rebases each hit from that text onto the file as it now stands. A line inside an unchanged run
+of text maps exactly; a line inside an edited run is reported `lost` rather than guessed; a
+line that maps but no longer holds the name is reported `unverified`; and a file the snapshot
+does not cover is reported `unindexed`. Every extent a query prints is rebased, its own header
+included. Where an extent has two endpoints the more serious of the two notes is the one
+reported, `lost` and `unindexed` above `unverified` above `moved`, because a start that merely
+moved would otherwise hide an end that cannot be placed at all; and a line that is not a
+location is printed as `?(N)`, naming the indexed line it came from without offering it as a
+current one. Rebuilding instead
+would cost about eight minutes each time, against a few milliseconds to diff a file of this
+crate's median size, so the index is built once and the diff absorbs the sweep.
+
+What no rebase can supply is an entity created after the build, so a query also states what it
+cannot answer: how many indexed files have changed, how many are gone or unreadable, and how
+many source files have appeared in the directories the index covers. That is settled by
+comparing the snapshot with the tree before any result is chosen, not while hits are placed,
+because otherwise the statement would depend on which files a query happened to touch: a query
+that matched nothing, which is the answer most likely to be wrong on a moved tree, would have
+reported a clean one. Reading the snapshotted text costs about a tenth of a second for this
+crate, against seconds to diff it, so only the line maps stay lazy. `just code-index` is the
+remedy in every case.
 
 **Reading it.** The index is protobuf, read with the standard library alone rather than a
 package, so the subproject keeps its stdlib-only rule (D44). Five fields carry the answers;
@@ -574,13 +732,22 @@ occurrence does not say which it is. It does populate the enclosing range of a d
 and that is what makes callers and callees derivable: a reference belongs to whichever
 definition's range contains its line.
 
-**Test sites.** Two thirds of this crate is test code, and it sits in the same files as the
-code it exercises, so neither the path nor the index separates them. The boundary is the
-first unindented `#[cfg(test)]` line in a file; an indented one sits on a test-only item and
-is not a boundary. A `mocks` file is test support throughout. Sites past the boundary are
-hidden unless `--tests` is passed (D45), because without that the answer is mostly noise: of
-the forty occurrences of the voter mailbox's `resolved`, thirty-eight are tests and one is
-the sending actor.
+**Test sites.** Nearly three quarters of this crate is test code (82,401 lines of 114,177),
+and it sits in the same files as the code it exercises, so neither the path nor the index
+separates them. What is test code is the extent of each item carrying `#[cfg(test)]`, read
+from the syntax tree of section 5.8. An attribute is a child of the item it applies to, so
+the item is that attribute's nearest enclosing node and its range is what to exclude. The
+item's own start offset will not identify it, because a doc comment or an earlier attribute
+begins the item instead -- as the resolver module does, documenting its test module on the
+line above the attribute. A file suffix will not do,
+because an attribute may gate one item with production code after it -- `voter/mod.rs` gates
+a single re-export at line 18, declares its configuration at 22, and only opens its test
+module at 52, so a suffix rule would hide the configuration. A `mocks` file is test support
+throughout. Test sites are hidden unless `--tests` is passed (D45), because without that the
+answer is mostly noise: of the forty occurrences of the voter mailbox's `resolved`,
+thirty-eight are tests and one is the sending actor. Without rust-analyzer there is no tree,
+and the fallback looks only for a `#[cfg(test)] mod`, which is the shape that does run to the
+end of a file.
 
 ### 5.8 Syntax trees
 
@@ -597,11 +764,26 @@ belongs there. A write through `&mut` reads as a read, and the tree carries no t
 field and a method of one name are one spelling to it (D46). Identity comes from the index,
 which also says which two or three files to parse rather than all of them.
 
+**Macro bodies.** This command parses source, and parsing does not expand macros, so the body
+of a macro invocation is one unstructured token tree: it holds the tokens but no expressions.
+A name there can be neither a read nor a write by shape, so `ast sites` reports it as `macro`
+rather than dropping it or guessing, and `ast notes` leaves such a comment without an item.
+Containment is asked of the ancestor chain, so a body of any length is recognised; a bounded
+search back through the nodes would treat a token deep inside a long body as though it were
+outside a macro, and drop it.
+This is not a rare corner in this crate, which puts much of its concurrency inside `select!`:
+`view` has 183 such sites and `round` 179 (D47). A site reported this way has to be read.
+
 **Comments.** A comment is a token here, so it can be told from the same words in code or in
-a string, and `ast notes` pairs each comment block with the item it documents: the next item
-after it, or, for a doc comment, the item it is leading trivia of. Consecutive comment tokens
-are one block, because a doc comment of several lines is several tokens and only the block
-documents the item. This is the material of the beacon step's first question, the comments
+a string, and `ast notes` pairs each comment block with the item it documents. A doc comment
+and an attribute are both children of the item they belong to and both come before its
+keyword, so a documented item is the nearest enclosing item that the comment leads, and
+whether it leads is decided by looking for the item's first token that is neither. Comparing
+start offsets instead fails as soon as anything precedes the comment. An ordinary comment
+inside a body documents what follows it, bounded by the scope it sits in rather than by a
+count of nodes, and a comment inside a macro body documents nothing, there being no
+structured item of that body to name. Consecutive comment tokens are one block, because a doc comment of
+several lines is several tokens and only the block documents the item. This is the material of the beacon step's first question, the comments
 about orderings, races, recovery, and cases that cannot happen.
 
 **Following a value.** Neither section answers what a data-flow tool would, and none of the
@@ -612,6 +794,15 @@ rejects each step it proposes. `prompts/discover-flow.md` is that method, and bo
 instrumentation prompts point at it; it also carries the one bridge that does work across a
 mailbox, which is that the message variant names both the sending function and the handler
 arm.
+
+### 5.9 Script tests
+
+`just check-scripts` runs `scripts/test_statelens.py`, which covers the paths that fail
+quietly rather than loudly: a result tuple compared against an exit code, a SCIP range read
+as four elements when a definition on one line has three, and an assignment classified from
+the wrong sub-expression. Each of these returned a plausible wrong answer, so each test is
+written to fail without its fix. The tests need no network and no campaign; the ones that
+read a syntax tree skip when rust-analyzer is absent.
 
 ---
 
@@ -633,7 +824,11 @@ the repository root, which is the agent's working directory.
 ### 6.2 Procedure
 
 1. Validate `KIND`, the registry, and that at least one source is given.
-2. Record the content hash of every file under `SL/invariants/`, in all registries.
+2. Record the content hash of every file under `SL/invariants/`, in all registries, and
+   record the same whole-worktree snapshot Phase 2 takes for its scope check (section 7.5):
+   every path `git status --porcelain --untracked-files=all` lists, with a hash of its
+   content. A Phase 1 agent may write anywhere in the tree it runs in, and that tree is the
+   operator's own, so the registry alone is not enough to watch.
 3. Compute `NEXT_ID`, which is global (section 4.1).
 4. For `paper`, convert each local `.pdf` source (ignoring a `#...` suffix) to text in
    `SL/extract/papers/<stem>-<digest>.txt`, where `<digest>` is the first 10 hex digits of
@@ -651,7 +846,11 @@ the repository root, which is the agent's working directory.
    `SL/extract/<UTC timestamp>-<kind>.log`.
 7. New files = files that did not exist in step 2. Report any pre-existing file whose
    hash changed as a problem ("agent modified or deleted an existing invariant"), and any new file
-   outside `SL/invariants/<registry>/` ("agent wrote outside the registry").
+   outside `SL/invariants/<registry>/` ("agent wrote outside the registry"). Compare the
+   worktree snapshot too, and report every path the agent changed outside the invariant tree
+   ("agent changed a file outside invariants/"), excepting this subproject's own `extract/`
+   and `campaign/`, which the script writes itself and names rather than trusting a
+   `.gitignore` to hide.
 8. Lint the new files (section 4.6).
 9. Print each new file with its title and the reminder: "Every file in a registry is
    used by the next campaign that binds it. Review, edit or delete these files first."
@@ -677,7 +876,7 @@ A campaign runs in place in the checkout (D10); `repo` is its root
    - `cargo`, `cargo-nextest`, `cargo-fuzz` and `just` are on `PATH` (the agent CLI is
      checked before), so a missing tool fails before any agent time is spent;
    - none of `consensus/src/simplex/statelens.rs`,
-     `consensus/fuzz/simplex/fuzz_targets/simplex_statelens.rs` and
+     `consensus/fuzz/simplex/fuzz_targets/*_statelens.rs` and
      `consensus/fuzz/marshal/fuzz_targets/*_statelens.rs` exists (an earlier campaign
      already instrumented this checkout);
    - `git status --porcelain --untracked-files=no` lists no path outside `SL/`.
@@ -735,8 +934,8 @@ file and the anchor.
 | 1 | `consensus/src/simplex/statelens.rs` | Create as a copy of `SL/runtime/statelens.rs`. |
 | 2 | `consensus/src/simplex/mod.rs` | After the line `pub mod types;` insert `pub mod statelens;`. |
 | 3 | `consensus/Cargo.toml` | After the line `thiserror.workspace = true` insert `sancov.workspace = true`. |
-| 4 | `consensus/fuzz/simplex/fuzz_targets/simplex_statelens.rs` | Create as a copy of `SL/runtime/target.rs`. |
-| 5 | `consensus/fuzz/simplex/Cargo.toml` | Append the `[[bin]]` block of Appendix B.2. |
+| 4 | `consensus/fuzz/simplex/fuzz_targets/<stem>_statelens.rs`, one per variant | Derive from `<stem>.rs` (Appendix B.1). |
+| 5 | `consensus/fuzz/simplex/Cargo.toml` | Append one `[[bin]]` block per variant, each derived from its original's (Appendix B.2). |
 | 6 | `consensus/fuzz/core/src/lib.rs` | After the line `let compromised = case.compromised.iter().copied().collect::<HashSet<_>>();` (with four leading spaces) insert the hook of Appendix B.3. |
 | 7 | `runtime/src/deterministic.rs` | Before the line `impl From<Config> for Runner {` insert the static of Appendix B.4. |
 | 8 | `runtime/src/deterministic.rs` | After the line `pub fn new(cfg: Config) -> Self {` (with four leading spaces) insert the call of Appendix B.4. |
@@ -813,7 +1012,7 @@ empty and the step proceeds from the code alone.
 Commands, run in order:
 
 1. `CHECK`: `cargo +<test toolchain> check -p commonware-consensus --lib --tests`
-2. `FUZZBUILD`: `cargo +<fuzz toolchain> fuzz build --fuzz-dir consensus/fuzz/simplex simplex_statelens`;
+2. `FUZZBUILD`: `cargo +<fuzz toolchain> fuzz build --fuzz-dir consensus/fuzz/simplex <variant>`;
    for the `marshal` profile, the build of each StateLens variant (section 8.3).
 
 The fuzz toolchain is `STATELENS_FUZZ_TOOLCHAIN`, or the value of `NIGHTLY_VERSION:` in
@@ -862,8 +1061,8 @@ statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
 statelens: result     READY | STOPPED after <step> | PANIC (tests) | BUILD FAILED | SETUP FAILED
 statelens: reason     <why the campaign stopped, for any result other than READY>
 statelens: panic      <first [statelens][...] line, or the first panic message>
-statelens: run        cd <repo>/consensus/fuzz && NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- -rss_limit_mb=4000 -print_final_stats=1
-statelens: replay     cd <repo>/consensus/fuzz && CONSENSUS_FUZZ_LOG=1 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens simplex/artifacts/simplex_statelens/<crash file>
+statelens: run        cd <repo>/consensus/fuzz && NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statelens -- -rss_limit_mb=4000 -print_final_stats=1
+statelens: replay     cd <repo>/consensus/fuzz && CONSENSUS_FUZZ_LOG=1 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statelens simplex/artifacts/simplex_cert_mock_twins_mutator_statelens/<crash file>
 ~~~
 
 The `run` and `replay` lines appear only with `READY`, one pair per target: the `marshal`
@@ -880,7 +1079,7 @@ The `run` lines of the summary (section 7.9) give one command per target. For th
 `simplex` profile, in `consensus/fuzz`:
 
 ~~~
-NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- \
+NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statelens -- \
   -rss_limit_mb=4000 -print_final_stats=1
 ~~~
 
@@ -897,7 +1096,7 @@ NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- \
 ### 7.11 Phase 3: crashes and replay
 
 - libFuzzer writes a crashing input to the artifact directory of the target's package:
-  `consensus/fuzz/simplex/artifacts/simplex_statelens/`, or
+  `consensus/fuzz/simplex/artifacts/simplex_cert_mock_twins_mutator_statelens/`, or
   `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant (R-ART-1).
 - The `replay` line of the summary, with the crash file put in, replays the input in the
   same checkout, and replay reproduces the panic (R-NF-2).
@@ -967,7 +1166,7 @@ and 6.4) have not been exercised with a real agent, so AC-14 to AC-17 are unveri
 | ID | Decision | PRD requirement |
 |---|---|---|
 | D24 | StateLens variants are generated from the existing marshal targets, with two anchored insertions each, rather than kept as templates. The variant set therefore always equals the target set. | R-M-P2-1 step 1 |
-| D25 | The `marshal` profile does not create `simplex_statelens` (section 7.2, edits 4 and 5), and does not check `SL/runtime/target.rs`. | R-M-P2-1 step 1 |
+| D25 | The `marshal` profile derives variants only from the targets of `consensus/fuzz/marshal`, so it adds no simplex variant (section 7.2, edits 4 and 5). | R-M-P2-1 step 1 |
 | D26 | The wedge scenario gets its own guard hook (Appendix F). The Twins targets use edit 6, and the other targets need no hook. | G5 |
 | D27 | The core actor derives `me` when it is created and copies it into its mailbox. The standard adapters read it there, and coding reads its scheme provider. `None` never stands for an unknown identity. | R-M-INS-1 |
 | D28 | The marshal beacon components are `marshal.core`, `marshal.standard` and `marshal.coding`. The backfill resolver, application gates, ancestry and store modules have no identity of their own, so they are instrumented at their call sites in these components. | R-FB-4, R-M-FB-1 |
@@ -1922,13 +2121,13 @@ Last lines of its output:
 | AC-2 | On `main` with the subproject committed: `git ls-files consensus/fuzz/statelens` contains no `Cargo.toml`; `just check-fmt`; `just lint`; `just test -p commonware-consensus`; the CI fuzz target listings for `consensus/fuzz/simplex` and `consensus/fuzz/marshal`. | All behave exactly as without the subproject. |
 | AC-3 | `just check-invariants`; `git ls-files consensus/fuzz/statelens/invariants consensus/fuzz/statelens/false-invariants`; then `just extract --registry marshal comment consensus/src/marshal/mod.rs`. | No lint problem. Every invariant file is in a subsystem directory. The new files are in `invariants/marshal/`, numbered from the next global ID. |
 | AC-4 | With at least one simplex invariant: `just campaign`, then the printed `run` command. | Materialize, instrument, plan, build and test gate complete, the result is `READY`, and the `run` command starts the fuzzer. |
-| AC-5 | In an instrumented checkout, two 10-minute runs on empty corpora: `STATELENS_FEEDBACK=0 just run simplex_statelens <empty dir A> -- -max_total_time=600` and the same without the variable on `<empty dir B>`. | The `ft:` value on the `DONE` line is higher with feedback. Compare `ft:`, not `cov:` (section 9.3). |
+| AC-5 | In an instrumented checkout, two 10-minute runs on empty corpora: `STATELENS_FEEDBACK=0 just run simplex_cert_mock_twins_mutator_statelens <empty dir A> -- -max_total_time=600` and the same without the variable on `<empty dir B>`. | The `ft:` value on the `DONE` line is higher with feedback. Compare `ft:`, not `cov:` (section 9.3). |
 | AC-6 | `STATELENS_FALSE_INVARIANTS=1 just campaign`; if the result is `READY`, a short run of the printed `run` command. | Result `PANIC (tests)` with `[statelens][FALSE-0001]`, or a panic with it in the short run. |
-| AC-7 | In an instrumented checkout: `STATELENS_BYZANTINE=panic just run simplex_statelens -- -max_total_time=120`, then the same without the variable. | The first run panics with `[statelens][BYZANTINE]`; the second does not; `[statelens] participant index mismatch` never appears. Verified at the reference commit (section 1.2). |
-| AC-8 | `just run simplex_statelens <artifact>` in the checkout of a crashing Phase 3 run, with that run's `STATELENS_BYZANTINE` value. | The same `[statelens][...]` line as in that run. Verified for `BYZANTINE` (section 1.2). |
+| AC-7 | In an instrumented checkout: `STATELENS_BYZANTINE=panic just run simplex_cert_mock_twins_mutator_statelens -- -max_total_time=120`, then the same without the variable. The same for `simplex_cert_mock_statelens`, whose `Standard` driver compromises nobody, so it must not panic either way and is the negative control. | The first run panics with `[statelens][BYZANTINE]`; the second does not; `[statelens] participant index mismatch` never appears. Verified at the reference commit (section 1.2). |
+| AC-8 | `just run simplex_cert_mock_twins_mutator_statelens <artifact>` in the checkout of a crashing Phase 3 run, with that run's `STATELENS_BYZANTINE` value. | The same `[statelens][...]` line as in that run. Verified for `BYZANTINE` (section 1.2). |
 | AC-14 | With `STATELENS_KB` set to a findings corpus, run the queries of section 5.6 by hand for each registry: `kb modules`, `kb find`, `kb cites <a component directory>`, `kb grep`, `kb show`. | Every command answers from the index; `find` and `cites` return only findings whose `module` is in that subsystem's filter; `cites` returns the findings that name files under the directory, with those files listed; `show` refuses a section that is not state-bearing and an identifier out of scope. |
 | AC-15 | `STATELENS_KB=` with a campaign. | The campaign warns that there is no knowledge base, renders the beacon step with no query commands, and still reaches `READY`. |
-| R-NF-3 | Same duration and flags: `simplex_statelens` in an instrumented checkout, and `simplex_cert_mock_twins_mutator` in an uninstrumented checkout at the same commit. | exec/s from `-print_final_stats=1` are reported side by side; a slowdown above 2x is recorded as an instrumentation problem. |
+| R-NF-3 | Same duration and flags: `simplex_cert_mock_twins_mutator_statelens` in an instrumented checkout, and `simplex_cert_mock_twins_mutator` in an uninstrumented checkout at the same commit. | exec/s from `-print_final_stats=1` are reported side by side; a slowdown above 2x is recorded as an instrumentation problem. |
 
 Section 8.6 gives the procedures for AC-9 to AC-13, and for R-NF-3 on the marshal
 variants.
@@ -1941,7 +2140,7 @@ variants.
    `templates/invariant.md`, all prompts with the subsystem parts (section 13),
    `false-invariants/simplex/FALSE-0001.md` (Appendix C),
    `false-invariants/marshal/FALSE-0002.md` (Appendix E), `runtime/statelens.rs`
-   (Appendix A) and `runtime/target.rs` (Appendix B.1). Create `invariants/simplex/` and
+   (Appendix A). Create `invariants/simplex/` and
    `invariants/marshal/`, each with a `.gitkeep` file while it is empty. Invariant files
    that already exist go to their subsystem directory with `git mv`.
 2. Check the runtime templates:
@@ -2522,43 +2721,46 @@ mod tests {
 
 ## Appendix B: fuzz target and runner hook
 
-### B.1 `runtime/target.rs` (verbatim)
+### B.1 Deriving a variant
+
+A StateLens fuzz target is not written; it is derived from an existing target of the
+profile's package, so that no hand-written copy has to be kept in step with the target it
+imitates. `<stem>_statelens.rs` is `<stem>.rs` with two lines inserted into the body of its
+`fuzz_target!`:
 
 ~~~rust
-#![no_main]
-
-#[cfg(feature = "mocks")]
-mod fuzz {
-    use commonware_consensus::simplex::statelens;
-    use commonware_consensus_fuzz_simplex::{
-        CodeCoverage, FuzzInput, SimplexCertificateMock, TwinsMutator, fuzz,
-    };
-    use libfuzzer_sys::fuzz_target;
-
     fuzz_target!(|input: FuzzInput| {
-        statelens::reset();
-        fuzz::<SimplexCertificateMock, TwinsMutator, CodeCoverage>(input);
-        statelens::clear_compromised();
+        commonware_consensus::simplex::statelens::reset();
+        // ... the target's own body, unchanged ...
+        commonware_consensus::simplex::statelens::clear_compromised();
     });
-}
 ~~~
 
-`SimplexCertificateMock` uses the `cert_mock` certificate scheme, the only scheme
-StateLens fuzz targets may use (D15). `CodeCoverage` keeps `state_cov` and
-happens-before feedback off (R-FB-1). `TwinsMutator` forces the `N4F1C3` configuration.
+The first line is inserted after the line matching `^    fuzz_target!\(\|input: \w+\| \{$`
+and the second before the next `    });`. Paths are written in full so that the variant needs
+no `use` the original does not have. Which targets a profile derives from is section 5.5;
+each must use the `cert_mock` certificate scheme, the only scheme a StateLens fuzz target may
+use (D15), which is checked as the first type argument of its `fuzz::<...>` call.
 
-### B.2 `[[bin]]` block appended to `consensus/fuzz/simplex/Cargo.toml` (verbatim)
+### B.2 The variant's `[[bin]]` block
+
+The block appended to the package manifest is the original target's own block with `name` and
+`path` renamed to the variant, so `required-features` and every other key are inherited
+rather than assumed:
 
 ~~~toml
 
 [[bin]]
-name = "simplex_statelens"
-path = "fuzz_targets/simplex_statelens.rs"
+name = "<stem>_statelens"
+path = "fuzz_targets/<stem>_statelens.rs"
 test = false
 doc = false
 bench = false
 required-features = ["twins"]
 ~~~
+
+`required-features` above is the value for a `twins` target; `simplex_cert_mock` carries
+`["base"]` instead, and a hardcoded block would have been wrong for it.
 
 ### B.3 Hook inserted into `run_twins_with_backend` (verbatim)
 

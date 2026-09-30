@@ -11,6 +11,7 @@ Python 3.9 or later.
 import argparse
 import collections
 import datetime
+import difflib
 import hashlib
 import json
 import os
@@ -53,7 +54,7 @@ FILE_NAMES = {
 
 FINDING_STATES = ("valid", "tested", "triaged", "intake", "invalid")
 STATE_RANK = {state: rank for rank, state in enumerate(FINDING_STATES)}
-# SPEC section 6.3: the knowledge base and its index.
+# SPEC section 5.6: the knowledge base and its index.
 KB_INDEX = "extract/kb-index.json"
 KB_DOC_DIRS = ("kb", "config", "context")
 KB_STATE_SECTIONS = (
@@ -96,9 +97,17 @@ BATCH_SIZE = 8
 REPAIR_ATTEMPTS = 3
 ERROR_LINES = 150
 
-TARGET = "simplex_statelens"
+# The existing simplex targets a campaign derives StateLens variants from. Only
+# `cert_mock` targets may be listed (R-P2-4), and the list is curated rather
+# than "every target in the directory" because simplex has twenty-one of them
+# and most drive inputs StateLens has no interest in. Marshal derives from all
+# of its targets, so its entry is None.
+SIMPLEX_VARIANTS = (
+    "simplex_cert_mock",
+    "simplex_cert_mock_twins_campaign",
+    "simplex_cert_mock_twins_mutator",
+)
 STATELENS_RS = "consensus/src/simplex/statelens.rs"
-TARGET_RS = "consensus/fuzz/simplex/fuzz_targets/simplex_statelens.rs"
 FUZZ_MANIFEST = "consensus/fuzz/simplex/Cargo.toml"
 CORE_SIMPLEX = "consensus/fuzz/core/src/simplex.rs"
 MARSHAL_TARGETS = "consensus/fuzz/marshal/fuzz_targets"
@@ -113,7 +122,7 @@ NOT_CODE = re.compile(r"<!--\s*statelens-lint:\s*not-code:\s*(.*?)\s*-->", re.S)
 CODE_WORD = re.compile(r"`([a-z_][a-z0-9_]*_[a-z0-9_]+)`")
 # Everything a campaign creates (deleted by `clean`) or edits (restored by `clean`).
 # The marshal variants are found by glob, because their names come from the targets.
-CREATED_PATHS = (STATELENS_RS, TARGET_RS)
+CREATED_PATHS = (STATELENS_RS,)
 EDITED_PATHS = (
     "consensus/src/simplex/mod.rs",
     "consensus/Cargo.toml",
@@ -143,7 +152,7 @@ PROFILES = {
             ("resolver", "consensus/src/simplex/actors/resolver", "simplex"),
         ),
         "package": "consensus/fuzz/simplex",
-        "target": TARGET,
+        "variants": SIMPLEX_VARIANTS,
         "test_filter": SIMPLEX_TEST_FILTER,
         "replay_env": "CONSENSUS_FUZZ_LOG=1",
     },
@@ -164,7 +173,7 @@ PROFILES = {
             ("marshal.coding", "consensus/src/marshal/coding", "marshal"),
         ),
         "package": "consensus/fuzz/marshal",
-        "target": None,
+        "variants": None,
         "test_filter": SIMPLEX_TEST_FILTER + " | test(/^marshal::/)",
         "replay_env": "",
     },
@@ -182,17 +191,6 @@ HOOK = """\
             "[statelens] participant index mismatch"
         );
     }"""
-
-# SPEC Appendix B.2: appended to the Simplex fuzz package manifest.
-BIN_BLOCK = """
-[[bin]]
-name = "simplex_statelens"
-path = "fuzz_targets/simplex_statelens.rs"
-test = false
-doc = false
-bench = false
-required-features = ["twins"]
-"""
 
 # SPEC Appendix B.4: the deterministic runtime's fresh-run hook, which clears StateLens
 # ghost state when a fresh runtime starts an independent run.
@@ -333,10 +331,14 @@ def by_id(path):
     return (id_number(path), path.name)
 
 
-def porcelain_paths(output):
-    """Returns the paths of `git status --porcelain -z` output, including rename sources."""
+def porcelain_entries(output):
+    """(status, path) for `git status --porcelain -z` output.
+
+    A rename or copy carries its source as the next record, and that source is
+    reported as its own entry so callers see both paths.
+    """
     entries = output.split("\0")
-    paths = []
+    found = []
     index = 0
     while index < len(entries):
         entry = entries[index]
@@ -344,12 +346,17 @@ def porcelain_paths(output):
         if len(entry) < 4:
             continue
         status, path = entry[:2], entry[3:]
-        paths.append(path)
+        found.append((status, path))
         if "R" in status or "C" in status:
             if index < len(entries) and entries[index]:
-                paths.append(entries[index])
+                found.append((status, entries[index]))
             index += 1
-    return paths
+    return found
+
+
+def porcelain_paths(output):
+    """Returns the paths of `git status --porcelain -z` output, including rename sources."""
+    return [path for _status, path in porcelain_entries(output)]
 
 
 def load_config(sl_dir):
@@ -711,6 +718,27 @@ def files_under(root):
     return {path: sha256(path) for path in root.rglob("*") if path.is_file()}
 
 
+def worktree_state(repo):
+    """Every path git reports as differing from HEAD, with a digest of each.
+
+    A Phase 1 agent can write anywhere in the tree it runs in, and that tree is
+    the operator's own, so the invariant registry is not enough to watch. This
+    is the whole worktree as git sees it, which is cheap because git reports only
+    what differs. `-uall` is passed so that an untracked directory is listed as
+    its files rather than collapsed, and a digest is kept as well as the status
+    because a file already modified before the run keeps its status when it is
+    modified again. Ignored paths are not reported, so `extract/` and
+    `campaign/` do not appear.
+    """
+    state = {}
+    for status, path in porcelain_entries(
+        git(repo, "status", "--porcelain", "-z", "-uall")
+    ):
+        target = repo / path
+        state[path] = (status, sha256(target) if target.is_file() else None)
+    return state
+
+
 def cmd_extract(args):
     """Phase 1 (SPEC section 6.2)."""
     repo = repo_root()
@@ -732,6 +760,7 @@ def cmd_extract(args):
         f"extract: {agent} reads {len(args.sources)} {args.kind} source(s) for the "
         f"{args.registry} registry, from {values['NEXT_ID']}; log {log.relative_to(repo)}"
     )
+    tree_before = worktree_state(repo)
     code, _ = run_logged(agent_command(config, agent, 1, repo), log, repo, stdin_text=prompt)
     if code != 0:
         raise Abort(2, f"the agent exited with code {code}; see {log.relative_to(repo)}")
@@ -747,6 +776,21 @@ def cmd_extract(args):
         if path.parent != registry:
             print(f"{path}: the agent wrote outside the registry invariants/{args.registry}/")
             problems += 1
+    # Anything the agent touched outside the invariant tree. The tree itself is
+    # left to the checks above, which say more about it than this one can, and
+    # this run's own log and prompt are named rather than assumed to be ignored,
+    # so the check does not depend on a .gitignore being right.
+    tree_after = worktree_state(repo)
+    ours = (
+        str(SL / "invariants") + "/",
+        str(SL / "extract") + "/",
+        str(SL / "campaign") + "/",
+    )
+    for path in sorted(set(tree_before) | set(tree_after)):
+        if path.startswith(ours) or tree_before.get(path) == tree_after.get(path):
+            continue
+        print(f"{path}: the agent changed a file outside invariants/")
+        problems += 1
     problems += lint_paths(new, registry_files(sl_dir))
     for path in new:
         say(f"new: {path.relative_to(sl_dir)}: {title_of(path)}")
@@ -770,7 +814,7 @@ def inside_repo(repo, path):
 
 
 # ---------------------------------------------------------------------------
-# Knowledge base (SPEC section 6.3)
+# Knowledge base (SPEC section 5.6)
 # ---------------------------------------------------------------------------
 
 
@@ -821,7 +865,7 @@ def claim_fields(text):
 
 
 def code_references(text):
-    """The files and symbols a finding cites, most-cited first (SPEC section 6.3)."""
+    """The files and symbols a finding cites, most-cited first (SPEC section 5.6)."""
     found = {}
     for name, pattern, group in (("paths", KB_REF_PATH, 0), ("symbols", KB_REF_SYMBOL, 1)):
         counts = collections.Counter(match.group(group) for match in pattern.finditer(text))
@@ -842,7 +886,7 @@ def section_spans(text):
 
 
 def normalize_module(value):
-    """Maps a `module` value to its crate module (SPEC section 6.3)."""
+    """Maps a `module` value to its crate module (SPEC section 5.6)."""
     module = value.strip().strip("`")
     if not module:
         return ""
@@ -995,7 +1039,7 @@ def read_corpus(path):
 
 
 def kb_find(entries, registry, terms):
-    """Findings whose claim fields match, ranked as SPEC section 6.3 says."""
+    """Findings whose claim fields match, ranked as SPEC section 5.6 says."""
     wanted = [term.lower() for term in terms]
     ranked = []
     for position, entry in enumerate(entries):
@@ -1017,7 +1061,7 @@ def kb_find(entries, registry, terms):
 
 
 def kb_cites(entries, registry, prefix):
-    """Findings citing a path under `prefix`, most citations first (SPEC section 6.3)."""
+    """Findings citing a path under `prefix`, most citations first (SPEC section 5.6)."""
     ranked = []
     for position, entry in enumerate(entries):
         if entry["kind"] != "finding":
@@ -1088,7 +1132,7 @@ def reference_lines(entry):
 
 
 def cmd_kb(args):
-    """The retrieval interface of SPEC section 6.3, used by the beacon agent."""
+    """The retrieval interface of SPEC section 5.6, used by the beacon agent."""
     repo = repo_root()
     sl_dir = repo / SL
     config = load_config(sl_dir)
@@ -1179,6 +1223,22 @@ def cmd_kb(args):
             print()
         text = kb_text(entry)
         origin = f"{Path(entry['root']).name}/{entry['path']}"
+        if entry["kind"] == "document":
+            # A document has no claim block and no state-bearing sections, so
+            # rendering it as a finding would print an empty shell of both. The
+            # whole text is what `show` is for once a `grep` snippet has
+            # justified reading it (R-KB-4).
+            if args.section:
+                raise Abort(
+                    1,
+                    f"{entry['identifier']} is a document, which has no sections; "
+                    f"ask for it without one",
+                )
+            body = text.rstrip("\n")
+            print(f"{entry['identifier']}  (document)  {origin}  "
+                  f"{len(body.splitlines())} line(s)")
+            print(body)
+            continue
         if not args.section:
             match = re.search(r"^```claim\s*\n.*?^```\s*$", text, re.S | re.M)
             print(f"{entry['identifier']}  ({entry['state'] or entry['kind']})  {origin}")
@@ -1225,10 +1285,14 @@ def kb_query_help(registry):
 
 
 def campaign_artifacts(repo):
-    """(created paths that exist, tracked paths a campaign edits) (SPEC section 7.13)."""
-    variants = sorted((repo / MARSHAL_TARGETS).glob("*_statelens.rs"))
+    """(created paths that exist, tracked paths a campaign edits) (SPEC section 5.4)."""
+    variants = [
+        path
+        for profile in PROFILES
+        for path in sorted((repo / profile_fuzz_dir(profile)).glob("*_statelens.rs"))
+    ]
     created = [path for path in CREATED_PATHS if (repo / path).exists()]
-    created += [str(path.relative_to(repo)) for path in variants]
+    created += sorted({str(path.relative_to(repo)) for path in variants})
     edited = [path for path in EDITED_PATHS if (repo / path).exists()]
     return created, edited
 
@@ -1401,42 +1465,92 @@ def index_build(repo, sl_dir, subsystem):
         "--exclude-vendored-libraries",
     ]
     log = sl_dir / "extract" / "code-index.log"
-    code = run_logged(command, log, cwd=repo)
+    code, _tail = run_logged(command, log, cwd=repo)
     if code != 0 or not out.exists():
         say(f"the code index build failed; see {log.relative_to(repo)}")
         return None
     size = out.stat().st_size
-    say(f"wrote {out.relative_to(repo)} ({size // (1 << 20)} MiB)")
+    # Snapshot exactly the files the index describes, so a later query can
+    # rebase its line numbers onto the tree as instrumentation changes it.
+    try:
+        occurrences, _definitions, _names = index_load(out)
+        kept = snapshot_write(repo, sl_dir, {path for _s, path, _l, _d in occurrences})
+    except (ValueError, IndexError, OSError) as error:
+        # The index is written and queryable; only rebasing needs the snapshot,
+        # and a query says so when it is absent.
+        say(f"wrote {out.relative_to(repo)} ({size // (1 << 20)} MiB)")
+        say(f"could not snapshot the indexed sources ({error}); lines will not be rebased")
+        return out
+    say(f"wrote {out.relative_to(repo)} ({size // (1 << 20)} MiB, {kept} file(s) snapshotted)")
     return out
 
 
-def index_test_boundary(repo, relative):
-    """The first line of a file's `#[cfg(test)]` module, or None.
+def index_test_ranges(repo, relative):
+    """The line ranges a file puts behind `#[cfg(test)]`.
 
-    Two thirds of this crate is test code, and the tests live in the same files
-    as the code they exercise, so neither the path nor the index separates them.
-    The unindented attribute marks the module; an indented one sits on a
-    test-only item and is not a boundary. A `mocks` file is test support
-    throughout and has no boundary to find.
+    Much of this crate is test code living in the same files as the code it
+    exercises, so neither the path nor the index separates them. A file suffix
+    is the wrong rule: `simplex/actors/voter/mod.rs` gates a single re-export at
+    line 18 and then declares production configuration at 22, with its test
+    module only at 52, so treating everything from the first attribute as test
+    code hides the configuration.
+
+    An attribute is leading trivia of the item it annotates, so that item begins
+    at the attribute and its extent is exactly the range to exclude. Without
+    rust-analyzer there is no tree to ask, and the fallback looks for the test
+    module alone, since a `#[cfg(test)] mod` is the shape that runs to the end
+    of a file. A `mocks` file is test support throughout.
     """
     name = Path(relative)
     if "mocks" in name.parts or name.stem == "mocks":
-        return 1
+        return [(1, None)]
+    path = repo / relative
+    if ast_available():
+        try:
+            nodes, line_of, source = ast_tree(path)
+        except (Abort, OSError):
+            nodes = None
+        if nodes is not None:
+            ranges = []
+            for _index, node, ancestors in ast_walk(nodes):
+                _depth, kind, start, end = node
+                if kind != "ATTR" or b"cfg(test)" not in source[start:end]:
+                    continue
+                # An attribute is a child of the item it applies to, whatever
+                # comes before it: a doc comment or a second attribute moves the
+                # item's start, so its offset cannot identify it.
+                found = ast_innermost(ancestors)
+                if found is None:
+                    continue
+                _item_index, item = found
+                if item[1] == "SOURCE_FILE":
+                    return [(1, None)]
+                ranges.append((line_of(item[2]), line_of(item[3] - 1)))
+            return ranges
     try:
-        text = (repo / relative).read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return None
-    for number, line in enumerate(text.splitlines(), 1):
-        if line.startswith("#[cfg(test)]"):
-            return number
-    return None
+        return []
+    lines = text.splitlines()
+    for number, line in enumerate(lines, 1):
+        if not line.startswith("#[cfg(test)]"):
+            continue
+        following = next(
+            (one for one in lines[number:] if one.strip() and not one.startswith("#[")),
+            "",
+        )
+        if following.lstrip().startswith(("mod ", "pub mod ")):
+            return [(number, None)]
+    return []
 
 
-def index_is_test(repo, boundaries, relative, line):
-    if relative not in boundaries:
-        boundaries[relative] = index_test_boundary(repo, relative)
-    boundary = boundaries[relative]
-    return boundary is not None and line >= boundary
+def index_is_test(repo, ranges, relative, line):
+    if relative not in ranges:
+        ranges[relative] = index_test_ranges(repo, relative)
+    return any(
+        first <= line and (last is None or line <= last)
+        for first, last in ranges[relative]
+    )
 
 
 def index_match(occurrences, definitions, names, needle):
@@ -1494,6 +1608,12 @@ def cmd_code(args):
         )
         return 1
     occurrences, definitions, names = index_load(index)
+    rebaser = Rebaser(repo, sl_dir)
+    # Said before any result, because an answer of "nothing matches" is the one
+    # most likely to be wrong when the tree has moved on from the index.
+    warning = rebaser.report()
+    if warning:
+        say(warning)
     symbols = index_match(occurrences, definitions, names, args.name)
     if not symbols:
         print(f"no symbol matches {args.name!r} in {index.relative_to(repo)}")
@@ -1504,7 +1624,13 @@ def cmd_code(args):
     boundaries = {}
 
     def wanted(path, line):
-        return args.tests or not index_is_test(repo, boundaries, path, line)
+        if args.tests:
+            return True
+        # The boundary is read from the file as it stands, so the line has to be
+        # rebased onto it first; comparing an indexed line with a current
+        # boundary can let a test site through as a production one.
+        at, _note = rebaser.place(path, line)
+        return not index_is_test(repo, boundaries, path, at)
 
     print(f"{len(symbols)} symbol(s) matching {args.name!r}\n")
     for symbol in symbols[:CODE_HITS_LIMIT]:
@@ -1513,17 +1639,27 @@ def cmd_code(args):
         kept = [site for site in sites if wanted(site[0], site[1])]
         hidden = len(sites) - len(kept)
         header = index_short(symbol, names)
+        # The name to look for when checking that a rebased line still holds
+        # the entity: the symbol's own display name, or what was asked for.
+        display = names.get(symbol) or args.name
         if args.query == "defs":
             print(f"{header}")
             if where:
-                print(f"    {where[0]}:{where[1]}-{where[2]}")
+                first, note = rebaser.place(where[0], where[1], display)
+                last, last_note = rebaser.place(where[0], where[2])
+                print(f"    {rebase_extent(where[0], first, note, last, last_note)}")
             else:
                 print("    (no definition in this crate)")
             continue
         if args.query == "refs":
             print(f"{header}    {len(kept)} shown, {hidden} in test code")
             for path, line, is_def in kept:
-                print(f"    {'def' if is_def else 'ref'}  {path}:{line}")
+                at, note = rebaser.place(path, line, display)
+                mark = f"  [{note}]" if note else ""
+                print(
+                    f"    {'def' if is_def else 'ref'}  "
+                    f"{path}:{rebase_line(at, note)}{mark}"
+                )
             print()
             continue
         if args.query == "callers":
@@ -1534,7 +1670,9 @@ def cmd_code(args):
                     continue  # the definition itself, and its own body
                 holder = index_enclosing(definitions, path, line)
                 label = index_short(holder, names) if holder else "(top level)"
-                print(f"    {path}:{line}  in {label}")
+                at, note = rebaser.place(path, line, display)
+                mark = f"  [{note}]" if note else ""
+                print(f"    {path}:{rebase_line(at, note)}  in {label}{mark}")
                 found += 1
             if not found:
                 print("    (no call site outside its own body)")
@@ -1545,7 +1683,9 @@ def cmd_code(args):
                 print(f"{header}\n    (no definition in this crate)\n")
                 continue
             path, start, end = where
-            print(f"{header}    {path}:{start}-{end}")
+            first, first_note = rebaser.place(path, start, display)
+            last, last_note = rebaser.place(path, end)
+            print(f"{header}    {rebase_extent(path, first, first_note, last, last_note)}")
             # A callee defined outside the indexed crate has no definition
             # here, which is how `!` (`bool::not`) and `Option::and_then` are
             # told from this crate's own functions. --all keeps them.
@@ -1560,15 +1700,253 @@ def cmd_code(args):
                 key=lambda item: item[1],
             )
             for other, line in inner:
-                print(f"    {path}:{line}  {index_short(other, names)}")
+                at, note = rebaser.place(path, line)
+                mark = f"  [{note}]" if note else ""
+                print(
+                    f"    {path}:{rebase_line(at, note)}  "
+                    f"{index_short(other, names)}{mark}"
+                )
             if not inner:
                 print("    (calls nothing defined in this crate)")
             print()
     dropped = max(0, len(symbols) - CODE_HITS_LIMIT)
     if dropped:
         print(f"{dropped} further symbol(s) not shown")
+    # Said again, because placing the hits can discover a file with no snapshot.
+    after = rebaser.report()
+    if after and after != warning:
+        say(after)
     return 0
 
+
+
+# --- Keeping the index honest as the tree is edited ------------------------
+#
+# The index is built before instrumentation, and instrumentation then edits the
+# files it describes. Which function calls which survives that, but line
+# numbers do not: a probe inserted above a reference moves it, and the index
+# would go on naming the line it used to be on. Line numbers are the whole
+# answer here, so a stale one is not a degraded answer, it is a wrong one.
+#
+# So the build snapshots the sources it indexed, and every query rebases its
+# hits from that snapshot onto the file as it now stands. A line inside an
+# unchanged run of text maps exactly; a line inside an edited run cannot be
+# mapped and is reported as lost rather than guessed. After mapping, the
+# identifier is looked for on the line it landed on, which catches the rest.
+#
+# Entities added after the build are absent from the index no matter how well
+# hits are rebased, so a query says which files have changed. The remedy for
+# both is `just code-index`.
+
+SNAPSHOT = "extract/code-index-sources.json"
+
+
+def snapshot_path(sl_dir):
+    return sl_dir / SNAPSHOT
+
+
+def snapshot_write(repo, sl_dir, relatives):
+    """Record the text of every file the index describes."""
+    stored = {}
+    for relative in sorted(set(relatives)):
+        try:
+            stored[str(relative)] = (repo / relative).read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            continue
+    path = snapshot_path(sl_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    return len(stored)
+
+
+# Worst first. A `lost` or `unindexed` line is not a location at all, an
+# `unverified` one is a location the name has left, and a `moved` one is simply
+# current. Combining with `or` would let the first nonempty note win, so a start
+# that merely moved would hide an end that cannot be placed.
+REBASE_SEVERITY = ("lost", "unindexed", "unverified", "moved")
+REBASE_INVALID = ("lost", "unindexed")
+
+
+def rebase_worst(*notes):
+    """The most serious of several endpoint notes."""
+    for note in REBASE_SEVERITY:
+        if note in notes:
+            return note
+    return ""
+
+
+def rebase_line(line, note):
+    """A line number, or `?` when the note says it is not one."""
+    return f"?({line})" if note in REBASE_INVALID else str(line)
+
+
+def rebase_extent(path, first, first_note, last, last_note):
+    """`path:first-last`, with an endpoint that is not a location marked."""
+    note = rebase_worst(first_note, last_note)
+    mark = f"  [{note}]" if note else ""
+    return (
+        f"{path}:{rebase_line(first, first_note)}"
+        f"-{rebase_line(last, last_note)}{mark}"
+    )
+
+
+class Rebaser:
+    """Maps a line in the indexed text to the same line in the file today.
+
+    `place` returns (line, note). The note is empty when the file has not
+    changed, `moved` when the line was carried across an edit, `lost` when it
+    sat inside an edited run, and `unverified` when it mapped but the name is
+    no longer on it.
+    """
+
+    def __init__(self, repo, sl_dir):
+        self.repo = repo
+        self.maps = {}
+        self.changed = set()
+        self.missing = set()
+        self.added = set()
+        self.unsnapshotted = set()
+        self.lines = {}
+        path = snapshot_path(sl_dir)
+        try:
+            self.snapshot = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self.snapshot = None
+        self.survey()
+
+    def survey(self):
+        """Compare every snapshotted file with the tree, before any hit is placed.
+
+        Deciding this lazily, one queried file at a time, made the report depend
+        on which files a query happened to touch: a query that matched nothing,
+        or that matched only in files nobody had edited, reported a clean tree
+        while another file was stale. Reading the snapshotted text is cheap
+        against diffing it, so what changed is settled up front and only the
+        line map stays lazy.
+
+        A file added since the build is in neither the index nor the snapshot,
+        so its entities cannot be found however well hits are rebased. Only the
+        directories the snapshot covers are scanned, so a build artifact or a
+        template that was never indexable is not mistaken for new source.
+        """
+        if self.snapshot is None:
+            return
+        for key, stored in self.snapshot.items():
+            current = self._read(key)
+            if current is None:
+                self.missing.add(key)
+            elif current != stored:
+                self.changed.add(key)
+        directories = {str(Path(key).parent) for key in self.snapshot}
+        for found in (self.repo / CODE_CRATE).rglob("*.rs"):
+            relative = str(found.relative_to(self.repo))
+            if relative not in self.snapshot and str(Path(relative).parent) in directories:
+                self.added.add(relative)
+
+    def _read(self, relative):
+        """The file's text, or None when it is gone or unreadable.
+
+        An empty file is text, not absence: an emptied source must count as
+        changed rather than fall through as unchanged.
+        """
+        try:
+            return (self.repo / str(relative)).read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            return None
+
+    def available(self):
+        return self.snapshot is not None
+
+    def _current(self, relative):
+        """The file as it stands, read once per query rather than per hit."""
+        key = str(relative)
+        if key not in self.lines:
+            try:
+                self.lines[key] = (
+                    (self.repo / key).read_text(encoding="utf-8", errors="replace")
+                ).splitlines()
+            except OSError:
+                self.lines[key] = []
+        return self.lines[key]
+
+    def _map_for(self, relative):
+        """old line -> current line, or None when no rebasing is possible."""
+        key = str(relative)
+        if key in self.maps:
+            return self.maps[key]
+        mapping = None
+        if key in self.missing:
+            # The file is gone, so no line of it survives.
+            mapping = {}
+        elif key in self.changed:
+            stored = self.snapshot[key]
+            current = self._read(key) or ""
+            mapping = {}
+            matcher = difflib.SequenceMatcher(
+                a=stored.splitlines(), b=current.splitlines(), autojunk=False
+            )
+            for tag, a0, a1, b0, b1 in matcher.get_opcodes():
+                if tag == "equal":
+                    for step in range(a1 - a0):
+                        mapping[a0 + step + 1] = b0 + step + 1
+        elif (self.snapshot or {}).get(key) is None:
+            # In the index but not in the snapshot: nothing to rebase against,
+            # so say so rather than pass the indexed line off as current.
+            self.unsnapshotted.add(key)
+        self.maps[key] = mapping
+        return mapping
+
+    def place(self, relative, line, name=None):
+        mapping = self._map_for(relative)
+        if mapping is None:
+            if str(relative) in self.unsnapshotted:
+                return line, "unindexed"
+            return line, ""
+        moved = mapping.get(line)
+        if moved is None:
+            return line, "lost"
+        note = "moved" if moved != line else ""
+        if name:
+            text = self._current(relative)
+            if not (0 < moved <= len(text)) or name not in text[moved - 1]:
+                note = "unverified"
+        return moved, note
+
+    def report(self):
+        """One line for the operator, or nothing when the tree is unchanged."""
+        if not self.available():
+            return (
+                "no source snapshot beside the index, so lines are not rebased; "
+                "rebuild with `just code-index`"
+            )
+        parts = []
+        if self.changed:
+            parts.append(
+                f"{len(self.changed)} indexed file(s) have changed since the index was "
+                "built: lines are rebased, and entities added since are missing"
+            )
+        if self.missing:
+            parts.append(
+                f"{len(self.missing)} indexed file(s) are gone or unreadable, so their "
+                "hits are marked `lost`"
+            )
+        if self.added:
+            parts.append(
+                f"{len(self.added)} source file(s) appeared since the index was built, "
+                "so nothing they define can be found"
+            )
+        if self.unsnapshotted:
+            parts.append(
+                f"{len(self.unsnapshotted)} file(s) have no snapshot, so their lines "
+                "are marked `unindexed` and not rebased"
+            )
+        if not parts:
+            return None
+        return "; ".join(parts) + ". Rebuild with `just code-index`."
 
 
 # --- Syntax trees (SPEC section 5.8) -----------------------------------------
@@ -1647,6 +2025,56 @@ def ast_tree(path):
     return nodes, line_of, source
 
 
+def ast_walk(nodes):
+    """Yield (index, node, ancestors) for each node, ancestors outermost first.
+
+    Pre-order plus a depth is all that ancestry needs, so one pass with a stack
+    gives it exactly. Deriving it per node by scanning backwards needs a cutoff,
+    and every cutoff is a case that quietly behaves as though the node had no
+    ancestor at all: a doc comment or a second attribute moves an item's start
+    offset, and a macro body longer than the cutoff puts its `TOKEN_TREE` out of
+    reach, which drops sites rather than reporting them.
+
+    Each ancestor is carried as (its index, its node), so a consumer that needs
+    to scan an ancestor's children does not have to search for it. The yielded
+    list is the walker's own stack, so read it before asking for the next node.
+    """
+    stack = []
+    for index, node in enumerate(nodes):
+        while stack and stack[-1][1][0] >= node[0]:
+            stack.pop()
+        yield index, node, stack
+        stack.append((index, node))
+
+
+def ast_innermost(ancestors, kinds=None):
+    """The nearest enclosing (index, node), optionally of one of `kinds`."""
+    for entry in reversed(ancestors):
+        if kinds is None or entry[1][1] in kinds:
+            return entry
+    return None
+
+
+def ast_leads(nodes, index, item_index, item):
+    """Whether nodes[index] sits before the item's first real token.
+
+    A doc comment and an attribute are children of the item they belong to, and
+    they come before its keyword, so this is what separates a comment that
+    documents an item from one inside its body. The scan is bounded by the item
+    rather than by a node count.
+    """
+    child_depth = item[0] + 2
+    start = nodes[index][2]
+    for position in range(item_index + 1, len(nodes)):
+        depth, kind, node_start, _end = nodes[position]
+        if node_start >= item[3]:
+            break
+        if depth != child_depth or kind in ("WHITESPACE", "COMMENT", "ATTR"):
+            continue
+        return start < node_start
+    return False
+
+
 def ast_next_significant(nodes, index, after):
     """The first node at or past byte `after` that is not trivia."""
     for position in range(index, len(nodes)):
@@ -1657,46 +2085,57 @@ def ast_next_significant(nodes, index, after):
     return None
 
 
-def ast_field_ops(path, name):
-    """Where `name` is written, read, or given an initial value.
+def ast_in_token_tree(ancestors):
+    """Whether a token sits inside a macro body.
 
-    Returns three sorted line lists. A write is an assignment to a field or
+    `rust-analyzer parse` does not expand macros, so a macro body is a
+    `TOKEN_TREE` of bare tokens with no expressions in it. A name there cannot
+    be called a read or a write from shape, and this crate puts a great deal of
+    control flow inside `select!`, so such a site is reported rather than
+    dropped. Asked of the ancestor chain, so a body of any length is seen.
+    """
+    return any(node[1] == "TOKEN_TREE" for _index, node in ancestors)
+
+
+def ast_field_ops(path, name):
+    """Where `name` is written, read, given an initial value, or unknown.
+
+    Returns four sorted line lists. A write is an assignment to a field or
     path expression; an init is a struct literal field; everything else that
-    names the entity is a read. A write through `&mut` is reported as a read,
-    which is the known limit of reading shape alone.
+    names the entity is a read; and a site inside a macro body is unknown,
+    because the tree does not structure one. A write through `&mut` is reported
+    as a read, which is the known limit of reading shape alone.
     """
     nodes, line_of, source = ast_tree(path)
-    writes, reads, inits = set(), set(), set()
-    for index, (depth, kind, start, end) in enumerate(nodes):
+    writes, reads, inits, opaque = set(), set(), set(), set()
+    for index, node, ancestors in ast_walk(nodes):
+        _depth, kind, start, end = node
         if kind != "IDENT" or source[start:end].decode("utf-8", "replace") != name:
             continue
         line = line_of(start)
         # `NAME` is a declaration, `NAME_REF` a use. A declaration of the same
         # spelling is a different entity -- the method beside the field of that
         # name -- and the tree carries no types to tell them apart, so skip it.
-        parent = nodes[index - 1] if index else None
+        found = ast_innermost(ancestors)
+        parent = found[1] if found else None
         if parent is None or parent[1] != "NAME_REF":
+            if ast_in_token_tree(ancestors):
+                opaque.add(line)
             continue
-        # Walk outward to the expression that owns this identifier. It has to
-        # contain it: the `self` in `self.f = x` is a PATH_EXPR that ends before
-        # the field name, and taking it would put `.` where `=` belongs.
-        owner = None
-        for back in range(index - 1, -1, -1):
-            up_depth, up_kind, up_start, up_end = nodes[back]
-            if up_depth >= depth or up_end < end:
-                continue
-            if up_kind in ("FIELD_EXPR", "RECORD_EXPR_FIELD", "RECORD_FIELD"):
-                owner = (back, up_kind, up_end)
-                break
-            if up_kind == "PATH_EXPR":
-                owner = (back, up_kind, up_end)
-                break
-            if up_depth < depth - 4:
-                break
+        if ast_in_token_tree(ancestors):
+            opaque.add(line)
+            continue
+        # The expression that owns this identifier, which has to contain it: the
+        # `self` in `self.f = x` is a PATH_EXPR ending before the field name,
+        # and taking it would put `.` where `=` belongs.
+        owner = ast_innermost(
+            [one for one in ancestors if one[1][3] >= end],
+            ("FIELD_EXPR", "RECORD_EXPR_FIELD", "RECORD_FIELD", "PATH_EXPR"),
+        )
         if owner is None:
             reads.add(line)
             continue
-        _back, owner_kind, owner_end = owner
+        owner_kind, owner_end = owner[1][1], owner[1][3]
         if owner_kind in ("RECORD_EXPR_FIELD", "RECORD_FIELD"):
             inits.add(line)
             continue
@@ -1705,7 +2144,41 @@ def ast_field_ops(path, name):
             writes.add(line)
         else:
             reads.add(line)
-    return sorted(writes), sorted(reads), sorted(inits)
+    return sorted(writes), sorted(reads), sorted(inits), sorted(opaque)
+
+
+def ast_documented_item(nodes, index, ancestors, first, last, depth, line_of):
+    """The item a comment block documents, or None.
+
+    A doc comment and an attribute are children of the item they belong to and
+    come before its keyword, so a documented item is the nearest enclosing item
+    that the comment leads. Matching the item's start offset instead fails as
+    soon as anything precedes the comment, because then the item begins at that
+    instead.
+
+    An ordinary comment inside a body documents what follows it, bounded by the
+    scope it sits in rather than by a node count. Inside a macro body there is
+    nothing to document: the body is an unstructured token tree, so no item of
+    it exists to name.
+    """
+    if ast_in_token_tree(ancestors):
+        return None
+    holder = ast_innermost(ancestors, tuple(AST_ITEMS) + ("MODULE",))
+    if holder is not None:
+        item_index, item = holder
+        if ast_leads(nodes, index, item_index, item):
+            return item[1], line_of(item[2])
+    scope = ast_innermost(ancestors)
+    limit = scope[1][3] if scope else None
+    for position in range(index, len(nodes)):
+        node_depth, kind, start, _end = nodes[position]
+        if limit is not None and start >= limit:
+            break
+        if start < last or kind in AST_TRIVIA or node_depth > depth:
+            continue
+        if kind in AST_ITEMS:
+            return kind, line_of(start)
+    return None
 
 
 def ast_notes(path, pattern):
@@ -1717,10 +2190,16 @@ def ast_notes(path, pattern):
     """
     nodes, line_of, source = ast_tree(path)
     wanted = re.compile(pattern, re.I)
+    # The walk is forward-only, and the loop below jumps over comment blocks, so
+    # the ancestor chains are taken first.
+    chains = {}
+    for index, _node, ancestors in ast_walk(nodes):
+        if _node[1] == "COMMENT":
+            chains[index] = list(ancestors)
     blocks = []
     index = 0
     while index < len(nodes):
-        _depth, kind, start, end = nodes[index]
+        depth, kind, start, end = nodes[index]
         if kind != "COMMENT":
             index += 1
             continue
@@ -1735,22 +2214,9 @@ def ast_notes(path, pattern):
                 break
         text = source[first:last].decode("utf-8", "replace")
         if wanted.search(text):
-            item = None
-            for position in range(after, min(after + 40, len(nodes))):
-                _d, item_kind, item_start, _e = nodes[position]
-                if item_kind in AST_TRIVIA or item_start < last:
-                    continue
-                if item_kind in AST_ITEMS:
-                    item = (item_kind, line_of(item_start))
-                    break
-            if item is None:
-                # A doc comment is leading trivia of the item it documents, so
-                # that item begins before the comment rather than after it.
-                for position in range(index - 1, -1, -1):
-                    _d, item_kind, item_start, item_end = nodes[position]
-                    if item_kind in AST_ITEMS and item_start <= first and item_end >= last:
-                        item = (item_kind, line_of(item_start))
-                        break
+            item = ast_documented_item(
+                nodes, index, chains[index], first, last, depth, line_of
+            )
             blocks.append((line_of(first), text, item))
         index = after
     return blocks
@@ -1817,16 +2283,17 @@ def cmd_ast(args):
     boundaries = {}
     shown = 0
     for relative in targets:
-        writes, reads, inits = ast_field_ops(repo / relative, args.name)
+        writes, reads, inits, opaque = ast_field_ops(repo / relative, args.name)
         rows = (
             [("write", line) for line in writes]
             + [("init", line) for line in inits]
             + [("read", line) for line in reads]
+            + [("macro", line) for line in opaque]
         )
         for kind, line in rows:
             if not args.tests and index_is_test(repo, boundaries, str(relative), line):
                 continue
-            if kind != "write" and args.writes_only:
+            if kind not in ("write", "macro") and args.writes_only:
                 continue
             print(f"{kind:6s} {relative}:{line}")
             shown += 1
@@ -1834,22 +2301,70 @@ def cmd_ast(args):
     return 0
 
 
-def cmd_clean(args):
-    """Undo what a campaign wrote, so a checkout can be reused (SPEC section 7.13)."""
-    repo = repo_root()
+def clean_plan(repo):
+    """What to delete and what to restore, taken from git's view of the tree.
+
+    The instrumenter may add files of its own, so a fixed inventory of generated
+    paths is not enough: git already knows which paths differ from HEAD. What
+    decides between deleting and restoring is whether the path exists in HEAD,
+    and that is asked of `git ls-tree` rather than inferred from a status code.
+    The codes are easy to get wrong -- `git add --intent-to-add` reports ` A`
+    while `git add` of a new file reports `A `, and a rename reports one code for
+    two paths -- whereas presence in HEAD is exactly the question being asked.
+
+    The distinction matters because the two need different commands. `git
+    checkout` on an intent-to-add path succeeds, leaves the file staged, and
+    empties it; only `git rm` removes it. A generated file git does not report,
+    because it is ignored, is still ours to delete.
+    """
     created, edited = campaign_artifacts(repo)
     roots = sorted({root for profile in PROFILES.values() for root in profile["roots"]})
-    dirty = porcelain_paths(git(repo, "status", "--porcelain", "-z", "--", *roots))
-    touched = porcelain_paths(git(repo, "status", "--porcelain", "-z", "--", *edited))
-    if not created and not dirty and not touched:
+    scope = roots + [path for path in edited if path not in roots]
+    in_head = {
+        path
+        for path in git(
+            repo, "ls-tree", "-r", "HEAD", "--name-only", "-z", "--", *scope
+        ).split("\0")
+        if path
+    }
+    delete, restore = set(), set()
+    # `-uall` so that a wholly untracked directory is listed as its files. Git
+    # collapses one to a single `dir/` entry by default, and a directory is not
+    # something to unlink; it is also what the operator's own git configuration
+    # might change, so the mode is stated rather than assumed.
+    for _status, path in porcelain_entries(
+        git(repo, "status", "--porcelain", "-z", "-uall", "--", *scope)
+    ):
+        (restore if path in in_head else delete).add(path)
+    for path in created:
+        if (repo / path).exists():
+            delete.add(path)
+            restore.discard(path)
+    return sorted(delete), sorted(restore), roots
+
+
+def cmd_targets(args):
+    """The StateLens targets a profile builds, one per line (SPEC section 5.5).
+
+    `just fuzz <profile>` reads this rather than parsing a campaign summary, so
+    the recipe and the campaign cannot disagree about what was built.
+    """
+    repo = repo_root()
+    for target in profile_targets(repo, args.profile):
+        print(target)
+    return 0
+
+
+def cmd_clean(args):
+    """Undo what a campaign wrote, so a checkout can be reused (SPEC section 5.4)."""
+    repo = repo_root()
+    created, restore, roots = clean_plan(repo)
+    if not created and not restore:
         say("clean: nothing to undo; this checkout has no campaign artifacts")
         return 0
     say("clean: this restores the paths below to HEAD, losing any edit of your own in them")
     for path in created:
         print(f"  delete   {path}")
-    # A created file is deleted, not restored: after `git rm --cached` its pathspec is
-    # unknown to git, and one unknown pathspec fails the whole `git checkout`.
-    restore = sorted((set(touched) | set(dirty)) - set(created))
     for path in restore:
         print(f"  restore  {path}")
     if not args.yes:
@@ -1857,19 +2372,51 @@ def cmd_clean(args):
         # otherwise report the safe path as a broken recipe.
         say(
             f"clean: nothing done. Rerun as `just clean --yes` to delete {len(created)} "
-            f"file(s) and restore {len(restore) + len(roots)} path(s)"
+            f"file(s) and restore {len(restore)} path(s)"
         )
         return 0
     # Restore first: a failure then leaves every generated file in place, so the
-    # checkout is still recoverable. Only pathspecs git can resolve are passed, because
-    # one unknown pathspec aborts the whole checkout.
-    targets = sorted(set(restore) | {root for root in roots if (repo / root).is_dir()})
-    if targets:
-        git(repo, "checkout", "--", *targets)
+    # checkout is still recoverable. `checkout HEAD --` rather than `checkout --`,
+    # because the latter restores the index, which keeps instrumentation the
+    # operator happened to stage.
+    if restore:
+        git(repo, "checkout", "HEAD", "--", *restore)
+    emptied = set()
     for path in created:
-        git(repo, "rm", "--cached", "--quiet", "--ignore-unmatch", path)
-        (repo / path).unlink()
-    say(f"clean: restored {len(targets)} path(s) and deleted {len(created)} file(s)")
+        git(repo, "rm", "-f", "--quiet", "--ignore-unmatch", "--", path)
+        target = repo / path
+        if target.is_dir():
+            # `-uall` should have listed files, so this means a pathspec that
+            # names a directory. Removing its contents unseen is not this
+            # command's business; say so and leave it.
+            say(f"clean: {path} is a directory, not a generated file; left in place")
+            continue
+        if target.exists():
+            target.unlink()
+        emptied.add(target.parent)
+    # A directory this left empty was created by the campaign, so remove it, but
+    # only while it is empty and only up to the roots.
+    keep = {(repo / root).resolve() for root in roots}
+    for directory in sorted(emptied, key=lambda one: len(str(one)), reverse=True):
+        while directory.is_dir() and directory.resolve() not in keep:
+            if any(directory.iterdir()) or not inside_repo(repo, directory):
+                break
+            parent = directory.parent
+            directory.rmdir()
+            directory = parent
+    left = [
+        f"{status} {path}" for status, path in porcelain_entries(
+            git(repo, "status", "--porcelain", "-z", "-uall", "--", *(
+                roots + [one for one in campaign_artifacts(repo)[1] if one not in roots]
+            ))
+        )
+    ]
+    if left:
+        say("clean: these paths still differ from HEAD, so the checkout is not reusable:")
+        for row in left[:20]:
+            print(f"  {row}")
+        return 1
+    say(f"clean: restored {len(restore)} path(s) and deleted {len(created)} file(s)")
     say("clean: campaign/ and extract/ were left alone; delete them by hand if you want to")
     return 0
 
@@ -1941,22 +2488,43 @@ def read_sl_file(repo, relative):
     return read_edit_file(repo, relative, "restore it from HEAD")
 
 
-def marshal_sources(repo):
-    """Stems of the marshal fuzz targets, in file name order (StateLens variants excluded)."""
-    names = sorted(
-        path.name
-        for path in (repo / MARSHAL_TARGETS).glob("*.rs")
+def profile_fuzz_dir(profile):
+    return f"{PROFILES[profile]['package']}/fuzz_targets"
+
+
+def profile_manifest(profile):
+    return f"{PROFILES[profile]['package']}/Cargo.toml"
+
+
+def profile_sources(repo, profile):
+    """The existing targets `profile` derives StateLens variants from.
+
+    A profile that names them takes them in that order; one that does not takes
+    every target of its package, in file name order, which is how marshal picks
+    up a target someone adds. A StateLens variant is never a source.
+    """
+    chosen = PROFILES[profile]["variants"]
+    directory = repo / profile_fuzz_dir(profile)
+    present = sorted(
+        path.name[: -len(".rs")]
+        for path in directory.glob("*.rs")
         if not path.name.endswith("_statelens.rs")
     )
-    return [name[: -len(".rs")] for name in names]
+    if chosen is None:
+        return present
+    missing = [stem for stem in chosen if stem not in present]
+    if missing:
+        raise Abort(
+            2,
+            f"materialize: {profile} names fuzz target(s) that do not exist in "
+            f"{profile_fuzz_dir(profile)}: {', '.join(missing)}",
+        )
+    return [stem for stem in chosen]
 
 
 def profile_targets(repo, profile):
     """The StateLens targets a campaign of `profile` builds (SPEC section 5.5)."""
-    target = PROFILES[profile]["target"]
-    if target:
-        return [target]
-    return [f"{stem}_statelens" for stem in marshal_sources(repo)]
+    return [f"{stem}_statelens" for stem in profile_sources(repo, profile)]
 
 
 def simplex_types(repo):
@@ -1969,24 +2537,6 @@ def simplex_types(repo):
         block = rest[: following.start()] if following else rest
         types[match.group(1)] = "type Scheme = cert_mock::Scheme<" in block
     return types
-
-
-def check_cert_mock(repo, sl_dir):
-    """D15 for the target templates in SL/runtime/ (SPEC section 7.2)."""
-    types = simplex_types(repo)
-    for template in sorted((sl_dir / "runtime").glob("*.rs")):
-        if template.name == "statelens.rs":
-            continue
-        names = re.findall(r"\bfuzz(?:_audit)?::<\s*(\w+)", template.read_text())
-        if not names:
-            raise Abort(2, f"{template.name}: no fuzz::<P, ...> call to check (D15)")
-        for name in names:
-            if not types.get(name):
-                raise Abort(
-                    2,
-                    f"{template.name}: {name} does not use the cert_mock certificate "
-                    "scheme; StateLens fuzz targets may only use cert_mock (D15)",
-                )
 
 
 def turbofish_arguments(text):
@@ -2008,6 +2558,28 @@ def turbofish_arguments(text):
                 start = index + 1
             index += 1
     return [argument.strip() for argument in arguments if argument.strip()]
+
+
+def check_simplex_cert_mock(repo, stems):
+    """Only a `cert_mock` scheme may become a StateLens variant (D15).
+
+    The scheme is the first type argument of the target's `fuzz::<...>` call;
+    the others name its driver and its coverage mode, which this says nothing
+    about.
+    """
+    types = simplex_types(repo)
+    for stem in stems:
+        text = (repo / profile_fuzz_dir("simplex") / f"{stem}.rs").read_text()
+        names = re.findall(r"\bfuzz(?:_audit)?::<\s*(\w+)", text)
+        if not names:
+            raise Abort(2, f"{stem}: no fuzz::<P, ...> call to check (D15)")
+        for name in names:
+            if not types.get(name):
+                raise Abort(
+                    2,
+                    f"{stem}: {name} does not use the cert_mock certificate scheme; "
+                    "StateLens fuzz targets may only use cert_mock (D15)",
+                )
 
 
 def check_marshal_cert_mock(repo, stems):
@@ -2098,7 +2670,7 @@ def bin_entries(block):
     return entries
 
 
-def variant_bin_block(blocks, stem):
+def variant_bin_block(blocks, stem, manifest=None):
     """The [[bin]] block of a StateLens variant (SPEC section 8.3, edit M2)."""
     owners = []
     for block in blocks:
@@ -2110,7 +2682,7 @@ def variant_bin_block(blocks, stem):
     if len(owners) != 1:
         raise Abort(
             2,
-            f"materialize: expected one [[bin]] block for {stem} in {MARSHAL_MANIFEST}, "
+            f"materialize: expected one [[bin]] block for {stem} in {manifest}, "
             f"found {len(owners)}",
         )
     variant = f"{stem}_statelens"
@@ -2121,7 +2693,7 @@ def variant_bin_block(blocks, stem):
             if line.count("[") > line.count("]"):
                 raise Abort(
                     2,
-                    f"materialize: the {key} value of {stem} in {MARSHAL_MANIFEST} spans "
+                    f"materialize: the {key} value of {stem} in {manifest} spans "
                     "several lines, which the variant block cannot copy",
                 )
             lines.append(line)
@@ -2151,32 +2723,33 @@ def materialize_edits(repo, sl_dir, profile):
         anchors.append((relative, anchor if isinstance(anchor, str) else anchor.pattern, index + 1))
         return index + 1 if position == "after" else index
 
-    if profile == "simplex":
-        check_cert_mock(repo, sl_dir)
-    else:
-        stems = marshal_sources(repo)
-        if not stems:
-            raise Abort(2, f"materialize: no fuzz targets in {MARSHAL_TARGETS}")
+    stems = profile_sources(repo, profile)
+    if not stems:
+        raise Abort(2, f"materialize: no fuzz targets in {profile_fuzz_dir(profile)}")
+    if profile == "marshal":
         check_marshal_cert_mock(repo, stems)
+    else:
+        check_simplex_cert_mock(repo, stems)
 
     edits = ANCHORS + ((WEDGE_ANCHOR,) if profile == "marshal" else ())
     for relative, anchor, position, text in edits:
         insertions[relative].append((locate(relative, anchor, position), text))
     create[STATELENS_RS] = read_sl_file(repo, SL / "runtime" / "statelens.rs")
-    if profile == "simplex":
-        create[TARGET_RS] = read_sl_file(repo, SL / "runtime" / "target.rs")
-        appends[FUZZ_MANIFEST] = BIN_BLOCK
-    else:
-        blocks = bin_blocks(read_edit_file(repo, MARSHAL_MANIFEST))
-        manifest = []
-        for stem in stems:
-            relative = f"{MARSHAL_TARGETS}/{stem}.rs"
-            start = locate(relative, VARIANT_START, "after")
-            end = locate(relative, VARIANT_END, "before")
-            lines = insert_lines(lines_of(relative), [(start, VARIANT_RESET), (end, VARIANT_CLEAR)])
-            create[f"{MARSHAL_TARGETS}/{stem}_statelens.rs"] = "\n".join(lines)
-            manifest.append(variant_bin_block(blocks, stem))
-        appends[MARSHAL_MANIFEST] = "".join(manifest)
+    # Both profiles derive a variant the same way: the target's own source with
+    # a reset before its body and a clear after it, plus a `[[bin]]` block taken
+    # from the original's. There is no hand-written target to keep in step.
+    directory = profile_fuzz_dir(profile)
+    manifest_path = profile_manifest(profile)
+    blocks = bin_blocks(read_edit_file(repo, manifest_path))
+    manifest = []
+    for stem in stems:
+        relative = f"{directory}/{stem}.rs"
+        start = locate(relative, VARIANT_START, "after")
+        end = locate(relative, VARIANT_END, "before")
+        lines = insert_lines(lines_of(relative), [(start, VARIANT_RESET), (end, VARIANT_CLEAR)])
+        create[f"{directory}/{stem}_statelens.rs"] = "\n".join(lines)
+        manifest.append(variant_bin_block(blocks, stem, manifest_path))
+    appends[manifest_path] = "".join(manifest)
 
     modify = {
         relative: "\n".join(insert_lines(lines_of(relative), items))
@@ -2354,8 +2927,12 @@ class Campaign:
         for tool in CAMPAIGN_TOOLS:
             if shutil.which(tool) is None:
                 raise Abort(2, f"{tool} is not on PATH; see the prerequisites in README.md")
-        variants = sorted((self.repo / MARSHAL_TARGETS).glob("*_statelens.rs"))
-        created = [STATELENS_RS, TARGET_RS]
+        variants = [
+            path
+            for name in PROFILES
+            for path in sorted((self.repo / profile_fuzz_dir(name)).glob("*_statelens.rs"))
+        ]
+        created = [STATELENS_RS]
         created += [str(path.relative_to(self.repo)) for path in variants]
         for path in created:
             if (self.repo / path).exists():
@@ -2443,11 +3020,12 @@ class Campaign:
     def code_index(self):
         """Index the crate before it is instrumented (SPEC section 5.7).
 
-        The index is built here, not during instrumentation, because the agent
-        edits the files it queries: inserting a probe adds lines but does not
-        change which function calls which, so an index of the pristine tree
-        stays correct for the whole sweep. A missing index degrades the sweep
-        to search and reading rather than failing it.
+        The index is built here rather than during instrumentation so that its
+        cost falls once on the campaign instead of on every query. The agent
+        then edits the files it queries, which moves the lines the index names,
+        so the build also snapshots the indexed sources and each query rebases
+        its hits through a diff. A missing index degrades the sweep to search
+        and reading rather than failing it.
         """
         if not index_build(self.repo, self.sl_dir, self.profile_name):
             say("continuing without a code index; the agent falls back to search")
@@ -2458,25 +3036,18 @@ class Campaign:
             (self.repo / relative).write_text(text)
         git(self.repo, "add", "--intent-to-add", "--", *edits.create)
         self.baseline = self.snapshot()
-        if self.profile["target"]:
-            say(
-                "materialize: runtime module, fuzz target, Twins runner hook and fresh-run "
-                "hook are in place"
-            )
-        else:
-            say(
-                f"materialize: runtime module, {len(edits.targets)} StateLens variants, Twins "
-                "runner hook, wedge-scenario hook and fresh-run hook are in place"
-            )
+        wedge = ", wedge-scenario hook" if self.profile_name == "marshal" else ""
+        say(
+            f"materialize: runtime module, {len(edits.targets)} StateLens variant(s), Twins "
+            f"runner hook{wedge} and fresh-run hook are in place"
+        )
 
     def snapshot(self):
-        """Hashes every path that `git status` reports (SPEC section 7.2)."""
-        status = git(self.repo, "status", "--porcelain", "--untracked-files=all", "-z")
-        result = {}
-        for path in porcelain_paths(status):
-            full = self.repo / path
-            result[path] = sha256(full) if full.is_file() else "absent"
-        return result
+        """Hashes every path that `git status` reports (SPEC section 7.2).
+
+        The same view Phase 1 watches, so both phases judge scope alike.
+        """
+        return worktree_state(self.repo)
 
     # Sections 7.3 to 7.5.
 
@@ -2776,7 +3347,7 @@ def main(argv):
         help="undo what a campaign wrote to this checkout",
         description=(
             "Delete the files a campaign created and restore the paths it edits to HEAD, "
-            "so a checkout can be reused (SPEC section 7.13). Prints what it would do and "
+            "so a checkout can be reused (SPEC section 5.4). Prints what it would do and "
             "needs --yes to act."
         ),
     )
@@ -2784,7 +3355,7 @@ def main(argv):
     kb = commands.add_parser(
         "kb",
         help="query the knowledge base (the instrumenter uses it too)",
-        description="The retrieval interface of SPEC section 6.3.",
+        description="The retrieval interface of SPEC section 5.6.",
     )
     kb.add_argument(
         "--registry",
@@ -2843,6 +3414,17 @@ def main(argv):
             action="store_true",
             help="for callees, include functions defined outside this crate",
         )
+    targets = commands.add_parser(
+        "targets",
+        help="the StateLens targets a profile builds, one per line",
+        description="Used by `just fuzz <profile>` to run every target of a profile.",
+    )
+    targets.add_argument(
+        "--profile",
+        choices=sorted(PROFILES),
+        default="simplex",
+        help="profile whose targets to list (default: simplex)",
+    )
     ast = commands.add_parser(
         "ast",
         help="read the syntax tree: which sites write an entity, and what comments say",
@@ -2900,6 +3482,8 @@ def main(argv):
             return cmd_extract(args)
         if args.command == "kb":
             return cmd_kb(args)
+        if args.command == "targets":
+            return cmd_targets(args)
         if args.command == "code":
             return cmd_code(args)
         if args.command == "ast":
