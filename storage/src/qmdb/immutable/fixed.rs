@@ -271,6 +271,7 @@ mod tests {
             let floor = db.inactivity_floor_loc();
             db = apply_set(db, key, value, floor).await;
 
+            db = db.flush().await.unwrap();
             let handle;
             (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();
