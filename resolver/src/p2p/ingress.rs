@@ -50,16 +50,8 @@ where
     where
         D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
-        let Fetch {
-            key,
-            subscriber,
-            span,
-        } = key.into();
-        self.sender.enqueue(Message::Fetch(vec![FetchKey {
-            key,
-            subscribers: NonEmptyVec::new((subscriber, span)),
-            metadata: None,
-        }]))
+        self.sender
+            .enqueue(Message::Fetch(vec![fetch_key(key.into(), None)]))
     }
 
     /// Send fetches to the peer actor for a batch of keys.
@@ -117,16 +109,8 @@ where
         key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         targets: NonEmptyVec<Self::PublicKey>,
     ) -> Feedback {
-        let Fetch {
-            key,
-            subscriber,
-            span,
-        } = key.into();
-        self.sender.enqueue(Message::Fetch(vec![FetchKey {
-            key,
-            subscribers: NonEmptyVec::new((subscriber, span)),
-            metadata: Some(targets),
-        }]))
+        self.sender
+            .enqueue(Message::Fetch(vec![fetch_key(key.into(), Some(targets))]))
     }
 
     /// Send targeted fetches to the peer actor for a batch of keys.
