@@ -25,6 +25,18 @@ fuzz target *args:
     just campaign --profile "$profile"
     just run "$target" "$@"
 
+# Build the code index a campaign and the agents query: just code-index [--subsystem S]
+code-index *args:
+    python3 scripts/statelens.py code build "$@"
+
+# Identify an entity in the code: just code <defs|refs|callers|callees> <NAME>
+code query name *args:
+    python3 scripts/statelens.py code "$@"
+
+# Read the syntax tree: just ast <sites|notes> [NAME] [path...]
+ast query *args:
+    python3 scripts/statelens.py ast "$@"
+
 # Undo what a campaign wrote to this checkout: just clean [--yes]
 clean *args:
     python3 scripts/statelens.py clean "$@"

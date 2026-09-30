@@ -10,6 +10,12 @@ below:
 2. Find where the implementation establishes and uses the concepts. Trace with search,
    references and call hierarchy across the components the subsystem rules name,
    including the mailbox messages between them and the recovery path on restart.
+   `python3 scripts/statelens.py code refs|callers|callees <NAME>` gives references and
+   call hierarchy by symbol, which matters because names here collide: `proposal` is
+   five different methods. `ast sites <NAME>` says which of those sites write the state
+   and which only read it. Both hide test sites unless you pass `--tests`, and the
+   `callers` of a mailbox method name the actor that sends the message.
+   `prompts/discover-flow.md` is the method for the cases where this is not enough.
 3. Choose assertion sites where a violation first becomes observable: just before the
    replica acts (signs, broadcasts, persists, accepts a certificate, enters a view) or
    just after it changes the relevant state. Cover every code path that performs the

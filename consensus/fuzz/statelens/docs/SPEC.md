@@ -105,6 +105,10 @@ them; the last column names the PRD requirement.
 | D33 | Retrieval is a structured index over the findings' claim fields plus full-text search of their prose sections. No vector store and no embedding service. | R-KB-4 |
 | D37 | A finding's state and remediation status are shown to the instrumenter, not used to filter findings out. Weak evidence costs coverage, not correctness. | R-KB-8 |
 | D42 | The beacon step is an agent loop over actions (read code, the five `kb` queries, add a probe), not a fixed procedure. Reading code leads, and a query is what the agent does when its hypothesis needs developer context. How long to spend on a candidate is the agent's judgment; there is no step budget. | R-FB-4 |
+| D43 | Entities are identified from a SCIP index built once before instrumentation, not from a language server queried during it. Startup is paid for one campaign rather than one query, and inserting a probe does not change which function calls which, so the index stays correct while the agent edits. | R-AG-4 |
+| D44 | The SCIP protobuf is decoded with the standard library, not a protobuf package, so the subproject keeps its stdlib-only rule. Only the five fields the four queries need are read. | R-AG-4, R-LAYOUT-2 |
+| D45 | Sites in test code are hidden unless asked for. Two thirds of the crate is test code sharing files with the code it exercises, so the unfiltered answer is mostly noise. | R-AG-4 |
+| D46 | Read and write polarity comes from the syntax tree, not from a language server. The tree needs no project and costs a tenth of a second for a file, against a server's startup on every query, and it classifies a struct literal field as an initial value where the server calls it a read. | R-AG-5 |
 
 D24 to D30 concern marshal only; they are in section 8.2.
 
@@ -142,6 +146,7 @@ consensus/fuzz/statelens/
     instrument.md                Phase 2, shared rules and API (section 13.7)
     instrument-invariants.md     Phase 2, bind invariants (section 13.8)
     instrument-beacons.md        Phase 2, beacon probes (section 13.9)
+    discover-flow.md             method for tracing state across functions (section 5.8)
     repair.md                    Phase 2, compile repair (section 13.10)
     subsystems/
       simplex-analyst.md         Phase 1, Simplex part (section 13.11)
@@ -512,9 +517,10 @@ writing a beacon. Reading code leads, because a candidate announces itself there
 when its hypothesis needs context the source does not carry: what an assumption means, why it
 matters, whether it has failed before, or which code manages the transition (D42). This is the paper's on-demand retrieval and its query refinement, within
 one agent run. The campaign's instrumenter is the agent doing this, so retrieval and
-instrumentation happen in one loop. What this project does not have is the paper's Phase 2
-frontier: no call-graph or data-flow tool, so tracing a state across functions is search and
-reading, and the findings' own citations stand in for it.
+instrumentation happen in one loop. Of the paper's Phase 2 frontier this project has the
+call-graph half, in the code index of section 5.7. It has no data-flow tool, so following a
+value through a computation is search and reading, and the findings' own citations stand in
+for it.
 
 **Citations.** A hit names the files and symbols its finding cites: paths matching
 `<crate>/src/**/*.rs`, with an optional `:line`, and backticked `Type::method` symbols, each
@@ -545,6 +551,67 @@ byte offset. All three of `kb find`, `kb cites` and `kb grep` truncate after the
 hits were dropped. `kb cites` orders by citation count, then by the state rank above, then by
 index order. Ties keep
 index order, so one index gives one answer.
+
+### 5.7 Code index
+
+`rust-analyzer scip consensus` writes a SCIP index of the crate to
+`extract/code-index.scip`: every definition and every reference, keyed by a symbol string
+that tells a field from a same-named method. `statelens.py code` answers four questions from
+it -- `defs`, `refs`, `callers`, `callees` -- and `just code-index` builds it.
+
+**Why an index and not a language server.** A server charges its startup on every invocation,
+and the instrumenter edits the files it is querying. An index is paid for once, before the
+campaign instruments anything, and stays correct across the sweep: inserting a probe adds
+lines, but it does not change which function calls which (D43). The campaign builds it in a
+step between materialize and instrument, and a failure there warns and continues, because the
+sweep worked without one before it existed.
+
+**Reading it.** The index is protobuf, read with the standard library alone rather than a
+package, so the subproject keeps its stdlib-only rule (D44). Five fields carry the answers;
+the ones rust-analyzer leaves empty set the limits. It writes no relationships, so the index
+has no trait-implementation edges, and it leaves the read and write role bits unset, so an
+occurrence does not say which it is. It does populate the enclosing range of a definition,
+and that is what makes callers and callees derivable: a reference belongs to whichever
+definition's range contains its line.
+
+**Test sites.** Two thirds of this crate is test code, and it sits in the same files as the
+code it exercises, so neither the path nor the index separates them. The boundary is the
+first unindented `#[cfg(test)]` line in a file; an indented one sits on a test-only item and
+is not a boundary. A `mocks` file is test support throughout. Sites past the boundary are
+hidden unless `--tests` is passed (D45), because without that the answer is mostly noise: of
+the forty occurrences of the voter mailbox's `resolved`, thirty-eight are tests and one is
+the sending actor.
+
+### 5.8 Syntax trees
+
+`rust-analyzer parse` reads one file on stdin and prints its concrete syntax tree with a byte
+span on every node. It wants no cargo, no project and no index, and costs about a tenth of a
+second for a file of two thousand lines, so `statelens.py ast` answers from it the two
+questions section 5.7 cannot.
+
+**Polarity.** The index records that a line mentions an entity, not whether it reads or
+writes it, because the read and write role bits are unset. An assignment is a shape: the
+token after the field expression is `=` or an `op=`. `ast sites` reports each site as a
+write, an initial value in a struct literal, or a read, which is what decides whether a probe
+belongs there. A write through `&mut` reads as a read, and the tree carries no types, so a
+field and a method of one name are one spelling to it (D46). Identity comes from the index,
+which also says which two or three files to parse rather than all of them.
+
+**Comments.** A comment is a token here, so it can be told from the same words in code or in
+a string, and `ast notes` pairs each comment block with the item it documents: the next item
+after it, or, for a doc comment, the item it is leading trivia of. Consecutive comment tokens
+are one block, because a doc comment of several lines is several tokens and only the block
+documents the item. This is the material of the beacon step's first question, the comments
+about orderings, races, recovery, and cases that cannot happen.
+
+**Following a value.** Neither section answers what a data-flow tool would, and none of the
+tools that do fits: one cannot follow a value across a call at all, another answers whether a
+marked source reaches a marked sink from one chosen entry point, and none crosses an actor
+mailbox. The agent is therefore the simulator, and these two sections are what confirms or
+rejects each step it proposes. `prompts/discover-flow.md` is that method, and both
+instrumentation prompts point at it; it also carries the one bridge that does work across a
+mailbox, which is that the message variant names both the sending function and the handler
+arm.
 
 ---
 

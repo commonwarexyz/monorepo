@@ -234,6 +234,7 @@ consensus/fuzz/statelens/
     instrument.md             Phase 2: shared rules and runtime API
     instrument-invariants.md  Phase 2: invariants -> assertions, invariant probes, ghost state
     instrument-beacons.md     Phase 2: code and knowledge base -> beacon probes
+    discover-flow.md          method: follow state across functions without a data-flow tool
     repair.md                 Phase 2: fix instrumentation that does not build
     subsystems/
       simplex-analyst.md      Phase 1: what the analyst needs to know about Simplex
@@ -465,9 +466,13 @@ R-ART-2. The operator investigates inside the instrumented checkout before disca
 
 R-AG-1. The agent is a parameter (`claude|codex`). Prompts are plain Markdown and do not depend on either agent. `scripts/statelens.py` maps the parameter to the non-interactive invocation of each CLI (`claude -p`, `codex exec`).
 
-R-AG-2. Phase 2 agents use the tools their CLI provides: file reading, text search, build and test. StateLens supplies no call-graph, data-flow or AST-matching tool, so tracing a state across functions is search and reading. This is one reason the knowledge base matters: a finding names the files and symbols it concerns, so the instrumenter starts from a citation rather than from a blank search.
+R-AG-2. Phase 2 agents use the tools their CLI provides: file reading, text search, build and test. StateLens adds the code index of R-AG-4 and the syntax-tree queries of R-AG-5, but supplies no data-flow tool, so following a value through a computation is search and reading. The knowledge base matters for the same reason: a finding names the files and symbols it concerns, so the instrumenter starts from a citation rather than from a blank search.
 
 R-AG-3. Phase 1 agents run restricted in the operator's working tree: file edits, read-only tools, `gh`, and `curl`. Phase 2 agents run with full permissions in the checkout, so campaigns must run on a dedicated machine or container.
+
+R-AG-4. StateLens identifies entities in the code it instruments: where a name is defined, every reference to it, the call sites outside its definition with the enclosing function, and what a definition calls. Text search cannot do this here, because the names collide: `proposal` is five different methods of this crate and `broadcast_notarize` is both a field and a method of the same type. A campaign builds the index before it instruments, since inserting a probe adds lines but does not change which function calls which, so an index of the pristine tree stays correct for the whole sweep. Sites in test code are hidden unless asked for, because two thirds of the crate is test code and it shares files with the code it exercises. A missing index degrades a sweep to search and reading; it does not fail it.
+
+R-AG-5. StateLens reads the syntax tree of a file to answer what the index cannot: whether a site writes an entity or only reads it, and which item a comment documents. The first matters because a probe belongs where state changes, and the index records that a line mentions an entity without recording which it does. The second matters because a comment about an ordering, a race or a case that cannot happen names the state it concerns, and a comment is a token in the tree, so it can be told from the same words in code or in a string. A tree carries no types, so it gives shape where the index gives identity, and the two are used together.
 
 ### 7.12 Non-functional
 

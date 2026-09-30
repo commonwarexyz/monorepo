@@ -91,7 +91,7 @@ CONFIG_KEYS = (
     "STATELENS_BEACONS",
 )
 
-STOP_STEPS = ("materialize", "instrument", "build")
+STOP_STEPS = ("materialize", "index", "instrument", "build")
 BATCH_SIZE = 8
 REPAIR_ATTEMPTS = 3
 ERROR_LINES = 150
@@ -1233,6 +1233,607 @@ def campaign_artifacts(repo):
     return created, edited
 
 
+
+# --- Code index (SPEC section 5.7) -------------------------------------------
+#
+# `rust-analyzer scip` writes a SCIP index: one protobuf file naming every
+# definition and every reference in the crate, keyed by a symbol string that
+# distinguishes a field from a same-named method. Text search cannot make that
+# distinction, and in this crate the names collide often: `proposal` is five
+# different methods, `construct_notarize` is three.
+#
+# The format is read here directly rather than through a protobuf library, so
+# the subproject stays stdlib-only (R-LAYOUT-3). Only these fields are needed:
+#
+#   Index.documents            = 2   Document.relative_path     = 1
+#   Document.occurrences       = 2   Document.symbols           = 3
+#   Occurrence.range           = 1   Occurrence.symbol          = 2
+#   Occurrence.symbol_roles    = 3   Occurrence.enclosing_range = 7
+#   SymbolInformation.symbol   = 1   SymbolInformation.display_name = 6
+#
+# rust-analyzer leaves SymbolInformation.relationships empty, so the index
+# carries no implementation edges, and it leaves the WriteAccess/ReadAccess role
+# bits unset, so an occurrence does not say whether it reads or writes. It does
+# populate enclosing_range on definitions, which is what makes callers and
+# callees derivable: a reference belongs to whichever definition's range
+# contains its line.
+
+CODE_CRATE = "consensus"
+SCIP_INDEX = "extract/code-index.scip"
+SCIP_ROLE_DEFINITION = 0x1
+SCIP_CALLABLE = "()."
+CODE_HITS_LIMIT = 40
+
+
+def scip_varint(buf, i):
+    """Decode one protobuf varint, returning (value, next offset)."""
+    shift = result = 0
+    while True:
+        byte = buf[i]
+        i += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return result, i
+        shift += 7
+
+
+def scip_fields(buf, start=0, end=None):
+    """Yield (field number, wire type, payload) for one protobuf message."""
+    i = start
+    end = len(buf) if end is None else end
+    while i < end:
+        key, i = scip_varint(buf, i)
+        number, wire = key >> 3, key & 7
+        if wire == 0:
+            value, i = scip_varint(buf, i)
+            yield number, wire, value
+        elif wire == 2:
+            length, i = scip_varint(buf, i)
+            yield number, wire, buf[i : i + length]
+            i += length
+        elif wire == 5:
+            yield number, wire, buf[i : i + 4]
+            i += 4
+        elif wire == 1:
+            yield number, wire, buf[i : i + 8]
+            i += 8
+        else:
+            raise ValueError(f"unsupported protobuf wire type {wire}")
+
+
+def scip_packed(payload):
+    """Decode a packed repeated int32 field."""
+    out, i = [], 0
+    while i < len(payload):
+        value, i = scip_varint(payload, i)
+        out.append(value)
+    return out
+
+
+def index_load(path):
+    """Read a SCIP index into (occurrences, definitions, display names).
+
+    Occurrences are (symbol, path, line, is definition). Definitions map a
+    symbol to (path, first line, last line) covering the whole item, 1-based.
+    """
+    raw = memoryview(path.read_bytes())
+    occurrences = []
+    definitions = {}
+    names = {}
+    for number, _wire, document in scip_fields(raw):
+        if number != 2:
+            continue
+        relative, occs, syms = None, [], []
+        for field, _w, payload in scip_fields(document):
+            if field == 1:
+                # SCIP paths are relative to the indexed crate; make them
+                # repo-relative so that a hit can be opened and read directly.
+                relative = f"{CODE_CRATE}/" + bytes(payload).decode("utf-8", "replace")
+            elif field == 2:
+                occs.append(payload)
+            elif field == 3:
+                syms.append(payload)
+        if relative is None:
+            continue
+        for entry in syms:
+            symbol = display = None
+            for field, _w, payload in scip_fields(entry):
+                if field == 1:
+                    symbol = bytes(payload).decode("utf-8", "replace")
+                elif field == 6:
+                    display = bytes(payload).decode("utf-8", "replace")
+            if symbol and display:
+                names[symbol] = display
+        for entry in occs:
+            span = symbol = enclosing = None
+            roles = 0
+            for field, wire, payload in scip_fields(entry):
+                if field == 1:
+                    span = scip_packed(payload) if wire == 2 else [payload]
+                elif field == 2:
+                    symbol = bytes(payload).decode("utf-8", "replace")
+                elif field == 3:
+                    roles = payload
+                elif field == 7:
+                    enclosing = scip_packed(payload) if wire == 2 else None
+            if not symbol or not span:
+                continue
+            line = span[0] + 1
+            is_def = bool(roles & SCIP_ROLE_DEFINITION)
+            occurrences.append((symbol, relative, line, is_def))
+            if roles & SCIP_ROLE_DEFINITION and enclosing:
+                # A SCIP range is [start line, start char, end line, end char],
+                # but collapses to [start line, start char, end char] when it
+                # begins and ends on one line, so the third element is only a
+                # line number in the four-element form.
+                if len(enclosing) >= 4:
+                    first, last = enclosing[0] + 1, enclosing[2] + 1
+                elif len(enclosing) == 3:
+                    first = last = enclosing[0] + 1
+                else:
+                    continue
+                definitions[symbol] = (relative, first, last)
+    return occurrences, definitions, names
+
+
+def index_path(sl_dir):
+    return sl_dir / SCIP_INDEX
+
+
+def index_build(repo, sl_dir, subsystem):
+    """Write the SCIP index for the crate that owns `subsystem`."""
+    if shutil.which("rust-analyzer") is None:
+        say(
+            "rust-analyzer is not installed, so the code index cannot be built.\n"
+            "Install it with `rustup component add rust-analyzer`."
+        )
+        return None
+    crate = CODE_CRATE
+    out = index_path(sl_dir)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    say(f"building the code index for {crate} (several minutes)")
+    command = [
+        "rust-analyzer",
+        "scip",
+        crate,
+        "--output",
+        str(out),
+        "--exclude-vendored-libraries",
+    ]
+    log = sl_dir / "extract" / "code-index.log"
+    code = run_logged(command, log, cwd=repo)
+    if code != 0 or not out.exists():
+        say(f"the code index build failed; see {log.relative_to(repo)}")
+        return None
+    size = out.stat().st_size
+    say(f"wrote {out.relative_to(repo)} ({size // (1 << 20)} MiB)")
+    return out
+
+
+def index_test_boundary(repo, relative):
+    """The first line of a file's `#[cfg(test)]` module, or None.
+
+    Two thirds of this crate is test code, and the tests live in the same files
+    as the code they exercise, so neither the path nor the index separates them.
+    The unindented attribute marks the module; an indented one sits on a
+    test-only item and is not a boundary. A `mocks` file is test support
+    throughout and has no boundary to find.
+    """
+    name = Path(relative)
+    if "mocks" in name.parts or name.stem == "mocks":
+        return 1
+    try:
+        text = (repo / relative).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.startswith("#[cfg(test)]"):
+            return number
+    return None
+
+
+def index_is_test(repo, boundaries, relative, line):
+    if relative not in boundaries:
+        boundaries[relative] = index_test_boundary(repo, relative)
+    boundary = boundaries[relative]
+    return boundary is not None and line >= boundary
+
+
+def index_match(occurrences, definitions, names, needle):
+    """Symbols whose display name or symbol string matches `needle`.
+
+    An exact display name wins, so `refs construct_notarize` reports the three
+    symbols that carry that name rather than everything containing the text.
+    """
+    exact = {sym for sym, display in names.items() if display == needle}
+    if not exact:
+        exact = {sym for sym in definitions if needle in sym}
+    if not exact:
+        exact = {sym for sym, _p, _l, _d in occurrences if needle in sym}
+    return sorted(exact)
+
+
+def index_enclosing(definitions, relative, line):
+    """The definition whose extent contains `line`, innermost first."""
+    best = None
+    for symbol, (path, start, end) in definitions.items():
+        if path != relative or not start <= line <= end:
+            continue
+        if best is None or (end - start) < (best[2] - best[1]):
+            best = (symbol, start, end)
+    return best[0] if best else None
+
+
+def index_short(symbol, names):
+    """A symbol string trimmed to what identifies it in output.
+
+    A SCIP symbol is `scheme manager package version descriptor`, and the
+    descriptor itself can contain spaces inside backticks (`impl#[`Round<S,
+    D>`]method().`), so only the first four spaces separate fields.
+    """
+    parts = symbol.split(" ", 4)
+    tail = parts[4] if len(parts) == 5 else symbol
+    tail = tail.rstrip(".")
+    display = names.get(symbol)
+    if display and display not in tail:
+        return f"{tail} ({display})"
+    return tail
+
+
+def cmd_code(args):
+    """Entity identification over the SCIP index (SPEC section 5.7)."""
+    repo = repo_root()
+    sl_dir = repo / SL
+    if args.query == "build":
+        return 0 if index_build(repo, sl_dir, args.subsystem) else 1
+    index = index_path(sl_dir)
+    if not index.exists():
+        say(
+            f"no code index at {index.relative_to(repo)}.\n"
+            "Build it with `just code-index`, or `statelens.py code build`."
+        )
+        return 1
+    occurrences, definitions, names = index_load(index)
+    symbols = index_match(occurrences, definitions, names, args.name)
+    if not symbols:
+        print(f"no symbol matches {args.name!r} in {index.relative_to(repo)}")
+        return 1
+    by_symbol = collections.defaultdict(list)
+    for symbol, path, line, is_def in occurrences:
+        by_symbol[symbol].append((path, line, is_def))
+    boundaries = {}
+
+    def wanted(path, line):
+        return args.tests or not index_is_test(repo, boundaries, path, line)
+
+    print(f"{len(symbols)} symbol(s) matching {args.name!r}\n")
+    for symbol in symbols[:CODE_HITS_LIMIT]:
+        where = definitions.get(symbol)
+        sites = sorted(set(by_symbol.get(symbol, [])))
+        kept = [site for site in sites if wanted(site[0], site[1])]
+        hidden = len(sites) - len(kept)
+        header = index_short(symbol, names)
+        if args.query == "defs":
+            print(f"{header}")
+            if where:
+                print(f"    {where[0]}:{where[1]}-{where[2]}")
+            else:
+                print("    (no definition in this crate)")
+            continue
+        if args.query == "refs":
+            print(f"{header}    {len(kept)} shown, {hidden} in test code")
+            for path, line, is_def in kept:
+                print(f"    {'def' if is_def else 'ref'}  {path}:{line}")
+            print()
+            continue
+        if args.query == "callers":
+            print(f"{header}")
+            found = 0
+            for path, line, is_def in kept:
+                if is_def or (where and path == where[0] and where[1] <= line <= where[2]):
+                    continue  # the definition itself, and its own body
+                holder = index_enclosing(definitions, path, line)
+                label = index_short(holder, names) if holder else "(top level)"
+                print(f"    {path}:{line}  in {label}")
+                found += 1
+            if not found:
+                print("    (no call site outside its own body)")
+            print()
+            continue
+        if args.query == "callees":
+            if not where:
+                print(f"{header}\n    (no definition in this crate)\n")
+                continue
+            path, start, end = where
+            print(f"{header}    {path}:{start}-{end}")
+            # A callee defined outside the indexed crate has no definition
+            # here, which is how `!` (`bool::not`) and `Option::and_then` are
+            # told from this crate's own functions. --all keeps them.
+            inner = sorted(
+                {
+                    (other, line)
+                    for other, opath, line, is_def in occurrences
+                    if opath == path and start <= line <= end and other != symbol
+                    and not is_def and other.endswith(SCIP_CALLABLE)
+                    and (args.all or other in definitions)
+                },
+                key=lambda item: item[1],
+            )
+            for other, line in inner:
+                print(f"    {path}:{line}  {index_short(other, names)}")
+            if not inner:
+                print("    (calls nothing defined in this crate)")
+            print()
+    dropped = max(0, len(symbols) - CODE_HITS_LIMIT)
+    if dropped:
+        print(f"{dropped} further symbol(s) not shown")
+    return 0
+
+
+
+# --- Syntax trees (SPEC section 5.8) -----------------------------------------
+#
+# `rust-analyzer parse` reads one file on stdin and prints its concrete syntax
+# tree with a byte span on every node. It needs no cargo, no project and no
+# index, and costs about a tenth of a second for a file of two thousand lines,
+# so it answers the two questions the SCIP index cannot.
+#
+# The first is polarity. The index records that a line mentions an entity, not
+# whether it reads or writes it, because rust-analyzer leaves SCIP's read and
+# write role bits unset. An assignment is a shape in the tree: the token after
+# the field expression is `=`.
+#
+# The second is comments. A comment is a token here, so it can be told from the
+# same words in code or in a string, and the item it sits above is the next
+# node after it. A comment about an ordering, a race or a case that cannot
+# happen names the state it is about, which is what makes it a beacon.
+#
+# The tree carries no types: `$x.armed` is the same shape whichever type owns
+# `armed`. Identity comes from the index, shape from the tree.
+
+AST_NODE = re.compile(r'^(\s*)([A-Z_0-9]+)@(\d+)\.\.(\d+)(?: "(.*)")?$')
+AST_TRIVIA = ("WHITESPACE", "COMMENT")
+# `x = 1` and every `x op= 1`.
+AST_ASSIGN = (
+    "EQ", "PLUSEQ", "MINUSEQ", "STAREQ", "SLASHEQ", "PERCENTEQ",
+    "AMPEQ", "PIPEEQ", "CARETEQ", "SHLEQ", "SHREQ",
+)
+AST_ITEMS = (
+    "FN", "STRUCT", "ENUM", "IMPL", "TRAIT", "VARIANT", "RECORD_FIELD",
+    "LET_STMT", "EXPR_STMT", "MATCH_ARM", "IF_EXPR", "WHILE_EXPR", "CONST",
+    "TYPE_ALIAS", "MACRO_CALL", "USE",
+)
+AST_NOTE_DEFAULT = r"race|order|recover|replay|cannot happen|must not|never|stale|evict|assume"
+
+
+def ast_available():
+    return shutil.which("rust-analyzer") is not None
+
+
+def ast_tree(path):
+    """Parse one file. Returns (nodes, line_of, source bytes).
+
+    A node is (depth, kind, start, end). `line_of` maps a byte offset to a
+    1-based line. Token text in the dump is elided when long, so callers slice
+    the source instead of trusting it.
+    """
+    source = path.read_bytes()
+    result = subprocess.run(
+        ["rust-analyzer", "parse"], input=source, capture_output=True
+    )
+    if result.returncode != 0:
+        raise Abort(2, f"rust-analyzer parse failed on {path}")
+    starts, offset = [0], 0
+    for line in source.split(b"\n"):
+        offset += len(line) + 1
+        starts.append(offset)
+
+    def line_of(position):
+        low, high = 0, len(starts) - 1
+        while low < high:
+            middle = (low + high + 1) // 2
+            if starts[middle] <= position:
+                low = middle
+            else:
+                high = middle - 1
+        return low + 1
+
+    nodes = []
+    for raw in result.stdout.decode("utf-8", "replace").splitlines():
+        found = AST_NODE.match(raw)
+        if found:
+            indent, kind, start, end, _text = found.groups()
+            nodes.append((len(indent), kind, int(start), int(end)))
+    return nodes, line_of, source
+
+
+def ast_next_significant(nodes, index, after):
+    """The first node at or past byte `after` that is not trivia."""
+    for position in range(index, len(nodes)):
+        _depth, kind, start, _end = nodes[position]
+        if start < after or kind in AST_TRIVIA:
+            continue
+        return nodes[position]
+    return None
+
+
+def ast_field_ops(path, name):
+    """Where `name` is written, read, or given an initial value.
+
+    Returns three sorted line lists. A write is an assignment to a field or
+    path expression; an init is a struct literal field; everything else that
+    names the entity is a read. A write through `&mut` is reported as a read,
+    which is the known limit of reading shape alone.
+    """
+    nodes, line_of, source = ast_tree(path)
+    writes, reads, inits = set(), set(), set()
+    for index, (depth, kind, start, end) in enumerate(nodes):
+        if kind != "IDENT" or source[start:end].decode("utf-8", "replace") != name:
+            continue
+        line = line_of(start)
+        # `NAME` is a declaration, `NAME_REF` a use. A declaration of the same
+        # spelling is a different entity -- the method beside the field of that
+        # name -- and the tree carries no types to tell them apart, so skip it.
+        parent = nodes[index - 1] if index else None
+        if parent is None or parent[1] != "NAME_REF":
+            continue
+        # Walk outward to the expression that owns this identifier. It has to
+        # contain it: the `self` in `self.f = x` is a PATH_EXPR that ends before
+        # the field name, and taking it would put `.` where `=` belongs.
+        owner = None
+        for back in range(index - 1, -1, -1):
+            up_depth, up_kind, up_start, up_end = nodes[back]
+            if up_depth >= depth or up_end < end:
+                continue
+            if up_kind in ("FIELD_EXPR", "RECORD_EXPR_FIELD", "RECORD_FIELD"):
+                owner = (back, up_kind, up_end)
+                break
+            if up_kind == "PATH_EXPR":
+                owner = (back, up_kind, up_end)
+                break
+            if up_depth < depth - 4:
+                break
+        if owner is None:
+            reads.add(line)
+            continue
+        _back, owner_kind, owner_end = owner
+        if owner_kind in ("RECORD_EXPR_FIELD", "RECORD_FIELD"):
+            inits.add(line)
+            continue
+        following = ast_next_significant(nodes, index, owner_end)
+        if following and following[1] in AST_ASSIGN:
+            writes.add(line)
+        else:
+            reads.add(line)
+    return sorted(writes), sorted(reads), sorted(inits)
+
+
+def ast_notes(path, pattern):
+    """Comment blocks matching `pattern`, with the item each sits above.
+
+    Consecutive comment tokens are one block, because a doc comment spanning
+    several lines is several tokens and only the block as a whole documents the
+    item below it.
+    """
+    nodes, line_of, source = ast_tree(path)
+    wanted = re.compile(pattern, re.I)
+    blocks = []
+    index = 0
+    while index < len(nodes):
+        _depth, kind, start, end = nodes[index]
+        if kind != "COMMENT":
+            index += 1
+            continue
+        first, last, after = start, end, index + 1
+        while after < len(nodes):
+            _d, next_kind, next_start, next_end = nodes[after]
+            if next_kind == "COMMENT":
+                last, after = next_end, after + 1
+            elif next_kind == "WHITESPACE" and source[next_start:next_end].count(b"\n") <= 1:
+                after += 1
+            else:
+                break
+        text = source[first:last].decode("utf-8", "replace")
+        if wanted.search(text):
+            item = None
+            for position in range(after, min(after + 40, len(nodes))):
+                _d, item_kind, item_start, _e = nodes[position]
+                if item_kind in AST_TRIVIA or item_start < last:
+                    continue
+                if item_kind in AST_ITEMS:
+                    item = (item_kind, line_of(item_start))
+                    break
+            if item is None:
+                # A doc comment is leading trivia of the item it documents, so
+                # that item begins before the comment rather than after it.
+                for position in range(index - 1, -1, -1):
+                    _d, item_kind, item_start, item_end = nodes[position]
+                    if item_kind in AST_ITEMS and item_start <= first and item_end >= last:
+                        item = (item_kind, line_of(item_start))
+                        break
+            blocks.append((line_of(first), text, item))
+        index = after
+    return blocks
+
+
+def ast_files(repo, sl_dir, name, explicit):
+    """Which files to parse: the ones given, else the ones the index names.
+
+    Parsing every source of the crate costs about ten seconds; the index says
+    which two or three files mention the entity, so scope narrows to those.
+    """
+    if explicit:
+        return [Path(one) for one in explicit]
+    index = index_path(sl_dir)
+    if not index.exists():
+        say("no code index, so every subsystem source is parsed; pass paths to narrow it")
+        found = []
+        for subsystem in SUBSYSTEMS:
+            found += sorted((repo / "consensus/src" / subsystem).rglob("*.rs"))
+        return [one.relative_to(repo) for one in found]
+    occurrences, definitions, names = index_load(index)
+    symbols = set(index_match(occurrences, definitions, names, name))
+    return sorted(
+        {Path(path) for symbol, path, _line, _def in occurrences if symbol in symbols}
+    )
+
+
+def cmd_ast(args):
+    """Syntax tree queries over the code (SPEC section 5.8)."""
+    repo = repo_root()
+    sl_dir = repo / SL
+    if not ast_available():
+        say(
+            "rust-analyzer is not installed, so syntax trees are unavailable.\n"
+            "Install it with `rustup component add rust-analyzer`."
+        )
+        return 1
+    if args.query == "notes":
+        targets = [Path(one) for one in args.paths] if args.paths else None
+        if targets is None:
+            targets = []
+            for subsystem in SUBSYSTEMS:
+                targets += [
+                    one.relative_to(repo)
+                    for one in sorted((repo / "consensus/src" / subsystem).rglob("*.rs"))
+                ]
+        total = 0
+        boundaries = {}
+        for relative in targets:
+            blocks = ast_notes(repo / relative, args.pattern)
+            for line, text, item in blocks:
+                if not args.tests and index_is_test(repo, boundaries, str(relative), line):
+                    continue
+                where = f"{item[0]}@{item[1]}" if item else "-"
+                first = text.strip().splitlines()[0][:96]
+                print(f"{relative}:{line}  {where:22s} {first}")
+                total += 1
+        print(f"\n{total} comment block(s) matching {args.pattern!r}")
+        return 0
+    targets = ast_files(repo, sl_dir, args.name, args.paths)
+    if not targets:
+        print(f"no file mentions {args.name!r}")
+        return 1
+    boundaries = {}
+    shown = 0
+    for relative in targets:
+        writes, reads, inits = ast_field_ops(repo / relative, args.name)
+        rows = (
+            [("write", line) for line in writes]
+            + [("init", line) for line in inits]
+            + [("read", line) for line in reads]
+        )
+        for kind, line in rows:
+            if not args.tests and index_is_test(repo, boundaries, str(relative), line):
+                continue
+            if kind != "write" and args.writes_only:
+                continue
+            print(f"{kind:6s} {relative}:{line}")
+            shown += 1
+    print(f"\n{shown} site(s) for {args.name!r} in {len(targets)} file(s)")
+    return 0
+
+
 def cmd_clean(args):
     """Undo what a campaign wrote, so a checkout can be reused (SPEC section 7.13)."""
     repo = repo_root()
@@ -1658,6 +2259,7 @@ class Campaign:
     def run(self):
         steps = (
             ("materialize", self.materialize),
+            ("index", self.code_index),
             ("instrument", self.instrument),
             ("build", self.build),
             ("test", self.test_gate),
@@ -1837,6 +2439,18 @@ class Campaign:
         )
 
     # Section 7.2 and section 8.3, edits M1 to M3.
+
+    def code_index(self):
+        """Index the crate before it is instrumented (SPEC section 5.7).
+
+        The index is built here, not during instrumentation, because the agent
+        edits the files it queries: inserting a probe adds lines but does not
+        change which function calls which, so an index of the pristine tree
+        stays correct for the whole sweep. A missing index degrades the sweep
+        to search and reading rather than failing it.
+        """
+        if not index_build(self.repo, self.sl_dir, self.profile_name):
+            say("continuing without a code index; the agent falls back to search")
 
     def materialize(self):
         edits = materialize_edits(self.repo, self.sl_dir, self.profile_name)
@@ -2194,6 +2808,71 @@ def main(argv):
     kb_show_parser.add_argument("identifier", metavar="IDENTIFIER")
     # Section names contain spaces ("Root Cause"), so accept them unquoted too.
     kb_show_parser.add_argument("section", nargs="*", metavar="SECTION")
+    code = commands.add_parser(
+        "code",
+        help="identify entities in the code: definitions, references, callers, callees",
+        description=(
+            "Queries the SCIP index of the consensus crate (SPEC section 5.7). "
+            "Names in this crate collide -- `proposal` is five different methods -- "
+            "so a symbol index answers what text search cannot. Test sites are "
+            "hidden unless --tests is passed, because two thirds of the crate is "
+            "test code."
+        ),
+    )
+    code_queries = code.add_subparsers(dest="query", required=True, parser_class=Parser)
+    code_build = code_queries.add_parser("build", help="write the index (several minutes)")
+    code_build.add_argument(
+        "--subsystem",
+        choices=SUBSYSTEMS,
+        default="simplex",
+        help="subsystem whose campaign the index serves (default: simplex)",
+    )
+    for name, helptext in (
+        ("defs", "where a name is defined, with the extent of each definition"),
+        ("refs", "every reference to a name, definition included"),
+        ("callers", "call sites outside the definition, with the enclosing function"),
+        ("callees", "what a definition references inside its own extent"),
+    ):
+        query = code_queries.add_parser(name, help=helptext)
+        query.add_argument("name", metavar="NAME", help="a display name or part of a symbol")
+        query.add_argument(
+            "--tests", action="store_true", help="include sites in test code"
+        )
+        query.add_argument(
+            "--all",
+            action="store_true",
+            help="for callees, include functions defined outside this crate",
+        )
+    ast = commands.add_parser(
+        "ast",
+        help="read the syntax tree: which sites write an entity, and what comments say",
+        description=(
+            "Queries `rust-analyzer parse` (SPEC section 5.8). The code index says "
+            "where an entity occurs; the syntax tree says whether a site reads or "
+            "writes it, and which item a comment documents. No cargo and no index "
+            "are needed, though an index narrows which files are parsed."
+        ),
+    )
+    ast_queries = ast.add_subparsers(dest="query", required=True, parser_class=Parser)
+    ast_sites = ast_queries.add_parser(
+        "sites", help="where a field or binding is written, initialized and read"
+    )
+    ast_sites.add_argument("name", metavar="NAME", help="a field or variable name")
+    ast_sites.add_argument("paths", nargs="*", metavar="PATH", help="files to parse")
+    ast_sites.add_argument("--tests", action="store_true", help="include test code")
+    ast_sites.add_argument(
+        "--writes-only", action="store_true", help="only the sites that assign it"
+    )
+    ast_notes_parser = ast_queries.add_parser(
+        "notes", help="comment blocks matching a pattern, with the item each documents"
+    )
+    ast_notes_parser.add_argument(
+        "--pattern",
+        default=AST_NOTE_DEFAULT,
+        help="case-insensitive regular expression (default: the beacon words)",
+    )
+    ast_notes_parser.add_argument("paths", nargs="*", metavar="PATH", help="files to parse")
+    ast_notes_parser.add_argument("--tests", action="store_true", help="include test code")
     campaign = commands.add_parser(
         "campaign",
         help="instrument this checkout, build the StateLens targets, run the test gate (Phase 2)",
@@ -2221,6 +2900,10 @@ def main(argv):
             return cmd_extract(args)
         if args.command == "kb":
             return cmd_kb(args)
+        if args.command == "code":
+            return cmd_code(args)
+        if args.command == "ast":
+            return cmd_ast(args)
         if args.command == "clean":
             return cmd_clean(args)
         if args.command == "lint-examples":

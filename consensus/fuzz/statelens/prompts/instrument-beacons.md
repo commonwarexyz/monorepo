@@ -5,7 +5,8 @@ different internal states. Do not add assertions in this task.
 
 This is a loop, not a checklist. At each step you choose one action, look at what it
 returned, and choose again. Your actions are: read and search the code of this component;
-query the knowledge base with one of the commands below; add a probe.
+identify an entity with the code index; query the knowledge base with one of the commands
+below; add a probe.
 
 Reading the code leads, because that is where a candidate announces itself. Query the
 knowledge base when your hypothesis needs developer context the source does not carry.
@@ -31,6 +32,36 @@ alone.
 A finding tells you which states have gone wrong before, so a state it describes is worth
 probing even when the code looks unremarkable. It never tells you to add an assertion: a
 finding is evidence, not a property, and this task adds probes only.
+
+### The code index
+
+    python3 scripts/statelens.py code defs|refs|callers|callees <NAME> [--tests]
+
+Names in this crate collide: `proposal` is five different methods, and `broadcast_notarize` is
+both a field and a method of the same type. So when a name turns up in more places than you
+expect, it is probably several entities, and `refs` separates them. Before you probe a field,
+ask `refs` for every place that touches it, because the site you would miss by reading one
+function is the one worth probing. To learn which actor sends a mailbox message, ask for the
+`callers` of the mailbox method. Two thirds of this crate is test code and the index hides it
+unless you pass `--tests`.
+
+If the index is missing the campaign said so, and search and reading are the fallback.
+
+### The syntax tree
+
+    python3 scripts/statelens.py ast sites <NAME>    # written here, read there
+    python3 scripts/statelens.py ast notes [PATH]    # comments about races and recovery
+
+The index says a line mentions a field; it does not say whether the line changes it. Before
+you probe a transition, ask `ast sites` for the write sites, because those are the
+transitions and the rest are decisions. `ast notes` is the fastest way to do step 1 below:
+it finds the comments about orderings, races, recovery and cases that cannot happen, and
+names the item each one documents.
+
+When a candidate needs state followed across functions, actors or a restart, work through
+`prompts/discover-flow.md`. There is no data-flow tool here, so you are the one simulating
+the flow, and that method says how to propose a step and then make the tools confirm or
+reject it.
 
 ### Beacons in the code
 
