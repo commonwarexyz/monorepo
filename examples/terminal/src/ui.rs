@@ -665,8 +665,7 @@ async fn scripted_payment<E: Env>(
     unreachable!("payment attempt budget is nonzero")
 }
 
-/// Starts one asynchronous close and drives it to the operator's certified
-/// finalization, returning the closed epoch.
+/// Drives an owned work epoch to the operator's certified finalization.
 async fn close_epoch<E: Env>(
     network: &E,
     operator: SocketAddr,
@@ -680,7 +679,7 @@ async fn close_epoch<E: Env>(
         format_args!("epoch {epoch}; waiting for certification and finality..."),
     );
     loop {
-        match agent.poll_close(network, operator, close.epoch).await? {
+        match agent.poll_close(network, operator, epoch).await? {
             PollCloseResponse::NoEvent => network.sleep(Duration::from_millis(10)).await,
             PollCloseResponse::Finished(finished) => {
                 ensure!(
@@ -695,7 +694,7 @@ async fn close_epoch<E: Env>(
                         finished.dealing_bytes as f64 / 1_000.0
                     ),
                 );
-                return Ok(close.epoch);
+                return Ok(epoch);
             }
             PollCloseResponse::Failed { epoch, error } => {
                 anyhow::bail!(
@@ -710,15 +709,14 @@ async fn close_epoch<E: Env>(
 /// Waits for the script's sole deposit to reach the certified finalized head.
 async fn finalized_deposit<E: Env>(
     network: &E,
-    operator: SocketAddr,
     chain: &mut Client,
     agent: &mut Agent,
     expected: u64,
 ) -> Result<u64> {
     for _ in 0..FINALIZE_ATTEMPTS {
-        if let Ok((status, opening)) = agent.finalized_head(network, chain, operator).await {
+        if let Ok((status, opening)) = agent.validator_head(network, chain).await {
             ensure!(!status.hard_faulted, "the deposit deployment hard-faulted");
-            if opening.balance.get() == expected
+            if opening.is_some_and(|opening| opening.balance.get() == expected)
                 && let Some(epoch) = status.last_finalized
             {
                 return Ok(epoch);
@@ -821,14 +819,8 @@ pub(crate) async fn scripted<E: Env>(
 
     // The withdrawal signs the finalized root containing this deposit. Wait for
     // the operator to observe that finality before sending the fresh request.
-    let deposit_epoch = finalized_deposit(
-        network,
-        operator,
-        &mut chain,
-        &mut agent,
-        start + deposit.amount,
-    )
-    .await?;
+    let deposit_epoch =
+        finalized_deposit(network, &mut chain, &mut agent, start + deposit.amount).await?;
     close_epoch(network, operator, &mut agent, deposit_epoch).await?;
     walkthrough::event(
         "Balance",
@@ -854,6 +846,7 @@ pub(crate) async fn scripted<E: Env>(
     }
     let withdrawal = withdrawal
         .context("the signed withdrawal remains unresolved; retry keeps the saved request")?;
+
     walkthrough::event(
         "Withdrawal",
         format_args!("3 queued for epoch {withdrawal}; claim after finality"),
@@ -865,10 +858,8 @@ pub(crate) async fn scripted<E: Env>(
         "The operator returns receipts before settlement.",
     );
 
-    // An interrupted run can also lose a staged payment's response. Resubmit
-    // the exact staged bytes here, after this run's deposit and withdrawal:
-    // the resumed send registers the epoch and becomes its first payment,
-    // which freezes the boundary that intake had to enter first.
+    // An interrupted run can lose a staged payment's response. The wallet resolves that
+    // exact authorization before this walkthrough creates another payment intent.
     if let Some(outcomes) = agent
         .resume_pending_payment(network, &mut chain, operator)
         .await
@@ -1062,6 +1053,8 @@ pub(crate) async fn scripted<E: Env>(
         format_args!("withdrawal of 2 queued for epoch {eve_withdrawal}"),
     );
 
+    // Eve's withdrawal can outlive the payer's last signing context.
+    agent.head(network, &mut chain, operator, 1).await?;
     let successor = scripted_payment(network, operator, &mut chain, &mut agent, &[(1, 1)]).await?;
     walkthrough::event(
         agent.name(),
@@ -1070,11 +1063,7 @@ pub(crate) async fn scripted<E: Env>(
             successor.epoch
         ),
     );
-    // The successor payment registered the next epoch's payment context, so
-    // close that epoch too, inside its admission runway: an activated context
-    // left registered would expire its admission deadline and permanently
-    // hard-fault the deployment.
-    close_epoch(
+    let last_close = close_epoch(
         network,
         operator,
         &mut agent,
@@ -1091,23 +1080,22 @@ pub(crate) async fn scripted<E: Env>(
         format_args!("{} returned to Eve onchain", eve_release.amount),
     );
 
-    // Every close completes only on its certified finalization, which
-    // retires that epoch's registration record, and nothing after the last
-    // close registers, so only validator serving lag separates this read from
-    // the proven absence.
-    let mut retired = false;
-    for _ in 0..100 {
-        if chain.registration(network).await?.is_none() {
-            retired = true;
+    // Finality covers the walkthrough's work while the operator continues serving successors.
+    let mut finalized = false;
+    for _ in 0..EFFECT_ATTEMPTS {
+        let status = chain.status(network).await?;
+        ensure!(!status.hard_faulted, "the deployment hard-faulted");
+        if status
+            .last_finalized
+            .is_some_and(|epoch| epoch >= last_close)
+        {
+            finalized = true;
             break;
         }
-        network.sleep(Duration::from_millis(100)).await;
+        network.sleep(POLL).await;
     }
-    ensure!(retired, "a live registration outlived the walkthrough");
-    walkthrough::event(
-        "Complete",
-        "all live closes finalized; no pending epoch deadlines",
-    );
+    ensure!(finalized, "the walkthrough's last close did not finalize");
+    walkthrough::event("Complete", "payments and withdrawals finalized");
 
     Ok(())
 }

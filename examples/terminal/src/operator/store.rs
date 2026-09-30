@@ -3,7 +3,7 @@
 #[cfg(test)]
 use crate::protocol::INITIAL_BALANCE;
 use crate::{
-    chain::state::Intake,
+    chain::state::{Intake, RegistrationRecord},
     protocol::{
         Acceptance, AcceptedEntry, Account, AccountIdentity, Ack, DepositEvent, Entry, Key,
         MAX_ACCEPTED_PAYMENTS, MAX_DEPOSIT_EVENTS, MAX_DESTINATION_BYTES, MAX_ENTRIES,
@@ -943,6 +943,13 @@ impl Store {
             .transpose()
     }
 
+    pub(crate) fn successor_withdrawals(&self) -> Result<WithdrawalBatch<Key, Digest>> {
+        epoch_withdrawals(
+            &self.connection,
+            self.epoch()?.checked_add(1).context("epoch overflow")?,
+        )
+    }
+
     pub(crate) fn staged_withdrawal(
         &self,
         account: &Key,
@@ -950,7 +957,7 @@ impl Store {
         self.connection
             .query_row(
                 "SELECT epoch, applied_amount, length(encoded), encoded
-                 FROM withdrawals WHERE epoch = ?1 AND account = ?2",
+                 FROM withdrawals WHERE epoch >= ?1 AND account = ?2 ORDER BY epoch LIMIT 1",
                 params![sql_u64(self.epoch()?, "epoch")?, account.as_ref()],
                 |row| {
                     Ok((
@@ -1157,58 +1164,57 @@ impl Store {
         )
     }
 
-    /// Adopts the live epoch's certified registration record: the floors it
-    /// captured, its deadlines once settlement assigned them, the end of the
-    /// inbox prefix it pulled, and the inbox length when it executed. The
-    /// payment context commits none of them, so adoption leaves it unchanged.
+    /// Freezes the successor's inbox prefix before its registration can escape.
+    pub(crate) fn begin_successor(
+        &mut self,
+        expected: &EpochPaymentContext,
+        end: u64,
+    ) -> Result<()> {
+        mutate(&mut self.connection, "prepare successor", |transaction| {
+            let epoch = metadata_epoch(transaction)?;
+            ensure!(
+                metadata_payment_context(transaction)?.as_ref() == Some(expected),
+                "successor predecessor changed"
+            );
+            let successor = epoch.checked_add(1).context("epoch overflow")?;
+            let start = live_intake(transaction)?.end;
+            ensure!(
+                start <= end && end <= metadata_observed(transaction)?,
+                "successor inbox end is outside observed intake"
+            );
+            if let Some(retained) = registration_end(transaction, successor)? {
+                ensure!(
+                    retained == end,
+                    "successor publication changed its inbox end"
+                );
+            } else {
+                transaction.execute(
+                    "INSERT INTO registrations(epoch, intake_end) VALUES(?1, ?2)",
+                    params![
+                        sql_u64(successor, "successor epoch")?,
+                        sql_u64(end, "successor inbox end")?
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn successor_end(&self) -> Result<Option<u64>> {
+        registration_end(
+            &self.connection,
+            self.epoch()?.checked_add(1).context("epoch overflow")?,
+        )
+    }
+
+    /// Adopts the certified boundary of the live epoch.
     pub(crate) fn adopt_registration(
         &mut self,
         expected: &EpochPaymentContext,
-        floors: commonware_clearing::bajillion::logs::Floors,
-        deadlines: Option<(u64, u64)>,
-        end: u64,
-        intake: u64,
+        record: &RegistrationRecord,
     ) -> Result<()> {
         mutate(&mut self.connection, "chain registration", |transaction| {
-            let epoch = metadata_epoch(transaction)?;
-            ensure!(
-                epoch == expected.epoch(),
-                "the registration targets another epoch"
-            );
-            if let Some(stored) = metadata_payment_context(transaction)? {
-                ensure!(
-                    stored == *expected,
-                    "stored payment context differs from the live registration"
-                );
-            }
-            let (admission, challenge) = match deadlines {
-                Some((admission, challenge)) => (
-                    Some(sql_u64(admission, "admission deadline")?),
-                    Some(sql_u64(challenge, "challenge deadline")?),
-                ),
-                None => (None, None),
-            };
-            transaction.execute(
-                "INSERT INTO registrations(
-                     epoch, floors, admission_deadline, challenge_deadline, intake_end, intake
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(epoch) DO UPDATE
-                 SET floors = ?2, admission_deadline = ?3, challenge_deadline = ?4,
-                     intake_end = COALESCE(intake_end, ?5), intake = ?6",
-                params![
-                    sql_u64(epoch, "epoch")?,
-                    floors.encode().as_ref(),
-                    admission,
-                    challenge,
-                    sql_u64(end, "inbox end")?,
-                    sql_u64(intake, "inbox length")?,
-                ],
-            )?;
-            ensure!(
-                live_intake(transaction)?.end == end,
-                "the adopted inbox end differs from the published boundary"
-            );
-            Ok(())
+            adopt_registration(transaction, expected, record)
         })
     }
 
@@ -1532,17 +1538,6 @@ impl Store {
         published(&self.connection, self.epoch()?)
     }
 
-    /// Whether the unpublished live boundary leaves observed inbox rows untaken.
-    pub(crate) fn blocked(&self) -> Result<bool> {
-        if self.published()? {
-            return Ok(false);
-        }
-        self.connection
-            .prepare_cached("SELECT EXISTS(SELECT 1 FROM intake)")?
-            .query_row([], |row| row.get(0))
-            .map_err(Into::into)
-    }
-
     /// Returns the observed intake no epoch has taken, in index order.
     pub(crate) fn untaken(&self) -> Result<Vec<(u64, Intake)>> {
         let mut statement = self
@@ -1714,14 +1709,20 @@ impl Store {
             &mut self.connection,
             "unregistered withdrawal",
             |transaction| {
-                let epoch = metadata_epoch(transaction)?;
+                let live = metadata_epoch(transaction)?;
+                let epoch = expected.epoch();
                 ensure!(
-                    epoch == expected.epoch()
-                        && epoch == replacement.epoch()
+                    epoch == replacement.epoch()
                         && expected.operator() == replacement.operator()
-                        && metadata_payment_context(transaction)?.as_ref() == Some(expected),
+                        && (epoch == live || live.checked_add(1) == Some(epoch)),
                     "unregistered withdrawal context changed"
                 );
+                if epoch == live {
+                    ensure!(
+                        metadata_payment_context(transaction)?.as_ref() == Some(expected),
+                        "unregistered withdrawal anchor changed"
+                    );
+                }
                 let epoch_sql = sql_u64(epoch, "epoch")?;
                 let adopted: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM registrations WHERE epoch = ?1 AND floors IS NOT NULL)
@@ -1739,15 +1740,17 @@ impl Store {
 
                 // Unpublishing lets the boundary take intake again before it republishes.
                 transaction.execute("DELETE FROM registrations WHERE epoch = ?1", [epoch_sql])?;
-                transaction.execute("UPDATE operator_meta SET payment_context = ?1, live_liability = ?2 WHERE singleton = 1",
+                if epoch == live {
+                    transaction.execute("UPDATE operator_meta SET payment_context = ?1, live_liability = ?2 WHERE singleton = 1",
                 params![replacement.encode().as_ref(), liability.to_be_bytes().as_slice()])?;
+                }
                 Ok(())
             },
         )
     }
 
-    pub(crate) fn withdrawals_frozen(&self) -> Result<bool> {
-        withdrawals_frozen(&self.connection, self.epoch()?)
+    pub(crate) fn withdrawals_frozen(&self, epoch: u64) -> Result<bool> {
+        withdrawals_frozen(&self.connection, epoch)
     }
 
     pub(crate) fn stage_withdrawal(
@@ -1775,12 +1778,19 @@ impl Store {
         );
 
         mutate(&mut self.connection, "withdrawal", |transaction| {
-            let epoch = metadata_epoch(transaction)?;
-            ensure!(epoch == expected.epoch(), "withdrawal context is stale");
+            let live = metadata_epoch(transaction)?;
+            let epoch = expected.epoch();
+            let successor = live.checked_add(1) == Some(epoch);
             ensure!(
-                metadata_payment_context(transaction)?.as_ref() == Some(expected),
-                "withdrawal anchor is stale"
+                epoch == live || (successor && published(transaction, live)?),
+                "withdrawal context is stale"
             );
+            if !successor {
+                ensure!(
+                    metadata_payment_context(transaction)?.as_ref() == Some(expected),
+                    "withdrawal anchor is stale"
+                );
+            }
 
             // A registration may reach settlement before its read-back or first receipt.
             // Published withdrawal boundaries remain fixed across those crash cuts.
@@ -1789,17 +1799,38 @@ impl Store {
                 "withdrawals are frozen once registration publication begins"
             );
 
-            let mut liability = metadata_live_liability(transaction)?;
-            stage_request(transaction, epoch, request, queued, None, &mut liability)?;
-            transaction.execute(
-                "UPDATE operator_meta
-                 SET payment_context = ?1, live_liability = ?2
-                 WHERE singleton = 1",
-                params![
-                    replacement.encode().as_ref(),
-                    liability.to_be_bytes().as_slice(),
-                ],
-            )?;
+            if successor {
+                if !queued {
+                    let account = eligible_account(transaction, live, request.account())?;
+                    ensure!(
+                        account.predecessor > 0,
+                        "withdrawal account is absent from the predecessor"
+                    );
+                    if let WithdrawalAction::Amount(amount) = request.body().action() {
+                        ensure!(
+                            account.current >= amount.get(),
+                            "withdrawal exceeds the live balance"
+                        );
+                    }
+                }
+                // A queued request can replace an unreserved extra before publication.
+                let stored = transaction.execute(
+                    "INSERT INTO withdrawals(epoch, account, request_id, applied_amount, encoded, idx)
+                     VALUES(?1, ?2, ?3, NULL, ?4, NULL)
+                     ON CONFLICT(epoch, account) DO UPDATE
+                     SET request_id = excluded.request_id, encoded = excluded.encoded
+                     WHERE ?5 AND withdrawals.applied_amount IS NULL AND withdrawals.idx IS NULL",
+                    params![sql_u64(epoch, "epoch")?, request.account().as_ref(), request.id::<Sha256>().digest().as_ref(), request.encode().as_ref(), queued],
+                )?;
+                ensure!(stored == 1, "the successor withdrawal could not be staged");
+            } else {
+                let mut liability = metadata_live_liability(transaction)?;
+                stage_request(transaction, epoch, request, queued, None, &mut liability)?;
+                transaction.execute(
+                    "UPDATE operator_meta SET payment_context = ?1, live_liability = ?2 WHERE singleton = 1",
+                    params![replacement.encode().as_ref(), liability.to_be_bytes().as_slice()],
+                )?;
+            }
             Ok(StagedWithdrawal {
                 epoch,
                 account: request.account().clone(),
@@ -1841,6 +1872,7 @@ impl Store {
         successor: &EpochContext<Key, Digest>,
         takes: &[Take],
         closing_end: u64,
+        record: &RegistrationRecord,
     ) -> Result<()> {
         #[cfg(test)]
         let fail_commit = std::mem::take(&mut self.fail_cutover_commit);
@@ -1901,6 +1933,17 @@ impl Store {
                 );
             }
 
+            // Future authorizations reserve no predecessor balances. Install their account
+            // effects only after the predecessor tail, including deferred withdrawals, is fixed.
+            let extras = epoch_withdrawals(transaction, next_epoch)?;
+            transaction.execute(
+                "DELETE FROM withdrawals WHERE epoch = ?1",
+                [sql_u64(next_epoch, "successor epoch")?],
+            )?;
+            for request in extras.requests() {
+                stage_request(transaction, next_epoch, request, true, None, &mut liability)?;
+            }
+
             // The successor takes intake only after the closing tail is settled, so no deferred
             // withdrawal can consume its deposits.
             let mut deposit_events = 0;
@@ -1949,6 +1992,7 @@ impl Store {
                     sql_u64(closing_end, "closing inbox end")?,
                 ],
             )?;
+            adopt_registration(transaction, successor.payment(), record)?;
             Ok(())
         })?;
         #[cfg(test)]
@@ -2995,6 +3039,55 @@ fn metadata_observed(connection: &Connection) -> Result<u64> {
     from_sql_u64(observed, "observed inbox")
 }
 
+// The immutable inbox end recorded before a boundary can be published.
+fn registration_end(connection: &Connection, epoch: u64) -> Result<Option<u64>> {
+    connection
+        .query_row(
+            "SELECT intake_end FROM registrations WHERE epoch = ?1",
+            [sql_u64(epoch, "epoch")?],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten()
+        .map(|end| from_sql_u64(end, "registration inbox end"))
+        .transpose()
+}
+
+// The live context and its certified adoption share the transaction that installs them.
+fn adopt_registration(
+    transaction: &Transaction<'_>,
+    expected: &EpochPaymentContext,
+    record: &RegistrationRecord,
+) -> Result<()> {
+    let epoch = metadata_epoch(transaction)?;
+    ensure!(
+        epoch == expected.epoch() && record.epoch == epoch && &record.anchor == expected.anchor(),
+        "the registration targets another context"
+    );
+    ensure!(
+        metadata_payment_context(transaction)?.as_ref() == Some(expected),
+        "stored payment context differs from the registration"
+    );
+    ensure!(
+        live_intake(transaction)? == record.pulled,
+        "the adopted inbox differs from the published boundary"
+    );
+    let (admission, challenge) = match record.deadlines {
+        Some((admission, challenge)) => (
+            Some(sql_u64(admission, "admission deadline")?),
+            Some(sql_u64(challenge, "challenge deadline")?),
+        ),
+        None => (None, None),
+    };
+    transaction.execute(
+        "INSERT INTO registrations(epoch, floors, admission_deadline, challenge_deadline, intake_end, intake)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(epoch) DO UPDATE SET floors = ?2, admission_deadline = ?3, challenge_deadline = ?4, intake_end = ?5, intake = ?6",
+        params![sql_u64(epoch, "epoch")?, record.floors.encode().as_ref(), admission, challenge, sql_u64(record.pulled.end, "inbox end")?, sql_u64(record.intake, "inbox length")?],
+    )?;
+    Ok(())
+}
+
 // Whether registration publication began for `epoch`.
 fn published(connection: &Connection, epoch: u64) -> Result<bool> {
     connection
@@ -3317,6 +3410,27 @@ mod tests {
         }
     }
 
+    fn certified_registration(
+        context: &EpochContext<Key, Digest>,
+        start: u64,
+    ) -> RegistrationRecord {
+        RegistrationRecord {
+            epoch: context.payment().epoch(),
+            anchor: *context.payment().anchor(),
+            height: 0,
+            deadlines: None,
+            deposits_root: *context.deposit_root(),
+            withdrawals_root: *context.withdrawal_root(),
+            pulled: start..start,
+            intake: start,
+            floors: commonware_clearing::bajillion::logs::Floors {
+                activity: 0,
+                payouts: 0,
+            },
+            admitted: None,
+        }
+    }
+
     #[test]
     fn non_wal_sqlite_sources_are_rejected() {
         let source = StoreSource::new(Path::new(":memory:")).unwrap();
@@ -3582,7 +3696,14 @@ mod tests {
             epoch_context(1, &DepositBatch::empty(), &WithdrawalBatch::empty()).unwrap();
         fixture
             .store
-            .rotate_epoch(0, &fixture.context, &successor, &[], 0)
+            .rotate_epoch(
+                0,
+                &fixture.context,
+                &successor,
+                &[],
+                0,
+                &certified_registration(&successor, 0),
+            )
             .unwrap();
         fixture = fixture.reopen();
         let endpoint = fixture
@@ -4209,7 +4330,14 @@ mod tests {
         assert!(
             fixture
                 .store
-                .rotate_epoch(0, &fixture.context, &invalid.context, &[], 1)
+                .rotate_epoch(
+                    0,
+                    &fixture.context,
+                    &invalid.context,
+                    &[],
+                    1,
+                    &certified_registration(&invalid.context, 1)
+                )
                 .is_err()
         );
         assert_eq!(fixture.store.epoch().unwrap(), 0);
@@ -4225,7 +4353,14 @@ mod tests {
         fixture.store.fail_next_cutover_commit();
         let error = fixture
             .store
-            .rotate_epoch(0, &fixture.context, &successor.context, &[], 1)
+            .rotate_epoch(
+                0,
+                &fixture.context,
+                &successor.context,
+                &[],
+                1,
+                &certified_registration(&successor.context, 1),
+            )
             .unwrap_err();
         assert!(error.downcast_ref::<CommitUnknown>().is_some());
         fixture = fixture.reopen();
@@ -4243,7 +4378,14 @@ mod tests {
         assert!(
             fixture
                 .store
-                .rotate_epoch(0, &fixture.context, &successor.context, &[], 1)
+                .rotate_epoch(
+                    0,
+                    &fixture.context,
+                    &successor.context,
+                    &[],
+                    1,
+                    &certified_registration(&successor.context, 1)
+                )
                 .is_err()
         );
         fixture = fixture.reopen();
@@ -4333,7 +4475,14 @@ mod tests {
                 epoch_context(1, &DepositBatch::empty(), &WithdrawalBatch::empty()).unwrap();
             fixture
                 .store
-                .rotate_epoch(0, &fixture.context, &successor, &[], 0)
+                .rotate_epoch(
+                    0,
+                    &fixture.context,
+                    &successor,
+                    &[],
+                    0,
+                    &certified_registration(&successor, 0),
+                )
                 .unwrap();
             fixture = fixture.reopen();
             assert_eq!(
@@ -4407,7 +4556,14 @@ mod tests {
                 epoch_context(1, &DepositBatch::empty(), &WithdrawalBatch::empty()).unwrap();
             fixture
                 .store
-                .rotate_epoch(0, &fixture.context, &successor, &[], 0)
+                .rotate_epoch(
+                    0,
+                    &fixture.context,
+                    &successor,
+                    &[],
+                    0,
+                    &certified_registration(&successor, 0),
+                )
                 .unwrap();
             assert_eq!(
                 fixture.store.epoch_reader().load(0).unwrap().withdrawals[0].applied_amount,
@@ -4532,7 +4688,14 @@ mod tests {
         let successor =
             epoch_context(1, &DepositBatch::empty(), &WithdrawalBatch::empty()).unwrap();
         store
-            .rotate_epoch(0, replacement.payment(), &successor, &[], 0)
+            .rotate_epoch(
+                0,
+                replacement.payment(),
+                &successor,
+                &[],
+                0,
+                &certified_registration(&successor, 0),
+            )
             .unwrap();
 
         assert_eq!(store.epoch().unwrap(), 1);

@@ -1202,12 +1202,13 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
         .encode()),
         OperatorRequest::ApplyWithdrawal(request) => stage_withdrawal(operator, request, false),
         OperatorRequest::StartClose(request) => {
-            let started = operator
-                .start_close(request.expected_epoch)
-                .context("start close")?;
+            anyhow::ensure!(
+                operator.close_already_started(request.expected_epoch)?,
+                "close requires certified successor registration"
+            );
             Ok(StartCloseResponse {
-                epoch: started.epoch,
-                queued: started.queued,
+                epoch: request.expected_epoch,
+                queued: true,
             }
             .encode())
         }
@@ -1275,18 +1276,6 @@ fn stage_withdrawal(
         digest,
     }
     .encode())
-}
-
-/// Dispatches an authorization whose queue eligibility was authenticated by the service.
-pub(crate) fn apply_withdrawal_confirmed(
-    operator: &mut Operator,
-    request: ApplyWithdrawalRequest,
-    queued: bool,
-) -> rpc::Response {
-    match stage_withdrawal(operator, request, queued) {
-        Ok(body) => rpc::Response::Success { body },
-        Err(error) => rpc::error_response(format!("{error:#}")),
-    }
 }
 
 async fn invoke<E: Network + Clock>(
@@ -1869,6 +1858,7 @@ mod tests {
         accepted.acceptance.verify(head.context.payment()).unwrap();
 
         operator.adopt_at(0, None).unwrap();
+        operator.start_close_at(0).unwrap();
         let started = StartCloseResponse::decode(success_body(handle(
             &mut operator,
             request(
@@ -1878,7 +1868,7 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(started.epoch, 0);
-        assert!(!started.queued);
+        assert!(started.queued);
 
         loop {
             let event = PollCloseResponse::decode(success_body(handle(

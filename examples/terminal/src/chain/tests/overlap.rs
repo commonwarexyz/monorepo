@@ -119,7 +119,8 @@ pub(super) async fn run(
         "the deposit during a registered epoch took another inbox index"
     );
 
-    // The operator cuts epoch 0, and its close worker holds at the stage.
+    // The operator registers epoch 1 before cutting epoch 0, and epoch 0's
+    // close worker holds at the stage.
     let (started, release) = sqlite.lock().pause_close_at(stage);
     let close = alice.start_close(&context, operator).await?;
     anyhow::ensure!(close.epoch == 0, "the operator cut a foreign epoch");
@@ -137,8 +138,8 @@ pub(super) async fn run(
     // epoch 1's context.
     observed_balance(&context, &mut bob, &mut bob_chain, operator, 111).await?;
 
-    // Carol, a cold wallet, pays in epoch 1. Her first receipt registers
-    // epoch 1 behind the unadmitted epoch 0 and binds its certified anchor.
+    // Carol, a cold wallet, pays under epoch 1's certified anchor while its
+    // registration queues behind the unadmitted epoch 0.
     let cold = paid(
         carol
             .pay(&context, &mut carol_chain, operator, &[(3, 3)])
@@ -213,7 +214,7 @@ pub(super) async fn run(
     );
 
     // Epoch 1 certifies, admits, and finalizes behind epoch 0.
-    let finished = walkthrough_close(&context, &mut alice, operator).await?;
+    let finished = walkthrough_close(&context, &mut alice, &mut alice_chain, operator).await?;
     anyhow::ensure!(finished.epoch == 1, "the close finished a foreign epoch");
     let status = alice_chain.status(&context).await?;
     anyhow::ensure!(
@@ -223,9 +224,35 @@ pub(super) async fn run(
             && !status.hard_faulted,
         "the end state did not settle: {status:?}"
     );
+
+    // Finalization retires epochs 0 and 1 while epoch 2's registered boundary
+    // remains live for successor payments.
+    for epoch in 0..=1 {
+        anyhow::ensure!(
+            alice_chain
+                .registration_at(&context, epoch)
+                .await?
+                .is_none(),
+            "epoch {epoch}'s registration outlived its finality"
+        );
+    }
+    let live = alice_chain
+        .registration_at(&context, 2)
+        .await?
+        .context("epoch 2 lost its registration")?;
+    let boundary = sqlite.lock().live_registration_boundary()?.0;
+    let (admission_deadline, _) = live
+        .deadlines
+        .context("epoch 2 has not become the admission frontier")?;
     anyhow::ensure!(
-        alice_chain.registration(&context).await?.is_none(),
-        "a registration outlived finality"
+        status.next_admission == 2
+            && status.next_registration == 3
+            && live.epoch == 2
+            && boundary.epoch() == 2
+            && boundary.anchor() == &live.anchor
+            && live.admitted.is_none()
+            && alice_chain.admitted(&context, 2).await?.is_none(),
+        "the operator does not serve the unadmitted epoch-2 registration"
     );
 
     // The certified closes bind the chain's admitted roots, chain epoch 1 to
@@ -298,6 +325,18 @@ pub(super) async fn run(
     anyhow::ensure!(
         head.floor_epoch == 2 && head.root == status.state_root,
         "the operator replica serves another finalized state"
+    );
+    let latest = alice_chain.status(&context).await?;
+    anyhow::ensure!(
+        latest.last_finalized == Some(1)
+            && latest.next_admission == 2
+            && latest.next_registration == 3
+            && latest.state_root == one.roots.successor
+            && latest.custody == CUSTODY
+            && latest.claimable == 0
+            && !latest.hard_faulted
+            && latest.height <= admission_deadline,
+        "epoch 2 lost its admission runway during the final reads: {latest:?}"
     );
     Ok(())
 }

@@ -1248,7 +1248,7 @@ impl Agent {
 
     /// Reads a verified head that covers `total` and re-anchors the signing floor on it,
     /// returning its context and floor root.
-    async fn head<E: Env>(
+    pub(crate) async fn head<E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,
@@ -1815,18 +1815,15 @@ pub(super) async fn operator_head<E: Env>(
     Ok(head)
 }
 
-/// The live payment context from the chain alone: the latest registered epoch
+/// The latest registered payment context from the chain alone: the epoch
 /// and the anchor settlement certified for it, under `bound`, the operator the
 /// wallet is bound to. A send signed under it needs no operator head, and the
 /// context cannot be false because the anchor is the chain's own registration
 /// record.
 ///
-/// Epochs register without waiting for earlier closes, so the latest
-/// registration names the newest epoch the operator opened for payments. Its
-/// record keeps naming it after its close is admitted, until the successor
-/// registers or finalization retires it. An admitted close is fixed, so that
-/// epoch is dead for a new send: only an unadmitted registration is a live
-/// context.
+/// A successor can register while its predecessor still accepts payments. A send under the
+/// successor waits for the operator's handoff, retaining its exact authorization while pending.
+/// An admitted close is fixed, so its epoch cannot accept a new send.
 async fn registered_context<E: Env>(
     ctx: &E,
     chain: &mut Client,

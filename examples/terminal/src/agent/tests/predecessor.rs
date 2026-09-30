@@ -43,10 +43,11 @@ async fn chain_with(
 
 /// Cuts the operator's live epoch and holds its close before preparation until the returned
 /// sender releases it.
-fn hold(operator: &mut Operator) -> SyncSender<()> {
+async fn hold(control: &harness::Control, operator: &mut Operator) -> SyncSender<()> {
     let epoch = operator.status().unwrap().epoch;
     let (started, release) = operator.pause_next_close();
-    operator.start_close(epoch).unwrap();
+    let successor = register_successor(control, operator).await;
+    operator.start_close(epoch, &successor).unwrap();
     started.recv_timeout(Duration::from_secs(5)).unwrap();
     release
 }
@@ -160,8 +161,8 @@ fn cut_resigns_against_reported_endpoint() {
             assert_eq!(first.epoch, old.epoch());
             let (mut listener, mut operator) = staging.await.unwrap();
 
-            // The operator cuts epoch 0, holds its close, and registers epoch 1.
-            let release = hold(&mut operator);
+            // The operator registers epoch 1, cuts epoch 0, and holds its close.
+            let release = hold(&control, &mut operator).await;
             let live = register(&control, &mut operator).await;
             let reported = root(agent.account(), bob_edge(7, 1));
 
@@ -281,8 +282,8 @@ fn endpoint_below_held_receipt_waits_for_admission() {
             .collect::<Vec<_>>();
         let (mut listener, mut operator) = partial.await.unwrap();
 
-        // The operator cuts epoch 0 and registers epoch 1.
-        let release = hold(&mut operator);
+        // The operator registers epoch 1 and cuts epoch 0.
+        let release = hold(&control, &mut operator).await;
         let live = register(&control, &mut operator).await;
 
         // Every retry of the exact batch earns the lying report, and the wallet never reads a
@@ -380,8 +381,8 @@ fn endpoint_above_held_receipts_requires_receipt() {
             );
             let (mut listener, mut operator, expected) = partial.await.unwrap();
 
-            // The operator cuts epoch 0 and registers epoch 1.
-            let _release = hold(&mut operator);
+            // The operator registers epoch 1 and cuts epoch 0.
+            let _release = hold(&control, &mut operator).await;
             register(&control, &mut operator).await;
             let reported = root(agent.account(), bob_edge(3, 1));
 
@@ -491,8 +492,8 @@ fn silent_operator_keeps_waiting() {
         );
         let (mut listener, mut operator) = staging.await.unwrap();
 
-        // The operator cuts epoch 0 and registers epoch 1.
-        let release = hold(&mut operator);
+        // The operator registers epoch 1 and cuts epoch 0.
+        let release = hold(&control, &mut operator).await;
         let live = register(&control, &mut operator).await;
 
         // Three silent rounds resubmit the same epoch-0 bytes and resolve nothing.
@@ -554,7 +555,7 @@ fn retired_predecessor_admission_restages_stale_send() {
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         register(&control, &mut operator).await;
         operator.pay(2, 3, 1).unwrap();
-        let first = operator.complete_close(31).unwrap();
+        let first = complete_chain_close(&control, &mut operator, 31).await;
         finalize(&control, &first).await;
         let cached = register(&control, &mut operator).await;
         let mut listener = context
@@ -581,7 +582,7 @@ fn retired_predecessor_admission_restages_stale_send() {
 
         // Epochs 1 and 2 finalize, which retires epoch 0's admission and keeps epoch 1's, and
         // epoch 3 is registered.
-        let second = operator.complete_close(32).unwrap();
+        let second = complete_chain_close(&control, &mut operator, 32).await;
         finalize(&control, &second).await;
         assert!(
             control
@@ -591,7 +592,7 @@ fn retired_predecessor_admission_restages_stale_send() {
         );
         register(&control, &mut operator).await;
         operator.pay(2, 3, 1).unwrap();
-        let third = operator.complete_close(33).unwrap();
+        let third = complete_chain_close(&control, &mut operator, 33).await;
         finalize(&control, &third).await;
         assert!(
             control
@@ -666,7 +667,7 @@ fn resign_waits_for_original_epoch() {
         // epoch-1 cut. The empty epoch-1 report is retried until the wallet gives up.
         let script = context.child("script").spawn(move |_| async move {
             relay(&mut listener, &mut operator).await;
-            let release = hold(&mut operator);
+            let release = hold(&cut_control, &mut operator).await;
             register(&cut_control, &mut operator).await;
             respond(&mut listener, |request| {
                 let [send] = sends(&request).try_into().unwrap();
@@ -681,7 +682,8 @@ fn resign_waits_for_original_epoch() {
                     .unwrap(),
             );
             operator.pay(2, 3, 1).unwrap();
-            operator.start_close(1).unwrap();
+            let successor = register_successor(&cut_control, &mut operator).await;
+            operator.start_close(1, &successor).unwrap();
             let successor = register(&cut_control, &mut operator).await;
             let mut sink = sink;
             rpc::send_response(
@@ -763,7 +765,7 @@ fn resign_waits_despite_nonempty_intermediate_endpoint() {
         // drops the reply.
         let script = context.child("script").spawn(move |_| async move {
             relay(&mut listener, &mut operator).await;
-            let release = hold(&mut operator);
+            let release = hold(&cut_control, &mut operator).await;
             register(&cut_control, &mut operator).await;
             respond(&mut listener, |request| {
                 operator_rpc::handle_decoded(&mut operator, request)
@@ -796,9 +798,10 @@ fn resign_waits_despite_nonempty_intermediate_endpoint() {
         );
         assert_eq!(agent.superseded.len(), 2);
 
-        // The operator cuts epoch 1 and registers epoch 2. The epoch-1 report names the first
+        // The operator registers epoch 2 and cuts epoch 1. The epoch-1 report names the first
         // re-sign, and every retry is the exact epoch-1 batch.
-        operator.start_close(1).unwrap();
+        let successor = register_successor(&control, &mut operator).await;
+        operator.start_close(1, &successor).unwrap();
         let successor = register(&control, &mut operator).await;
         let expected = resigned.clone();
         let waiting = context.child("waiting").spawn(move |_| async move {
@@ -896,7 +899,7 @@ fn mismatched_predecessor_resigns_dead_bodies() {
             else {
                 panic!("the first original earned a report");
             };
-            let release = hold(&mut operator);
+            let release = hold(&cut_control, &mut operator).await;
             let live = register(&cut_control, &mut operator).await;
             rpc::send_response(
                 &mut sink,
@@ -947,7 +950,8 @@ fn mismatched_predecessor_resigns_dead_bodies() {
         // Once epoch 1 is cut and epoch 2 registered, the remaining payment is signed under
         // epoch 2 bound to the empty root of the wallet's dead epoch-1 terminal.
         operator.pay(2, 3, 1).unwrap();
-        operator.start_close(1).unwrap();
+        let successor = register_successor(&control, &mut operator).await;
+        operator.start_close(1, &successor).unwrap();
         operator.wait_for_closes().unwrap();
         let successor = register(&control, &mut operator).await;
         let rolling = context.child("rolling").spawn(move |_| async move {
@@ -1020,7 +1024,7 @@ fn late_resign_receipt_settles_carried_original() {
             else {
                 panic!("the carrier refused the first original");
             };
-            let release = hold(&mut face);
+            let release = hold(&cut_control, &mut face).await;
             let live = register(&cut_control, &mut face).await;
             rpc::send_response(
                 &mut sink,
@@ -1045,7 +1049,8 @@ fn late_resign_receipt_settles_carried_original() {
         assert_eq!(agent.superseded.len(), 2);
 
         // Epoch 0 is admitted carrying the first original.
-        carrier.start_close(0).unwrap();
+        let successor = register_successor(&control, &mut carrier).await;
+        carrier.start_close(0, &successor).unwrap();
         carrier.wait_for_closes().unwrap();
         let original = carrier.retained_result(0).unwrap().unwrap();
         applied(
@@ -1154,7 +1159,7 @@ fn mismatched_predecessor_without_resign_is_replaceable() {
 
         // The face cuts epoch 0 and reports the batch endpoint. With both receipts served,
         // the batch concludes in epoch 0.
-        let _release = hold(&mut face);
+        let _release = hold(&control, &mut face).await;
         let live = register(&control, &mut face).await;
         let mut endpoint = vec![
             OutEntry {
@@ -1216,7 +1221,8 @@ fn mismatched_predecessor_without_resign_is_replaceable() {
 
         // Epoch 0 is admitted carrying only the first send. The pending send becomes
         // replaceable, and the wallet refuses to sign again under epoch 1.
-        carrier.start_close(0).unwrap();
+        let successor = register_successor(&control, &mut carrier).await;
+        carrier.start_close(0, &successor).unwrap();
         carrier.wait_for_closes().unwrap();
         let original = carrier.retained_result(0).unwrap().unwrap();
         applied(
@@ -1293,7 +1299,7 @@ async fn omit_resign(context: &deterministic::Context, timing: crate::protocol::
                 sends: vec![original],
             })
             .unwrap();
-        let release = hold(&mut face);
+        let release = hold(&cut_control, &mut face).await;
         register(&cut_control, &mut face).await;
         rpc::send_response(&mut sink, &operator_rpc::handle_decoded(&mut face, request))
             .await
@@ -1314,7 +1320,8 @@ async fn omit_resign(context: &deterministic::Context, timing: crate::protocol::
     assert_eq!(resigned.acceptance.ack.predecessor(), empty());
 
     // Epoch 0 is admitted carrying the original.
-    carrier.start_close(0).unwrap();
+    let successor = register_successor(&control, &mut carrier).await;
+    carrier.start_close(0, &successor).unwrap();
     carrier.wait_for_closes().unwrap();
     let original = carrier.retained_result(0).unwrap().unwrap();
     applied(
@@ -1378,7 +1385,8 @@ async fn omit_resign(context: &deterministic::Context, timing: crate::protocol::
 
     // The carrier's epoch-1 close omits the re-sign and is admitted.
     carrier.pay(2, 3, 1).unwrap();
-    carrier.start_close(1).unwrap();
+    let successor = register_successor(&control, &mut carrier).await;
+    carrier.start_close(1, &successor).unwrap();
     carrier.wait_for_closes().unwrap();
     let omitting = carrier.retained_result(1).unwrap().unwrap();
     applied(
@@ -1555,7 +1563,7 @@ fn offline_wallet_decides_superseded_copies_after_successor_finality() {
         // epoch 1 is lost.
         let script = context.child("script").spawn(move |_| async move {
             relay(&mut listener, &mut operator).await;
-            let release = hold(&mut operator);
+            let release = hold(&cut_control, &mut operator).await;
             register(&cut_control, &mut operator).await;
             respond(&mut listener, |request| {
                 let [send] = sends(&request).try_into().unwrap();
@@ -1591,7 +1599,8 @@ fn offline_wallet_decides_superseded_copies_after_successor_finality() {
             .adopt_registration(&registration_record(&control).await)
             .unwrap();
         operator.pay(2, 3, 1).unwrap();
-        operator.start_close(1).unwrap();
+        let successor = register_successor(&control, &mut operator).await;
+        operator.start_close(1, &successor).unwrap();
         operator.wait_for_closes().unwrap();
         let excluding = operator.retained_result(1).unwrap().unwrap();
         finalize(&control, &excluding).await;
@@ -1700,11 +1709,11 @@ fn offline_pending_batch_concludes_from_finalized_close() {
 
             // While the wallet is away, epochs 0 and 1 finalize. The chain still retains epoch
             // 0's anchor and admission.
-            let first = operator.complete_close(31).unwrap();
+            let first = complete_chain_close(&control, &mut operator, 31).await;
             finalize(&control, &first).await;
             register(&control, &mut operator).await;
             operator.pay(2, 3, 1).unwrap();
-            let second = operator.complete_close(32).unwrap();
+            let second = complete_chain_close(&control, &mut operator, 32).await;
             finalize(&control, &second).await;
             let live = register(&control, &mut operator).await;
             assert!(control.record(anchor_key(&deployment(), 0)).await.is_some());
@@ -1792,7 +1801,7 @@ fn watcher_convicts_omitting_close_and_prunes_dead_receipts() {
                 else {
                     panic!("the carrier refused the first original");
                 };
-                let release = hold(&mut face);
+                let release = hold(&cut_control, &mut face).await;
                 let live = register(&cut_control, &mut face).await;
                 rpc::send_response(
                     &mut sink,
@@ -1817,7 +1826,8 @@ fn watcher_convicts_omitting_close_and_prunes_dead_receipts() {
 
             // Epoch 0 is admitted carrying the first original. The face then receipts both
             // re-signs, the carried original concludes, and the dead re-sign keeps its receipt.
-            carrier.start_close(0).unwrap();
+            let successor = register_successor(&control, &mut carrier).await;
+            carrier.start_close(0, &successor).unwrap();
             carrier.wait_for_closes().unwrap();
             let original = carrier.retained_result(0).unwrap().unwrap();
             applied(
@@ -1852,7 +1862,8 @@ fn watcher_convicts_omitting_close_and_prunes_dead_receipts() {
                 .adopt_registration(&registration_record(&control).await)
                 .unwrap();
             carrier.pay(2, 3, 1).unwrap();
-            carrier.start_close(1).unwrap();
+            let successor = register_successor(&control, &mut carrier).await;
+            carrier.start_close(1, &successor).unwrap();
             carrier.wait_for_closes().unwrap();
             let omitting = carrier.retained_result(1).unwrap().unwrap();
             let batch_id = omitting.header.batch_id::<Sha256>();

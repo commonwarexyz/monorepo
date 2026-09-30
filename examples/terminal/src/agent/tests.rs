@@ -264,7 +264,7 @@ async fn wide_chain(context: &deterministic::Context) -> harness::Control {
         "chain",
         harness::native(crate::protocol::deployments()),
         crate::protocol::Timing {
-            admission_offset: 100,
+            admission_offset: 200,
             challenge_duration: 100,
         },
     )
@@ -629,33 +629,86 @@ async fn registration_record(control: &harness::Control) -> RegistrationRecord {
         .next_registration
         .checked_sub(1)
         .expect("an epoch is registered");
+    registration_record_at(control, epoch).await
+}
+
+async fn registration_record_at(control: &harness::Control, epoch: u64) -> RegistrationRecord {
     match control.record(registration_key(&deployment(), epoch)).await {
         Some(Record::Registration(record)) => record,
         record => panic!("expected the registration record, found {record:?}"),
     }
 }
 
-/// Registers the operator's live epoch (boundary only), adopts the
-/// chain-assigned deadlines from the certified registration record, and
-/// returns the payment context every scripted head then serves.
+/// Registers the live boundary and adopts its certified record. Re-reading an already
+/// registered successor refreshes its assigned admission deadlines.
 async fn register(
     control: &harness::Control,
     operator: &mut Operator,
 ) -> PaymentContext<Key, Digest> {
     let request = operator.signed_registration().unwrap();
-    applied(control, &SettlementTx::RegisterEpoch(request)).await;
-    let record = registration_record(control).await;
+    let epoch = request.epoch;
+    if control
+        .record(registration_key(&deployment(), epoch))
+        .await
+        .is_none()
+    {
+        applied(control, &SettlementTx::RegisterEpoch(request)).await;
+    }
+    let record = registration_record_at(control, epoch).await;
     operator.adopt_registration(&record).unwrap();
-    operator.registration_boundary().unwrap().0
+    operator.live_registration_boundary().unwrap().0
 }
 
-/// Registers a shared operator's live epoch and adopts the certified record,
-/// without holding the operator across the chain round trip.
+/// Registers a shared operator without holding its lock across the chain round trip.
 async fn register_shared(control: &harness::Control, operator: &Mutex<Operator>) {
     let request = operator.lock().signed_registration().unwrap();
-    applied(control, &SettlementTx::RegisterEpoch(request)).await;
-    let record = registration_record(control).await;
+    let epoch = request.epoch;
+    if control
+        .record(registration_key(&deployment(), epoch))
+        .await
+        .is_none()
+    {
+        applied(control, &SettlementTx::RegisterEpoch(request)).await;
+    }
+    let record = registration_record_at(control, epoch).await;
     operator.lock().adopt_registration(&record).unwrap();
+}
+
+/// Publishes the retained successor while the predecessor is still live.
+async fn register_successor(
+    control: &harness::Control,
+    operator: &mut Operator,
+) -> RegistrationRecord {
+    let epoch = operator.status().unwrap().epoch;
+    let request = operator.signed_successor(epoch).unwrap();
+    if control
+        .record(registration_key(&deployment(), request.epoch))
+        .await
+        .is_none()
+    {
+        applied(control, &SettlementTx::RegisterEpoch(request)).await;
+    }
+    registration_record_at(control, epoch + 1).await
+}
+
+/// Cuts to the actual certified successor and completes the predecessor close.
+async fn complete_chain_close(
+    control: &harness::Control,
+    operator: &mut Operator,
+    seed: u64,
+) -> SettlementResult {
+    let successor = register_successor(control, operator).await;
+    operator
+        .complete_close_with_successor(seed, &successor)
+        .unwrap()
+}
+
+/// Cuts a shared operator after publishing its successor, leaving close construction async.
+async fn start_close_shared(control: &harness::Control, operator: &Mutex<Operator>, epoch: u64) {
+    let request = operator.lock().signed_successor(epoch).unwrap();
+    applied(control, &SettlementTx::RegisterEpoch(request)).await;
+    let successor = registration_record_at(control, epoch + 1).await;
+    operator.lock().start_close(epoch, &successor).unwrap();
 }
 
 /// Serves every request against a shared operator until aborted, counting
@@ -683,9 +736,14 @@ fn serve<L: commonware_runtime::Listener>(
     (server, heads)
 }
 
-/// Admits `result`'s close and drives the chain past its challenge window to
-/// certified finalization.
+/// Admits the close near its deadline to leave its successor live through the challenge window,
+/// then drives the chain to certified finalization.
 async fn finalize(control: &harness::Control, result: &SettlementResult) {
+    let height = control.advance(0).await;
+    let admission = result.context.admission_deadline();
+    if height + 1 < admission {
+        control.advance(admission - height - 1).await;
+    }
     applied(control, &SettlementTx::Admit(AdmitRequest::from(result))).await;
     let deadline = result.context.challenge_deadline();
     let height = control.advance(0).await;
@@ -700,6 +758,23 @@ async fn finalize(control: &harness::Control, result: &SettlementResult) {
     );
 }
 
+/// Keeps the registered successor healthy while waiting for a withdrawal authorization to expire.
+async fn advance_with_closes(control: &harness::Control, operator: &mut Operator, until: u64) {
+    loop {
+        register(control, operator).await;
+        let record = registration_record_at(control, operator.status().unwrap().epoch).await;
+        if record.deadlines.unwrap().0 > until {
+            break;
+        }
+        let result = complete_chain_close(control, operator, 20_000 + record.epoch).await;
+        finalize(control, &result).await;
+    }
+    let height = control.advance(0).await;
+    if height < until {
+        control.advance(until - height).await;
+    }
+}
+
 /// Registers the operator's live epoch with one payment and finalizes its close, which retires
 /// the admission and anchor two epochs back.
 async fn finalize_next(
@@ -709,7 +784,7 @@ async fn finalize_next(
 ) -> SettlementResult {
     register(control, operator).await;
     operator.pay(2, 3, 1).unwrap();
-    let result = operator.complete_close(seed).unwrap();
+    let result = complete_chain_close(control, operator, seed).await;
     finalize(control, &result).await;
     result
 }
@@ -1357,7 +1432,7 @@ fn unresolved_intent_keeps_exact_bytes_across_hostile_epoch_hints_and_reopen() {
                 "chain",
                 harness::native(crate::protocol::deployments()),
                 crate::protocol::Timing {
-                    admission_offset: 100,
+                    admission_offset: 200,
                     challenge_duration: 100,
                 },
             )
@@ -1440,7 +1515,7 @@ fn unresolved_intent_keeps_exact_bytes_across_hostile_epoch_hints_and_reopen() {
             } else if !committed {
                 operator.pay(1, 2, 1).unwrap();
             }
-            let result = operator.complete_close(31).unwrap();
+            let result = complete_chain_close(&control, &mut operator, 31).await;
             finalize(&control, &result).await;
             let live = register(&control, &mut operator).await;
             let hint = live.clone();
@@ -1626,7 +1701,7 @@ fn finalized_payment_without_a_saved_ack_remains_pending_after_retirement() {
             if !committed {
                 operator.pay(1, 2, 1).unwrap();
             }
-            let result = operator.complete_close(31).unwrap();
+            let result = complete_chain_close(&control, &mut operator, 31).await;
             finalize(&control, &result).await;
 
             // The epoch after a successor can retire the descriptor before a lost
@@ -1634,7 +1709,7 @@ fn finalized_payment_without_a_saved_ack_remains_pending_after_retirement() {
             // authorization remains pending.
             register(&control, &mut operator).await;
             operator.pay(2, 3, 1).unwrap();
-            let successor = operator.complete_close(32).unwrap();
+            let successor = complete_chain_close(&control, &mut operator, 32).await;
             finalize(&control, &successor).await;
             finalize_next(&control, &mut operator, 33).await;
             assert!(
@@ -2008,7 +2083,7 @@ fn finalized_zero_balance_preserves_accepted_epoch_state() {
                 .unwrap(),
         );
         let mut operator = server.await.unwrap();
-        let result = operator.complete_close(34).unwrap();
+        let result = complete_chain_close(&control, &mut operator, 34).await;
         finalize(&control, &result).await;
         assert_eq!(
             agent
@@ -2034,7 +2109,7 @@ fn withdrawal_escalation_uses_finalized_balance_across_pending_closes() {
             "chain",
             harness::native(crate::protocol::deployments()),
             crate::protocol::Timing {
-                admission_offset: 100,
+                admission_offset: 200,
                 challenge_duration: 100,
             },
         )
@@ -2044,7 +2119,7 @@ fn withdrawal_escalation_uses_finalized_balance_across_pending_closes() {
         for epoch in 0..6 {
             register(&control, &mut operator).await;
             operator.pay(1, 2, 1).unwrap();
-            let result = operator.complete_close(35 + epoch).unwrap();
+            let result = complete_chain_close(&control, &mut operator, 35 + epoch).await;
             applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
         }
         assert!(status(&control).await.last_finalized.is_none());
@@ -2084,7 +2159,7 @@ fn finalized_activity_requires_its_actual_batch_root_and_account() {
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         register(&control, &mut operator).await;
         operator.pay(0, 1, 7).unwrap();
-        let result = operator.complete_close(32).unwrap();
+        let result = complete_chain_close(&control, &mut operator, 32).await;
         finalize(&control, &result).await;
         let admitted = chain.admitted(&context, 0).await.unwrap().unwrap();
         let account = wallets()[0].public_key();
@@ -2166,7 +2241,7 @@ fn unfinalized_included_activity_cannot_resolve_an_ambiguous_intent() {
             .authorization
             .clone();
         let (mut listener, mut operator) = staging.await.unwrap();
-        let result = operator.complete_close(33).unwrap();
+        let result = complete_chain_close(&control, &mut operator, 33).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
         let response = context.child("pending_close").spawn(move |_| async move {
             respond(&mut listener, |_| rpc::Response::Success {
@@ -2209,13 +2284,13 @@ fn admitted_registration_is_not_stageable_without_the_operator_head() {
             .unwrap();
         let operator_address = listener.local_addr().unwrap();
 
-        // The close is admitted but not finalized: the epoch's registration
-        // record still names it, now marked admitted, and the certified head is
-        // still the genesis root.
+        // The unavailable operator withholds successor registration and discards its local
+        // successor without issuing receipts. Settlement certifies epoch 0's close while the
+        // finalized head remains at genesis.
         operator.pay(1, 2, 1).unwrap();
         let result = operator.complete_close(10).unwrap();
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
-        let registration = registration_record(&control).await;
+        let registration = registration_record_at(&control, admitted.epoch()).await;
         assert_eq!(registration.epoch, admitted.epoch());
         assert!(registration.admitted.is_some());
         assert!(status(&control).await.last_finalized.is_none());
@@ -2548,7 +2623,7 @@ fn admitted_activity_exclusion_allows_a_new_epoch_intent() {
 
             // The admitted close either contains the earlier accepted body or no payer activity.
             operator.pay(2, 3, 1).unwrap();
-            let result = operator.complete_close(11).unwrap();
+            let result = complete_chain_close(&control, &mut operator, 11).await;
             if finalized {
                 finalize(&control, &result).await;
             } else {
@@ -3159,7 +3234,6 @@ fn forged_head_operator_is_rejected_before_staging() {
 enum HeadUse {
     Pay,
     Balance,
-    Finalized,
 }
 
 #[test]
@@ -3170,11 +3244,6 @@ fn foreign_deployment_head_cannot_authorize_payment() {
 #[test]
 fn foreign_deployment_balance_cannot_cache_payment_context() {
     foreign_deployment_head_cannot_authorize(HeadUse::Balance);
-}
-
-#[test]
-fn foreign_deployment_finalized_head_cannot_cache_payment_context() {
-    foreign_deployment_head_cannot_authorize(HeadUse::Finalized);
 }
 
 fn foreign_deployment_head_cannot_authorize(usage: HeadUse) {
@@ -3294,9 +3363,6 @@ fn foreign_deployment_head_cannot_authorize(usage: HeadUse) {
             HeadUse::Pay => {}
             HeadUse::Balance => {
                 let _ = agent.balance(&context, &mut chain, address).await;
-            }
-            HeadUse::Finalized => {
-                let _ = agent.finalized_head(&context, &mut chain, address).await;
             }
         }
         drop(agent);
@@ -3913,8 +3979,8 @@ fn finalized_claim_completes_without_operator_bookkeeping() {
             .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
             .unwrap();
         register(&control, &mut operator).await;
-        let withdrawals = operator.registration_boundary().unwrap().1;
-        let result = operator.complete_close(25).unwrap();
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let result = complete_chain_close(&control, &mut operator, 25).await;
         finalize(&control, &result).await;
         let (request, position, _) =
             settlement_withdrawal(&operator, &result, &withdrawals, &wallets()[0].public_key());
@@ -3955,14 +4021,14 @@ fn delayed_payout_page_is_reopened_at_the_newer_claimed_status_head() {
             .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
             .unwrap();
         register(&control, &mut operator).await;
-        let withdrawals = operator.registration_boundary().unwrap().1;
-        let first = operator.complete_close(25).unwrap();
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let first = complete_chain_close(&control, &mut operator, 25).await;
         finalize(&control, &first).await;
         let (request, position, _) =
             settlement_withdrawal(&operator, &first, &withdrawals, &wallets()[0].public_key());
 
         register(&control, &mut operator).await;
-        let successor = operator.complete_close(26).unwrap();
+        let successor = complete_chain_close(&control, &mut operator, 26).await;
         assert!(successor.roots.withdrawal_outputs.operations > position);
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -4020,8 +4086,8 @@ fn withdrawal_claim_positions_are_global_across_epochs() {
             .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
             .unwrap();
         register(&control, &mut operator).await;
-        let first_withdrawals = operator.registration_boundary().unwrap().1;
-        let first = operator.complete_close(41).unwrap();
+        let first_withdrawals = operator.live_registration_boundary().unwrap().1;
+        let first = complete_chain_close(&control, &mut operator, 41).await;
         finalize(&control, &first).await;
         let (first_request, first_position, _) =
             settlement_withdrawal(&operator, &first, &first_withdrawals, &account);
@@ -4031,8 +4097,11 @@ fn withdrawal_claim_positions_are_global_across_epochs() {
             .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(20).unwrap()))
             .unwrap();
         register(&control, &mut operator).await;
-        let second_withdrawals = operator.registration_boundary().unwrap().1;
-        let second = operator.complete_close(42).unwrap();
+        let handoff = complete_chain_close(&control, &mut operator, 1041).await;
+        finalize(&control, &handoff).await;
+        register(&control, &mut operator).await;
+        let second_withdrawals = operator.live_registration_boundary().unwrap().1;
+        let second = complete_chain_close(&control, &mut operator, 42).await;
         finalize(&control, &second).await;
         let (second_request, second_position, _) =
             settlement_withdrawal(&operator, &second, &second_withdrawals, &account);
@@ -4064,12 +4133,7 @@ fn withdrawal_claim_positions_are_global_across_epochs() {
                 .unwrap(),
             native_before + 25
         );
-        let height = control.advance(0).await;
-        if height < first_request.body().deadline() {
-            control
-                .advance(first_request.body().deadline() - height)
-                .await;
-        }
+        advance_with_closes(&control, &mut operator, first_request.body().deadline()).await;
         agent
             .observe_withdrawal_expiry(&context, &mut chain)
             .await
@@ -4141,8 +4205,8 @@ fn advisory_withdrawal_substitution_cannot_poison_the_pending_request() {
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         operator.apply_withdrawal(first.clone(), false).unwrap();
         register(&control, &mut operator).await;
-        let first_withdrawals = operator.registration_boundary().unwrap().1;
-        let first_close = operator.complete_close(27).unwrap();
+        let first_withdrawals = operator.live_registration_boundary().unwrap().1;
+        let first_close = complete_chain_close(&control, &mut operator, 27).await;
         finalize(&control, &first_close).await;
         let (_, first_position, first_claim) = settlement_withdrawal(
             &operator,
@@ -4153,8 +4217,11 @@ fn advisory_withdrawal_substitution_cannot_poison_the_pending_request() {
 
         operator.withdraw(0, action).unwrap();
         register(&control, &mut operator).await;
-        let second_withdrawals = operator.registration_boundary().unwrap().1;
-        let second_close = operator.complete_close(28).unwrap();
+        let handoff = complete_chain_close(&control, &mut operator, 1027).await;
+        finalize(&control, &handoff).await;
+        register(&control, &mut operator).await;
+        let second_withdrawals = operator.live_registration_boundary().unwrap().1;
+        let second_close = complete_chain_close(&control, &mut operator, 28).await;
         finalize(&control, &second_close).await;
         let (second, second_position, second_claim) = settlement_withdrawal(
             &operator,
@@ -4226,8 +4293,8 @@ fn permissionless_spend_between_discovery_and_cache_preserves_the_wallet() {
             .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
             .unwrap();
         register(&control, &mut operator).await;
-        let withdrawals = operator.registration_boundary().unwrap().1;
-        let close = operator.complete_close(29).unwrap();
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let close = complete_chain_close(&control, &mut operator, 29).await;
         finalize(&control, &close).await;
         let (request, position, claim) =
             settlement_withdrawal(&operator, &close, &withdrawals, &wallets()[0].public_key());
@@ -4273,8 +4340,8 @@ fn discovered_payout_is_durable_before_the_followup_status_read() {
             .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
             .unwrap();
         register(&control, &mut operator).await;
-        let withdrawals = operator.registration_boundary().unwrap().1;
-        let close = operator.complete_close(29).unwrap();
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let close = complete_chain_close(&control, &mut operator, 29).await;
         finalize(&control, &close).await;
         let (request, position, _) =
             settlement_withdrawal(&operator, &close, &withdrawals, &wallets()[0].public_key());
@@ -4327,8 +4394,8 @@ fn replayed_preissuance_claimed_absence_cannot_authorize_a_cached_payout() {
             .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
             .unwrap();
         register(&control, &mut operator).await;
-        let withdrawals = operator.registration_boundary().unwrap().1;
-        let close = operator.complete_close(29).unwrap();
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let close = complete_chain_close(&control, &mut operator, 29).await;
         finalize(&control, &close).await;
         let (_, issued_position, claim) =
             settlement_withdrawal(&operator, &close, &withdrawals, &wallets()[0].public_key());
@@ -4410,8 +4477,8 @@ fn spent_cached_payout_completes_after_head_advance_without_a_fresh_opening() {
             .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
             .unwrap();
         register(&control, &mut operator).await;
-        let withdrawals = operator.registration_boundary().unwrap().1;
-        let close = operator.complete_close(30).unwrap();
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let close = complete_chain_close(&control, &mut operator, 30).await;
         finalize(&control, &close).await;
         let (_, position, claim) =
             settlement_withdrawal(&operator, &close, &withdrawals, &wallets()[0].public_key());
@@ -4438,7 +4505,7 @@ fn spent_cached_payout_completes_after_head_advance_without_a_fresh_opening() {
         );
 
         register(&control, &mut operator).await;
-        let successor = operator.complete_close(31).unwrap();
+        let successor = complete_chain_close(&control, &mut operator, 31).await;
         finalize(&control, &successor).await;
         assert!(successor.roots.withdrawal_outputs.operations > position);
         drop(operator);
@@ -4471,8 +4538,8 @@ fn consumed_equal_output_cannot_complete_another_exact_request_after_retirement(
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         operator.apply_withdrawal(first.clone(), false).unwrap();
         register(&control, &mut operator).await;
-        let withdrawals = operator.registration_boundary().unwrap().1;
-        let source_close = operator.complete_close(29).unwrap();
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let source_close = complete_chain_close(&control, &mut operator, 29).await;
         finalize(&control, &source_close).await;
         let (source_request, position, stale_claim) =
             settlement_withdrawal(&operator, &source_close, &withdrawals, &account);
@@ -4518,7 +4585,7 @@ fn consumed_equal_output_cannot_complete_another_exact_request_after_retirement(
 
         register(&control, &mut operator).await;
         operator.pay(2, 3, 1).unwrap();
-        let successor = operator.complete_close(30).unwrap();
+        let successor = complete_chain_close(&control, &mut operator, 30).await;
         finalize(&control, &successor).await;
         finalize_next(&control, &mut operator, 31).await;
         assert!(
@@ -4676,8 +4743,8 @@ fn unfinalized_payout_is_not_trusted_before_finalization() {
             .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
             .unwrap();
         register(&control, &mut operator).await;
-        let withdrawals = operator.registration_boundary().unwrap().1;
-        let result = operator.complete_close(28).unwrap();
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let result = complete_chain_close(&control, &mut operator, 28).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
 
         let account = wallets()[0].public_key();
@@ -4730,8 +4797,8 @@ fn cached_evidence_claims_after_the_operator_vanishes() {
             .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
             .unwrap();
         register(&control, &mut operator).await;
-        let withdrawals = operator.registration_boundary().unwrap().1;
-        let result = operator.complete_close(31).unwrap();
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let result = complete_chain_close(&control, &mut operator, 31).await;
         finalize(&control, &result).await;
 
         let account = wallets()[0].public_key();
@@ -4800,7 +4867,7 @@ fn activity_resolved_payment_recovers_after_hard_fault_frozen_at_its_head() {
 
         // The committed send finalizes certifiably at the head H, and epoch 1
         // registers so its later expiry freezes the deployment at H.
-        let result = operator.complete_close(34).unwrap();
+        let result = complete_chain_close(&control, &mut operator, 34).await;
         finalize(&control, &result).await;
         let frozen_root = result.roots.successor;
         register(&control, &mut operator).await;
@@ -4924,8 +4991,8 @@ fn false_epoch_withdrawal_ack_cannot_strand_the_claim() {
 
         // The true reserve finalizes in the real certified epoch-0 batch.
         register(&control, &mut operator).await;
-        let withdrawals = operator.registration_boundary().unwrap().1;
-        let result = operator.complete_close(35).unwrap();
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let result = complete_chain_close(&control, &mut operator, 35).await;
         finalize(&control, &result).await;
         let (_, _, claim) = settlement_withdrawal(&operator, &result, &withdrawals, &account);
         let expected = crate::chain::state::WithdrawalResponse {
@@ -4979,7 +5046,11 @@ fn withdrawal_is_refused_while_a_prior_claim_is_unfinished() {
         // Its close is admitted but not finalized, so the exact request remains pending without
         // a finalized payout candidate.
         register(&control, &mut operator).await;
-        let first_close = operator.complete_close(36).unwrap();
+        let first_close = complete_chain_close(&control, &mut operator, 36).await;
+        let height = control.advance(0).await;
+        control
+            .advance(first_close.context.admission_deadline() - height - 1)
+            .await;
         applied(
             &control,
             &SettlementTx::Admit(AdmitRequest::from(&first_close)),
@@ -5029,11 +5100,8 @@ fn withdrawal_is_refused_while_a_prior_claim_is_unfinished() {
         assert_eq!(first_release, first_expected);
         assert_eq!(first_release.amount, 7);
         assert!(agent.pending_withdrawal_claim.is_none());
-        let height = control.advance(0).await;
         let deadline = agent.pending_withdrawal.as_ref().unwrap().body().deadline();
-        if height < deadline {
-            control.advance(deadline - height).await;
-        }
+        advance_with_closes(&control, &mut operator, deadline).await;
         agent
             .observe_withdrawal_expiry(&context, &mut chain)
             .await
@@ -5059,8 +5127,11 @@ fn withdrawal_is_refused_while_a_prior_claim_is_unfinished() {
         // The second close finalizes before the wallet fetches its evidence. Configured native
         // custodians retain the source and current proof for later claims.
         register(&control, &mut operator).await;
-        let second_withdrawals = operator.registration_boundary().unwrap().1;
-        let second_close = operator.complete_close(37).unwrap();
+        let handoff = complete_chain_close(&control, &mut operator, 1036).await;
+        finalize(&control, &handoff).await;
+        register(&control, &mut operator).await;
+        let second_withdrawals = operator.live_registration_boundary().unwrap().1;
+        let second_close = complete_chain_close(&control, &mut operator, 37).await;
         finalize(&control, &second_close).await;
         let (_, _, claim) =
             settlement_withdrawal(&operator, &second_close, &second_withdrawals, &account);
@@ -5825,11 +5896,11 @@ fn retired_receipts_are_withheld_without_requerying_evidence() {
         assert_eq!(bob.incoming().total, 5);
 
         operator.pay(2, 3, 1).unwrap();
-        let first = operator.complete_close(60).unwrap();
+        let first = complete_chain_close(&control, &mut operator, 60).await;
         finalize(&control, &first).await;
         register(&control, &mut operator).await;
         operator.pay(2, 3, 1).unwrap();
-        let successor = operator.complete_close(61).unwrap();
+        let successor = complete_chain_close(&control, &mut operator, 61).await;
         finalize(&control, &successor).await;
         finalize_next(&control, &mut operator, 62).await;
         assert_eq!(status(&control).await.last_finalized, Some(2));
@@ -5883,7 +5954,7 @@ fn verified_incoming_reconciles_and_survives_restart() {
         register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
         operator.pay(0, 1, 3).unwrap();
-        let result = operator.complete_close(44).unwrap();
+        let result = complete_chain_close(&control, &mut operator, 44).await;
         finalize(&control, &result).await;
 
         // The reconstructed committed-side evidence matches the finalized roots, so the
@@ -5942,7 +6013,7 @@ fn verified_incoming_reconciles_and_survives_restart() {
         let mut operator = operator_server.await.unwrap();
         register(&control, &mut operator).await;
         operator.pay(0, 2, 1).unwrap();
-        let successor = operator.complete_close(45).unwrap();
+        let successor = complete_chain_close(&control, &mut operator, 45).await;
         finalize(&control, &successor).await;
 
         // The held pairs, cursor, and reconciled mark all survive a restart.
@@ -5974,7 +6045,7 @@ fn late_incoming_page_reopens_a_clean_reconciliation() {
         let rows = operator
             .incoming_payments(&wallets()[1].public_key(), 0, 10)
             .unwrap();
-        let result = operator.complete_close(1).unwrap();
+        let result = complete_chain_close(&control, &mut operator, 1).await;
         finalize(&control, &result).await;
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
@@ -6044,12 +6115,12 @@ fn retired_descriptor_skips_first_time_receipt_without_credit() {
         // Operational balance versions are pruned while authenticated close evidence remains.
         register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
-        let held = operator.complete_close(50).unwrap();
+        let held = complete_chain_close(&control, &mut operator, 50).await;
         finalize(&control, &held).await;
         for epoch in 1..=5 {
             register(&control, &mut operator).await;
             operator.pay(0, 2, 1).unwrap();
-            let result = operator.complete_close(50 + epoch).unwrap();
+            let result = complete_chain_close(&control, &mut operator, 50 + epoch).await;
             assert_eq!(result.context.payment().epoch(), epoch);
             finalize(&control, &result).await;
         }
@@ -6493,7 +6564,7 @@ fn head_and_withdrawal_use_validators_with_operator_unreachable() {
         operator.apply_withdrawal(request, true).unwrap();
         register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
-        let result = operator.complete_close(60).unwrap();
+        let result = complete_chain_close(&control, &mut operator, 60).await;
         finalize(&control, &result).await;
         assert_eq!(
             agent
@@ -6506,7 +6577,7 @@ fn head_and_withdrawal_use_validators_with_operator_unreachable() {
         // Finalized balance evidence remains available when another close is admitted.
         register(&control, &mut operator).await;
         operator.pay(1, 2, 1).unwrap();
-        let successor = operator.complete_close(61).unwrap();
+        let successor = complete_chain_close(&control, &mut operator, 61).await;
         applied(
             &control,
             &SettlementTx::Admit(AdmitRequest::from(&successor)),
@@ -6709,8 +6780,8 @@ fn claim_evidence_fetched_during_window_claims_after_finalization() {
             .unwrap();
         register(&control, &mut operator).await;
         operator.pay(1, operator.wallet_count(), 40).unwrap();
-        let withdrawals = operator.registration_boundary().unwrap().1;
-        let result = operator.complete_close(71).unwrap();
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let result = complete_chain_close(&control, &mut operator, 71).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
         let (exact_request, _, _) =
             settlement_withdrawal(&operator, &result, &withdrawals, &wallets()[0].public_key());
@@ -6776,8 +6847,8 @@ fn finalized_zero_withdrawal_completes_without_an_asset_release() {
             }
             register(&control, &mut operator).await;
             operator.pay(0, 1, 100).unwrap();
-            let withdrawals = operator.registration_boundary().unwrap().1;
-            let result = operator.complete_close(1).unwrap();
+            let withdrawals = operator.live_registration_boundary().unwrap().1;
+            let result = complete_chain_close(&control, &mut operator, 1).await;
             assert_eq!(result.withdrawal_total, if other_reserve { 25 } else { 0 });
             let (_, position, _) =
                 settlement_withdrawal(&operator, &result, &withdrawals, &alice.account());
@@ -6878,7 +6949,7 @@ fn scripted_restart_submits_an_uncarried_withdrawal() {
             })
             .await;
             register(&served_control, &mut operator).await;
-            let close = operator.complete_close(1).unwrap();
+            let close = complete_chain_close(&served_control, &mut operator, 1).await;
             finalize(&served_control, &close).await;
         });
         let mut agent = Agent::open(database.path(), 0).unwrap();
@@ -6997,8 +7068,8 @@ fn uncached_finalized_payouts_require_an_unspent_candidate() {
             drop(alice);
             register(&control, &mut operator).await;
             operator.pay(1, operator.wallet_count(), 40).unwrap();
-            let withdrawals = operator.registration_boundary().unwrap().1;
-            let first = operator.complete_close(1).unwrap();
+            let withdrawals = operator.live_registration_boundary().unwrap().1;
+            let first = complete_chain_close(&control, &mut operator, 1).await;
             finalize(&control, &first).await;
             let (source_request, _, source_claim) =
                 settlement_withdrawal(&operator, &first, &withdrawals, &wallets()[0].public_key());
@@ -7036,7 +7107,7 @@ fn uncached_finalized_payouts_require_an_unspent_candidate() {
             }
             register(&control, &mut operator).await;
             operator.pay(2, operator.wallet_count(), 20).unwrap();
-            let second = operator.complete_close(2).unwrap();
+            let second = complete_chain_close(&control, &mut operator, 2).await;
             finalize(&control, &second).await;
             finalize_next(&control, &mut operator, 3).await;
 
@@ -7049,7 +7120,10 @@ fn uncached_finalized_payouts_require_an_unspent_candidate() {
             );
             assert!(control.record(anchor_key(&deployment(), 0)).await.is_none());
             drop(operator);
-            assert!(chain.registration(&context).await.unwrap().is_none());
+            assert_eq!(
+                chain.registration(&context).await.unwrap().unwrap().epoch,
+                3
+            );
 
             let mut unavailable = client_with_holders(&context, &control, UNREACHABLE);
             let mut alice = Agent::open(alice_database.path(), 0).unwrap();
@@ -7331,7 +7405,7 @@ fn operator_dark_wallet_moves_finalized_claim_to_registered_operator() {
 
         // The close carrying the withdrawal is only admitted, so the wallet retains the request
         // hint without caching an unfinalized payout candidate.
-        let result = operator.complete_close(80).unwrap();
+        let result = complete_chain_close(&control, &mut operator, 80).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
         let waiting = agent
             .claim_withdrawal(&context, &mut chain, UNREACHABLE)
@@ -7557,7 +7631,7 @@ fn invalidated_receipt_is_protected_across_fault_order_and_restart() {
                 "chain",
                 harness::native(crate::protocol::deployments()),
                 crate::protocol::Timing {
-                    admission_offset: 100,
+                    admission_offset: 200,
                     challenge_duration: 100,
                 },
             )
@@ -7566,14 +7640,14 @@ fn invalidated_receipt_is_protected_across_fault_order_and_restart() {
             for predecessor in 0..epoch {
                 register(&control, &mut operator).await;
                 operator.pay(2, 3, 1).unwrap();
-                let result = operator.complete_close(70 + predecessor).unwrap();
+                let result = complete_chain_close(&control, &mut operator, 70 + predecessor).await;
                 applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
             }
             let payment = register(&control, &mut operator).await;
             assert_eq!(payment.epoch(), epoch);
             let receipt = issued_receipt(&payment, &wallets()[0], &wallets()[1].public_key(), 5);
             operator.pay(2, 3, 1).unwrap();
-            let result = operator.complete_close(70 + epoch).unwrap();
+            let result = complete_chain_close(&control, &mut operator, 70 + epoch).await;
             applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
             let committed = operator
                 .committed_entry(&wallets()[0].public_key(), &receipt.recipient, epoch)
@@ -7913,7 +7987,7 @@ fn expired_unacknowledged_withdrawal_retires_into_the_signing_floor() {
         for nonce in 0..HISTORY_BEFORE {
             register(&control, &mut operator).await;
             operator.pay(2, 3, 1).unwrap();
-            let result = operator.complete_close(9_000 + nonce).unwrap();
+            let result = complete_chain_close(&control, &mut operator, 9_000 + nonce).await;
             finalize(&control, &result).await;
         }
 
@@ -7942,9 +8016,8 @@ fn expired_unacknowledged_withdrawal_retires_into_the_signing_floor() {
         for nonce in 0..HISTORY_AFTER {
             register(&control, &mut operator).await;
             operator.pay(2, 3, 1).unwrap();
-            let result = operator
-                .complete_close(9_000 + HISTORY_BEFORE + nonce)
-                .unwrap();
+            let result =
+                complete_chain_close(&control, &mut operator, 9_000 + HISTORY_BEFORE + nonce).await;
             finalize(&control, &result).await;
         }
         let status = status(&control).await;
@@ -8028,7 +8101,7 @@ fn virtual_receiver_retains_credit_then_exits_and_receives_again() {
         drop(receiver);
         let mut receiver = Agent::open(database.path(), wallets().len()).unwrap();
         assert_eq!(receiver.incoming().total, 7);
-        let first = operator.complete_close(1).unwrap();
+        let first = complete_chain_close(&control, &mut operator, 1).await;
         finalize(&control, &first).await;
         assert_eq!(
             receiver
@@ -8063,7 +8136,10 @@ fn virtual_receiver_retains_credit_then_exits_and_receives_again() {
         };
         operator.apply_withdrawal(request, false).unwrap();
         register(&control, &mut operator).await;
-        let exit = operator.complete_close(2).unwrap();
+        let handoff = complete_chain_close(&control, &mut operator, 1001).await;
+        finalize(&control, &handoff).await;
+        register(&control, &mut operator).await;
+        let exit = complete_chain_close(&control, &mut operator, 2).await;
         finalize(&control, &exit).await;
         assert_eq!(
             receiver
@@ -8090,7 +8166,7 @@ fn virtual_receiver_retains_credit_then_exits_and_receives_again() {
 
         register(&control, &mut operator).await;
         operator.pay(1, operator.wallet_count(), 5).unwrap();
-        let recreated = operator.complete_close(3).unwrap();
+        let recreated = complete_chain_close(&control, &mut operator, 3).await;
         finalize(&control, &recreated).await;
         drop(receiver);
         let mut receiver = Agent::open(database.path(), wallets().len()).unwrap();
@@ -8122,7 +8198,7 @@ fn virtual_receiver_spends_from_admitted_predecessor_before_finalization() {
             let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
             register(&control, &mut operator).await;
             operator.pay(0, operator.wallet_count(), 7).unwrap();
-            let first = operator.complete_close(1).unwrap();
+            let first = complete_chain_close(&control, &mut operator, 1).await;
             applied(&control, &SettlementTx::Admit(AdmitRequest::from(&first))).await;
             assert!(
                 !chain
@@ -8202,7 +8278,7 @@ fn invalidated_first_virtual_credit_recovers_no_frozen_balance() {
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         let payment = register(&control, &mut operator).await;
         operator.pay(0, operator.wallet_count(), 7).unwrap();
-        let first = operator.complete_close(1).unwrap();
+        let first = complete_chain_close(&control, &mut operator, 1).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&first))).await;
         register(&control, &mut operator).await;
         let account = crate::protocol::eve_wallet().public_key();
@@ -8280,7 +8356,7 @@ fn admitted_withdrawal_boundary_replaces_the_older_balance_floor() {
         register(&control, &mut operator).await;
         operator.pay(0, 1, 85).unwrap();
         operator.pay(2, 0, 10).unwrap();
-        let first = operator.complete_close(1).unwrap();
+        let first = complete_chain_close(&control, &mut operator, 1).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&first))).await;
         register(&control, &mut operator).await;
         let mut alice = Agent::new(0).unwrap();
@@ -8313,7 +8389,7 @@ fn stale_finalized_head_cannot_override_admitted_withdrawal() {
         register(&control, &mut operator).await;
         operator.pay(0, 1, 85).unwrap();
         operator.pay(2, 0, 10).unwrap();
-        let first = operator.complete_close(1).unwrap();
+        let first = complete_chain_close(&control, &mut operator, 1).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&first))).await;
         register(&control, &mut operator).await;
         let current = operator.payment_head(&wallets()[0].public_key()).unwrap();
@@ -8398,8 +8474,14 @@ fn frozen_recovery_preserves_finalized_withdrawals_without_history() {
                 );
                 operator.pay(0, 1, INITIAL_BALANCE).unwrap();
             }
-            let withdrawals = operator.registration_boundary().unwrap().1;
-            let close = operator.complete_close(1).unwrap();
+            let withdrawals = operator.live_registration_boundary().unwrap().1;
+            let close = if carried {
+                complete_chain_close(&control, &mut operator, 1).await
+            } else {
+                // The operator vanishes after omitting the queued request and withholds the
+                // successor registration. No local successor receipt is issued.
+                operator.complete_close(1).unwrap()
+            };
             finalize(&control, &close).await;
             let cached_source = if cached {
                 let (source_request, position, claim) =
@@ -8664,7 +8746,7 @@ fn payment_conclusion_retires_its_context_in_the_same_commit() {
                 )
             };
             if conclusion != "accepted" {
-                let close = operator.complete_close(819).unwrap();
+                let close = complete_chain_close(&control, &mut operator, 819).await;
                 if conclusion == "abandoned" {
                     applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
                 } else {
@@ -8761,14 +8843,14 @@ fn receipt_acquisition_after_successor_registration_keeps_the_challenge() {
         let old = register(&control, &mut operator).await;
         let receipt = issued_receipt(&old, &wallets()[0], &wallets()[1].public_key(), 5);
         operator.pay(2, 3, 1).unwrap();
-        let first = operator.complete_close(798).unwrap();
+        let first = complete_chain_close(&control, &mut operator, 798).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&first))).await;
         let next = register(&control, &mut operator).await;
         let descendant = issued_receipt(&next, &wallets()[0], &wallets()[1].public_key(), 7);
         operator.pay(2, 3, 1).unwrap();
-        let second = operator.complete_close(799).unwrap();
+        let second = complete_chain_close(&control, &mut operator, 799).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&second))).await;
-        assert_eq!(registration_record(&control).await.epoch, 1);
+        assert_eq!(registration_record(&control).await.epoch, 2);
         assert!(!chain.admitted(&context, 0).await.unwrap().unwrap().finalized);
         assert!(status(&control).await.height <= first.context.challenge_deadline());
         let mut listener = context.bind(UNREACHABLE).await.unwrap();
@@ -8833,7 +8915,13 @@ fn accepted_reply_crossing_finalization_uses_the_finalized_outcome() {
                     } else {
                         operator.pay(2, 3, 1).unwrap();
                     }
-                    let result = operator.complete_close(800).unwrap();
+                    let result = if included {
+                        complete_chain_close(&server_control, &mut operator, 800).await
+                    } else {
+                        // The lying operator withholds successor registration and replies with
+                        // an epoch-0 receipt after settling a close that excludes it.
+                        operator.complete_close(800).unwrap()
+                    };
                     finalize(&server_control, &result).await;
                     assert_eq!(status(&server_control).await.last_finalized, Some(0));
                     rpc::send_response(
@@ -8928,7 +9016,7 @@ fn late_incoming_requires_both_finalized_endpoints() {
             let payment = register(&control, &mut operator).await;
             operator.pay(0, 1, 5).unwrap();
             operator.pay(0, 1, 3).unwrap();
-            let result = operator.complete_close(801).unwrap();
+            let result = complete_chain_close(&control, &mut operator, 801).await;
             finalize(&control, &result).await;
             let admitted = chain.admitted(&context, 0).await.unwrap().unwrap();
             assert!(admitted.finalized);
@@ -8993,7 +9081,7 @@ fn finalized_receipt_uses_authenticated_operator_fallback() {
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
-        let result = operator.complete_close(802).unwrap();
+        let result = complete_chain_close(&control, &mut operator, 802).await;
         finalize(&control, &result).await;
         assert!(
             healthy
@@ -9071,16 +9159,21 @@ fn incoming_fault_page_commits_covered_prefix_and_retries_survivor() {
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
-        let first = operator.complete_close(803).unwrap();
-        finalize(&control, &first).await;
+        let first = complete_chain_close(&control, &mut operator, 803).await;
+        let height = control.advance(0).await;
+        control
+            .advance(first.context.admission_deadline() - height - 1)
+            .await;
+        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&first))).await;
         register(&control, &mut operator).await;
         operator.pay(0, 1, 7).unwrap();
-        let survivor = operator.complete_close(804).unwrap();
+        let survivor = complete_chain_close(&control, &mut operator, 804).await;
         applied(
             &control,
             &SettlementTx::Admit(AdmitRequest::from(&survivor)),
         )
         .await;
+        finalize(&control, &first).await;
         register(&control, &mut operator).await;
         operator.pay(0, 1, 9).unwrap();
         let rows = operator
@@ -9219,7 +9312,7 @@ fn accepted_reply_resolves_admission_exclusion_and_finalized_inclusion() {
                 "chain",
                 harness::native(crate::protocol::deployments()),
                 crate::protocol::Timing {
-                    admission_offset: 100,
+                    admission_offset: 200,
                     challenge_duration: 100,
                 },
             )
@@ -9295,7 +9388,7 @@ fn accepted_reply_resolves_admission_exclusion_and_finalized_inclusion() {
             if !prior && !included {
                 operator.pay(2, 3, 1).unwrap();
             }
-            let result = operator.complete_close(805).unwrap();
+            let result = complete_chain_close(&control, &mut operator, 805).await;
             if finalized {
                 finalize(&control, &result).await;
             } else {
@@ -9495,14 +9588,14 @@ fn accepted_reply_cannot_complete_faulted_work_before_finalized_coverage() {
     for (admitted, invalidated) in [(false, false), (true, false), (true, true)] {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let database = TempDatabase::new();
-            let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 100, challenge_duration: 100 }).await;
+            let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 200, challenge_duration: 100 }).await;
             let mut chain = client_with_holders(&context, &control, CHAIN);
             let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
             let challenged = if invalidated {
                 let payment = register(&control, &mut operator).await;
                 let receipt = issued_receipt(&payment, &wallets()[0], &wallets()[1].public_key(), 5);
                 operator.pay(2, 3, 1).unwrap();
-                let result = operator.complete_close(806).unwrap();
+                let result = complete_chain_close(&control, &mut operator, 806).await;
                 applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
                 let lookup = operator.committed_entry(&wallets()[0].public_key(), &wallets()[1].public_key(), 0).unwrap();
                 Some((result, receipt, lookup))
@@ -9521,7 +9614,7 @@ fn accepted_reply_cannot_complete_faulted_work_before_finalized_coverage() {
             let (mut listener, mut operator, response) = stage.await.unwrap();
             response.acceptance.verify(&payment).unwrap();
             let close = if admitted {
-                let result = operator.complete_close(807).unwrap();
+                let result = complete_chain_close(&control, &mut operator, 807).await;
                 applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
                 Some(result)
             } else { None };
@@ -9654,7 +9747,7 @@ fn stale_heads_cannot_restore_a_concluded_signing_context() {
             let old_id = Sha256::hash(&[authorization.body().encode().as_ref()]);
             let mut operator = staging.await.unwrap();
             operator.pay(2, 3, 1).unwrap();
-            let close = operator.complete_close(820).unwrap();
+            let close = complete_chain_close(&control, &mut operator, 820).await;
             applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
             let admitted = chain.admitted(&context, 0).await.unwrap().unwrap();
             let activity = Holders::default()
@@ -9681,9 +9774,11 @@ fn stale_heads_cannot_restore_a_concluded_signing_context() {
                     .is_err()
             );
             assert_eq!(agent.pending_payments.len(), 1);
-            assert_eq!(agent.pending_payments[0].authorization, authorization);
-            assert!(agent.pending_payments[0].replaceable);
-            assert!(agent.cache.is_none());
+            assert_ne!(agent.pending_payments[0].authorization, authorization);
+            assert_eq!(agent.pending_payments[0].authorization.body().epoch(), 1);
+            assert!(!agent.pending_payments[0].replaceable);
+            assert!(agent.store.check_signing_context(&old).is_err());
+            assert_eq!(agent.cache.as_ref().unwrap().context.epoch(), 1);
             assert_eq!(agent.store.debits_since(0).unwrap(), 0);
             let successor = register(&control, &mut operator).await;
             assert_eq!(successor.epoch(), 1);
@@ -9722,7 +9817,7 @@ fn stale_heads_cannot_restore_a_concluded_signing_context() {
                     })
                     .await;
                 });
-            if poll_balance {
+            for _ in 0..(1 + usize::from(poll_balance)) {
                 assert_eq!(
                     agent
                         .balance(&context, &mut chain, UNREACHABLE)
@@ -9730,10 +9825,12 @@ fn stale_heads_cannot_restore_a_concluded_signing_context() {
                         .unwrap(),
                     INITIAL_BALANCE
                 );
-                assert!(
-                    agent.cache.is_none(),
-                    "a retired head must not repopulate the cache"
+                assert_eq!(
+                    agent.cache.as_ref().unwrap().context.epoch(),
+                    1,
+                    "a retired head must not replace the successor cache"
                 );
+                assert!(agent.store.check_signing_context(&old).is_err());
             }
             let receipt = accepted(
                 agent
@@ -9861,13 +9958,13 @@ fn receipt_challenge(
 fn accepted_activity_is_reclassified_after_its_evidence_await() {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
         let database = TempDatabase::new();
-        let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 100, challenge_duration: 100 }).await;
+        let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 200, challenge_duration: 100 }).await;
         let mut chain = client_with_holders(&context, &control, CHAIN);
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         let first = register(&control, &mut operator).await;
         let omitted = issued_receipt(&first, &wallets()[2], &wallets()[3].public_key(), 5);
         operator.pay(1, 3, 1).unwrap();
-        let predecessor = operator.complete_close(821).unwrap();
+        let predecessor = complete_chain_close(&control, &mut operator, 821).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&predecessor))).await;
         let omission = operator.committed_entry(&wallets()[2].public_key(), &wallets()[3].public_key(), 0).unwrap();
         assert_eq!(omission.resolve::<Sha256>(&activity_range(&predecessor), &wallets()[2].public_key(), &wallets()[3].public_key()).unwrap(), (0, 0));
@@ -9882,7 +9979,7 @@ fn accepted_activity_is_reclassified_after_its_evidence_await() {
         assert!(agent.pay(&context, &mut chain, UNREACHABLE, &[(1, 7)]).await.is_err());
         let expected = agent.pending_payments.first().unwrap().authorization.encode();
         let (mut listener, mut operator, response) = staging.await.unwrap();
-        let close = operator.complete_close(822).unwrap();
+        let close = complete_chain_close(&control, &mut operator, 822).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
         let admitted = chain.admitted(&context, 1).await.unwrap().unwrap();
         assert!(!admitted.finalized);
@@ -9942,7 +10039,7 @@ fn hidden_later_challenge_defers_receipts_until_terminal_settlement() {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
         let payer_database = TempDatabase::new();
         let receiver_database = TempDatabase::new();
-        let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 100, challenge_duration: 100 }).await;
+        let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 200, challenge_duration: 100 }).await;
         let mut chain = client_with_holders(&context, &control, CHAIN);
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         let payment = register(&control, &mut operator).await;
@@ -9958,7 +10055,7 @@ fn hidden_later_challenge_defers_receipts_until_terminal_settlement() {
         assert!(payer.pay(&context, &mut chain, UNREACHABLE, &[(1, 7)]).await.is_err());
         let expected = payer.pending_payments.first().unwrap().authorization.encode();
         let (mut listener, mut operator, accepted) = staging.await.unwrap();
-        let close = operator.complete_close(823).unwrap();
+        let close = complete_chain_close(&control, &mut operator, 823).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
         let omission = operator.committed_entry(&wallets()[2].public_key(), &wallets()[3].public_key(), 0).unwrap();
         assert_eq!(omission.resolve::<Sha256>(&activity_range(&close), &wallets()[2].public_key(), &wallets()[3].public_key()).unwrap(), (0, 0));
@@ -10027,7 +10124,7 @@ fn finalized_signed_incoming_receipt_uses_retained_admitted_evidence() {
         let payment = register(&control, &mut operator).await;
         let receipt = issued_receipt(&payment, &wallets()[0], &wallets()[1].public_key(), 7);
         operator.pay(0, 1, 7).unwrap();
-        let finalized = operator.complete_close(824).unwrap();
+        let finalized = complete_chain_close(&control, &mut operator, 824).await;
         finalize(&control, &finalized).await;
         let mut listener = context.bind(UNREACHABLE).await.unwrap();
         let server = context
@@ -10066,13 +10163,13 @@ fn live_incoming_credit_is_durable_before_the_next_evidence_await() {
             let finalized_receipt =
                 issued_receipt(&old, &wallets()[0], &wallets()[1].public_key(), 7);
             operator.pay(0, 1, 7).unwrap();
-            let finalized = operator.complete_close(824).unwrap();
+            let finalized = complete_chain_close(&control, &mut operator, 824).await;
             finalize(&control, &finalized).await;
             let live = register(&control, &mut operator).await;
             let live_receipt =
                 issued_receipt(&live, &wallets()[0], &wallets()[1].public_key(), 5);
             operator.pay(2, 3, 1).unwrap();
-            let unfinalized = operator.complete_close(825).unwrap();
+            let unfinalized = complete_chain_close(&control, &mut operator, 825).await;
             applied(
                 &control,
                 &SettlementTx::Admit(AdmitRequest::from(&unfinalized)),
@@ -10196,12 +10293,12 @@ fn live_incoming_credit_is_durable_before_the_next_evidence_await() {
 fn clean_prefix_finalizing_during_fault_read_remains_creditable() {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
         let database = TempDatabase::new();
-        let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 100, challenge_duration: 100 }).await;
+        let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 200, challenge_duration: 100 }).await;
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         let payment = register(&control, &mut operator).await;
         let receipt = issued_receipt(&payment, &wallets()[0], &wallets()[1].public_key(), 7);
         operator.pay(0, 1, 7).unwrap();
-        let close = operator.complete_close(826).unwrap();
+        let close = complete_chain_close(&control, &mut operator, 826).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
         register(&control, &mut operator).await;
         let deadline = registration_record(&control).await.deadlines.unwrap().0;
@@ -10278,7 +10375,7 @@ fn payment_head_floor_lies_between_finality_and_its_context() {
         // operator's head floors at epoch 0's admitted successor.
         register(&control, &mut operator).await;
         operator.pay(0, 1, 7).unwrap();
-        let first = operator.complete_close(1).unwrap();
+        let first = complete_chain_close(&control, &mut operator, 1).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&first))).await;
         register(&control, &mut operator).await;
         let valid =
@@ -10396,9 +10493,9 @@ fn lower_bound_spans_the_floor_epoch_and_its_successor() {
             .unwrap();
         assert_eq!(bob.incoming().total, 30);
 
-        // Epoch 0 is cut with its close held, and epoch 1 registers behind it.
+        // Epoch 1 registers behind epoch 0, then epoch 0 is cut with its close held.
         let (started, resume) = operator.lock().pause_next_close();
-        operator.lock().start_close(0).unwrap();
+        start_close_shared(&control, &operator, 0).await;
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         register_shared(&control, &operator).await;
 
@@ -10462,14 +10559,13 @@ fn retired_withdrawal_forces_the_floor_past_its_carrying_close() {
         };
         operator.apply_withdrawal(request.clone(), false).unwrap();
         register(&control, &mut operator).await;
-        let first = operator.complete_close(1).unwrap();
+        let first = complete_chain_close(&control, &mut operator, 1).await;
         finalize(&control, &first).await;
         let before = chain.status(&context).await.unwrap();
         assert!(before.height < request.body().deadline());
 
         // The authorization retires once the chain reaches its deadline.
-        let height = control.advance(0).await;
-        control.advance(request.body().deadline() - height).await;
+        advance_with_closes(&control, &mut operator, request.body().deadline()).await;
         agent
             .observe_withdrawal_expiry(&context, &mut chain)
             .await
@@ -10485,7 +10581,7 @@ fn retired_withdrawal_forces_the_floor_past_its_carrying_close() {
         register(&control, &mut operator).await;
         let head =
             operator_rpc::PaymentHeadResponse::from(operator.payment_head(&account).unwrap());
-        assert_eq!(head.floor_epoch, 1);
+        assert!(head.floor_epoch > first.context.payment().epoch());
         assert_eq!(head.opening.balance.get(), INITIAL_BALANCE - 7);
         let error = agent
             .verify_head(&context, &mut chain, &head, &before)
@@ -10494,9 +10590,9 @@ fn retired_withdrawal_forces_the_floor_past_its_carrying_close() {
         assert!(format!("{error:#}").contains("predates a retired withdrawal authorization"));
 
         // Past the deadline, a head floored before the finalized carrying close
-        // is refused, and one floored at it verifies.
+        // is refused, and the current finalized floor verifies.
         let status = chain.status(&context).await.unwrap();
-        assert_eq!(status.last_finalized, Some(0));
+        assert_eq!(status.last_finalized, Some(head.floor_epoch - 1));
         let genesis = genesis_cache();
         let mut prior = head.clone();
         prior.floor_epoch = 0;
@@ -10511,7 +10607,7 @@ fn retired_withdrawal_forces_the_floor_past_its_carrying_close() {
             .verify_head(&context, &mut chain, &head, &status)
             .await
             .unwrap();
-        assert_eq!(agent.cache.as_ref().unwrap().root, first.roots.successor);
+        assert_eq!(agent.cache.as_ref().unwrap().root, head.root);
     });
 }
 
@@ -10523,11 +10619,12 @@ fn queued_registration_is_live_until_a_fault_invalidates_it() {
         let (control, mut chain) = chain(&context).await;
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
 
-        // Epoch 0 is the frontier, and epoch 1 queues behind it after the cut.
+        // Epoch 0 is the frontier, and epoch 1 queues behind it before the cut.
         let frontier = register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
         let (started, resume) = operator.pause_next_close();
-        operator.start_close(0).unwrap();
+        let successor = register_successor(&control, &mut operator).await;
+        operator.start_close(0, &successor).unwrap();
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         let queued = register(&control, &mut operator).await;
         assert_eq!(queued.epoch(), 1);
@@ -10576,7 +10673,7 @@ fn admission_during_the_registration_read_is_live_and_admitted() {
         // Epoch 0 registers with one payment, and its close completes unadmitted.
         let payment = register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
-        let close = operator.complete_close(1).unwrap();
+        let close = complete_chain_close(&control, &mut operator, 1).await;
 
         // The classification is held at its registration read.
         let (query, mut holds) = holding_query(
@@ -10622,7 +10719,7 @@ fn finality_during_the_status_read_is_finalized() {
         // Epoch 0 registers with one payment, and its close completes unadmitted.
         let payment = register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
-        let close = operator.complete_close(1).unwrap();
+        let close = complete_chain_close(&control, &mut operator, 1).await;
 
         // The classification is held at its status read.
         let (query, mut holds) =
@@ -10666,7 +10763,7 @@ fn late_admission_during_the_status_read_is_live_and_admitted() {
         let payment = register(&control, &mut operator).await;
         let (deadline, _) = registration_record(&control).await.deadlines.unwrap();
         operator.pay(0, 1, 5).unwrap();
-        let close = operator.complete_close(1).unwrap();
+        let close = complete_chain_close(&control, &mut operator, 1).await;
 
         // The classification is held at its status read.
         let (query, mut holds) =
@@ -10713,7 +10810,7 @@ fn finality_during_the_admission_reread_is_finalized() {
         // Epoch 0 registers with one payment, and its close completes unadmitted.
         let payment = register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
-        let close = operator.complete_close(1).unwrap();
+        let close = complete_chain_close(&control, &mut operator, 1).await;
 
         // The classification is held at its registration read and at the admission read after
         // it.
@@ -10770,11 +10867,12 @@ fn queued_finality_during_the_status_read_is_finalized() {
         let control = wide_chain(&context).await;
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
 
-        // Epoch 0 is the frontier, and epoch 1 queues behind it after the cut.
+        // Epoch 0 is the frontier, and epoch 1 queues behind it before the cut.
         register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
         let (started, resume) = operator.pause_next_close();
-        operator.start_close(0).unwrap();
+        let successor = register_successor(&control, &mut operator).await;
+        operator.start_close(0, &successor).unwrap();
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         let queued = register(&control, &mut operator).await;
         assert_eq!(registration_record(&control).await.deadlines, None);
@@ -10805,7 +10903,8 @@ fn queued_finality_during_the_status_read_is_finalized() {
             .adopt_registration(&registration_record(&control).await)
             .unwrap();
         operator.pay(2, 3, 1).unwrap();
-        operator.start_close(1).unwrap();
+        let successor = register_successor(&control, &mut operator).await;
+        operator.start_close(1, &successor).unwrap();
         operator.wait_for_closes().unwrap();
         let second = operator.retained_result(1).unwrap().unwrap();
         finalize(&control, &second).await;
@@ -10831,7 +10930,7 @@ fn retirement_after_the_finalized_status_read_is_retired() {
         // Epoch 0 registers with one payment, and its close completes unadmitted.
         let payment = register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
-        let close = operator.complete_close(1).unwrap();
+        let close = complete_chain_close(&control, &mut operator, 1).await;
 
         // The classification is held at its status read and at the read after it.
         let (query, mut holds) =
@@ -10902,7 +11001,7 @@ fn successor_registered_during_the_registration_read_is_the_latest() {
 
         // Epoch 1 registers and epoch 0's close admits before the held read is served.
         held.await.unwrap();
-        let close = operator.complete_close(1).unwrap();
+        let close = complete_chain_close(&control, &mut operator, 1).await;
         let live = register(&control, &mut operator).await;
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
         release.send(()).unwrap();
@@ -10938,10 +11037,10 @@ fn credit_only_recipient_waits_for_its_creating_close() {
         let eve = operator.lock().wallet_count();
         operator.lock().pay(0, eve, 7).unwrap();
 
-        // Epoch 0 is cut with its close held. Epoch 1 registers and accepts
+        // Epoch 1 registers, then epoch 0 is cut with its close held. Epoch 1 accepts
         // an eligible payer.
         let (started, resume) = operator.lock().pause_next_close();
-        operator.lock().start_close(0).unwrap();
+        start_close_shared(&control, &operator, 0).await;
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         register_shared(&control, &operator).await;
         assert_eq!(operator.lock().pay(1, 2, 3).unwrap().epoch, 1);

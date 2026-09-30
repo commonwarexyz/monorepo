@@ -371,28 +371,53 @@ async fn drive_closes<E: Env, C: Chain>(
     let Some(epoch) = operator.lock().automatic_epoch()? else {
         return Ok(());
     };
-    let request = chain.request(Lookup::Registration { epoch });
-    let verified = chain.recent(ctx, &request).await?;
-    if let Some(Record::Registration(record)) = verified.record {
-        let mut operator = operator.lock();
-        if operator.automatic_epoch()? == Some(epoch) {
-            operator.adopt_registration(&record)?;
-            operator.close_if_due(&record, verified.height, timing)?;
+    if !operator.lock().successor_pending()? {
+        let request = chain.request(Lookup::Registration { epoch });
+        let verified = chain.recent(ctx, &request).await?;
+        let publish_current = {
+            let mut operator = operator.lock();
+            if operator.automatic_epoch()? != Some(epoch) {
+                return Ok(());
+            }
+            match verified.record {
+                Some(Record::Registration(record)) => {
+                    operator.adopt_registration(&record)?;
+                    if !operator.close_due(&record, verified.height, timing)? {
+                        return Ok(());
+                    }
+                    operator.signed_successor(epoch)?;
+                    None
+                }
+                None => Some(operator.signed_registration()?),
+                Some(_) => bail!("certified registration read returned a foreign record"),
+            }
+        };
+        if let Some(registration) = publish_current {
+            chain
+                .submit(ctx, &SettlementTx::RegisterEpoch(registration))
+                .await?;
+            return Ok(());
         }
-        return Ok(());
     }
-
-    // One attempt leaves admission/finality observation live while registration is pending.
+    let next = epoch.checked_add(1).context("successor epoch overflow")?;
+    let record = chain.registration_at(ctx, next).await?;
     let registration = {
         let mut operator = operator.lock();
         if operator.automatic_epoch()? != Some(epoch) {
             return Ok(());
         }
-        operator.signed_registration()?
+        if let Some(record) = record {
+            operator.start_close(epoch, &record)?;
+            None
+        } else {
+            Some(operator.signed_successor(epoch)?)
+        }
     };
-    chain
-        .submit(ctx, &SettlementTx::RegisterEpoch(registration))
-        .await?;
+    if let Some(registration) = registration {
+        chain
+            .submit(ctx, &SettlementTx::RegisterEpoch(registration))
+            .await?;
+    }
     Ok(())
 }
 
@@ -485,7 +510,7 @@ pub(crate) fn run_agent(
     Ok(())
 }
 
-/// Releases unregistered reservations after their signed intake context is permanently invalid.
+/// Discards authorizations whose intake context is permanently invalid, restoring any reservation.
 async fn reconcile_withdrawals<E: Env, C: Chain>(
     ctx: &E,
     chain: &mut C,
@@ -602,90 +627,28 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
             if attempt > 0 {
                 ctx.sleep(POLL).await;
             }
-            if operator
-                .lock()
-                .staged_withdrawal(&request.request)?
+            if stage_withdrawal(ctx, chain, operator, request, timing)
+                .await?
                 .is_some()
             {
-                return Ok(None);
-            }
-            let expected = operator.lock().registration_boundary()?.0;
-            let status = chain.recent_status(ctx).await?;
-            ensure!(
-                !status.hard_faulted,
-                "withdrawal deployment is hard-faulted"
-            );
-            request
-                .request
-                .verify_deployment(&status.deployment)
-                .context("verify withdrawal authorization")?;
-            let inclusion = status
-                .height
-                .checked_add(1)
-                .context("withdrawal inclusion height overflow")?;
-            let config = crate::protocol::settlement_config(&timing)?;
-            let minimum = inclusion
-                .checked_add(config.minimum_withdrawal_notice.get())
-                .context("withdrawal notice overflow")?;
-            let maximum = inclusion.saturating_add(config.maximum_withdrawal_notice.get());
-            let deadline = request.request.body().deadline();
-            let current_root = request.request.body().state_root() == &status.state_root.digest;
-            let valid_notice = (minimum..=maximum).contains(&deadline);
-
-            let lookup = chain.request(Lookup::Withdrawal {
-                account: request.request.account().clone(),
-            });
-            let queued = chain.recent(ctx, &lookup).await?;
-            ensure!(
-                queued.height >= status.height && deadline > queued.height,
-                "withdrawal has expired"
-            );
-            let index = match queued.record {
-                Some(Record::Withdrawal(accepted)) => {
-                    (accepted.request == request.request).then_some(accepted.index)
-                }
-                None => None,
-                Some(_) => bail!("certified withdrawal read returned a foreign record"),
-            };
-            let queued = index.is_some();
-            if !queued {
-                ensure!(
-                    current_root,
-                    "withdrawal reference root differs from the current finalized state"
-                );
-                ensure!(
-                    valid_notice,
-                    "withdrawal deadline {deadline} is outside [{minimum}, {maximum}] at height {}",
-                    status.height
-                );
-            }
-
-            // Publication fixes the current boundary. Keep this authorization intact
-            // until the close driver opens a successor boundary for it.
-            {
-                let mut operator = operator.lock();
-                if operator.registration_boundary()?.0 != expected {
-                    continue;
-                }
-                if !operator.withdrawals_frozen()? {
-                    // Only this operator's registrations supersede a queued request, and the
-                    // unpublished boundary follows every one of them, so its store decides.
-                    if let Some(index) = index {
-                        ensure!(
-                            !operator.superseded(&request.request, index)?,
-                            "a registered withdrawal superseded the queued request"
-                        );
-                    }
-                    return Ok(Some(operator_rpc::apply_withdrawal_confirmed(
-                        &mut operator,
-                        request.clone(),
-                        queued,
-                    )));
+                // A future authorization can be discarded or superseded before handoff.
+                // Only its exact retained row can acknowledge an epoch that has become live.
+                let operator = operator.lock();
+                if let Some(staged) = operator.staged_withdrawal(&request.request)?
+                    && staged.epoch <= operator.epoch()?
+                {
+                    return Ok(Some(rpc::Response::Success {
+                        body: operator_rpc::WithdrawalAck {
+                            epoch: staged.epoch,
+                            digest: operator_rpc::withdrawal_digest(&request.request),
+                        }
+                        .encode(),
+                    }));
                 }
             }
             drive_closes(ctx, chain, operator, timing).await?;
         }
-        bail!("the next withdrawal boundary did not open in time; retry the saved request");
+        bail!("the withdrawal epoch did not become live in time; retry the saved request");
     }
 
     if !matches!(
@@ -710,7 +673,142 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
         })
     })
     .await?;
+    if let operator_rpc::OperatorRequest::StartClose(request) = request {
+        let started = register_successor(ctx, chain, operator, request.expected_epoch).await?;
+        return Ok(Some(rpc::Response::Success {
+            body: operator_rpc::StartCloseResponse {
+                epoch: started.epoch,
+                queued: started.queued,
+            }
+            .encode(),
+        }));
+    }
     Ok(None)
+}
+
+/// Authenticates one withdrawal intake attempt and durably stages it without driving a handoff.
+/// Staging does not imply that the request's epoch is operational.
+async fn stage_withdrawal<E: Env, C: Chain>(
+    ctx: &E,
+    chain: &mut C,
+    operator: &Mutex<Operator>,
+    request: &operator_rpc::ApplyWithdrawalRequest,
+    timing: Timing,
+) -> Result<Option<crate::operator::StagedWithdrawal>> {
+    if let Some(staged) = operator.lock().staged_withdrawal(&request.request)? {
+        return Ok(Some(staged));
+    }
+    let expected = operator.lock().registration_boundary()?.0;
+    let status = chain.recent_status(ctx).await?;
+    ensure!(
+        !status.hard_faulted,
+        "withdrawal deployment is hard-faulted"
+    );
+    request
+        .request
+        .verify_deployment(&status.deployment)
+        .context("verify withdrawal authorization")?;
+    let inclusion = status
+        .height
+        .checked_add(1)
+        .context("withdrawal inclusion height overflow")?;
+    let config = crate::protocol::settlement_config(&timing)?;
+    let minimum = inclusion
+        .checked_add(config.minimum_withdrawal_notice.get())
+        .context("withdrawal notice overflow")?;
+    let maximum = inclusion.saturating_add(config.maximum_withdrawal_notice.get());
+    let deadline = request.request.body().deadline();
+    let current_root = request.request.body().state_root() == &status.state_root.digest;
+    let valid_notice = (minimum..=maximum).contains(&deadline);
+
+    let lookup = chain.request(Lookup::Withdrawal {
+        account: request.request.account().clone(),
+    });
+    let queued = chain.recent(ctx, &lookup).await?;
+    ensure!(
+        queued.height >= status.height && deadline > queued.height,
+        "withdrawal has expired"
+    );
+    let index = match queued.record {
+        Some(Record::Withdrawal(accepted)) => {
+            (accepted.request == request.request).then_some(accepted.index)
+        }
+        None => None,
+        Some(_) => bail!("certified withdrawal read returned a foreign record"),
+    };
+    if index.is_none() {
+        ensure!(
+            current_root,
+            "withdrawal reference root differs from the current finalized state"
+        );
+        ensure!(
+            valid_notice,
+            "withdrawal deadline {deadline} is outside [{minimum}, {maximum}] at height {}",
+            status.height
+        );
+    }
+
+    let mut operator = operator.lock();
+    if operator.registration_boundary()?.0 != expected || operator.withdrawals_frozen()? {
+        return Ok(None);
+    }
+
+    // Only this operator's registrations supersede a queued request, and the
+    // unpublished boundary follows every one of them, so its store decides.
+    if let Some(index) = index {
+        ensure!(
+            !operator.superseded(&request.request, index)?,
+            "a registered withdrawal superseded the queued request"
+        );
+    }
+    operator
+        .apply_withdrawal(request.request.clone(), index.is_some())
+        .map(Some)
+        .context("apply withdrawal")
+}
+
+/// Keeps the predecessor writable until the exact successor registration is certified.
+/// Publication intent is durable, so the close driver resumes it if this RPC is cancelled.
+async fn register_successor<E: Env, C: Chain>(
+    ctx: &E,
+    chain: &mut C,
+    operator: &Mutex<Operator>,
+    epoch: u64,
+) -> Result<crate::operator::CloseStarted> {
+    for attempt in 0..REGISTER_ATTEMPTS {
+        if attempt > 0 {
+            ctx.sleep(REGISTER_POLL).await;
+        }
+        if operator.lock().close_already_started(epoch)? {
+            return Ok(crate::operator::CloseStarted {
+                epoch,
+                queued: true,
+            });
+        }
+        observe(ctx, chain, operator).await?;
+        reconcile_withdrawals(ctx, chain, operator).await?;
+        let request = {
+            let mut operator = operator.lock();
+            if operator.close_already_started(epoch)? {
+                return Ok(crate::operator::CloseStarted {
+                    epoch,
+                    queued: true,
+                });
+            }
+            operator.signed_successor(epoch)?
+        };
+        let successor = request.epoch;
+        chain
+            .deliver(ctx, &SettlementTx::RegisterEpoch(request))
+            .await?;
+        for _ in 0..CONFIRM_ATTEMPTS {
+            if let Some(record) = chain.registration_at(ctx, successor).await? {
+                return operator.lock().start_close(epoch, &record);
+            }
+            ctx.sleep(CONFIRM_POLL).await;
+        }
+    }
+    bail!("the successor registration never appeared in certified state")
 }
 
 /// Records the certified inbox entries the operator has not observed and lets its live boundary
@@ -807,7 +905,11 @@ async fn register_epoch<E: Env, C: Chain>(
                 .await
                 .context("read back the registered epoch")?;
             if let Some(record) = record {
-                return operator.lock().adopt_registration(&record);
+                let mut operator = operator.lock();
+                if !required(&operator)? {
+                    return Ok(());
+                }
+                return operator.adopt_registration(&record);
             }
             ctx.sleep(CONFIRM_POLL).await;
         }
@@ -832,7 +934,7 @@ mod tests {
                 registration_key, status_key, withdrawal_key,
             },
         },
-        protocol::{DepositEvent, deployment, wallets},
+        protocol::{DepositEvent, SettlementResult, deployment, wallets},
     };
     use bytes::Bytes;
     use commonware_clearing::bajillion::boundary::{SignedWithdrawal, WithdrawalAction};
@@ -937,6 +1039,30 @@ mod tests {
             context.child("client_rng"),
         )
         .unwrap()
+    }
+
+    /// Runs the synchronous close fixture with an actual certified successor registration.
+    async fn complete_close(
+        context: &deterministic::Context,
+        chain: &mut Client,
+        operator: &Mutex<Operator>,
+        seed: u64,
+    ) -> SettlementResult {
+        let epoch = operator.lock().status().unwrap().epoch;
+        let request = operator.lock().signed_successor(epoch).unwrap();
+        chain
+            .deliver(context, &SettlementTx::RegisterEpoch(request))
+            .await
+            .unwrap();
+        let successor = chain
+            .registration_at(context, epoch + 1)
+            .await
+            .unwrap()
+            .unwrap();
+        operator
+            .lock()
+            .complete_close_with_successor(seed, &successor)
+            .unwrap()
     }
 
     /// A client whose one validator address answers nothing.
@@ -1206,14 +1332,11 @@ mod tests {
                         request: withdrawal.clone(),
                     },
                 );
-                let response =
+                assert!(
                     prepare_request(&context, &mut chain, &operator, &request, Timing::DEFAULT)
                         .await
-                        .unwrap()
-                        .unwrap();
-                assert!(
-                    matches!(response, rpc::Response::Error { .. }),
-                    "withdrawal without a predecessor opening was carried: {response:?}"
+                        .is_err(),
+                    "withdrawal without a predecessor opening was carried"
                 );
                 assert!(
                     operator
@@ -1289,6 +1412,11 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(staged.epoch, 1);
+            assert_eq!(
+                operator.lock().status().unwrap().epoch,
+                staged.epoch,
+                "the service acknowledged a future withdrawal before certified handoff"
+            );
             assert!(
                 chain
                     .status(&context)
@@ -1340,7 +1468,8 @@ mod tests {
                 .unwrap();
             let first = chain.registration(&context).await.unwrap().unwrap();
             operator.lock().pay(0, 1, 5).unwrap();
-            let close = operator.lock().complete_close(1).unwrap();
+            let close = complete_close(&context, &mut chain, &operator, 1).await;
+            advance_to(&control, first.deadlines.unwrap().0 - 2).await;
             control
                 .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
                     &close,
@@ -1375,27 +1504,20 @@ mod tests {
                     request: queued.clone(), opening: queued_opening.opening,
                 })).await;
                 assert_eq!(chain.withdrawal(&context, queued_wallet.public_key()).await.unwrap().as_ref(), Some(queued));
-                let request = operator_rpc::OperatorRequest::ApplyWithdrawal(operator_rpc::ApplyWithdrawalRequest { request: queued.clone() });
-                let response = prepare_request(&context, &mut chain, &operator, &request, Timing::DEFAULT).await.unwrap().unwrap();
-                assert!(matches!(response, rpc::Response::Success { .. }), "{response:?}");
+                let request = operator_rpc::ApplyWithdrawalRequest { request: queued.clone() };
+                assert!(stage_withdrawal(&context, &mut chain, &operator, &request, Timing::DEFAULT).await.unwrap().is_some());
             }
-            let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
-                operator_rpc::ApplyWithdrawalRequest {
-                    request: withdrawal.clone(),
-                },
-            );
-            let response =
-                prepare_request(&context, &mut chain, &operator, &request, Timing::DEFAULT)
-                    .await
-                    .unwrap()
-                    .unwrap_or_else(|| operator_rpc::handle_decoded(&mut operator.lock(), request));
-            assert!(matches!(response, rpc::Response::Success { .. }), "{response:?}");
-            let published = operator.lock().signed_registration().unwrap();
-            assert_eq!(published.epoch, 1);
+            let request = operator_rpc::ApplyWithdrawalRequest {
+                request: withdrawal.clone(),
+            };
+            assert!(stage_withdrawal(&context, &mut chain, &operator, &request, Timing::DEFAULT)
+                .await.unwrap().is_some());
+            let published = operator.lock().signed_successor(1).unwrap();
+            assert_eq!(published.epoch, 2);
             assert_eq!(published.withdrawals.request_for(withdrawal.account()), Some(&withdrawal));
             if matches!(retention, WithdrawalRootAdvance::Registered) {
                 control.submit(SettlementTx::RegisterEpoch(published.clone())).await;
-                assert_eq!(chain.registration(&context).await.unwrap().unwrap().epoch, 1);
+                assert_eq!(chain.registration(&context).await.unwrap().unwrap().epoch, 2);
                 assert!(operator.lock().unregistered_withdrawals().unwrap().is_some());
             }
 
@@ -1405,17 +1527,17 @@ mod tests {
             assert_eq!(advanced.last_finalized, Some(0));
             assert_ne!(advanced.state_root.digest, head.state_root.digest);
             assert!(advanced.height < deadline);
-            let anchor = chain.request(Lookup::Anchor { epoch: 1 });
+            let anchor = chain.request(Lookup::Anchor { epoch: 2 });
             if !matches!(retention, WithdrawalRootAdvance::Fresh) {
                 for _ in 0..2 {
                     reconcile_withdrawals(&context, &mut chain, &operator).await.unwrap();
                 }
-                let retained = operator.lock().signed_registration().unwrap();
+                let retained = operator.lock().signed_successor(1).unwrap();
                 if matches!(retention, WithdrawalRootAdvance::Mixed) {
                     assert!(operator.lock().staged_withdrawal(&withdrawal).unwrap().is_none());
                     assert_eq!(operator.lock().payment_head(&wallet.public_key()).unwrap().balance, 95);
                     assert_eq!(retained.withdrawals.requests(), std::slice::from_ref(queued.as_ref().unwrap()));
-                    assert_eq!(operator.lock().payment_head(&queued_wallet.public_key()).unwrap().balance, 102);
+                    assert_eq!(operator.lock().payment_head(&queued_wallet.public_key()).unwrap().balance, 105);
                 } else {
                     assert_eq!(retained, published);
                     assert!(operator.lock().staged_withdrawal(&withdrawal).unwrap().is_some());
@@ -1429,19 +1551,20 @@ mod tests {
             control.submit(SettlementTx::RegisterEpoch(published)).await;
             assert!(chain.recent(&context, &anchor).await.unwrap().record.is_none());
 
-            drive_closes(&context, &mut chain, &operator, Timing::DEFAULT)
-                .await
-                .unwrap();
+            let retry = operator_rpc::OperatorRequest::ApplyWithdrawal(request);
+            let error = prepare_request(&context, &mut chain, &operator, &retry, Timing::DEFAULT)
+                .await.unwrap_err();
+            assert!(format!("{error:#}").contains("reference root differs"));
             assert!(operator.lock().staged_withdrawal(&withdrawal).unwrap().is_none());
             assert_eq!(operator.lock().payment_head(&wallet.public_key()).unwrap().balance, 95);
-            let retry = operator.lock().signed_registration().unwrap();
+            let retry = operator.lock().signed_successor(1).unwrap();
             control.submit(SettlementTx::RegisterEpoch(retry)).await;
             let current = chain.recent_status(&context).await.unwrap();
             assert!(current.height < deadline);
             assert!(!current.hard_faulted);
             assert_eq!(
                 chain.registration(&context).await.unwrap().map(|record| record.epoch),
-                Some(1),
+                Some(2),
                 "a staged {action:?} blocked successor registration after finalized-root advancement"
             );
         });
@@ -1522,6 +1645,34 @@ mod tests {
                                     .unwrap()
                                     .maximum_withdrawal_notice
                                     .get();
+                            let extra = if debit == 98 && credit == 0 {
+                                let extra = SignedWithdrawal::sign(
+                                    deployment(),
+                                    opening.root.digest,
+                                    wallet.public_key().encode(),
+                                    WithdrawalAction::Amount(NonZeroU64::MIN),
+                                    deadline,
+                                    wallet.signer(),
+                                );
+                                let apply = operator_rpc::ApplyWithdrawalRequest {
+                                    request: extra.clone(),
+                                };
+                                assert!(
+                                    stage_withdrawal(
+                                        &context,
+                                        &mut chain,
+                                        &operator,
+                                        &apply,
+                                        Timing::DEFAULT
+                                    )
+                                    .await
+                                    .unwrap()
+                                    .is_some()
+                                );
+                                Some(extra)
+                            } else {
+                                None
+                            };
                             let withdrawal = SignedWithdrawal::sign(
                                 deployment(),
                                 opening.root.digest,
@@ -1546,7 +1697,44 @@ mod tests {
                                 Some(withdrawal.clone())
                             );
                             assert_eq!(chain.registration(&context).await.unwrap(), Some(first));
-                            let first_close = operator.lock().complete_close(1).unwrap();
+                            observe(&context, &mut chain, &operator).await.unwrap();
+                            let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
+                                operator_rpc::ApplyWithdrawalRequest {
+                                    request: withdrawal.clone(),
+                                },
+                            );
+                            let before_cut = stage_withdrawal(
+                                &context,
+                                &mut chain,
+                                &operator,
+                                &operator_rpc::ApplyWithdrawalRequest {
+                                    request: withdrawal.clone(),
+                                },
+                                Timing::DEFAULT,
+                            )
+                            .await
+                            .unwrap()
+                            .unwrap();
+                            assert_eq!(before_cut.epoch, 1);
+                            assert_eq!(operator.lock().status().unwrap().epoch, 0);
+                            if let Some(extra) = extra {
+                                assert!(operator.lock().staged_withdrawal(&extra).is_err());
+                            }
+                            assert_eq!(
+                                operator
+                                    .lock()
+                                    .snapshot()
+                                    .unwrap()
+                                    .accounts
+                                    .iter()
+                                    .find(|account| account.name == wallet.name)
+                                    .unwrap()
+                                    .balance,
+                                100 - debit,
+                                "future withdrawal intake must not reserve the current tail"
+                            );
+                            let first_close =
+                                complete_close(&context, &mut chain, &operator, 1).await;
                             assert_eq!(
                                 first_close.context.withdrawal_root(),
                                 &WithdrawalBatch::<crate::protocol::Key, Digest>::empty()
@@ -1559,11 +1747,6 @@ mod tests {
                                 )))
                                 .await;
 
-                            let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
-                                operator_rpc::ApplyWithdrawalRequest {
-                                    request: withdrawal.clone(),
-                                },
-                            );
                             let response = prepare_request(
                                 &context,
                                 &mut chain,
@@ -1573,7 +1756,16 @@ mod tests {
                             )
                             .await
                             .unwrap()
-                            .unwrap();
+                            .unwrap_or_else(|| {
+                                operator_rpc::handle_decoded(
+                                    &mut operator.lock(),
+                                    operator_rpc::OperatorRequest::ApplyWithdrawal(
+                                        operator_rpc::ApplyWithdrawalRequest {
+                                            request: withdrawal.clone(),
+                                        },
+                                    ),
+                                )
+                            });
                             assert!(
                                 matches!(response, rpc::Response::Success { .. }),
                                 "debit={debit} credit={credit} action={action:?}: {response:?}"
@@ -1589,6 +1781,9 @@ mod tests {
                                     .unwrap()
                                     .is_some()
                             );
+                            observe_closes(&context, &mut chain, &operator)
+                                .await
+                                .unwrap();
                             let registration = operator.lock().signed_registration().unwrap();
                             assert_eq!(registration.epoch, 1);
                             assert_eq!(
@@ -1607,7 +1802,7 @@ mod tests {
                             if debit == 100 {
                                 assert!(operator.lock().pay(0, 1, 1).is_err());
                             }
-                            let close = operator.lock().complete_close(2).unwrap();
+                            let close = complete_close(&context, &mut chain, &operator, 2).await;
                             let tail = 100 - debit + credit;
                             let expected = match action {
                                 WithdrawalAction::Amount(amount) if tail >= amount.get() => {
@@ -1619,6 +1814,7 @@ mod tests {
                             assert_eq!(close.withdrawal_total, expected);
                             let position = close.context.predecessor_logs().payouts.operations;
                             assert_eq!(close.roots.withdrawal_outputs.operations, position + 2);
+                            advance_to(&control, registered.deadlines.unwrap().0 - 1).await;
                             control
                                 .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
                                     &close,
@@ -1691,23 +1887,29 @@ mod tests {
                             let operator = Mutex::new(
                                 Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap(),
                             );
-                            let before = operator.lock().registration_boundary().unwrap();
+                            let before = operator.lock().status().unwrap().epoch;
                             let mut unavailable = unreachable_client(&context);
-                            assert!(
-                                prepare_request(
-                                    &context,
-                                    &mut unavailable,
-                                    &operator,
-                                    &request,
-                                    Timing::DEFAULT,
-                                )
-                                .await
-                                .unwrap()
-                                .is_none()
+                            let response = prepare_request(
+                                &context,
+                                &mut unavailable,
+                                &operator,
+                                &request,
+                                Timing::DEFAULT,
+                            )
+                            .await
+                            .unwrap()
+                            .unwrap();
+                            assert!(matches!(response, rpc::Response::Success { .. }));
+                            let retry = operator_rpc::handle_decoded(
+                                &mut operator.lock(),
+                                operator_rpc::OperatorRequest::ApplyWithdrawal(
+                                    operator_rpc::ApplyWithdrawalRequest {
+                                        request: withdrawal.clone(),
+                                    },
+                                ),
                             );
-                            let retry = operator_rpc::handle_decoded(&mut operator.lock(), request);
                             assert_eq!(retry.encode(), response.encode());
-                            assert_eq!(operator.lock().registration_boundary().unwrap(), before);
+                            assert_eq!(operator.lock().status().unwrap().epoch, before);
                         },
                     );
                 }
@@ -1793,7 +1995,7 @@ mod tests {
                 .unwrap();
             assert_eq!(first.action, WithdrawalAction::Close);
             operator.lock().adopt_at(0, None).unwrap();
-            operator.lock().start_close(0).unwrap();
+            operator.lock().start_close_at(0).unwrap();
 
             let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
                 operator_rpc::ApplyWithdrawalRequest {
@@ -1801,18 +2003,22 @@ mod tests {
                 },
             );
             let mut chain = unreachable_client(&context);
-            assert!(
-                prepare_request(
-                    &context,
-                    &mut chain,
-                    &operator,
-                    &request,
-                    crate::protocol::Timing::DEFAULT
-                )
-                .await
-                .unwrap()
-                .is_none()
-            );
+            let response = prepare_request(
+                &context,
+                &mut chain,
+                &operator,
+                &request,
+                crate::protocol::Timing::DEFAULT,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let rpc::Response::Success { body } = response else {
+                panic!("historical withdrawal replay was rejected");
+            };
+            let ack = operator_rpc::WithdrawalAck::decode(body).unwrap();
+            assert_eq!(ack.epoch, 0);
+            assert_eq!(ack.digest, operator_rpc::withdrawal_digest(&close));
             let mut operator = operator.into_inner();
             let retry = operator.apply_withdrawal(close, false).unwrap();
             assert_eq!(retry.epoch, 0);
@@ -2451,12 +2657,7 @@ mod tests {
                 .unwrap()
                 .context;
             let action = WithdrawalAction::Amount(NonZeroU64::new(3).unwrap());
-            let rejected = operator
-                .lock()
-                .withdraw(0, action)
-                .err()
-                .expect("direct intake must preserve the published withdrawal boundary");
-            assert!(format!("{rejected:#}").contains("withdrawals are frozen"));
+            assert_eq!(operator.lock().withdraw(2, action).unwrap().epoch, 1);
             assert_eq!(
                 operator
                     .lock()
@@ -2505,9 +2706,24 @@ mod tests {
                     .epoch,
                 1
             );
-            assert_eq!(operator.lock().status().unwrap().epoch, 1);
+            assert_eq!(operator.lock().status().unwrap().epoch, epoch);
+            let successor = chain
+                .registration_at(&context, epoch)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(successor.epoch, 1);
             assert_eq!(
-                chain.registration(&context).await.unwrap().unwrap(),
+                successor.anchor,
+                *operator
+                    .lock()
+                    .live_registration_boundary()
+                    .unwrap()
+                    .0
+                    .anchor()
+            );
+            assert_eq!(
+                chain.registration_at(&context, 0).await.unwrap().unwrap(),
                 registered
             );
             assert_eq!(
@@ -2563,13 +2779,13 @@ mod tests {
             }
             assert_eq!(operator.lock().status().unwrap().epoch, 1);
             operator.lock().wait_for_closes().unwrap();
-            assert_eq!(operator.lock().automatic_epoch().unwrap(), None);
+            assert_eq!(operator.lock().automatic_epoch().unwrap(), Some(1));
             drive_closes(&context, &mut chain, &operator, Timing::DEFAULT)
                 .await
                 .unwrap();
             assert_eq!(
                 chain.registration(&context).await.unwrap().unwrap().epoch,
-                0
+                1
             );
             assert!(!status(&control).await.hard_faulted);
         });
@@ -2634,12 +2850,15 @@ mod tests {
                 110
             );
             assert_eq!(operator.lock().signed_registration().unwrap(), old);
-            let rejected = operator
-                .lock()
-                .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()))
-                .err()
-                .expect("the published boundary must keep withdrawals frozen");
-            assert!(format!("{rejected:#}").contains("withdrawals are frozen"));
+            assert_eq!(
+                operator
+                    .lock()
+                    .withdraw(2, WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()))
+                    .unwrap()
+                    .epoch,
+                1
+            );
+            assert_eq!(operator.lock().signed_registration().unwrap(), old);
 
             // The cutover's successor takes the later deposit and credits it.
             for _ in 0..8 {
@@ -2823,6 +3042,148 @@ mod tests {
                 assert!(reopened.lock().pending_epochs().unwrap().is_empty());
                 assert!(reopened.lock().pay(0, 1, 1).is_err());
             }
+        });
+    }
+
+    #[test]
+    fn successor_registration_recovers_every_publication_and_cut_boundary() {
+        for cut in 0..5 {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(
+                move |context| async move {
+                    let databases = TempDatabases::new();
+                    let control = harness::start(&context, CHAIN, "successor_recovery").await;
+                    let mut chain = client(&context, &control);
+                    let operator = Mutex::new(
+                        Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap(),
+                    );
+                    register_epoch(&context, &mut chain, &operator, |_| Ok(true))
+                        .await
+                        .unwrap();
+                    operator.lock().pay(0, 1, 2).unwrap();
+
+                    let mut depositor = Agent::new(0).unwrap();
+                    depositor.deposit(&context, &mut chain, 7).await.unwrap();
+                    observe(&context, &mut chain, &operator).await.unwrap();
+                    let withdrawal = SignedWithdrawal::sign(
+                        deployment(),
+                        status(&control).await.state_root.digest,
+                        Bytes::copy_from_slice(wallets()[1].public_key().as_ref()),
+                        WithdrawalAction::Amount(NonZeroU64::new(5).unwrap()),
+                        50,
+                        wallets()[1].signer(),
+                    );
+                    let apply = operator_rpc::ApplyWithdrawalRequest {
+                        request: withdrawal.clone(),
+                    };
+                    assert!(
+                        stage_withdrawal(&context, &mut chain, &operator, &apply, Timing::DEFAULT)
+                            .await
+                            .unwrap()
+                            .is_some()
+                    );
+                    assert_eq!(operator.lock().status().unwrap().epoch, 0);
+                    let published = operator.lock().signed_successor(0).unwrap();
+                    assert_eq!(published.end, 1);
+                    assert_eq!(
+                        published.withdrawals.requests(),
+                        std::slice::from_ref(&withdrawal)
+                    );
+                    operator.lock().pay(0, 1, 3).unwrap();
+                    let late = SignedWithdrawal::sign(
+                        deployment(),
+                        status(&control).await.state_root.digest,
+                        Bytes::copy_from_slice(wallets()[2].public_key().as_ref()),
+                        WithdrawalAction::Close,
+                        50,
+                        wallets()[2].signer(),
+                    );
+                    assert!(
+                        operator
+                            .lock()
+                            .apply_withdrawal(late.clone(), false)
+                            .is_err()
+                    );
+                    assert!(operator.lock().ensure_store_usable().is_ok());
+                    assert_eq!(operator.lock().signed_successor(0).unwrap(), published);
+                    if cut >= 1 {
+                        chain
+                            .deliver(&context, &SettlementTx::RegisterEpoch(published.clone()))
+                            .await
+                            .unwrap();
+                    }
+                    if cut >= 2 {
+                        let record = chain.registration_at(&context, 1).await.unwrap().unwrap();
+                        if cut == 3 {
+                            operator.lock().start_close(0, &record).unwrap();
+                            operator.lock().wait_for_closes().unwrap();
+                        } else if cut == 4 {
+                            operator.lock().fail_next_cutover_commit();
+                            assert!(operator.lock().start_close(0, &record).is_err());
+                            assert!(operator.lock().ensure_store_usable().is_err());
+                        }
+                    }
+                    drop(operator);
+
+                    let reopened = Mutex::new(
+                        Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap(),
+                    );
+                    observe_closes(&context, &mut chain, &reopened)
+                        .await
+                        .unwrap();
+                    if cut < 3 {
+                        assert_eq!(reopened.lock().status().unwrap().epoch, 0);
+                        assert_eq!(reopened.lock().signed_successor(0).unwrap(), published);
+                        assert!(reopened.lock().apply_withdrawal(late, false).is_err());
+                        let replay = reopened.lock().pay(0, 1, 4).unwrap();
+                        assert_eq!(replay.epoch, 0);
+                        register_successor(&context, &mut chain, &reopened, 0)
+                            .await
+                            .unwrap();
+                    }
+                    assert_eq!(reopened.lock().status().unwrap().epoch, 1);
+                    assert!(reopened.lock().adopted());
+                    assert_eq!(reopened.lock().signed_registration().unwrap(), published);
+                    let accepted = reopened.lock().pay(0, 1, 1).unwrap();
+                    let registered = chain.registration_at(&context, 1).await.unwrap().unwrap();
+                    assert_eq!(accepted.acceptance.ack.body().anchor(), &registered.anchor);
+                    reopened.lock().wait_for_closes().unwrap();
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn successor_cut_rejects_a_foreign_boundary_without_fencing_payments() {
+        deterministic::Runner::timed(Duration::from_secs(20)).start(|context| async move {
+            let control = harness::start(&context, CHAIN, "successor_binding").await;
+            let mut chain = client(&context, &control);
+            let operator =
+                Mutex::new(Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap());
+            register_epoch(&context, &mut chain, &operator, |_| Ok(true))
+                .await
+                .unwrap();
+            let published = operator.lock().signed_successor(0).unwrap();
+            chain
+                .deliver(&context, &SettlementTx::RegisterEpoch(published))
+                .await
+                .unwrap();
+            let record = chain.registration_at(&context, 1).await.unwrap().unwrap();
+            for mutation in 0..5 {
+                let mut foreign = record.clone();
+                match mutation {
+                    0 => foreign.epoch += 1,
+                    1 => foreign.anchor = Sha256::hash(&[b"foreign anchor"]),
+                    2 => foreign.pulled.end += 1,
+                    3 => foreign.deposits_root.digest = Sha256::hash(&[b"foreign deposits"]),
+                    _ => foreign.withdrawals_root.digest = Sha256::hash(&[b"foreign withdrawals"]),
+                }
+                assert!(operator.lock().start_close(0, &foreign).is_err());
+                assert!(operator.lock().ensure_store_usable().is_ok());
+                assert_eq!(operator.lock().pay(0, 1, 1).unwrap().epoch, 0);
+            }
+            operator.lock().start_close(0, &record).unwrap();
+            assert_eq!(operator.lock().pay(0, 1, 1).unwrap().epoch, 1);
+            operator.lock().wait_for_closes().unwrap();
         });
     }
 

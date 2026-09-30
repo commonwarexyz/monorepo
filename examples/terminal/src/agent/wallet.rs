@@ -342,28 +342,10 @@ impl Agent {
         Ok(opening.map_or(0, |opening| opening.balance.get()))
     }
 
-    /// Returns the operator-served account opening verified against the certified
-    /// finalized root, together with the status that authenticates that root.
-    pub(crate) async fn finalized_head<E: Env>(
-        &mut self,
-        ctx: &E,
-        chain: &mut Client,
-        operator: SocketAddr,
-    ) -> Result<(StatusRecord, StateOpening<Key, Digest>)> {
-        let head = operator_head(ctx, operator, self.account(), &self.operator).await?;
-        let status = settlement_status(ctx, chain, self.deployment).await?;
-        ensure!(
-            status.state_root == head.root,
-            "payer opening is not the exact finalized head"
-        );
-        self.verify_head(ctx, chain, &head, &status).await?;
-        Ok((status, head.opening))
-    }
-
     /// This wallet's leaf at the certified head, opened by the validators,
     /// verified against the status root, and retained: the head read that
     /// needs no operator.
-    pub(super) async fn validator_head<E: Env>(
+    pub(crate) async fn validator_head<E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,

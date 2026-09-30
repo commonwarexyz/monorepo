@@ -7169,27 +7169,19 @@ fn begin_hard_fault_is_not_a_griefing_lever() {
 
 /// Deployment timing policy for the walkthrough deployment.
 ///
-/// The walkthrough runs many client round trips between the registration's
-/// inclusion and the certified admission (the corrective payment retry, the
-/// receiver's anchored intake, and the close worker's dissemination and
-/// admission), and each certified poll advances simulated blocks, so the
-/// compiled grid's ten-block runway is too tight for this arc. The admission
-/// offset is deployment-chosen at genesis and bounded above by the wallet's
-/// withdrawal-deadline horizon (the carried withdrawal must finalize at
-/// offset plus duration plus one blocks after the registration's inclusion).
-/// Both fields deliberately differ from the compiled grid and the generated
-/// genesis defaults: genesis is the timing authority end to end, with
-/// execution assigning the deadlines from this policy. The
-/// walkthrough passing under a two-block duration pins that no chain-facing
-/// path enforces a compiled pair.
+/// Certified wallet reads, receiver intake, successor publication, and distributed close
+/// construction all advance simulated blocks. The admission window reserves time for
+/// construction and the successor wallet arc after the predecessor finalizes.
+/// Both fields differ from the compiled grid and generated genesis defaults: the
+/// two-block challenge duration verifies that genesis owns the timing policy end to end.
 const WALKTHROUGH_TIMING: Timing = Timing {
-    admission_offset: 30,
+    admission_offset: 120,
     challenge_duration: 2,
 };
 
-/// Custody after epoch 0 settles: four genesis accounts at
-/// [`INITIAL_BALANCE`], plus Alice's deposit of ten, minus her claimed
-/// withdrawal of three. The end state adds [`UNREPORTED_DEPOSIT`].
+/// Custody from four genesis accounts at [`INITIAL_BALANCE`], Alice's deposit
+/// of ten, and her withdrawal of three. The relayed deposit adds
+/// [`UNREPORTED_DEPOSIT`] before epoch 0 settles.
 const WALKTHROUGH_CUSTODY: u64 = 407;
 
 /// Bob's signed deposit, relayed without notifying the operator and carried
@@ -7937,8 +7929,36 @@ async fn observed_balance(
 async fn walkthrough_close(
     context: &deterministic::Context,
     agent: &mut Agent,
+    chain: &mut Client,
     operator: std::net::SocketAddr,
 ) -> anyhow::Result<operator_rpc::CloseFinishedResponse> {
+    // A later admission gives the successor time for its wallet arc after this close finalizes.
+    // The remaining quarter of the window covers successor publication and close construction.
+    let record = chain
+        .registration(context)
+        .await?
+        .context("the manual close has no certified registration")?;
+    let (admission_deadline, _) = record
+        .deadlines
+        .context("the manual close has not become the admission frontier")?;
+    let runway = (chain.genesis().timing().admission_offset / 4).max(4);
+    let cut_height = admission_deadline.saturating_sub(runway);
+
+    loop {
+        let status = chain.status(context).await?;
+        anyhow::ensure!(
+            !status.hard_faulted,
+            "the manual close's deployment faulted"
+        );
+        anyhow::ensure!(
+            status.height <= admission_deadline,
+            "the manual close missed its admission window"
+        );
+        if status.height >= cut_height {
+            break;
+        }
+        context.sleep(POLL).await;
+    }
     let close = agent.start_close(context, operator).await?;
     loop {
         match agent.poll_close(context, operator, close.epoch).await? {
@@ -7970,8 +7990,8 @@ async fn walkthrough_close(
 /// Bob's payment to Carol with Carol's anchored intake gating acceptance before
 /// the close is cut, the distributed close of epoch 0 through real blocks to
 /// certified finalization, Alice's claim against the certified release
-/// record, Carol's reconciliation of epoch 0, the successor payment that
-/// registers epoch 1, its close, and the settled end state, every
+/// record, Carol's reconciliation of epoch 0, her successor payment in
+/// epoch 1, its close, and the settled end state, every
 /// guarantee-bearing read verified through the light client.
 async fn walkthrough(
     context: deterministic::Context,
@@ -8074,75 +8094,9 @@ async fn walkthrough(
         "the receiver holds no evidence for the accepted batch"
     );
 
-    // The operator cuts and closes epoch 0: dissemination, sealing, votes,
-    // the exact-quorum certificate, the certified admission, and the
-    // challenge window in real blocks to certified finalization.
-    let finished = walkthrough_close(&context, &mut alice, operator).await?;
-    anyhow::ensure!(finished.epoch == 0, "the close finished a foreign epoch");
-    anyhow::ensure!(finished.rows > 0, "the close settled no account rows");
-    let settled = alice_chain.status(&context).await?;
-    anyhow::ensure!(
-        settled.last_finalized == Some(0) && !settled.hard_faulted,
-        "epoch 0 did not certifiably finalize"
-    );
-    anyhow::ensure!(
-        settled.custody == WALKTHROUGH_CUSTODY && settled.claimable == withdrawal.get(),
-        "finalization left unexpected custody {} and claimable {}",
-        settled.custody,
-        settled.claimable
-    );
-
-    // Alice verifies the current payout opening and consumes its native position.
-    let release = alice
-        .claim_withdrawal(&context, &mut alice_chain, operator)
-        .await?;
-    anyhow::ensure!(
-        release.amount == 3 && release.destination == alice.account().encode(),
-        "settlement released another withdrawal"
-    );
-    let claimed = alice_chain.status(&context).await?;
-    anyhow::ensure!(
-        claimed.custody == WALKTHROUGH_CUSTODY && claimed.claimable == 0,
-        "the claim left unexpected custody {} and claimable {}",
-        claimed.custody,
-        claimed.claimable
-    );
-    let mut withdrawal_retired = false;
-    for _ in 0..EFFECT_ATTEMPTS {
-        alice
-            .observe_withdrawal_expiry(&context, &mut alice_chain)
-            .await?;
-        if !alice.has_pending_withdrawal_claim() {
-            withdrawal_retired = true;
-            break;
-        }
-        context.sleep(POLL).await;
-    }
-    anyhow::ensure!(
-        withdrawal_retired,
-        "the claimed withdrawal authorization never retired"
-    );
-
-    // Carol reconciles her held epoch-zero receipts and persists the result.
-    let summary = carol
-        .reconcile(&context, &mut carol_chain, operator)
-        .await?;
-    anyhow::ensure!(
-        summary.reconciled == vec![0]
-            && summary.convicted.is_empty()
-            && summary.protected.is_empty()
-            && summary.unenforceable.is_empty()
-            && summary.withheld.is_empty(),
-        "epoch 0 did not reconcile cleanly: {summary:?}"
-    );
-    anyhow::ensure!(
-        carol.last_reconciled_epoch() == Some(0),
-        "the RECONCILED mark is not durable"
-    );
-
     // A relayer submits Bob's signed deposit without reporting it to the
     // operator. The follower observes the finalized record and stages the
-    // credit for the next close.
+    // credit for the successor boundary before epoch 0 is cut.
     let unreported = DepositEvent {
         id: Sha256::hash(&[b"walkthrough-unreported-deposit"]),
         account: bob.account(),
@@ -8175,6 +8129,68 @@ async fn walkthrough(
         context.sleep(POLL).await;
     }
     anyhow::ensure!(recorded, "the unreported deposit earned no custody record");
+
+    // The operator cuts and closes epoch 0: dissemination, sealing, votes,
+    // the exact-quorum certificate, the certified admission, and the
+    // challenge window in real blocks to certified finalization.
+    let finished = walkthrough_close(&context, &mut alice, &mut alice_chain, operator).await?;
+    anyhow::ensure!(finished.epoch == 0, "the close finished a foreign epoch");
+    anyhow::ensure!(finished.rows > 0, "the close settled no account rows");
+    let settled = alice_chain.status(&context).await?;
+    anyhow::ensure!(
+        settled.last_finalized == Some(0) && !settled.hard_faulted,
+        "epoch 0 did not certifiably finalize"
+    );
+    anyhow::ensure!(
+        settled.custody == WALKTHROUGH_CUSTODY + UNREPORTED_DEPOSIT
+            && settled.claimable == withdrawal.get(),
+        "finalization left unexpected custody {} and claimable {}",
+        settled.custody,
+        settled.claimable
+    );
+
+    // Alice verifies the current payout opening and consumes its native position.
+    let release = alice
+        .claim_withdrawal(&context, &mut alice_chain, operator)
+        .await?;
+    anyhow::ensure!(
+        release.amount == 3 && release.destination == alice.account().encode(),
+        "settlement released another withdrawal"
+    );
+    let claimed = alice_chain.status(&context).await?;
+    anyhow::ensure!(
+        claimed.custody == WALKTHROUGH_CUSTODY + UNREPORTED_DEPOSIT && claimed.claimable == 0,
+        "the claim left unexpected custody {} and claimable {}",
+        claimed.custody,
+        claimed.claimable
+    );
+    // A payout consumes its native position while the signed authorization remains live.
+    alice
+        .observe_withdrawal_expiry(&context, &mut alice_chain)
+        .await?;
+    anyhow::ensure!(
+        alice.has_pending_withdrawal_claim()
+            && alice.pending_withdrawal_action() == Some(WithdrawalAction::Amount(withdrawal)),
+        "the payout retired the live withdrawal authorization"
+    );
+
+    // Carol reconciles her held epoch-zero receipts and persists the result.
+    let summary = carol
+        .reconcile(&context, &mut carol_chain, operator)
+        .await?;
+    anyhow::ensure!(
+        summary.reconciled == vec![0]
+            && summary.convicted.is_empty()
+            && summary.protected.is_empty()
+            && summary.unenforceable.is_empty()
+            && summary.withheld.is_empty(),
+        "epoch 0 did not reconcile cleanly: {summary:?}"
+    );
+    anyhow::ensure!(
+        carol.last_reconciled_epoch() == Some(0),
+        "the RECONCILED mark is not durable"
+    );
+
     observed_balance(
         &context,
         &mut bob,
@@ -8184,10 +8200,10 @@ async fn walkthrough(
     )
     .await?;
 
-    // The successor payment registers epoch 1 at its first receipt, and
-    // Bob's intake holds its pair before that close is cut.
-    let successor = match alice
-        .pay(&context, &mut alice_chain, operator, &[(1, 1)])
+    // Carol pays under the certified successor boundary while Alice retains her authorization.
+    // Bob holds the pair before that close is cut.
+    let successor = match carol
+        .pay(&context, &mut carol_chain, operator, &[(1, 1)])
         .await?
     {
         PaymentOutcome::Accepted(payment) => *payment,
@@ -8196,7 +8212,7 @@ async fn walkthrough(
         }
     };
     anyhow::ensure!(
-        successor.epoch == 1 && alice.receipt_count() == 1,
+        successor.epoch == 1 && carol.receipt_count() == 1,
         "the successor payment did not land in epoch 1"
     );
     bob.intake_incoming(&context, &mut bob_chain, operator)
@@ -8207,9 +8223,8 @@ async fn walkthrough(
         "the receiver ledger does not hold the verified successor pair"
     );
 
-    // Close epoch 1 inside its admission runway and reconcile it: nothing
-    // registers afterwards, so the deployment idles safely.
-    let finished = walkthrough_close(&context, &mut alice, operator).await?;
+    // Close epoch 1 inside its admission runway and reconcile its held pair.
+    let finished = walkthrough_close(&context, &mut alice, &mut alice_chain, operator).await?;
     anyhow::ensure!(finished.epoch == 1, "the close finished a foreign epoch");
     let summary = bob.reconcile(&context, &mut bob_chain, operator).await?;
     anyhow::ensure!(
@@ -8222,20 +8237,21 @@ async fn walkthrough(
     );
 
     // The walkthrough's end state, as certified reads: both epochs
-    // finalized, no live registration, custody and claimable settled, the
+    // finalized, epoch 2 registered, custody and claimable settled, the
     // custody records still proving both deposits, and no fault.
-    let mut retired = false;
-    for _ in 0..EFFECT_ATTEMPTS {
-        if alice_chain.registration(&context).await?.is_none() {
-            retired = true;
-            break;
-        }
-        context.sleep(POLL).await;
-    }
-    anyhow::ensure!(retired, "a live registration outlived the walkthrough");
+    let live = alice_chain
+        .registration_at(&context, 2)
+        .await?
+        .context("the successor lost its certified registration")?;
+    anyhow::ensure!(
+        live.epoch == 2 && live.admitted.is_none() && live.deadlines.is_some(),
+        "the live successor is not the unadmitted frontier"
+    );
     let end = alice_chain.status(&context).await?;
     anyhow::ensure!(
         end.last_finalized == Some(1)
+            && end.next_admission == 2
+            && end.next_registration == 3
             && end.custody == WALKTHROUGH_CUSTODY + UNREPORTED_DEPOSIT
             && end.claimable == 0
             && !end.hard_faulted,
@@ -8274,18 +8290,22 @@ async fn walkthrough(
         "the walkthrough left a fault record"
     );
 
-    // The verified head reads reflect Alice's deposit, withdrawal, and successor
-    // payment; Bob's initial payment and successor credit; and Carol's epoch-zero
-    // credit. Bob also receives the observed unreported deposit.
+    // The verified heads include Alice's deposit and withdrawal, Bob's payment
+    // and both credits, and Carol's incoming credit and successor payment.
     let balance = alice.balance(&context, &mut alice_chain, operator).await?;
-    anyhow::ensure!(balance == 106, "Alice's verified balance is {balance}");
+    anyhow::ensure!(balance == 107, "Alice's verified balance is {balance}");
     let balance = bob.balance(&context, &mut bob_chain, operator).await?;
     anyhow::ensure!(
         balance == 96 + UNREPORTED_DEPOSIT,
         "Bob's verified balance is {balance}"
     );
     let balance = carol.balance(&context, &mut carol_chain, operator).await?;
-    anyhow::ensure!(balance == 105, "Carol's verified balance is {balance}");
+    anyhow::ensure!(balance == 104, "Carol's verified balance is {balance}");
+    let end = alice_chain.status(&context).await?;
+    anyhow::ensure!(
+        !end.hard_faulted && end.height <= live.deadlines.expect("checked above").0,
+        "the live successor expired during the final reads"
+    );
     Ok(())
 }
 
@@ -8343,7 +8363,7 @@ async fn tenant(
         bob.has_receipt(&alice.account(), &receipt_id)?,
         "the receiver holds no evidence for the accepted batch"
     );
-    let finished = walkthrough_close(&context, &mut alice, operator).await?;
+    let finished = walkthrough_close(&context, &mut alice, &mut alice_chain, operator).await?;
     anyhow::ensure!(finished.epoch == 0, "the close finished a foreign epoch");
     let summary = bob.reconcile(&context, &mut bob_chain, operator).await?;
     anyhow::ensure!(
@@ -8369,7 +8389,7 @@ async fn tenant(
     );
     bob.intake_incoming(&context, &mut bob_chain, operator)
         .await?;
-    let finished = walkthrough_close(&context, &mut alice, operator).await?;
+    let finished = walkthrough_close(&context, &mut alice, &mut alice_chain, operator).await?;
     anyhow::ensure!(finished.epoch == 1, "the close finished a foreign epoch");
     let summary = bob.reconcile(&context, &mut bob_chain, operator).await?;
     anyhow::ensure!(
@@ -8524,7 +8544,19 @@ impl Property<ed25519::PublicKey, State<Threshold>> for WalkthroughSettled {
                         .await
                         .is_some()
                 {
-                    return Err("a live registration survived the walkthrough".into());
+                    return Err("a finalized walkthrough registration was not retired".into());
+                }
+                if !matches!(
+                    (state.reader)(registration_key(&deployment(), 2)).await,
+                    Some(Record::Registration(record))
+                        if record.epoch == 2 && record.admitted.is_none()
+                            && record.deadlines.is_some_and(|(deadline, _)| status.height <= deadline)
+                ) || status.next_admission != 2
+                    || status.next_registration != 3
+                {
+                    return Err(
+                        "the live walkthrough successor is not the certified frontier".into(),
+                    );
                 }
                 if !matches!(
                     (state.reader)(deposit_key(&deployment(), &deposit)).await,
@@ -8558,8 +8590,8 @@ impl Property<ed25519::PublicKey, State<Threshold>> for WalkthroughSettled {
 }
 
 /// Every node settled every tenant deployment's end state, each scoped to
-/// its own records: two epochs finalized, custody holding the deposit, no
-/// live registration, and no fault.
+/// its own records: two epochs finalized, custody holding the deposit, a
+/// registered successor, and no fault.
 #[derive(Clone)]
 struct TenantsSettled {
     deployments: Vec<Digest>,
@@ -8602,7 +8634,19 @@ impl Property<ed25519::PublicKey, State<Threshold>> for TenantsSettled {
                     if (state.reader)(registration_key(scoped, 0)).await.is_some()
                         || (state.reader)(registration_key(scoped, 1)).await.is_some()
                     {
-                        return Err("a live registration survived the tenant arc".into());
+                        return Err("a finalized tenant registration was not retired".into());
+                    }
+                    if !matches!(
+                        (state.reader)(registration_key(scoped, 2)).await,
+                        Some(Record::Registration(record))
+                            if record.epoch == 2 && record.admitted.is_none()
+                                && record.deadlines.is_some_and(|(deadline, _)| status.height <= deadline)
+                    ) || status.next_admission != 2
+                        || status.next_registration != 3
+                    {
+                        return Err(
+                            "the live tenant successor is not the certified frontier".into()
+                        );
                     }
                     if (state.reader)(fault_key(scoped)).await.is_some() {
                         return Err("the tenant arc left a fault record".into());

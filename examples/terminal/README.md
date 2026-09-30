@@ -139,37 +139,41 @@ again.
 ### Closes advance while blocks pass
 
 A close records the net effects of an epoch's payments. Validators certify it,
-then the chain **admits** it for settlement. Payments continue in the next epoch
-while earlier closes are certified, admitted, and finalized:
+then the chain **admits** it for settlement. The operator registers the next epoch
+while continuing to accept payments in the current one. Once registration is
+confirmed onchain, it switches payments and builds the previous epoch's close:
 
 ```text
-  epoch e:    register -- payments -- cut -- certify -- admit ... finalize
-                                       |
-  epoch e+1:                           register -- payments -- cut -- ...
+  epoch e:    register -- payments ------------ end -- build -- certify -- admit ... finalize
+                                                |
+  epoch e+1:              register onchain -----+-- payments -- end -- ...
 
   blocks:     [H] ---> [H+1] ---> [H+2] ---> ... (including empty blocks)
 ```
 
-With the generated defaults, the operator schedules a cut four blocks after
-registration, or sooner when the epoch fills. The wallet can request an earlier cut.
-Cuts do not wait for earlier closes, so closes can queue. Deposits wait in the
-settlement chain's inbox, and a registration must take each one within 400
-blocks. A registration takes only intake recorded before its block. From then on
-a deposit follows its epoch to admission, or to a refund if the deployment
-faults first, however long the closes queued ahead of it take.
-Validator panes show finalized block heights, hashes, and transaction counts.
-Empty blocks advance deadlines too.
+With the generated defaults, the operator starts registering the next epoch four
+blocks after the current epoch's registration, or sooner when the epoch fills.
+The wallet can request an earlier transition. Transitions do not wait for
+earlier closes, so closes can queue. Empty registered epochs follow the same
+schedule and incur the same registration fee. Deposits wait in the settlement
+chain's inbox, and a registration must take each one within 400 blocks. A
+registration takes only intake recorded before its block. From then on a
+deposit follows its epoch to admission, or to a refund if the deployment faults
+first, however long the closes queued ahead of it take. Validator panes show
+finalized block heights, hashes, and transaction counts. Empty blocks advance
+deadlines too.
 
 Each payment in epoch `e+1` also signs the root where the payer's vector ended
 in `e`, and validators reject a close that carries a payment bound to another
-root. A payment from `e` that reaches the operator after the cut is rejected as
-stale with the payer's final state in `e` and the root `e+1` requires. The
-operator keeps that state until `e+1` finalizes. The wallet then signs the
-remaining payments again in `e+1` against that root and keeps the originals as
-superseded copies until an admitted close decides them. A request that gets no
-response is resent unchanged, never treated as excluded. If the operator
-acknowledged a payment that no close can carry, the wallet keeps that receipt
-and challenges the admitted close that omits it until that close finalizes.
+root. An unaccepted payment from `e` that arrives after the epoch ends is
+rejected as stale with the payer's final state in `e` and the root `e+1`
+requires. The operator keeps that state until `e+1` finalizes. The wallet then
+signs the remaining payments again in `e+1` against that root and keeps the
+originals as superseded copies until an admitted close decides them. A request
+that gets no response is resent unchanged, never treated as excluded. If the
+operator acknowledged a payment that no close can carry, the wallet keeps that
+receipt and challenges the admitted close that omits it until that close
+finalizes.
 
 The generated defaults allow 300 blocks for admission and one further block for
 challenges. An epoch receives these deadlines once every earlier epoch is

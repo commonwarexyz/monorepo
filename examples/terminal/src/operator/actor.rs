@@ -995,10 +995,19 @@ impl Operator {
         })
     }
 
-    /// Whether registration has fixed the live epoch's withdrawal boundary.
+    fn withdrawal_registration(&self) -> Result<EpochRegistration> {
+        if self.store.published()? {
+            self.successor().map(|(registration, _)| registration)
+        } else {
+            Ok(self.registration.clone())
+        }
+    }
+
+    /// Whether publication has fixed the boundary available to withdrawal intake.
     pub(crate) fn withdrawals_frozen(&self) -> Result<bool> {
         self.ensure_operating()?;
-        self.store.withdrawals_frozen()
+        self.store
+            .withdrawals_frozen(self.withdrawal_registration()?.context.payment().epoch())
     }
 
     /// Stages an authorization after the service authenticates fresh intake or its exact queue record.
@@ -1007,12 +1016,12 @@ impl Operator {
         request: SignedWithdrawal<Key, Digest>,
         queued: bool,
     ) -> Result<StagedWithdrawal> {
-        self.ensure_operating()?;
         Key::decode(request.body().destination().clone())
             .context("withdrawal destination is not a canonical native account")?;
         if let Some(staged) = self.staged_withdrawal(&request)? {
             return Ok(staged);
         }
+        self.ensure_operating()?;
 
         // An observed chain-queued withdrawal takes precedence over a different request for its
         // account.
@@ -1022,46 +1031,61 @@ impl Operator {
                 "the account has another chain-queued withdrawal"
             );
         }
-        self.ensure_withdrawal_intake_horizon(request.body().action())?;
+        let registration = self.withdrawal_registration()?;
+        let epoch = registration.context.payment().epoch();
+        match request.body().action() {
+            WithdrawalAction::Amount(_) => ensure_amount_withdrawal_horizon(epoch)?,
+            WithdrawalAction::Close => ensure_close_horizon(epoch)?,
+        }
+        ensure!(
+            !self.store.withdrawals_frozen(epoch)?,
+            "withdrawal boundary is published"
+        );
         if !queued {
-            // Pulls are prefixes, so rows the boundary could not take hold back every later
-            // deposit. They take the capacity a fresh extra would consume.
             ensure!(
-                !self.store.blocked()?,
-                "the live boundary leaves inbox rows untaken"
+                registration.intake.end == self.store.observed()?,
+                "the withdrawal boundary leaves inbox rows untaken"
             );
             self.ensure_payer_eligible(request.account())?;
         }
         request
             .verify_deployment(&self.protocol.deployment())
             .context("verify withdrawal authorization")?;
-
         let replacement =
-            registration_with_withdrawal(&self.protocol, &self.registration, request.clone())
+            registration_with_withdrawal(&self.protocol, &registration, request.clone())
                 .context("prospective withdrawal does not fit the epoch anchor")?;
         let result = self.store.stage_withdrawal(
             &request,
-            self.registration.context.payment(),
+            registration.context.payment(),
             replacement.context.payment(),
             queued,
         );
         let staged = self.guard_store(result)?;
-        self.registration = replacement;
+        if epoch == self.registration.context.payment().epoch() {
+            self.registration = replacement;
+        }
         Ok(staged)
     }
 
-    /// Unregistered withdrawal reservations and the exact boundary that owns them.
+    /// Unregistered authorizations and the exact boundary that owns them.
     pub(crate) fn unregistered_withdrawals(&self) -> Result<Option<WithdrawalBoundary>> {
         self.ensure_store_usable()?;
-        if self.ensure_operating().is_err()
-            || self.registration.withdrawals.requests().is_empty()
-            || self.registration.floors.is_some()
+        if self.ensure_operating().is_err() {
+            return Ok(None);
+        }
+        let registration = if self.registration.floors.is_none()
+            && !self.registration.withdrawals.requests().is_empty()
         {
+            self.registration.clone()
+        } else {
+            self.withdrawal_registration()?
+        };
+        if registration.withdrawals.requests().is_empty() || registration.floors.is_some() {
             return Ok(None);
         }
         Ok(Some((
-            self.registration.context.payment().clone(),
-            self.registration.withdrawals.clone(),
+            registration.context.payment().clone(),
+            registration.withdrawals,
         )))
     }
 
@@ -1072,17 +1096,21 @@ impl Operator {
         discarded: &WithdrawalBatch<Key, Digest>,
     ) -> Result<()> {
         self.ensure_operating()?;
-        if self.registration.context.payment() != expected || discarded.requests().is_empty() {
+        let registration = if expected.epoch() == self.registration.context.payment().epoch() {
+            self.registration.clone()
+        } else {
+            self.withdrawal_registration()?
+        };
+        if registration.context.payment() != expected || discarded.requests().is_empty() {
             return Ok(());
         }
         for request in discarded.requests() {
             ensure!(
-                self.registration.withdrawals.request_for(request.account()) == Some(request),
+                registration.withdrawals.request_for(request.account()) == Some(request),
                 "discarded withdrawal differs from the live boundary"
             );
         }
-        let remaining = self
-            .registration
+        let remaining = registration
             .withdrawals
             .requests()
             .iter()
@@ -1091,18 +1119,20 @@ impl Operator {
             .collect();
         let mut replacement = self.protocol.registration(
             expected.epoch(),
-            self.registration.deposits.clone(),
+            registration.deposits,
             WithdrawalBatch::new(remaining)?,
-            self.registration.liability,
+            registration.liability,
         )?;
-        replacement.intake = self.registration.intake.clone();
+        replacement.intake = registration.intake;
         let result = self.store.discard_unregistered_withdrawals(
             expected,
             replacement.context.payment(),
             discarded.requests(),
         );
         self.guard_store(result)?;
-        self.registration = replacement;
+        if expected.epoch() == self.registration.context.payment().epoch() {
+            self.registration = replacement;
+        }
         Ok(())
     }
 
@@ -1117,6 +1147,18 @@ impl Operator {
         let Some((stored, staged)) = self.store.staged_withdrawal(request.account())? else {
             return Ok(None);
         };
+        // The observed inbox selects which request the successor carries for this account.
+        if stored != *request
+            && staged.epoch == self.next_openable_epoch()?
+            && self
+                .successor()?
+                .0
+                .withdrawals
+                .request_for(request.account())
+                == Some(request)
+        {
+            return Ok(None);
+        }
         ensure!(
             stored == *request,
             "account already staged another withdrawal"
@@ -1124,13 +1166,13 @@ impl Operator {
         Ok(Some(staged))
     }
 
-    /// Cuts the registered epoch, opens its successor, and schedules close construction.
-    ///
-    /// Only an epoch whose certified registration is adopted can be cut. The
-    /// successor takes the untaken inbox prefix from the end the cut epoch
-    /// pulled, as far as the close limits admit, and keeps taking intake until
-    /// it publishes. The cut does not wait for earlier closes.
-    pub(crate) fn start_close(&mut self, expected_epoch: u64) -> Result<CloseStarted> {
+    /// Freezes the predecessor and installs its exactly certified successor before scheduling
+    /// close construction. Payer vectors and deferred withdrawals resolve at this handoff.
+    pub(crate) fn start_close(
+        &mut self,
+        expected_epoch: u64,
+        record: &RegistrationRecord,
+    ) -> Result<CloseStarted> {
         if self.close_already_started(expected_epoch)? {
             return Ok(CloseStarted {
                 epoch: expected_epoch,
@@ -1144,7 +1186,18 @@ impl Operator {
         );
         let epoch = expected_epoch;
         let payment_context = self.registration.context.payment().clone();
-        let (successor, takes) = self.successor()?;
+        ensure!(
+            self.store.successor_end()?.is_some(),
+            "successor publication has not begun"
+        );
+        let (mut successor, takes) = self.successor()?;
+        validate_registration(&successor, record)?;
+        ensure!(
+            record.admitted.is_none(),
+            "the successor has already closed"
+        );
+        successor.floors = Some(record.floors);
+        successor.deadlines = record.deadlines;
         let next_epoch = successor.context.payment().epoch();
         let cutover = self.store.rotate_epoch(
             epoch,
@@ -1152,6 +1205,7 @@ impl Operator {
             &successor.context,
             &takes,
             self.registration.intake.end,
+            record,
         );
         if let Err(error) = self.guard_store(cutover) {
             if self.store_fault.is_some() {
@@ -1163,8 +1217,8 @@ impl Operator {
         }
         println!("epoch {epoch} cut; successor={next_epoch}");
 
-        // SQLite owns the cut and the root-independent successor context. The RPC service registers
-        // that exact context with settlement before it releases the successor's first receipt.
+        // SQLite commits successor adoption with the cut, so every new receipt belongs to the
+        // certified boundary and binds its payer's final predecessor vector.
         let scheduling: Result<bool> = (|| {
             self.registration = successor;
             self.validate_current_epoch()?;
@@ -1191,18 +1245,28 @@ impl Operator {
         Ok(CloseStarted { epoch, queued })
     }
 
-    // The successor boundary a cut opens: it starts at the live epoch's inbox end and takes the
-    // untaken prefix from there as far as the close limits admit.
+    // Publication fixes only the boundary. Liability and withdrawal reservations are projected
+    // from the latest predecessor tail when the cut installs this successor.
     fn successor(&self) -> Result<(EpochRegistration, Vec<Take>)> {
         let mut successor = self.protocol.registration(
             self.next_openable_epoch()?,
             DepositBatch::empty(),
-            WithdrawalBatch::empty(),
+            self.store.successor_withdrawals()?,
             self.store.successor_liability()?,
         )?;
         let end = self.registration.intake.end;
         successor.intake = end..end;
-        let (takes, successor) = self.plan_takes(successor, 0, self.store.untaken()?)?;
+        let published = self.store.successor_end()?;
+        let rows = self
+            .store
+            .untaken()?
+            .into_iter()
+            .take_while(|(index, _)| published.is_none_or(|end| *index < end));
+        let (takes, successor) = self.plan_takes(successor, 0, rows)?;
+        ensure!(
+            published.is_none_or(|end| successor.intake.end == end),
+            "published successor boundary cannot be reconstructed"
+        );
         Ok((successor, takes))
     }
 
@@ -1350,6 +1414,12 @@ impl Operator {
                 .then_some("authenticating the recovered live registration"))
     }
 
+    /// Returns the operational epoch from the durable ledger.
+    pub(crate) fn epoch(&self) -> Result<u64> {
+        self.ensure_store_usable()?;
+        self.store.epoch()
+    }
+
     pub(crate) fn status(&self) -> Result<StoreStatus> {
         self.ensure_store_usable()?;
         self.store.status()
@@ -1381,10 +1451,27 @@ impl Operator {
     /// Snapshot of the boundary whose exact withdrawals need certified queue classification.
     pub(crate) fn registration_boundary(&self) -> Result<WithdrawalBoundary> {
         self.ensure_operating()?;
+        let registration = self.withdrawal_registration()?;
+        Ok((
+            registration.context.payment().clone(),
+            registration.withdrawals,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_registration_boundary(&self) -> Result<WithdrawalBoundary> {
+        self.ensure_store_usable()?;
         Ok((
             self.registration.context.payment().clone(),
             self.registration.withdrawals.clone(),
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_withdrawals_frozen(&self) -> Result<bool> {
+        self.ensure_store_usable()?;
+        self.store
+            .withdrawals_frozen(self.registration.context.payment().epoch())
     }
 
     /// Returns whether the live epoch's certified registration is adopted.
@@ -1393,22 +1480,43 @@ impl Operator {
         self.registration.floors.is_some()
     }
 
-    /// Freezes intake before publishing the live epoch's signed boundary, which pulls the inbox
-    /// up to the end of the prefix the boundary took. Later intake cannot invalidate the
-    /// request, so it stays valid until it lands. Retries rebuild the same bytes from the
-    /// durable boundary and the immutable deployment fee.
+    /// Freezes the live boundary before publishing its signed registration.
     pub(crate) fn signed_registration(&mut self) -> Result<RegisterEpochRequest> {
         self.ensure_operating()?;
         self.next_openable_epoch()?;
+        let prepared = self.store.begin_registration(
+            self.registration.context.payment(),
+            self.registration.intake.end,
+        );
+        self.guard_store(prepared)?;
+        self.sign_registration(&self.registration)
+    }
 
-        let epoch = self.registration.context.payment().epoch();
-        let end = self.registration.intake.end;
-        let withdrawals = self.registration.withdrawals.clone();
-        let deposits_root = self
-            .registration
-            .deposits
-            .root::<Sha256>()
-            .context("commit registration deposit boundary")?;
+    /// Retains the successor boundary while the current epoch continues accepting payments.
+    pub(crate) fn signed_successor(&mut self, expected_epoch: u64) -> Result<RegisterEpochRequest> {
+        self.validate_close_start(expected_epoch)?;
+        ensure!(
+            self.registration.floors.is_some(),
+            "the live registration is not adopted"
+        );
+        let (successor, _) = self.successor()?;
+        let prepared = self
+            .store
+            .begin_successor(self.registration.context.payment(), successor.intake.end);
+        self.guard_store(prepared)?;
+        self.sign_registration(&successor)
+    }
+
+    pub(crate) fn successor_pending(&self) -> Result<bool> {
+        self.ensure_store_usable()?;
+        Ok(self.store.successor_end()?.is_some())
+    }
+
+    fn sign_registration(&self, registration: &EpochRegistration) -> Result<RegisterEpochRequest> {
+        let epoch = registration.context.payment().epoch();
+        let end = registration.intake.end;
+        let withdrawals = registration.withdrawals.clone();
+        let deposits_root = registration.deposits.root::<Sha256>()?;
         let signature = self.protocol.sign_chain_registration(
             epoch,
             end,
@@ -1416,7 +1524,7 @@ impl Operator {
             &withdrawals,
             self.epoch_fee,
         );
-        let request = RegisterEpochRequest {
+        Ok(RegisterEpochRequest {
             deployment: self.protocol.deployment(),
             epoch,
             end,
@@ -1424,12 +1532,7 @@ impl Operator {
             withdrawals,
             fee: self.epoch_fee,
             signature,
-        };
-        let prepared = self
-            .store
-            .begin_registration(self.registration.context.payment(), end);
-        self.guard_store(prepared)?;
-        Ok(request)
+        })
     }
 
     /// Adopts the live epoch's certified registration record: the floors it
@@ -1444,18 +1547,7 @@ impl Operator {
     pub(crate) fn adopt_registration(&mut self, record: &RegistrationRecord) -> Result<()> {
         self.ensure_operating()?;
         let epoch = self.registration.context.payment().epoch();
-        ensure!(
-            record.epoch == epoch,
-            "the certified registration record is not the live epoch"
-        );
-        ensure!(
-            self.registration.context.payment().anchor() == &record.anchor,
-            "the certified registration does not match the live context"
-        );
-        ensure!(
-            record.pulled == self.registration.intake,
-            "the certified registration pulled other inbox indices"
-        );
+        validate_registration(&self.registration, record)?;
         let adopted = self.registration.floors.is_some();
         if let Some(floors) = self.registration.floors {
             ensure!(
@@ -1472,13 +1564,9 @@ impl Operator {
                 return Ok(());
             }
         }
-        let stored = self.store.adopt_registration(
-            self.registration.context.payment(),
-            record.floors,
-            record.deadlines,
-            record.pulled.end,
-            record.intake,
-        );
+        let stored = self
+            .store
+            .adopt_registration(self.registration.context.payment(), record);
         self.guard_store(stored)?;
         self.registration.floors = Some(record.floors);
         self.registration.deadlines = record.deadlines;
@@ -1503,23 +1591,28 @@ impl Operator {
         height: u64,
         deadlines: Option<(u64, u64)>,
     ) -> Result<RegistrationRecord> {
-        let record = RegistrationRecord {
-            epoch: self.registration.context.payment().epoch(),
-            anchor: *self.registration.context.payment().anchor(),
-            height,
-            deadlines,
-            deposits_root: self.registration.deposits.root::<Sha256>()?,
-            withdrawals_root: self.registration.withdrawals.root::<Sha256>()?,
-            pulled: self.registration.intake.clone(),
-            intake: self.registration.intake.end,
-            floors: commonware_clearing::bajillion::logs::Floors {
-                activity: 0,
-                payouts: 0,
-            },
-            admitted: None,
-        };
+        let record = registration_record(&self.registration, height, deadlines)?;
         self.adopt_registration(&record)?;
         Ok(record)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn fail_next_cutover_commit(&mut self) {
+        self.store.fail_next_cutover_commit();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_close_at(&mut self, epoch: u64) -> Result<CloseStarted> {
+        if self.close_already_started(epoch)? {
+            return Ok(CloseStarted {
+                epoch,
+                queued: true,
+            });
+        }
+        self.signed_successor(epoch)?;
+        let (successor, _) = self.successor()?;
+        let record = registration_record(&successor, 0, None)?;
+        self.start_close(epoch, &record)
     }
 
     /// Audits the operational successor after its durable epoch transition.
@@ -1541,17 +1634,6 @@ impl Operator {
 
     fn ensure_balance_intake_horizon(&self) -> Result<()> {
         ensure_balance_intake_horizon(self.registration.context.payment().epoch())
-    }
-
-    fn ensure_withdrawal_intake_horizon(&self, action: &WithdrawalAction) -> Result<()> {
-        match action {
-            WithdrawalAction::Amount(_) => {
-                ensure_amount_withdrawal_horizon(self.registration.context.payment().epoch())
-            }
-            WithdrawalAction::Close => {
-                ensure_close_horizon(self.registration.context.payment().epoch())
-            }
-        }
     }
 
     pub(crate) fn payout_proof(
@@ -1905,27 +1987,25 @@ impl Operator {
         Ok(Some(self.registration.context.payment().epoch()))
     }
 
-    /// Cuts the adopted live epoch once it has dwelt past its certified
-    /// registration height, or once it is full.
+    /// Whether dwell time or capacity calls for publishing the successor registration.
     ///
-    /// The dwell never exceeds the admission runway an epoch registered as the
-    /// frontier receives. Cuts do not wait for earlier closes: each cut epoch
-    /// is registered, and it receives its own admission window when every
-    /// earlier epoch is admitted. The successor's registration pulls the
-    /// deposits it took, so a backlog of closes never expires a deposit.
+    /// The dwell leaves time in the live epoch's admission window for publication and close
+    /// construction. The handoff follows certified successor registration. Every registered
+    /// epoch receives its admission window when its predecessor is admitted. Registration
+    /// pulls the successor's deposits, protecting them from expiry while earlier closes finish.
     /// Withdrawal deadlines are absolute heights, so a backlog of closes that
     /// outlasts one faults the deployment.
-    pub(crate) fn close_if_due(
-        &mut self,
+    pub(crate) fn close_due(
+        &self,
         record: &RegistrationRecord,
         height: u64,
         timing: Timing,
-    ) -> Result<Option<CloseStarted>> {
+    ) -> Result<bool> {
         if self.automatic_epoch()? != Some(record.epoch)
             || self.registration.floors.is_none()
             || self.registration.context.payment().anchor() != &record.anchor
         {
-            return Ok(None);
+            return Ok(false);
         }
         let runway = timing.admission_offset.min(4);
         let due = record
@@ -1934,9 +2014,9 @@ impl Operator {
         let full = self.store.current_entry_count()? >= MAX_ACCEPTED_PAYMENTS
             || self.store.current_deposit_events()? >= MAX_DEPOSIT_EVENTS;
         if height < due && !full {
-            return Ok(None);
+            return Ok(false);
         }
-        self.start_close(record.epoch).map(Some)
+        Ok(true)
     }
 
     fn ensure_operating(&self) -> Result<()> {
@@ -1997,9 +2077,8 @@ impl Operator {
     ///
     /// `record` is the live epoch's registration, and `status` is read at the
     /// same height or later. A faulted chain is left to the fault path. A
-    /// healthy chain must have registered exactly the epochs the operator cut,
-    /// plus possibly the live one, and an adopted live registration must still
-    /// match its certified record.
+    /// healthy chain may include the live epoch and its durably staged successor beyond
+    /// the cut epochs. An adopted live registration must match its certified record.
     pub(crate) fn release_recovery(
         &mut self,
         record: Option<&RegistrationRecord>,
@@ -2011,7 +2090,9 @@ impl Operator {
         }
         let epoch = self.registration.context.payment().epoch();
         let registered = status.next_registration == epoch
-            || Some(status.next_registration) == epoch.checked_add(1);
+            || Some(status.next_registration) == epoch.checked_add(1)
+            || (self.store.successor_end()?.is_some()
+                && Some(status.next_registration) == epoch.checked_add(2));
         let adopted = self.registration.floors.is_none_or(|floors| {
             record.is_some_and(|record| {
                 record.epoch == epoch
@@ -2077,16 +2158,34 @@ impl Operator {
     /// the result for chain admission by the caller.
     #[cfg(test)]
     pub(crate) fn complete_close(&mut self, seed: u64) -> Result<SettlementResult> {
+        let (successor, _) = self.successor()?;
+        let record = registration_record(&successor, 0, None)?;
+        self.complete_close_with_successor(seed, &record)
+    }
+
+    /// Runs the synchronous fixture pipeline with the actual certified successor boundary.
+    #[cfg(test)]
+    pub(crate) fn complete_close_with_successor(
+        &mut self,
+        seed: u64,
+        record: &RegistrationRecord,
+    ) -> Result<SettlementResult> {
         let epoch = self.registration.context.payment().epoch();
         let data = self.store.load_current()?;
         let prepared = self.prepare_epoch(data, self.registration.clone())?;
-        let (successor, takes) = self.successor()?;
+        let (mut successor, takes) = self.successor()?;
+        validate_registration(&successor, record)?;
+        self.store
+            .begin_successor(self.registration.context.payment(), successor.intake.end)?;
+        successor.floors = Some(record.floors);
+        successor.deadlines = record.deadlines;
         self.store.rotate_epoch(
             epoch,
             self.registration.context.payment(),
             &successor.context,
             &takes,
             self.registration.intake.end,
+            record,
         )?;
         self.registration = successor;
         self.validate_current_epoch()?;
@@ -2126,6 +2225,51 @@ impl Operator {
             seal_micros: result.seal_micros,
         })
     }
+}
+
+fn validate_registration(
+    registration: &EpochRegistration,
+    record: &RegistrationRecord,
+) -> Result<()> {
+    ensure!(
+        record.epoch == registration.context.payment().epoch()
+            && &record.anchor == registration.context.payment().anchor()
+            && &record.deposits_root == registration.context.deposit_root()
+            && &record.withdrawals_root == registration.context.withdrawal_root()
+            && record.pulled == registration.intake
+            && record.intake >= record.pulled.end,
+        "the certified registration does not match the planned boundary"
+    );
+    ensure!(
+        record
+            .deadlines
+            .is_none_or(|(admission, challenge)| admission < challenge),
+        "the certified registration has invalid deadlines"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+fn registration_record(
+    registration: &EpochRegistration,
+    height: u64,
+    deadlines: Option<(u64, u64)>,
+) -> Result<RegistrationRecord> {
+    Ok(RegistrationRecord {
+        epoch: registration.context.payment().epoch(),
+        anchor: *registration.context.payment().anchor(),
+        height,
+        deadlines,
+        deposits_root: registration.deposits.root::<Sha256>()?,
+        withdrawals_root: registration.withdrawals.root::<Sha256>()?,
+        pulled: registration.intake.clone(),
+        intake: registration.intake.end,
+        floors: commonware_clearing::bajillion::logs::Floors {
+            activity: 0,
+            payouts: 0,
+        },
+        admitted: None,
+    })
 }
 
 pub(super) fn registration_for(protocol: &Protocol, data: &EpochData) -> Result<EpochRegistration> {
@@ -2188,6 +2332,10 @@ fn registration_with_withdrawal(
     current: &EpochRegistration,
     request: SignedWithdrawal<Key, Digest>,
 ) -> Result<EpochRegistration> {
+    // Observed requests can belong to the successor projection before intake persists them.
+    if current.withdrawals.request_for(request.account()) == Some(&request) {
+        return Ok(current.clone());
+    }
     registration_replacing_withdrawal(protocol, current, None, request)
 }
 

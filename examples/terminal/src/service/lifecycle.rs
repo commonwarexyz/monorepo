@@ -1,4 +1,7 @@
 //! Native lifecycle trace execution over the service, SQLite operator, and certified chain.
+//!
+//! Apply observes authenticated private withdrawal staging. External withdrawal RPC
+//! acknowledgments wait until the staged epoch becomes operational.
 
 use super::*;
 use crate::{
@@ -33,11 +36,11 @@ use std::{
 const ADDRESS: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9_702);
 static DATABASE_ID: AtomicU64 = AtomicU64::new(0);
+// The challenge window covers interleaved certified reads before explicit finalization.
 const TIMING: Timing = Timing {
     admission_offset: 64,
-    challenge_duration: 1,
+    challenge_duration: 16,
 };
-const REGISTRATION_SPACING: u64 = 16;
 
 struct Database(PathBuf);
 
@@ -317,32 +320,45 @@ impl Native {
         &mut self,
         context: &deterministic::Context,
         slot: usize,
-    ) -> Result<rpc::Response> {
+    ) -> Result<Option<crate::operator::StagedWithdrawal>> {
         let saved = self.requests[slot]
             .as_ref()
             .context("request is unsigned")?;
-        let request =
-            operator_rpc::OperatorRequest::ApplyWithdrawal(operator_rpc::ApplyWithdrawalRequest {
-                request: saved.request.clone(),
-            });
-        let response = prepare_request(
+        let request = operator_rpc::ApplyWithdrawalRequest {
+            request: saved.request.clone(),
+        };
+        match stage_withdrawal(
             context,
             &mut self.client(context),
             self.operator(),
             &request,
             TIMING,
         )
-        .await?;
-        Ok(response
-            .unwrap_or_else(|| operator_rpc::handle_decoded(&mut self.operator().lock(), request)))
+        .await
+        {
+            Ok(staged) => Ok(staged),
+            Err(error) => {
+                self.operator()
+                    .lock()
+                    .ensure_store_usable()
+                    .context(error)?;
+                Ok(None)
+            }
+        }
     }
 
     async fn freeze(&mut self, context: &deterministic::Context) -> Result<PacketId> {
-        let epoch = self.operator().lock().registration_boundary()?.0.epoch();
-        let request = self.operator().lock().signed_registration()?;
+        let live = self.operator().lock().snapshot()?.epoch;
+        let adopted = self.operator().lock().adopted();
+        let request = if adopted {
+            self.operator().lock().signed_successor(live)?
+        } else {
+            self.operator().lock().signed_registration()?
+        };
+        let epoch = request.epoch;
         ensure!(
-            request.epoch == epoch,
-            "the live epoch moved during registration"
+            epoch == live + u64::from(adopted),
+            "registration targets an unexpected epoch"
         );
         let requests = self.request_mask(&request.withdrawals)?;
 
@@ -370,24 +386,7 @@ impl Native {
         Ok(id)
     }
 
-    async fn publish(&mut self, context: &deterministic::Context, packet: PacketId) -> Result<()> {
-        if let Some(previous) = self.client(context).registration(context).await?
-            && previous.epoch + 1 == u64::from(packet.epoch)
-        {
-            // Separate live leases so finalizing the predecessor leaves room to admit
-            // its successor. Every intervening empty block still executes native state.
-            let (_, challenge_deadline) = previous
-                .deadlines
-                .context("the admitted predecessor has no deadlines")?;
-            let earliest = challenge_deadline
-                .checked_add(REGISTRATION_SPACING)
-                .context("registration schedule exceeds the clock")?
-                .saturating_sub(TIMING.admission_offset);
-            let current = self.status(context).await.height;
-            if current < earliest {
-                self.control.advance(earliest - current).await;
-            }
-        }
+    async fn publish(&mut self, packet: PacketId) -> Result<()> {
         let request = self
             .packets
             .get(&packet)
@@ -399,7 +398,7 @@ impl Native {
     }
 
     async fn adopt(&mut self, context: &deterministic::Context) -> Result<()> {
-        let epoch = self.operator().lock().registration_boundary()?.0.epoch();
+        let epoch = self.operator().lock().snapshot()?.epoch;
         let registered = self
             .client(context)
             .registration_at(context, epoch)
@@ -408,16 +407,35 @@ impl Native {
         self.operator().lock().adopt_registration(&registered)
     }
 
-    fn cut(&mut self) -> Result<()> {
+    async fn cut(&mut self, context: &deterministic::Context) -> Result<()> {
+        self.adopt(context).await?;
+        let epoch = self.operator().lock().snapshot()?.epoch;
+        let successor = self
+            .client(context)
+            .registration_at(context, epoch + 1)
+            .await?
+            .context("the successor has no certified registration")?;
         let close = self
             .operator()
             .lock()
-            .complete_close(self.closes.len() as u64 + 1)?;
+            .complete_close_with_successor(self.closes.len() as u64 + 1, &successor)?;
         self.closes.push(close);
         Ok(())
     }
 
-    async fn admit(&mut self, epoch: usize) -> Result<()> {
+    async fn admit(&mut self, context: &deterministic::Context, epoch: usize) -> Result<()> {
+        // Promotion starts the successor's lease. Admit near the predecessor's
+        // deadline so its challenge window expires while that lease remains live.
+        let deadline = self
+            .closes
+            .get(epoch)
+            .context("close is unavailable")?
+            .context
+            .admission_deadline();
+        let height = self.status(context).await.height;
+        if height + 1 < deadline {
+            self.control.advance(deadline - height - 1).await;
+        }
         let close = self.closes.get(epoch).context("close is unavailable")?;
         self.control
             .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
@@ -660,16 +678,9 @@ impl Native {
                 }
             }
             Action::Apply(id) => {
-                let response = self.apply(context, id.index()).await?;
-                if matches!(response, rpc::Response::Success { .. }) {
-                    let saved = self.requests[id.index()].as_ref().unwrap();
-                    let acknowledgment = self
-                        .operator()
-                        .lock()
-                        .staged_withdrawal(&saved.request)?
-                        .context("successful application has no durable acknowledgment")?;
+                if let Some(staged) = self.apply(context, id.index()).await? {
                     Outcome::Acknowledged(Acknowledgement {
-                        epoch: acknowledgment.epoch.try_into()?,
+                        epoch: staged.epoch.try_into()?,
                         request: id,
                     })
                 } else {
@@ -677,7 +688,10 @@ impl Native {
                 }
             }
             Action::Freeze => {
-                let epoch = self.operator().lock().registration_boundary()?.0.epoch();
+                if self.operator().lock().fault().is_some() {
+                    return Ok(Outcome::Rejected);
+                }
+                let epoch = self.operator().lock().snapshot()?.epoch;
                 if epoch > 0
                     && self
                         .client(context)
@@ -700,7 +714,7 @@ impl Native {
                     epoch: u64::from(packet.epoch),
                 });
                 let before = self.client(context).recent(context, &lookup).await?.record;
-                self.publish(context, packet).await?;
+                self.publish(packet).await?;
                 let after = self.client(context).recent(context, &lookup).await?.record;
                 let accepted = self.project(context).await?.anchors[usize::from(packet.epoch)]
                     == Some(PacketId {
@@ -782,7 +796,7 @@ impl Native {
                 }
             }
             Action::Cut => {
-                self.cut()?;
+                self.cut(context).await?;
                 Outcome::Accepted
             }
             Action::Admit(epoch) => {
@@ -790,7 +804,7 @@ impl Native {
                     .client(context)
                     .admitted(context, u64::from(epoch))
                     .await?;
-                self.admit(usize::from(epoch)).await?;
+                self.admit(context, usize::from(epoch)).await?;
                 let after = self
                     .client(context)
                     .admitted(context, u64::from(epoch))
@@ -880,6 +894,7 @@ impl Native {
                         self.control.advance(admission_deadline - height + 1).await;
                     }
                     if self.status(context).await.hard_faulted {
+                        observe_closes(context, &mut self.client(context), self.operator()).await?;
                         Outcome::Accepted
                     } else {
                         Outcome::Rejected
@@ -936,7 +951,7 @@ impl Native {
 
     async fn project(&mut self, context: &deterministic::Context) -> Result<Projection> {
         let snapshot = self.operator().lock().snapshot()?;
-        let (_, withdrawals) = self.operator().lock().registration_boundary()?;
+        let (_, withdrawals) = self.operator().lock().live_registration_boundary()?;
         let adopted = self.operator().lock().adopted();
         let wallets = wallets();
         let mut balances = [0; model::ACCOUNTS];
@@ -1180,7 +1195,7 @@ impl Native {
             balances,
             present,
             boundary,
-            frozen: self.operator().lock().withdrawals_frozen()?,
+            frozen: self.operator().lock().live_withdrawals_frozen()?,
             adopted,
             faulted: status.hard_faulted,
             acknowledgements,
@@ -1221,9 +1236,11 @@ async fn replay(context: &deterministic::Context, trace: Trace) {
             .await
             .unwrap_or_else(|error| panic!("{} step {index}: {action:?}: {error:#}", trace.name));
         assert_eq!(
-            observed, transition.outcome,
-            "{} step {index}: {action:?}",
-            trace.name
+            observed,
+            transition.outcome,
+            "{} step {index}: {action:?}; path: {:?}",
+            trace.name,
+            &trace.actions[..=index]
         );
         assert_eq!(
             native.project(context).await.unwrap_or_else(|error| {
