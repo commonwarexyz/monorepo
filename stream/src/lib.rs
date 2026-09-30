@@ -159,18 +159,18 @@ commonware_macros::stability_scope!(BETA {
 
     /// Authenticates a raw connection and agrees on a secret [Transcript].
     ///
-    /// Implementations must authenticate each peer's declared identity and bind the supplied
-    /// application namespace and both peer identities, in their dialer and listener roles, to the
-    /// same fresh secret transcript. Its state must be unpredictable to parties outside the
-    /// connection. Before returning, each role must confirm that its authenticated peer derived
-    /// the same transcript in the opposite role. A successful dial must authenticate the expected
-    /// peer. A listen may succeed only if the bouncer returns `true` for the same authenticated
-    /// peer that is returned.
+    /// Let `D` and `L` be the identities authenticated for the dialer and the listener. A
+    /// successful handshake returns the same transcript `T` to both peers, where:
     ///
-    /// Implementations must not consume bytes from `stream` past the final handshake message because
-    /// the caller reuses `stream` and `sink` after the handshake.
+    /// 1. `T` commits to `namespace`, to `D` as dialer, and to `L` as listener.
+    /// 2. `T` is fresh for each handshake and unpredictable to any party other than `D` and `L`.
+    /// 3. Each peer returns `T` only after verifying that the other peer holds `T`.
     ///
-    /// Callers must enforce a deadline. Dropping the handshake future cancels the attempt.
+    /// A dial to `peer` succeeds only if `L` is `peer`. A listen succeeds only if `bouncer`
+    /// returns `true` for `D`, and returns `D`.
+    ///
+    /// Implementations must not read from `stream` beyond the final handshake message. Callers
+    /// must enforce a deadline. Dropping the returned future cancels the attempt.
     pub trait Handshake: Clone + Send + Sync + 'static {
         /// Public key identifying an authenticated peer.
         type PublicKey: Send;
