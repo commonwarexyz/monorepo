@@ -160,13 +160,15 @@ running.join().await?;
 
 The `log-multimmit` example is the compiling consensus reference. `Inspection` is a diagnostic API,
 not an application delivery stream. A deployment may attach marshal directly as its `Reporter`
-without changing consensus durability or progress.
+without changing consensus durability or progress. Marshal reclaims pending producer bodies only
+as far as the engine's `Activity::CertificateRecorded` reports allow, so the engine's activity
+must reach marshal for pending custody to be reclaimed.
 
 ### Marshal service lifecycle
 
 Marshal implements the Section 6 two-pass ordering variant. Consensus emits authenticated L-QCs,
-accepted producer headers, and available history openings through one best-effort `Activity`
-stream; marshal validates each identity, persists useful hints, and resolves missing openings or
+accepted producer headers, available history openings, and the DA certificates it has durably
+recorded through one best-effort `Activity` stream; marshal validates each identity, persists useful hints, and resolves missing openings or
 blocks by authenticated digest. Dense delivery and application acknowledgement never enter
 consensus storage. `marshal/mod.rs` lists the actors; each owns its own store:
 

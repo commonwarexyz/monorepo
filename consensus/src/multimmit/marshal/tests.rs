@@ -64,6 +64,8 @@ const ENGINE_CHANNELS: Channels = Channels {
     broadcast: 5,
 };
 const WAIT_STEPS: usize = 2_000;
+/// Resolver mailbox capacity, which also bounds backfill concurrency.
+const RESOLVER_MAILBOX_SIZE: NonZeroUsize = NZUsize!(64);
 const WAIT_STEP: Duration = Duration::from_millis(5);
 const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_MARSHAL_E2E";
 const NODE_LABELS: [[&str; 3]; 2] = [
@@ -569,8 +571,9 @@ impl Harness {
         .with_pending_segment_items(
             NonZeroU64::new(self.catalog_mailbox_size.get() as u64).unwrap(),
         )
-        .with_resolver_mailbox_size(NZUsize!(64))
-        .with_backfill_concurrency(NZUsize!(64))
+        .with_resolver_mailbox_size(RESOLVER_MAILBOX_SIZE)
+        // Backfill must not exceed the resolver mailbox.
+        .with_backfill_concurrency(RESOLVER_MAILBOX_SIZE)
         .with_max_commit_outputs(self.max_commit_outputs)
         .with_max_hot_block_bytes(self.max_hot_block_bytes)
         .with_max_pending_acks(self.max_pending_acks)
