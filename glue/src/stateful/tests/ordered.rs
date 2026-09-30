@@ -848,7 +848,7 @@ fn an_interrupted_sync_resumes_toward_its_recorded_target() {
         context.sleep(Duration::from_millis(50)).await;
         joining.crash().await;
 
-        // Restarted with a peer, the node syncs to the target it recorded without a new offer.
+        // Restarted with a peer, the node syncs to the target it persisted without a new offer.
         let joiner = Node::joining("joiner", &source);
         let joiner_context = context.child("joiner");
         let mut joining = joiner.start(&joiner_context).await;

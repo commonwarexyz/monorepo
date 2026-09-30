@@ -687,6 +687,11 @@ impl<P, T> TipUpdate<P, T> {
     }
 
     /// Creates an update that resolves `observed` once a sync has handled it.
+    ///
+    /// A sync also resolves `observed` for an update it ignores because the update is not above
+    /// its current anchor. A caller that reads the signal as "the sync reaches this update or a
+    /// later one", as the executor's ordered mode does, must offer updates in increasing order, so
+    /// that an ignored update is always below one the sync already targets.
     pub(crate) const fn observed_by(anchor: P, targets: T, observed: oneshot::Sender<()>) -> Self {
         Self {
             anchor,

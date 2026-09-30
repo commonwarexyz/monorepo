@@ -395,7 +395,7 @@ where
                 }
             }
             Message::Diverged { height } => {
-                error!(%height, "honest validators certified a block other than the one synced to");
+                error!(%height, "honest validators signed a block other than one offered to sync to");
                 return Err(Halt::Diverged(height));
             }
             Message::Target { block, response } => {
@@ -408,7 +408,16 @@ where
 
     /// Makes `block` the sync target if it is above the current one, starting the sync if none
     /// runs yet.
+    ///
+    /// A target below the inputs marshal delivers is ignored: marshal has already passed the
+    /// input after it, so a base there would miss inputs.
     async fn offer(&mut self, block: Arc<X::Block>) {
+        if let Some(lowest) = self.inputs.front()
+            && block.height().get().saturating_add(1) < lowest.index.get()
+        {
+            debug!(height = %block.height(), lowest = %lowest.index, "target is below marshal's inputs");
+            return;
+        }
         if let Some(syncing) = &self.syncing {
             if block.height() == syncing.target.height() {
                 assert_eq!(
@@ -428,7 +437,7 @@ where
         {
             check_input(block.as_ref(), input);
         }
-        self.store.record_target(&block).await;
+        self.store.persist_target(&block).await;
         match &mut self.syncing {
             Some(syncing) => {
                 syncing.offered.insert(block.height(), Arc::clone(&block));
@@ -669,12 +678,59 @@ where
             input.acknowledgement.acknowledge();
             return;
         }
+        if index < self.expected {
+            self.redeliver(input);
+            return;
+        }
         assert_eq!(
             index, self.expected,
             "marshal must deliver each input once, in index order"
         );
         self.expected = index.next();
         self.inputs.push_back(input);
+    }
+
+    /// Takes the acknowledgement of an input above the applied one that marshal delivers again
+    /// after moving its floor, as when its jump to a floor installed for a state sync reaches the
+    /// executor after the base. The input is queued, executing, or delivered, and marshal no longer
+    /// counts the acknowledgement it carried before, which is released.
+    fn redeliver(&mut self, input: Finalized<X::Input, A>) {
+        let height = Height::new(input.index.get());
+        let digest = input.block.digest();
+        let (executed, acknowledgement) = if let Some(queued) = self
+            .inputs
+            .iter_mut()
+            .find(|queued| queued.index == input.index)
+        {
+            (queued.block.digest(), &mut queued.acknowledgement)
+        } else if let Some(execution) = self
+            .execution
+            .as_mut()
+            .filter(|execution| execution.height == height)
+        {
+            (execution.input, &mut execution.acknowledgement)
+        } else {
+            let block = self
+                .line
+                .iter()
+                .find(|block| block.height() == height)
+                .expect("an input above the applied one is queued, executing, or delivered");
+            let delivered = self
+                .delivered
+                .iter_mut()
+                .find(|delivered| delivered.height == height)
+                .expect("an executed block above the applied one is delivered");
+            (
+                block.input().expect("an executed block has an input"),
+                &mut delivered.acknowledgement,
+            )
+        };
+        assert_eq!(
+            executed, digest,
+            "marshal redelivered an input other than the one executed"
+        );
+        debug!(%height, "marshal redelivered an input after moving its floor");
+        mem::replace(acknowledgement, input.acknowledgement).acknowledge();
     }
 
     /// Starts executing the oldest queued input on top of the newest executed block.

@@ -131,11 +131,13 @@ where
     ///
     /// `batches` hold the state after the block at `context.height - 1`, which `ancestry` yields
     /// first. The same determinism rules as [`Execute::execute`] apply: the result may depend
-    /// only on the ancestry, the input, and the state they determine, and an input that is
-    /// invalid in context yields [`Execution::Unchanged`] instead of failing.
+    /// only on the parent, the input, and the state they determine, not on how far `ancestry`
+    /// reaches, which differs between a synced node and one that executed from genesis. An input
+    /// that is invalid in context yields [`Execution::Unchanged`] instead of failing.
     ///
     /// [`Stateful`] checks that a changed block commits to its batches, and that an unchanged
-    /// block commits to its parent's state, and panics otherwise. Applications using
+    /// block commits to its parent's state, before the executor archives it, and panics
+    /// otherwise. Applications using
     /// [`qmdb::current`](commonware_storage::qmdb::current) must still commit to the batches'
     /// canonical root, which that check does not cover.
     ///
