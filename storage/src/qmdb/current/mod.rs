@@ -511,7 +511,8 @@ pub mod tests {
 
     pub use super::BitmapPrunedBits;
     use super::{
-        FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig, grafting, ordered, unordered,
+        Codec, FConfig, FixedConfig, MerkleConfig, Operation, Strategy, Update, VConfig,
+        VariableConfig, batch, grafting, ordered, unordered,
     };
     use crate::{
         merkle::{self, mmb, mmr, storage::Storage as _},
@@ -1458,12 +1459,22 @@ pub mod tests {
     /// A chain applied under different apply, drop, and prune schedules must leave the root,
     /// bounds, floor, activity bits, and grafted tree that applying its batches one at a time
     /// leaves. A follow-on batch checks the live grafted tree, which a reopen rebuilds.
-    pub async fn test_chained_schedules_match_sequential<M, C, F, Fut>(
+    pub async fn test_chained_schedules_match_sequential<M, U, const N: usize, S, C, F, Fut>(
         context: Context,
         mut open_db: F,
     ) where
         M: merkle::Graftable,
-        C: DbAny<M, Key = Digest, Value = Digest, Digest = Digest> + BitmapPrunedBits,
+        U: Update,
+        S: Strategy,
+        Operation<M, U>: Codec,
+        C: DbAny<
+                M,
+                Key = Digest,
+                Value = Digest,
+                Digest = Digest,
+                Merkleized = Arc<batch::MerkleizedBatch<M, Digest, U, N, S>>,
+                Batch = batch::UnmerkleizedBatch<M, Sha256, U, N, S>,
+            > + BitmapPrunedBits,
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
@@ -1549,21 +1560,21 @@ pub mod tests {
 
             // Build A <- B <- E <- C on the seeded db.
             let a_batch = build(&db, db.new_batch(), &a).await;
-            let b_batch = build(&db, db.new_child(&a_batch), &b).await;
-            let e_batch = build(&db, db.new_child(&b_batch), &e).await;
-            let c_batch = build(&db, db.new_child(&e_batch), &c).await;
+            let b_batch = build(&db, a_batch.new_batch::<Sha256>(), &b).await;
+            let e_batch = build(&db, b_batch.new_batch::<Sha256>(), &e).await;
+            let c_batch = build(&db, e_batch.new_batch::<Sha256>(), &c).await;
 
             // Apply D under the schedule. Only S5 prunes, which moves the retained start.
             let (db, pruned) = match schedule {
                 // S1: apply D over all-pending ancestors.
                 1 => {
-                    let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+                    let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
                     (db.apply_batch(d_batch).await.unwrap().0, false)
                 }
 
                 // S2: apply A, then a D built before A was applied.
                 2 => {
-                    let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+                    let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
                     let (db, _) = db.apply_batch(a_batch).await.unwrap();
                     (db.apply_batch(d_batch).await.unwrap().0, false)
                 }
@@ -1571,14 +1582,14 @@ pub mod tests {
                 // S3: apply A and drop it, then merkleize D on C and apply it.
                 3 => {
                     let (db, _) = db.apply_batch(a_batch).await.unwrap();
-                    let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+                    let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
                     (db.apply_batch(d_batch).await.unwrap().0, false)
                 }
 
                 // S4: as S3, but apply B before D.
                 4 => {
                     let (db, _) = db.apply_batch(a_batch).await.unwrap();
-                    let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+                    let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
                     let (db, _) = db.apply_batch(b_batch).await.unwrap();
                     (db.apply_batch(d_batch).await.unwrap().0, false)
                 }
@@ -1586,7 +1597,7 @@ pub mod tests {
                 // S5: apply A and prune to the sync boundary, then apply a D built before the
                 // prune.
                 5 => {
-                    let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+                    let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
                     let (db, _) = db.apply_batch(a_batch).await.unwrap();
                     let db = db.commit().await.unwrap();
                     let boundary = db.sync_boundary();

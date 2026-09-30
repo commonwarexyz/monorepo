@@ -1547,13 +1547,22 @@ pub(crate) mod test {
     /// resolves the keys A created through the base locations of the dropped prefix. B and C
     /// touch only keys A created, so a lost base location duplicates them silently.
     #[boxed]
-    async fn apply_dropped_chain<F: Family, D>(
+    async fn apply_dropped_chain<F: Family, U, S, D>(
         db: D,
         model: &mut Model,
         make_value: &impl Fn(u64) -> Digest,
     ) -> D
     where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        U: Update<Key = Digest, Value = Digest>,
+        S: Strategy,
+        Operation<F, U>: Codec,
+        D: DbAny<
+                F,
+                Key = Digest,
+                Value = Digest,
+                Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
+                Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
+            >,
     {
         // A updates and deletes siblings and creates new ones.
         let a = vec![
@@ -1576,10 +1585,10 @@ pub(crate) mod test {
 
         // Build A <- B, apply A and drop it, then merkleize C on B and apply it.
         let a_batch = build(&db, db.new_batch(), &a).await;
-        let b_batch = build(&db, db.new_child(&a_batch), &b).await;
+        let b_batch = build(&db, a_batch.new_batch::<Sha256>(), &b).await;
         let (db, _) = db.apply_batch(a_batch).await.unwrap();
         let db = db.commit().await.unwrap();
-        let c_batch = build(&db, db.new_child(&b_batch), &c).await;
+        let c_batch = build(&db, b_batch.new_batch::<Sha256>(), &c).await;
         let (db, _) = db.apply_batch(c_batch).await.unwrap();
         for writes in [&a, &b, &c] {
             model.apply(writes);
@@ -1591,13 +1600,22 @@ pub(crate) mod test {
     /// pending ancestors are both non-empty. On a db without active keys, every key in A's diff
     /// is created by A, so a key misresolved through either partition is duplicated silently.
     #[boxed]
-    async fn apply_mixed_chain<F: Family, D>(
+    async fn apply_mixed_chain<F: Family, U, S, D>(
         db: D,
         model: &mut Model,
         make_value: &impl Fn(u64) -> Digest,
     ) -> D
     where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        U: Update<Key = Digest, Value = Digest>,
+        S: Strategy,
+        Operation<F, U>: Codec,
+        D: DbAny<
+                F,
+                Key = Digest,
+                Value = Digest,
+                Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
+                Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
+            >,
     {
         // A recreates deleted siblings and creates new ones.
         let a = vec![
@@ -1619,8 +1637,8 @@ pub(crate) mod test {
 
         // Build A <- B <- C, then apply A and C.
         let a_batch = build(&db, db.new_batch(), &a).await;
-        let b_batch = build(&db, db.new_child(&a_batch), &b).await;
-        let c_batch = build(&db, db.new_child(&b_batch), &c).await;
+        let b_batch = build(&db, a_batch.new_batch::<Sha256>(), &b).await;
+        let c_batch = build(&db, b_batch.new_batch::<Sha256>(), &c).await;
         let (db, _) = db.apply_batch(a_batch).await.unwrap();
         let (db, _) = db.apply_batch(c_batch).await.unwrap();
         for writes in [&a, &b, &c] {
@@ -1633,13 +1651,22 @@ pub(crate) mod test {
     /// is applied before D. D then resolves B's keys through the applied ancestor and the keys A
     /// shares with C through the base locations of the dropped prefix.
     #[boxed]
-    async fn apply_crossed_chain<F: Family, D>(
+    async fn apply_crossed_chain<F: Family, U, S, D>(
         db: D,
         model: &mut Model,
         make_value: &impl Fn(u64) -> Digest,
     ) -> D
     where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        U: Update<Key = Digest, Value = Digest>,
+        S: Strategy,
+        Operation<F, U>: Codec,
+        D: DbAny<
+                F,
+                Key = Digest,
+                Value = Digest,
+                Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
+                Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
+            >,
     {
         // A updates and deletes siblings and creates new ones.
         let a = vec![
@@ -1676,11 +1703,11 @@ pub(crate) mod test {
 
         // Build A <- B <- C, then apply A and drop it before D is merkleized on C.
         let a_batch = build(&db, db.new_batch(), &a).await;
-        let b_batch = build(&db, db.new_child(&a_batch), &b).await;
-        let c_batch = build(&db, db.new_child(&b_batch), &c).await;
+        let b_batch = build(&db, a_batch.new_batch::<Sha256>(), &b).await;
+        let c_batch = build(&db, b_batch.new_batch::<Sha256>(), &c).await;
         let (db, _) = db.apply_batch(a_batch).await.unwrap();
         let db = db.commit().await.unwrap();
-        let d_batch = build(&db, db.new_child(&c_batch), &d).await;
+        let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
 
         // Apply B, then D over pending C.
         let (db, _) = db.apply_batch(b_batch).await.unwrap();
@@ -1738,8 +1765,14 @@ pub(crate) mod test {
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,
         Operation<F, U>: Codec,
-        Db<F, Context, C, I, Sha256, U, N, S>:
-            DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+        Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
+                F,
+                Key = Digest,
+                Value = Digest,
+                Digest = Digest,
+                Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
+                Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
+            >,
         Fut: Future<Output = Db<F, Context, C, I, Sha256, U, N, S>>,
     {
         // Shape 1: A is applied and dropped before C is merkleized on B.
