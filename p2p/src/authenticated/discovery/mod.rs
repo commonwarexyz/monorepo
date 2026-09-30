@@ -170,7 +170,7 @@
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::{cups::{self, Cups}, sake::{Sake, Version}};
+//! use commonware_stream::{cups::{self, Cups}, sake::{self, Sake}};
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
 //! use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, time::Duration};
 //!
@@ -213,7 +213,7 @@
 //!             signer: signer.clone(),
 //!             synchrony_bound: Duration::from_secs(5),
 //!             max_handshake_age: Duration::from_secs(10),
-//!             version: Version::V1,
+//!             version: sake::Version::V1,
 //!         },
 //!         cups::Version::V1,
 //!     ),

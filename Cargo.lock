@@ -2496,6 +2496,7 @@ dependencies = [
 name = "commonware-stream"
 version = "2026.9.0"
 dependencies = [
+ "arbitrary",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",

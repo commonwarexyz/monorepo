@@ -3,7 +3,7 @@
 use crate::{
     Upgrader as _,
     cups::{self, Cups},
-    sake::{Sake, Version},
+    sake::{self, Sake},
 };
 use commonware_conformance::{Conformance, conformance_tests};
 use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
@@ -42,14 +42,14 @@ impl Sink for Tap {
     }
 }
 
-/// Runs a full connection at the SAKE `version` with `records` and returns every byte each peer
+/// Runs a full connection at the given SAKE and CUPS versions and returns every byte each peer
 /// wrote.
 ///
 /// The log covers the identity prelude, the handshake messages, and records of every length class
 /// in both directions, so it pins the handshake and the record format of each version.
 /// Ephemeral keys and timestamps come from the deterministic runtime, so a change to its scheduling
 /// can also move the log.
-fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
+fn exchange(seed: u64, sake: sake::Version, cups: cups::Version) -> Vec<u8> {
     let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(seed));
     runner.start(|mut context| async move {
         // Start at a seeded time so handshake timestamps have nonzero upper bytes.
@@ -78,9 +78,9 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
                 signer: listener.clone(),
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),
-                version,
+                version: sake,
             },
-            records,
+            cups,
         );
         let handle = context.child("listener").spawn(move |context| async move {
             listener_handshake
@@ -99,9 +99,9 @@ fn exchange(seed: u64, version: Version, records: cups::Version) -> Vec<u8> {
                 signer: dialer,
                 synchrony_bound: Duration::from_secs(5),
                 max_handshake_age: Duration::from_secs(10),
-                version,
+                version: sake,
             },
-            records,
+            cups,
         )
         .dial(
             context.child("dialer"),
@@ -146,7 +146,7 @@ struct CupsV0;
 
 impl Conformance for CupsV0 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, Version::V0, cups::Version::V0)
+        exchange(seed, sake::Version::V0, cups::Version::V0)
     }
 }
 
@@ -155,7 +155,7 @@ struct CupsV1;
 
 impl Conformance for CupsV1 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, Version::V1, cups::Version::V1)
+        exchange(seed, sake::Version::V1, cups::Version::V1)
     }
 }
 
@@ -164,7 +164,7 @@ struct SakeV0CupsV1;
 
 impl Conformance for SakeV0CupsV1 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, Version::V0, cups::Version::V1)
+        exchange(seed, sake::Version::V0, cups::Version::V1)
     }
 }
 
@@ -173,7 +173,7 @@ struct SakeV1CupsV0;
 
 impl Conformance for SakeV1CupsV0 {
     async fn commit(seed: u64) -> Vec<u8> {
-        exchange(seed, Version::V1, cups::Version::V0)
+        exchange(seed, sake::Version::V1, cups::Version::V0)
     }
 }
 

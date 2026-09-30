@@ -5,30 +5,24 @@ use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks}
 use commonware_stream::{
     Upgrader as _,
     cups::{self, Cups},
-    sake::{Sake, Version},
+    sake::{self, Sake},
     utils::Timeout,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
-/// Returns the records that pair with the SAKE `version`.
-fn record_version(version: Version) -> cups::Version {
-    match version {
-        Version::V0 => cups::Version::V0,
-        Version::V1 => cups::Version::V1,
-    }
-}
-
 static NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
 
-fn fuzz(data: &[u8]) {
-    // Pick the protocol version from the first byte.
-    let version = if data.first().is_some_and(|byte| byte & 1 == 1) {
-        Version::V1
-    } else {
-        Version::V0
-    };
+#[derive(Debug, arbitrary::Arbitrary)]
+struct FuzzInput {
+    sake: sake::Version,
+    cups: cups::Version,
+    data: Vec<u8>,
+}
+
+fn fuzz(input: FuzzInput) {
+    let FuzzInput { sake, cups, data } = input;
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let dialer_signer = PrivateKey::from_seed(42);
@@ -42,9 +36,9 @@ fn fuzz(data: &[u8]) {
                 signer: dialer_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
-                version,
+                version: sake,
             },
-            record_version(version),
+            cups,
         );
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
@@ -53,9 +47,9 @@ fn fuzz(data: &[u8]) {
                 signer: listener_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
-                version,
+                version: sake,
             },
-            record_version(version),
+            cups,
         );
         let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(1));
 
@@ -100,6 +94,6 @@ fn fuzz(data: &[u8]) {
     });
 }
 
-fuzz_target!(|input: &[u8]| {
+fuzz_target!(|input: FuzzInput| {
     fuzz(input);
 });

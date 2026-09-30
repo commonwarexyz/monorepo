@@ -5,20 +5,12 @@ use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks}
 use commonware_stream::{
     SakeCups, Upgrader as StreamUpgrader,
     cups::{self, Cups},
-    sake::{Sake, Version},
+    sake::{self, Sake},
     utils::Timeout,
 };
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
-
-/// Returns the records that pair with the SAKE `version`.
-fn record_version(version: Version) -> cups::Version {
-    match version {
-        Version::V0 => cups::Version::V0,
-        Version::V1 => cups::Version::V1,
-    }
-}
 
 static NAMESPACE: &[u8] = b"lazy_fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 1023 * 1024; // ~1MB buffer
@@ -38,9 +30,9 @@ struct TransportPair {
     listener_receiver: Receiver,
 }
 
-/// Connects a dialer and listener at `version` and returns the dialer's sender and the
-/// listener's receiver.
-fn connect(version: Version) -> TransportPair {
+/// Connects a dialer and listener at the given SAKE and CUPS versions and returns the dialer's
+/// sender and the listener's receiver.
+fn connect(sake: sake::Version, cups: cups::Version) -> TransportPair {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let dialer_signer = PrivateKey::from_seed(42);
@@ -54,9 +46,9 @@ fn connect(version: Version) -> TransportPair {
                 signer: dialer_signer.clone(),
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
-                version,
+                version: sake,
             },
-            record_version(version),
+            cups,
         );
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(2));
 
@@ -65,9 +57,9 @@ fn connect(version: Version) -> TransportPair {
                 signer: listener_signer.clone(),
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
-                version,
+                version: sake,
             },
-            record_version(version),
+            cups,
         );
         let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(2));
 
@@ -107,18 +99,36 @@ fn connect(version: Version) -> TransportPair {
 }
 
 thread_local! {
-    static TRANSPORTS: RefCell<[TransportPair; 2]> =
-        RefCell::new([connect(Version::V0), connect(Version::V1)]);
+    static TRANSPORTS: RefCell<[TransportPair; 4]> = RefCell::new([
+        connect(sake::Version::V0, cups::Version::V0),
+        connect(sake::Version::V1, cups::Version::V0),
+        connect(sake::Version::V0, cups::Version::V1),
+        connect(sake::Version::V1, cups::Version::V1),
+    ]);
 }
 
-fn fuzz(data: &[u8]) {
+#[derive(Debug, arbitrary::Arbitrary)]
+struct FuzzInput {
+    sake: sake::Version,
+    cups: cups::Version,
+    data: Vec<u8>,
+}
+
+fn fuzz(input: FuzzInput) {
+    let FuzzInput { sake, cups, data } = input;
     if data.is_empty() || data.len() > MAX_MESSAGE_SIZE as usize {
         return;
     }
 
     TRANSPORTS.with(|transports| {
-        // Pick the protocol version from the first byte.
-        let transport = &mut transports.borrow_mut()[usize::from(data[0] & 1)];
+        // Select the connection at the input's versions, following the order of TRANSPORTS.
+        let index = match (sake, cups) {
+            (sake::Version::V0, cups::Version::V0) => 0,
+            (sake::Version::V1, cups::Version::V0) => 1,
+            (sake::Version::V0, cups::Version::V1) => 2,
+            (sake::Version::V1, cups::Version::V1) => 3,
+        };
+        let transport = &mut transports.borrow_mut()[index];
 
         for chunk in data.chunks(1024) {
             block_on(transport.dialer_sender.send(chunk.to_vec())).unwrap();
@@ -129,6 +139,6 @@ fn fuzz(data: &[u8]) {
     });
 }
 
-fuzz_target!(|input: &[u8]| {
+fuzz_target!(|input: FuzzInput| {
     fuzz(input);
 });

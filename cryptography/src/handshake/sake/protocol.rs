@@ -17,6 +17,7 @@ const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 ///
 /// The version is part of the protocol definition: both peers must agree on it out of band.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum Version {
     /// Commits the dialer identity after the [Syn] signature. If the signature scheme lacks
     /// conservative exclusive ownership (it admits key substitution), a dialer can complete a
@@ -427,7 +428,7 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<Transcript, Error> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{ChaCha20Poly1305, Cipher, Signer, ed25519::PrivateKey, secp256r1::standard};
+    use crate::{Signer, ed25519::PrivateKey, secp256r1::standard};
     use commonware_codec::{Codec, Copying, DecodeExt};
     use commonware_math::algebra::Random;
     use commonware_utils::{test_rng, union_unique};
@@ -443,17 +444,10 @@ mod test {
         assert!(value == &<T as DecodeExt<_>>::decode(value.encode()).unwrap());
     }
 
-    /// Seals `msg` with `send` and checks that `recv` opens it.
-    fn exchange<C: Cipher>(send: C, recv: C, msg: &[u8]) {
-        let mut data = msg.to_vec();
-        let (_, tag) = send.seal(&[], &mut data).unwrap();
-        recv.open(&[], &mut data, &tag).unwrap();
-        assert_eq!(data, msg);
-    }
-
-    /// Completes a handshake under each [Version] and exchanges a message in each direction.
+    /// Completes a handshake under each [Version] and checks that both peers return the same
+    /// transcript.
     #[test]
-    fn test_can_setup_and_send_messages() -> Result<(), Error> {
+    fn test_can_setup() -> Result<(), Error> {
         for version in VERSIONS {
             let mut rng = test_rng();
             let dialer_crypto = PrivateKey::random(&mut rng);
@@ -489,18 +483,6 @@ mod test {
             test_encode_roundtrip(&msg3);
             let listener = listen_end(l_state, msg3)?;
             assert_eq!(dialer.summarize(), listener.summarize());
-
-            // Each send cipher pairs with the peer's receive cipher.
-            for (sender, receiver, label, message) in [
-                (&dialer, &listener, b"cipher_d2l", b"message 1"),
-                (&listener, &dialer, b"cipher_l2d", b"message 2"),
-            ] {
-                exchange::<ChaCha20Poly1305>(
-                    Random::random(sender.noise(label)),
-                    Random::random(receiver.noise(label)),
-                    message,
-                );
-            }
         }
 
         Ok(())
@@ -815,11 +797,7 @@ mod test {
             };
             let (ack, dialer) = dial_end(state, syn_ack).unwrap();
             let listener = listen_end(listen_state, ack).unwrap();
-            exchange::<ChaCha20Poly1305>(
-                Random::random(dialer.noise(b"cipher_d2l")),
-                Random::random(listener.noise(b"cipher_d2l")),
-                b"hello",
-            );
+            assert_eq!(dialer.summarize(), listener.summarize());
         }
     }
 }

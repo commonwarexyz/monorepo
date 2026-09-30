@@ -173,7 +173,7 @@ mod tests {
     use commonware_stream::{
         SakeCups, Upgrader,
         cups::{self, Cups},
-        sake::{Sake, Version},
+        sake::{self, Sake},
         utils::Timeout,
     };
     use commonware_utils::{NZUsize, SystemTimeExt};
@@ -198,7 +198,7 @@ mod tests {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
-                version: Version::V1,
+                version: sake::Version::V1,
             },
             cups::Version::V1,
         );

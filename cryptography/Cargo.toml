@@ -156,6 +156,11 @@ harness = false
 path = "src/blake3/benches/bench.rs"
 
 [[bench]]
+name = "chacha20_poly1305"
+harness = false
+path = "src/chacha20_poly1305/benches/bench.rs"
+
+[[bench]]
 name = "lthash"
 harness = false
 path = "src/lthash/benches/bench.rs"

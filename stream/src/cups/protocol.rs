@@ -99,6 +99,7 @@ impl From<FrameError> for Error {
 ///
 /// Both peers must use the same version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum Version {
     /// Records framed by a visible length prefix.
     V0,
@@ -115,7 +116,7 @@ impl From<Version> for Mode {
     }
 }
 
-/// A handshake `H` and CUPS records of one [Version], sealed by `C`.
+/// [Upgrader] that runs handshake `H`, then exchanges records of one [Version] sealed by `C`.
 pub struct Cups<H, C> {
     /// Handshake used to authenticate peers and agree on a secret transcript.
     pub handshake: H,
@@ -139,7 +140,7 @@ impl<H: Clone, C> Clone for Cups<H, C> {
 }
 
 impl<H, C> Cups<H, C> {
-    /// Pairs `handshake` with `version` records sealed by `C`.
+    /// Runs `handshake`, then exchanges `version` records sealed by `C`.
     pub const fn new(handshake: H, version: Version) -> Self {
         Self {
             handshake,

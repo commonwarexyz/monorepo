@@ -13,7 +13,7 @@ arbitrary = { workspace = true, features = ["derive"] }
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-runtime.workspace = true
-commonware-stream.workspace = true
+commonware-stream = { workspace = true, features = ["arbitrary"] }
 commonware-utils.workspace = true
 futures.workspace = true
 libfuzzer-sys.workspace = true

@@ -5,25 +5,18 @@ use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks}
 use commonware_stream::{
     Upgrader as _,
     cups::{self, Cups},
-    sake::{Sake, Version},
+    sake::{self, Sake},
     utils::Timeout,
 };
 use futures::join;
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
-/// Returns the records that pair with the SAKE `version`.
-fn record_version(version: Version) -> cups::Version {
-    match version {
-        Version::V0 => cups::Version::V0,
-        Version::V1 => cups::Version::V1,
-    }
-}
-
 #[derive(Debug)]
 pub struct FuzzInput {
-    // Protocol version shared by both peers
-    version: Version,
+    // SAKE and CUPS versions shared by both peers
+    sake: sake::Version,
+    cups: cups::Version,
 
     // Seeds for cryptographic identities
     dialer_seed: u64,
@@ -43,12 +36,9 @@ pub struct FuzzInput {
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        // Pick the protocol version
-        let version = if bool::arbitrary(u)? {
-            Version::V1
-        } else {
-            Version::V0
-        };
+        // Pick the SAKE and CUPS versions
+        let sake = u.arbitrary()?;
+        let cups = u.arbitrary()?;
 
         // Generate basic seeds
         let dialer_seed = u64::arbitrary(u)?;
@@ -89,7 +79,8 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         }
 
         Ok(FuzzInput {
-            version,
+            sake,
+            cups,
             dialer_seed,
             listener_seed,
             namespace,
@@ -122,9 +113,9 @@ fn fuzz(input: FuzzInput) {
                 signer: dialer_signer.clone(),
                 synchrony_bound,
                 max_handshake_age,
-                version: input.version,
+                version: input.sake,
             },
-            record_version(input.version),
+            input.cups,
         );
         let dialer_handshake = Timeout::new(dialer_handshake, handshake_timeout);
 
@@ -133,9 +124,9 @@ fn fuzz(input: FuzzInput) {
                 signer: listener_signer.clone(),
                 synchrony_bound,
                 max_handshake_age,
-                version: input.version,
+                version: input.sake,
             },
-            record_version(input.version),
+            input.cups,
         );
         let listener_handshake = Timeout::new(listener_handshake, handshake_timeout);
 

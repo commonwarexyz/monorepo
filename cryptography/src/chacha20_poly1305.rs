@@ -239,4 +239,42 @@ mod tests {
         let tag = FixedBytes::new([0u8; TAG_SIZE]);
         assert!(recv.open(b"", &mut [], &tag).is_none());
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::Encode;
+        use commonware_conformance::{Conformance, conformance_tests};
+        use rand::RngExt as _;
+
+        /// Seals several messages with random associated data under a seeded key, logging each
+        /// ciphertext and tag.
+        struct Seal;
+
+        impl Conformance for Seal {
+            async fn commit(seed: u64) -> Vec<u8> {
+                let mut log = Vec::new();
+                let mut rng = TestRng::new(seed);
+                let mut cipher = ChaCha20Poly1305::random(&mut rng);
+
+                // Seal enough messages that successive nonces are covered.
+                for _ in 0..4 {
+                    let mut aad = vec![0u8; rng.random_range(0..32)];
+                    rng.fill(&mut aad[..]);
+                    let mut data = vec![0u8; rng.random_range(0..256)];
+                    rng.fill(&mut data[..]);
+                    let (next, tag) = cipher.seal(&aad, &mut data).unwrap();
+                    cipher = next;
+                    log.extend(aad.encode());
+                    log.extend(data.encode());
+                    log.extend_from_slice(&tag);
+                }
+                log
+            }
+        }
+
+        conformance_tests! {
+            Seal => 4096,
+        }
+    }
 }

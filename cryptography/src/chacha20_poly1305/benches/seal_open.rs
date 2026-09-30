@@ -1,8 +1,14 @@
-use commonware_cryptography::Cipher;
+use commonware_cryptography::{ChaCha20Poly1305, Cipher};
+use commonware_math::algebra::Random;
+use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
 
-fn bench_transport(c: &mut Criterion) {
-    let (send, recv) = super::connect().unwrap();
+fn bench_seal_open(c: &mut Criterion) {
+    // test_rng() has a fixed seed, so both ciphers get the same key.
+    let (send, recv) = (
+        ChaCha20Poly1305::random(test_rng()),
+        ChaCha20Poly1305::random(test_rng()),
+    );
 
     // Sealing and opening consume each cipher and return the next one.
     let (mut send, mut recv) = (Some(send), Some(recv));
@@ -21,4 +27,4 @@ fn bench_transport(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_transport);
+criterion_group!(benches, bench_seal_open);

@@ -46,14 +46,14 @@ impl From<HandshakeError> for Error {
 ///
 /// ```
 /// use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-/// use commonware_stream::sake::{Sake, Version};
+/// use commonware_stream::sake::{self, Sake};
 /// use std::time::Duration;
 ///
 /// let handshake = Sake {
 ///     signer: PrivateKey::from_seed(0),
 ///     synchrony_bound: Duration::from_secs(5),
 ///     max_handshake_age: Duration::from_secs(10),
-///     version: Version::V1,
+///     version: sake::Version::V1,
 /// };
 /// ```
 #[derive(Clone)]
@@ -196,6 +196,7 @@ mod test {
     use crate::{
         Upgrader as _,
         cups::{self, Cups},
+        sake,
         utils::{Timeout, TimeoutError},
     };
     use commonware_codec::varint::UInt;
@@ -229,16 +230,20 @@ mod test {
             let (sink, peer_stream) = mocks::Channel::init();
             let (_peer_sink, stream) = mocks::Channel::init();
             drop(peer_stream);
-            let result = upgrader(PrivateKey::from_seed(0), Version::V1, cups::Version::V1)
-                .dial(
-                    context.child("dialer"),
-                    NAMESPACE,
-                    MAX_MESSAGE_SIZE,
-                    PrivateKey::from_seed(1).public_key(),
-                    stream,
-                    sink,
-                )
-                .await;
+            let result = upgrader(
+                PrivateKey::from_seed(0),
+                sake::Version::V1,
+                cups::Version::V1,
+            )
+            .dial(
+                context.child("dialer"),
+                NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                PrivateKey::from_seed(1).public_key(),
+                stream,
+                sink,
+            )
+            .await;
             assert!(matches!(
                 result,
                 Err(Error::Frame(FrameError::SendFailed(_)))
@@ -257,8 +262,11 @@ mod test {
                 for dialer in [true, false] {
                     let (sink, _) = mocks::Channel::init();
                     let (_, stream) = mocks::Channel::init();
-                    let handshake =
-                        upgrader(PrivateKey::from_seed(0), Version::V1, cups::Version::V1);
+                    let handshake = upgrader(
+                        PrivateKey::from_seed(0),
+                        sake::Version::V1,
+                        cups::Version::V1,
+                    );
                     let attempt = async {
                         if dialer {
                             handshake
@@ -303,16 +311,16 @@ mod test {
         });
     }
 
-    /// Returns an upgrader that runs SAKE `version` with `signer` and CUPS `records`.
-    fn upgrader(signer: PrivateKey, version: Version, records: cups::Version) -> TestUpgrade {
+    /// Returns an upgrader for `signer` at the given SAKE and CUPS versions.
+    fn upgrader(signer: PrivateKey, sake: sake::Version, cups: cups::Version) -> TestUpgrade {
         Cups::new(
             Sake {
                 signer,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
-                version,
+                version: sake,
             },
-            records,
+            cups,
         )
     }
 
@@ -379,7 +387,7 @@ mod test {
     /// payloads above `max_message_size` and exchange messages in both directions.
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Box<dyn std::error::Error>> {
-        for records in [cups::Version::V0, cups::Version::V1] {
+        for cups in [cups::Version::V0, cups::Version::V1] {
             for max_message_size in [0, 1, 100, MAX_MESSAGE_SIZE] {
                 let executor = deterministic::Runner::timed(Duration::from_secs(5));
                 executor.start(move |context| async move {
@@ -391,9 +399,9 @@ mod test {
                     let (dialer_sink, listener_stream) = mocks::Channel::init();
                     let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-                    let dialer_handshake = upgrader(dialer_signer.clone(), Version::V1, records);
+                    let dialer_handshake = upgrader(dialer_signer.clone(), sake::Version::V1, cups);
                     let listener_handshake =
-                        upgrader(listener_signer.clone(), Version::V1, records);
+                        upgrader(listener_signer.clone(), sake::Version::V1, cups);
 
                     // Run both sides of the handshake.
                     let listener_handle =
@@ -460,8 +468,8 @@ mod test {
     /// Connects peers with the given SAKE and CUPS versions. Checks bidirectional delivery for
     /// matching CUPS versions and V1 rejection of V0 records after a successful handshake.
     fn connect_with(
-        dialer: (Version, cups::Version),
-        listener: (Version, cups::Version),
+        dialer: (sake::Version, cups::Version),
+        listener: (sake::Version, cups::Version),
     ) -> Result<(), Error> {
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(move |context| async move {
@@ -534,10 +542,10 @@ mod test {
     #[test]
     fn test_versions() {
         let versions = [
-            (Version::V0, cups::Version::V0),
-            (Version::V0, cups::Version::V1),
-            (Version::V1, cups::Version::V0),
-            (Version::V1, cups::Version::V1),
+            (sake::Version::V0, cups::Version::V0),
+            (sake::Version::V0, cups::Version::V1),
+            (sake::Version::V1, cups::Version::V0),
+            (sake::Version::V1, cups::Version::V1),
         ];
         for dialer in versions {
             for listener in versions {
@@ -561,7 +569,7 @@ mod test {
     /// read returned.
     #[test]
     fn test_recv_decrypts_unique_frame_in_place() -> Result<(), Box<dyn std::error::Error>> {
-        for records in [cups::Version::V0, cups::Version::V1] {
+        for cups in [cups::Version::V0, cups::Version::V1] {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
                 let dialer_signer = PrivateKey::from_seed(42);
@@ -577,8 +585,8 @@ mod test {
                     last_alloc: last_alloc.clone(),
                 };
 
-                let dialer_handshake = upgrader(dialer_signer, Version::V1, records);
-                let listener_handshake = upgrader(listener_signer.clone(), Version::V1, records);
+                let dialer_handshake = upgrader(dialer_signer, sake::Version::V1, cups);
+                let listener_handshake = upgrader(listener_signer.clone(), sake::Version::V1, cups);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -631,7 +639,7 @@ mod test {
     /// Checks that `send_many` of small messages reaches the sink as one single-chunk send.
     #[test]
     fn test_send_many_uses_single_runtime_send() -> Result<(), Box<dyn std::error::Error>> {
-        for records in [cups::Version::V0, cups::Version::V1] {
+        for cups in [cups::Version::V0, cups::Version::V1] {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
                 let dialer_signer = PrivateKey::from_seed(42);
@@ -642,8 +650,8 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = upgrader(dialer_signer.clone(), Version::V1, records);
-                let listener_handshake = upgrader(listener_signer.clone(), Version::V1, records);
+                let dialer_handshake = upgrader(dialer_signer.clone(), sake::Version::V1, cups);
+                let listener_handshake = upgrader(listener_signer.clone(), sake::Version::V1, cups);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -711,7 +719,7 @@ mod test {
     /// at most one sink call per batch.
     #[test]
     fn test_send_many_flushes_at_network_pool_item_max() -> Result<(), Box<dyn std::error::Error>> {
-        for records in [cups::Version::V0, cups::Version::V1] {
+        for cups in [cups::Version::V0, cups::Version::V1] {
             // Cap network pool items at 256 bytes.
             let executor = deterministic::Runner::new(
                 deterministic::Config::new().with_network_buffer_pool_config(
@@ -729,8 +737,8 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = upgrader(dialer_signer.clone(), Version::V1, records);
-                let listener_handshake = upgrader(listener_signer.clone(), Version::V1, records);
+                let dialer_handshake = upgrader(dialer_signer.clone(), sake::Version::V1, cups);
+                let listener_handshake = upgrader(listener_signer.clone(), sake::Version::V1, cups);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -776,7 +784,7 @@ mod test {
                         assert!(chunk_counts.lock().is_empty());
                     } else {
                         assert_eq!(sends.load(Ordering::Relaxed), 1);
-                        let expected_chunks = if records == cups::Version::V1 {
+                        let expected_chunks = if cups == cups::Version::V1 {
                             count
                         } else {
                             count.div_ceil(2)
@@ -802,7 +810,7 @@ mod test {
     #[test]
     fn test_send_many_sends_oversized_single_message_alone()
     -> Result<(), Box<dyn std::error::Error>> {
-        for records in [cups::Version::V0, cups::Version::V1] {
+        for cups in [cups::Version::V0, cups::Version::V1] {
             // Cap network pool items at 128 bytes, below the frame of the 200-byte message.
             let executor = deterministic::Runner::new(
                 deterministic::Config::new().with_network_buffer_pool_config(
@@ -820,8 +828,8 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = upgrader(dialer_signer.clone(), Version::V1, records);
-                let listener_handshake = upgrader(listener_signer.clone(), Version::V1, records);
+                let dialer_handshake = upgrader(dialer_signer.clone(), sake::Version::V1, cups);
+                let listener_handshake = upgrader(listener_signer.clone(), sake::Version::V1, cups);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -880,7 +888,7 @@ mod test {
     /// any of it, leaving the sender usable.
     #[test]
     fn test_send_many_too_large_preserves_sender_state() -> Result<(), Box<dyn std::error::Error>> {
-        for records in [cups::Version::V0, cups::Version::V1] {
+        for cups in [cups::Version::V0, cups::Version::V1] {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
                 let dialer_signer = PrivateKey::from_seed(42);
@@ -891,8 +899,8 @@ mod test {
                 let sends = Arc::new(AtomicUsize::new(0));
                 let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-                let dialer_handshake = upgrader(dialer_signer.clone(), Version::V1, records);
-                let listener_handshake = upgrader(listener_signer.clone(), Version::V1, records);
+                let dialer_handshake = upgrader(dialer_signer.clone(), sake::Version::V1, cups);
+                let listener_handshake = upgrader(listener_signer.clone(), sake::Version::V1, cups);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -968,7 +976,8 @@ mod test {
 
             // Even with a large application limit, the listener should bound the
             // unauthenticated peer-key frame to the fixed public-key size.
-            let listener_handshake = upgrader(listener_signer, Version::V1, cups::Version::V1);
+            let listener_handshake =
+                upgrader(listener_signer, sake::Version::V1, cups::Version::V1);
             let max_message_size = 1024 * 1024;
 
             // Advertise a frame that is one byte larger than the encoded public key and send no
@@ -1014,13 +1023,14 @@ mod test {
 
             // Use a large application limit to make sure this path is guarded by
             // the fixed SynAck size rather than by post-handshake settings.
-            let dialer_handshake = upgrader(dialer_signer, Version::V1, cups::Version::V1);
+            let dialer_handshake = upgrader(dialer_signer, sake::Version::V1, cups::Version::V1);
             let max_message_size = 1024 * 1024;
 
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.
             let listener_public_key = listener_signer.public_key();
-            let listener_handshake = upgrader(listener_signer, Version::V1, cups::Version::V1);
+            let listener_handshake =
+                upgrader(listener_signer, sake::Version::V1, cups::Version::V1);
             let dialer_context = dialer_handshake.handshake.clone().context(
                 &context,
                 NAMESPACE,

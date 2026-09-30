@@ -8,7 +8,7 @@ use commonware_runtime::{
 use commonware_stream::{
     SakeCups, Upgrader as StreamUpgrader,
     cups::{self, Cups},
-    sake::{Sake, Version},
+    sake::{self, Sake},
     utils::{
         Timeout,
         codec::{Error, recv_frame, send_frame},
@@ -18,38 +18,15 @@ use futures::future::{Either, select};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
-/// Returns the records that pair with the SAKE `version`.
-fn record_version(version: Version) -> cups::Version {
-    match version {
-        Version::V0 => cups::Version::V0,
-        Version::V1 => cups::Version::V1,
-    }
-}
-
-fn records(version: Version) -> Cups<(), ChaCha20Poly1305> {
-    Cups::new((), record_version(version))
-}
-
 const NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 2048;
 const MAX_CIPHERTEXT_SIZE: u32 =
     MAX_MESSAGE_SIZE + <<ChaCha20Poly1305 as Cipher>::Tag as FixedSize>::SIZE as u32;
 
-#[derive(Debug)]
+#[derive(Debug, arbitrary::Arbitrary)]
 enum Direction {
     D2L,
     L2D,
-}
-
-impl<'a> arbitrary::Arbitrary<'a> for Direction {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let out = if bool::arbitrary(u)? {
-            Self::D2L
-        } else {
-            Self::L2D
-        };
-        Ok(out)
-    }
 }
 
 #[derive(Debug)]
@@ -95,7 +72,8 @@ type Receiver = <SakeCups<PrivateKey, ChaCha20Poly1305> as StreamUpgrader>::Rece
 
 #[derive(Debug)]
 pub struct FuzzInput {
-    version: Version,
+    sake: sake::Version,
+    cups: cups::Version,
     setup_corruption: Vec<u8>,
     messages: Vec<Message>,
 }
@@ -108,11 +86,8 @@ impl FuzzInput {
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let version = if bool::arbitrary(u)? {
-            Version::V1
-        } else {
-            Version::V0
-        };
+        let sake = u.arbitrary()?;
+        let cups = u.arbitrary()?;
         let setup_corruption = if bool::arbitrary(u)? {
             Vec::arbitrary(u)?
         } else {
@@ -120,7 +95,8 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         };
         let messages = u.arbitrary_iter()?.collect::<Result<Vec<Message>, _>>()?;
         Ok(Self {
-            version,
+            sake,
+            cups,
             setup_corruption,
             messages,
         })
@@ -132,10 +108,12 @@ fn fuzz(input: FuzzInput) {
     executor.start(|context| async move {
         let has_setup_corruption = input.has_setup_corruption();
         let FuzzInput {
-            version,
+            sake,
+            cups,
             setup_corruption,
             messages,
         } = input;
+        let layout = Cups::<(), ChaCha20Poly1305>::new((), cups);
         let dialer_signer = PrivateKey::from_seed(42);
         let listener_signer = PrivateKey::from_seed(24);
 
@@ -149,9 +127,9 @@ fn fuzz(input: FuzzInput) {
                 signer: dialer_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
-                version,
+                version: sake,
             },
-            record_version(version),
+            cups,
         );
         let dialer_handshake = Timeout::new(dialer_handshake, Duration::from_secs(1));
 
@@ -160,9 +138,9 @@ fn fuzz(input: FuzzInput) {
                 signer: listener_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
-                version,
+                version: sake,
             },
-            record_version(version),
+            cups,
         );
         let listener_handshake = Timeout::new(listener_handshake, Duration::from_secs(1));
 
@@ -314,10 +292,7 @@ fn fuzz(input: FuzzInput) {
                     sender.send(data.clone()).await.unwrap();
 
                     // Intercept the resulting record from the wire.
-                    let record = a_in
-                        .recv(records(version).record_len(data.len()))
-                        .await
-                        .unwrap();
+                    let record = a_in.recv(layout.record_len(data.len())).await.unwrap();
 
                     // Forward the exact record unchanged.
                     a_out.send(record).await.unwrap();
@@ -357,15 +332,17 @@ fn fuzz(input: FuzzInput) {
                     sender.send(vec![0u8]).await.unwrap();
 
                     // Adversary intercepts and drops that record.
-                    let _ = a_in.recv(records(version).record_len(1)).await.unwrap();
+                    let _ = a_in.recv(layout.record_len(1)).await.unwrap();
 
                     // Adversary injects forged unauthenticated bytes instead. A forged version 1
                     // header is padded to full size so the receiver has a header to reject.
-                    match version {
-                        Version::V0 => send_frame(a_out, data, MAX_CIPHERTEXT_SIZE).await.unwrap(),
-                        Version::V1 => {
+                    match cups {
+                        cups::Version::V0 => {
+                            send_frame(a_out, data, MAX_CIPHERTEXT_SIZE).await.unwrap()
+                        }
+                        cups::Version::V1 => {
                             let mut forged = data;
-                            forged.resize(forged.len().max(records(Version::V1).header_len(0)), 0);
+                            forged.resize(forged.len().max(layout.header_len(0)), 0);
                             a_out.send(forged).await.unwrap();
                         }
                     }
@@ -411,7 +388,7 @@ fn fuzz(input: FuzzInput) {
                     // Send a legitimate record and intercept it.
                     sender.send(data.clone()).await.unwrap();
                     let mut record: Vec<u8> = a_in
-                        .recv(records(version).record_len(data.len()))
+                        .recv(layout.record_len(data.len()))
                         .await
                         .unwrap()
                         .coalesce()
@@ -420,9 +397,9 @@ fn fuzz(input: FuzzInput) {
                     // Flip one byte. A version 0 prefix is left intact so the receiver reads the
                     // same span, and any version 1 byte may change because its header is
                     // authenticated before the payload is requested.
-                    let start = match version {
-                        Version::V0 => records(version).header_len(data.len()),
-                        Version::V1 => 0,
+                    let start = match cups {
+                        cups::Version::V0 => layout.header_len(data.len()),
+                        cups::Version::V1 => 0,
                     };
                     let target = start + index % (record.len() - start);
                     record[target] ^= mask;

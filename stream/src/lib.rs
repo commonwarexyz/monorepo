@@ -19,7 +19,7 @@ commonware_macros::stability_scope!(BETA {
     pub mod sake;
     pub mod utils;
 
-    /// [SAKE](sake::Sake) paired with [CUPS](cups::Cups) records sealed by `C`.
+    /// [CUPS](cups::Cups) running a [SAKE](sake::Sake) handshake with cipher `C`.
     pub type SakeCups<S, C> = cups::Cups<sake::Sake<S>, C>;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
@@ -168,7 +168,7 @@ commonware_macros::stability_scope!(BETA {
     /// peer that is returned.
     ///
     /// Implementations must not consume bytes from `stream` past the final handshake message because
-    /// the caller reuses `stream` and `sink` for the transport.
+    /// the caller reuses `stream` and `sink` after the handshake.
     ///
     /// Callers must enforce a deadline. Dropping the handshake future cancels the attempt.
     pub trait Handshake: Clone + Send + Sync + 'static {

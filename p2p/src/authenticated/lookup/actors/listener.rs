@@ -331,7 +331,7 @@ mod tests {
     };
     use commonware_stream::{
         cups::{self, Cups},
-        sake::{Sake, Version},
+        sake::{self, Sake},
         utils::Timeout,
     };
     use commonware_utils::{NZU32, NZUsize};
@@ -372,7 +372,7 @@ mod tests {
                     signer: PrivateKey::from_seed(1),
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),
-                    version: Version::V1,
+                    version: sake::Version::V1,
                 },
                 cups::Version::V1,
             );
@@ -545,7 +545,7 @@ mod tests {
                     signer: PrivateKey::from_seed(1),
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),
-                    version: Version::V1,
+                    version: sake::Version::V1,
                 },
                 cups::Version::V1,
             );
@@ -635,7 +635,7 @@ mod tests {
                     signer: PrivateKey::from_seed(1),
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),
-                    version: Version::V1,
+                    version: sake::Version::V1,
                 },
                 cups::Version::V1,
             );
@@ -725,7 +725,7 @@ mod tests {
                     signer: PrivateKey::from_seed(1),
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(1),
-                    version: Version::V1,
+                    version: sake::Version::V1,
                 },
                 cups::Version::V1,
             );
