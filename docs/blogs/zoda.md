@@ -3,7 +3,7 @@ title: "Fast Block Dissemination with Immediate Guarantees"
 description: "You can come to consensus over a mere fingerprint of the block---a hash for example---but doing anything interesting with that fingerprint, like processing transactions or updating state, requires disseminating (a lot of) data."
 date: "November 4th, 2025"
 published-time: "2025-11-04T00:00:00Z"
-modified-time: "2026-09-29T00:00:00Z"
+modified-time: "2026-09-30T00:00:00Z"
 author: "Lucas Meier"
 author_twitter: "https://x.com/cronokirby"
 url: "https://commonware.xyz/blogs/zoda"
@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/zoda-card.png"
 katex: true
 ---
 
-*Update (9/29/26): ZODA is no longer implemented in the Commonware Library. Implementation links point to its last version.*
+*Update (9/30/26): ZODA is no longer provided by the Commonware Library. Implementation links point to its last version.*
 
 You can come to consensus over a mere fingerprint of the block---a hash for example---
 but doing anything interesting with that fingerprint, like processing transactions or updating
