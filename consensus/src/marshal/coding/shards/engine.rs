@@ -2138,8 +2138,8 @@ mod tests {
             C::encode(config, data, strategy)
         }
 
-        fn codec_config(config: &CodingConfig, maximum_data: usize) -> CodecConfig {
-            C::codec_config(config, maximum_data)
+        fn bound(config: &CodingConfig, maximum_data: usize) -> CodecConfig {
+            C::bound(config, maximum_data)
         }
 
         fn check(
@@ -2194,8 +2194,8 @@ mod tests {
             C::encode(config, data, strategy)
         }
 
-        fn codec_config(config: &CodingConfig, maximum_data: usize) -> CodecConfig {
-            C::codec_config(config, maximum_data)
+        fn bound(config: &CodingConfig, maximum_data: usize) -> CodecConfig {
+            C::bound(config, maximum_data)
         }
 
         fn check(
@@ -4740,9 +4740,8 @@ mod tests {
     fn test_oversized_reconstruction_rejected() {
         let coding_config = coding_config_for_participants(4);
         let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
-        let width = |size: usize| {
-            C::codec_config(&coding_config, size + CodingConfig::SIZE).maximum_shard_size
-        };
+        let width =
+            |size: usize| C::bound(&coding_config, size + CodingConfig::SIZE).maximum_shard_size;
         let size = inner.encode_size();
         let max = (1..size)
             .rev()

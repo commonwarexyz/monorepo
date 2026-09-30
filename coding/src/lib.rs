@@ -74,7 +74,7 @@ commonware_macros::stability_scope!(ALPHA {
 
     /// The configuration for decoding shard data.
     ///
-    /// [`Scheme::codec_config`] derives it from a [`Config`] and a maximum data size.
+    /// [`Scheme::bound`] derives it from a [`Config`] and a maximum data size.
     #[derive(Clone, Debug)]
     pub struct CodecConfig {
         /// The maximum number of bytes a shard is expected to contain.
@@ -179,9 +179,9 @@ commonware_macros::stability_scope!(ALPHA {
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
-        /// Returns a [`CodecConfig`] under which every shard [`Self::encode`] produces for
-        /// `config` and at most `maximum_data` bytes of data decodes.
-        fn codec_config(config: &Config, maximum_data: usize) -> CodecConfig;
+        /// Returns the [`CodecConfig`] that bounds every shard [`Self::encode`] produces for
+        /// `config` and at most `maximum_data` bytes of data.
+        fn bound(config: &Config, maximum_data: usize) -> CodecConfig;
 
         /// Check the integrity of a shard, producing a checked shard.
         ///
@@ -285,7 +285,7 @@ mod test {
 
         fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
             let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
-            let read_cfg = S::codec_config(config, data.len().max(MAX_DATA));
+            let read_cfg = S::bound(config, data.len().max(MAX_DATA));
             for shard in &shards {
                 let decoded_shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
                 assert_eq!(decoded_shard, *shard);

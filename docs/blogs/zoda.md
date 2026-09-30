@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/zoda-card.png"
 katex: true
 ---
 
-*Update (9/29/26): We removed ZODA from the Commonware Library. Marshal requires each block to have a unique commitment, which ZODA does not provide on its own ([#4969](https://github.com/commonwarexyz/monorepo/issues/4969)). Links to our implementation point to its last version.*
+*Update (9/29/26): ZODA is no longer part of the Commonware Library. Implementation links point to its last version.*
 
 You can come to consensus over a mere fingerprint of the block---a hash for example---
 but doing anything interesting with that fingerprint, like processing transactions or updating

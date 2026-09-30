@@ -1223,7 +1223,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         )
     }
 
-    fn codec_config(config: &Config, maximum_data: usize) -> CodecConfig {
+    fn bound(config: &Config, maximum_data: usize) -> CodecConfig {
         // Encoding rejects longer data, and the width grows with the data length, so the widest
         // shard encodes the most data.
         let data = maximum_data.min(u32::MAX as usize);
@@ -2459,7 +2459,7 @@ mod tests {
     /// The codec config for a data bound admits the widest shard that much data produces and
     /// rejects the next width.
     #[test]
-    fn test_codec_config_bounds_widest_shard() {
+    fn test_bound_admits_widest_shard() {
         for (min, extra) in [(1u16, 1u16), (2, 2), (4, 6), (34, 66)] {
             let config = Config {
                 minimum_shards: NZU16!(min),
@@ -2467,7 +2467,7 @@ mod tests {
             };
             for data_len in [0, 1, 2 * usize::from(min), 1000, 4099] {
                 // Encoding exactly the bound produces the widest admitted shard.
-                let cfg = RS::codec_config(&config, data_len);
+                let cfg = RS::bound(&config, data_len);
                 let (_, chunks) =
                     RS::encode(&config, vec![0; data_len].as_slice(), &STRATEGY).unwrap();
                 assert_eq!(chunks[0].shard.len(), cfg.maximum_shard_size);
@@ -2492,8 +2492,8 @@ mod tests {
 
             // Encoding rejects data longer than a u32 can describe, so it does not widen the bound.
             assert_eq!(
-                RS::codec_config(&config, usize::MAX).maximum_shard_size,
-                RS::codec_config(&config, u32::MAX as usize).maximum_shard_size
+                RS::bound(&config, usize::MAX).maximum_shard_size,
+                RS::bound(&config, u32::MAX as usize).maximum_shard_size
             );
         }
     }
