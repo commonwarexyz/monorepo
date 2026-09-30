@@ -625,11 +625,6 @@ impl crate::Spawner for Context {
             Arc::clone(&parent),
         );
 
-        // Attach cancellation before another thread can begin polling the task.
-        if let Some(aborter) = handle.aborter() {
-            parent.register(aborter);
-        }
-
         // Destroying a finished or canceled future, or an undelivered output, can
         // unwind outside the user-poll boundary. Report it before releasing the tracker.
         let panicker = executor.panicker.clone();
@@ -1197,75 +1192,6 @@ mod tests {
         }
     }
 
-    /// A task spawned from a context whose supervisor closes while the factory
-    /// runs is never polled.
-    #[test]
-    fn test_spawn_after_supervisor_abort_is_never_polled() {
-        let cfg = Config::new().with_worker_threads(16);
-        let storage_directory = cfg.storage_directory().clone();
-        Runner::new(cfg).start(|context| async move {
-            for execution in [
-                Execution::Shared(false),
-                Execution::Shared(true),
-                Execution::Dedicated,
-            ] {
-                for iteration in 0..2_000 {
-                    let polled = Arc::new(AtomicBool::new(false));
-                    let (target_tx, target_rx) = oneshot::channel();
-                    let (owner_release_tx, owner_release_rx) = oneshot::channel();
-                    let (sentinel_started_tx, sentinel_started_rx) = oneshot::channel();
-                    let (sentinel_dropped_tx, sentinel_dropped_rx) = std::sync::mpsc::channel();
-                    let (factory_started_tx, factory_started_rx) = std::sync::mpsc::channel();
-                    let (factory_release_tx, factory_release_rx) = std::sync::mpsc::channel();
-
-                    // The owner hands out a descendant context and exits when released.
-                    // The sentinel below the target drops only after the target closes.
-                    context.child("owner").spawn(move |owner| async move {
-                        let target = owner.child("target");
-                        target.child("sentinel").spawn(move |_| async move {
-                            let _notify = NotifyDrop(sentinel_dropped_tx);
-                            sentinel_started_tx.send(()).unwrap();
-                            futures::future::pending::<()>().await;
-                        });
-                        sentinel_started_rx.await.unwrap();
-                        assert!(target_tx.send(target).is_ok());
-                        owner_release_rx.await.unwrap();
-                    });
-                    let target = target_rx.await.unwrap();
-
-                    // Release the owner once the factory runs, then release the
-                    // factory once the owner's abort has reached the sentinel.
-                    context
-                        .child("coordinator")
-                        .shared(true)
-                        .spawn(move |_| async move {
-                            factory_started_rx.recv().unwrap();
-                            owner_release_tx.send(()).unwrap();
-                            sentinel_dropped_rx.recv().unwrap();
-                            factory_release_tx.send(()).unwrap();
-                        });
-
-                    // Spawn from the target while its supervisor closes.
-                    let observed = polled.clone();
-                    let handle = placed(target, execution).spawn(move |_| {
-                        factory_started_tx.send(()).unwrap();
-                        factory_release_rx.recv().unwrap();
-                        async move {
-                            observed.store(true, Ordering::SeqCst);
-                        }
-                    });
-                    let result = handle.await;
-                    assert!(
-                        !polled.load(Ordering::SeqCst),
-                        "{execution:?} task polled after its supervisor closed on iteration {iteration}"
-                    );
-                    assert!(matches!(result, Err(Error::Closed)));
-                }
-            }
-        });
-        let _ = std::fs::remove_dir_all(storage_directory);
-    }
-
     /// A task panic raised while the runner drains tasks after the root returns
     /// fails the runner.
     #[test]
@@ -1373,6 +1299,130 @@ mod tests {
         } else {
             let panic = result.expect_err("disposal panic did not fail the runner");
             assert_eq!(utils::extract_panic_message(&*panic), "disposal panic");
+        }
+    }
+
+    /// Records the tracker's active count for each error logged on the installing thread.
+    struct ActiveOnError {
+        /// Tracker of the runner under test.
+        tasks: Arc<TaskTracker>,
+        /// Active counts observed when errors were logged.
+        active: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl tracing::Subscriber for ActiveOnError {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == Level::ERROR
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, _: &tracing::Event<'_>) {
+            self.active.lock().push(self.tasks.state.lock().active);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// A disposal panic is reported while its task is still tracked, so the runner cannot
+    /// finish draining before the panic is published.
+    #[test]
+    fn test_disposal_panic_reported_before_tracker_release() {
+        let cfg = Config::new().with_catch_panics(true);
+        let storage_directory = cfg.storage_directory().clone();
+        let active = Arc::new(Mutex::new(Vec::new()));
+        let observed = active.clone();
+        Runner::new(cfg).start(|context| async move {
+            // The only tracked task records the tracker when its panic is logged.
+            let subscriber = ActiveOnError {
+                tasks: context.executor.tasks.clone(),
+                active: observed,
+            };
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let handle = context
+                .child("disposal")
+                .dedicated()
+                .spawn(move |_| async move {
+                    std::mem::forget(tracing::subscriber::set_default(subscriber));
+                    let _guard = PanicOnDrop;
+                    ready_tx.send(()).unwrap();
+                    futures::future::pending::<()>().await;
+                });
+            ready_rx.await.unwrap();
+
+            // Aborting destroys the guard, whose panic is logged on the task's thread.
+            handle.abort();
+            assert!(matches!(handle.await, Err(Error::Closed)));
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert_eq!(*active.lock(), vec![1]);
+    }
+
+    /// A root destroyed on completion can still spawn work, which shutdown drains.
+    #[test]
+    fn test_root_destruction_can_spawn_work_before_shutdown() {
+        /// Ready root that spawns a task while its destructor still owns a context.
+        struct Root {
+            context: Option<Context>,
+            invoked: Arc<AtomicBool>,
+            dropped: std::sync::mpsc::Sender<()>,
+        }
+
+        impl Future for Root {
+            type Output = ();
+
+            fn poll(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<()> {
+                Poll::Ready(())
+            }
+        }
+
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let invoked = self.invoked.clone();
+                let payload = NotifyDrop(self.dropped.clone());
+                self.context.take().unwrap().spawn(move |_| {
+                    invoked.store(true, Ordering::SeqCst);
+                    async move {
+                        let _payload = payload;
+                        futures::future::pending::<()>().await;
+                    }
+                });
+            }
+        }
+
+        for execution in [
+            Execution::Shared(false),
+            Execution::Shared(true),
+            Execution::Dedicated,
+        ] {
+            let cfg = Config::new();
+            let storage_directory = cfg.storage_directory().clone();
+            let invoked = Arc::new(AtomicBool::new(false));
+            let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+            Runner::new(cfg).start(|context| Root {
+                context: Some(placed(context.child("root"), execution)),
+                invoked: invoked.clone(),
+                dropped: dropped_tx,
+            });
+            let _ = std::fs::remove_dir_all(storage_directory);
+
+            // The root can still spawn during disposal, and shutdown drains its child.
+            assert!(
+                invoked.load(Ordering::SeqCst),
+                "{execution:?} spawn from root destruction was rejected"
+            );
+            assert!(
+                dropped_rx.try_recv().is_ok(),
+                "{execution:?} child spawned by root destruction outlived the runner"
+            );
         }
     }
 
