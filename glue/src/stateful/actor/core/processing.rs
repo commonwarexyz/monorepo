@@ -288,7 +288,7 @@ where
                                         &self.context,
                                         &self.marshal,
                                         &block,
-                                        durability.barrier.is_none(),
+                                        !durability.has_barrier(),
                                     ),
                                     &mut actions,
                                 )
@@ -323,7 +323,7 @@ where
                     // Pruning waits for the active barrier. It can remove history any branch may
                     // read, so it also waits for every running execution step and starts no new
                     // one until it finishes.
-                    if durability.barrier.is_some() {
+                    if durability.has_barrier() {
                         let completion = verifications
                             .drive(durability.completion(), &mut actions)
                             .await;
