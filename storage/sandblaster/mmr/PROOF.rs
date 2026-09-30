@@ -3833,3 +3833,243 @@ fn to_nearest_size_determined(size: Position) {
     use_real(1, size, a.0 as Nat);
     apply(position_ext);
 }
+
+// ---------------------------------------------------------------------------
+// Optimization lemmas (`#[rewrite]`): the alternatives of `opt.rs` are the
+// source functions they replace. Proven, so they need no human review; the
+// build lowers an alternative into the host's file only where it is cheaper
+// (DESIGN.md §2.1). The search: the largest leaf count `n` with
+// `mmr_size(n) <= s` lies in `s/2 ..= s/2 + 32`. Each alternative is opaque
+// in proofs (its callers see its contract only).
+// ---------------------------------------------------------------------------
+
+/// The search starts with the answer in `[s/2, s/2 + 64)`.
+#[lemma]
+fn leaves_search_start(s: u64) {
+    requires((s as Int) < pow2(63));
+    ensures(((s >> 1u32) as Int) + 64 <= (s as Int) / 2 + 64
+        && crate::laws::mmr_size((s >> 1u32) as Nat) <= s as Nat
+        && (s as Nat) < crate::laws::mmr_size(((s >> 1u32) as Nat) + 64));
+    assert((s >> 1u32) as Nat == (s as Nat) / 2, { follows(); });
+    crate::stdlib::bits::halves(s as Nat);
+    crate::stdlib::bits::pow2_step(64);
+    crate::stdlib::bits::pow2_step(63);
+    crate::stdlib::bits::popcount_below(((s >> 1u32) as Nat) + 64, 64);
+    by_unfolding(crate::laws::mmr_size);
+}
+
+/// `nodes(n)` is the size of the MMR of `n` leaves, whose leaf count is `n`.
+#[lift_attach(crate::opt::nodes)]
+fn nodes_is_mmr_size() {
+    opaque();
+    requires((n as Int) < pow2(63));
+    ensures(|ret: u64| (ret as Nat) == crate::laws::mmr_size(n as Nat)
+        && crate::proof::leaves(crate::laws::mmr_size(n as Nat), 63) == n as Nat
+        && (n as Nat) <= crate::laws::mmr_size(n as Nat));
+    at_start! {
+        crate::stdlib::bits::count_ones_u64(n);
+        crate::stdlib::bits::pow2_step(64);
+        crate::proof::leaves_inverse(n as Nat, 63);
+        crate::proof::mmr_size_ge(n as Nat);
+    }
+}
+
+/// One step keeps the answer in `[ret, ret + k)`.
+#[lift_attach(crate::opt::leaves_step)]
+fn leaves_step_keeps_the_answer() {
+    opaque();
+    requires(k >= 1u64 && (s as Int) < pow2(63) && (lo as Int) + 2 * (k as Int) <= (s as Int) / 2 + 64
+        && crate::laws::mmr_size(lo as Nat) <= s as Nat
+        && (s as Nat) < crate::laws::mmr_size((lo as Nat) + 2 * (k as Nat)));
+    ensures(|ret: u64| (ret as Int) + (k as Int) <= (s as Int) / 2 + 64
+        && crate::laws::mmr_size(ret as Nat) <= s as Nat
+        && (s as Nat) < crate::laws::mmr_size((ret as Nat) + (k as Nat)));
+}
+
+/// Three steps from the start: the answer in `[ret, ret + 8)`.
+#[lift_attach(crate::opt::leaves_coarse)]
+fn leaves_coarse_narrows() {
+    opaque();
+    requires((s as Int) < pow2(63));
+    ensures(|ret: u64| (ret as Int) + 8 <= (s as Int) / 2 + 64
+        && crate::laws::mmr_size(ret as Nat) <= s as Nat
+        && (s as Nat) < crate::laws::mmr_size((ret as Nat) + 8));
+    at_start! {
+        crate::proof::leaves_search_start(s);
+    }
+}
+
+/// Three more steps: the answer is `ret`.
+#[lift_attach(crate::opt::leaves_fine)]
+fn leaves_fine_finds() {
+    opaque();
+    requires((s as Int) < pow2(63) && (lo as Int) + 8 <= (s as Int) / 2 + 64
+        && crate::laws::mmr_size(lo as Nat) <= s as Nat
+        && (s as Nat) < crate::laws::mmr_size((lo as Nat) + 8));
+    ensures(|ret: u64| (ret as Int) + 1 <= (s as Int) / 2 + 64
+        && crate::laws::mmr_size(ret as Nat) <= s as Nat
+        && (s as Nat) < crate::laws::mmr_size((ret as Nat) + 1));
+}
+
+/// Six steps: the answer is `ret` (below `2^62 + 64`).
+#[lift_attach(crate::opt::leaves_at_most)]
+fn leaves_at_most_is_the_leaf_count() {
+    opaque();
+    requires((s as Int) < pow2(63));
+    ensures(|ret: u64| (ret as Int) < pow2(62) + 64
+        && crate::laws::mmr_size(ret as Nat) <= s as Nat
+        && (s as Nat) < crate::laws::mmr_size((ret as Nat) + 1));
+    at_start! {
+        crate::stdlib::bits::pow2_step(63);
+    }
+}
+
+/// `to_nearest_size_fast`: the source function's precondition, and its
+/// summary (`to_nearest_size_summary`).
+#[lift_attach(crate::opt::to_nearest_size_fast)]
+fn to_nearest_size_fast_summary() {
+    opaque();
+    requires((size.0 as Int) < pow2(63));
+    at_start! {
+        crate::proof::pos_le(size, crate::merkle::mmr::Family__MAX_NODES());
+    }
+    ensures(|ret: crate::merkle::Position| (ret.0 as Nat) == crate::laws::mmr_size(crate::proof::leaves(ret.0 as Nat, 63))
+        && ret.0 <= size.0 && (size.0 as Nat) < crate::laws::mmr_size(crate::proof::leaves(ret.0 as Nat, 63) + 1)
+        && crate::proof::leaves(ret.0 as Nat, 63) <= ret.0 as Nat);
+}
+
+/// Two results with that summary have the same leaf count: equal.
+#[lemma]
+#[rewrite]
+fn to_nearest_size_by_search(size: Position) {
+    requires((size.0 as Int) < pow2(63));
+    ensures(PeakIterator::to_nearest_size(size) == crate::opt::to_nearest_size_fast(size));
+    let a = PeakIterator::to_nearest_size(size);
+    let b = crate::opt::to_nearest_size_fast(size);
+    leaves_nonneg(a.0 as Nat, 63);
+    leaves_nonneg(b.0 as Nat, 63);
+    let la = leaves(a.0 as Nat, 63);
+    let lb = leaves(b.0 as Nat, 63);
+    if la < lb {
+        if la + 1 == lb {
+            follows();
+        } else {
+            mmr_size_mono(la + 1, lb);
+            follows();
+        }
+    } else if lb < la {
+        if lb + 1 == la {
+            follows();
+        } else {
+            mmr_size_mono(lb + 1, la);
+            follows();
+        }
+    } else {
+        // equal leaf counts, equal sizes; a position is its value
+        mmr_size_cong(la, lb);
+        assert(a.0 == b.0, { follows(); });
+        position_ext(a, b);
+        follows();
+    }
+}
+
+/// `is_valid_size_fast`: a size up to `MAX_NODES` that `to_nearest_size`
+/// keeps.
+#[lift_attach(crate::opt::is_valid_size_fast)]
+fn is_valid_size_fast_summary() {
+    opaque();
+    at_start! {
+        crate::proof::pos_le(size, crate::merkle::mmr::Family__MAX_NODES());
+    }
+    ensures(|ret: bool| implies(((size.0 as Int) < pow2(63)) == false, ret == false)
+        && implies((size.0 as Int) < pow2(63), ret == (crate::opt::to_nearest_size_fast(size).0 == size.0)));
+}
+
+/// `a && b` is `b` when `a` holds.
+#[lemma]
+fn and_true(a: bool, b: bool) {
+    requires(a == true);
+    ensures((a && b) == b);
+    rewrite(a == true);
+    by_computation();
+}
+
+/// `a && b` is false when `a` is.
+#[lemma]
+fn and_false(a: bool, b: bool) {
+    requires(a == false);
+    ensures((a && b) == false);
+    rewrite(a == false);
+    by_computation();
+}
+
+/// A size is valid exactly when rounding it down to a valid size keeps it.
+#[lemma]
+#[rewrite]
+fn is_valid_size_by_search(size: Position) {
+    ensures(crate::merkle::mmr::Family::is_valid_size(size) == crate::opt::is_valid_size_fast(size));
+    // both summaries (as facts)
+    let v = crate::merkle::mmr::Family::is_valid_size(size);
+    let f = crate::opt::is_valid_size_fast(size);
+    if (size.0 as Int) < pow2(63) {
+        let b = crate::opt::to_nearest_size_fast(size);
+        leaves_nonneg(b.0 as Nat, 63);
+        let lb = leaves(b.0 as Nat, 63);
+        crate::stdlib::bits::pow2_step(64);
+        if valid_size(size.0 as Nat) {
+            leaves_fits(size.0 as Nat, 63);
+            leaves_nonneg(size.0 as Nat, 63);
+            let l = leaves(size.0 as Nat, 63);
+            if l < lb {
+                // too many leaves: more nodes than `size`
+                mmr_size_mono(l, lb);
+                follows();
+            } else if lb < l {
+                // too few: `size` would round down past itself
+                if lb + 1 == l {
+                    mmr_size_cong(lb + 1, l);
+                    follows();
+                } else {
+                    mmr_size_mono(lb + 1, l);
+                    follows();
+                }
+            } else {
+                // the same leaf count: rounding down keeps `size`
+                mmr_size_cong(lb, l);
+                assert(b.0 == size.0, { follows(); });
+                assert((crate::opt::to_nearest_size_fast(size).0 == size.0) == true, { follows(); });
+                calc! {
+                    crate::merkle::mmr::Family::is_valid_size(size)
+                        == (((size.0 as Int) < pow2(63)) && valid_size(size.0 as Nat)) by { follows(); };
+                        == valid_size(size.0 as Nat) by { and_true(((size.0 as Int) < pow2(63)), valid_size(size.0 as Nat)); follows(); };
+                        == true by { follows(); };
+                        == (crate::opt::to_nearest_size_fast(size).0 == size.0) by { follows(); };
+                        == crate::opt::is_valid_size_fast(size) by { follows(); };
+                }
+            }
+        } else if b.0 == size.0 {
+            // `size` is the size of the MMR of `lb` leaves: valid
+            mmr_size_fits(lb, 63);
+            assert(valid_size(size.0 as Nat), { by_unfolding(valid_size); });
+            follows();
+        } else {
+            // not valid, and rounding down moves it
+            calc! {
+                crate::merkle::mmr::Family::is_valid_size(size)
+                    == (((size.0 as Int) < pow2(63)) && valid_size(size.0 as Nat)) by { follows(); };
+                    == valid_size(size.0 as Nat) by { and_true(((size.0 as Int) < pow2(63)), valid_size(size.0 as Nat)); follows(); };
+                    == false by { follows(); };
+                    == (crate::opt::to_nearest_size_fast(size).0 == size.0) by { follows(); };
+                    == crate::opt::is_valid_size_fast(size) by { follows(); };
+            }
+        }
+    } else {
+        // above `MAX_NODES`: both false
+        calc! {
+            crate::merkle::mmr::Family::is_valid_size(size)
+                == (((size.0 as Int) < pow2(63)) && valid_size(size.0 as Nat)) by { follows(); };
+                == false by { and_false(((size.0 as Int) < pow2(63)), valid_size(size.0 as Nat)); follows(); };
+                == crate::opt::is_valid_size_fast(size) by { follows(); };
+        }
+    }
+}

@@ -8,6 +8,12 @@
 
 mod merkle;
 
+// optimization alternatives: faster code for source functions, each tied to
+// its function by a proven `#[rewrite]` lemma in PROOF.rs; lowered into the
+// host's files only where cheaper (DESIGN.md §2.1)
+#[lift(opt, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family")]
+mod opt;
+
 // the toolchain's domain-free proof library (its `bridges` are prover rules)
 #[cfg(sandblaster)]
 #[path = "../../../sandblaster/front/stdlib/mod.rs"]

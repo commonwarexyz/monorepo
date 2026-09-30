@@ -112,6 +112,10 @@ pub struct LiftedInfo {
     /// `#[lift(in_place)]`: the host's own file, verified where rustc
     /// compiles it (never emitted).
     pub in_place: bool,
+    /// `#[lift(opt)]`: optimization alternatives (never emitted as a
+    /// module; their functions replace source functions only through
+    /// `#[rewrite]` lemmas and the lifted round trip, `driver::lowered`).
+    pub opt: bool,
 }
 
 /// Host facts the lift's reading assumed and what it left out, for the
@@ -133,6 +137,11 @@ pub struct LiftFacts {
     /// arguments as the source writes them): `Decoder__u16` →
     /// (`Decoder`, [`u16`]).
     pub instances: BTreeMap<String, (String, Vec<String>)>,
+    /// Trait → every primitive type implementing it in the lifted source,
+    /// in source order, `#[lift(unverified = ..)]` types included (the
+    /// lowering's per-type dispatch implements its trait for exactly these,
+    /// `driver::lowered`). Recorded only: it changes no lifted meaning.
+    pub sealed_impls: BTreeMap<String, Vec<String>>,
     /// The test hook that was active while lifting (never set outside
     /// the toolchain's own tests; [`test_hook`]).
     pub test_hook: Option<test_hook::WrongRule>,
@@ -426,6 +435,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     facts.dropped = std::mem::take(&mut cx.dropped);
     facts.conform = std::mem::take(&mut cx.conform);
     facts.instances = std::mem::take(&mut cx.instances);
+    facts.sealed_impls = std::mem::take(&mut cx.sealed_impl_types);
     facts.test_hook = test_hook::get();
     facts.conform_skipped = std::mem::take(&mut cx.conform_skipped);
     facts.host_obligations = std::mem::take(&mut cx.open.host_obligations);
@@ -542,6 +552,9 @@ struct Ctx {
     file: FileId,
     /// Impl types declared unverified (`#[lift(unverified = ..)]`).
     unverified: HashSet<String>,
+    /// Every impl type of each trait implemented on primitives, unverified
+    /// ones included ([`LiftFacts::sealed_impls`]).
+    sealed_impl_types: BTreeMap<String, Vec<String>>,
     traits: HashMap<String, TraitInfo>,
     impls: Vec<ImplInfo>,
     structs: HashMap<String, StructInfo>,
@@ -758,6 +771,13 @@ impl Ctx {
                         continue;
                     };
                     let tname = tpath.segments.last().unwrap().ident.to_string();
+                    if im.generics.params.is_empty() && type_name(&im.self_ty).is_some_and(|n| is_prim(&n)) {
+                        let v = self.sealed_impl_types.entry(tname.clone()).or_default();
+                        let k = ty_key(&im.self_ty);
+                        if !v.contains(&k) {
+                            v.push(k);
+                        }
+                    }
                     if self.unverified.contains(&ty_key(&im.self_ty)) {
                         continue;
                     }

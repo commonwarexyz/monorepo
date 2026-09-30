@@ -46,6 +46,11 @@ pub struct LiftOpts {
     pub host: bool,
     /// `in_place`: the lifted source is the host's own file (`#[path]`).
     pub in_place: bool,
+    /// `opt`: optimization alternatives — agent-written Rust in the host's
+    /// dialect, lifted and verified like any code, never emitted as a
+    /// module; `#[rewrite]` lemmas name its functions as the replacements of
+    /// source functions (`driver::lowered`).
+    pub opt: bool,
     /// `unverified = "u128, i16"`: sealed-trait impl types left out.
     pub unverified: Vec<String>,
     /// `children = "iterator"`: out-of-line modules of the source lifted too.
@@ -69,6 +74,7 @@ impl LiftOpts {
     pub fn merge(&mut self, o: LiftOpts) {
         self.host |= o.host;
         self.in_place |= o.in_place;
+        self.opt |= o.opt;
         self.unverified.extend(o.unverified);
         self.children.extend(o.children);
         self.instances.extend(o.instances);
@@ -93,7 +99,7 @@ fn split_pairs(s: &str) -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
-const LIFT_USAGE: &str = "expected `#[lift]`, `#[lift(host)]` or `#[lift(unverified = \"T, ..\")]`, and for the host's own files `#[lift(in_place, children = \"m\", instance = \"Trait: path::Type\", unverified_instances = \"Trait: path::Type\", unverified_impls = \"Trait, ..\", unverified_fns = \"Type::method, ..\")]`";
+const LIFT_USAGE: &str = "expected `#[lift]`, `#[lift(host)]`, `#[lift(opt)]` or `#[lift(unverified = \"T, ..\")]`, and for the host's own files `#[lift(in_place, children = \"m\", instance = \"Trait: path::Type\", unverified_instances = \"Trait: path::Type\", unverified_impls = \"Trait, ..\", unverified_fns = \"Type::method, ..\")]`";
 
 /// Parses one `#[lift]` / `#[lift(..)]` attribute.
 pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
@@ -104,6 +110,7 @@ pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
         match &m {
             syn::Meta::Path(p) if p.is_ident("host") => o.host = true,
             syn::Meta::Path(p) if p.is_ident("in_place") => o.in_place = true,
+            syn::Meta::Path(p) if p.is_ident("opt") => o.opt = true,
             syn::Meta::NameValue(nv) => {
                 let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(ls), .. }) = &nv.value else { return Err(LIFT_USAGE.into()) };
                 let v = ls.value();
@@ -120,6 +127,9 @@ pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
             }
             _ => return Err(LIFT_USAGE.into()),
         }
+    }
+    if o.opt && (o.host || o.in_place) {
+        return Err("`opt` (optimization alternatives) cannot be combined with `host` or `in_place`".into());
     }
     if !o.children.is_empty() && !o.in_place {
         return Err("`children = \"..\"` needs `in_place` (the children are the host's own files next to the source)".into());

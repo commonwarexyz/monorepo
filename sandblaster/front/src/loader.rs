@@ -618,7 +618,7 @@ impl Loader<'_> {
     ) -> usize {
         let c = self.modules.len();
         self.modules.push(LoadedModule { name: name.clone(), parent: Some(parent), file: cfile, ghost, vis, decl_span: span, decl_attrs, inner_attrs: cast.attrs.clone(), items: vec![], cfg: cfg.clone(), data_files: HashMap::new(), lifted: true });
-        self.lifted_info.push(crate::lift::LiftedInfo { name: name.clone(), file: cfile, ghost, host: opts.host, unverified: opts.unverified.clone(), in_place: opts.in_place });
+        self.lifted_info.push(crate::lift::LiftedInfo { name: name.clone(), file: cfile, ghost, host: opts.host, unverified: opts.unverified.clone(), in_place: opts.in_place, opt: opts.opt });
         // the children to lift with this module
         let dir = if mod_rs_like {
             path.parent().map(Path::to_path_buf).unwrap_or_default()

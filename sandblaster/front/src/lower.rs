@@ -86,16 +86,86 @@ pub fn lower_fn_state(pv: &Crate, id: ItemId, name: &str, names: &Names, state: 
     lower_fn_with(pv, id, name, names, Some(state))
 }
 
-fn lower_fn_with(pv: &Crate, id: ItemId, name: &str, names: &Names, state: Option<usize>) -> R<LoweredFn> {
+/// [`lower_fn`] for a reader: parameter `state` is the lift's reading of
+/// `buf: &mut impl Buf` (a `Seq<u8>`, the bytes not yet read), returned as
+/// the function's value — alone, or first beside the result when
+/// `has_result`. The body is printed as statements on the original
+/// `&mut impl Buf` parameter (`buf.try_get_u8()`) and the result as the
+/// value: every state value is used once, in order (the old state is never
+/// read again); the only state operation is the buffer model's
+/// `try_get_u8`, bound by `let` or matched, and `if`/`match` on non-state
+/// values carry the state through their arms.
+pub fn lower_fn_reader(pv: &Crate, id: ItemId, name: &str, names: &Names, state: usize, has_result: bool) -> R<LoweredFn> {
     let f = pv.fn_def(id).ok_or_else(|| format!("`{}` is not a function", pv.item(id).path))?;
+    check_lowerable(pv, id, f)?;
+    let body = match &f.body {
+        FnBody::Exec(e) => e,
+        _ => return Err("not an exec body".into()),
+    };
+    let prm = f.params.get(state).ok_or("no state parameter")?;
+    let PatKind::Binding { local, .. } = &prm.pat.kind else { return Err("a state parameter with a pattern".into()) };
+    let ret_ok = match (&f.ret, has_result) {
+        (Ty::Tuple(ts), true) => ts.len() == 2 && is_state_ty(&ts[0]),
+        (t, false) => is_state_ty(t),
+        _ => false,
+    };
+    if !is_state_ty(&prm.ty) || !ret_ok {
+        return Err("the state is not a `Buf` buffer returned first".into());
+    }
+    let p = Printer { pv, f, names, state: std::cell::RefCell::new(Some((*local, String::new()))), reader: Default::default() };
+    let mut params = Vec::new();
+    for (k, prm) in f.params.iter().enumerate() {
+        let PatKind::Binding { local, mode: BindingMode::ByValue, sub: None } = &prm.pat.kind else {
+            return Err("a parameter with a destructuring pattern".into());
+        };
+        if k == state {
+            let n = p.local(*local);
+            *p.state.borrow_mut() = Some((*local, n.clone()));
+            params.push(format!("{n}: &mut impl Buf"));
+            continue;
+        }
+        let m = if f.local(*local).mutable { "mut " } else { "" };
+        params.push(format!("{m}{}: {}", p.local(*local), p.ty(&prm.ty)?));
+    }
+    let ret = match &f.ret {
+        Ty::Tuple(ts) if has_result => {
+            if contains_ref(&ts[1]) {
+                return Err("a reference in the return type".into());
+            }
+            format!(" -> {}", p.ty(&ts[1])?)
+        }
+        _ => String::new(),
+    };
+    let mut out = Vec::new();
+    let v = p.reader_expr(body, 1, &mut out, has_result)?;
+    let mut text = String::from("{\n");
+    for l in out {
+        text.push_str(&l);
+        text.push('\n');
+    }
+    if let Some(v) = v {
+        text.push_str(&format!("{}{v}\n", ind(1)));
+    }
+    text.push('}');
+    let text = format!(
+        "#[inline(always)]\n#[allow(non_snake_case, unused_parens, unused_mut, unused_variables, unused_braces, clippy::all)]\nfn {name}({}){ret} {text}\n",
+        params.join(", ")
+    );
+    Ok(LoweredFn { name: name.to_string(), text })
+}
+
+/// The shape conditions every lowered function meets.
+fn check_lowerable(pv: &Crate, id: ItemId, f: &FnDef) -> R<()> {
     if f.kind != FnKind::Exec {
         return Err("not an exec function".into());
     }
     if f.recursion != Recursion::None {
         return Err("a recursive function (lowered code has no loops or recursion yet)".into());
     }
-    if f.receiver.is_some() || f.owner.is_some() {
-        return Err("a method (lowered helpers are free functions)".into());
+    // an associated function without a receiver is lowered as a free
+    // helper (it is called by name, never as a method)
+    if f.receiver.is_some() {
+        return Err("a method with a receiver (lowered helpers are free functions)".into());
     }
     if !f.generics.is_empty() || !f.lifetimes.is_empty() {
         return Err("a generic function".into());
@@ -106,6 +176,13 @@ fn lower_fn_with(pv: &Crate, id: ItemId, name: &str, names: &Names, state: Optio
     if f.decreases.is_some() {
         return Err("a `decreases` clause (lowered code is not recursive)".into());
     }
+    let _ = (pv, id);
+    Ok(())
+}
+
+fn lower_fn_with(pv: &Crate, id: ItemId, name: &str, names: &Names, state: Option<usize>) -> R<LoweredFn> {
+    let f = pv.fn_def(id).ok_or_else(|| format!("`{}` is not a function", pv.item(id).path))?;
+    check_lowerable(pv, id, f)?;
     let body = match &f.body {
         FnBody::Exec(e) => e,
         _ => return Err("not an exec body".into()),
@@ -119,7 +196,7 @@ fn lower_fn_with(pv: &Crate, id: ItemId, name: &str, names: &Names, state: Optio
         }
         state_local = Some(*local);
     }
-    let p = Printer { pv, f, names, state: std::cell::RefCell::new(state_local.map(|l| (l, String::new()))) };
+    let p = Printer { pv, f, names, state: std::cell::RefCell::new(state_local.map(|l| (l, String::new()))), reader: Default::default() };
     let mut params = Vec::new();
     for (k, prm) in f.params.iter().enumerate() {
         let PatKind::Binding { local, mode: BindingMode::ByValue, sub: None } = &prm.pat.kind else {
@@ -187,11 +264,29 @@ struct Printer<'a> {
     /// State mode ([`lower_fn_state`]): the current state local and the
     /// name of the `&mut impl BufMut` parameter.
     state: std::cell::RefCell<Option<(LocalId, String)>>,
+    /// Reader mode: the pair local (`let p = try_get_u8(..)`) whose `.0` is
+    /// the current state, a local its tuple pattern bound to that state,
+    /// and each pair's result variable in the printed code.
+    reader: std::cell::RefCell<ReaderState>,
 }
 
-/// The lifted type of a `BufMut` state: `Seq<u8>`.
+#[derive(Clone, Default)]
+struct ReaderState {
+    pair: Option<LocalId>,
+    alias: Option<LocalId>,
+    results: HashMap<LocalId, String>,
+}
+
+/// The lifted type of a buffer state: `Seq<u8>`.
 fn is_state_ty(t: &Ty) -> bool {
     matches!(t, Ty::Seq(e) if **e == Ty::u8())
+}
+
+/// Whether a type holds a buffer state anywhere.
+fn has_state(t: &Ty) -> bool {
+    let mut r = false;
+    t.walk(&mut |x| r |= is_state_ty(x));
+    r
 }
 
 /// The buffer model's operations the lowering prints back as `BufMut`
@@ -200,6 +295,14 @@ fn model_op(pv: &Crate, id: ItemId) -> Option<&'static str> {
     match pv.item(id).path.to_string().as_str() {
         "crate::__lift_model::bufmut_put_u8" => Some("put_u8"),
         "crate::__lift_model::bufmut_put_slice" => Some("put_slice"),
+        _ => None,
+    }
+}
+
+/// Whether `e` is the buffer model's `try_get_u8` on a state (reader mode).
+fn is_try_get<'e>(pv: &Crate, e: &'e Expr) -> Option<&'e Expr> {
+    match &e.kind {
+        ExprKind::Call { callee: Callee::Item(id, tys), args } if tys.is_empty() && args.len() == 1 && pv.item(*id).path.to_string() == "crate::__lift_model::buf_try_get_u8" => Some(&args[0]),
         _ => None,
     }
 }
@@ -242,6 +345,12 @@ impl Printer<'_> {
             Ty::Option(e) => format!("Option<{}>", self.ty(e)?),
             Ty::Adt(id, args) => {
                 let it = self.pv.item(*id);
+                // the lift's models (`I16`, `TryGetError`, ...) have no host
+                // spelling (the host writes `i16`, `bytes::TryGetError`),
+                // except core's `Result` (in every Rust prelude)
+                if it.path.0.first().is_some_and(|m| m == "__lift" || m == "__lift_model") && it.path.to_string() != "crate::__lift::Result" {
+                    return Err(format!("the lift prelude type `{}` has no host spelling", it.path));
+                }
                 if args.is_empty() {
                     it.name.clone()
                 } else {
@@ -411,7 +520,7 @@ impl Printer<'_> {
     fn expr(&self, e: &Expr, i: usize, pos: Pos) -> R<String> {
         let s = match &e.kind {
             ExprKind::Lit(l) => self.lit(l, &e.ty)?,
-            ExprKind::Local(l) if is_state_ty(&self.f.local(*l).ty) => return Err("a buffer state used as a value".into()),
+            ExprKind::Local(l) if has_state(&self.f.local(*l).ty) => return Err("a buffer state used as a value".into()),
             ExprKind::Local(l) => self.local(*l),
             ExprKind::Const(id) => self.pv.item(*id).name.clone(),
             ExprKind::BuiltinConst(c) => match c {
@@ -450,6 +559,13 @@ impl Printer<'_> {
             ExprKind::Tuple(xs) => format!("({})", self.args(xs, i)?),
             ExprKind::Array(xs) => format!("[{}]", self.args(xs, i)?),
             ExprKind::Repeat { elem, count } => format!("[{}; {count}]", self.expr(elem, i, Pos::Top)?),
+            ExprKind::Field { base, index, .. } if matches!(&base.kind, ExprKind::Local(p) if self.reader.borrow().results.contains_key(p)) => {
+                let ExprKind::Local(p) = &base.kind else { unreachable!() };
+                if *index != 1 {
+                    return Err("a buffer state used as a value".into());
+                }
+                self.reader.borrow().results[p].clone()
+            }
             ExprKind::Field { base, index, name } => format!("{}.{}", self.expr(base, i, Pos::Operand)?, name.clone().unwrap_or_else(|| index.to_string())),
             ExprKind::Index { base, index } => format!("{}[{}]", self.expr(base, i, Pos::Operand)?, self.expr(index, i, Pos::Top)?),
             ExprKind::SliceRange { base, lo, hi } => {
@@ -500,6 +616,214 @@ impl Printer<'_> {
             _ => return Err("ghost code".into()),
         };
         Ok(self.paren(s, e, pos))
+    }
+
+    /// Reader mode ([`lower_fn_reader`]): statements in `out` (indent `i`)
+    /// that turn the current state into the state of `e`, and the text of
+    /// `e`'s result when `res` (`e : (Seq<u8>, R)`; else `e : Seq<u8>`).
+    fn reader_expr(&self, e: &Expr, i: usize, out: &mut Vec<String>, res: bool) -> R<Option<String>> {
+        let (cur, name) = self.state.borrow().clone().ok_or("reader mode without a state")?;
+        if let Some(arg) = match &e.kind {
+            ExprKind::Match { scrut, .. } => is_try_get(self.pv, scrut),
+            _ => None,
+        } {
+            let ExprKind::Match { arms, .. } = &e.kind else { unreachable!() };
+            // `match try_get_u8(cur) { (t, p) => .. }`
+            self.reader_is_current(arg)?;
+            let mut s = format!("match {name}.try_get_u8() {{\n");
+            for a in arms {
+                if a.guard.is_some() {
+                    return Err("a guarded arm in reader mode".into());
+                }
+                let PatKind::Tuple(ps) = &a.pat.kind else { return Err("a `try_get_u8` matched without a tuple pattern".into()) };
+                let [pt, pr] = ps.as_slice() else { return Err("a `try_get_u8` pattern of another arity".into()) };
+                let PatKind::Binding { local: t, sub: None, .. } = &pt.kind else { return Err("the state of `try_get_u8` is not bound to a name".into()) };
+                *self.state.borrow_mut() = Some((*t, name.clone()));
+                let arm = self.reader_block(&a.body, i + 1, res)?;
+                s.push_str(&format!("{}{} => {arm},\n", ind(i + 1), self.pat(pr)?));
+            }
+            s.push_str(&ind(i));
+            s.push('}');
+            *self.state.borrow_mut() = Some((LocalId(u32::MAX), name));
+            return if res {
+                Ok(Some(s))
+            } else {
+                out.push(format!("{}{s}", ind(i)));
+                Ok(None)
+            };
+        }
+        // `match p { (t, r) => body }` on a pair of `try_get_u8`
+        let pair_res = match &e.kind {
+            ExprKind::Match { scrut, .. } => match &scrut.kind {
+                ExprKind::Local(p) => self.reader.borrow().results.get(p).cloned(),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let ExprKind::Match { scrut, arms, .. } = &e.kind
+            && let ExprKind::Local(p) = &scrut.kind
+            && let Some(resv) = pair_res
+        {
+            if Some(*p) != self.reader.borrow().pair {
+                return Err("an old buffer state used again".into());
+            }
+            let [a] = arms.as_slice() else { return Err("a `try_get_u8` pair matched with more than one arm".into()) };
+            if a.guard.is_some() {
+                return Err("a guarded arm in reader mode".into());
+            }
+            let PatKind::Tuple(ps) = &a.pat.kind else { return Err("a `try_get_u8` pair matched without a tuple pattern".into()) };
+            let [pt, pr] = ps.as_slice() else { return Err("a `try_get_u8` pattern of another arity".into()) };
+            let alias = match &pt.kind {
+                PatKind::Binding { local, sub: None, .. } => Some(*local),
+                PatKind::Wild => None,
+                _ => return Err("the state of `try_get_u8` is not bound to a name".into()),
+            };
+            self.reader_set(LocalId(u32::MAX), Some(*p), alias);
+            let arm = self.reader_block(&a.body, i + 1, res)?;
+            let s = format!("match {resv} {{\n{}{} => {arm},\n{}}}", ind(i + 1), self.pat(pr)?, ind(i));
+            self.reader_set(LocalId(u32::MAX), None, None);
+            return if res {
+                Ok(Some(s))
+            } else {
+                out.push(format!("{}{s}", ind(i)));
+                Ok(None)
+            };
+        }
+        match &e.kind {
+            ExprKind::Tuple(xs) if res && xs.len() == 2 => {
+                self.reader_is_current(&xs[0])?;
+                Ok(Some(self.expr(&xs[1], i, Pos::Top)?))
+            }
+            ExprKind::Local(_) if !res => {
+                self.reader_is_current(e)?;
+                Ok(None)
+            }
+            ExprKind::Block(b) => {
+                for st in &b.stmts {
+                    let tg = match &st.kind {
+                        StmtKind::Let { init, els: None, .. } => is_try_get(self.pv, init),
+                        _ => None,
+                    };
+                    match (&st.kind, tg) {
+                        // `let (t, r) = try_get_u8(cur);`
+                        // `let p = try_get_u8(cur);`: `p.0` is the new state,
+                        // `p.1` (or `p`'s tuple pattern) the result
+                        (StmtKind::Let { pat, .. }, Some(arg)) if matches!(&pat.kind, PatKind::Binding { sub: None, .. }) => {
+                            self.reader_is_current(arg)?;
+                            let PatKind::Binding { local: p, .. } = &pat.kind else { unreachable!() };
+                            let res = format!("{}_r", self.local(*p));
+                            out.push(format!("{}let {res} = {name}.try_get_u8();", ind(i)));
+                            self.reader.borrow_mut().results.insert(*p, res);
+                            self.reader_set(LocalId(u32::MAX), Some(*p), None);
+                        }
+                        (StmtKind::Let { pat, .. }, Some(arg)) => {
+                            self.reader_is_current(arg)?;
+                            let PatKind::Tuple(ps) = &pat.kind else { return Err(format!("a `try_get_u8` bound without a tuple pattern ({})", format!("{:?}", pat.kind).chars().take(300).collect::<String>())) };
+                            let [pt, pr] = ps.as_slice() else { return Err("a `try_get_u8` pattern of another arity".into()) };
+                            let PatKind::Binding { local: t, sub: None, .. } = &pt.kind else { return Err("the state of `try_get_u8` is not bound to a name".into()) };
+                            out.push(format!("{}let {} = {name}.try_get_u8();", ind(i), self.pat(pr)?));
+                            *self.state.borrow_mut() = Some((*t, name.clone()));
+                        }
+                        // `let s = cur;`: another name of the current state
+                        (StmtKind::Let { pat, init, .. }, None) if is_state_ty(&pat.ty) && matches!(&pat.kind, PatKind::Binding { sub: None, .. }) && self.reader_is_current(init).is_ok() => {
+                            let PatKind::Binding { local, .. } = &pat.kind else { unreachable!() };
+                            let (pair, alias) = {
+                                let r = self.reader.borrow();
+                                (r.pair, r.alias)
+                            };
+                            self.reader_set(*local, pair, alias);
+                        }
+                        (StmtKind::Let { pat, .. }, None) if has_state(&pat.ty) => return Err("a buffer state bound other than from `try_get_u8`".into()),
+                        _ => {
+                            if let Some(t) = self.stmt(st, i)? {
+                                out.push(format!("{}{t}", ind(i)));
+                            }
+                        }
+                    }
+                }
+                match &b.tail {
+                    Some(t) => self.reader_expr(t, i, out, res),
+                    None => Err("a state block without a value".into()),
+                }
+            }
+            ExprKind::If { cond, then, els: Some(els) } => {
+                let c = self.expr(cond, i, Pos::Top)?;
+                let saved = self.reader.borrow().clone();
+                let a = self.reader_block(then, i, res)?;
+                *self.state.borrow_mut() = Some((cur, name.clone()));
+                *self.reader.borrow_mut() = saved;
+                let b = self.reader_block(els, i, res)?;
+                *self.state.borrow_mut() = Some((LocalId(u32::MAX), name));
+                let s = format!("if {c} {a} else {b}");
+                if res {
+                    Ok(Some(s))
+                } else {
+                    out.push(format!("{}{s}", ind(i)));
+                    Ok(None)
+                }
+            }
+            ExprKind::Match { scrut, arms, .. } if !has_state(&scrut.ty) => {
+                let mut s = format!("match {} {{\n", self.expr(scrut, i, Pos::Top)?);
+                let saved = self.reader.borrow().clone();
+                for a in arms {
+                    if a.guard.is_some() {
+                        return Err("a guarded arm in reader mode".into());
+                    }
+                    *self.state.borrow_mut() = Some((cur, name.clone()));
+                    *self.reader.borrow_mut() = saved.clone();
+                    let arm = self.reader_block(&a.body, i + 1, res)?;
+                    s.push_str(&format!("{}{} => {arm},\n", ind(i + 1), self.pat(&a.pat)?));
+                }
+                s.push_str(&ind(i));
+                s.push('}');
+                *self.state.borrow_mut() = Some((LocalId(u32::MAX), name));
+                if res {
+                    Ok(Some(s))
+                } else {
+                    out.push(format!("{}{s}", ind(i)));
+                    Ok(None)
+                }
+            }
+            _ => Err("a buffer state operation the lowering does not print (reader mode)".into()),
+        }
+    }
+
+    /// A reader-mode arm or branch as a block: its statements and value.
+    fn reader_block(&self, e: &Expr, i: usize, res: bool) -> R<String> {
+        let mut out = Vec::new();
+        let v = self.reader_expr(e, i + 1, &mut out, res)?;
+        let mut s = String::from("{\n");
+        for l in out {
+            s.push_str(&l);
+            s.push('\n');
+        }
+        if let Some(v) = v {
+            s.push_str(&format!("{}{v}\n", ind(i + 1)));
+        }
+        s.push_str(&ind(i));
+        s.push('}');
+        Ok(s)
+    }
+
+    /// `s` is the current reader state (never an old one, never computed).
+    fn reader_is_current(&self, s: &Expr) -> R<()> {
+        let cur = self.state.borrow().as_ref().map(|x| x.0).ok_or("reader mode without a state")?;
+        let r = self.reader.borrow();
+        match &s.kind {
+            ExprKind::Local(l) if *l == cur || Some(*l) == r.alias => Ok(()),
+            ExprKind::Field { base, index: 0, .. } if matches!(&base.kind, ExprKind::Local(p) if Some(*p) == r.pair) => Ok(()),
+            ExprKind::Local(_) | ExprKind::Field { .. } => Err("an old buffer state used again".into()),
+            _ => Err("a buffer state expression the lowering does not print".into()),
+        }
+    }
+
+    /// A new current state: the local `l` (or none, after a pair).
+    fn reader_set(&self, l: LocalId, pair: Option<LocalId>, alias: Option<LocalId>) {
+        let name = self.state.borrow().as_ref().map(|x| x.1.clone()).unwrap_or_default();
+        *self.state.borrow_mut() = Some((l, name));
+        let mut r = self.reader.borrow_mut();
+        r.pair = pair;
+        r.alias = alias;
     }
 
     /// The statements that turn the current state into the state value

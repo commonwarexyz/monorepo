@@ -80,6 +80,16 @@ impl SetModel {
         self.tables.iter().map(|t| Walker::new(t, krate, callee).fn_cost(f)).max().unwrap_or(0)
     }
 
+    /// [`SetModel::fn_cost`] with each loop's **loop-carried chain** on the
+    /// critical path: an iteration's longest chain times the trip count (the
+    /// plain model charges a loop body's throughput only). The lowering of
+    /// lifted code (`driver::lowered`) compares with it; the optimizer's own
+    /// choices still use the plain model (moving them needs the QMDB
+    /// regression run, DESIGN.md §8.2).
+    pub fn fn_cost_carried(&self, krate: &Crate, f: &FnDef, callee: &dyn Fn(ItemId) -> Option<u64>) -> u64 {
+        self.tables.iter().map(|t| Walker { carried: true, ..Walker::new(t, krate, callee) }.fn_cost(f)).max().unwrap_or(0)
+    }
+
     /// The cost of an expression (the worst over the tables).
     pub fn expr_cost(&self, krate: &Crate, e: &Expr, callee: &dyn Fn(ItemId) -> Option<u64>) -> u64 {
         self.tables.iter().map(|t| Walker::new(t, krate, callee).cost_of(e)).max().unwrap_or(0)
@@ -112,6 +122,28 @@ impl SetModel {
     }
 }
 
+/// The locals a block assigns (`x = ..`, `x op= ..`, at any depth).
+fn assigned_locals(b: &Block, out: &mut Vec<LocalId>) {
+    struct V<'o>(&'o mut Vec<LocalId>);
+    impl crate::visit::Visitor for V<'_> {
+        fn stmt(&mut self, s: &Stmt) {
+            if let StmtKind::Assign { place, .. } | StmtKind::CompoundAssign { place, .. } = &s.kind
+                && !self.0.contains(&place.local)
+            {
+                self.0.push(place.local);
+            }
+            crate::visit::walk_stmt(self, s);
+        }
+    }
+    let mut v = V(out);
+    for s in &b.stmts {
+        crate::visit::Visitor::stmt(&mut v, s);
+    }
+    if let Some(t) = &b.tail {
+        crate::visit::Visitor::expr(&mut v, t);
+    }
+}
+
 /// `(ΣTP, CP)` of a piece of code.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Est {
@@ -132,6 +164,8 @@ struct Walker<'a> {
     tp: u64,
     /// Price every operation as its 128-bit vector form (lane candidates).
     vector: bool,
+    /// Charge each loop's loop-carried chain ([`SetModel::fn_cost_carried`]).
+    carried: bool,
     /// The probability that the code being walked runs (fixed point,
     /// [`ONE`] = 1): branches split it between their arms, and an arm that
     /// returns early takes its share out of the code after it.
@@ -148,7 +182,7 @@ const TRY_FAIL: u64 = ONE / 16;
 
 impl<'a> Walker<'a> {
     fn new(t: &'a Table, krate: &'a Crate, callee: &'a dyn Fn(ItemId) -> Option<u64>) -> Walker<'a> {
-        Walker { t, krate, callee, ready: HashMap::new(), tp: 0, vector: false, w: ONE, ret_cp: 0, ret_w: 0 }
+        Walker { t, krate, callee, ready: HashMap::new(), tp: 0, vector: false, w: ONE, ret_cp: 0, ret_w: 0, carried: false }
     }
 
     /// The expected readiness of the result: the early exits and the
@@ -206,7 +240,7 @@ impl<'a> Walker<'a> {
 
     /// A sub-walker for an arm (its locals start as ours).
     fn arm(&self) -> Walker<'a> {
-        Walker { t: self.t, krate: self.krate, callee: self.callee, ready: self.ready.clone(), tp: 0, vector: self.vector, w: self.w, ret_cp: 0, ret_w: 0 }
+        Walker { t: self.t, krate: self.krate, callee: self.callee, ready: self.ready.clone(), tp: 0, vector: self.vector, w: self.w, ret_cp: 0, ret_w: 0, carried: self.carried }
     }
 
     fn lit_u32(e: &Expr) -> bool {
@@ -352,11 +386,35 @@ impl<'a> Walker<'a> {
                     },
                     LoopKind::While { .. } => 16,
                 };
+                if !self.carried {
+                    let mut w = self.arm();
+                    let r = w.block(&l.body);
+                    let per = w.tp + (self.t.op(Op::Branch).tp + self.t.op(Op::Alu).tp) * self.w / ONE;
+                    self.tp += per.saturating_mul(trips);
+                    return r.saturating_mul(trips);
+                }
+                // one iteration in steady state: every value the body reads
+                // is ready at its start; the locals it writes back are the
+                // loop-carried chain, whose latency each iteration adds
                 let mut w = self.arm();
+                for v in w.ready.values_mut() {
+                    *v = 0;
+                }
                 let r = w.block(&l.body);
                 let per = w.tp + (self.t.op(Op::Branch).tp + self.t.op(Op::Alu).tp) * self.w / ONE;
                 self.tp += per.saturating_mul(trips);
-                r.saturating_mul(trips)
+                // the chain: the longest one the iteration computes (the
+                // state it writes back depends on it, directly or through
+                // the branch it decides)
+                let carried = w.ready.values().copied().max().unwrap_or(0).max(r);
+                let mut assigned: Vec<LocalId> = Vec::new();
+                assigned_locals(&l.body, &mut assigned);
+                let entry = assigned.iter().filter_map(|k| self.ready.get(k).copied()).max().unwrap_or(0);
+                let done = entry.saturating_add(carried.saturating_mul(trips));
+                for k in assigned {
+                    self.ready.insert(k, done);
+                }
+                done
             }
             PropEq(..) | PropNe(..) | PropAnd(..) | PropOr(..) | PropNot(..) | Implies(..) | Iff(..) | Quant { .. } | Lambda { .. } | Apply { .. } => 0,
         }
