@@ -1340,6 +1340,62 @@ mod tests {
         assert!(prunable.is_chunk_aligned()); // 0 bits
     }
 
+    fn check_ones_iter_ranges<const N: usize>() {
+        let len = 3 * Prunable::<N>::CHUNK_SIZE_BITS + 3;
+        for stride in [1, 7, 63, 65, len + 1] {
+            let mut bitmap = Prunable::<N>::new();
+            bitmap.extend_to(len);
+            for bit in (0..len).filter(|bit| bit % stride == 0) {
+                bitmap.set_bit(bit, true);
+            }
+            for pruned in [false, true] {
+                if pruned {
+                    bitmap.prune_to_bit(Prunable::<N>::CHUNK_SIZE_BITS);
+                }
+                for from in (0..=len + 1).filter(|bit| N <= 9 || bit % 8 <= 1 || bit % 8 == 7) {
+                    for end in (from..=len + 1).filter(|bit| N <= 9 || bit % 8 <= 1 || bit % 8 == 7)
+                    {
+                        let expected = (from.max(bitmap.pruned_bits())..end.min(len))
+                            .find(|&bit| bitmap.get_bit(bit));
+                        assert_eq!(
+                            bitmap.ones_iter_range(from..end).next(),
+                            expected,
+                            "N={N}, {from}..{end}"
+                        );
+                    }
+                    assert_eq!(
+                        bitmap.ones_iter_range(from..u64::MAX).next(),
+                        (from.max(bitmap.pruned_bits())..len).find(|&bit| bitmap.get_bit(bit))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_ones_iter_range_matches_bit_scan() {
+        check_ones_iter_ranges::<1>();
+        check_ones_iter_ranges::<7>();
+        check_ones_iter_ranges::<8>();
+        check_ones_iter_ranges::<9>();
+        check_ones_iter_ranges::<32>();
+        check_ones_iter_ranges::<64>();
+    }
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_ones_iter_range_near_max() {
+        let mut bitmap = Prunable::<8>::new_with_pruned_chunks((u64::MAX / 64) as usize).unwrap();
+        let from = bitmap.pruned_bits();
+        bitmap.extend_to(u64::MAX);
+        assert_eq!(bitmap.ones_iter_range(from..u64::MAX).next(), None);
+        bitmap.set_bit(u64::MAX - 1, true);
+        assert_eq!(bitmap.ones_iter_range(from..u64::MAX - 1).next(), None);
+        assert_eq!(
+            bitmap.ones_iter_range(from..u64::MAX).next(),
+            Some(u64::MAX - 1)
+        );
+    }
+
     #[test]
     fn test_ones_iter_with_pruning() {
         // 3 chunks of 32 bits each = 96 bits total.

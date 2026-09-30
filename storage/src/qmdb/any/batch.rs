@@ -1601,7 +1601,7 @@ where
             .merkleize_with_floor_scan(
                 metadata,
                 staged_updates,
-                prefetched,
+                Some(prefetched),
                 |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
             )
             .await?;
@@ -1611,8 +1611,8 @@ where
     /// Resolve the caller's updates on the strategy pool while gathering and reading the
     /// committed prefix of the floor-raise candidates, overlapping the two. Returns the
     /// prepared batch, the staged updates, and the prefetched candidates to seed its floor scan
-    /// with. Manual-floor batches skip prefetching and return `None`. Preparation validates and
-    /// retains the live chain before any supplied-database read.
+    /// with. Manual-floor batches return an empty prefetch. Preparation validates and retains
+    /// the live chain before any supplied-database read.
     ///
     /// `fill_candidates` must be the same candidate source the subsequent floor raise
     /// scans, so the prefetched prefix continues seamlessly into the live scan (see
@@ -1636,7 +1636,7 @@ where
         (
             Prepared<'a, F, E, C, I, H, update::Unordered<K, V>, N, S>,
             StagedUpdates<F, update::Unordered<K, V>>,
-            Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
+            PrefetchedCandidates<F, update::Unordered<K, V>>,
         ),
         crate::qmdb::Error<F>,
     >
@@ -1653,7 +1653,7 @@ where
         let mut prepared = batch.prepare(db)?;
 
         let steps_bound = if prepared.merkleizer.manual_floor.is_some() {
-            None
+            0
         } else {
             // Bound the steps the floor raise can take: only emitted ops consume steps, and an
             // op is emitted per location-resolved update plus per upsert or prior mutation on a
@@ -1675,7 +1675,7 @@ where
                 .chain(prepared.mutations.keys())
                 .filter(|&key| db.snapshot.get(key).next().is_some())
                 .count();
-            Some(resolved_updates + existing_writes + 1)
+            resolved_updates + existing_writes + 1
         };
 
         // Overlap the serial update resolution with the candidate prefetch: the
@@ -1691,26 +1691,20 @@ where
 
         // Gather the committed-prefix candidates and read their operations, sharded, while
         // the resolution job runs.
-        let prefetch = if let Some(steps_bound) = steps_bound {
-            let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
-            let mut locs: Vec<Location<F>> = Vec::with_capacity(steps_bound);
-            let next_scan = fill_candidates(scan_from, committed_tip, steps_bound, &mut locs);
-            let raw: Vec<u64> = locs.iter().map(|loc| **loc).collect();
-            db.log.read_many_sharded(&raw).await.map(|shards| {
-                Some(PrefetchedCandidates {
-                    locs,
-                    shards,
-                    next_scan,
-                })
-            })
-        } else {
-            Ok(None)
-        };
+        let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
+        let mut locs: Vec<Location<F>> = Vec::with_capacity(steps_bound);
+        let next_scan = fill_candidates(scan_from, committed_tip, steps_bound, &mut locs);
+        let raw: Vec<u64> = locs.iter().map(|loc| **loc).collect();
+        let read = db.log.read_many_sharded(&raw).await;
 
         // Join the resolution and surface any read failure.
         let (mutations, staged_updates) = resolve.await;
         prepared.mutations = mutations;
-        let prefetched = prefetch?;
+        let prefetched = PrefetchedCandidates {
+            locs,
+            shards: read?,
+            next_scan,
+        };
         Ok((prepared, staged_updates, prefetched))
     }
 }
@@ -1837,7 +1831,6 @@ where
                 // The final commit has a set bit but is not a live update.
                 let candidate = db.bitmap.first_one(*location, end.min(*db_size - 1));
                 location = Location::new(candidate.unwrap_or(end));
-                batch.manual_floor = Some(location);
                 if candidate.is_none() {
                     continue;
                 }
@@ -1847,7 +1840,6 @@ where
             } else {
                 Cow::Borrowed(read_op_from_ancestors(&ancestors, *location, *db_size))
             };
-            batch.manual_floor = Some(location + 1);
             if let Operation::Update(update) = operation.as_ref() {
                 let key = update::Update::key(update);
 
@@ -1860,6 +1852,7 @@ where
                     let Operation::Update(update) = operation.into_owned() else {
                         unreachable!("active operation is an update");
                     };
+                    batch.manual_floor = Some(location + 1);
                     return Ok((batch, Some(ActiveEntry { location, update })));
                 }
             }
@@ -1868,6 +1861,7 @@ where
 
         // Ancestors must remain alive until every operation read has completed.
         drop(ancestors);
+        batch.manual_floor = Some(location);
         Ok((batch, None))
     }
 

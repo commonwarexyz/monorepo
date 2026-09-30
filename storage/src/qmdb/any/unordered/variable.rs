@@ -845,9 +845,14 @@ pub(crate) mod test {
             assert!(weak_grandparent.upgrade().is_some());
 
             let (batch, retained_ancestors) = prepared
-                .merkleize_with_floor_scan(None, updates, prefetched, |floor, tip, limit, out| {
-                    Location::new(db.bitmap.fill_candidates(*floor, tip, limit, out))
-                })
+                .merkleize_with_floor_scan(
+                    None,
+                    updates,
+                    Some(prefetched),
+                    |floor, tip, limit, out| {
+                        Location::new(db.bitmap.fill_candidates(*floor, tip, limit, out))
+                    },
+                )
                 .await
                 .unwrap();
             assert_eq!(batch.root(), expected_root);
