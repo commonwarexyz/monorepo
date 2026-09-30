@@ -79,8 +79,8 @@ type JournalBatch<F, D, K, V, S> = Arc<authenticated::MerkleizedBatch<F, D, Oper
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`]. Reads through it refuse with
-/// [`crate::qmdb::Error::StaleRead`] once a batch that is not its ancestor is applied, whether
-/// from a different fork or one of its own descendants (see [`crate::qmdb::chain`]).
+/// [`crate::qmdb::Error::StaleRead`] once any batch other than itself or an ancestor is applied,
+/// whether from a different fork or one of its own descendants (see [`crate::qmdb::chain`]).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> {
     /// Authenticated journal batch (Merkle state + local items).

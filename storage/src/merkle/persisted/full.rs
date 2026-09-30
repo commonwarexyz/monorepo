@@ -154,11 +154,11 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// all un-synced nodes, and the pinned node set as derived from both its own pruning boundary
     /// and the full structure's pruning boundary.
     ///
-    /// Held in an [`Arc`] so [`Merkle::mem`] can hand a zero-copy, immutable view to jobs
+    /// Held in an [`Arc`] so [`Merkle::view`] can hand a zero-copy, immutable view to jobs
     /// running off the calling task. Mutations go through [`Arc::make_mut`]: they are in-place
     /// while no view or snapshot is alive and copy-on-write otherwise, so neither observes later
     /// mutations.
-    pub(crate) mem: Arc<Mem<F, D>>,
+    mem: Arc<Mem<F, D>>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been
     /// pruned.
@@ -5845,6 +5845,25 @@ mod tests {
         for (&position, node) in positions.iter().zip(&nodes) {
             assert_eq!(snapshot.get_node(position).await.unwrap(), Some(*node));
         }
+
+        // A boundary past the leaf count is out of range for the snapshot, the live structure, and
+        // its in-memory nodes alike.
+        let past = Location::try_from(size).unwrap() + 1;
+        assert!(matches!(
+            snapshot.pinned_nodes_at(past).await,
+            Err(Error::RangeOutOfBounds(loc)) if loc == past
+        ));
+        let live_past = Location::try_from(mmr.size()).unwrap() + 1;
+        assert!(matches!(
+            mmr.pinned_nodes_at(live_past).await,
+            Err(Error::RangeOutOfBounds(loc)) if loc == live_past
+        ));
+        let mem_past =
+            Location::try_from(crate::merkle::storage::Storage::size(mmr.mem())).unwrap() + 1;
+        assert!(matches!(
+            crate::merkle::storage::Storage::pinned_nodes_at(mmr.mem(), mem_past).await,
+            Err(Error::RangeOutOfBounds(loc)) if loc == mem_past
+        ));
 
         drop(snapshot);
         mmr.destroy().await.unwrap();
