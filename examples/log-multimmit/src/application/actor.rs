@@ -403,10 +403,13 @@ mod tests {
     };
     use commonware_storage::translator::EightCap;
     use commonware_utils::{Acknowledgement as _, NZU16, NZU64, NZUsize, acknowledgement::Exact};
-    use std::{convert::Infallible, time::Duration};
+    use std::{convert::Infallible, num::NonZeroUsize, time::Duration};
 
     /// Body bytes in every test block.
     const BODY_SIZE: usize = 32;
+
+    /// Resolver mailbox capacity, which also bounds backfill concurrency.
+    const RESOLVER_MAILBOX_SIZE: NonZeroUsize = NZUsize!(64);
 
     /// Participants in the test committee; participant 0 runs the actor and produces chain 0.
     const PARTICIPANTS: u32 = 6;
@@ -501,8 +504,9 @@ mod tests {
             .with_catalog_mailbox_size(NZUsize!(64))
             .with_admission_cut_capacity(NZUsize!(64))
             .with_pending_segment_items(NZU64!(64))
-            .with_resolver_mailbox_size(NZUsize!(64))
-            .with_backfill_concurrency(NZUsize!(64));
+            .with_resolver_mailbox_size(RESOLVER_MAILBOX_SIZE)
+            // Backfill must not exceed the resolver mailbox.
+            .with_backfill_concurrency(RESOLVER_MAILBOX_SIZE);
             let (mut service, bridge) =
                 marshal::open::<_, EightCap, Sha256, MinPk, Body, ed25519::PublicKey>(
                     context.child("marshal"),
