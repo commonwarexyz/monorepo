@@ -54,3 +54,21 @@ finding is evidence, not a property, and this task adds probes only.
 5. Budget: 20 to 60 probes for this component. Avoid per-message hot loops unless the state
    there is interesting.
 6. Add one row per probe to the "Beacon probes" table of the plan.
+
+### A worked example
+
+`consensus/fuzz/statelens/examples/statelens_commonware_voter_example.md` works this task
+through on the Simplex voter, end to end. The parts that match what you are doing:
+
+- section 0, how the example's vocabulary maps onto this workflow;
+- sections 3 to 8, reading a comment, noticing what the source cannot answer, and querying the
+  knowledge base at exactly that point rather than up front;
+- section 26, turning a finding into a coverage dimension, and choosing which cells of it are
+  worth telling apart;
+- section 27, the probe shapes, including how four booleans become one packed side of the pair,
+  and how to observe two rules that live at different call sites;
+- section 28, why reading a short-circuited condition eagerly changes what the program does.
+
+Two things in it are not your job. It derives invariants, which belongs to Phase 1: you add
+probes only. And it names artifacts from the StateLens paper, a Beacon Summary and a State
+Report, which do not exist here -- your output is the probes and the plan rows.

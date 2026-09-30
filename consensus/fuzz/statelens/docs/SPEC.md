@@ -127,6 +127,9 @@ consensus/fuzz/statelens/
   false-invariants/
     simplex/FALSE-0001.md        deliberately false invariant for AC-6 (Appendix C)
     marshal/FALSE-0002.md        deliberately false invariant for AC-10 (Appendix E)
+  examples/
+    statelens_commonware_voter_example.md   worked analysis of the Simplex voter,
+                                 referenced by the Phase 2 prompts (sections 13.8, 13.9)
   templates/
     invariant.md                 reference format (section 4.5)
   prompts/
@@ -1565,6 +1568,18 @@ below:
    nothing for it and set Status to `unbound` with the reason.
 7. Add the invariant's section to the plan.
 
+A worked example of this reasoning is
+`consensus/fuzz/statelens/examples/statelens_commonware_voter_example.md`, on the Simplex
+voter. Sections 9 to 25 take a comment such as "nullification does not cancel pending
+certification work" and turn it into a relation over named state, which is what steps 1 and 2
+above ask of you; section 24 ranks the results by how much they actually say, and section 25
+lists readings that look right and are too strong. That last one is rule 6: a Statement bound
+more strictly than it is written produces false alarms that cost someone a day.
+
+Read it for how the reasoning goes, not for what to add. The example *derives* invariants,
+which is Phase 1 work; your job is to bind the ones below, and its local labels (`INV-A1` and
+so on) are not registry ids. Section 0 gives the rest of the mapping.
+
 Invariants:
 
 {{INVARIANTS}}
@@ -1629,6 +1644,24 @@ finding is evidence, not a property, and this task adds probes only.
 5. Budget: 20 to 60 probes for this component. Avoid per-message hot loops unless the state
    there is interesting.
 6. Add one row per probe to the "Beacon probes" table of the plan.
+
+### A worked example
+
+`consensus/fuzz/statelens/examples/statelens_commonware_voter_example.md` works this task
+through on the Simplex voter, end to end. The parts that match what you are doing:
+
+- section 0, how the example's vocabulary maps onto this workflow;
+- sections 3 to 8, reading a comment, noticing what the source cannot answer, and querying the
+  knowledge base at exactly that point rather than up front;
+- section 26, turning a finding into a coverage dimension, and choosing which cells of it are
+  worth telling apart;
+- section 27, the probe shapes, including how four booleans become one packed side of the pair,
+  and how to observe two rules that live at different call sites;
+- section 28, why reading a short-circuited condition eagerly changes what the program does.
+
+Two things in it are not your job. It derives invariants, which belongs to Phase 1: you add
+probes only. And it names artifacts from the StateLens paper, a Beacon Summary and a State
+Report, which do not exist here -- your output is the probes and the plan rows.
 ~~~
 
 ### 13.10 `prompts/repair.md`
