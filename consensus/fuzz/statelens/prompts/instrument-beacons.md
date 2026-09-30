@@ -55,27 +55,30 @@ finding is evidence, not a property, and this task adds probes only.
    there is interesting.
 6. Add one row per probe to the "Beacon probes" table of the plan.
 
-### A worked example
+### What makes a probe worth adding
 
-Two documents in `consensus/fuzz/statelens/examples/` work this task through end to end:
-`statelens_commonware_voter_example.md` on the Simplex voter, and
-`statelens_commonware_marshal_example.md` on marshal's deferred verification path. Read the one
-whose subsystem matches this component. The parts that match what you are doing:
+- A state is worth probing when its outcomes **run the same code**. If two outcomes take
+  different branches, edge coverage already separates them and the probe adds nothing.
+- Probe what the replica decided and what it held, not what a peer sent.
+- A finding tells you a state has gone wrong before, so it is worth probing even where the code
+  looks unremarkable. It does not tell you to assert anything.
+- Prefer a state established in one place and read in another, across a mailbox, a component
+  boundary or a restart. Those are the states a single-function reading misses.
 
-- section 0, how the example's vocabulary maps onto this workflow;
-- sections 3 to 8, reading a comment, noticing what the source cannot answer, and querying the
-  knowledge base at exactly that point rather than up front;
-- section 26 of the voter example, or 32 of the marshal one, turning a finding into a coverage
-  dimension and choosing which cells of it are worth telling apart;
-- section 27, or 33 of the marshal one, the probe shapes: how several booleans become one packed
-  side of the pair, how to observe two rules that live at different call sites, and when to
-  split a wide dimension into several probes that a round relates;
-- section 28 of the voter example, why reading a short-circuited condition eagerly changes what
-  the program does;
-- section 35 of the marshal example, a trace of observe, hypothesise, act, which is the shape
-  your own reasoning should take.
+### Fitting a wide dimension into a pair
 
-Two things in them are not your job. They derive invariants, which belongs to Phase 1: you add
-probes only. And they name artifacts from the StateLens paper, a Beacon Summary and a State
-Report, which do not exist here -- your output is the probes and the plan rows. Section 0 of
-each gives the rest of the mapping.
+A dimension often has more parts than a pair holds. In order of preference:
+
+1. Put the inputs on one side and the outcome on the other:
+   `pack(flag(valid), flag(durable))` against `disc(&outcome)`.
+2. Build a mask when several flags belong together:
+   `flag(a) | flag(b) << 1 | flag(c) << 2`, against the outcome.
+3. Split across the sites the code already has, sharing a label prefix, and let the view or
+   round relate them. Prefer this over one probe that has to reach for a value: never call
+   something with side effects, and never force a value the original code computes only
+   conditionally.
+
+Full worked analyses, one per subsystem, are in `consensus/fuzz/statelens/examples/`. They are
+reference material, not a pattern to copy: they also derive invariants, which is Phase 1 work,
+and they use the vocabulary of the StateLens paper, which section 0 of each maps onto this
+workflow. Do not let their shape decide what this component's states are -- the code does.

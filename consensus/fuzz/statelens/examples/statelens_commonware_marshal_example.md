@@ -43,7 +43,12 @@ The agent should learn to:
 
 ---
 
+<!-- statelens-lint: not-code: related_findings, remediation_status -->
+
 # 0. How this maps onto StateLens in this repository
+
+`just check-examples` verifies that every code name this document cites still exists. The two
+names declared above are knowledge-base claim fields, not code.
 
 This document uses the vocabulary of the StateLens paper. The workflow here divides the work
 differently, so read the mapping before following the example literally. The companion

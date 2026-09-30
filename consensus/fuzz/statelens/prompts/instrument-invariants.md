@@ -29,22 +29,29 @@ below:
    nothing for it and set Status to `unbound` with the reason.
 7. Add the invariant's section to the plan.
 
-Two worked examples of this reasoning live in `consensus/fuzz/statelens/examples/`:
-`statelens_commonware_voter_example.md` on the Simplex voter, and
-`statelens_commonware_marshal_example.md` on marshal's deferred verification path. Read the one
-whose subsystem you are binding in.
+### Readings that look right and are too strong
 
-Sections 9 to 25 of the voter example take a comment such as "nullification does not cancel
-pending certification work" and turn it into a relation over named state, which is what steps 1
-and 2 above ask of you; section 24 ranks the results by how much they actually say, and section
-25 lists readings that look right and are too strong. That last one is rule 6: a Statement
-bound more strictly than it is written produces false alarms that cost someone a day. The
-marshal example does the same across a state machine that spans several functions, a restart and
-a crash-recovery path, which is the harder case for step 2.
+Rule 6 is where bindings go wrong, and always in the same direction: a Statement is checked
+more strictly than it is written, and the assertion fires on correct behavior. The patterns to
+watch for:
 
-Read them for how the reasoning goes, not for what to add. They *derive* invariants, which is
-Phase 1 work; your job is to bind the ones below, and their local labels (`INV-A1`, `M1` and so
-on) are not registry ids. Section 0 of each gives the rest of the mapping.
+- **A negative read as its converse.** "Nullification must not cancel certification work" does
+  not say the work survives; something else may legitimately end it in the same moment. Assert
+  that this event did not cause it, not that it is still there.
+- **A permission read as an obligation.** "The replica may retry" does not mean it must. An
+  invariant about what is allowed is not an invariant about what happens.
+- **A local rule read as a global one.** Same-view often does not mean same-term, and same-term
+  does not mean always. Bind the scope the Statement gives, not the widest one that parses.
+- **A property read as a synchronous one.** Two components reach a state through mailboxes, so
+  "after X, Y holds" is not checkable at X. Record the history in ghost state and assert at Y.
+- **An accident of today's code read as the rule.** If the Statement is silent about ordering
+  and the code happens to be ordered, do not assert the order.
+
+When you find only a weaker form is checkable, that is a `partial`, not a licence to round up.
+
+Full worked analyses, one per subsystem, are in `consensus/fuzz/statelens/examples/`. They are
+reference material: they *derive* invariants, which is Phase 1 work, while your job is to bind
+the ones below, and their local labels (`INV-A1`, `M1` and so on) are not registry ids.
 
 Invariants:
 

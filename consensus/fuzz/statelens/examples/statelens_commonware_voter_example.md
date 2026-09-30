@@ -27,7 +27,15 @@ The example assumes a **mock Knowledge Base (KB)** containing protocol documenta
 
 ---
 
+<!-- statelens-lint: not-code: related_findings, remediation_status,
+     proposal_parent_resolution, proposal_parent_resolvable,
+     parent_ancestry_payload_available, add_nullification_inner -->
+
 # 0. How this maps onto StateLens in this repository
+
+`just check-examples` verifies that every code name this document cites still exists. The
+names declared above are exempt: two are knowledge-base claim fields, and the rest are names
+this document mentions only to say they are not functions in this codebase.
 
 This document is written in the vocabulary of the StateLens paper. The workflow in this
 repository divides the same work differently, so read the mapping below before following the

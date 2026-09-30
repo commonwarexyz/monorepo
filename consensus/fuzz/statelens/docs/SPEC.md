@@ -158,6 +158,11 @@ consensus/fuzz/statelens/
 Constraints on committed files:
 
 - Plain ASCII only (R-NF-5).
+- The worked analyses in `examples/` name real functions and fields, and the Phase 2 prompts
+  point agents at them, so `just check-examples` checks that every code name they cite still
+  exists in the instrumented subsystems. A name that is not code, such as a knowledge-base
+  claim field, is declared in the document with a
+  `<!-- statelens-lint: not-code: a, b -->` line.
 - No `Cargo.toml` anywhere under `SL/` (R-LAYOUT-2).
 - `runtime/*.rs` pass `rustfmt +<pinned nightly> --edition 2024 --check` with the
   repository `rustfmt.toml`.
@@ -375,6 +380,10 @@ fuzz target *args:
 clean *args:
     python3 scripts/statelens.py clean "$@"
 
+# Check the worked analyses: just check-examples [path...]
+check-examples *args:
+    python3 scripts/statelens.py lint-examples "$@"
+
 # Check invariant files: just check-invariants [path...]
 check-invariants *args:
     python3 scripts/statelens.py lint "$@"
@@ -391,6 +400,7 @@ prefixed with `statelens:`.
 | `lint` | `lint [PATH...]` | 0 clean, 3 problems |
 | `extract` | `extract [--agent A] [--registry R] KIND SOURCE...`, where `R` is `simplex` (default) or `marshal` | 0 done (including zero files), 1 usage, 2 agent failed, 3 lint problems |
 | `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, or a section that is not state-bearing, 2 no readable corpus root |
+| `lint-examples` | `lint-examples [PATH...]`; with no path it checks every `*.md` in `examples/` | 0 clean, 3 problems |
 | `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing | 0 in every case; a preview is not a failure |
 | `campaign` | `campaign [--agent A] [--profile P] [--stop-after STEP]`, where `P` is `simplex` (default) or `marshal` | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
 
@@ -1458,6 +1468,12 @@ probes that tell the fuzzer when an execution reached a new internal state.
    use the runtime context, RNG, clock, network, storage, metrics or logging. Do not
    send or reorder messages, and do not move or consume values the original code uses
    later; clone small values if you need them after a move.
+
+   The trap worth naming: reading a short-circuited condition eagerly changes what runs.
+   Given `if self.in_window(view) && !self.parent_ready(view) { return None; }`, hoisting
+   both calls into locals makes `parent_ready` run even when `in_window` is false, which
+   the original never did. Keep the guard:
+   `let ready = if in_window { Some(self.parent_ready(view)) } else { None };`
 5. No accidental panics. Only an invariant violation may panic. Use saturating or
    checked arithmetic (tests run with overflow checks). Do not use `unwrap`, `expect`,
    or indexing that can go out of bounds.
@@ -1568,22 +1584,29 @@ below:
    nothing for it and set Status to `unbound` with the reason.
 7. Add the invariant's section to the plan.
 
-Two worked examples of this reasoning live in `consensus/fuzz/statelens/examples/`:
-`statelens_commonware_voter_example.md` on the Simplex voter, and
-`statelens_commonware_marshal_example.md` on marshal's deferred verification path. Read the one
-whose subsystem you are binding in.
+### Readings that look right and are too strong
 
-Sections 9 to 25 of the voter example take a comment such as "nullification does not cancel
-pending certification work" and turn it into a relation over named state, which is what steps 1
-and 2 above ask of you; section 24 ranks the results by how much they actually say, and section
-25 lists readings that look right and are too strong. That last one is rule 6: a Statement
-bound more strictly than it is written produces false alarms that cost someone a day. The
-marshal example does the same across a state machine that spans several functions, a restart and
-a crash-recovery path, which is the harder case for step 2.
+Rule 6 is where bindings go wrong, and always in the same direction: a Statement is checked
+more strictly than it is written, and the assertion fires on correct behavior. The patterns to
+watch for:
 
-Read them for how the reasoning goes, not for what to add. They *derive* invariants, which is
-Phase 1 work; your job is to bind the ones below, and their local labels (`INV-A1`, `M1` and so
-on) are not registry ids. Section 0 of each gives the rest of the mapping.
+- **A negative read as its converse.** "Nullification must not cancel certification work" does
+  not say the work survives; something else may legitimately end it in the same moment. Assert
+  that this event did not cause it, not that it is still there.
+- **A permission read as an obligation.** "The replica may retry" does not mean it must. An
+  invariant about what is allowed is not an invariant about what happens.
+- **A local rule read as a global one.** Same-view often does not mean same-term, and same-term
+  does not mean always. Bind the scope the Statement gives, not the widest one that parses.
+- **A property read as a synchronous one.** Two components reach a state through mailboxes, so
+  "after X, Y holds" is not checkable at X. Record the history in ghost state and assert at Y.
+- **An accident of today's code read as the rule.** If the Statement is silent about ordering
+  and the code happens to be ordered, do not assert the order.
+
+When you find only a weaker form is checkable, that is a `partial`, not a licence to round up.
+
+Full worked analyses, one per subsystem, are in `consensus/fuzz/statelens/examples/`. They are
+reference material: they *derive* invariants, which is Phase 1 work, while your job is to bind
+the ones below, and their local labels (`INV-A1`, `M1` and so on) are not registry ids.
 
 Invariants:
 
@@ -1650,30 +1673,33 @@ finding is evidence, not a property, and this task adds probes only.
    there is interesting.
 6. Add one row per probe to the "Beacon probes" table of the plan.
 
-### A worked example
+### What makes a probe worth adding
 
-Two documents in `consensus/fuzz/statelens/examples/` work this task through end to end:
-`statelens_commonware_voter_example.md` on the Simplex voter, and
-`statelens_commonware_marshal_example.md` on marshal's deferred verification path. Read the one
-whose subsystem matches this component. The parts that match what you are doing:
+- A state is worth probing when its outcomes **run the same code**. If two outcomes take
+  different branches, edge coverage already separates them and the probe adds nothing.
+- Probe what the replica decided and what it held, not what a peer sent.
+- A finding tells you a state has gone wrong before, so it is worth probing even where the code
+  looks unremarkable. It does not tell you to assert anything.
+- Prefer a state established in one place and read in another, across a mailbox, a component
+  boundary or a restart. Those are the states a single-function reading misses.
 
-- section 0, how the example's vocabulary maps onto this workflow;
-- sections 3 to 8, reading a comment, noticing what the source cannot answer, and querying the
-  knowledge base at exactly that point rather than up front;
-- section 26 of the voter example, or 32 of the marshal one, turning a finding into a coverage
-  dimension and choosing which cells of it are worth telling apart;
-- section 27, or 33 of the marshal one, the probe shapes: how several booleans become one packed
-  side of the pair, how to observe two rules that live at different call sites, and when to
-  split a wide dimension into several probes that a round relates;
-- section 28 of the voter example, why reading a short-circuited condition eagerly changes what
-  the program does;
-- section 35 of the marshal example, a trace of observe, hypothesise, act, which is the shape
-  your own reasoning should take.
+### Fitting a wide dimension into a pair
 
-Two things in them are not your job. They derive invariants, which belongs to Phase 1: you add
-probes only. And they name artifacts from the StateLens paper, a Beacon Summary and a State
-Report, which do not exist here -- your output is the probes and the plan rows. Section 0 of
-each gives the rest of the mapping.
+A dimension often has more parts than a pair holds. In order of preference:
+
+1. Put the inputs on one side and the outcome on the other:
+   `pack(flag(valid), flag(durable))` against `disc(&outcome)`.
+2. Build a mask when several flags belong together:
+   `flag(a) | flag(b) << 1 | flag(c) << 2`, against the outcome.
+3. Split across the sites the code already has, sharing a label prefix, and let the view or
+   round relate them. Prefer this over one probe that has to reach for a value: never call
+   something with side effects, and never force a value the original code computes only
+   conditionally.
+
+Full worked analyses, one per subsystem, are in `consensus/fuzz/statelens/examples/`. They are
+reference material, not a pattern to copy: they also derive invariants, which is Phase 1 work,
+and they use the vocabulary of the StateLens paper, which section 0 of each maps onto this
+workflow. Do not let their shape decide what this component's states are -- the code does.
 ~~~
 
 ### 13.10 `prompts/repair.md`

@@ -206,7 +206,7 @@ consensus/fuzz/statelens/
     SPEC.md                   technical specification
   README.md                   how to run the three phases
   config.env                  defaults: agent, models, toolchains
-  justfile                    recipes: extract, campaign, run, fuzz, clean, check-invariants
+  justfile                    recipes: extract, campaign, run, fuzz, clean, check-*
   .gitignore                  ignores the generated campaign/ and extract/ directories
   invariants/                 the registries: one file per invariant, all active
     simplex/
@@ -219,7 +219,7 @@ consensus/fuzz/statelens/
       FALSE-0001.md
     marshal/
       FALSE-0002.md
-  examples/                   worked analyses the Phase 2 prompts point agents at
+  examples/                   worked analyses, reference material for Phase 2 agents
     statelens_commonware_voter_example.md
     statelens_commonware_marshal_example.md
   templates/
@@ -244,7 +244,7 @@ consensus/fuzz/statelens/
     statelens.rs              guard, counter table, probe/assert macros, ghost state
     target.rs                 fuzz target (cert_mock scheme only)
   scripts/
-    statelens.py              lint, extract, kb, campaign, clean
+    statelens.py              lint, lint-examples, extract, kb, campaign, clean
 ```
 
 R-LAYOUT-2. Files under `runtime/` are templates. No committed crate compiles them, and committed code does not include them as a module. A cargo-fuzz package (a `Cargo.toml` with `cargo-fuzz = true`) must not exist under `consensus/fuzz/statelens/` on the main branch. The existing `just fuzz` / `just build` recipes discover packages by grepping `*/Cargo.toml` for `cargo-fuzz = true`, and would otherwise pick it up in CI (G6). The templates must stay `rustfmt`-clean, because CI's `just check-fmt` formats every `*.rs` file in the tree.
@@ -369,6 +369,8 @@ R-P2-2. Steps, in order; R-S-P2-1 and R-M-P2-1 say what each step does for their
 R-P2-3. The only output of a campaign is its result: one of `READY` (the StateLens fuzz targets are built and the test gate passed), `PANIC (tests)`, `BUILD FAILED`, or `SETUP FAILED`. It is printed with the checkout location and, where there is one, the first panic message. A `READY` result also prints the command that runs each StateLens target and the command that replays a crash. The standard artifacts described in 7.11 hold the crashes that Phase 3 finds.
 
 R-P2-4. **Cryptography (decision).** StateLens fuzz targets use only the `cert_mock` certificate scheme: the mock scheme in `consensus/src/simplex/mocks/scheme.rs`, which `consensus/fuzz/core` imports as `cert_mock`. Every target instantiates the harness with a `cert_mock`-based Simplex type from `consensus/fuzz/core/src/simplex.rs`, such as `SimplexCertificateMock`. No target uses ed25519, BLS12-381, or secp256r1 schemes. A campaign refuses to materialize a target that breaks this rule; for the marshal variants, R-M-P2-2 says how this is checked. The rule covers fuzz targets only; the test gate (R-P2-2 step 6) runs the engine-level tests with their own fixtures.
+
+R-P2-6. **Worked analyses.** `examples/` holds one worked analysis per subsystem, written against real code. The Phase 2 prompts carry the transferable craft themselves -- what makes a state worth probing, how a wide dimension becomes one probe pair, and the readings of a Statement that are too strong -- and name the examples only as reference material an agent may open. A prompt does not inline them: each is tens of thousands of tokens, several times the prompt, and a worked analysis of one component should not decide what another component's states are. Because they name real functions and fields, `just check-examples` fails when a name they cite no longer exists.
 
 R-P2-5. **Recipes.** `just campaign` runs a campaign and no fuzzer, as R-P2-2 step 7 says. `just run <target>` fuzzes a target a campaign built, and `just fuzz <target>` is a convenience that does both in order, inferring the profile from the target name. `just clean` undoes what a campaign wrote to a checkout: it deletes the files a campaign created and restores the paths it edits to `HEAD`, printing what it would do and acting only with `--yes`. It leaves `campaign/` and `extract/` alone, and it restores whole paths, so an edit of the operator's own inside them is lost.
 

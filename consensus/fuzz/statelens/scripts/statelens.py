@@ -105,6 +105,12 @@ MARSHAL_TARGETS = "consensus/fuzz/marshal/fuzz_targets"
 MARSHAL_MANIFEST = "consensus/fuzz/marshal/Cargo.toml"
 MARSHAL_SRC = "consensus/fuzz/marshal/src"
 PLAN = "consensus/fuzz/statelens/campaign/plan.md"
+# Worked analyses the Phase 2 prompts point at. They name real functions and fields, so
+# `lint-examples` checks those still exist; a document declares its non-code terms with a
+# `<!-- statelens-lint: not-code: a, b -->` line.
+EXAMPLES = "consensus/fuzz/statelens/examples"
+NOT_CODE = re.compile(r"<!--\s*statelens-lint:\s*not-code:\s*(.*?)\s*-->", re.S)
+CODE_WORD = re.compile(r"`([a-z_][a-z0-9_]*_[a-z0-9_]+)`")
 # Everything a campaign creates (deleted by `clean`) or edits (restored by `clean`).
 # The marshal variants are found by glob, because their names come from the targets.
 CREATED_PATHS = (STATELENS_RS, TARGET_RS)
@@ -1267,6 +1273,60 @@ def cmd_clean(args):
     return 0
 
 
+def subsystem_sources(repo):
+    """Every non-test Rust source of both subsystems, concatenated."""
+    text = []
+    for name in SUBSYSTEMS:
+        for path in sorted((repo / "consensus/src" / name).rglob("*.rs")):
+            try:
+                text.append(path.read_text(errors="replace"))
+            except OSError as error:
+                say(f"warning: cannot read {path}: {error.strerror or error}; skipped")
+    return "\n".join(text)
+
+
+def lint_example_file(path, sources):
+    """Checks one worked analysis: ASCII, and every code name it cites still exists."""
+    problems = []
+    data = path.read_bytes()
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        problems.append("contains non-ASCII characters")
+        text = data.decode("utf-8", errors="replace")
+    declared = set()
+    for match in NOT_CODE.finditer(text):
+        declared |= {word.strip() for word in match.group(1).split(",") if word.strip()}
+    cited = {match.group(1) for match in CODE_WORD.finditer(text)}
+    missing = sorted(name for name in cited - declared if name not in sources)
+    for name in missing:
+        problems.append(
+            f"cites `{name}`, which no longer exists in consensus/src/simplex or "
+            "consensus/src/marshal; fix the reference, or declare it with a "
+            "`<!-- statelens-lint: not-code: ... -->` line when it is not a code name"
+        )
+    return problems
+
+
+def cmd_lint_examples(args):
+    """SPEC chapter 3: the worked analyses must keep naming real code."""
+    repo = repo_root()
+    root = repo / EXAMPLES
+    paths = [Path(p) for p in args.paths] if args.paths else sorted(root.glob("*.md"))
+    sources = subsystem_sources(repo)
+    count = 0
+    for path in paths:
+        if not path.is_file():
+            print(f"{path}: not a file", flush=True)
+            count += 1
+            continue
+        for problem in lint_example_file(path, sources):
+            print(f"{path}: {problem}", flush=True)
+            count += 1
+    say(f"lint-examples: {len(paths)} file(s), {count} problem(s)")
+    return 3 if count else 0
+
+
 def read_edit_file(repo, relative, hint="update the paths and anchors in scripts/statelens.py"):
     """Text of a file the materialize step reads; a missing file aborts with exit code 2."""
     try:
@@ -2088,6 +2148,15 @@ def main(argv):
     )
     extract.add_argument("kind", choices=KINDS, help="source kind")
     extract.add_argument("sources", nargs="+", metavar="SOURCE", help="a source (SPEC section 6.1)")
+    lint_examples = commands.add_parser(
+        "lint-examples",
+        help="check that the worked analyses still name real code",
+        description=(
+            "Check the worked analyses in examples/: plain ASCII, and every code name they "
+            "cite still exists in the instrumented subsystems."
+        ),
+    )
+    lint_examples.add_argument("paths", nargs="*", metavar="PATH", help="an example file")
     clean = commands.add_parser(
         "clean",
         help="undo what a campaign wrote to this checkout",
@@ -2154,6 +2223,8 @@ def main(argv):
             return cmd_kb(args)
         if args.command == "clean":
             return cmd_clean(args)
+        if args.command == "lint-examples":
+            return cmd_lint_examples(args)
         return Campaign(args).run()
     except Abort as error:
         say(f"error: {error}")

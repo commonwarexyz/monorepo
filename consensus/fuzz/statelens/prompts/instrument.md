@@ -71,6 +71,12 @@ probes that tell the fuzzer when an execution reached a new internal state.
    use the runtime context, RNG, clock, network, storage, metrics or logging. Do not
    send or reorder messages, and do not move or consume values the original code uses
    later; clone small values if you need them after a move.
+
+   The trap worth naming: reading a short-circuited condition eagerly changes what runs.
+   Given `if self.in_window(view) && !self.parent_ready(view) { return None; }`, hoisting
+   both calls into locals makes `parent_ready` run even when `in_window` is false, which
+   the original never did. Keep the guard:
+   `let ready = if in_window { Some(self.parent_ready(view)) } else { None };`
 5. No accidental panics. Only an invariant violation may panic. Use saturating or
    checked arithmetic (tests run with overflow checks). Do not use `unwrap`, `expect`,
    or indexing that can go out of bounds.
