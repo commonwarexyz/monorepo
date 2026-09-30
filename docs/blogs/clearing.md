@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/29/26): Payments continue in epoch $e+1$ while epoch $e$'s close is built, certified, and admitted. A payment that misses the cut can be signed again in $e+1$ without settling twice.*
+*Update (9/29/26): Payments continue in epoch $e+1$ while epoch $e$'s close is built, certified, and admitted. Each payment signature also covers where the payer's vector ended in the previous epoch, so a payment that misses the cut settles at most once.*
 
 *Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 
@@ -105,7 +105,7 @@ Payments are grouped into settlement periods called **epochs**. Every signature 
 
 The payer tracks a balance $B_a$ and an epoch's total debit $D_a$, initially zero. It keeps a vector $V_a$ ordered by recipient, with one entry $(G,J)$ recording the cumulative amount and payment count for each. These entries form the leaves of a binary Merkle tree (BMT). Before the example payment, $B_a=100$, $D_a=0$, and $V_a$ is empty.
 
-To send $x>0$, $a$ updates $b$'s entry and signs the updated sequence number $n_a$ for the epoch, cumulative debit, and vector's Merkle root. It also signs the root of its final vector in the previous epoch, $V_a^{e-1}$, which is empty if it paid no one there. The operator countersigns this updated payer state:
+To send $x>0$, $a$ updates $b$'s entry and signs one payer state: the epoch's anchor, its updated sequence number $n_a$, its cumulative debit, its vector's Merkle root, and the root of its final vector in the previous epoch, $V_a^{e-1}$, which is empty if it paid no one there. The operator's receipt $R$ countersigns that state:
 
 $$
 S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with }b:(G+x,\,J+1)),\;\mathsf{root}(V_a^{e-1})\bigr),
@@ -364,7 +364,7 @@ The operator can price each transfer type or payer independently, including volu
 ```
 
 ::: {.image-caption}
-Figure 7: The fee shares the same signed payment root as the recipient payments. The payer also signs the epoch anchor, its sequence, its cumulative debit, and its predecessor root. Recipient $b$ receives the countersigned payer state and an opening for its own entry.
+Figure 7: The fee shares the same signed payment root as the recipient payments. The same signature covers the epoch anchor, its sequence, its cumulative debit, and its predecessor root. Recipient $b$ receives the countersigned payer state and an opening for its own entry.
 :::
 
 ## The Cost of Settlement

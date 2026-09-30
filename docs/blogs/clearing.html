@@ -104,9 +104,9 @@ O’Grady</a></div>
         <p><em>Update (9/29/26): Payments continue in epoch <span
         class="math inline">e+1</span> while epoch <span
         class="math inline">e</span>’s close is built, certified, and
-        admitted. A payment that misses the cut can be signed again in
-        <span class="math inline">e+1</span> without settling
-        twice.</em></p>
+        admitted. Each payment signature also covers where the payer’s
+        vector ended in the previous epoch, so a payment that misses the
+        cut settles at most once.</em></p>
         <p><em>Update (9/18/26): Settlement certificates require at
         least <span class="math inline">f+1</span> signatures: every
         signer validates and retains the complete close. The settlement
@@ -248,13 +248,13 @@ O’Grady</a></div>
         class="math inline">V_a</span> is empty.</p>
         <p>To send <span class="math inline">x&gt;0</span>, <span
         class="math inline">a</span> updates <span
-        class="math inline">b</span>’s entry and signs the updated
-        sequence number <span class="math inline">n_a</span> for the
-        epoch, cumulative debit, and vector’s Merkle root. It also signs
-        the root of its final vector in the previous epoch, <span
-        class="math inline">V_a^{e-1}</span>, which is empty if it paid
-        no one there. The operator countersigns this updated payer
-        state:</p>
+        class="math inline">b</span>’s entry and signs one payer state:
+        the epoch’s anchor, its updated sequence number <span
+        class="math inline">n_a</span>, its cumulative debit, its
+        vector’s Merkle root, and the root of its final vector in the
+        previous epoch, <span class="math inline">V_a^{e-1}</span>,
+        which is empty if it paid no one there. The operator’s receipt
+        <span class="math inline">R</span> countersigns that state:</p>
         <p><span class="math display">
         S=\mathsf{Sign}_a\bigl(\mathcal
         A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with
@@ -788,8 +788,8 @@ O’Grady</a></div>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="Payer a signs one batch paying 20 to b, 7 to c, and the operator's quoted fee of 2 to its designated fee recipient. The payer signs the epoch anchor, sequence 1, cumulative debit 29, the payment root, and the predecessor root, which is empty because the payer paid no one in the previous epoch. Recipient b's receipt contains the operator-countersigned payer state and an opening for b's entry, with amount 20 and payment count 1.">
         <div class="image-caption">
         <p>Figure 7: The fee shares the same signed payment root as the
-        recipient payments. The payer also signs the epoch anchor, its
-        sequence, its cumulative debit, and its predecessor root.
+        recipient payments. The same signature covers the epoch anchor,
+        its sequence, its cumulative debit, and its predecessor root.
         Recipient <span class="math inline">b</span> receives the
         countersigned payer state and an opening for its own entry.</p>
         </div>
