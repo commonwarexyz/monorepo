@@ -3,7 +3,7 @@
 //! The stream interleaves many producer chains, so it is not [`Linear`](crate::marshal::Linear):
 //! a block's height is its height in its own chain, not its index.
 
-use super::{Floor, Mailbox, Update, storage::catalog_state::frontier_index};
+use super::{Error, Floor, Mailbox, Update, storage::catalog_state::frontier_index};
 use crate::{
     marshal::{Delivery, Finalized, Floors, Ledger},
     multimmit::types::{Body, TransactionBlock},
@@ -12,7 +12,7 @@ use crate::{
 use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
 use commonware_utils::acknowledgement::Exact;
 use std::num::NonZeroUsize;
-use tracing::{debug, warn};
+use tracing::debug;
 
 impl<B: crate::Block> Delivery for Update<B> {
     type Block = B;
@@ -34,11 +34,10 @@ where
     B: Body<H>,
 {
     type Block = TransactionBlock<H, B>;
+    type Error = Error;
 
-    async fn prune(&self, below: OutputIndex) {
-        if let Err(error) = Self::prune(self, below).await {
-            warn!(?error, %below, "marshal did not prune");
-        }
+    async fn prune(&self, below: OutputIndex) -> Result<(), Error> {
+        Self::prune(self, below).await
     }
 
     fn ack_window(&self) -> NonZeroUsize {
@@ -54,18 +53,24 @@ where
 {
     type Floor = Floor<V, H::Digest>;
 
-    async fn floor_at(&self, at: OutputIndex) -> Option<(OutputIndex, Self::Floor)> {
-        Self::floor_at(self, at).await.ok().flatten()
+    async fn floor_at(&self, at: OutputIndex) -> Result<Option<(OutputIndex, Self::Floor)>, Error> {
+        Self::floor_at(self, at).await
     }
 
     /// The floor's index is the sum of its emitted frontier's heights, which installing the floor
-    /// authenticates.
-    async fn install(&self, floor: Self::Floor) -> Option<OutputIndex> {
-        let index = frontier_index(floor.emitted())?;
-        if let Err(error) = self.install_floor(floor).await {
-            debug!(?error, "marshal rejected the floor");
-            return None;
+    /// authenticates. A floor that fails to install is rejected; a busy or closed marshal is an
+    /// error.
+    async fn install(&self, floor: Self::Floor) -> Result<Option<OutputIndex>, Error> {
+        let Some(index) = frontier_index(floor.emitted()) else {
+            return Ok(None);
+        };
+        match self.install_floor(floor).await {
+            Ok(()) => Ok(Some(index)),
+            Err(Error::Failed(error)) => {
+                debug!(%error, "marshal rejected the floor");
+                Ok(None)
+            }
+            Err(error) => Err(error),
         }
-        Some(index)
     }
 }

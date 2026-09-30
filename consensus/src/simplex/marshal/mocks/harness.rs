@@ -5125,14 +5125,19 @@ pub fn get_finalization_by_height<H: TestHarness>() {
     })
 }
 
-/// Test that floors resolve to the newest stored finalization at or below a height, survive
-/// pruning, and resume a fresh validator after the block before the one they finalize.
+/// Test that floors resolve to the newest stored finalization at or below a height and resume a
+/// fresh validator after the block before the one they finalize, which rejects a floor that does
+/// not verify or is stale.
 pub fn finalization_floors<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
         let Fixture {
             participants,
             schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let Fixture {
+            schemes: wrong_schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
@@ -5155,13 +5160,14 @@ pub fn finalization_floors<H: TestHarness>() {
         assert!(
             Floors::floor_at(&handle.mailbox, OutputIndex::new(1))
                 .await
+                .unwrap()
                 .is_none()
         );
 
         // Finalize heights one through four, but store finalizations only for one and four.
         let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
-        let mut commitments = Vec::new();
+        let mut proposals = Vec::new();
         for i in 1..=4u64 {
             let block = H::make_test_block(
                 parent,
@@ -5174,18 +5180,18 @@ pub fn finalization_floors<H: TestHarness>() {
             let round = Round::new(Epoch::zero(), View::new(i));
             H::propose(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
+            let proposal = Proposal {
+                round,
+                parent: View::new(i - 1),
+                payload: commitment,
+            };
             if i == 1 || i == 4 {
-                let proposal = Proposal {
-                    round,
-                    parent: View::new(i - 1),
-                    payload: commitment,
-                };
-                let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                let finalization = H::make_finalization(proposal.clone(), &schemes, QUORUM);
                 H::report_finalization(&mut handle.mailbox, finalization).await;
             }
             parent = H::digest(&block);
             parent_commitment = commitment;
-            commitments.push(commitment);
+            proposals.push(proposal);
         }
         while handle
             .mailbox
@@ -5204,33 +5210,31 @@ pub fn finalization_floors<H: TestHarness>() {
             (3, Some(4)),
             (9, Some(4)),
         ] {
-            let found = Floors::floor_at(&handle.mailbox, OutputIndex::new(at)).await;
+            let found = Floors::floor_at(&handle.mailbox, OutputIndex::new(at))
+                .await
+                .unwrap();
             let found = found.map(|(index, finalization)| {
                 let height = index.get() + 1;
                 assert_eq!(
                     finalization.proposal.payload,
-                    commitments[height as usize - 1]
+                    proposals[height as usize - 1].payload
                 );
                 height
             });
             assert_eq!(found, floor, "floor at {at}");
         }
 
-        // Pruning keeps the floor at the pruned index.
-        Ledger::prune(&handle.mailbox, OutputIndex::new(2)).await;
-        let (_, floor) = Floors::floor_at(&handle.mailbox, OutputIndex::new(2))
-            .await
-            .unwrap();
-        assert_eq!(floor.proposal.payload, commitments[0]);
-
-        // A fresh validator installs the floor at height four, fetching its block from peers, and
-        // then rejects an older one.
+        // A fresh validator rejects a floor that does not verify, installs the floor at height
+        // four, fetching its block from peers, and then rejects an older one.
         let (_, floor) = Floors::floor_at(&handle.mailbox, OutputIndex::new(3))
             .await
+            .unwrap()
             .unwrap();
         let (_, older) = Floors::floor_at(&handle.mailbox, OutputIndex::new(0))
             .await
+            .unwrap()
             .unwrap();
+        let forged = H::make_finalization(proposals[3].clone(), &wrong_schemes, QUORUM);
         let fresh = H::setup_validator(
             context.child("validator").with_attribute("index", 1),
             &mut oracle,
@@ -5239,11 +5243,97 @@ pub fn finalization_floors<H: TestHarness>() {
         )
         .await;
         setup_network_links(&mut oracle, &participants, LINK).await;
+        assert_eq!(Floors::install(&fresh.mailbox, forged).await.unwrap(), None);
         assert_eq!(
-            Floors::install(&fresh.mailbox, floor).await,
+            Floors::install(&fresh.mailbox, floor).await.unwrap(),
             Some(OutputIndex::new(3))
         );
-        assert_eq!(Floors::install(&fresh.mailbox, older).await, None);
+        assert_eq!(Floors::install(&fresh.mailbox, older).await.unwrap(), None);
+    })
+}
+
+/// Test that pruning below an index keeps the newest floor at or below it, even when that floor's
+/// finalization is in a section a plain prune at the index would drop.
+pub fn finalization_floors_survive_pruning<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(120));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let (mailbox, extra, _application) = H::setup_prunable_validator(
+            context.child("validator"),
+            &oracle,
+            participants[0].clone(),
+            &schemes,
+            "floors-prune",
+            page_cache,
+        )
+        .await;
+
+        // Finalize heights one through thirty-five, ten per archive section, but store
+        // finalizations only for fifteen and thirty-five.
+        let mut parent = Sha256::hash(&[b""]);
+        let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+        let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+        let mut floor_commitment = None;
+        for i in 1..=35u64 {
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                NUM_VALIDATORS as u16,
+            );
+            let commitment = H::commitment(&block);
+            parent = H::digest(&block);
+            parent_commitment = commitment;
+            let bounds = epocher.containing(Height::new(i)).unwrap();
+            let round = Round::new(bounds.epoch(), View::new(i));
+            let mut handle = ValidatorHandle {
+                mailbox: mailbox.clone(),
+                extra: extra.clone(),
+            };
+            H::verify_for_prune(&mut handle, round, &block).await;
+            context.sleep(LINK.latency).await;
+            if i == 15 || i == 35 {
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i - 1),
+                    payload: commitment,
+                };
+                let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                H::report_finalization(&mut handle.mailbox, finalization).await;
+            }
+            if i == 15 {
+                floor_commitment = Some(commitment);
+            }
+        }
+        while mailbox.get_processed().await.map(Processed::height) != Some(Height::new(35)) {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+
+        // Pruning below 33 keeps the finalization at fifteen, the newest floor at or below 33,
+        // and drops the section before it.
+        Ledger::prune(&mailbox, OutputIndex::new(33)).await.unwrap();
+        while mailbox.get_block(Height::new(5)).await.is_some() {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        let (index, floor) = Floors::floor_at(&mailbox, OutputIndex::new(33))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(index, OutputIndex::new(14));
+        assert_eq!(Some(floor.proposal.payload), floor_commitment);
+        assert!(mailbox.get_block(Height::new(15)).await.is_some());
     })
 }
 

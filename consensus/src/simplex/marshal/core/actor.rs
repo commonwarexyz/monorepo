@@ -5,7 +5,7 @@ use super::{
     certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
-    floor::{Floor, Processed, State as FloorState},
+    floor::{Floor, Installed, Processed, State as FloorState},
     mailbox::{CommitmentFallback, Mailbox, Message},
     staged::Staged,
     stream::Stream,
@@ -416,6 +416,7 @@ where
                 self = self
                     .install_floor(
                         finalization,
+                        None,
                         &mut resolver,
                         &mut buffer,
                         &mut waiters,
@@ -946,9 +947,20 @@ where
                         .ignore();
                 }
             }
-            Message::SetFloor { finalization, .. } => {
+            Message::SetFloor {
+                finalization,
+                installed,
+                ..
+            } => {
                 self = self
-                    .install_floor(finalization, resolver, buffer, waiters, application)
+                    .install_floor(
+                        finalization,
+                        installed,
+                        resolver,
+                        buffer,
+                        waiters,
+                        application,
+                    )
                     .await;
             }
             Message::Prune { height, .. } => {
@@ -1200,9 +1212,14 @@ where
     }
 
     /// Verifies and installs a floor, awaiting the anchor block from the buffer or peers if needed.
+    ///
+    /// `installed` receives the anchor's height once the floor is applied, and is dropped if the
+    /// floor is ignored. A floor that does not verify is ignored when it has a reply, and panics
+    /// otherwise, since its sender vouched for it.
     async fn install_floor<Buf, R>(
         mut self: Box<Self>,
         finalization: Finalization<P::Scheme, V::Commitment>,
+        installed: Option<Installed>,
         resolver: &mut R,
         buffer: &mut Buf,
         waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
@@ -1224,12 +1241,15 @@ where
         }
 
         let Some(scoped) = self.provider.scoped(finalization.epoch()) else {
-            panic!("floor finalization epoch unavailable");
+            assert!(installed.is_some(), "floor finalization epoch unavailable");
+            warn!(?round, "floor not updated, epoch unavailable");
+            return self;
         };
-        assert!(
-            finalization.verify(self.context.as_mut(), &scoped, &self.strategy),
-            "floor finalization must verify"
-        );
+        if !finalization.verify(self.context.as_mut(), &scoped, &self.strategy) {
+            assert!(installed.is_some(), "floor finalization must verify");
+            warn!(?round, "floor not updated, finalization does not verify");
+            return self;
+        }
 
         let commitment = finalization.proposal.payload;
         let digest = V::commitment_to_inner(commitment);
@@ -1246,7 +1266,7 @@ where
 
         // A local anchor replaces any older pending floor and installs through ingest.
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-            self.floor.set_pending(finalization, None);
+            self.floor.set_pending(finalization, installed, None);
             let anchored;
             (self, anchored) = self.ingest(block, buffer, application, resolver).await;
             assert!(anchored, "failed to ingest pending floor anchor");
@@ -1265,7 +1285,7 @@ where
         let aborter = buffer
             .subscribe_by_commitment(commitment)
             .map(|rx| waiters.push(rx.or_else(|_| future::pending())));
-        self.floor.set_pending(finalization, aborter);
+        self.floor.set_pending(finalization, installed, aborter);
 
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor
@@ -1322,20 +1342,32 @@ where
     ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(block.clone());
 
-        let Some(finalization) = self.floor.take_matching(V::commitment(&block)) else {
+        let Some((finalization, installed)) = self.floor.take_matching(V::commitment(&block))
+        else {
             return (self, false);
         };
 
         self = self
-            .apply_floor(finalization, block, buffer, application, resolver)
+            .apply_floor(
+                finalization,
+                installed,
+                block,
+                buffer,
+                application,
+                resolver,
+            )
             .await;
         (self, true)
     }
 
     /// Applies the floor transition that `finalization` announces using its anchor block.
+    ///
+    /// `installed` receives the anchor's height once the floor is durable, and is dropped if the
+    /// anchor is at or below the processed height.
     async fn apply_floor<Buf: Buffer<V>>(
         mut self: Box<Self>,
         finalization: Finalization<P::Scheme, V::Commitment>,
+        installed: Option<Installed>,
         block: V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -1423,6 +1455,9 @@ where
             .sync()
             .await
             .expect("failed to sync floor metadata");
+        if let Some(installed) = installed {
+            installed.send_lossy(height);
+        }
 
         // Drop all pending acknowledgement waiters so any in-flight application
         // acks for blocks below the new floor cannot rewrite the processed floor.

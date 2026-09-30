@@ -1903,7 +1903,6 @@ dependencies = [
  "commonware-utils",
  "criterion",
  "futures",
- "num-traits",
  "paste",
  "pin-project",
  "proptest",

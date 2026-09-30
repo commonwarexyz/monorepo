@@ -1414,6 +1414,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_finalization_floors_survive_pruning() {
+        harness::finalization_floors_survive_pruning::<InlineHarness>();
+        harness::finalization_floors_survive_pruning::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_hint_finalized_triggers_fetch() {
         harness::hint_finalized_triggers_fetch::<InlineHarness>();
         harness::hint_finalized_triggers_fetch::<DeferredHarness>();
