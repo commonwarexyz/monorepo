@@ -212,14 +212,15 @@ where
             write_buffer: config.write_buffer,
         };
         let journal = StorageJournal::init(context, storage_config).await?;
-        let empty = journal.is_empty();
         let mut replay = journal
             .replay(0, 0, config.replay_buffer, ReadOptions::DONT_CACHE)
             .await?;
         let mut header = false;
+        let mut restarted = false;
         let mut certificates = Vec::new();
         while let Some(record) = replay.next().await {
             let (_, _, _, record) = record?;
+            restarted = true;
             match (header, record) {
                 (false, Record::Header(version, stored)) => {
                     if version != VERSION {
@@ -248,7 +249,8 @@ where
             }
         }
         let mut journal = replay.finish()?;
-        if empty {
+        // A crash during initialization can leave an empty section without a durable header.
+        if !restarted {
             let (next, _, _) = journal
                 .append(0, &Record::Header(VERSION, identity))
                 .await?;
@@ -260,7 +262,7 @@ where
             Self {
                 inner: Some(journal),
                 heights_per_section: config.heights_per_section,
-                restarted: !empty,
+                restarted,
             },
             certificates,
         ))
@@ -289,7 +291,7 @@ mod tests {
     use commonware_cryptography::certificate::{Verifier, mocks::Fixture};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{Blob as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{NZU16, NZUsize, non_empty, ordered::Quorum as _};
 
     const NAMESPACE: &[u8] = b"aggregation journal test";
@@ -398,6 +400,34 @@ mod tests {
                 .map(|certificate| certificate.item.position)
                 .collect();
             assert_eq!(positions, [FIRST, LAST]);
+        });
+    }
+
+    #[test_traced]
+    fn test_recovers_interrupted_initialization() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let scheme = &fixture.schemes[0];
+            let config = config(&context, "interrupted");
+
+            // Leave an existing section with no durable header.
+            let (blob, _) = context
+                .open(&config.partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            let (mut journal, certificates) =
+                open(&mut context, config.clone(), scheme).await.unwrap();
+            assert!(!journal.restarted());
+            assert!(certificates.is_empty());
+            journal.append(certificate(&fixture, FIRST)).await.unwrap();
+            drop(journal);
+
+            let (journal, certificates) = open(&mut context, config, scheme).await.unwrap();
+            assert!(journal.restarted());
+            assert_eq!(certificates.len(), 1);
         });
     }
 
