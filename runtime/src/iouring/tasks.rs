@@ -575,17 +575,38 @@ pub mod tests {
         finish(t);
     }
 
+    /// Addresses at regular strides, as an allocator places cells, spread
+    /// evenly over the shards. The addresses are synthetic, so the result
+    /// does not depend on the allocator and is the same on every run.
+    #[test]
+    fn test_hash_spreads_strided_addresses() {
+        let set = Tasks::new(16);
+        let shards = set.shards.len();
+        let per_shard = 256;
+        for stride in [64, 128, 144, 192, 256, 384, 512, 4096] {
+            let mut lens = vec![0_usize; shards];
+            for i in 0..shards * per_shard {
+                // Never dereferenced, so the pointer needs no provenance.
+                let addr = 0x7f00_0000_0000 + i * stride;
+                let node = NonNull::new(std::ptr::without_provenance_mut(addr)).unwrap();
+                lens[set.index(node)] += 1;
+            }
+            assert!(
+                lens.iter()
+                    .all(|&len| len.abs_diff(per_shard) <= per_shard / 8),
+                "uneven shards at stride {stride}: {lens:?}"
+            );
+        }
+    }
+
+    /// Cells from the real allocator spread evenly over the shards. Miri
+    /// places allocations at random addresses instead of the allocator's
+    /// strides, so this runs natively only.
+    #[cfg(not(miri))]
     #[test]
     fn test_hashed_shards_spread_cells() {
         let set = Tasks::new(16);
-        cfg_if::cfg_if! {
-            if #[cfg(miri)] {
-                // Miri is slow, so fewer tasks per shard with a looser bound.
-                let (count, slack) = (1024, 0.5);
-            } else {
-                let (count, slack) = (64 * 1024, 0.25);
-            }
-        }
+        let count = 64 * 1024;
         let tasks: Vec<Task> = (0..count).map(|_| task(&set)).collect();
         for t in &tasks {
             assert!(set.insert(t));
@@ -596,7 +617,7 @@ pub mod tests {
         let max = *lens.iter().max().unwrap() as f64;
         let min = *lens.iter().min().unwrap() as f64;
         assert!(
-            max < mean * (1.0 + slack) && min > mean * (1.0 - slack),
+            max < mean * 1.25 && min > mean * 0.75,
             "uneven shards: {lens:?}"
         );
         drop(set.teardown());
