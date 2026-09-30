@@ -909,15 +909,10 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         // the blob after any mutable method returns an error.
         self.current_page += pages_to_cache as u64;
         self.partial_page_state = partial_page_state;
-        self.durable_page_state = if sync {
-            // The write below is made durable before this flush returns.
-            partial_page_state
-        } else if pages_to_cache > 0 {
+        if pages_to_cache > 0 {
             // The tip moved to a page with no durable contents to preserve yet.
-            None
-        } else {
-            self.durable_page_state
-        };
+            self.durable_page_state = None;
+        }
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
         let page_size: u64 = self.cache_ref.page_size().widen();
@@ -934,6 +929,9 @@ impl<B: Blob, Phase> Writer<B, Phase> {
                     WriteOptions::SYNC | WriteOptions::DONT_CACHE,
                 )
                 .await?;
+
+            // The completed write proves the flushed checksum durable.
+            self.durable_page_state = partial_page_state;
         } else {
             self.sync_state
                 .write_at(
@@ -1640,6 +1638,77 @@ mod tests {
             assert_eq!(recovered.size(), synced.len() as u64);
             let read = recovered.read_at(0, synced.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), synced.as_slice());
+        });
+    }
+
+    /// A canceled [Writer::sync] must not advance the durable checksum slot. After a sync drops
+    /// between its page write and its barrier, an unsynced rewrite must still preserve the last
+    /// synced checksum. A crash keeping the synced payload and the rewrite's footer then recovers
+    /// the synced prefix. `dirty` stages an unsynced rewrite first, making the canceled sync issue
+    /// a full barrier.
+    #[rstest::rstest]
+    #[case::clean(false)]
+    #[case::dirty(true)]
+    fn test_cancelled_sync_preserves_durable_checksum_slot(#[case] dirty: bool) {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let physical_page = page_size + CHECKSUM_SIZE as usize;
+            let inner = Arc::new(SyncTrackingBlob::new());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // Make a mid-page prefix durable.
+            let synced = b"abcdefghij";
+            writer.append(synced).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Leave an unsynced rewrite so the canceled sync issues a full barrier.
+            if dirty {
+                writer.append(b"klmno").await.unwrap();
+                drop(writer.snapshot().await.unwrap());
+            }
+
+            // Cancel a sync after its page write lands but before its barrier completes.
+            pending.arm();
+            writer.append(b"pqrst").await.unwrap();
+            let mut sync = Box::pin(writer.sync());
+            assert!(sync.as_mut().now_or_never().is_none());
+            drop(sync);
+            assert_eq!(pending.calls(), 1);
+
+            // Rewrite the page without a sync.
+            writer.append(b"uvwxyz1234").await.unwrap();
+            drop(writer.snapshot().await.unwrap());
+
+            // Crash: the payload keeps its durable bytes while the rewrite's footer lands.
+            let visible = inner
+                .read_at(0, physical_page, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            let (mut crash, _, _, _) = inner.snapshot();
+            crash[page_size..].copy_from_slice(&visible.as_ref()[page_size..]);
+            let (crashed, _) = context
+                .open("test_partition", b"cancelled_sync_crash")
+                .await
+                .unwrap();
+            crashed
+                .write_at(0, crash, WriteOptions::default())
+                .await
+                .unwrap();
+            crashed.sync().await.unwrap();
+
+            // The synced prefix must recover through the preserved durable slot.
+            let recovered = Writer::new(crashed, physical_page as u64, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(recovered.size(), synced.len() as u64);
+            let read = recovered.read_at(0, synced.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), synced);
         });
     }
 

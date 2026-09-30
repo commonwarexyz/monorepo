@@ -559,8 +559,11 @@ impl Panicked {
                 // and return the output
                 Err(_) => task.await,
             },
-            Either::Right((output, _)) => {
-                // Return the output
+            Either::Right((output, mut panicked)) => {
+                // A panic sent while the task completed wins over its output
+                if let Ok(panic) = panicked.try_recv() {
+                    resume_unwind(panic);
+                }
                 output
             }
         }
@@ -591,12 +594,18 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use super::{AbortOnDrop, Handle};
-    use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
+    use super::{AbortOnDrop, Handle, Panicker};
+    use crate::{
+        Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic,
+        utils::extract_panic_message,
+    };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{FutureExt as _, future, poll, stream::AbortHandle};
     use rstest::rstest;
-    use std::sync::Arc;
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::Arc,
+    };
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
@@ -951,5 +960,21 @@ mod tests {
                 "expected tasks_running gauge to return to 0 after abort: {metrics}",
             );
         });
+    }
+
+    /// A panic published during the task's completing poll wins over its output.
+    #[test]
+    fn interrupt_observes_panic_sent_while_completing() {
+        let (panicker, panicked) = Panicker::new(false);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            panicked
+                .interrupt(async move {
+                    panicker.notify(Box::new("late"));
+                    7
+                })
+                .now_or_never()
+        }));
+        let panic = result.expect_err("panic sent while completing was dropped");
+        assert_eq!(extract_panic_message(&*panic), "late");
     }
 }

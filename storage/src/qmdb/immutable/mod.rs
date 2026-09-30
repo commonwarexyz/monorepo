@@ -85,7 +85,6 @@ use crate::{
     },
     translator::Translator,
 };
-use ahash::AHashSet;
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
@@ -696,35 +695,9 @@ where
         // Apply journal.
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
 
-        // Apply snapshot inserts. Child first (child wins via `seen`), then
-        // uncommitted ancestor batches.
-        //
-        // `seen` is only consulted when at least one ancestor diff will be applied, so it is
-        // skipped entirely otherwise.
+        // Apply snapshot inserts for the batch and every unapplied ancestor.
         let bounds = self.journal.bounds();
-        let track_shadow = batch
-            .bounds
-            .ancestors
-            .iter()
-            .any(|a| a.state.size > db_size);
-        let seen_cap = if track_shadow {
-            batch.diff.len()
-                + batch
-                    .bounds
-                    .ancestors
-                    .iter()
-                    .zip(&batch.ancestor_diffs)
-                    .filter(|(a, _)| a.state.size > db_size)
-                    .map(|(_, d)| d.len())
-                    .sum::<usize>()
-        } else {
-            0
-        };
-        let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
         for (key, entry) in batch.diff.iter() {
-            if track_shadow {
-                seen.insert(key);
-            }
             self.snapshot
                 .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
         }
@@ -733,10 +706,8 @@ where
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
-                if seen.insert(key) {
-                    self.snapshot
-                        .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
-                }
+                self.snapshot
+                    .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
             }
         }
 
@@ -2415,9 +2386,19 @@ pub(super) mod tests {
         // After merkleize, child's diff wins.
         assert_eq!(child_m.get(&key, &db).await.unwrap(), Some(val_child));
 
-        // Apply and verify.
+        // Apply only the child. The snapshot retains the unapplied parent's location too.
         let (db, _) = db.apply_batch(child_m).await.unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(val_child));
+        let mut live: Vec<_> = db.snapshot.get(&key).copied().collect();
+        live.sort();
+        assert_eq!(live.len(), 2);
+
+        // Reopen: the rebuilt snapshot holds the same locations as the live one.
+        db.sync().await.unwrap();
+        let db = open_db(context.child("reopen")).await;
+        let mut rebuilt: Vec<_> = db.snapshot.get(&key).copied().collect();
+        rebuilt.sort();
+        assert_eq!(rebuilt, live);
 
         db.destroy().await.unwrap();
     }
@@ -3829,7 +3810,7 @@ pub(super) mod tests {
         let (db, _) = commit_sets(db, [(key, v2)], None).await;
         db.sync().await.unwrap();
 
-        // Reopen: replay visits both writes and keeps only the newer location.
+        // Reopen: replay keeps both writes and serves the newer location first.
         let db = open_db(context.child("second"), None).await.unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v2));
 

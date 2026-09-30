@@ -4,6 +4,9 @@
 //! # Panics
 //!
 //! Unless configured otherwise, any task panic will lead to a runtime panic.
+//! Panics raised while destroying a task's future or undelivered output are
+//! task panics. A handle still waiting on that task resolves to
+//! [crate::Error::Closed].
 //!
 //! # Storage
 //!
