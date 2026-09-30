@@ -128,7 +128,7 @@ impl Mailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::{owned::Owned, task::Task, waker::tests::eventfd_count};
+    use crate::iouring::{task::Task, tasks::Tasks, waker::tests::eventfd_count};
     use std::{
         future::pending,
         sync::{
@@ -171,7 +171,7 @@ mod tests {
                 let _guard = guard;
                 pending::<()>().await;
             },
-            &Owned::new(1),
+            &Tasks::new(1),
             Weak::new(),
         );
 
@@ -179,7 +179,7 @@ mod tests {
     }
 
     /// Dispose of messages, clearing each carried task's future in place, as
-    /// worker teardown does through the owned-task set, before releasing the
+    /// worker teardown does through the task set, before releasing the
     /// message.
     fn dispose(messages: impl IntoIterator<Item = Message>) {
         for message in messages {
@@ -203,7 +203,7 @@ mod tests {
             mailbox
                 .send(Message::Wake(Target::Task(Task::new(
                     pending(),
-                    &Owned::new(1),
+                    &Tasks::new(1),
                     Weak::new()
                 ))))
                 .is_ok()

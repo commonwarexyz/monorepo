@@ -2,7 +2,7 @@
 //! future. Root futures, including the tasks one-off workers run as their
 //! roots, belong to their workers instead.
 //!
-//! [`Owned`] is a sharded intrusive list, as tokio's `OwnedTasks`. Each shard
+//! [`Tasks`] is a sharded intrusive list, as tokio's `OwnedTasks`. Each shard
 //! is a mutex over a doubly linked list threaded through the task cells, whose
 //! [`Links`] sit in a trailer after the future. Any thread inserts or removes a
 //! task in constant time with only the task in hand, and the set allocates
@@ -13,16 +13,28 @@
 //! them at regular strides, so the address bits alone, even shifted, would
 //! reach only a few shards.
 //!
-//! The set holds one reference to each linked task, which removal or draining
-//! hands back. Closing refuses further insertion and draining then hands out
+//! [`Tasks::register`] allocates each task for its set and retains it before
+//! the first token reaches a worker, so every token belongs to a task the set
+//! holds. The set holds one reference to each linked task, which removal or
+//! draining hands back. Closing refuses further insertion and draining then hands out
 //! every task left, so an open set retains every task it accepted until its
 //! removal. Every task carries the identity of the set that retains it,
 //! checked on insertion and removal, so a task routed to another runtime's set
 //! panics instead of corrupting that set's lists.
 
-use super::task::{Header, Task};
+use super::{
+    mailbox::Mailbox,
+    task::{Header, Task},
+};
 use crossbeam_utils::CachePadded;
-use std::{cell::UnsafeCell, num::NonZeroU64, ptr::NonNull, sync::atomic::AtomicU64, thread};
+use std::{
+    cell::UnsafeCell,
+    future::Future,
+    num::NonZeroU64,
+    ptr::NonNull,
+    sync::{Weak, atomic::AtomicU64},
+    thread,
+};
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
@@ -141,7 +153,7 @@ impl List {
 }
 
 /// Every live ordinary task of one runner, as a sharded intrusive list.
-pub struct Owned {
+pub struct Tasks {
     /// Lists by shard, each on its own cache line.
     shards: Box<[CachePadded<Mutex<List>>]>,
     /// Right shift that keeps the hash's top `log2(shards)` bits.
@@ -152,7 +164,7 @@ pub struct Owned {
     id: NonZeroU64,
 }
 
-impl Owned {
+impl Tasks {
     /// A set sized for `workers` workers, with four shards per worker rounded
     /// up to a power of two, as tokio sizes its own.
     pub fn new(workers: usize) -> Self {
@@ -172,7 +184,7 @@ impl Owned {
         // Wrapping would take 2^64 sets.
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NonZeroU64::new(NEXT_ID.fetch_add(1, Ordering::Relaxed))
-            .expect("owned-task set identities exhausted");
+            .expect("task set identities exhausted");
 
         Self {
             shards: (0..count)
@@ -209,10 +221,37 @@ impl Owned {
         list
     }
 
+    /// Allocate a task for this set, owned by the worker behind `mailbox`,
+    /// retain it, then deliver its first poll's token to that worker directly
+    /// or through its mailbox.
+    ///
+    /// Returns the new task if the set has closed. The caller clears its
+    /// future outside worker borrows.
+    pub fn register<F>(&self, future: F, mailbox: Weak<Mailbox>) -> Result<(), Task>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let task = Task::new(future, self, mailbox);
+
+        // The factory runs after the worker's open check, so the set checks
+        // closure again. The set closes before the worker's mailbox, so a
+        // token the mailbox refuses belongs to a task accepted before
+        // closure, which teardown clears.
+        if !self.insert(&task) {
+            return Err(task);
+        }
+
+        #[cfg(test)]
+        tests::after_insert();
+
+        task.schedule();
+        Ok(())
+    }
+
     /// Retain `task`, counting a reference for the set. Returns false,
     /// retaining nothing, once the set is closed.
     pub fn insert(&self, task: &Task) -> bool {
-        assert_eq!(task.owner(), self.id, "task belongs to another set");
+        assert_eq!(task.owner(), self.id, "task belongs to another runtime");
         let node = task.as_ptr();
         let mut list = self.lock(self.index(node));
 
@@ -238,7 +277,7 @@ impl Owned {
     /// drain already handed out, and panics for a task an open set does not
     /// hold.
     pub fn remove(&self, task: &Task) -> Option<Task> {
-        assert_eq!(task.owner(), self.id, "task belongs to another set");
+        assert_eq!(task.owner(), self.id, "task belongs to another runtime");
         let node = task.as_ptr();
         let mut list = self.lock(self.index(node));
 
@@ -277,7 +316,7 @@ impl Owned {
         );
         let count = self.shards.len();
         Drain {
-            owned: self,
+            tasks: self,
             index: start % count,
             remaining: count,
         }
@@ -315,10 +354,10 @@ impl Owned {
     }
 }
 
-/// Tasks handed out by [`Owned::drain`], one shard at a time.
+/// Tasks handed out by [`Tasks::drain`], one shard at a time.
 pub struct Drain<'a> {
     /// The closed set being drained.
-    owned: &'a Owned,
+    tasks: &'a Tasks,
     /// Shard being drained.
     index: usize,
     /// Shards not yet found empty, including the current one.
@@ -331,19 +370,19 @@ impl Iterator for Drain<'_> {
     fn next(&mut self) -> Option<Task> {
         while self.remaining > 0 {
             // The guard drops here, so the caller clears the task unlocked.
-            let node = self.owned.lock(self.index).pop_front();
+            let node = self.tasks.lock(self.index).pop_front();
             if let Some(node) = node {
                 // SAFETY: a linked task carried the set's reference.
                 return Some(unsafe { Task::from_raw(node) });
             }
-            self.index = (self.index + 1) % self.owned.shards.len();
+            self.index = (self.index + 1) % self.tasks.shards.len();
             self.remaining -= 1;
         }
         None
     }
 }
 
-impl Drop for Owned {
+impl Drop for Tasks {
     fn drop(&mut self) {
         // A task still linked would leak with its future. The check is skipped
         // while unwinding, where a second panic would abort.
@@ -360,10 +399,11 @@ impl Drop for Owned {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::{iouring::task::tests::refs, utils::extract_panic_message};
     use std::{
+        cell::RefCell,
         future::pending,
         panic::{AssertUnwindSafe, catch_unwind},
         sync::{Arc, Barrier, Weak},
@@ -371,9 +411,23 @@ mod tests {
         time::Duration,
     };
 
-    /// A pending task retained by `owned`, with no worker.
-    fn task(owned: &Owned) -> Task {
-        Task::new(pending::<()>(), owned, Weak::new())
+    thread_local! {
+        /// Callback run once by this thread's next registration, after the set
+        /// retains the task and before its first token is delivered.
+        pub static AFTER_INSERT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Run the callback a test installed for the window between retention and
+    /// first-token delivery.
+    pub fn after_insert() {
+        if let Some(callback) = AFTER_INSERT.take() {
+            callback();
+        }
+    }
+
+    /// A pending task for `set` to retain, with no worker.
+    fn task(set: &Tasks) -> Task {
+        Task::new(pending::<()>(), set, Weak::new())
     }
 
     /// Drop a test task, clearing its future first.
@@ -384,46 +438,46 @@ mod tests {
 
     #[test]
     fn test_insert_then_remove_returns_the_reference_once() {
-        let owned = Owned::new(4);
-        let t = task(&owned);
-        assert!(owned.insert(&t));
+        let set = Tasks::new(4);
+        let t = task(&set);
+        assert!(set.insert(&t));
         assert_eq!(refs(&t), 2);
 
-        let removed = owned.remove(&t).expect("linked task is removed");
+        let removed = set.remove(&t).expect("linked task is removed");
         assert_eq!(removed.as_ptr(), t.as_ptr());
         drop(removed);
         assert_eq!(refs(&t), 1);
-        assert_eq!(owned.live(), 0);
+        assert_eq!(set.live(), 0);
 
         // An open set holds every task it accepted until its removal, so a
         // second removal is a routing bug. Once closed, it finds nothing.
-        let panic = catch_unwind(AssertUnwindSafe(|| drop(owned.remove(&t)))).unwrap_err();
+        let panic = catch_unwind(AssertUnwindSafe(|| drop(set.remove(&t)))).unwrap_err();
         assert_eq!(
             extract_panic_message(&*panic),
             "task missing from an open set"
         );
-        assert!(owned.teardown().is_empty());
-        assert!(owned.remove(&t).is_none());
+        assert!(set.teardown().is_empty());
+        assert!(set.remove(&t).is_none());
         finish(t);
     }
 
     #[test]
     fn test_remove_head_middle_and_tail_of_one_shard() {
         // One shard, so every task shares a list.
-        let owned = Owned::with_shards(1);
-        let tasks: Vec<Task> = (0..5).map(|_| task(&owned)).collect();
+        let set = Tasks::with_shards(1);
+        let tasks: Vec<Task> = (0..5).map(|_| task(&set)).collect();
         for t in &tasks {
-            assert!(owned.insert(t));
+            assert!(set.insert(t));
         }
 
         // The front is tasks[4]. Remove the middle, then the head, then the
         // tail.
         for index in [2, 4, 0] {
-            assert!(owned.remove(&tasks[index]).is_some());
+            assert!(set.remove(&tasks[index]).is_some());
         }
-        assert_eq!(owned.lens(), [2]);
+        assert_eq!(set.lens(), [2]);
 
-        let rest: Vec<_> = owned.teardown().iter().map(Task::as_ptr).collect();
+        let rest: Vec<_> = set.teardown().iter().map(Task::as_ptr).collect();
         assert_eq!(rest, [tasks[3].as_ptr(), tasks[1].as_ptr()]);
         for t in tasks {
             assert_eq!(refs(&t), 1);
@@ -433,21 +487,21 @@ mod tests {
 
     #[test]
     fn test_close_refuses_insertion_and_drain_hands_out_everything() {
-        let owned = Owned::new(4);
-        let tasks: Vec<Task> = (0..100).map(|_| task(&owned)).collect();
+        let set = Tasks::new(4);
+        let tasks: Vec<Task> = (0..100).map(|_| task(&set)).collect();
         for t in &tasks {
-            assert!(owned.insert(t));
+            assert!(set.insert(t));
         }
 
         // Closing keeps the linked tasks for the drain.
-        owned.close();
-        let late = task(&owned);
-        assert!(!owned.insert(&late), "a closed set refuses insertion");
-        assert_eq!(owned.live(), 100);
-        assert_eq!(owned.drain(3).count(), 100);
+        set.close();
+        let late = task(&set);
+        assert!(!set.insert(&late), "a closed set refuses insertion");
+        assert_eq!(set.live(), 100);
+        assert_eq!(set.drain(3).count(), 100);
 
         for t in tasks.iter().chain([&late]) {
-            assert!(owned.remove(t).is_none(), "nothing left to remove");
+            assert!(set.remove(t).is_none(), "nothing left to remove");
             assert_eq!(refs(t), 1);
         }
         for t in tasks {
@@ -459,19 +513,19 @@ mod tests {
     #[test]
     fn test_drain_holds_no_lock_between_tasks() {
         // One shard, so every insertion below locks the shard being drained.
-        let owned = Owned::with_shards(1);
-        let tasks: Vec<Task> = (0..3).map(|_| task(&owned)).collect();
+        let set = Tasks::with_shards(1);
+        let tasks: Vec<Task> = (0..3).map(|_| task(&set)).collect();
         for t in &tasks {
-            assert!(owned.insert(t));
+            assert!(set.insert(t));
         }
-        owned.close();
+        set.close();
 
         // A destructor that spawns while teardown clears its task is refused
         // instead of deadlocking on the shard lock.
-        let late = task(&owned);
+        let late = task(&set);
         let mut drained = 0;
-        for t in owned.drain(0) {
-            assert!(!owned.insert(&late));
+        for t in set.drain(0) {
+            assert!(!set.insert(&late));
             drop(t);
             drained += 1;
         }
@@ -482,10 +536,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "task belongs to another set")]
+    #[should_panic(expected = "task belongs to another runtime")]
     fn test_task_of_another_set_is_rejected() {
-        let owner = Owned::new(1);
-        let other = Owned::new(1);
+        let owner = Tasks::new(1);
+        let other = Tasks::new(1);
         let t = task(&owner);
         t.clear();
         other.insert(&t);
@@ -493,24 +547,24 @@ mod tests {
 
     #[test]
     fn test_second_insertion_is_rejected() {
-        let owned = Owned::new(1);
-        let t = task(&owned);
-        assert!(owned.insert(&t));
-        let panic = catch_unwind(AssertUnwindSafe(|| owned.insert(&t))).unwrap_err();
+        let set = Tasks::new(1);
+        let t = task(&set);
+        assert!(set.insert(&t));
+        let panic = catch_unwind(AssertUnwindSafe(|| set.insert(&t))).unwrap_err();
         assert_eq!(extract_panic_message(&*panic), "task inserted twice");
 
         // The first insertion's reference is still the only one retained.
         assert_eq!(refs(&t), 2);
-        drop(owned.teardown());
+        drop(set.teardown());
         finish(t);
     }
 
     #[test]
     fn test_dropping_a_set_with_live_tasks_panics() {
-        let owned = Owned::new(1);
-        let t = task(&owned);
-        assert!(owned.insert(&t));
-        let panic = catch_unwind(AssertUnwindSafe(|| drop(owned))).unwrap_err();
+        let set = Tasks::new(1);
+        let t = task(&set);
+        assert!(set.insert(&t));
+        let panic = catch_unwind(AssertUnwindSafe(|| drop(set))).unwrap_err();
         assert_eq!(
             extract_panic_message(&*panic),
             "set dropped with live tasks"
@@ -523,7 +577,7 @@ mod tests {
 
     #[test]
     fn test_hashed_shards_spread_cells() {
-        let owned = Owned::new(16);
+        let set = Tasks::new(16);
         cfg_if::cfg_if! {
             if #[cfg(miri)] {
                 // Miri is slow, so fewer tasks per shard with a looser bound.
@@ -532,12 +586,12 @@ mod tests {
                 let (count, slack) = (64 * 1024, 0.25);
             }
         }
-        let tasks: Vec<Task> = (0..count).map(|_| task(&owned)).collect();
+        let tasks: Vec<Task> = (0..count).map(|_| task(&set)).collect();
         for t in &tasks {
-            assert!(owned.insert(t));
+            assert!(set.insert(t));
         }
 
-        let lens = owned.lens();
+        let lens = set.lens();
         let mean = count as f64 / lens.len() as f64;
         let max = *lens.iter().max().unwrap() as f64;
         let min = *lens.iter().min().unwrap() as f64;
@@ -545,7 +599,7 @@ mod tests {
             max < mean * (1.0 + slack) && min > mean * (1.0 - slack),
             "uneven shards: {lens:?}"
         );
-        drop(owned.teardown());
+        drop(set.teardown());
         for t in tasks {
             finish(t);
         }
@@ -566,13 +620,12 @@ mod tests {
         }
         let threads = 4;
         for round in 0..rounds {
-            let owned = Arc::new(Owned::new(8));
-            let tasks: Arc<Vec<Task>> =
-                Arc::new((0..threads * per).map(|_| task(&owned)).collect());
+            let set = Arc::new(Tasks::new(8));
+            let tasks: Arc<Vec<Task>> = Arc::new((0..threads * per).map(|_| task(&set)).collect());
             let barrier = Arc::new(Barrier::new(threads + 1));
             let workers: Vec<_> = (0..threads)
                 .map(|t| {
-                    let owned = owned.clone();
+                    let set = set.clone();
                     let tasks = tasks.clone();
                     let barrier = barrier.clone();
                     thread::spawn(move || {
@@ -580,13 +633,13 @@ mod tests {
                         let (mut inserted, mut removed) = (0, 0);
                         for i in 0..per {
                             let task = &tasks[t * per + i];
-                            if !owned.insert(task) {
+                            if !set.insert(task) {
                                 continue;
                             }
                             inserted += 1;
 
                             // Remove every other task right away.
-                            if i % 2 == 0 && owned.remove(task).is_some() {
+                            if i % 2 == 0 && set.remove(task).is_some() {
                                 removed += 1;
                             }
                         }
@@ -598,8 +651,8 @@ mod tests {
             // Close part way through the insertions, then drain.
             barrier.wait();
             thread::sleep(Duration::from_micros(50 * (round % 5) as u64));
-            owned.close();
-            let drained_len = owned.drain(round).count();
+            set.close();
+            let drained_len = set.drain(round).count();
             let (inserted, removed) = workers
                 .into_iter()
                 .map(|w| w.join().unwrap())
@@ -607,7 +660,7 @@ mod tests {
 
             // Anything inserted after the close was refused, so the set now
             // holds nothing, and every inserted task came back once.
-            assert_eq!(owned.live(), 0);
+            assert_eq!(set.live(), 0);
             assert_eq!(drained_len + removed, inserted, "round {round}");
             for task in tasks.iter() {
                 assert_eq!(refs(task), 1, "round {round}: a reference leaked");
@@ -632,26 +685,26 @@ mod loom_tests {
     #[test]
     fn test_insert_remove_and_close_race_in_one_shard() {
         loom::model(|| {
-            let owned = Arc::new(Owned::with_shards(1));
+            let set = Arc::new(Tasks::with_shards(1));
             let tasks: Arc<[Task; 3]> =
-                Arc::new([(); 3].map(|_| Task::new(pending::<()>(), &owned, Weak::new())));
-            assert!(owned.insert(&tasks[0]));
-            assert!(owned.insert(&tasks[1]));
+                Arc::new([(); 3].map(|_| Task::new(pending::<()>(), &set, Weak::new())));
+            assert!(set.insert(&tasks[0]));
+            assert!(set.insert(&tasks[1]));
 
             // Unlink the middle neighbor while another thread links a third
             // task at the front and the main thread closes and drains the set.
             let remover = thread::spawn({
-                let owned = owned.clone();
+                let set = set.clone();
                 let tasks = tasks.clone();
-                move || owned.remove(&tasks[0]).is_some()
+                move || set.remove(&tasks[0]).is_some()
             });
             let inserter = thread::spawn({
-                let owned = owned.clone();
+                let set = set.clone();
                 let tasks = tasks.clone();
-                move || owned.insert(&tasks[2])
+                move || set.insert(&tasks[2])
             });
-            owned.close();
-            let drained: Vec<_> = owned.drain(0).map(|t| t.as_ptr()).collect();
+            set.close();
+            let drained: Vec<_> = set.drain(0).map(|t| t.as_ptr()).collect();
             let removed = remover.join().unwrap();
             let inserted = inserter.join().unwrap();
 
@@ -660,7 +713,7 @@ mod loom_tests {
             assert_ne!(removed, returned(&tasks[0]));
             assert!(returned(&tasks[1]));
             assert_eq!(inserted, returned(&tasks[2]));
-            assert_eq!(owned.live(), 0);
+            assert_eq!(set.live(), 0);
             for t in tasks.iter() {
                 assert_eq!(refs(t), 1);
                 t.clear();

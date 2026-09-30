@@ -273,10 +273,10 @@ jobs:
       run: |
         cd runtime
         just miri iouring::task::tests:: --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
-    - name: Run miri tests for runtime::iouring::owned
+    - name: Run miri tests for runtime::iouring::tasks
       run: |
         cd runtime
-        just miri iouring::owned::tests:: --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
+        just miri iouring::tasks::tests:: --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"

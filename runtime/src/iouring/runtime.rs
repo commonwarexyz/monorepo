@@ -12,7 +12,7 @@
 //!   +-- Shared (Arc) <-------------------------- Local.shared
 //!   |     +-- Config, metrics, stop/panic signals
 //!   |     +-- Network, Storage, buffer pools
-//!   |     +-- Owned (every live ordinary task, for teardown)
+//!   |     +-- Tasks (every live ordinary task, for teardown)
 //!   |     `-- Workers <------------------------ ActiveWorker
 //!   +-- supervision tree
 //!   `-- ordinary worker's Mailbox (Weak)
@@ -22,7 +22,7 @@
 //!   |                                               |
 //!   +-- Rc<RefCell<Local>> <------------------------+
 //!   |     +-- Shared (Arc)
-//!   |     +-- Tasks (ready tokens)
+//!   |     +-- Ready (ready tokens)
 //!   |     +-- Timers (sleep registrations and deadlines)
 //!   |     +-- Driver
 //!   |     |     +-- ring (SQ/CQ)
@@ -47,14 +47,14 @@
 //!
 //! Factories run on the spawning caller. Ordinary tasks always target the
 //! runner's calling-thread worker, including when spawned from another worker.
-//! Registration retains the task in [`Owned`] on the caller's thread, then
-//! delivers its first token.
+//! Registration allocates the task and retains it in [`Tasks`] on the caller's
+//! thread, then delivers its first token.
 //!
 //! ```text
 //! ordinary spawn:
-//!   check origin --> factory --> Tasks::register --> Owned
-//!                                  +-- owning thread --> Tasks
-//!                                  `-- other thread --> Mailbox --> Tasks
+//!   check origin --> factory --> Tasks::register
+//!                                  +-- owning thread --> Ready
+//!                                  `-- other thread --> Mailbox --> Ready
 //!
 //! dedicated / blocking spawn:
 //!   Workers::reserve --> factory --> new thread
@@ -109,11 +109,11 @@
 use super::{
     driver::Driver,
     mailbox::{Cancel, Forward, Mailbox, Message},
-    owned::Owned,
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
-    task::{AfterPoll, RootWaker, Target, Task, Tasks},
+    task::{AfterPoll, Ready, RootWaker, Target},
+    tasks::Tasks,
     timeout::TimeoutWheel,
     waker::SUBMISSION_SEQ_MASK,
 };
@@ -176,7 +176,7 @@ use std::{
 const BATCH_SIZE: usize = 64;
 
 /// Pinned future polled as a one-off worker's root, or the runner's service
-/// task before it becomes a [`Task`].
+/// task before it becomes a [`Task`](super::task::Task).
 type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Configuration of each worker's io_uring instance and operation timing wheel.
@@ -603,7 +603,7 @@ struct Shared {
     workers: Arc<Workers>,
     /// Every live ordinary task, retained so the ordinary worker's cleanup
     /// can drop its future.
-    owned: Owned,
+    tasks: Tasks,
     /// Metered storage with its metadata lock and directory hold.
     storage: MeteredStorage<Storage>,
     /// Metered native socket adapter.
@@ -716,7 +716,7 @@ impl crate::Spawner for Context {
             };
             Some(reservation)
         } else {
-            if !Tasks::is_open(&origin) {
+            if !Local::is_open(&origin) {
                 return Handle::closed(metric);
             }
             None
@@ -745,9 +745,7 @@ impl crate::Spawner for Context {
         // becomes a task on its origin worker.
         if let Some(reservation) = reservation {
             shared.launch(Box::pin(future), reservation);
-        } else if let Err(task) =
-            Tasks::register(&shared.owned, Task::new(future, &shared.owned, origin))
-        {
+        } else if let Err(task) = shared.tasks.register(future, origin) {
             // Rejection after closure follows the caller's panic boundary.
             // Cancel descendants and finish metrics before destroying captures.
             parent.abort();
@@ -971,7 +969,7 @@ pub struct Local {
     /// Ring owner, taken only after kernel retirement so it can be dropped unborrowed.
     pub driver: Option<Driver>,
     /// FIFO ready tokens.
-    pub tasks: Tasks,
+    pub ready: Ready,
     /// Sleeper registrations and deadlines.
     pub timers: Timers,
     /// Reject new registration while allowing idempotent cancellation.
@@ -1007,7 +1005,7 @@ impl Local {
 
         Ok(Self {
             driver: Some(driver),
-            tasks: Tasks::default(),
+            ready: Ready::default(),
             timers: Timers::default(),
             closing: false,
             now,
@@ -1036,6 +1034,19 @@ impl Local {
         // The weak reference preserves allocation identity without retaining a worker.
         let matches = ptr::eq(Arc::as_ptr(&local.borrow().mailbox), mailbox.as_ptr());
         matches.then_some(local)
+    }
+
+    /// Whether the worker behind `mailbox` currently accepts tasks.
+    ///
+    /// This does not reserve a place. Registration checks again after construction.
+    pub fn is_open(mailbox: &Weak<Mailbox>) -> bool {
+        if let Some(local) = Self::owner(mailbox) {
+            // The owning thread can check closure without locking the mailbox.
+            return !local.borrow().closing;
+        }
+
+        // Foreign callers use the mailbox's acceptance state.
+        mailbox.upgrade().is_some_and(|mailbox| mailbox.is_open())
     }
 
     /// Release an operation or timer on its worker, directly or through its mailbox.
@@ -1085,7 +1096,7 @@ impl Local {
 
     /// Whether task polling or callbacks prevent the worker from parking.
     fn is_ready(&self) -> bool {
-        self.tasks.is_ready() || self.root_ready || !self.deferred.is_empty()
+        !self.ready.is_empty() || self.root_ready || !self.deferred.is_empty()
     }
 
     /// Earliest absolute deadline across driver requests and sleepers.
@@ -1290,7 +1301,7 @@ struct Worker {
     /// Mailbox publication sequence acknowledged when whole batches enter the inbox.
     processed_seq: u32,
     /// Whether this is the ordinary worker, which hosts every task and closes
-    /// and drains the owned-task set during shutdown.
+    /// and drains the task set during shutdown.
     ordinary: bool,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
@@ -1344,11 +1355,10 @@ impl Worker {
 
         // Register the background service as an ordinary task before constructing
         // the separately polled root.
-        if let Some(service) = service {
-            let service = Task::new(service, &shared.owned, Arc::downgrade(&mailbox));
-            if let Err(service) = Tasks::register(&shared.owned, service) {
-                worker.panics.run(|| service.clear());
-            }
+        if let Some(service) = service
+            && let Err(service) = shared.tasks.register(service, Arc::downgrade(&mailbox))
+        {
+            worker.panics.run(|| service.clear());
         }
         let root_waker = RootWaker::new(Arc::downgrade(&mailbox)).into();
 
@@ -1433,7 +1443,7 @@ impl Worker {
             // mailbox refuses belongs to a task accepted before closure.
             // Cleanup drains the set once the caller has cancelled the tasks.
             if self.ordinary {
-                local.shared.owned.close();
+                local.shared.tasks.close();
             }
             local.mailbox.clone()
         };
@@ -1466,19 +1476,19 @@ impl Worker {
         // Discard queued forwarding messages so their receivers observe closure.
         // Senders can run callbacks on drop, so destroy these messages outside
         // the local borrow. A queued wake's token is a second reference to a
-        // task the owned set retains, so releasing it runs no user code.
+        // task the task set retains, so releasing it runs no user code.
         for message in self.inbox.drain(..) {
             Panics::contain(|| drop(message));
         }
 
         // Destroy tasks before closing I/O, letting their futures detach
         // observers. Ready tokens are second references as well. The ordinary
-        // worker drains the owned set it closed and clears each task outside
+        // worker drains the task set it closed and clears each task outside
         // the local borrow and the set's locks.
-        self.local.borrow_mut().tasks.clear();
+        self.local.borrow_mut().ready.clear();
         if self.ordinary {
             let shared = self.local.borrow().shared.clone();
-            for task in shared.owned.drain(0) {
+            for task in shared.tasks.drain(0) {
                 Panics::contain(|| task.clear());
             }
         }
@@ -1574,7 +1584,7 @@ impl Worker {
                     let mut local = self.local.borrow_mut();
                     match target {
                         Target::Root => local.root_ready = true,
-                        Target::Task(task) => local.tasks.push(task),
+                        Target::Task(task) => local.ready.push(task),
                     }
                 }
                 Message::Forward(forward) => {
@@ -1650,7 +1660,7 @@ impl Worker {
             // Bound task polling so a self-waking task cannot starve the root,
             // mailbox, or ring service.
             for _ in 0..BATCH_SIZE {
-                let Some(task) = self.local.borrow_mut().tasks.pop() else {
+                let Some(task) = self.local.borrow_mut().ready.pop() else {
                     break;
                 };
 
@@ -1659,14 +1669,14 @@ impl Worker {
                 match task.poll() {
                     AfterPoll::Done => {}
                     // Join the tail so self-waking tasks cannot skip other ready work.
-                    AfterPoll::Requeue(task) => self.local.borrow_mut().tasks.push(task),
+                    AfterPoll::Requeue(task) => self.local.borrow_mut().ready.push(task),
                     // The future is gone, so releasing the set's reference and
                     // the token's runs no user code.
-                    AfterPoll::Retire(task) => drop(shared.owned.remove(&task)),
+                    AfterPoll::Retire(task) => drop(shared.tasks.remove(&task)),
                 }
             }
 
-            // The root has no Tasks entry. Its flag also records notifications
+            // The root has no ready token. Its flag also records notifications
             // forwarded from other workers through the mailbox.
             let poll_root = mem::take(&mut self.local.borrow_mut().root_ready);
 
@@ -1908,7 +1918,7 @@ impl crate::Runner for Runner {
             panicker,
             workers: Arc::new(Workers::default()),
             // The calling thread is the only ordinary worker.
-            owned: Owned::new(1),
+            tasks: Tasks::new(1),
             storage,
             network,
             network_buffer_pool,

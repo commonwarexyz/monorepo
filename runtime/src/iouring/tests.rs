@@ -5,7 +5,7 @@ use super::{
         driver::tests::fail_after_completion,
         operation::Operation,
         request::{RecvRequest, Request},
-        task::tests::AFTER_INSERT,
+        tasks::tests::AFTER_INSERT,
     },
     *,
 };
@@ -1645,7 +1645,7 @@ fn test_unpolled_task_disposal_is_contained() {
 #[test]
 fn test_self_woken_task_requeues_behind_queued_work() {
     // A task that wakes itself during its poll runs again only after the work
-    // already queued, and completed tasks leave the owned-task set.
+    // already queued, and completed tasks leave the task set.
     let order = Runner::new(config()).start(|context| async move {
         let order = Arc::new(Mutex::new(Vec::new()));
         let first = context.child("first").spawn({
@@ -1664,7 +1664,7 @@ fn test_self_woken_task_requeues_behind_queued_work() {
         second.await.unwrap();
 
         // Only the runner's service task is still registered.
-        assert_eq!(context.shared.owned.live(), 1);
+        assert_eq!(context.shared.tasks.live(), 1);
         order.lock().clone()
     });
     assert_eq!(order, ["first", "second", "first again"]);
@@ -1743,15 +1743,15 @@ fn test_shutdown_cancels_tasks_before_destruction() {
                     );
                     tree.register(handle.aborter().unwrap());
                     let shared = context.shared.clone();
-                    let task = Task::new(future, &shared.owned, context.origin.clone());
+                    let origin = context.origin.clone();
                     if matches!(placement, Placement::Foreign) {
                         thread::spawn(move || {
-                            assert!(Tasks::register(&shared.owned, task).is_ok())
+                            assert!(shared.tasks.register(future, origin).is_ok())
                         })
                         .join()
                         .unwrap();
                     } else {
-                        assert!(Tasks::register(&shared.owned, task).is_ok());
+                        assert!(shared.tasks.register(future, origin).is_ok());
                     }
 
                     handles.push(handle);
@@ -1784,10 +1784,10 @@ fn test_shutdown_cancels_tasks_before_destruction() {
 }
 
 #[test]
-fn test_foreign_spawn_joins_the_owned_set_before_its_worker_runs() {
+fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
     Runner::new(config()).start(|context| async move {
         // Only the runner's service task is registered.
-        assert_eq!(context.shared.owned.live(), 1);
+        assert_eq!(context.shared.tasks.live(), 1);
 
         // The root has not yielded, so the worker has not taken the first
         // token from its mailbox, yet the set already retains the task.
@@ -1795,11 +1795,11 @@ fn test_foreign_spawn_joins_the_owned_set_before_its_worker_runs() {
         let handle = thread::spawn(move || remote.spawn(|_| async {}))
             .join()
             .unwrap();
-        assert_eq!(context.shared.owned.live(), 2);
+        assert_eq!(context.shared.tasks.live(), 2);
 
         // Completion on the worker removes it again.
         handle.await.unwrap();
-        assert_eq!(context.shared.owned.live(), 1);
+        assert_eq!(context.shared.tasks.live(), 1);
     });
 }
 
@@ -1845,7 +1845,7 @@ fn test_shutdown_between_registration_and_first_token_clears_the_task() {
 }
 
 #[test]
-fn test_spawn_refused_by_the_closed_owned_set_is_disposed_on_its_caller() {
+fn test_spawn_refused_by_the_closed_task_set_is_disposed_on_its_caller() {
     /// Record the thread that drops a future.
     struct ThreadDrop(Arc<Mutex<Vec<thread::ThreadId>>>);
 
@@ -1863,7 +1863,7 @@ fn test_spawn_refused_by_the_closed_owned_set_is_disposed_on_its_caller() {
                 // Close the set as the worker does when it begins closing,
                 // leaving the origin open so the factory runs and only
                 // registration can refuse the task.
-                context.shared.owned.close();
+                context.shared.tasks.close();
                 let spawner = context.child("refused");
                 let spawn = move || {
                     let payload = ThreadDrop(drops.clone());

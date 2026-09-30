@@ -1,8 +1,8 @@
 //! Single-allocation tasks that double as their wakers.
 //!
 //! A spawned task is one [`Cell`]: a type-erased [`Header`], the concrete
-//! future, and a trailer with the task's [`Links`] in the runner's owned-task
-//! set. The header holds the task's [`State`], a vtable for the erased future,
+//! future, and a trailer with the task's [`Links`] in the runner's task set.
+//! The header holds the task's [`State`], a vtable for the erased future,
 //! the mailbox of the worker that owns the task, and the identity of the set
 //! that retains it. A [`Task`] and a task's [`Waker`] are each a thin pointer
 //! to that header holding one reference, so cloning either counts a reference,
@@ -40,14 +40,14 @@
 //!
 //! # Ownership
 //!
-//! Every ready token, cloned waker, and owned-task set entry holds one
-//! reference, counted in the state word above the lifecycle bits. Transitions
-//! that create or consume a reference change the count in the same exchange: a
-//! wake by reference that publishes counts the token's, a wake by value hands
-//! its reference to the token it publishes or releases it, and a poll that ends
+//! Every ready token, cloned waker, and task set entry holds one reference,
+//! counted in the state word above the lifecycle bits. Transitions that create
+//! or consume a reference change the count in the same exchange: a wake by
+//! reference that publishes counts the token's, a wake by value hands its
+//! reference to the token it publishes or releases it, and a poll that ends
 //! idle releases its token's. The waker passed to a poll borrows its token's.
 //!
-//! The runner's [`Owned`] set retains every registered task so teardown can
+//! The runner's [`Tasks`] set retains every registered task so teardown can
 //! drop its future, and completion removes it on whichever thread finishes the
 //! task. A future is dropped in place when its task completes or is cleared,
 //! and freeing a cell whose future is still present panics, so releasing a
@@ -60,8 +60,8 @@
 
 use super::{
     mailbox::{Mailbox, Message},
-    owned::{Links, Owned},
     runtime::{Local, Panics},
+    tasks::{Links, Tasks},
 };
 use crossbeam_utils::CachePadded;
 use std::{
@@ -321,8 +321,8 @@ impl State {
                 // No wake arrived. The next wake publishes a new token, so
                 // this one is released in the same exchange.
                 RUNNING => {
-                    // The owned-task set holds a reference to every task that
-                    // can go idle, so the token's is never the last.
+                    // The task set holds a reference to every task that can go
+                    // idle, so the token's is never the last.
                     assert!(
                         state & REFS > REF_ONE,
                         "idle task would release its last reference"
@@ -424,7 +424,7 @@ pub enum AfterPoll {
     /// Queue the carried token again. A wake arrived during the pending poll,
     /// so the task needs another poll.
     Requeue(Task),
-    /// Remove the carried task from its [`Owned`] set. The future returned
+    /// Remove the carried task from its [`Tasks`] set. The future returned
     /// ready, panicked, or was cleared during the poll, and has been dropped.
     Retire(Task),
 }
@@ -462,12 +462,12 @@ pub struct Header {
     /// Worker that owns the task, reached by foreign wakes, without extending
     /// its lifetime.
     mailbox: Weak<Mailbox>,
-    /// Identity of the [`Owned`] set that retains the task.
+    /// Identity of the [`Tasks`] set that retains the task.
     owner: NonZeroU64,
 }
 
 impl Header {
-    /// Identity of the [`Owned`] set that retains the task.
+    /// Identity of the [`Tasks`] set that retains the task.
     pub const fn owner(&self) -> NonZeroU64 {
         self.owner
     }
@@ -499,7 +499,7 @@ struct Cell<F> {
     header: Header,
     /// The future, `None` once completed or cleared.
     future: UnsafeCell<Option<F>>,
-    /// Links in the owned-task set, after the future as in tokio's trailer,
+    /// Links in the task set, after the future as in tokio's trailer,
     /// since only insertion, removal, and teardown touch them.
     links: Links,
     /// Sets the cell's alignment with a zero-sized field.
@@ -573,14 +573,14 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
 
 /// An owning reference to a task, counted in its state.
 ///
-/// Ready tokens and owned-task set entries are `Task`s. Dropping the last
+/// Ready tokens and task set entries are `Task`s. Dropping the last
 /// reference frees the cell, whose future must already be gone.
 pub struct Task(NonNull<Header>);
 
 // SAFETY: `Task::new` requires `F: Send`, and the header (including its
 // `Weak<Mailbox>`) is `Send + Sync`. Only the thread that wins the running
 // state or clears a nonrunning task accesses the future, and only the holder
-// of the task's owned-set shard lock accesses its links.
+// of the task's shard lock in the task set accesses its links.
 unsafe impl Send for Task {}
 // SAFETY: the header is `Sync`, and `F: Send` permits `clear` to drop the
 // future on another thread. Its state transition grants exclusive access,
@@ -622,10 +622,10 @@ impl Drop for Task {
 }
 
 impl Task {
-    /// Allocate a task for `owned` to retain, owned by the worker behind
+    /// Allocate a task for `tasks` to retain, owned by the worker behind
     /// `mailbox`, with its first poll queued. Returns its one reference, which
     /// is that poll's token.
-    pub fn new<F>(future: F, owned: &Owned, mailbox: Weak<Mailbox>) -> Self
+    pub fn new<F>(future: F, tasks: &Tasks, mailbox: Weak<Mailbox>) -> Self
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -634,7 +634,7 @@ impl Task {
                 state: State::queued(),
                 vtable: Cell::<F>::vtable(),
                 mailbox,
-                owner: owned.id(),
+                owner: tasks.id(),
             },
             future: UnsafeCell::new(Some(future)),
             links: Links::default(),
@@ -729,7 +729,7 @@ impl Task {
     ///
     /// A closing worker, or a closed or dropped mailbox, releases the token.
     /// The task then stays queued until teardown clears it.
-    fn schedule(self) {
+    pub fn schedule(self) {
         // On the owning thread, the token goes straight to the ready queue.
         // Polls and destructors run without the local borrow, so a wake from
         // inside one can take it here.
@@ -740,7 +740,7 @@ impl Task {
             // Releasing a reference runs no user code, so dropping it under
             // the borrow is fine.
             if !local.closing {
-                local.tasks.push(self);
+                local.ready.push(self);
             }
 
             return;
@@ -935,70 +935,35 @@ impl Wake for RootWaker {
 
 /// One worker's ready tokens, touched only by that worker.
 #[derive(Default)]
-pub struct Tasks {
-    /// Ready tokens in FIFO order.
-    ready: VecDeque<Task>,
+pub struct Ready {
+    /// Tokens in FIFO order.
+    tokens: VecDeque<Task>,
 }
 
-impl Tasks {
-    /// Whether the worker behind `mailbox` currently accepts tasks.
-    ///
-    /// This does not reserve a place. Registration checks again after construction.
-    pub fn is_open(mailbox: &Weak<Mailbox>) -> bool {
-        if let Some(local) = Local::owner(mailbox) {
-            // The owning thread can check closure without locking the mailbox.
-            return !local.borrow().closing;
-        }
-
-        // Foreign callers use the mailbox's acceptance state.
-        mailbox.upgrade().is_some_and(|mailbox| mailbox.is_open())
-    }
-
-    /// Register a new task: retain it in `owned`, then deliver its first
-    /// poll's token, which is the reference passed in, to the owning worker
-    /// directly or through its mailbox.
-    ///
-    /// Returns the task if `owned` has closed. The caller clears its future
-    /// outside worker borrows.
-    pub fn register(owned: &Owned, task: Task) -> Result<(), Task> {
-        // The factory runs after is_open, so the set checks closure again. The
-        // set closes before the worker's mailbox, so a token the mailbox
-        // refuses belongs to a task accepted before closure, which teardown
-        // clears.
-        if !owned.insert(&task) {
-            return Err(task);
-        }
-
-        #[cfg(test)]
-        tests::after_insert();
-
-        task.schedule();
-        Ok(())
-    }
-
+impl Ready {
     /// Queue a ready token.
     #[inline]
     pub fn push(&mut self, task: Task) {
-        self.ready.push_back(task);
+        self.tokens.push_back(task);
     }
 
     /// Take the oldest ready token.
     #[inline]
     pub fn pop(&mut self) -> Option<Task> {
-        self.ready.pop_front()
+        self.tokens.pop_front()
     }
 
-    /// Whether at least one ready token is queued.
-    pub fn is_ready(&self) -> bool {
-        !self.ready.is_empty()
+    /// Whether no ready token is queued.
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
     }
 
     /// Release every ready token.
     ///
-    /// Each token is a second reference to a task the owned-task set retains,
-    /// so releasing them runs no user code.
+    /// Each token is a second reference to a task the task set retains, so
+    /// releasing them runs no user code.
     pub fn clear(&mut self) {
-        self.ready.clear();
+        self.tokens.clear();
     }
 }
 
@@ -1007,7 +972,6 @@ pub mod tests {
     use super::*;
     use commonware_utils::sync::Mutex;
     use std::{
-        cell::RefCell,
         future::{pending, poll_fn},
         marker::PhantomPinned,
         ptr,
@@ -1017,20 +981,6 @@ pub mod tests {
         },
         thread,
     };
-
-    thread_local! {
-        /// Callback run once by this thread's next registration, after the set
-        /// retains the task and before its first token is delivered.
-        pub static AFTER_INSERT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
-    }
-
-    /// Run the callback a test installed for the window between retention and
-    /// first-token delivery.
-    pub fn after_insert() {
-        if let Some(callback) = AFTER_INSERT.take() {
-            callback();
-        }
-    }
 
     /// Record when a task's captured state is destroyed.
     struct DropCount(Arc<AtomicUsize>);
@@ -1155,23 +1105,23 @@ pub mod tests {
         Arc::new(Mailbox::new().unwrap())
     }
 
-    /// Retain a task owned by `mailbox` in `owned` and queue its first token
-    /// in `tasks`, returning the caller's own reference.
+    /// Retain a task owned by `mailbox` in `set` and queue its first token in
+    /// `ready`, returning the caller's own reference.
     fn insert(
-        owned: &Owned,
-        tasks: &mut Tasks,
+        set: &Tasks,
+        ready: &mut Ready,
         mailbox: &Arc<Mailbox>,
         future: impl Future<Output = ()> + Send + 'static,
     ) -> Task {
-        let task = Task::new(future, owned, Arc::downgrade(mailbox));
-        assert!(owned.insert(&task));
-        tasks.push(task.clone());
+        let task = Task::new(future, set, Arc::downgrade(mailbox));
+        assert!(set.insert(&task));
+        ready.push(task.clone());
         task
     }
 
-    /// Remove a completed task from `owned`, which must still retain it.
-    fn retire(owned: &Owned, task: Task) {
-        assert!(owned.remove(&task).is_some(), "completed task not retained");
+    /// Remove a completed task from `set`, which must still retain it.
+    fn retire(set: &Tasks, task: Task) {
+        assert!(set.remove(&task).is_some(), "completed task not retained");
     }
 
     /// References held to `task`, including the caller's.
@@ -1212,8 +1162,8 @@ pub mod tests {
     #[test]
     fn test_links_follow_the_future() {
         fn check<F: Future<Output = ()> + Send + 'static>(future: F) {
-            let owned = Owned::new(1);
-            let task = Task::new(future, &owned, Weak::new());
+            let set = Tasks::new(1);
+            let task = Task::new(future, &set, Weak::new());
             let cell = task.as_ptr().cast::<Cell<F>>();
             // SAFETY: the task's reference keeps the cell alive, and `new`
             // leaked a `Cell<F>` at this pointer.
@@ -1256,7 +1206,7 @@ pub mod tests {
         let mailbox = mailbox();
 
         // A new task holds only its first token and one mailbox reference.
-        let task = Task::new(pending::<()>(), &Owned::new(1), Arc::downgrade(&mailbox));
+        let task = Task::new(pending::<()>(), &Tasks::new(1), Arc::downgrade(&mailbox));
         assert_eq!(refs(&task), 1);
         assert_eq!(Arc::weak_count(&mailbox), 1);
 
@@ -1291,10 +1241,10 @@ pub mod tests {
     #[test]
     fn test_foreign_wakes_coalesce_into_one_token() {
         let mailbox = mailbox();
-        let owned = Owned::new(1);
-        let mut tasks = Tasks::default();
-        let task = insert(&owned, &mut tasks, &mailbox, pending());
-        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
+        let set = Tasks::new(1);
+        let mut ready = Ready::default();
+        let task = insert(&set, &mut ready, &mailbox, pending());
+        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
 
         // Wakes from a thread without a worker travel through the mailbox, and
         // duplicates publish one token. The coalesced wake by value releases
@@ -1312,11 +1262,11 @@ pub mod tests {
         assert_eq!(tokens.len(), 1);
 
         // The token polls the task again, which leaves it idle once more.
-        tasks.push(tokens.pop().unwrap());
-        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
+        ready.push(tokens.pop().unwrap());
+        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
         assert!(scheduled(&mailbox).is_empty());
         task.clear();
-        drop(owned.teardown());
+        drop(set.teardown());
     }
 
     /// A running poll keeps exclusive access before and after a wake.
@@ -1339,11 +1289,11 @@ pub mod tests {
     fn test_wakes_during_poll_coalesce_into_one_requeue() {
         let drops = Arc::new(AtomicUsize::new(0));
         let mailbox = mailbox();
-        let owned = Owned::new(1);
-        let mut tasks = Tasks::default();
+        let set = Tasks::new(1);
+        let mut ready = Ready::default();
         let task = insert(
-            &owned,
-            &mut tasks,
+            &set,
+            &mut ready,
             &mailbox,
             SelfWaker {
                 wakes: 3,
@@ -1354,7 +1304,7 @@ pub mod tests {
 
         // Wakes during the poll leave exactly one successor token, returned
         // to the poller rather than published.
-        let AfterPoll::Requeue(token) = tasks.pop().unwrap().poll() else {
+        let AfterPoll::Requeue(token) = ready.pop().unwrap().poll() else {
             panic!("self-woken pending poll must requeue");
         };
         assert_eq!(token.as_ptr(), task.as_ptr());
@@ -1365,7 +1315,7 @@ pub mod tests {
             panic!("final poll must complete");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-        retire(&owned, token);
+        retire(&set, token);
         assert!(scheduled(&mailbox).is_empty());
         assert_eq!(refs(&task), 1);
     }
@@ -1376,81 +1326,77 @@ pub mod tests {
     fn test_poll_panic_completes_the_task_and_leaves_the_set() {
         let drops = Arc::new(AtomicUsize::new(0));
         let mailbox = mailbox();
-        let owned = Owned::new(1);
-        let mut tasks = Tasks::default();
+        let set = Tasks::new(1);
+        let mut ready = Ready::default();
         let guard = DropCount(drops.clone());
-        let first = insert(&owned, &mut tasks, &mailbox, async move {
+        let first = insert(&set, &mut ready, &mailbox, async move {
             let _guard = guard;
             panic!("poll panic");
         });
         let waker = Waker::clone(&first.waker());
 
         // The panicking poll completes the task and drops its future.
-        let AfterPoll::Retire(token) = tasks.pop().unwrap().poll() else {
+        let AfterPoll::Retire(token) = ready.pop().unwrap().poll() else {
             panic!("panicking poll must complete the task");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-        retire(&owned, token);
-        assert_eq!(owned.live(), 0);
+        retire(&set, token);
+        assert_eq!(set.live(), 0);
 
         // The completed task's waker neither publishes nor reaches the next
         // task.
-        let second = insert(&owned, &mut tasks, &mailbox, pending());
-        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
+        let second = insert(&set, &mut ready, &mailbox, pending());
+        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
         waker.wake_by_ref();
         assert!(scheduled(&mailbox).is_empty());
         drop(waker);
         assert_eq!(refs(&first), 1);
-        assert_eq!(owned.live(), 1);
+        assert_eq!(set.live(), 1);
         second.clear();
-        drop(owned.teardown());
+        drop(set.teardown());
     }
 
     /// A task registered from a thread without its worker joins the set at
     /// once and sends its first token through the mailbox. A closed or dropped
     /// mailbox drops the token and leaves the task to teardown, and a closed
-    /// set returns the task to the caller with its future intact.
+    /// set returns the new task to the caller with its future intact.
     #[test]
     fn test_foreign_registration_retains_the_task_and_mails_its_token() {
         let drops = Arc::new(AtomicUsize::new(0));
         let mailbox = mailbox();
-        let owned = Owned::new(1);
+        let set = Tasks::new(1);
 
         // The set retains the task, and its first token arrives as a wake.
-        let task = Task::new(pending(), &owned, Arc::downgrade(&mailbox));
-        assert!(Tasks::register(&owned, task.clone()).is_ok());
-        assert_eq!(owned.live(), 1);
+        assert!(set.register(pending(), Arc::downgrade(&mailbox)).is_ok());
+        assert_eq!(set.live(), 1);
         let tokens = scheduled(&mailbox);
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].as_ptr(), task.as_ptr());
+        assert_eq!(refs(&tokens[0]), 2);
         drop(tokens);
 
         // A closed or dropped mailbox releases the token, and the set keeps
         // the task until teardown clears it.
         drop(mailbox.close());
-        let closed = Task::new(pending(), &owned, Arc::downgrade(&mailbox));
-        assert!(Tasks::register(&owned, closed.clone()).is_ok());
+        assert!(set.register(pending(), Arc::downgrade(&mailbox)).is_ok());
         let gone = Arc::downgrade(&mailbox);
         drop(mailbox);
-        let dropped = Task::new(pending(), &owned, gone);
-        assert!(Tasks::register(&owned, dropped.clone()).is_ok());
-        assert_eq!(owned.live(), 3);
-        for task in [&task, &closed, &dropped] {
-            assert_eq!(refs(task), 2);
-        }
+        assert!(set.register(pending(), gone).is_ok());
+        assert_eq!(set.live(), 3);
 
-        // A closed set rejects the task without dropping its future.
-        let retained = owned.teardown();
+        // Closing hands out each task with the set's reference as its only
+        // one, and a closed set rejects a new task without dropping its future.
+        let retained = set.teardown();
+        assert_eq!(retained.len(), 3);
+        assert!(retained.iter().all(|task| refs(task) == 1));
         let guard = DropCount(drops.clone());
-        let late = Task::new(
+        let registered = set.register(
             async move {
                 let _guard = guard;
                 pending::<()>().await;
             },
-            &owned,
             Weak::new(),
         );
-        let Err(rejected) = Tasks::register(&owned, late) else {
+        let Err(rejected) = registered else {
             panic!("a closed set must reject the task");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 0);
@@ -1466,14 +1412,14 @@ pub mod tests {
     /// leaking it.
     #[test]
     fn test_wake_to_a_closed_or_dropped_mailbox_releases_its_token() {
-        let owned = Owned::new(1);
-        let mut tasks = Tasks::default();
+        let set = Tasks::new(1);
+        let mut ready = Ready::default();
         let closed = mailbox();
         let dropped = mailbox();
-        let first = insert(&owned, &mut tasks, &closed, pending());
-        let second = insert(&owned, &mut tasks, &dropped, pending());
+        let first = insert(&set, &mut ready, &closed, pending());
+        let second = insert(&set, &mut ready, &dropped, pending());
         for _ in 0..2 {
-            assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
+            assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
         }
 
         // Each wake publishes a token no worker will take, and releases it,
@@ -1486,7 +1432,7 @@ pub mod tests {
         assert_eq!(refs(&second), 2);
 
         // Both tasks stay queued without a token until teardown clears them.
-        for task in owned.teardown() {
+        for task in set.teardown() {
             task.clear();
         }
     }
@@ -1498,11 +1444,11 @@ pub mod tests {
         for complete in [false, true] {
             let drops = Arc::new(AtomicUsize::new(0));
             let mailbox = mailbox();
-            let owned = Owned::new(1);
-            let mut tasks = Tasks::default();
+            let set = Tasks::new(1);
+            let mut ready = Ready::default();
             let task = insert(
-                &owned,
-                &mut tasks,
+                &set,
+                &mut ready,
                 &mailbox,
                 WakesOnDrop {
                     waker: None,
@@ -1511,15 +1457,15 @@ pub mod tests {
                 },
             );
 
-            match tasks.pop().unwrap().poll() {
-                AfterPoll::Retire(token) => retire(&owned, token),
+            match ready.pop().unwrap().poll() {
+                AfterPoll::Retire(token) => retire(&set, token),
                 AfterPoll::Done => task.clear(),
                 _ => panic!("the poll must complete or leave the task idle"),
             }
             assert_eq!(drops.load(Ordering::Relaxed), 1);
             assert!(scheduled(&mailbox).is_empty());
             assert_eq!(refs(&task), if complete { 1 } else { 2 });
-            drop(owned.teardown());
+            drop(set.teardown());
         }
     }
 
@@ -1529,11 +1475,11 @@ pub mod tests {
     fn test_clear_detaches_tasks_in_each_state() {
         let drops = Arc::new(AtomicUsize::new(0));
         let mailbox = mailbox();
-        let owned = Owned::new(1);
-        let mut tasks = Tasks::default();
+        let set = Tasks::new(1);
+        let mut ready = Ready::default();
         let handles = [(); 3].map(|_| {
             let guard = DropCount(drops.clone());
-            insert(&owned, &mut tasks, &mailbox, async move {
+            insert(&set, &mut ready, &mailbox, async move {
                 let _guard = guard;
                 pending::<()>().await;
             })
@@ -1541,19 +1487,19 @@ pub mod tests {
 
         // Leave one task idle, one queued with its token held outside the
         // worker, and one queued with its token still in the ready queue.
-        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
-        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
+        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
+        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
         handles[1].wake_by_ref();
         let mut tokens = scheduled(&mailbox);
         assert_eq!(tokens.len(), 1);
 
         // Teardown releases the ready tokens and closes the set, which hands
         // out every task without dropping any future.
-        tasks.clear();
-        assert!(!tasks.is_ready());
-        let retired = owned.teardown();
+        ready.clear();
+        assert!(ready.is_empty());
+        let retired = set.teardown();
         assert_eq!(retired.len(), 3);
-        assert!(owned.drain(0).next().is_none());
+        assert!(set.drain(0).next().is_none());
         assert_eq!(drops.load(Ordering::Relaxed), 0);
 
         // Clearing each detached task drops its future once, even when repeated.
@@ -1573,7 +1519,7 @@ pub mod tests {
         assert_eq!(refs(&handles[1]), 2);
 
         // A closed set has already handed out every task.
-        assert!(owned.remove(&handles[0]).is_none());
+        assert!(set.remove(&handles[0]).is_none());
         drop(retired);
         for task in &handles {
             assert_eq!(refs(task), 1);
@@ -1587,13 +1533,13 @@ pub mod tests {
         for wake_first in [false, true] {
             let drops = Arc::new(AtomicUsize::new(0));
             let mailbox = mailbox();
-            let owned = Owned::new(1);
-            let mut tasks = Tasks::default();
+            let set = Tasks::new(1);
+            let mut ready = Ready::default();
 
             // The future clears its own task mid-poll, standing in for
             // teardown on another thread while this one is polling.
             let cell = Arc::new(Mutex::new(None::<Task>));
-            let task = insert(&owned, &mut tasks, &mailbox, {
+            let task = insert(&set, &mut ready, &mailbox, {
                 let guard = DropCount(drops.clone());
                 let cell = Arc::clone(&cell);
                 poll_fn(move |cx| {
@@ -1612,11 +1558,11 @@ pub mod tests {
 
             // The poller completes the task and drops the future, and a later
             // wake publishes nothing.
-            let AfterPoll::Retire(token) = tasks.pop().unwrap().poll() else {
+            let AfterPoll::Retire(token) = ready.pop().unwrap().poll() else {
                 panic!("a task cleared during its poll must complete");
             };
             assert_eq!(drops.load(Ordering::Relaxed), 1);
-            retire(&owned, token);
+            retire(&set, token);
             task.wake_by_ref();
             assert!(scheduled(&mailbox).is_empty());
             cell.lock().take();
@@ -1630,20 +1576,20 @@ pub mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let mailbox = mailbox();
         let baseline = Arc::weak_count(&mailbox);
-        let owned = Owned::new(1);
-        let mut tasks = Tasks::default();
+        let set = Tasks::new(1);
+        let mut ready = Ready::default();
         let guard = DropCount(drops.clone());
-        let task = insert(&owned, &mut tasks, &mailbox, async move {
+        let task = insert(&set, &mut ready, &mailbox, async move {
             let _guard = guard;
             pending::<()>().await;
         });
         let waker = Waker::clone(&task.waker());
-        assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
+        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
 
         // Clear the future and remove the set's entry, leaving the caller's
         // reference and the cloned waker's.
         task.clear();
-        retire(&owned, task.clone());
+        retire(&set, task.clone());
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert_eq!(refs(&task), 2);
 
@@ -1671,18 +1617,18 @@ pub mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let mailbox = mailbox();
         let baseline = Arc::weak_count(&mailbox);
-        let owned = Owned::new(1);
-        let mut tasks = Tasks::default();
+        let set = Tasks::new(1);
+        let mut ready = Ready::default();
         let guard = DropCount(drops.clone());
-        let task = insert(&owned, &mut tasks, &mailbox, async move {
+        let task = insert(&set, &mut ready, &mailbox, async move {
             let _guard = guard;
         });
         let waker = Waker::clone(&task.waker());
 
-        let AfterPoll::Retire(token) = tasks.pop().unwrap().poll() else {
+        let AfterPoll::Retire(token) = ready.pop().unwrap().poll() else {
             panic!("ready future must complete");
         };
-        retire(&owned, token);
+        retire(&set, token);
         drop(task);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
 
@@ -1699,11 +1645,11 @@ pub mod tests {
             let drops = Arc::new(AtomicUsize::new(0));
             let mailbox = mailbox();
             let baseline = Arc::weak_count(&mailbox);
-            let owned = Owned::new(1);
-            let mut tasks = Tasks::default();
+            let set = Tasks::new(1);
+            let mut ready = Ready::default();
             let task = insert(
-                &owned,
-                &mut tasks,
+                &set,
+                &mut ready,
                 &mailbox,
                 PanicsOnDrop {
                     complete,
@@ -1711,18 +1657,18 @@ pub mod tests {
                 },
             );
             let waker = Waker::clone(&task.waker());
-            let outcome = tasks.pop().unwrap().poll();
+            let outcome = ready.pop().unwrap().poll();
 
             if complete {
                 // The ready future's destructor panics inside the poll.
                 let AfterPoll::Retire(token) = outcome else {
                     panic!("ready future must complete despite its destructor panic");
                 };
-                retire(&owned, token);
+                retire(&set, token);
             } else {
                 // Teardown clears the idle task and contains its destructor panic.
                 assert!(matches!(outcome, AfterPoll::Done));
-                for retired in owned.teardown() {
+                for retired in set.teardown() {
                     assert!(Panics::contain(|| retired.clear()).is_none());
                 }
             }
@@ -1749,12 +1695,12 @@ pub mod tests {
         assert!(align > std::mem::align_of::<CachePadded<()>>());
         for complete in [true, false] {
             let mailbox = mailbox();
-            let owned = Owned::new(1);
-            let mut tasks = Tasks::default();
+            let set = Tasks::new(1);
+            let mut ready = Ready::default();
             let addresses = Arc::new(Mutex::new(Vec::new()));
             let task = insert(
-                &owned,
-                &mut tasks,
+                &set,
+                &mut ready,
                 &mailbox,
                 OverAligned {
                     remaining: AtomicUsize::new(if complete { 3 } else { usize::MAX }),
@@ -1765,19 +1711,19 @@ pub mod tests {
 
             // Two polls leave the task idle, and each wake queues it again.
             for _ in 0..2 {
-                assert!(matches!(tasks.pop().unwrap().poll(), AfterPoll::Done));
+                assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
                 task.wake_by_ref();
-                tasks.push(scheduled(&mailbox).pop().unwrap());
+                ready.push(scheduled(&mailbox).pop().unwrap());
             }
             if complete {
                 // The third poll completes the future, which drops in place.
-                let AfterPoll::Retire(token) = tasks.pop().unwrap().poll() else {
+                let AfterPoll::Retire(token) = ready.pop().unwrap().poll() else {
                     panic!("the third poll must complete");
                 };
-                retire(&owned, token);
+                retire(&set, token);
             } else {
                 // Teardown drops the idle future in place.
-                for retired in owned.teardown() {
+                for retired in set.teardown() {
                     retired.clear();
                 }
             }
@@ -1812,7 +1758,7 @@ mod loom_tests {
     }
 
     /// State of a registered task whose first poll is queued: the token's
-    /// reference and the owned set's.
+    /// reference and the task set's.
     fn registered() -> State {
         let state = State::queued();
         state.retain();
@@ -1845,7 +1791,7 @@ mod loom_tests {
     #[test]
     fn test_wake_by_value_racing_a_pending_poll_keeps_the_count() {
         loom::model(|| {
-            // References: the polled token, the owned set's, and the waker's.
+            // References: the polled token, the task set's, and the waker's.
             let state = Arc::new(registered());
             state.retain();
             assert!(state.start_poll());
@@ -1857,7 +1803,7 @@ mod loom_tests {
             let requeued = matches!(state.finish_pending(), AfterPending::Requeue);
             let published = wake.join().unwrap();
 
-            // One token remains, holding one reference beside the owned set's.
+            // One token remains, holding one reference beside the task set's.
             assert_ne!(requeued, published);
             assert_eq!(refs(&state), 2);
         });

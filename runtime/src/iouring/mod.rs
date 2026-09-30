@@ -61,7 +61,6 @@
 mod driver;
 mod mailbox;
 pub(crate) mod operation;
-mod owned;
 mod registration;
 pub(crate) mod request;
 mod runtime;
@@ -70,6 +69,7 @@ mod sleep;
 pub(crate) mod sockaddr;
 mod spinner;
 mod task;
+mod tasks;
 mod timeout;
 mod waiter;
 mod waker;
