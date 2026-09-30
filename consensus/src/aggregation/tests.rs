@@ -1034,7 +1034,7 @@ fn test_recovery_threshold_cancellation_and_window_bound() {
         let participant = fixture.participants[0].clone();
         let (oracle, mut registrations) =
             simulation(context.child("simulation"), &fixture, false).await;
-        let application = ClosedApplication::default();
+        let application = PendingApplication::default();
         let requested = application.requested.clone();
         let recoverer = RecordingRecoverer::default();
         let events = recoverer.events.clone();
@@ -1060,7 +1060,7 @@ fn test_recovery_threshold_cancellation_and_window_bound() {
         while requested.lock().len() < 2 {
             context.sleep(Duration::from_millis(1)).await;
         }
-        assert_eq!(requested.lock().as_slice(), &[first, second]);
+        assert!(requested.lock().keys().eq(&[first, second]));
         context.sleep(Duration::from_millis(99)).await;
         assert!(events.lock().is_empty());
         context.sleep(Duration::from_millis(2)).await;
@@ -1238,7 +1238,9 @@ fn test_closed_proposal_response_is_terminal() {
             simulation(context.child("simulation"), &fixture, false).await;
         let application = ClosedApplication::default();
         let requested = application.requested.clone();
-        let cfg = config(
+        let recoverer = RecordingRecoverer::rejecting_once();
+        let events = recoverer.events.clone();
+        let mut cfg = config(
             &context,
             fixture.schemes[0].clone(),
             application,
@@ -1252,14 +1254,21 @@ fn test_closed_proposal_response_is_terminal() {
                 window: 1,
             },
         );
+        cfg.recovery_after_rebroadcasts = NonZeroU64::new(1_000).unwrap();
+        cfg.recoverer = recoverer;
         let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
         let handle = engine.start(registrations.remove(&participant).unwrap());
 
-        while requested.lock().is_empty() {
-            context.sleep(Duration::from_millis(1)).await;
-        }
+        // A declined digest skips the rebroadcast threshold, and a rejected fetch is retried on
+        // the next tick.
+        let key = RecoveryKey {
+            namespace: RecoveryNamespace::derive(NAMESPACE),
+            epoch,
+            position,
+        };
         context.sleep(Duration::from_millis(100)).await;
         assert_eq!(requested.lock().as_slice(), &[position]);
+        assert_eq!(events.lock().as_slice(), &[(true, key), (true, key)]);
 
         assert_eq!(
             submit(

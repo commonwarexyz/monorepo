@@ -418,6 +418,7 @@ where
                         Err(err) => {
                             warn!(?err, %position, "automaton returned error");
                             self.metrics.digest.inc(Status::Dropped);
+                            self.recover_declined(position);
                         }
                     }
                 }
@@ -654,6 +655,17 @@ where
         if let Some(ack) = ack {
             sender.send(Recipients::All, ack, self.priority_acks);
         }
+    }
+
+    /// Recovers a position whose digest the application declined, without waiting for acks.
+    ///
+    /// A rejected fetch is retried on each later rebroadcast tick.
+    fn recover_declined(&mut self, position: Height) {
+        let Some(pending) = self.pending.get_mut(&position) else {
+            return;
+        };
+        pending.rebroadcasts = pending.rebroadcasts.max(self.recovery_after_rebroadcasts);
+        self.fetch_recovery(position);
     }
 
     const fn recovery_key(&self, position: Height) -> RecoveryKey {
