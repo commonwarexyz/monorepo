@@ -2,10 +2,6 @@
 n_cases = 65536
 hash = "c28b55d44ff803a04bfc4dbf07e8f94ff7e577dc43cef99c390caf3289706ce4"
 
-["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Activity<Scheme,Sha256Digest>>"]
-n_cases = 65536
-hash = "c1f41f4653cdccd7060e8367537aeb803d83021d10ace5d4f4cfe23fe9b1e59b"
-
 ["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Certificate<Scheme,Sha256Digest>>"]
 n_cases = 65536
 hash = "c7ed824caef05e558858a5566bf3ee8c15658fc3d261d9be73f48086069949b4"
@@ -13,6 +9,10 @@ hash = "c7ed824caef05e558858a5566bf3ee8c15658fc3d261d9be73f48086069949b4"
 ["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Item<Sha256Digest>>"]
 n_cases = 65536
 hash = "55b287b5530fc9ba77c45ec5030ada38f86b2ddf66a1595fde27d4699667b1a3"
+
+["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Journaled<Scheme,Sha256Digest>>"]
+n_cases = 65536
+hash = "d20fab64a4250b37244b1ce45fa7e062dacefbe56868e063f669f043e40a3d70"
 
 ["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<TipAck<Scheme,Sha256Digest>>"]
 n_cases = 65536
