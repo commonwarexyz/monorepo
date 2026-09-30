@@ -38,12 +38,14 @@ struct Epoch {
 
 /// Each epoch creates one account and transfers from three existing accounts. The first
 /// epoch also closes one account, so handoff must preserve both membership and absence.
+/// Every payer signs its vector root in `previous`, the close this epoch extends.
 async fn prepare_epoch(
     state: &TestState,
     fixture: &Fixture,
     epoch: u64,
     predecessor_liability: u64,
     committee: &Committee,
+    previous: Option<&Epoch>,
 ) -> Epoch {
     let deployment = *fixture.context.deployment();
     let fresh = SigningKey::from_seed(40_000 + epoch).public_key();
@@ -67,9 +69,6 @@ async fn prepare_epoch(
         fixture.operator.public_key(),
         &deposits,
         &withdrawals,
-        predecessor_liability,
-        98,
-        99,
         CloseLimits::protocol_maximum(),
         committee.commitment::<Sha256>(),
     )
@@ -78,6 +77,12 @@ async fn prepare_epoch(
         state,
         &deposits,
         &withdrawals,
+        previous.map_or(0..0, |previous| {
+            rows(&previous.context, previous.prepared.close())
+        }),
+        predecessor_liability,
+        98,
+        99,
         Floors {
             activity: 0,
             payouts: 0,
@@ -105,16 +110,21 @@ async fn prepare_epoch(
                     1,
                     vector.root::<Sha256, ShaDigest>().unwrap(),
                 ),
+                previous.map_or_else(empty_root, |previous| {
+                    predecessor(previous.prepared.close(), payer)
+                }),
                 private,
                 &fixture.operator,
             );
+            let authorization = SendAuthorization::from_raw_unchecked(
+                ack.body().clone(),
+                ack.predecessor(),
+                ack.payer_signature().clone(),
+            );
             Terminal {
-                authorization: SendAuthorization::from_raw_unchecked(
-                    ack.body().clone(),
-                    ack.payer_signature().clone(),
-                ),
+                operator_signature: bls_ack(&fixture.operator_bls_private, &authorization),
+                authorization,
                 vector,
-                operator_signature: bls_ack(&fixture.operator_bls_private, ack.body()),
             }
         })
         .collect();
@@ -151,6 +161,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
         EPOCH,
         fixture.context.predecessor_liability(),
         &committee_out,
+        None,
     )
     .await;
     let first_close = first.prepared.close();
@@ -234,9 +245,14 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
         EPOCH + 1,
         first.context.predecessor_liability() + 50 - first_close.withdrawal_total,
         &committee_in,
+        Some(&first),
     )
     .await;
     assert_eq!(*second.context.predecessor_root(), accepted_root);
+    assert_eq!(
+        second.context.predecessor_range(),
+        Some(first_close.roots.activity_range(&first.context).unwrap())
+    );
 
     let mut incomplete = journal.clone();
     incomplete.pop();

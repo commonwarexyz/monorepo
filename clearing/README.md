@@ -55,11 +55,26 @@ the complete close, the certificate guarantees at least one honest full-data
 holder. It does not guarantee certificate uniqueness: distinct valid closes may
 each certify, and ordered admission selects the canonical close.
 
-Admission adds the close to an ordered queue and permits the next epoch to
-register. Finalization waits for the challenge deadline and all earlier closes,
-then makes withdrawals claimable. A successful receipt challenge blocks the
+Epochs register in order without waiting for earlier closes. Deposits and
+chain-queued withdrawals enter one ordered inbox, and each registration pulls the
+next prefix of it, so later intake never changes a registered boundary. A deposit
+must be pulled before its inclusion deadline. From then on no timer applies, and
+the deposit follows its epoch to admission, or to a refund if the deployment
+faults first. When an epoch becomes the admission
+frontier, settlement binds it to its own admitted head and assigns its
+deadlines. Admission adds the close to an ordered queue and promotes the next
+registered epoch. Finalization waits for the challenge deadline and all
+earlier closes, then makes withdrawals claimable. A successful receipt challenge blocks the
 contested close and its descendants. Earlier clean closes can still finalize
 before recovery freezes the surviving state.
+
+Each payment body also signs the root of the payer's terminal vector in the
+preceding epoch. Validators read that root from the preceding admitted close's
+account rows, so a wallet can re-sign a payment the preceding epoch excludes and
+at most one copy settles. An operator that refuses a payment as stale, because
+its epoch is already cut, reports the payer's final vector in that epoch and the
+root the next epoch requires. The report is unsigned, so the wallet trusts it
+only as far as its receipts confirm it.
 
 ## Balances and evidence
 

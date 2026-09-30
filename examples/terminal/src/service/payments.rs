@@ -569,17 +569,9 @@ fn encode_outcome(kind: ResponseKind, outcome: SendsOutcome) -> Result<rpc::Resp
                     );
                     operator_rpc::AcceptSendResponse::Accepted(accepted.remove(0).into())
                 }
-                SendsOutcome::Stale {
-                    context,
-                    cumulative_debit,
-                    seq,
-                    entries,
-                } => operator_rpc::AcceptSendResponse::Stale {
-                    context,
-                    cumulative_debit,
-                    seq,
-                    entries,
-                },
+                SendsOutcome::Stale { context, report } => operator_rpc::AcceptSendResponse::Stale(
+                    operator_rpc::StaleResponse::new(context, report),
+                ),
             };
             response.encode()
         }

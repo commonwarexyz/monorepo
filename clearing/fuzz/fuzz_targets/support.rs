@@ -18,7 +18,7 @@ use commonware_storage::{
     qmdb::current::FixedConfig, translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
-use core::num::NonZeroU64;
+use core::{num::NonZeroU64, ops::Range};
 
 pub type TestState = Replica<deterministic::Context, Sha256, VerifyingKey>;
 
@@ -121,6 +121,7 @@ pub fn close_context(
     epoch: u64,
     operator: VerifyingKey,
     state: &TestState,
+    predecessor_rows: Range<u64>,
     predecessor_liability: u64,
     deposits: &DepositBatch<VerifyingKey>,
     withdrawals: &WithdrawalBatch<VerifyingKey, Digest>,
@@ -136,13 +137,19 @@ pub fn close_context(
         operator,
         deposits,
         withdrawals,
-        predecessor_liability,
-        admission,
-        challenge,
         limits,
         committee,
     )
     .unwrap()
-    .bind::<Sha256, _, _>(state, deposits, withdrawals, floors)
+    .bind::<Sha256, _, _>(
+        state,
+        deposits,
+        withdrawals,
+        predecessor_rows,
+        predecessor_liability,
+        admission,
+        challenge,
+        floors,
+    )
     .unwrap()
 }

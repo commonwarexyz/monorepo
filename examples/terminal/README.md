@@ -140,31 +140,48 @@ again.
 
 A close records the net effects of an epoch's payments. Validators certify it,
 then the chain **admits** it for settlement. Payments continue in the next epoch
-while earlier closes await finality:
+while earlier closes are certified, admitted, and finalized:
 
 ```text
   epoch e:    register -- payments -- cut -- certify -- admit ... finalize
-                                                        |
-  epoch e+1:                                            register -- ...
+                                       |
+  epoch e+1:                           register -- payments -- cut -- ...
 
   blocks:     [H] ---> [H+1] ---> [H+2] ---> ... (including empty blocks)
 ```
 
 With the generated defaults, the operator schedules a cut four blocks after
 registration, or sooner when the epoch fills. The wallet can request an earlier cut.
+Cuts do not wait for earlier closes, so closes can queue. Deposits wait in the
+settlement chain's inbox, and a registration must take each one within 400
+blocks. A registration takes only intake recorded before its block. From then on
+a deposit follows its epoch to admission, or to a refund if the deployment
+faults first, however long the closes queued ahead of it take.
 Validator panes show finalized block heights, hashes, and transaction counts.
 Empty blocks advance deadlines too.
 
+Each payment in epoch `e+1` also signs the root where the payer's vector ended
+in `e`, and validators reject a close that carries a payment bound to another
+root. A payment from `e` that reaches the operator after the cut is rejected as
+stale with the payer's final state in `e` and the root `e+1` requires. The
+operator keeps that state until `e+1` finalizes. The wallet then signs the
+remaining payments again in `e+1` against that root and keeps the originals as
+superseded copies until an admitted close decides them. A request that gets no
+response is resent unchanged, never treated as excluded. If the operator
+acknowledged a payment that no close can carry, the wallet keeps that receipt
+and challenges the admitted close that omits it until that close finalizes.
+
 The generated defaults allow 300 blocks for admission and one further block for
-challenges. These deadlines are fixed at registration: a close registered at
-height `H` cannot finalize before `H + 302`, even if admitted early. Earlier
-closes must finalize first.
+challenges. An epoch receives these deadlines once every earlier epoch is
+admitted, either at its registration or at its predecessor's admission. A close
+whose deadlines start at height `H` cannot finalize before `H + 302`, even if
+admitted early. Earlier closes must finalize first.
 
 ## What each process keeps
 
 | Process | Owned state |
 | --- | --- |
-| Wallet | SQLite payment intents, receipts, one exact active withdrawal authorization, its retirement deadline, and an optional verified payout claim. |
+| Wallet | SQLite payment intents, receipts, superseded copies of re-signed payments, receipts of abandoned payments until their close finalizes, one exact active withdrawal authorization, its retirement deadline, and an optional verified payout claim. |
 | Operator | SQLite live payments and certified close jobs, with an optional balance QMDB and two native log replicas for proofs. |
 | Validator | Certified chain state; per deployment, a Current Ordered MMB balance QMDB, cumulative activity and payout MMRs, and a local compact keyless QMDB for checkpoints and saved votes. |
 
@@ -201,13 +218,19 @@ choice; an offline replica does not delay other validators' pruning. Keep wallet
 databases and a replica with the required history available for old claims.
 Adjacent claimed positions coalesce, so fully settled history and intervening commit markers
 collapse into one range; fragmented claims still require proportional range state. Each finalization
-retires the previous finalized admission and anchor. The chain keeps the latest
-finalized descriptor and the live pending suffix; the fixed admission and challenge
-windows bound that suffix. Proof servers walk retained native rows and payment
-entries for activity proofs, and native payout outputs for claims under the current
-finalized payout head. Public Commit operations carry no metadata. Unavailable
-operations make reads retryable rather than proving absence. Native transaction
-and deposit idempotency records are retained for replay protection.
+retires the admission and anchor two epochs back. The chain keeps the two latest
+finalized descriptors and the live pending suffix, and validators keep the
+activity rows of both finalized closes. A wallet that returns after an epoch's
+successor finalizes can therefore still decide the payments it signed in both
+epochs. This is a fixed bound, not a liveness guarantee: a wallet away until
+the epoch after that finalizes decides a payment only through its saved
+receipts, and an undecided payment blocks the wallet's later payments. The
+fixed admission and challenge windows bound the pending suffix.
+Proof servers walk retained native rows and payment entries for activity proofs,
+and native payout outputs for claims under the current finalized payout head.
+Public Commit operations carry no metadata. Unavailable operations make reads
+retryable rather than proving absence. Native transaction and deposit idempotency
+records are retained for replay protection.
 
 Run `terminal-operator --node-dir <operator-directory> --no-proof-replica` to
 accept payments, propose closes, and accept certificates without constructing any

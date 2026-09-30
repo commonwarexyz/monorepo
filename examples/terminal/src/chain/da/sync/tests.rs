@@ -29,7 +29,7 @@ fn maximum_fixed_activity_page_fits_one_rpc_frame() {
         account: payer.public_key(),
         predecessor: u64::MAX,
         successor: u64::MAX,
-        outgoing: Some(SendAuthorization::sign(body, payer.signer())),
+        outgoing: Some(SendAuthorization::sign(body, send_root, payer.signer())),
         output: SettlementOutput::Withdrawal(u64::MAX),
     };
     let row = ActivityRecord::Row(AccountChange::from_row(&row, send_root));

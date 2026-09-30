@@ -11,10 +11,9 @@
 //!
 //! [`Node`] is the local [`Chain`] backend over that state: reads come from
 //! the node's own verified finalized database, and submissions go straight
-//! onto the settlement transaction channel. [`Observer`] rides the marshal
-//! reporter chain and surfaces each finalized block's deposit transactions
-//! toward the operator's staging, holding the block's acknowledgement until
-//! that staging is durable. [`Certifier`] is the close
+//! onto the settlement transaction channel. The operator observes deposits
+//! and chain-queued withdrawals through the certified inbox records they
+//! leave, which persist until a registration pulls them. [`Certifier`] is the close
 //! pipeline actor: it disseminates signed activity over the settlement DA
 //! channel, verifies matching validator-derived results, assembles their
 //! exact-quorum certificate, and completes admission against the local
@@ -31,7 +30,7 @@ use crate::{
         light::{self, Verified},
         query::ReadRequest,
         setup::{NetworkConfig, OperatorConfig, read_genesis},
-        state::Record,
+        state::{Intake, Record, intake_key},
         tx::{AdmitRequest, SettlementTx},
         types::{Block, Database, now},
         validator::{
@@ -41,23 +40,20 @@ use crate::{
             db_config, sync_config,
         },
     },
-    protocol::{
-        CertifiedEpoch, DepositEvent, Key, PreparedEpoch, SettlementResult, dealt_participant,
-    },
+    protocol::{CertifiedEpoch, Key, PreparedEpoch, SettlementResult, dealt_participant},
 };
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use bytes::Bytes;
-use commonware_actor::{
-    Feedback,
-    mailbox::{self, Policy, Receiver as MailboxReceiver, Sender as MailboxSender},
+use commonware_actor::mailbox::{
+    self, Policy, Receiver as MailboxReceiver, Sender as MailboxSender,
 };
 use commonware_broadcast::buffered;
 use commonware_clearing::bajillion::{admission::bls12381, transition::CloseContext};
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
 use commonware_consensus::{
-    Epochable as _, Reporter, Reporters,
+    Epochable as _, Reporter,
     marshal::{
-        self, Update,
+        self,
         core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
         resolver::p2p as marshal_resolver,
         standard::Standard,
@@ -88,16 +84,17 @@ use commonware_runtime::{
 use commonware_storage::{Context as StorageContext, archive::prunable, translator::TwoCap};
 use commonware_stream::encrypted::Handshake;
 use commonware_utils::{
-    Acknowledgement as _, Faults as _, N3f1, NZU64, NZUsize, Participant,
-    acknowledgement::Exact,
+    Faults as _, N3f1, NZU64, NZUsize, Participant,
     channel::{fallible::OneshotExt as _, oneshot},
     ordered::Set,
 };
+use futures::TryStreamExt as _;
 use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, VecDeque},
     net::SocketAddr,
     num::NonZeroUsize,
+    ops::Range,
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
@@ -235,6 +232,39 @@ where
             payout_tip,
         }))
     }
+
+    /// One ordered scan of the inbox entries at `indices` under the
+    /// [`Self::snapshot`] rule: `None` when the finalized index has not caught
+    /// up to the applied database yet.
+    async fn scan(&self, indices: Range<u64>) -> Result<Option<Vec<Intake>>> {
+        let guard = self.db.read().await;
+        if self
+            .finalized
+            .latest()
+            .is_none_or(|tip| guard.root() != tip.root)
+        {
+            return Ok(None);
+        }
+        let keys =
+            intake_key(&self.deployment, indices.start)..intake_key(&self.deployment, indices.end);
+        let entries: Vec<_> = guard
+            .stream_range(keys)
+            .try_collect()
+            .await
+            .context("scan applied settlement state")?;
+        let mut entries = entries.into_iter();
+        indices
+            .map(|index| match entries.next() {
+                Some((key, Record::Intake(intake)))
+                    if key == intake_key(&self.deployment, index) =>
+                {
+                    Ok(intake)
+                }
+                _ => Err(anyhow!("certified inbox entry {index} is missing")),
+            })
+            .collect::<Result<_>>()
+            .map(Some)
+    }
 }
 
 impl<E, S> Chain for Node<E, S>
@@ -252,6 +282,18 @@ where
 
     async fn read<E2: Env>(&mut self, ctx: &E2, request: &ReadRequest) -> Result<Verified> {
         self.local(ctx, request).await
+    }
+
+    /// Reads the whole range from one pinned snapshot of the node's own
+    /// applied state, retried like [`Self::read`].
+    async fn inbox<E2: Env>(&mut self, ctx: &E2, indices: Range<u64>) -> Result<Vec<Intake>> {
+        for _ in 0..CATCHUP_ATTEMPTS {
+            if let Some(entries) = self.scan(indices.clone()).await? {
+                return Ok(entries);
+            }
+            ctx.sleep(CATCHUP_PAUSE).await;
+        }
+        bail!("the finalized index did not catch up to the applied state in time");
     }
 
     /// The node's own tip is honest (it verified every finalization itself),
@@ -686,95 +728,6 @@ where
     }
 }
 
-/// Deposit transactions carried by one finalized block, awaiting durable
-/// staging before the block is acknowledged to marshal.
-pub(crate) struct Observed {
-    /// Height of the finalized block that carried the transactions.
-    pub(crate) height: u64,
-    /// Deposit transactions in block order. Inclusion is not application: a
-    /// rejected transaction is effect-free, so the observer confirms each
-    /// event against the applied custody record before staging it.
-    pub(crate) events: Vec<DepositEvent>,
-    /// The block's marshal acknowledgement. It is fulfilled only once every
-    /// applied event is durably staged, and dropped on a staging failure.
-    pub(crate) ack: Exact,
-}
-
-impl Policy for Observed {
-    type Overflow = VecDeque<Self>;
-
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
-        overflow.push_back(message);
-    }
-}
-
-/// Marshal reporter surfacing each finalized block's deposit transactions to
-/// the operator's deposit observer.
-///
-/// Deposits are chain state, so the operator learns them from its own
-/// follower rather than from a wallet report: any party's deposit to a
-/// canonical account is credited without that party's cooperation. The
-/// observer stages a block's applied deposits durably (one immediate SQLite
-/// transaction per deposit-carrying block, deduplicated by deposit id)
-/// BEFORE fulfilling the block's acknowledgement. Staging is
-/// persist-before-externalize, and the acknowledgement is the
-/// externalization: marshal advances its processed height only past
-/// acknowledged blocks, so a crash between finalization and the staging
-/// commit re-delivers the block on restart, where the id dedupe makes the
-/// replay a no-op. A deposit the store cannot stage is never acknowledged.
-/// Storage failures are fatal, so the observer drops the acknowledgement
-/// instead, which stops marshal and halts the operator.
-///
-/// The acknowledgement gates only this operator's own follower height,
-/// never validator consensus. A deposit-carrying block costs one batched
-/// insert and fsync (single-digit milliseconds against second-scale blocks),
-/// and a block without deposits costs a read-only scan of its transactions
-/// and is acknowledged here immediately. If staging ever grew heavy enough
-/// to backpressure block-following, the escalation is a durable intake
-/// queue drained asynchronously. That is deliberately not built now.
-#[derive(Clone)]
-pub(crate) struct Observer {
-    /// The deployment this operator runs: only its deposits are surfaced.
-    deployment: Digest,
-    sender: MailboxSender<Observed>,
-}
-
-impl Observer {
-    pub(crate) const fn new(deployment: Digest, sender: MailboxSender<Observed>) -> Self {
-        Self { deployment, sender }
-    }
-}
-
-impl Reporter for Observer {
-    type Activity = Update<Block>;
-
-    fn report(&mut self, update: Self::Activity) -> Feedback {
-        let Update::Block(block, ack) = update else {
-            return Feedback::Ok;
-        };
-        let events = block
-            .transactions
-            .iter()
-            .filter_map(|tx| match tx {
-                SettlementTx::Deposit(request) => Some(request),
-                SettlementTx::ClaimDeposit(request) => Some(&request.deposit),
-                _ => None,
-            })
-            .filter(|request| request.deployment == self.deployment)
-            .map(|request| request.event.clone())
-            .collect::<Vec<_>>();
-        if events.is_empty() {
-            ack.acknowledge();
-            return Feedback::Ok;
-        }
-        self.sender.enqueue(Observed {
-            height: block.height.get(),
-            events,
-            ack,
-        })
-    }
-}
-
 /// Follows finalizations for a node without a consensus engine: every
 /// certificate-channel broadcast is decoded, finalizations are verified
 /// against the committee identity, and verified finalizations are reported
@@ -829,15 +782,13 @@ where
 /// Assembles and starts the operator's follower stack over the authenticated
 /// network: the tokio counterpart of the validator assembly without a
 /// consensus engine. Returns the local chain backend, the close pipeline
-/// facade, the deposit observation feed, and every actor handle for
-/// supervision.
+/// facade, and every actor handle for supervision.
 pub(crate) async fn start(
     context: tokio::Context,
     node_dir: &Path,
 ) -> Result<(
     Node<tokio::Context, discovery::Sender<ed25519::PublicKey, tokio::Context>>,
     Pipeline,
-    MailboxReceiver<Observed>,
     Vec<Handle<()>>,
 )> {
     let operator = OperatorConfig::load(node_dir).context("load operator node config")?;
@@ -1007,19 +958,7 @@ pub(crate) async fn start(
         },
     );
 
-    // The deposit observer joins the finalized-block reporter chain: a
-    // deposit-carrying block is acknowledged to marshal only after its
-    // applied events are durably staged (see [`Observer`]). It surfaces only
-    // this operator's own deployment's deposit transactions.
-    let (observer, observations) = mailbox::new(context.child("observations"), MAILBOX_SIZE);
-    let marshal_handle = marshal_actor.start(
-        Reporters::from((
-            stateful_mailbox.clone(),
-            Observer::new(deployment, observer),
-        )),
-        buffer,
-        resolver,
-    );
+    let marshal_handle = marshal_actor.start(stateful_mailbox.clone(), buffer, resolver);
     let stateful_handle = stateful_actor.start();
 
     // The finalization feed replaces the consensus engine's reporter stream.
@@ -1066,7 +1005,6 @@ pub(crate) async fn start(
     Ok((
         node,
         pipeline,
-        observations,
         vec![
             p2p_handle,
             broadcast_handle,
@@ -1132,7 +1070,11 @@ mod tests {
             self.inner.recipients()
         }
 
-        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+        fn send(
+            self,
+            message: impl Into<IoBufs> + Send,
+            priority: bool,
+        ) -> Unreliable<commonware_actor::Feedback> {
             let message = message.into().coalesce();
             self.messages.lock().push(message.clone());
             self.inner.send(message, priority)
@@ -1157,6 +1099,10 @@ mod tests {
         }
 
         async fn recent<E: Env>(&mut self, _: &E, _: &ReadRequest) -> Result<Verified> {
+            bail!("the stub backend serves no reads")
+        }
+
+        async fn inbox<E: Env>(&mut self, _: &E, _: Range<u64>) -> Result<Vec<Intake>> {
             bail!("the stub backend serves no reads")
         }
 
@@ -1356,6 +1302,10 @@ mod tests {
             let other = protocol.fixture_complete(&other_accounts, &[],
                 protocol.prepare(crate::protocol::EpochRegistration {
                     floors: None,
+                    deadlines: None,
+                    rows: 0..0,
+                    intake: 0..0,
+                    liability: result.context.predecessor_liability(),
                     context: result.context.epoch_context().clone(),
                     deposits: commonware_clearing::bajillion::boundary::DepositBatch::empty(),
                     withdrawals: commonware_clearing::bajillion::boundary::WithdrawalBatch::empty(),

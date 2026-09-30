@@ -61,9 +61,6 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             operator.public_key(),
             &deposits,
             &withdrawals,
-            300,
-            98,
-            99,
             CloseLimits::protocol_maximum(),
             Sha256::hash(&[b"committee"]),
         )
@@ -72,6 +69,10 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             &state,
             &deposits,
             &withdrawals,
+            0..0,
+            300,
+            98,
+            99,
             Floors {
                 activity: 0,
                 payouts: 0,
@@ -104,9 +105,10 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             25,
             vector.root::<Sha256, ShaDigest>().unwrap(),
         );
+        let authorization = SendAuthorization::sign(body, empty_root(), payer);
         let terminal = Terminal {
-            operator_signature: bls_ack(&operator_bls_private, &body),
-            authorization: SendAuthorization::sign(body, payer),
+            operator_signature: bls_ack(&operator_bls_private, &authorization),
+            authorization,
             vector,
         };
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
@@ -324,9 +326,6 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
                 operator.public_key(),
                 &deposits,
                 &withdrawals,
-                300,
-                98,
-                99,
                 CloseLimits::protocol_maximum(),
                 Sha256::hash(&[b"committee"]),
             )
@@ -337,6 +336,10 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
                     &state,
                     &deposits,
                     &withdrawals,
+                    0..0,
+                    300,
+                    98,
+                    99,
                     Floors {
                         activity: 0,
                         payouts: 0,

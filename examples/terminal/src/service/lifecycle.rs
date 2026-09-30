@@ -8,7 +8,7 @@ use crate::{
         light::Verified,
         query::{Evidence, EvidenceLookup, EvidenceRequest, EvidenceResponse, ReadRequest},
         state::StatusRecord,
-        tx::QueueWithdrawalRequest,
+        tx::{QueueWithdrawalRequest, RegisterEpochRequest},
     },
     protocol::{Key, SettlementResult, deployment, wallets},
     withdrawal_model::{
@@ -133,6 +133,14 @@ impl Chain for GatedChain {
         self.capture(&request.lookup).await?;
         let verified = self.client.recent(ctx, request).await?;
         self.deliver(&request.lookup, verified).await
+    }
+
+    async fn inbox<E: Env>(
+        &mut self,
+        ctx: &E,
+        indices: std::ops::Range<u64>,
+    ) -> Result<Vec<crate::chain::state::Intake>> {
+        crate::chain::client::inbox(ctx, self, indices).await
     }
 
     async fn submit<E: Env>(&mut self, ctx: &E, tx: &SettlementTx) -> Result<Submission> {
@@ -331,23 +339,28 @@ impl Native {
 
     async fn freeze(&mut self, context: &deterministic::Context) -> Result<PacketId> {
         let epoch = self.operator().lock().registration_boundary()?.0.epoch();
-        let request =
-            registration_request(context, &mut self.client(context), self.operator(), epoch)
-                .await?;
+        let request = self.operator().lock().signed_registration()?;
+        ensure!(
+            request.epoch == epoch,
+            "the live epoch moved during registration"
+        );
         let requests = self.request_mask(&request.withdrawals)?;
-        let queued = request
-            .withdrawals
-            .requests()
-            .iter()
-            .filter(|withdrawal| {
-                !request
-                    .openings
-                    .iter()
-                    .any(|opening| opening.account == *withdrawal.account())
-            })
-            .try_fold(0, |mask, request| {
-                Ok::<_, anyhow::Error>(mask | self.request_id(request)?.bit())
-            })?;
+
+        // Requests the chain already queued ride as exact records. The rest are
+        // operator-carried extras.
+        let mut chain = self.client(context);
+        let mut queued = 0;
+        for withdrawal in request.withdrawals.requests() {
+            let lookup = chain.request(Lookup::Withdrawal {
+                account: withdrawal.account().clone(),
+            });
+            if matches!(
+                chain.recent(context, &lookup).await?.record,
+                Some(Record::Withdrawal(accepted)) if accepted.request == *withdrawal
+            ) {
+                queued |= self.request_id(withdrawal)?.bit();
+            }
+        }
         let id = PacketId {
             epoch: epoch.try_into()?,
             requests,
@@ -363,8 +376,10 @@ impl Native {
         {
             // Separate live leases so finalizing the predecessor leaves room to admit
             // its successor. Every intervening empty block still executes native state.
-            let earliest = previous
-                .challenge_deadline
+            let (_, challenge_deadline) = previous
+                .deadlines
+                .context("the admitted predecessor has no deadlines")?;
+            let earliest = challenge_deadline
                 .checked_add(REGISTRATION_SPACING)
                 .context("registration schedule exceeds the clock")?
                 .saturating_sub(TIMING.admission_offset);
@@ -384,9 +399,10 @@ impl Native {
     }
 
     async fn adopt(&mut self, context: &deterministic::Context) -> Result<()> {
+        let epoch = self.operator().lock().registration_boundary()?.0.epoch();
         let registered = self
             .client(context)
-            .registration(context)
+            .registration_at(context, epoch)
             .await?
             .context("registration is absent")?;
         self.operator().lock().adopt_registration(&registered)
@@ -441,7 +457,8 @@ impl Native {
             .expect("reconciliation event")
     }
 
-    async fn restart(&mut self) {
+    /// Reopens the operator from SQLite and releases recovery as the service does.
+    async fn restart(&mut self, context: &deterministic::Context) -> Result<()> {
         // Await cancellation before releasing the authoritative SQL owner.
         if let Some(reconciliation) = self.reconciliation.take() {
             reconciliation.task.abort();
@@ -452,6 +469,9 @@ impl Native {
         assert_eq!(Arc::strong_count(&previous), 1);
         drop(previous);
         self.operator = Some(Arc::new(Mutex::new(self.database.open())));
+
+        // The reopened operator authenticates its live registration before intake resumes.
+        observe_closes(context, &mut self.client(context), self.operator()).await
     }
 
     fn request_id(&self, request: &SignedWithdrawal<Key, Digest>) -> Result<RequestId> {
@@ -710,9 +730,9 @@ impl Native {
                 }
             }
             Action::ObserveRegistration => {
-                let before = self.operator().lock().registration_boundary()?.0;
+                let before = self.operator().lock().adopted();
                 self.adopt(context).await?;
-                if self.operator().lock().registration_boundary()?.0 == before {
+                if self.operator().lock().adopted() == before {
                     Outcome::Unchanged
                 } else {
                     Outcome::Accepted
@@ -839,23 +859,25 @@ impl Native {
                 self.receive_event().await
             }
             Action::Restart => {
-                self.restart().await;
+                self.restart(context).await?;
                 Outcome::Accepted
             }
             Action::Fault => {
-                if self.status(context).await.hard_faulted {
+                let status = self.status(context).await;
+                if status.hard_faulted {
                     Outcome::Unchanged
                 } else {
                     let registration = self
                         .client(context)
-                        .registration(context)
+                        .registration_at(context, status.next_admission)
                         .await?
                         .context("fault action requires an active registration")?;
-                    let height = self.status(context).await.height;
-                    if height <= registration.admission_deadline {
-                        self.control
-                            .advance(registration.admission_deadline - height + 1)
-                            .await;
+                    let (admission_deadline, _) = registration
+                        .deadlines
+                        .context("fault action requires the admission frontier")?;
+                    let height = status.height;
+                    if height <= admission_deadline {
+                        self.control.advance(admission_deadline - height + 1).await;
                     }
                     if self.status(context).await.hard_faulted {
                         Outcome::Accepted
@@ -914,7 +936,8 @@ impl Native {
 
     async fn project(&mut self, context: &deterministic::Context) -> Result<Projection> {
         let snapshot = self.operator().lock().snapshot()?;
-        let (payment, withdrawals) = self.operator().lock().registration_boundary()?;
+        let (_, withdrawals) = self.operator().lock().registration_boundary()?;
+        let adopted = self.operator().lock().adopted();
         let wallets = wallets();
         let mut balances = [0; model::ACCOUNTS];
         let mut present = [false; model::ACCOUNTS];
@@ -947,7 +970,6 @@ impl Native {
         let mut chain = self.client(context);
         let status = chain.recent_status(context).await?;
         let payout_tip = chain.payout_checkpoint(context).await?;
-        let registered = chain.registration(context).await?;
         let mut receipts = [None; model::ACCOUNTS];
         for account in 0..model::ACCOUNTS {
             receipts[account] = chain
@@ -959,7 +981,6 @@ impl Native {
         }
         let mut anchors = [None; model::EPOCHS];
         let mut admitted = [false; model::EPOCHS];
-        let mut adopted = false;
         for epoch in 0..model::EPOCHS {
             if status
                 .last_finalized
@@ -969,10 +990,6 @@ impl Native {
                     .closes
                     .get(epoch)
                     .context("finalized trace epoch has no retained local close")?;
-                let anchor = *close.context.payment().anchor();
-                if payment.epoch() == epoch as u64 {
-                    adopted = payment.anchor() == &anchor;
-                }
                 anchors[epoch] = Some(PacketId {
                     epoch: epoch.try_into()?,
                     requests: self.request_mask(self.close_requests(close)?)?,
@@ -982,9 +999,6 @@ impl Native {
                 continue;
             }
             if let Some(anchor) = chain.anchor(context, epoch as u64).await? {
-                if payment.epoch() == epoch as u64 {
-                    adopted = payment.anchor() == &anchor;
-                }
                 let requests = if let Some(close) = self.closes.get(epoch) {
                     ensure!(
                         close.context.payment().anchor() == &anchor,
@@ -998,9 +1012,10 @@ impl Native {
                     );
                     published.packet.requests
                 } else {
-                    let registered = registered
-                        .as_ref()
-                        .filter(|record| record.epoch == epoch as u64 && record.anchor == anchor)
+                    let registered = chain
+                        .registration_at(context, epoch as u64)
+                        .await?
+                        .filter(|record| record.anchor == anchor)
                         .context("uncut native anchor has no current registration")?;
                     let request = self
                         .packets
@@ -1224,7 +1239,7 @@ async fn replay(context: &deterministic::Context, trace: Trace) {
         );
         expected = transition.state;
     }
-    native.restart().await;
+    native.restart(context).await.unwrap();
 }
 
 #[test]
@@ -1284,7 +1299,7 @@ fn restart_cancels_a_captured_certified_read_before_reopening_sql() {
         };
         assert_eq!(lookup, Lookup::Status);
         assert!(matches!(verified.record, Some(Record::Status(_))));
-        native.restart().await;
+        native.restart(&context).await.unwrap();
         assert!(deliver.send(()).is_err());
         let replay = native
             .operator()
@@ -1306,7 +1321,7 @@ fn restart_cancels_a_captured_certified_read_before_reopening_sql() {
                 }
             }
         }
-        native.restart().await;
+        native.restart(&context).await.unwrap();
         assert!(
             native
                 .operator()

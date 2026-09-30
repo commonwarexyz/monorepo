@@ -25,7 +25,7 @@ pub const BACKGROUND_LIABILITY: u64 = 200;
 const REQUIRED_WITNESSES: [&str; 11] = [
     "intake during active registration",
     "queued tail finalized",
-    "queue after freeze requires rebuilt publication",
+    "queue after freeze keeps publication",
     "stale fresh reservation released",
     "mixed fresh and queued reconciliation",
     "published registration survives lost response",
@@ -374,10 +374,15 @@ impl State {
     }
 
     fn occupied(&self, account: usize) -> bool {
-        self.pending[account].is_some()
-            || self.anchors.iter().flatten().any(|packet| {
-                packet.epoch >= self.root && contains_account(packet.requests, account)
-            })
+        self.pending[account].is_some() || self.carried(account)
+    }
+
+    // Whether a registered packet that has not finalized carries a request for `account`.
+    fn carried(&self, account: usize) -> bool {
+        self.anchors
+            .iter()
+            .flatten()
+            .any(|packet| packet.epoch >= self.root && contains_account(packet.requests, account))
     }
 
     fn acknowledgement(&self, id: RequestId) -> Option<Acknowledgement> {
@@ -584,6 +589,12 @@ impl WithdrawalModel {
                 if !queued && (signed.root != state.root || state.predecessor[id.account()] == 0) {
                     return Outcome::Rejected;
                 }
+
+                // A queued request leaves the pending set unstaged only when a registration
+                // superseded it.
+                if queued && state.pending[id.account()] != Some(id) {
+                    return Outcome::Rejected;
+                }
                 let reserved = match self.instance.withdrawal(id) {
                     Withdrawal::Amount(amount) if amount <= state.balances[id.account()] => {
                         Some(amount)
@@ -651,39 +662,34 @@ impl WithdrawalModel {
                 if state.active().is_some() || packet.epoch as usize != next {
                     return Outcome::Rejected;
                 }
-                for account in 0..ACCOUNTS {
-                    if state.pending[account].is_some()
-                        && request_for(packet.requests, account) != state.pending[account]
-                    {
-                        return Outcome::Rejected;
-                    }
-                }
-                let mut extra = 0;
+                // A carried request equal to its account's queued record
+                // rides as that record, even when the queue landed after the
+                // freeze. Any other carried request runs settlement intake
+                // against the finalized root. Its release resolves from the
+                // carrying epoch's tail, so registration checks no balance. A
+                // queued request the packet omits sits past the pulled prefix
+                // and waits in the inbox for a later registration, unless the
+                // packet carries another request for its account, which
+                // supersedes it.
+                let mut superseded = [false; ACCOUNTS];
                 for id in RequestId::ALL {
                     if packet.requests & id.bit() == 0 || state.pending[id.account()] == Some(id) {
                         continue;
                     }
                     let signed =
                         state.signed[id.index()].expect("saved packets have signed requests");
-                    let predecessor = if packet.epoch == 0 {
-                        INITIAL_BALANCES
-                    } else {
-                        state.closes[packet.epoch as usize - 1]
-                            .expect("admitted predecessor has a close")
-                            .successor
-                    };
                     if signed.root != state.root
                         || state.consumed & id.bit() != 0
-                        || state.occupied(id.account())
-                        || predecessor[id.account()] == 0
-                        || matches!(self.instance.withdrawal(id), Withdrawal::Amount(amount) if amount > predecessor[id.account()])
+                        || state.carried(id.account())
                     {
                         return Outcome::Rejected;
                     }
-                    extra |= id.bit();
+                    superseded[id.account()] = state.pending[id.account()].is_some();
                 }
-                if packet.requests & !packet.queued != extra {
-                    return Outcome::Rejected;
+                for (account, superseded) in superseded.into_iter().enumerate() {
+                    if superseded {
+                        state.pending[account] = None;
+                    }
                 }
                 state.anchors[packet.epoch as usize] = Some(canonical(packet));
                 Outcome::Accepted
@@ -1318,24 +1324,9 @@ impl WithdrawalModel {
                     append(Action::Claim(output), &mut state, &mut actions);
                 } else if name == "intake during active registration" {
                     append(Action::Queue(RequestId::A0), &mut state, &mut actions);
-                } else if name == "queue after freeze requires rebuilt publication" {
-                    let stale = state
-                        .prepared
-                        .expect("witness retains publication material");
-                    assert_eq!(
-                        model.step(&state, Action::Publish(stale)).outcome,
-                        Outcome::Rejected
-                    );
-                    append(Action::Publish(stale), &mut state, &mut actions);
-                    append(Action::Freeze, &mut state, &mut actions);
-                    let rebuilt = state.prepared.expect("registration is rebuilt");
-                    assert_ne!(stale, rebuilt);
-                    assert_eq!(
-                        model.step(&state, Action::Publish(rebuilt)).outcome,
-                        Outcome::Accepted
-                    );
-                    append(Action::Publish(rebuilt), &mut state, &mut actions);
+                } else if name == "queue after freeze keeps publication" {
                     append(Action::ObserveRegistration, &mut state, &mut actions);
+                    assert!(state.adopted);
                 } else {
                     if name == "captured anchor excludes stale request"
                         || name == "published registration survives lost response"
@@ -1534,22 +1525,20 @@ impl Model for WithdrawalModel {
                         .flatten()
                         .any(Option::is_some)
             }),
-            Property::<Self>::sometimes(
-                "queue after freeze requires rebuilt publication",
-                |_, s| {
-                    !s.faulted
-                        && s.epoch == 1
-                        && s.root == 0
-                        && s.admitted[0]
-                        && s.prepared.is_some_and(|packet| {
-                            RequestId::ALL.into_iter().any(|id| {
+            Property::<Self>::sometimes("queue after freeze keeps publication", |_, s| {
+                !s.faulted
+                    && s.epoch == 1
+                    && s.root == 0
+                    && s.admitted[0]
+                    && s.prepared.is_some_and(|packet| {
+                        s.anchors[1] == Some(canonical(packet))
+                            && RequestId::ALL.into_iter().any(|id| {
                                 packet.requests & id.bit() != 0
                                     && packet.queued & id.bit() == 0
                                     && s.pending[id.account()] == Some(id)
                             })
-                        })
-                },
-            ),
+                    })
+            }),
             Property::<Self>::sometimes("stale fresh reservation released", |_, s| {
                 stale_released(s, false)
             }),

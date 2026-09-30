@@ -4,6 +4,7 @@ use crate::bajillion::{
         AccountLookup, AckWitness, Challenge, ChallengeError, ChallengeKind, EntryWitness, Verdict,
         adjudicate,
     },
+    commitment::{self, VectorKind, VectorRoot},
     custody::Epoch,
     logs::{self, ActivityInput, Floors, Heads, Logs},
     payment::{
@@ -13,6 +14,7 @@ use crate::bajillion::{
     posted,
     qmdb::{self, Mutations, State, StateHead, StateLookup, StateOpening, StateRoot, account_key},
     replica::{PreparedReplica, Replica},
+    state::AccountChange,
     transition::{
         Close, CloseContext, CloseLimits, EpochContext, PreparedClose, Terminal,
         TransitionError as CloseError, WithdrawalClaim, WithdrawalOutput,
@@ -42,13 +44,14 @@ use commonware_storage::{
     qmdb::current::FixedConfig, translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
-use core::num::NonZeroU64;
+use core::{num::NonZeroU64, ops::Range};
 
 mod boundaries;
 mod challenges;
 mod flat_logs;
 mod native_custody;
 mod ordering;
+mod predecessor;
 mod rotation;
 mod state;
 mod virtual_balances;
@@ -316,13 +319,40 @@ struct Fixture {
 
 fn bls_ack(
     private: &BlsPrivate,
-    body: &VectorSendBody<VerifyingKey, ShaDigest>,
+    authorization: &SendAuthorization<VerifyingKey, ShaDigest>,
 ) -> crate::bajillion::transition::OperatorSignature {
     sign_message::<crate::bajillion::transition::OperatorVariant>(
         private,
         VECTOR_ACK_AGGREGATE_NAMESPACE,
-        body.encode().as_ref(),
+        authorization.message().as_ref(),
     )
+}
+
+// The predecessor a payer signs when the preceding close has no row for it.
+pub(crate) fn empty_root() -> VectorRoot<ShaDigest> {
+    commitment::empty_root::<Sha256>(VectorKind::OutEntry)
+}
+
+// Finds `payer`'s vector root in `close` by a linear scan of its rows.
+pub(crate) fn predecessor(
+    close: &Close<VerifyingKey, ShaDigest>,
+    payer: &VerifyingKey,
+) -> VectorRoot<ShaDigest> {
+    close
+        .activity_input::<Sha256>()
+        .rows()
+        .iter()
+        .find(|row| row.account() == payer)
+        .map_or_else(empty_root, AccountChange::send_root)
+}
+
+// Returns the account rows `close` appended under `context`.
+pub(crate) fn rows(
+    context: &CloseContext<VerifyingKey, ShaDigest>,
+    close: &Close<VerifyingKey, ShaDigest>,
+) -> Range<u64> {
+    let range = close.roots.activity_range(context).unwrap();
+    range.start..range.end
 }
 
 // Every sender pays one unit to each selected recipient. The expected balances below are
@@ -371,9 +401,6 @@ async fn fixture(
         operator.public_key(),
         &deposits,
         &withdrawals,
-        live as u64 * OPENING_BALANCE,
-        98,
-        99,
         CloseLimits::protocol_maximum(),
         Sha256::hash(&[b"close-test-committee"]),
     )
@@ -382,6 +409,10 @@ async fn fixture(
         &state,
         &deposits,
         &withdrawals,
+        0..0,
+        live as u64 * OPENING_BALANCE,
+        98,
+        99,
         Floors {
             activity: 0,
             payouts: 0,
@@ -407,14 +438,16 @@ async fn fixture(
             out_degree as u64,
             vector.root::<Sha256, ShaDigest>().unwrap(),
         );
-        let ack = VectorAck::sign_by_authorities(body, private, &operator);
+        let ack = VectorAck::sign_by_authorities(body, empty_root(), private, &operator);
+        let authorization = SendAuthorization::from_raw_unchecked(
+            ack.body().clone(),
+            ack.predecessor(),
+            ack.payer_signature().clone(),
+        );
         terminals.push(Terminal {
-            authorization: SendAuthorization::from_raw_unchecked(
-                ack.body().clone(),
-                ack.payer_signature().clone(),
-            ),
+            operator_signature: bls_ack(&operator_bls_private, &authorization),
+            authorization,
             vector,
-            operator_signature: bls_ack(&operator_bls_private, ack.body()),
         });
         acks.push(ack);
     }
@@ -553,9 +586,6 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
             fixture.operator.public_key(),
             &fixture.deposits,
             &fixture.withdrawals,
-            fixture.context.predecessor_liability() - close.withdrawal_total,
-            100,
-            101,
             CloseLimits::protocol_maximum(),
             *fixture.context.committee(),
         )
@@ -564,6 +594,10 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
             &state,
             &fixture.deposits,
             &fixture.withdrawals,
+            rows(&fixture.context, &close),
+            fixture.context.predecessor_liability() - close.withdrawal_total,
+            100,
+            101,
             Floors {
                 activity: 0,
                 payouts: 0,
@@ -629,12 +663,15 @@ fn forged_payer_and_operator_acceptance_are_rejected() {
             let mut terminals = fixture.terminals.clone();
             if forge_payer {
                 let wrong = SigningKey::from_seed(999);
-                terminals[0].authorization =
-                    SendAuthorization::sign(terminals[0].authorization.body().clone(), &wrong);
+                terminals[0].authorization = SendAuthorization::sign(
+                    terminals[0].authorization.body().clone(),
+                    empty_root(),
+                    &wrong,
+                );
             } else {
                 terminals[0].operator_signature = bls_ack(
                     &BlsPrivate::new(Scalar::from(999_u64)),
-                    terminals[0].authorization.body(),
+                    &terminals[0].authorization,
                 );
             }
             let forged = prepare_close_with_strategy::<Sha256, _, _, _, _>(

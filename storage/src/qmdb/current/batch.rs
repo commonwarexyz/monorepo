@@ -35,7 +35,8 @@ use commonware_utils::{
     Widen,
     bitmap::{self, Readable as _},
 };
-use core::ops::Range;
+use core::ops::{Range, RangeBounds};
+use futures::Stream;
 use std::sync::Arc;
 
 /// Speculative chunk-level bitmap overlay.
@@ -705,6 +706,21 @@ where
         I: crate::index::Ordered<Value = Location<F>>,
     {
         self.inner.get_neighbors(key, &db.any).await
+    }
+
+    /// Streams live (key, value) pairs in ascending key order within `range`. Reads pending
+    /// mutations, live ancestors, and committed state.
+    pub fn stream_range<'a, E, C, I>(
+        &'a self,
+        range: impl RangeBounds<K> + Send + 'a,
+        db: &'a super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> impl Stream<Item = Result<(K, V::Value), Error<F>>> + Send + 'a
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>>,
+    {
+        self.inner.stream_range(range, &db.any)
     }
 
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.

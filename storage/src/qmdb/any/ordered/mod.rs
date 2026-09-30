@@ -44,11 +44,22 @@ enum Cursor<K> {
 }
 
 /// Whether `key` lies beyond the range's upper bound.
-fn past_end<K: Ord>(end: Bound<&K>, key: &K) -> bool {
+pub(crate) fn past_end<K: Ord>(end: Bound<&K>, key: &K) -> bool {
     match end {
         Included(end) => key > end,
         Excluded(end) => key >= end,
         Unbounded => false,
+    }
+}
+
+/// Whether `range`'s bounds admit no key.
+pub(crate) fn is_empty<K: Ord>(range: &impl RangeBounds<K>) -> bool {
+    match (range.start_bound(), range.end_bound()) {
+        (Included(start), Included(end)) => start > end,
+        (Included(start) | Excluded(start), Excluded(end)) | (Excluded(start), Included(end)) => {
+            start >= end
+        }
+        _ => false,
     }
 }
 
@@ -224,13 +235,11 @@ where
         &'a self,
         range: impl RangeBounds<K> + Send + 'a,
     ) -> impl Stream<Item = Result<(K, V::Value), crate::qmdb::Error<F>>> + Send + 'a {
-        let empty = match (range.start_bound(), range.end_bound()) {
-            (Included(start), Included(end)) => start > end,
-            (Included(start) | Excluded(start), Excluded(end))
-            | (Excluded(start), Included(end)) => start >= end,
-            _ => false,
+        let cursor = if is_empty(&range) {
+            Cursor::Done
+        } else {
+            Cursor::Start
         };
-        let cursor = if empty { Cursor::Done } else { Cursor::Start };
 
         stream::unfold(
             (range, cursor, Vec::<Update<K, V>>::new()),

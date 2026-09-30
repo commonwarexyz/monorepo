@@ -35,7 +35,7 @@ fn funded_owner_outside_genesis_can_deposit() {
         seal_native(&db, 2, &native, &[deposit.clone(), deposit]).await;
         assert_eq!(
             read(&db, &deposit_key(&deployment(), &event.id)).await,
-            Some(Record::Deposit(event))
+            Some(Record::Deposit(DepositEffect { event, index: 0 }))
         );
         assert_eq!(
             native_balance(&db, &native, &owner.public_key())
@@ -121,21 +121,21 @@ fn first_credit(invalidated: bool) {
             })
             .collect::<Vec<_>>()
         };
-        let register = |epoch, liability, withdrawals: WithdrawalBatch<Key, Digest>, openings| {
+        // Every queue attempt is rejected, so each registration pulls an empty inbox.
+        let register = |epoch, withdrawals: WithdrawalBatch<Key, Digest>| {
             SettlementTx::RegisterEpoch(RegisterEpochRequest {
                 deployment: deployment(),
                 epoch,
-                predecessor_liability: liability,
+                end: 0,
                 deposits_root,
                 signature: protocol.sign_chain_registration(
                     epoch,
-                    liability,
+                    0,
                     &deposits_root,
                     &withdrawals,
                     4096,
                 ),
                 withdrawals,
-                openings,
                 fee: 4096,
             })
         };
@@ -153,6 +153,11 @@ fn first_credit(invalidated: bool) {
         assert_eq!(read(&db, &queue_key).await, None);
         let mut height = 2;
         let mut total = 0;
+
+        // Each epoch binds the preceding close's rows, and the payer signs its terminal root
+        // there.
+        let mut rows = 0..0;
+        let mut predecessor = commitment::empty_root::<Sha256>(VectorKind::OutEntry);
         for (epoch, amount) in [7, 5].into_iter().enumerate() {
             let epoch = epoch as u64;
             total += amount;
@@ -167,6 +172,7 @@ fn first_credit(invalidated: bool) {
                     height + 11,
                 )
                 .unwrap();
+            registration.rows = rows.clone();
             let vector = OutVector::new(
                 epoch,
                 payer.public_key(),
@@ -184,9 +190,11 @@ fn first_credit(invalidated: bool) {
                 amount,
                 vector.root::<Sha256, Digest>().unwrap(),
             );
+            let authorization = SendAuthorization::sign(body, predecessor, payer.signer());
+            predecessor = vector.root::<Sha256, Digest>().unwrap();
             let terminal = Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&body),
-                authorization: SendAuthorization::sign(body, payer.signer()),
+                operator_signature: protocol.sign_ack_aggregate(&authorization),
+                authorization,
                 vector,
             };
             if epoch > 0 {
@@ -209,6 +217,7 @@ fn first_credit(invalidated: bool) {
                 "credits accumulate in the virtual leaf"
             );
             assert_eq!(result.withdrawal_total, 0);
+            rows = result.rows().unwrap();
             balances = balances.apply(candidate).await.unwrap();
             let mut transactions = if epoch == 0 {
                 queues(
@@ -224,7 +233,7 @@ fn first_credit(invalidated: bool) {
                 Vec::new()
             };
             transactions.extend([
-                register(epoch, 400, withdrawals, Vec::new()),
+                register(epoch, withdrawals),
                 SettlementTx::Admit(AdmitRequest::from(&result)),
             ]);
             seal_native(&db, height, &native, &transactions).await;
@@ -315,6 +324,7 @@ fn first_credit(invalidated: bool) {
                 height + 11,
             )
             .unwrap();
+        registration.rows = rows.clone();
         let head = balances.logs().head();
         registration.floors = Some(commonware_clearing::bajillion::logs::Floors {
             activity: head.activity.operations - 1,
@@ -352,7 +362,7 @@ fn first_credit(invalidated: bool) {
             height,
             &native,
             &[
-                register(2, 400, withdrawals, vec![opening.clone()]),
+                register(2, withdrawals),
                 SettlementTx::Admit(AdmitRequest::from(&result)),
                 claim.clone(),
             ],
@@ -364,12 +374,7 @@ fn first_credit(invalidated: bool) {
         let finalized_claims = claimed(&db, payout_position).await;
         height += 13;
         let mut transactions = queues(result.roots.successor, opening, height);
-        transactions.push(register(
-            3,
-            400 - total,
-            WithdrawalBatch::empty(),
-            Vec::new(),
-        ));
+        transactions.push(register(3, WithdrawalBatch::empty()));
         seal_native(&db, height, &native, &transactions).await;
         assert_eq!(read(&db, &queue_key).await, None);
         seal_native(&db, height + 11, &native, &[]).await;

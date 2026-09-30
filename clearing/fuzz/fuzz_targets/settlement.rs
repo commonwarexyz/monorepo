@@ -11,18 +11,20 @@ use commonware_clearing::bajillion::{
         WithdrawalId,
     },
     challenge::{AckWitness, Challenge, ChallengeKind, EntryWitness, Verdict},
+    commitment::{self, VectorKind, VectorRoot},
     custody::Epoch,
-    logs::{LogHead, Opening as LogOpening, PayoutOperation},
+    logs::{Floors, LogHead, Opening as LogOpening, PayoutOperation},
     payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
     qmdb::{StateHead, StateOpening, StateRoot, account_key},
     settlement::{
         BatchStatus, Bounds, ClaimedRange, EpochDeadlinePolicy, Genesis, HardFaultReason,
-        HardFaultSettlement, PendingBatch, SettlementChain, SettlementConfig,
+        HardFaultSettlement, PendingBatch, SettlementChain, SettlementConfig, SettlementError,
     },
     state::SettlementOutput,
     transition::{
-        BatchId, Close, CloseContext, CloseLimits, OperatorKey, OperatorSignature, OperatorVariant,
-        PreparedClose, Terminal, WithdrawalClaim, WithdrawalOutput, prepare_close_with_strategy,
+        ActivityRange, BatchId, Close, CloseContext, CloseLimits, EpochContext, OperatorKey,
+        OperatorSignature, OperatorVariant, PreparedClose, Terminal, WithdrawalClaim,
+        WithdrawalOutput, prepare_close_with_strategy,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
@@ -46,6 +48,7 @@ use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
 };
 use support::TestState;
 
@@ -53,7 +56,7 @@ const MAX_INPUT_BYTES: usize = 16 * 1024;
 const MAX_ACCOUNTS: usize = 4;
 const MAX_ACTIONS: usize = 24;
 const MAX_DESTINATION_BYTES: usize = 16;
-const MAX_EPOCH_ADMISSION_DELAY: u64 = 6;
+const ADMISSION_DELAY: u64 = 2;
 const CHALLENGE_DURATION: u64 = 2;
 const DEPOSIT_INCLUSION_TIMEOUT: u64 = 6;
 const MINIMUM_WITHDRAWAL_NOTICE: u64 = 2;
@@ -100,6 +103,7 @@ type TestChain = SettlementChain<Sha256, VerifyingKey>;
 type TestChallenge = Challenge<VerifyingKey, Digest>;
 type TestClose = Close<VerifyingKey, Digest>;
 type TestContext = CloseContext<VerifyingKey, Digest>;
+type TestEpoch = EpochContext<VerifyingKey, Digest>;
 type TestDeposits = DepositBatch<VerifyingKey>;
 type TestWithdrawals = WithdrawalBatch<VerifyingKey, Digest>;
 type TestWithdrawalClaim = WithdrawalClaim<Digest>;
@@ -132,13 +136,19 @@ enum Action {
     },
     Register {
         tick: u8,
-        mutated: bool,
+        end: u8,
+        mutation: u8,
     },
     RegisterCredit {
         tick: u8,
+        end: u8,
         payer: u8,
         amount: u8,
         mutated: bool,
+    },
+    Stack {
+        tick: u8,
+        depth: u8,
     },
     Admit {
         tick: u8,
@@ -180,6 +190,36 @@ enum Action {
         account: u8,
         mutation: u8,
     },
+}
+
+// A registration's predecessor-independent material. Its close is prepared at admission against
+// the head that promotion bound, optionally carrying one virtual credit.
+#[derive(Clone)]
+struct Registration {
+    epoch: TestEpoch,
+    floors: Floors,
+    deposits: TestDeposits,
+    withdrawals: TestWithdrawals,
+    credit: Option<(u8, u8)>,
+}
+
+// One inbox entry in recording order. A deposit keeps its amount and inclusion deadline.
+#[derive(Clone, Debug)]
+enum Intake {
+    Deposit {
+        account: Box<VerifyingKey>,
+        amount: u64,
+        deadline: u64,
+    },
+    Withdrawal,
+}
+
+// A chain-queued withdrawal, its inbox index, and whether a live registration carries it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Queued {
+    index: u64,
+    request: SignedWithdrawal<VerifyingKey, Digest>,
+    carried: bool,
 }
 
 #[derive(Clone)]
@@ -242,7 +282,8 @@ struct Snapshot {
     state_root: StateRoot<Digest>,
     custody: u64,
     claimable: u64,
-    deposits: TestDeposits,
+    intake: u64,
+    pulled: u64,
     withdrawals: TestWithdrawals,
     batches: Vec<PendingBatch<Digest>>,
     deadlines: Vec<Option<u64>>,
@@ -311,12 +352,23 @@ struct Harness {
     accounts: Vec<SigningKey>,
     now: u64,
     finalized: TestCache,
+    // The context and close of the latest finalized epoch.
+    finalized_head: Option<(TestContext, TestClose)>,
     expected_epoch: u64,
     slots: VecDeque<Slot>,
-    registered: Option<Prepared>,
-    staged_deposits: BTreeMap<VerifyingKey, u64>,
-    staged_deposit_deadlines: BTreeMap<VerifyingKey, u64>,
-    staged_withdrawals: BTreeMap<VerifyingKey, SignedWithdrawal<VerifyingKey, Digest>>,
+    // The frontier followed by the queued registrations.
+    registered: VecDeque<Registration>,
+    // The frontier's admission and challenge deadlines.
+    deadlines: Option<(u64, u64)>,
+    // Deposits and chain-queued withdrawals in recording order, and the first unpulled index.
+    inbox: Vec<Intake>,
+    pulled: u64,
+    // Unadmitted deposit totals by account, pulled or not.
+    pending: BTreeMap<VerifyingKey, u64>,
+    // Deposits owed after terminal settlement starts, aggregated by account.
+    terminal_deposits: BTreeMap<VerifyingKey, u64>,
+    // Chain-queued withdrawals awaiting admission.
+    staged_withdrawals: BTreeMap<VerifyingKey, Queued>,
     outstanding: BTreeMap<VerifyingKey, SignedWithdrawal<VerifyingKey, Digest>>,
     consumed_deposit_ids: BTreeSet<Digest>,
     withdrawal_replays: BTreeMap<WithdrawalId<Digest>, u64>,
@@ -394,8 +446,7 @@ impl Harness {
             .expect("deterministic validator belongs to its committee");
         let config = SettlementConfig::new(
             EpochDeadlinePolicy::new(
-                NonZeroU64::new(MAX_EPOCH_ADMISSION_DELAY).unwrap(),
-                NonZeroU64::new(CHALLENGE_DURATION).unwrap(),
+                NonZeroU64::new(ADMISSION_DELAY).unwrap(),
                 NonZeroU64::new(CHALLENGE_DURATION).unwrap(),
             ),
             NonZeroU64::new(DEPOSIT_INCLUSION_TIMEOUT).unwrap(),
@@ -445,11 +496,15 @@ impl Harness {
             accounts,
             now: 0,
             finalized,
+            finalized_head: None,
             expected_epoch: 0,
             slots: VecDeque::new(),
-            registered: None,
-            staged_deposits: BTreeMap::new(),
-            staged_deposit_deadlines: BTreeMap::new(),
+            registered: VecDeque::new(),
+            deadlines: None,
+            inbox: Vec::new(),
+            pulled: 0,
+            pending: BTreeMap::new(),
+            terminal_deposits: BTreeMap::new(),
             staged_withdrawals: BTreeMap::new(),
             outstanding: BTreeMap::new(),
             consumed_deposit_ids: BTreeSet::new(),
@@ -560,13 +615,22 @@ impl Harness {
                 )
                 .await
             }
-            Action::Register { tick, mutated } => self.register(*tick, *mutated).await,
+            Action::Register {
+                tick,
+                end,
+                mutation,
+            } => self.register(*tick, *end, *mutation).await,
             Action::RegisterCredit {
                 tick,
+                end,
                 payer,
                 amount,
                 mutated,
-            } => self.register_credit(*tick, *payer, *amount, *mutated).await,
+            } => {
+                self.register_credit(*tick, *end, *payer, *amount, *mutated)
+                    .await
+            }
+            Action::Stack { tick, depth } => self.stack(*tick, *depth).await,
             Action::Admit { tick, mutated } => self.admit(*tick, *mutated).await,
             Action::Finalize { tick, early } => self.finalize(*tick, *early),
             Action::FaultUnadmitted {
@@ -640,8 +704,9 @@ impl Harness {
             state_root: self.chain.current_state_root(),
             custody: self.chain.custody_balance(),
             claimable: self.chain.claimable_balance(),
-            deposits: self.chain.pending_deposits(),
-            withdrawals: self.chain.pending_withdrawals(),
+            intake: self.chain.intake(),
+            pulled: self.chain.pulled(),
+            withdrawals: self.chain.pending_withdrawals(self.chain.intake()),
             batches: self.chain.pending_batches().cloned().collect(),
             deadlines: self
                 .accounts
@@ -708,6 +773,10 @@ impl Harness {
             assert!(expected.fence.is_none());
             expected.hard_fault = Some(observed.reason.clone());
             expected.fence = Some(observed.fence);
+
+            // A fault clears every carriage, which returns carried requests to the pending set.
+            // The invariants check that set against the model.
+            expected.withdrawals = after.withdrawals.clone();
         }
         assert_eq!(&expected, after);
     }
@@ -781,8 +850,14 @@ impl Harness {
         self.custody
             .checked_add(self.claimable)
             .expect("active and claimable custody fit the accounting domain");
-        assert_eq!(self.chain.pending_deposits(), self.deposit_batch());
-        assert_eq!(self.chain.pending_withdrawals(), self.withdrawal_batch());
+        assert_eq!(self.chain.intake(), self.inbox.len() as u64);
+        assert_eq!(self.chain.pulled(), self.pulled);
+        assert!(self.pulled <= self.inbox.len() as u64);
+        assert_eq!(
+            self.chain.pending_withdrawals(self.chain.intake()),
+            self.obligated(self.inbox.len() as u64)
+        );
+        self.assert_expiry();
         assert_eq!(self.chain.hard_fault(), self.hard_fault.as_ref());
         assert_eq!(self.chain.admission_fence_epoch(), self.fence);
         assert_eq!(self.chain.invalid_from(), self.invalid_from);
@@ -808,8 +883,14 @@ impl Harness {
 
         let mut predecessor_root = self.finalized.root();
         let mut predecessor_liability = self.finalized.liability();
+        let mut predecessor_range = self
+            .finalized_head
+            .as_ref()
+            .and_then(|(context, close)| rows(context, close));
         for (offset, slot) in self.slots.iter().enumerate() {
             assert_eq!(slot.predecessor.root(), *slot.context.predecessor_root());
+            assert_eq!(slot.context.predecessor_range(), predecessor_range);
+            predecessor_range = rows(&slot.context, &slot.close);
             assert_eq!(slot.close.header, slot.header);
             assert_eq!(
                 slot.context.payment().epoch(),
@@ -826,14 +907,65 @@ impl Harness {
             predecessor_liability = slot.successor.liability();
         }
 
+        // Terminal settlement moves every unadmitted deposit into the terminal table.
         if self.hard_fault_settlement.is_some() {
-            assert!(self.staged_deposit_deadlines.is_empty());
+            assert!(self.pending.is_empty());
         } else {
-            assert!(
-                self.staged_deposits
-                    .keys()
-                    .eq(self.staged_deposit_deadlines.keys())
+            assert!(self.terminal_deposits.is_empty());
+        }
+        assert!(self.pending.values().all(|amount| *amount > 0));
+
+        // Registered epochs are exactly [next admission, next registration). Only the frontier
+        // carries deadlines, and settlement bound it to the admitted head.
+        assert_eq!(
+            self.chain.next_admission_epoch().ok(),
+            Some(self.next_epoch())
+        );
+        assert_eq!(
+            self.chain.next_registration_epoch().ok(),
+            Some(self.next_registration())
+        );
+        assert_eq!(self.registered.is_empty(), self.deadlines.is_none());
+        match (
+            self.chain.registered(),
+            self.registered.front(),
+            self.deadlines,
+        ) {
+            (Some(actual), Some(frontier), Some(deadlines)) => {
+                assert_eq!(actual.context, &self.bind(frontier, deadlines));
+                assert_eq!(actual.deposits, &frontier.deposits);
+                assert_eq!(actual.withdrawals, &frontier.withdrawals);
+            }
+            (None, None, None) => {}
+            _ => panic!("the modeled frontier diverged from settlement"),
+        }
+        for (offset, registration) in self.registered.iter().enumerate() {
+            assert_eq!(
+                registration.epoch.payment().epoch(),
+                self.next_epoch() + offset as u64
             );
+        }
+
+        // A request is carried exactly when one live registration carries it, so a fault
+        // leaves none carried. While operating, an uncarried request sits at or past the pull.
+        for queued in self.staged_withdrawals.values() {
+            assert!(matches!(
+                self.inbox.get(queued.index as usize),
+                Some(Intake::Withdrawal)
+            ));
+            let carriers = self
+                .registered
+                .iter()
+                .filter(|registration| {
+                    registration
+                        .withdrawals
+                        .request_for(queued.request.account())
+                        == Some(&queued.request)
+                })
+                .count();
+            assert!(carriers <= 1);
+            assert_eq!(queued.carried, carriers == 1);
+            assert!(queued.carried || self.hard_fault.is_some() || queued.index >= self.pulled);
         }
         let unfinalized_deposits = self.unfinalized_deposit_total();
         assert_eq!(
@@ -858,7 +990,7 @@ impl Harness {
                 settlement.custody_balance
             );
             assert!(self.slots.is_empty());
-            assert!(self.registered.is_none());
+            assert!(self.registered.is_empty());
             assert!(self.staged_withdrawals.is_empty());
         } else {
             assert!(self.claimed_hard_fault_accounts.is_empty());
@@ -886,15 +1018,15 @@ impl Harness {
                 expected_deadline
             );
         }
-        for (account, request) in &self.staged_withdrawals {
-            assert_eq!(self.outstanding.get(account), Some(request));
-            assert_eq!(request.account(), account);
+        for (account, queued) in &self.staged_withdrawals {
+            assert_eq!(self.outstanding.get(account), Some(&queued.request));
+            assert_eq!(queued.request.account(), account);
         }
         if self.settled {
             assert_eq!(self.custody, 0);
             assert!(self.slots.is_empty());
-            assert!(self.staged_deposits.is_empty());
-            assert!(self.staged_deposit_deadlines.is_empty());
+            assert!(self.pending.is_empty());
+            assert!(self.terminal_deposits.is_empty());
             assert!(self.staged_withdrawals.is_empty());
             assert!(self.outstanding.is_empty());
             assert!(self.hard_fault_settlement.is_some());
@@ -917,11 +1049,34 @@ impl Harness {
         })
     }
 
+    // Registered epochs are exactly those from the next admission epoch up to this one.
+    fn next_registration(&self) -> u64 {
+        self.registered.back().map_or_else(
+            || self.next_epoch(),
+            |registration| registration.epoch.payment().epoch() + 1,
+        )
+    }
+
+    // Deadlines of an epoch that becomes the frontier at `now`.
+    fn frontier_deadlines(now: u64) -> Option<(u64, u64)> {
+        let admission = now.checked_add(ADMISSION_DELAY)?;
+        let challenge = admission
+            .checked_add(CHALLENGE_DURATION)
+            .filter(|deadline| *deadline < u64::MAX)?;
+        Some((admission, challenge))
+    }
+
+    // A fault drops the frontier and the queue. Unadmitted deposits and chain-queued
+    // withdrawals stay, and no request stays carried.
     fn enter_fault(&mut self, reason: HardFaultReason<VerifyingKey, Digest>) {
         if self.hard_fault.is_none() {
             self.fence = Some(self.next_epoch());
             self.hard_fault = Some(reason);
-            self.registered = None;
+            self.registered.clear();
+            self.deadlines = None;
+            for queued in self.staged_withdrawals.values_mut() {
+                queued.carried = false;
+            }
         }
     }
 
@@ -959,12 +1114,31 @@ impl Harness {
             .min()
     }
 
-    fn earliest_fault(&self) -> Option<(u64, HardFaultReason<VerifyingKey, Digest>)> {
-        let deposit = self
-            .staged_deposit_deadlines
+    // The unpulled deposits and their inclusion deadlines, in inbox order.
+    fn armed(&self) -> impl Iterator<Item = (u64, &VerifyingKey)> {
+        self.inbox[self.pulled as usize..]
             .iter()
-            .map(|(account, deadline)| (*deadline, account.clone()))
-            .min();
+            .filter_map(|entry| match entry {
+                Intake::Deposit {
+                    account, deadline, ..
+                } => Some((*deadline, account.as_ref())),
+                Intake::Withdrawal => None,
+            })
+    }
+
+    fn earliest_fault(&self) -> Option<(u64, HardFaultReason<VerifyingKey, Digest>)> {
+        // The earliest unpulled deadline expires first, attributed to the latest deposit
+        // recorded with it.
+        let deposit = self
+            .armed()
+            .map(|(deadline, _)| deadline)
+            .min()
+            .and_then(|deadline| {
+                self.armed()
+                    .filter(|(armed, _)| *armed == deadline)
+                    .last()
+                    .map(|(_, account)| (deadline, account.clone()))
+            });
         let withdrawal = self.earliest_outstanding();
         let intake = match (deposit, withdrawal) {
             (Some((deposit_deadline, _)), Some((withdrawal_deadline, account)))
@@ -994,19 +1168,22 @@ impl Harness {
             )),
             (None, None) => None,
         };
-        let registration = self.registered.as_ref().map(|registered| {
-            let deadline = registered.context.admission_deadline();
-            (
-                deadline
-                    .checked_add(1)
-                    .expect("a registered epoch reserves a post-deadline timestamp"),
-                HardFaultReason::ExpiredRegistration {
-                    anchor: *registered.context.payment().anchor(),
-                    epoch: registered.context.payment().epoch(),
-                    expired_at: deadline,
-                },
-            )
-        });
+        let registration =
+            self.registered
+                .front()
+                .zip(self.deadlines)
+                .map(|(frontier, (deadline, _))| {
+                    (
+                        deadline
+                            .checked_add(1)
+                            .expect("a frontier reserves a post-deadline timestamp"),
+                        HardFaultReason::ExpiredRegistration {
+                            anchor: *frontier.epoch.payment().anchor(),
+                            epoch: frontier.epoch.payment().epoch(),
+                            expired_at: deadline,
+                        },
+                    )
+                });
 
         match (intake, registration) {
             (Some(intake), Some(registration)) if registration.0 <= intake.0 => Some(registration),
@@ -1032,16 +1209,26 @@ impl Harness {
         SigningKey::from_seed(self.seed.wrapping_add(10_000)).public_key()
     }
 
-    fn deposit_batch(&self) -> TestDeposits {
-        if self.hard_fault_settlement.is_some() {
-            return DepositBatch::empty();
+    // The aggregate of the deposits recorded from the first unpulled index up to `end`.
+    fn deposits_to(&self, end: u64) -> TestDeposits {
+        let mut totals = BTreeMap::<VerifyingKey, u64>::new();
+        let start = self.pulled as usize;
+        for entry in &self.inbox[start..(end as usize).max(start)] {
+            if let Intake::Deposit {
+                account, amount, ..
+            } = entry
+            {
+                let total = totals.entry(account.as_ref().clone()).or_default();
+                *total = total
+                    .checked_add(*amount)
+                    .expect("bounded deposits cannot overflow the model");
+            }
         }
         DepositBatch::new(
-            self.staged_deposits
-                .iter()
+            totals
+                .into_iter()
                 .map(|(account, amount)| {
-                    DepositRecord::new(account.clone(), *amount)
-                        .expect("model deposits remain positive")
+                    DepositRecord::new(account, amount).expect("model deposits remain positive")
                 })
                 .collect(),
         )
@@ -1049,14 +1236,18 @@ impl Harness {
     }
 
     fn unfinalized_deposit_total(&self) -> u64 {
+        if self.hard_fault_settlement.is_some() {
+            return self
+                .terminal_deposits
+                .values()
+                .try_fold(0_u64, |total, amount| total.checked_add(*amount))
+                .expect("bounded terminal deposits cannot overflow the model");
+        }
         let staged = self
-            .staged_deposits
+            .pending
             .values()
             .try_fold(0_u64, |total, amount| total.checked_add(*amount))
-            .expect("bounded staged deposits cannot overflow the model");
-        if self.hard_fault_settlement.is_some() {
-            return staged;
-        }
+            .expect("bounded pending deposits cannot overflow the model");
         self.slots
             .iter()
             .try_fold(staged, |total, slot| {
@@ -1079,16 +1270,55 @@ impl Harness {
 
     fn finish_hard_fault_if_drained(&mut self) {
         if self.hard_fault_settlement.is_some()
-            && self.staged_deposits.is_empty()
+            && self.terminal_deposits.is_empty()
             && self.remaining_state_liability() == 0
         {
             self.settled = true;
         }
     }
 
-    fn withdrawal_batch(&self) -> TestWithdrawals {
-        WithdrawalBatch::new(self.staged_withdrawals.values().cloned().collect())
-            .expect("model withdrawals remain canonical")
+    // The chain-queued withdrawals a pull up to `end` must carry.
+    fn obligated(&self, end: u64) -> TestWithdrawals {
+        WithdrawalBatch::new(
+            self.staged_withdrawals
+                .values()
+                .filter(|queued| !queued.carried && queued.index < end)
+                .map(|queued| queued.request.clone())
+                .collect(),
+        )
+        .expect("model withdrawals remain canonical")
+    }
+
+    // Production's next expiry must equal the model's: settlement reports nothing one tick
+    // before the model's earliest deadline and exactly the model's reason at it.
+    fn assert_expiry(&self) {
+        if self.hard_fault.is_some() {
+            return;
+        }
+        let mut probe = TestChain::decode_cfg(
+            self.chain.encode(),
+            &Bounds {
+                committee: 4,
+                items: MAX_ACTIONS * MAX_ACCOUNTS,
+                destination: MAX_DESTINATION_BYTES,
+            },
+        )
+        .unwrap();
+        match self.earliest_fault() {
+            Some((deadline, reason)) => {
+                if let Some(before) = deadline.checked_sub(1) {
+                    assert!(matches!(
+                        probe.fault_expired(before),
+                        Err(SettlementError::DeadlineNotReached)
+                    ));
+                }
+                assert_eq!(probe.fault_expired(deadline).unwrap(), reason);
+            }
+            None => assert!(matches!(
+                probe.fault_expired(u64::MAX),
+                Err(SettlementError::DeadlineNotReached)
+            )),
+        }
     }
 
     fn tail_cache(&self) -> &TestCache {
@@ -1097,77 +1327,143 @@ impl Harness {
             .map_or(&self.finalized, |slot| &slot.successor)
     }
 
-    // A fresh fixture deadline clears both now and the pipeline tail, so a
-    // registration can satisfy the strict admission monotonicity rule while
-    // the oracle still predicts rejections for stale or distant deadlines.
-    fn fixture_admission_deadline(&self) -> u64 {
-        let tail = self
-            .slots
-            .back()
-            .map_or(0, |slot| slot.context.admission_deadline());
-        self.now.saturating_add(2).max(tail.saturating_add(1))
-    }
-
-    async fn make_context(
+    // The registration of `epoch` over the given boundary.
+    fn make_registration(
         &self,
         epoch: u64,
-        cache: &TestCache,
-        deposits: &TestDeposits,
-        withdrawals: &TestWithdrawals,
-        admission_deadline: u64,
-        challenge_deadline: u64,
-    ) -> TestContext {
-        assert_eq!(cache.root(), self.state.as_ref().unwrap().state().root());
-        support::close_context(
+        deposits: TestDeposits,
+        withdrawals: TestWithdrawals,
+        credit: Option<(u8, u8)>,
+    ) -> Registration {
+        let epoch = EpochContext::new::<Sha256>(
             self.deployment,
             epoch,
             self.operator.public_key(),
-            self.state.as_ref().unwrap(),
-            cache.liability(),
-            deposits,
-            withdrawals,
-            admission_deadline,
-            challenge_deadline,
+            &deposits,
+            &withdrawals,
             CloseLimits::new(4, 5, 4, 4, 16, u64::MAX, u64::MAX, u64::MAX),
             self.committee_digest,
-            self.chain.registration_floors(),
+        )
+        .expect("bounded fuzz boundaries construct an epoch");
+        Registration {
+            epoch,
+            floors: self.chain.registration_floors(),
+            deposits,
+            withdrawals,
+            credit,
+        }
+    }
+
+    // The context and close of the admitted head, if any epoch was admitted.
+    fn head(&self) -> Option<(&TestContext, &TestClose)> {
+        self.slots.back().map_or_else(
+            || {
+                self.finalized_head
+                    .as_ref()
+                    .map(|(context, close)| (context, close))
+            },
+            |slot| Some((&slot.context, &slot.close)),
         )
     }
 
-    async fn make_prepared(&self) -> Prepared {
-        let cache = &self.replica;
-        let deposits = self.deposit_batch();
-        let withdrawals = self.withdrawal_batch();
-        let admission = self.fixture_admission_deadline();
-        let context = self
-            .make_context(
-                self.next_epoch(),
-                cache,
-                &deposits,
-                &withdrawals,
+    // The account rows of the admitted head, empty before any admission.
+    fn head_rows(&self) -> Range<u64> {
+        self.head().map_or(0..0, |(context, close)| {
+            let range = close
+                .roots
+                .activity_range(context)
+                .expect("an admitted close has an exact activity range");
+            range.start..range.end
+        })
+    }
+
+    // Finds `payer`'s vector root in the admitted head by a linear scan.
+    fn predecessor(&self, payer: &VerifyingKey) -> VectorRoot<Digest> {
+        self.head()
+            .and_then(|(_, close)| {
+                close
+                    .activity_input::<Sha256>()
+                    .rows()
+                    .iter()
+                    .find(|row| row.account() == payer)
+                    .map(|row| row.send_root())
+            })
+            .unwrap_or_else(empty_root)
+    }
+
+    // Binds a registration to the replica, which is always the admitted head.
+    fn bind(&self, registration: &Registration, (admission, challenge): (u64, u64)) -> TestContext {
+        registration
+            .epoch
+            .clone()
+            .bind::<Sha256, _, _>(
+                self.state.as_ref().unwrap(),
+                &registration.deposits,
+                &registration.withdrawals,
+                self.head_rows(),
+                self.replica.liability(),
                 admission,
-                admission.saturating_add(CHALLENGE_DURATION),
+                challenge,
+                registration.floors,
             )
-            .await;
+            .expect("the replica is the admitted head")
+    }
+
+    // Prepares the frontier's close against the head, or an unregistered epoch's close when no
+    // epoch awaits admission.
+    async fn make_prepared(&self, now: u64) -> Prepared {
+        let (registration, deadlines) = match (self.registered.front(), self.deadlines) {
+            (Some(frontier), Some(deadlines)) => (frontier.clone(), deadlines),
+            _ => (
+                self.make_registration(
+                    self.next_registration(),
+                    self.deposits_to(self.inbox.len() as u64),
+                    self.obligated(self.inbox.len() as u64),
+                    None,
+                ),
+                Self::frontier_deadlines(now).unwrap_or((u64::MAX - 1, u64::MAX - 1)),
+            ),
+        };
+        let context = self.bind(&registration, deadlines);
+        if let Some((payer, amount)) = registration.credit
+            && let Some(prepared) = self
+                .make_credit_prepared(&registration, context.clone(), payer, amount)
+                .await
+        {
+            return prepared;
+        }
+        let cache = &self.replica;
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             self.state.as_ref().unwrap(),
             &context,
-            &deposits,
-            &withdrawals,
+            &registration.deposits,
+            &registration.withdrawals,
             Vec::new(),
             &Sequential,
         )
         .await
         .unwrap();
-        self.finish_prepared(cache, context, deposits, withdrawals, prepared)
-            .await
+        self.finish_prepared(
+            cache,
+            context,
+            registration.deposits,
+            registration.withdrawals,
+            prepared,
+        )
+        .await
     }
 
-    async fn make_credit_prepared(&self, payer_selector: u8, raw_amount: u8) -> Option<Prepared> {
-        if !self.staged_deposits.is_empty() || self.staged_withdrawals.len() > 1 {
+    async fn make_credit_prepared(
+        &self,
+        registration: &Registration,
+        context: TestContext,
+        payer_selector: u8,
+        raw_amount: u8,
+    ) -> Option<Prepared> {
+        if !registration.deposits.is_empty() || registration.withdrawals.len() > 1 {
             return None;
         }
-        let close_request = self.staged_withdrawals.values().next();
+        let close_request = registration.withdrawals.requests().first();
         if close_request
             .is_some_and(|request| !matches!(request.body().action(), WithdrawalAction::Close))
         {
@@ -1201,19 +1497,7 @@ impl Harness {
         let recipient = recipient_key.public_key();
 
         let deposits = DepositBatch::empty();
-        let withdrawals = self.withdrawal_batch();
-        let admission_deadline = self.fixture_admission_deadline();
-        let challenge_deadline = admission_deadline.saturating_add(CHALLENGE_DURATION);
-        let context = self
-            .make_context(
-                self.next_epoch(),
-                cache,
-                &deposits,
-                &withdrawals,
-                admission_deadline,
-                challenge_deadline,
-            )
-            .await;
+        let withdrawals = registration.withdrawals.clone();
         let maximum = if close_request.is_some() {
             leaf.balance
         } else {
@@ -1240,12 +1524,11 @@ impl Harness {
                 .root::<Sha256, Digest>()
                 .expect("bounded credit vector commits"),
         );
-        let operator_signature = bls_ack(&self.operator_ack, &body);
-        let outgoing = SendAuthorization::sign(body.clone(), payer);
+        let outgoing = SendAuthorization::sign(body, self.predecessor(&leaf.account), payer);
         let terminal = Terminal {
+            operator_signature: bls_ack(&self.operator_ack, &outgoing),
             authorization: outgoing,
             vector: out_vector,
-            operator_signature,
         };
 
         // Receiving does not make an absent-at-boundary key eligible to originate payments in the
@@ -1269,12 +1552,14 @@ impl Harness {
                 .root::<Sha256, Digest>()
                 .expect("bounded negative-control vector commits"),
         );
+        let recipient_outgoing =
+            SendAuthorization::sign(recipient_body, self.predecessor(&recipient), recipient_key);
         let mut ineligible = vec![
             terminal.clone(),
             Terminal {
-                authorization: SendAuthorization::sign(recipient_body.clone(), recipient_key),
+                operator_signature: bls_ack(&self.operator_ack, &recipient_outgoing),
+                authorization: recipient_outgoing,
                 vector: recipient_vector,
-                operator_signature: bls_ack(&self.operator_ack, &recipient_body),
             },
         ];
         ineligible.sort_unstable_by(|left, right| {
@@ -1476,18 +1761,19 @@ impl Harness {
             _ => amount = u64::MAX,
         }
 
+        // The deposit enters the inbox, even while earlier epochs are registered.
         let observation = self.predict_observation(now);
+        let epoch = self.next_registration();
         let aggregate = self
-            .staged_deposits
+            .pending
             .get(&account)
             .copied()
             .unwrap_or(0)
             .checked_add(amount);
         let deadline = now.checked_add(DEPOSIT_INCLUSION_TIMEOUT);
         let custody = self.custody.checked_add(amount);
-        let epoch_available = self.next_epoch().checked_add(3).is_some();
+        let epoch_available = epoch.checked_add(3).is_some();
         let expected = if self.operates_after(&observation)
-            && self.registered.is_none()
             && epoch_available
             && amount != 0
             && !self.consumed_deposit_ids.contains(&id)
@@ -1507,12 +1793,14 @@ impl Harness {
         assert_eq!(OutcomeClass::of(&result), expected);
         self.apply_observation(now, &observation);
         if expected == OutcomeClass::Success {
+            assert_eq!(result.ok(), Some(self.inbox.len() as u64));
             let deadline = deadline.expect("the oracle checked deposit deadline arithmetic");
-            self.staged_deposit_deadlines
-                .entry(account.clone())
-                .and_modify(|current| *current = (*current).min(deadline))
-                .or_insert(deadline);
-            self.staged_deposits.insert(
+            self.inbox.push(Intake::Deposit {
+                account: Box::new(account.clone()),
+                amount,
+                deadline,
+            });
+            self.pending.insert(
                 account,
                 aggregate.expect("the oracle checked accepted deposit aggregation"),
             );
@@ -1593,7 +1881,7 @@ impl Harness {
             }
             9 => {}
             _ => {
-                if let Some(depositing) = self.staged_deposits.keys().next() {
+                if let Some(depositing) = self.pending.keys().next() {
                     let depositing_account = depositing.clone();
                     if let Some(depositing_key) = self
                         .accounts
@@ -1656,11 +1944,20 @@ impl Harness {
         if expected == OutcomeClass::Success {
             let request_id = request.id::<Sha256>();
             assert!(!self.withdrawal_replays.contains_key(&request_id));
+            assert_eq!(result.ok(), Some(self.inbox.len() as u64));
             assert!(
                 self.staged_withdrawals
-                    .insert(account.clone(), request.clone())
+                    .insert(
+                        account.clone(),
+                        Queued {
+                            index: self.inbox.len() as u64,
+                            request: request.clone(),
+                            carried: false,
+                        },
+                    )
                     .is_none()
             );
+            self.inbox.push(Intake::Withdrawal);
             assert!(self.outstanding.insert(account, request.clone()).is_none());
             self.withdrawal_replays
                 .insert(request_id, request.body().deadline());
@@ -1762,11 +2059,7 @@ impl Harness {
             WithdrawalAction::Amount(_) => 2,
             WithdrawalAction::Close => 1,
         };
-        if self
-            .next_epoch()
-            .checked_add(epoch_offset + u64::from(self.registered.is_some()))
-            .is_none()
-        {
+        if self.next_registration().checked_add(epoch_offset).is_none() {
             return false;
         }
         let Some(minimum_deadline) = now.checked_add(MINIMUM_WITHDRAWAL_NOTICE) else {
@@ -1799,93 +2092,172 @@ impl Harness {
             }
     }
 
-    async fn register(&mut self, tick: u8, mutated: bool) -> ActionOutcome {
-        let prepared = self.make_prepared().await;
-        self.register_prepared(tick, mutated, prepared).await
+    async fn register(&mut self, tick: u8, end: u8, mutation: u8) -> ActionOutcome {
+        self.register_epoch(tick, Some(end), mutation, None)
     }
 
     async fn register_credit(
         &mut self,
         tick: u8,
+        end: u8,
         payer: u8,
         amount: u8,
         mutated: bool,
     ) -> ActionOutcome {
-        let (prepared, unavailable) = match self.make_credit_prepared(payer, amount).await {
-            Some(prepared) => (prepared, false),
-            None => (self.make_prepared().await, true),
-        };
-        self.register_prepared(tick, mutated || unavailable, prepared)
-            .await
+        self.register_epoch(tick, Some(end), u8::from(mutated), Some((payer, amount)))
     }
 
-    async fn register_prepared(
+    // Registers several epochs at one instant, each pulling the whole inbox. Nothing bounds the
+    // queue except acceptance.
+    async fn stack(&mut self, tick: u8, depth: u8) -> ActionOutcome {
+        let mut outcome = self.register_epoch(tick, None, 0, None);
+        for _ in 1..(depth % 3) + 1 {
+            if outcome.class == OutcomeClass::Error {
+                break;
+            }
+            outcome = self.register_epoch(0, None, 0, None);
+        }
+        outcome
+    }
+
+    // Registration needs only the previous epoch registered. It pulls the inbox from the first
+    // unpulled index up to a selected end, the whole inbox when none is selected, and must carry
+    // every uncarried chain-queued request there. A new frontier takes its deadlines from now.
+    //
+    // A mutation submits a later epoch, an end outside the unpulled inbox, a deposit root that
+    // does not commit the pulled aggregate, a batch omitting an obligated request, an early
+    // carriage of a request past the end, or a second carriage of a carried request.
+    fn register_epoch(
         &mut self,
         tick: u8,
-        mutated: bool,
-        prepared: Prepared,
+        end: Option<u8>,
+        mutation: u8,
+        credit: Option<(u8, u8)>,
     ) -> ActionOutcome {
         let now = self.advance(tick);
-        let context = if mutated {
-            self.make_context(
-                prepared.context.payment().epoch() + 1,
-                &self.replica,
-                &prepared.deposits,
-                &prepared.withdrawals,
-                prepared.context.admission_deadline(),
-                prepared.context.challenge_deadline(),
-            )
-            .await
+        let epoch = self.next_registration();
+        let intake = self.inbox.len() as u64;
+        let mut end = end.map_or(intake, |end| {
+            self.pulled + u64::from(end) % (intake - self.pulled + 1)
+        });
+        let mut withdrawals = self.obligated(end).requests().to_vec();
+        let mut submitted_epoch = epoch;
+        let mut committed = None;
+        let mut rejection = None;
+        match mutation % 7 {
+            1 => {
+                submitted_epoch = epoch.saturating_add(1);
+                rejection = Some(SettlementError::EpochSequence);
+            }
+            2 => {
+                end = self.pulled.checked_sub(1).unwrap_or(intake + 1);
+                withdrawals = self.obligated(intake).requests().to_vec();
+                rejection = Some(SettlementError::IntakeRange);
+            }
+            3 => {
+                let mut totals = self
+                    .deposits_to(end)
+                    .records()
+                    .iter()
+                    .map(|record| (record.account().clone(), record.amount()))
+                    .collect::<BTreeMap<_, _>>();
+                *totals.entry(self.accounts[0].public_key()).or_default() += 1;
+                committed = Some(
+                    DepositBatch::new(
+                        totals
+                            .into_iter()
+                            .map(|(account, amount)| DepositRecord::new(account, amount).unwrap())
+                            .collect(),
+                    )
+                    .unwrap(),
+                );
+                rejection = Some(SettlementError::BoundaryRoot);
+            }
+            4 => {
+                if !withdrawals.is_empty() {
+                    withdrawals.remove(0);
+                    rejection = Some(SettlementError::WithdrawalWitness);
+                }
+            }
+            5 => {
+                if let Some(early) = self
+                    .staged_withdrawals
+                    .values()
+                    .find(|queued| !queued.carried && queued.index >= end)
+                {
+                    withdrawals.push(early.request.clone());
+                }
+            }
+            6 => {
+                if let Some(carried) = self
+                    .staged_withdrawals
+                    .values()
+                    .find(|queued| queued.carried)
+                {
+                    withdrawals.push(carried.request.clone());
+                    rejection = Some(SettlementError::DuplicateWithdrawal);
+                }
+            }
+            _ => {}
+        }
+        let deposits = if end <= intake {
+            self.deposits_to(end)
         } else {
-            prepared.context.clone()
+            DepositBatch::empty()
         };
+        let withdrawals = WithdrawalBatch::new(withdrawals).expect("one request per account");
+        let registration =
+            self.make_registration(epoch, deposits.clone(), withdrawals.clone(), credit);
+        let submitted = self
+            .make_registration(
+                submitted_epoch,
+                committed.unwrap_or_else(|| deposits.clone()),
+                withdrawals.clone(),
+                credit,
+            )
+            .epoch;
         let observation = self.predict_observation(now);
-
-        // Mirror validate_epoch_deadlines: a strictly later admission deadline
-        // than the pipeline tail, a bounded admission delay from the tail (or
-        // from now when the pipeline is empty), and an exact challenge
-        // duration (the config sets minimum and maximum equal).
-        let tail_deadline = self
-            .slots
-            .back()
-            .map(|slot| slot.context.admission_deadline());
-        let deadline_base = tail_deadline.unwrap_or(now);
-        let deadlines_valid = (tail_deadline.is_none()
-            || context.admission_deadline() > deadline_base)
-            && context.admission_deadline()
-                <= deadline_base.saturating_add(MAX_EPOCH_ADMISSION_DELAY)
-            && context
-                .challenge_deadline()
-                .checked_sub(context.admission_deadline())
-                == Some(CHALLENGE_DURATION);
-        let expected = if self.operates_after(&observation)
-            && self.registered.is_none()
-            && now <= context.admission_deadline()
-            && deadlines_valid
-            && context == prepared.context
-        {
+        let deadlines = Self::frontier_deadlines(now);
+        let operating = self.operates_after(&observation) && deadlines.is_some();
+        let expected = if operating && rejection.is_none() && epoch.checked_add(1).is_some() {
             OutcomeClass::Success
         } else {
             OutcomeClass::Error
         };
         let result =
             self.chain
-                .register_close(now, context, prepared.withdrawals.clone(), &[], |_| true);
+                .register_epoch(now, submitted, end, deposits, withdrawals.clone(), |_| true);
         assert_eq!(OutcomeClass::of(&result), expected);
+        if operating && let Some(rejection) = rejection {
+            assert_eq!(
+                core::mem::discriminant(&result.unwrap_err()),
+                core::mem::discriminant(&rejection)
+            );
+        }
         self.apply_observation(now, &observation);
         if expected == OutcomeClass::Success {
-            assert!(self.registered.is_none());
-            self.registered = Some(prepared);
+            if self.registered.is_empty() {
+                self.deadlines = deadlines;
+            }
+            for request in withdrawals.requests() {
+                let queued = self
+                    .staged_withdrawals
+                    .get_mut(request.account())
+                    .expect("fuzz registrations carry only chain-queued requests");
+                assert!(!queued.carried);
+                queued.carried = true;
+            }
+            self.registered.push_back(registration);
+
+            // The pulled deposits follow the epoch from here.
+            self.pulled = end;
         }
         ActionOutcome::new(expected, Some(&observation))
     }
 
     async fn admit(&mut self, tick: u8, mutated: bool) -> ActionOutcome {
         let now = self.advance(tick);
-        let prepared = match self.registered.clone() {
-            Some(prepared) => prepared,
-            None => self.make_prepared().await,
-        };
+        let prepared = self.make_prepared(now).await;
         let (certificate, candidate) = self.certificate(&prepared).await;
         let retained_certificate = certificate.clone();
         let mut header = prepared.close.header;
@@ -1898,13 +2270,16 @@ impl Harness {
                 prepared.close.withdrawal_total,
             );
         }
+        // Admission promotes the next queued epoch with deadlines from now.
         let observation = self.predict_observation(now);
+        let promotion = Self::frontier_deadlines(now);
         let expected = if self.operates_after(&observation)
-            && self.registered.as_ref().is_some_and(|registered| {
-                now <= registered.context.admission_deadline()
-                    && header == registered.close.header
-                    && roots == registered.close.roots
-            }) {
+            && !mutated
+            && self
+                .deadlines
+                .is_some_and(|(admission, _)| now <= admission)
+            && (self.registered.len() < 2 || promotion.is_some())
+        {
             OutcomeClass::Success
         } else {
             OutcomeClass::Error
@@ -1927,10 +2302,12 @@ impl Harness {
         if expected == OutcomeClass::Success {
             let (state, validated) = candidate.apply(self.state.take().unwrap()).await.unwrap();
             assert_eq!(validated.header, prepared.close.header);
-            let registered = self
-                .registered
-                .take()
+            self.registered
+                .pop_front()
                 .expect("admission requires the exact registered epoch");
+            self.deadlines = (!self.registered.is_empty())
+                .then(|| promotion.expect("the oracle checked the promoted deadlines"));
+            let registered = prepared.clone();
             let payout_start = registered.context.predecessor_logs().payouts.operations;
             let mut withdrawal_claims = Vec::with_capacity(registered.withdrawal_outputs.len());
             for (offset, expected_output) in registered.withdrawal_outputs.iter().enumerate() {
@@ -1979,22 +2356,26 @@ impl Harness {
                     self.replica.balance(&account.public_key())
                 );
             }
+            // Admission removes exactly its pulled deposits and the requests it carries.
             for record in registered.deposits.records() {
-                assert_eq!(
-                    self.staged_deposits.remove(record.account()),
-                    Some(record.amount())
-                );
-                assert!(
-                    self.staged_deposit_deadlines
-                        .remove(record.account())
-                        .is_some()
-                );
+                let total = self
+                    .pending
+                    .get_mut(record.account())
+                    .expect("registration pulled only recorded deposits");
+                *total = total
+                    .checked_sub(record.amount())
+                    .expect("registration pulled only recorded deposits");
+                if *total == 0 {
+                    self.pending.remove(record.account());
+                }
             }
             for request in registered.withdrawals.requests() {
-                assert_eq!(
-                    self.staged_withdrawals.remove(request.account()),
-                    Some(request.clone())
-                );
+                let queued = self
+                    .staged_withdrawals
+                    .remove(request.account())
+                    .expect("the admitted registration carries a chain-queued request");
+                assert_eq!(&queued.request, request);
+                assert!(queued.carried);
             }
             self.slots.push_back(Slot {
                 predecessor: registered.predecessor,
@@ -2132,17 +2513,18 @@ impl Harness {
                 );
             }
             self.finalized = slot.successor;
+            self.finalized_head = Some((slot.context, slot.close));
             self.expected_epoch += 1;
         }
         ActionOutcome::new(expected, Some(&observation))
     }
 
     fn fault_unadmitted(&mut self, tick: u8, inclusive_boundary: bool) -> ActionOutcome {
-        let now = if let Some(prepared) = &self.registered {
+        let now = if let Some((admission, _)) = self.deadlines {
             let target = if inclusive_boundary {
-                prepared.context.admission_deadline()
+                admission
             } else {
-                prepared.context.admission_deadline().saturating_add(1)
+                admission.saturating_add(1)
             };
             self.advance_to(target)
         } else {
@@ -2248,6 +2630,9 @@ impl Harness {
         let seq = row
             .and_then(|position| close.rows[position].outgoing.as_ref())
             .map_or(0, |send| send.body().seq());
+        let predecessor = row
+            .and_then(|position| close.rows[position].outgoing.as_ref())
+            .map_or_else(empty_root, SendAuthorization::predecessor);
 
         // A retained vector strictly above the committed terminal entry for (payer, external).
         let recipient = self.external_account();
@@ -2278,9 +2663,10 @@ impl Harness {
         let retained_root = retained
             .root::<Sha256, Digest>()
             .expect("bounded retained vector commits");
-        let ack = |seq: u64, debit: u64| {
+        let ack = |seq: u64, debit: u64, predecessor: VectorRoot<Digest>| {
             VectorAck::sign_by_authorities(
                 VectorSendBody::new(context.payment(), payer.clone(), seq, debit, retained_root),
+                predecessor,
                 key,
                 &self.operator,
             )
@@ -2300,7 +2686,7 @@ impl Harness {
                     .expect("an admitted close has retained native activity");
                 (
                     Challenge::HigherAckDebit {
-                        ack: Box::new(AckWitness::from_ack(&ack(seq + 1, above))),
+                        ack: Box::new(AckWitness::from_ack(&ack(seq + 1, above, predecessor))),
                         payer: Box::new(
                             epoch
                                 .account_lookup(logs, &payer)
@@ -2333,7 +2719,7 @@ impl Harness {
                 (
                     Challenge::HigherAckEntry {
                         entry: Box::new(EntryWitness {
-                            ack: AckWitness::from_ack(&ack(seq + 1, above)),
+                            ack: AckWitness::from_ack(&ack(seq + 1, above, predecessor)),
                             recipient: recipient.clone(),
                             cumulative,
                             count,
@@ -2349,15 +2735,21 @@ impl Harness {
                     ChallengeKind::HigherAckEntry,
                 )
             }
+            // A fork differs in the body or, for odd families, only in the predecessor.
             _ => (
                 Challenge::AckFork {
-                    left: Box::new(AckWitness::from_ack(&ack(seq + 1, above))),
-                    right: Box::new(AckWitness::from_ack(&ack(
-                        seq + 1,
-                        above
-                            .checked_add(1)
-                            .expect("bounded fixture debit cannot overflow"),
-                    ))),
+                    left: Box::new(AckWitness::from_ack(&ack(seq + 1, above, predecessor))),
+                    right: Box::new(AckWitness::from_ack(&if (family / 3).is_multiple_of(2) {
+                        ack(
+                            seq + 1,
+                            above
+                                .checked_add(1)
+                                .expect("bounded fixture debit cannot overflow"),
+                            predecessor,
+                        )
+                    } else {
+                        ack(seq + 1, above, retained_root)
+                    })),
                 },
                 ChallengeKind::AckFork,
             ),
@@ -2383,7 +2775,7 @@ impl Harness {
         let (context, batch, close, admitted) = if let Some((context, batch, close)) = selected {
             (context, batch, close, true)
         } else {
-            let prepared = self.make_prepared().await;
+            let prepared = self.make_prepared(now).await;
             (
                 prepared.context,
                 prepared.close.header.batch_id::<Sha256>(),
@@ -2611,7 +3003,11 @@ impl Harness {
         let terminal_started = self.hard_fault_settlement.is_some();
         let account =
             self.accounts[usize::from(account_selector) % self.accounts.len()].public_key();
-        let amount = self.staged_deposits.get(&account).copied();
+        let amount = if terminal_started {
+            self.terminal_deposits.get(&account).copied()
+        } else {
+            self.pending.get(&account).copied()
+        };
         let expected = if (self.hard_fault.is_some() || observation.fault.is_some())
             && !self.settled
             && amount.is_some()
@@ -2628,15 +3024,11 @@ impl Harness {
             let refund = result.expect("the oracle predicted a deposit refund");
             assert_eq!(refund.account, account);
             assert_eq!(refund.amount, amount);
-            assert_eq!(self.staged_deposits.remove(&refund.account), Some(amount));
             if terminal_started {
-                assert!(!self.staged_deposit_deadlines.contains_key(&refund.account));
+                assert_eq!(self.terminal_deposits.remove(&refund.account), Some(amount));
             } else {
-                assert!(
-                    self.staged_deposit_deadlines
-                        .remove(&refund.account)
-                        .is_some()
-                );
+                // One refund returns every unadmitted deposit the account owns.
+                assert_eq!(self.pending.remove(&account), Some(amount));
             }
             self.custody = self
                 .custody
@@ -2686,22 +3078,27 @@ impl Harness {
                     unfinalized_deposit_total
                 );
                 assert_eq!(settlement.custody_balance, self.custody);
-                for slot in &self.slots {
-                    for record in slot.deposits.records() {
-                        let aggregate = self
-                            .staged_deposits
-                            .get(record.account())
-                            .copied()
-                            .unwrap_or(0)
-                            .checked_add(record.amount())
-                            .expect("bounded terminal deposits cannot overflow");
-                        self.staged_deposits
-                            .insert(record.account().clone(), aggregate);
-                    }
+                let buckets = core::mem::take(&mut self.pending).into_iter();
+                let admitted = self.slots.iter().flat_map(|slot| {
+                    slot.deposits
+                        .records()
+                        .iter()
+                        .map(|record| (record.account().clone(), record.amount()))
+                        .collect::<Vec<_>>()
+                });
+                for (account, amount) in buckets.chain(admitted).collect::<Vec<_>>() {
+                    let aggregate = self
+                        .terminal_deposits
+                        .get(&account)
+                        .copied()
+                        .unwrap_or(0)
+                        .checked_add(amount)
+                        .expect("bounded terminal deposits cannot overflow");
+                    self.terminal_deposits.insert(account, aggregate);
                 }
                 self.slots.clear();
-                self.registered = None;
-                self.staged_deposit_deadlines.clear();
+                self.registered.clear();
+                self.deadlines = None;
                 self.staged_withdrawals.clear();
                 self.withdrawal_replays.clear();
                 self.hard_fault_settlement = Some(settlement.clone());
@@ -2851,12 +3248,29 @@ fn output_total(outputs: &[WithdrawalOutput]) -> u64 {
         .expect("authenticated withdrawal outputs fit custody")
 }
 
-fn bls_ack(private: &Private, body: &VectorSendBody<VerifyingKey, Digest>) -> OperatorSignature {
+fn bls_ack(
+    private: &Private,
+    authorization: &SendAuthorization<VerifyingKey, Digest>,
+) -> OperatorSignature {
     sign_message::<OperatorVariant>(
         private,
         VECTOR_ACK_AGGREGATE_NAMESPACE,
-        body.encode().as_ref(),
+        authorization.message().as_ref(),
     )
+}
+
+// The predecessor a payer signs when the admitted head has no row for it.
+fn empty_root() -> VectorRoot<Digest> {
+    commitment::empty_root::<Sha256>(VectorKind::OutEntry)
+}
+
+// The account rows a close appended, which bind its successor, or `None` when it has none.
+fn rows(context: &TestContext, close: &TestClose) -> Option<ActivityRange<Digest>> {
+    let range = close
+        .roots
+        .activity_range(context)
+        .expect("an admitted close has an exact activity range");
+    (range.start < range.end).then_some(range)
 }
 
 // Derive balances from input vectors and boundaries, then compare every public activity row.
@@ -2933,6 +3347,7 @@ async fn lifecycle_probe(mut input: FuzzInput, runtime: deterministic::Context) 
     let actions = [
         Action::RegisterCredit {
             tick: 0,
+            end: 0,
             payer: 0,
             amount: 1,
             mutated: false,
@@ -2960,8 +3375,9 @@ async fn lifecycle_probe(mut input: FuzzInput, runtime: deterministic::Context) 
             mutation: 0,
         },
         Action::Register {
-            tick: 0,
-            mutated: false,
+            tick: 1,
+            end: 1,
+            mutation: 0,
         },
         Action::Admit {
             tick: 0,

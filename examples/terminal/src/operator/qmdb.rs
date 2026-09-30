@@ -593,14 +593,27 @@ async fn catch_up<E: Context + Spawner>(
         }
 
         // Replay derives all three native batches from retained SQL activity using the
-        // immutable floors in the certified result.
+        // immutable floors and deadlines in the certified result. The predecessor
+        // liability and rows are the operator's own projections, so the context
+        // comparison below also checks them against the values settlement bound.
         let data = source.load(applied)?;
         let registration = registration_for(protocol, &data)?;
         let terminals = replica_terminals(protocol, &data)?;
+        let rows = match applied.checked_sub(1) {
+            Some(previous) => source
+                .stored_result(previous)?
+                .context("certified result prefix has a gap")?
+                .rows()?,
+            None => 0..0,
+        };
         let context = registration.context.bind::<Sha256, _, _>(
             &replica,
             &registration.deposits,
             &registration.withdrawals,
+            rows,
+            registration.liability,
+            result.context.admission_deadline(),
+            result.context.challenge_deadline(),
             result.context.floors(),
         )?;
         ensure!(

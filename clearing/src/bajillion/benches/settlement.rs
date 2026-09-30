@@ -35,6 +35,7 @@ use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
     num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
     time::{Duration, Instant},
 };
 
@@ -135,8 +136,6 @@ const fn settlement_config(live_accounts: usize) -> SettlementConfig {
     SettlementConfig::new(
         EpochDeadlinePolicy::new(
             NonZeroU64::new(ADMISSION_DEADLINE).expect("benchmark admission delay is positive"),
-            NonZeroU64::new(CHALLENGE_DEADLINE - ADMISSION_DEADLINE)
-                .expect("benchmark challenge duration is positive"),
             NonZeroU64::new(CHALLENGE_DEADLINE - ADMISSION_DEADLINE)
                 .expect("benchmark challenge duration is positive"),
         ),
@@ -278,29 +277,24 @@ impl ChainSource {
     }
 }
 
+// Builds the close for `epoch` over `state`, whose latest close appended `rows`.
 #[commonware_macros::boxed]
 async fn admission_fixture(
     state: TestState,
     validators: &Validators,
     epoch: u64,
     withdrawals: TestWithdrawals,
+    rows: Range<u64>,
 ) -> (TestState, AdmissionFixture) {
     let deposits = DepositBatch::empty();
 
-    // Sequential registrations require strictly increasing admission deadlines.
-    let admission_deadline = ADMISSION_DEADLINE + epoch;
+    // Every benchmark epoch becomes the frontier at time zero, after its predecessor's admission.
     let context = EpochContext::new::<Sha256>(
         deployment(),
         epoch,
         SigningKey::from_seed(OPERATOR_SEED).public_key(),
         &deposits,
         &withdrawals,
-        u64::try_from(LIVE_ACCOUNTS)
-            .expect("benchmark account count fits u64")
-            .checked_mul(OPENING_BALANCE)
-            .expect("benchmark liability fits u64"),
-        admission_deadline,
-        admission_deadline + (CHALLENGE_DEADLINE - ADMISSION_DEADLINE),
         CloseLimits::protocol_maximum(),
         validators.committee().commitment::<Sha256>(),
     )
@@ -309,6 +303,13 @@ async fn admission_fixture(
         &state,
         &deposits,
         &withdrawals,
+        rows,
+        u64::try_from(LIVE_ACCOUNTS)
+            .expect("benchmark account count fits u64")
+            .checked_mul(OPENING_BALANCE)
+            .expect("benchmark liability fits u64"),
+        ADMISSION_DEADLINE,
+        CHALLENGE_DEADLINE,
         commonware_clearing::bajillion::logs::Floors {
             activity: 0,
             payouts: 0,
@@ -371,9 +372,24 @@ fn admit_fixture(chain: &mut TestChain, admission: AdmissionFixture) {
         withdrawal_total,
         certificate,
     } = admission;
+    let end = chain.intake();
     chain
-        .register_close(0, context, withdrawals, &[], |_| true)
+        .register_epoch(
+            0,
+            context.epoch_context().clone(),
+            end,
+            DepositBatch::empty(),
+            withdrawals,
+            |_| true,
+        )
         .expect("benchmark close can be registered");
+    assert_eq!(
+        chain
+            .registered()
+            .expect("the epoch is the frontier")
+            .context,
+        &context
+    );
     chain
         .admit(0, header, roots, withdrawal_total, certificate)
         .expect("benchmark close can be admitted");
@@ -440,6 +456,7 @@ async fn queue_source(runtime: deterministic::Context, depth: usize) -> QueueSou
         .await
         .unwrap();
     let mut admissions = Vec::with_capacity(depth);
+    let mut rows = 0..0;
 
     for epoch in 0..depth {
         let (next, admission) = admission_fixture(
@@ -447,9 +464,15 @@ async fn queue_source(runtime: deterministic::Context, depth: usize) -> QueueSou
             &chain.validators,
             u64::try_from(epoch).unwrap(),
             WithdrawalBatch::empty(),
+            rows,
         )
         .await;
         state = next;
+        let range = admission
+            .roots
+            .activity_range(&admission.context)
+            .expect("benchmark close range is valid");
+        rows = range.start..range.end;
 
         admissions.push(admission);
     }
@@ -496,7 +519,8 @@ async fn close_source(
         state,
         &chain.validators,
         0,
-        seed_chain.pending_withdrawals(),
+        seed_chain.pending_withdrawals(seed_chain.intake()),
+        0..0,
     )
     .await;
     CloseSource {
@@ -517,8 +541,16 @@ fn admit_input(source: &CloseSource) -> AdmitInput {
         withdrawal_total,
         certificate,
     } = source.admission.clone();
+    let end = chain.intake();
     chain
-        .register_close(0, context, withdrawals, &[], |_| true)
+        .register_epoch(
+            0,
+            context.epoch_context().clone(),
+            end,
+            DepositBatch::empty(),
+            withdrawals,
+            |_| true,
+        )
         .expect("benchmark close can be registered");
     AdmitInput {
         chain,

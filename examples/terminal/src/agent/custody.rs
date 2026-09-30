@@ -369,7 +369,7 @@ impl Agent {
             ctx.sleep(POLL).await;
         }
         match recorded {
-            Some(record) if record == event.event => {}
+            Some(record) if record.event == event.event => {}
             Some(_) => {
                 // A conflicting certified event makes these staged bytes unrecordable.
                 // Advance the nonce so a fresh intent cannot reuse that consumed ID.

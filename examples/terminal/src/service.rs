@@ -1,36 +1,35 @@
 //! Runtime-owning service loops for the terminal role binaries.
 
 #[cfg(test)]
+mod epoch_overlap;
+#[cfg(test)]
 mod lifecycle;
 mod payments;
 
 use crate::{
     agent::Agent,
     chain::{
-        client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL, SUBMIT_ATTEMPTS},
+        client::{Chain, Client, Env, POLL, SUBMIT_ATTEMPTS},
         native::RegistryEntry,
         node,
         query::Lookup,
         state::{FaultRecord, HardFaultReasonResponse, Record},
-        tx::{RegisterEpochRequest, SettlementTx},
+        tx::SettlementTx,
     },
     operator::{Operator, StagedDeposit, rpc as operator_rpc},
     protocol::{MIN_DEALING_BYTES, Timing, short_digest},
     rpc, ui,
 };
 use anyhow::{Context, Result, bail, ensure};
-use commonware_actor::mailbox::Receiver as MailboxReceiver;
 use commonware_clearing::bajillion::boundary::WithdrawalBatch;
-use commonware_codec::DecodeExt as _;
-#[cfg(test)]
-use commonware_codec::Encode as _;
+use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_cryptography::sha256::Digest;
 #[cfg(test)]
 use commonware_cryptography::{Hasher as _, Sha256};
 #[cfg(test)]
 use commonware_runtime::{Clock, Listener};
 use commonware_runtime::{Handle, Network, Runner as _, Spawner as _, Supervisor as _, tokio};
-use commonware_utils::{Acknowledgement as _, sync::Mutex};
+use commonware_utils::sync::Mutex;
 use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf, sync::Arc, time::Duration};
 
 /// Registration attempts before the epoch registration is reported stuck.
@@ -76,21 +75,18 @@ pub(crate) fn run_operator(
         // settlement fact it acts on comes from its own verified finalized
         // state and every settlement input goes onto the transaction channel
         // directly. The close worker certifies over the DA channel through
-        // the returned pipeline, and the deposit observation feed surfaces
-        // its own deployment's finalized deposit transactions.
+        // the returned pipeline.
         let config = crate::chain::setup::OperatorConfig::load(&node_dir)
             .context("load operator node config")?;
-        let (mut chain, pipeline, mut observations, mut handles) =
-            node::start(context.child("node"), &node_dir)
-                .await
-                .context("start operator follower node")?;
+        let (mut chain, pipeline, mut handles) = node::start(context.child("node"), &node_dir)
+            .await
+            .context("start operator follower node")?;
         let genesis = crate::chain::setup::read_genesis(&node_dir)?;
-        let (entry, held) = registered_operator(
+        let entry = registered_operator(
             &context,
             &mut chain,
             genesis.native.chain_id(),
             config.deployment,
-            &mut observations,
         )
         .await?;
         ensure!(
@@ -107,12 +103,12 @@ pub(crate) fn run_operator(
             .checked_mul(u64::from(entry.max_dealing_bytes).div_ceil(1024))
             .context("epoch fee overflow")?;
 
-        // Execution assigns every epoch deadline at inclusion under the
-        // genesis timing policy, so the operator carries no timing knob: it
-        // adopts the assigned deadlines from its certified registration read.
-        // The one operator is shared between the RPC loop and the deposit
-        // observer, locked around each synchronous call and never across an
-        // await.
+        // Settlement assigns every epoch's deadlines under the genesis timing
+        // policy when the epoch becomes the admission frontier, so the
+        // operator carries no timing knob: it adopts them from its certified
+        // registration reads. The one operator is shared between the RPC loop
+        // and the close driver, locked around each synchronous call and never
+        // across an await.
         let operator = Arc::new(Mutex::new(
             Operator::open_remote(
                 &database,
@@ -127,20 +123,7 @@ pub(crate) fn run_operator(
             .context("initialize SQLite operator")?,
         ));
         let payment_strategy = operator.lock().payment_strategy();
-
-        if let Some(observed) = held {
-            observe(&context, &mut chain, &operator, observed).await?;
-        }
-
-        let observer_handle = start_observation(
-            &context,
-            &mut chain,
-            operator.clone(),
-            observations,
-            genesis.timing(),
-        )
-        .await?;
-        handles.push(observer_handle);
+        synchronize(&context, &mut chain, &operator, genesis.timing()).await?;
 
         let driver_handle =
             start_close_driver(&context, chain.clone(), operator.clone(), genesis.timing());
@@ -224,37 +207,20 @@ pub(crate) async fn registered_operator<E: Env, C: Chain>(
     chain: &mut C,
     chain_id: Digest,
     deployment: Digest,
-    observations: &mut MailboxReceiver<node::Observed>,
-) -> Result<(RegistryEntry, Option<node::Observed>)> {
-    // Registration is immutable. Historical presence authenticates the operator while
-    // its follower catches up; historical absence cannot reject a later registration.
+) -> Result<RegistryEntry> {
+    // Registration is immutable. Historical presence authenticates the operator while its
+    // follower catches up, and historical absence cannot reject a later registration.
     let request = chain.request(Lookup::RegistryEntry {
         chain_id,
         deployment,
     });
-    let mut held: Option<node::Observed> = None;
     for attempt in 0..REGISTER_ATTEMPTS {
-        if held.is_none() {
-            held = observations.try_recv().ok();
-        }
         match chain.read(ctx, &request).await {
             Ok(verified) => match verified.record {
                 Some(Record::RegistryEntry(entry)) if *entry.deployment.digest() == deployment => {
-                    return Ok((entry, held));
+                    return Ok(entry);
                 }
-                None => {
-                    // Immutable registration absence at this applied height proves that
-                    // the observed target deposits were rejected before custody intake.
-                    if held
-                        .as_ref()
-                        .is_some_and(|observed| verified.height >= observed.height)
-                    {
-                        held.take()
-                            .expect("the observed height was checked")
-                            .ack
-                            .acknowledge();
-                    }
-                }
+                None => {}
                 Some(_) => bail!("certified registry read returned a foreign record"),
             },
             Err(error) if attempt + 1 == REGISTER_ATTEMPTS => {
@@ -267,44 +233,23 @@ pub(crate) async fn registered_operator<E: Env, C: Chain>(
     bail!("operator registration did not appear during follower catch-up")
 }
 
-/// Starts deposit observation and authenticates the state used to release RPC intake.
-pub(crate) async fn start_observation<E: Env, C: Chain + Clone>(
+/// Observes the chain's inbox and authenticates the state used to release RPC intake.
+pub(crate) async fn synchronize<E: Env, C: Chain>(
     ctx: &E,
     chain: &mut C,
-    operator: Arc<Mutex<Operator>>,
-    mut observations: MailboxReceiver<node::Observed>,
+    operator: &Mutex<Operator>,
     timing: Timing,
-) -> Result<Handle<()>> {
-    let mut observer_chain = chain.clone();
-    let observer_operator = operator.clone();
-    let handle = ctx.child("observer").spawn(move |context| async move {
-        while let Some(observed) = observations.recv().await {
-            match observe(&context, &mut observer_chain, &observer_operator, observed).await {
-                Ok(staged) => {
-                    for deposit in staged {
-                        println!(
-                            "observed deposit {}: staged {} into epoch {}",
-                            short_digest(&deposit.id),
-                            deposit.amount,
-                            deposit.epoch
-                        );
-                    }
-                }
-                Err(error) => panic!("deposit observation failed: {error:#}"),
-            }
-        }
-    });
-
-    // Applied deposits acknowledge historical blocks before fresh reads can succeed.
-    // RPC intake remains gated on the same recent canonical fault check as steady state.
+) -> Result<()> {
+    // Intake observed while the operator was down is recorded, and the recovered live
+    // registration is authenticated, before fresh reads can succeed. RPC intake remains gated
+    // on the same recent canonical fault check as steady state.
     for attempt in 0..REGISTER_ATTEMPTS {
-        match drive_closes(ctx, chain, &operator, timing).await {
-            Ok(()) => return Ok(handle),
+        match drive_closes(ctx, chain, operator, timing).await {
+            Ok(()) => return Ok(()),
             Err(error)
                 if operator.lock().ensure_store_usable().is_err()
                     || attempt + 1 == REGISTER_ATTEMPTS =>
             {
-                handle.abort();
                 return Err(
                     error.context("synchronize settlement lifecycle before serving operator RPC")
                 );
@@ -370,7 +315,25 @@ pub(crate) async fn observe_closes<E: Env, C: Chain>(
         let first = invalid_from.unwrap_or(operator.status()?.epoch);
         operator.fence_suffix(first, format!("certified deployment fault: {fault:?}"))?;
     }
-    Ok(())
+
+    // A restarted operator authenticates only its live registration before
+    // intake resumes: earlier closes keep progressing without holding it.
+    let Some(epoch) = operator.lock().recovering_epoch() else {
+        return Ok(());
+    };
+    let request = chain.request(Lookup::Registration { epoch });
+    let verified = chain.recent(ctx, &request).await?;
+    let record = match verified.record {
+        Some(Record::Registration(record)) => Some(record),
+        None => None,
+        Some(_) => bail!("certified registration read returned a foreign record"),
+    };
+    let status = chain.recent_status(ctx).await?;
+    ensure!(
+        status.height >= verified.height,
+        "settlement status predates the recovered registration read"
+    );
+    operator.lock().release_recovery(record.as_ref(), &status)
 }
 
 /// Keeps close progress live independently of RPC traffic and an empty backlog.
@@ -394,36 +357,39 @@ pub(crate) fn start_close_driver<E: Env, C: Chain>(
     })
 }
 
-/// Advances durable admission and finalized custody, then schedules the live epoch.
+/// Records observed intake, advances durable admission and finalized custody, then schedules
+/// the live epoch.
 async fn drive_closes<E: Env, C: Chain>(
     ctx: &E,
     chain: &mut C,
     operator: &Mutex<Operator>,
     timing: Timing,
 ) -> Result<()> {
+    observe(ctx, chain, operator).await?;
     observe_closes(ctx, chain, operator).await?;
     reconcile_withdrawals(ctx, chain, operator).await?;
     let Some(epoch) = operator.lock().automatic_epoch()? else {
         return Ok(());
     };
-    let request = chain.request(Lookup::Registration);
+    let request = chain.request(Lookup::Registration { epoch });
     let verified = chain.recent(ctx, &request).await?;
-    if let Some(Record::Registration(record)) = verified.record
-        && record.epoch == epoch
-    {
+    if let Some(Record::Registration(record)) = verified.record {
         let mut operator = operator.lock();
         if operator.automatic_epoch()? == Some(epoch) {
             operator.adopt_registration(&record)?;
-            operator.close_if_due(epoch, verified.height, timing)?;
+            operator.close_if_due(&record, verified.height, timing)?;
         }
         return Ok(());
     }
 
     // One attempt leaves admission/finality observation live while registration is pending.
-    if operator.lock().automatic_epoch()? != Some(epoch) {
-        return Ok(());
-    }
-    let registration = registration_request(ctx, chain, operator, epoch).await?;
+    let registration = {
+        let mut operator = operator.lock();
+        if operator.automatic_epoch()? != Some(epoch) {
+            return Ok(());
+        }
+        operator.signed_registration()?
+    };
     chain
         .submit(ctx, &SettlementTx::RegisterEpoch(registration))
         .await?;
@@ -537,6 +503,8 @@ async fn reconcile_withdrawals<E: Env, C: Chain>(
     for request in withdrawals.requests() {
         // Finalized QMDB roots commit a growing operation history and cannot recur.
         // Exact queued requests retain their root and deadline until settlement consumes them.
+        // A request the account queues on chain after the boundary was built cannot fail the
+        // registration, which supersedes it.
         if request.body().deadline() > status.height
             && request.body().state_root() == &status.state_root.digest
         {
@@ -552,7 +520,7 @@ async fn reconcile_withdrawals<E: Env, C: Chain>(
         );
         barrier = barrier.max(queued.height);
         match queued.record {
-            Some(Record::Withdrawal(accepted)) if accepted == *request => {}
+            Some(Record::Withdrawal(accepted)) if accepted.request == *request => {}
             Some(Record::Withdrawal(_)) | None => discarded.push(request.clone()),
             Some(_) => bail!("certified withdrawal read returned a foreign record"),
         }
@@ -583,7 +551,7 @@ async fn reconcile_withdrawals<E: Env, C: Chain>(
 /// before the synchronous dispatch may run, or answers it outright.
 ///
 /// The operator is locked around each synchronous call and never across an
-/// await, so the deposit observer can stage between the steps. Every
+/// await, so intake observation can take rows between the steps. Every
 /// dispatched operation revalidates its own preconditions.
 pub(crate) async fn prepare_request<E: Env, C: Chain>(
     ctx: &E,
@@ -592,6 +560,43 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
     request: &operator_rpc::OperatorRequest,
     timing: Timing,
 ) -> Result<Option<rpc::Response>> {
+    // Proof replica reads can wait on its catch-up, so they run outside the
+    // operator lock on a blocking-capable task.
+    match request {
+        operator_rpc::OperatorRequest::PaymentHead(request) => {
+            let snapshot = operator
+                .lock()
+                .head_snapshot(&request.account)
+                .context("read payment head")?;
+            let head = ctx
+                .child("head")
+                .shared(true)
+                .spawn(move |_| async move { snapshot.resolve() })
+                .await
+                .context("payment head task failed")?
+                .context("read payment head")?;
+            return Ok(Some(rpc::Response::Success {
+                body: operator_rpc::PaymentHeadResponse::from(head).encode(),
+            }));
+        }
+        operator_rpc::OperatorRequest::WithdrawalOpening(request) => {
+            let snapshot = operator
+                .lock()
+                .opening_snapshot(&request.account)
+                .context("read withdrawal opening")?;
+            let opening = ctx
+                .child("opening")
+                .shared(true)
+                .spawn(move |_| async move { snapshot.resolve() })
+                .await
+                .context("withdrawal opening task failed")?
+                .context("read withdrawal opening")?;
+            return Ok(Some(rpc::Response::Success {
+                body: operator_rpc::WithdrawalOpeningResponse::from(opening).encode(),
+            }));
+        }
+        _ => {}
+    }
     if let operator_rpc::OperatorRequest::ApplyWithdrawal(request) = request {
         for attempt in 0..SUBMIT_ATTEMPTS {
             if attempt > 0 {
@@ -635,11 +640,14 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
                 queued.height >= status.height && deadline > queued.height,
                 "withdrawal has expired"
             );
-            let queued = match queued.record {
-                Some(Record::Withdrawal(accepted)) => accepted == request.request,
-                None => false,
+            let index = match queued.record {
+                Some(Record::Withdrawal(accepted)) => {
+                    (accepted.request == request.request).then_some(accepted.index)
+                }
+                None => None,
                 Some(_) => bail!("certified withdrawal read returned a foreign record"),
             };
+            let queued = index.is_some();
             if !queued {
                 ensure!(
                     current_root,
@@ -660,6 +668,14 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
                     continue;
                 }
                 if !operator.withdrawals_frozen()? {
+                    // Only this operator's registrations supersede a queued request, and the
+                    // unpublished boundary follows every one of them, so its store decides.
+                    if let Some(index) = index {
+                        ensure!(
+                            !operator.superseded(&request.request, index)?,
+                            "a registered withdrawal superseded the queued request"
+                        );
+                    }
                     return Ok(Some(operator_rpc::apply_withdrawal_confirmed(
                         &mut operator,
                         request.clone(),
@@ -697,111 +713,56 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
     Ok(None)
 }
 
-/// Stages one finalized block's deposit transactions and acknowledges the
-/// block to marshal.
+/// Records the certified inbox entries the operator has not observed and lets its live boundary
+/// take them. Returns the newly credited deposits.
 ///
-/// The block's transactions were observed on the operator's own follower
-/// feed, but inclusion is not application: a rejected transaction is
-/// effect-free. Each event is therefore confirmed against the applied
-/// custody record at or past the block's height, where an absence is a
-/// verdict rather than lag, before the applied events are staged in one
-/// durable transaction. Only then is the block acknowledged, so a crash
-/// before the staging commit re-delivers the block on restart and the id
-/// dedupe makes the replay a no-op. An error leaves the acknowledgement
-/// unfulfilled, which stops marshal. Returns the newly staged credits.
+/// An entry persists from its recording until a registration pulls it. Only this operator's
+/// registrations pull, and only indices it observed, so every index from the observed cursor up
+/// to the status's inbox length is present at the status height or later. A missing entry is an
+/// error, never an exclusion. Observation is idempotent by index, so a failed read or commit
+/// observes the same entries again, and nothing depends on block delivery.
 pub(crate) async fn observe<E: Env, C: Chain>(
     ctx: &E,
     chain: &mut C,
     operator: &Mutex<Operator>,
-    observed: node::Observed,
 ) -> Result<Vec<StagedDeposit>> {
-    let mut applied = Vec::with_capacity(observed.events.len());
-    for event in &observed.events {
-        let mut confirmed = None;
-        let request = chain.request(Lookup::Deposit { id: event.id });
-        for _ in 0..EFFECT_ATTEMPTS {
-            if let Ok(verified) = chain.read(ctx, &request).await
-                && verified.height >= observed.height
-            {
-                confirmed = Some(verified.record);
-                break;
-            }
-            ctx.sleep(POLL).await;
-        }
-        let Some(record) = confirmed else {
-            bail!(
-                "the applied settlement state never reached observed deposit height {}",
-                observed.height
-            );
-        };
-        match record {
-            Some(Record::Deposit(recorded)) if recorded == *event => applied.push(event.clone()),
+    let from = operator.lock().observed()?;
+    let status = chain.recent_status(ctx).await?;
 
-            // The inclusion was rejected effect-free (a replayed or foreign
-            // id, or a deposit gated by an active registration), so the
-            // chain holds no custody for it and nothing may be staged.
-            Some(Record::Deposit(_)) | None => {}
-            Some(_) => bail!("certified deposit read returned a foreign record"),
-        }
+    // A faulted deployment refunds unadmitted deposits, so the operator credits none of them.
+    if status.hard_faulted {
+        return Ok(Vec::new());
     }
-    let mut staged = Vec::new();
-    if !applied.is_empty() {
-        staged = operator
-            .lock()
-            .observe(&applied)
-            .context("stage observed deposits")?;
+    let records = chain.inbox(ctx, from..status.intake).await?;
+    let staged = operator
+        .lock()
+        .observe(from, &records)
+        .context("record observed intake")?;
+    for deposit in &staged {
+        println!(
+            "observed deposit {} at inbox index {}: staged {} for {} into epoch {}",
+            short_digest(&deposit.id),
+            deposit.index,
+            deposit.amount,
+            deposit.account,
+            deposit.epoch
+        );
     }
-    observed.ack.acknowledge();
     Ok(staged)
 }
 
-/// Builds proofs for fresh extras against an unchanged boundary and certified queue records.
-async fn registration_request<E: Env, C: Chain>(
-    ctx: &E,
-    chain: &mut C,
-    operator: &Mutex<Operator>,
-    epoch: u64,
-) -> Result<RegisterEpochRequest> {
-    let expected = operator.lock().registration_boundary()?;
-    ensure!(
-        expected.0.epoch() == epoch,
-        "the live epoch moved during registration"
-    );
-    let mut queued = Vec::new();
-    for request in expected.1.requests() {
-        let lookup = chain.request(Lookup::Withdrawal {
-            account: request.account().clone(),
-        });
-        match chain.recent(ctx, &lookup).await?.record {
-            Some(Record::Withdrawal(accepted)) if accepted == *request => queued.push(accepted),
-            Some(Record::Withdrawal(_)) | None => {}
-            Some(_) => bail!("certified withdrawal read returned a foreign record"),
-        }
-    }
-    let queued = WithdrawalBatch::new(queued)?;
-    let genesis = operator.lock().genesis();
-    let mut openings = Vec::new();
-    for request in expected.1.requests() {
-        if queued.request_for(request.account()).is_none() {
-            openings.push(
-                chain
-                    .predecessor_opening(ctx, epoch, request.account().clone(), genesis)
-                    .await?,
-            );
-        }
-    }
-    let mut operator = operator.lock();
-    ensure!(
-        operator.registration_boundary()? == expected,
-        "the withdrawal boundary moved during registration"
-    );
-    operator.signed_registration_with_openings(&queued, openings)
-}
-
 /// Publishes the live boundary while its triggering request remains valid, then
-/// adopts the anchor and deadlines from the certified registration. Rechecking
-/// under the operator lock keeps expiry cleanup and deposit observation from
-/// publishing a boundary for work that is no longer eligible.
+/// adopts the anchor, floors, and any assigned deadlines from the certified
+/// registration. Each attempt observes the certified inbox before it signs, so
+/// the boundary takes the intake recorded so far. That intake is recorded at or
+/// below a finalized height, so every block that can include the registration
+/// builds on it. Rechecking under the operator
+/// lock keeps expiry cleanup and intake observation from publishing a boundary
+/// for work that is no longer eligible.
+///
+/// Registration waits for no earlier close: the chain accepts the live epoch
+/// once its predecessor is registered, and an unfinished predecessor only
+/// defers the epoch's deadlines.
 async fn register_epoch<E: Env, C: Chain>(
     ctx: &E,
     chain: &mut C,
@@ -813,33 +774,39 @@ async fn register_epoch<E: Env, C: Chain>(
         if attempt > 0 {
             ctx.sleep(REGISTER_POLL).await;
         }
+
+        // Only an attempt that will register reads the chain, so a request that needs no
+        // registration never waits on it.
+        if !required(&operator.lock())? {
+            return Ok(());
+        }
+        observe(ctx, chain, operator)
+            .await
+            .context("register settlement epoch")?;
         reconcile_withdrawals(ctx, chain, operator).await?;
-        let current_epoch = {
-            let operator = operator.lock();
+        let request = {
+            let mut operator = operator.lock();
             if !required(&operator)? {
                 return Ok(());
             }
-            operator.status()?.epoch
+            operator.signed_registration()?
         };
-        let request = registration_request(ctx, chain, operator, current_epoch).await?;
+        let registering = request.epoch;
         ensure!(
-            epoch.is_none_or(|epoch| epoch == request.epoch),
+            epoch.is_none_or(|epoch| epoch == registering),
             "the live epoch moved during registration"
         );
-        epoch = Some(request.epoch);
-        let tx = SettlementTx::RegisterEpoch(request);
+        epoch = Some(registering);
         chain
-            .deliver(ctx, &tx)
+            .deliver(ctx, &SettlementTx::RegisterEpoch(request))
             .await
             .context("register settlement epoch")?;
         for _ in 0..CONFIRM_ATTEMPTS {
             let record = chain
-                .registration(ctx)
+                .registration_at(ctx, registering)
                 .await
                 .context("read back the registered epoch")?;
-            if let Some(record) = record
-                && Some(record.epoch) == epoch
-            {
+            if let Some(record) = record {
                 return operator.lock().adopt_registration(&record);
             }
             ctx.sleep(CONFIRM_POLL).await;
@@ -862,18 +829,15 @@ mod tests {
             query::ReadRequest,
             state::{
                 FaultRecord, HardFaultReasonResponse, Record, anchor_key, fault_key,
-                registration_key, status_key,
+                registration_key, status_key, withdrawal_key,
             },
         },
         protocol::{DepositEvent, deployment, wallets},
     };
     use bytes::Bytes;
-    use commonware_actor::mailbox;
     use commonware_clearing::bajillion::boundary::{SignedWithdrawal, WithdrawalAction};
     use commonware_codec::{Decode as _, RangeCfg};
-    use commonware_consensus::{Reporter as _, marshal::Update};
     use commonware_runtime::deterministic;
-    use commonware_utils::acknowledgement::Exact;
     use std::{
         fs,
         num::NonZeroU64,
@@ -910,6 +874,14 @@ mod tests {
         }
 
         async fn recent<E: Env>(&mut self, _: &E, _: &ReadRequest) -> Result<Verified> {
+            unreachable!("the registered payment fixture does not query the chain")
+        }
+
+        async fn inbox<E: Env>(
+            &mut self,
+            _: &E,
+            _: std::ops::Range<u64>,
+        ) -> Result<Vec<crate::chain::state::Intake>> {
             unreachable!("the registered payment fixture does not query the chain")
         }
 
@@ -1198,11 +1170,15 @@ mod tests {
                     )
                     .await
                     .unwrap();
+                let effect = chain.deposit(&context, deposit.id).await.unwrap().unwrap();
+                assert_eq!(effect.event, deposit);
                 assert_eq!(
-                    chain.deposit(&context, deposit.id).await.unwrap(),
-                    Some(deposit.clone())
+                    observe(&context, &mut chain, &operator)
+                        .await
+                        .unwrap()
+                        .len(),
+                    1
                 );
-                operator.lock().observe(&[deposit]).unwrap();
                 assert!(
                     operator
                         .lock()
@@ -1256,7 +1232,7 @@ mod tests {
                 assert!(
                     operator
                         .lock()
-                        .signed_registration(&WithdrawalBatch::empty())
+                        .signed_registration()
                         .unwrap()
                         .withdrawals
                         .requests()
@@ -1322,10 +1298,7 @@ mod tests {
                     .is_none()
             );
             operator.lock().wait_for_closes().unwrap();
-            let carrying = operator
-                .lock()
-                .signed_registration(&WithdrawalBatch::empty())
-                .unwrap();
+            let carrying = operator.lock().signed_registration().unwrap();
             let predecessor = operator
                 .lock()
                 .payment_head(&wallet.public_key())
@@ -1337,14 +1310,6 @@ mod tests {
                 std::slice::from_ref(&withdrawal)
             );
             assert_ne!(withdrawal.body().state_root(), &predecessor.digest);
-            assert_eq!(carrying.openings.len(), 1);
-            assert_eq!(
-                carrying.openings[0]
-                    .verify::<Sha256>(&predecessor)
-                    .unwrap()
-                    .get(),
-                95
-            );
         });
     }
 
@@ -1425,7 +1390,7 @@ mod tests {
                     .unwrap()
                     .unwrap_or_else(|| operator_rpc::handle_decoded(&mut operator.lock(), request));
             assert!(matches!(response, rpc::Response::Success { .. }), "{response:?}");
-            let published = registration_request(&context, &mut chain, &operator, 1).await.unwrap();
+            let published = operator.lock().signed_registration().unwrap();
             assert_eq!(published.epoch, 1);
             assert_eq!(published.withdrawals.request_for(withdrawal.account()), Some(&withdrawal));
             if matches!(retention, WithdrawalRootAdvance::Registered) {
@@ -1435,7 +1400,7 @@ mod tests {
             }
 
             // Earlier close finality advances while the exact withdrawal authorizations remain retained.
-            advance_to(&control, first.challenge_deadline + 1).await;
+            advance_to(&control, first.deadlines.unwrap().1 + 1).await;
             let advanced = chain.recent_status(&context).await.unwrap();
             assert_eq!(advanced.last_finalized, Some(0));
             assert_ne!(advanced.state_root.digest, head.state_root.digest);
@@ -1445,7 +1410,7 @@ mod tests {
                 for _ in 0..2 {
                     reconcile_withdrawals(&context, &mut chain, &operator).await.unwrap();
                 }
-                let retained = registration_request(&context, &mut chain, &operator, 1).await.unwrap();
+                let retained = operator.lock().signed_registration().unwrap();
                 if matches!(retention, WithdrawalRootAdvance::Mixed) {
                     assert!(operator.lock().staged_withdrawal(&withdrawal).unwrap().is_none());
                     assert_eq!(operator.lock().payment_head(&wallet.public_key()).unwrap().balance, 95);
@@ -1469,7 +1434,7 @@ mod tests {
                 .unwrap();
             assert!(operator.lock().staged_withdrawal(&withdrawal).unwrap().is_none());
             assert_eq!(operator.lock().payment_head(&wallet.public_key()).unwrap().balance, 95);
-            let retry = operator.lock().signed_registration(&WithdrawalBatch::empty()).unwrap();
+            let retry = operator.lock().signed_registration().unwrap();
             control.submit(SettlementTx::RegisterEpoch(retry)).await;
             let current = chain.recent_status(&context).await.unwrap();
             assert!(current.height < deadline);
@@ -1624,15 +1589,12 @@ mod tests {
                                     .unwrap()
                                     .is_some()
                             );
-                            let registration =
-                                registration_request(&context, &mut chain, &operator, 1)
-                                    .await
-                                    .unwrap();
+                            let registration = operator.lock().signed_registration().unwrap();
+                            assert_eq!(registration.epoch, 1);
                             assert_eq!(
                                 registration.withdrawals.requests(),
                                 std::slice::from_ref(&withdrawal)
                             );
-                            assert!(registration.openings.is_empty());
                             control
                                 .submit(SettlementTx::RegisterEpoch(registration))
                                 .await;
@@ -1662,7 +1624,7 @@ mod tests {
                                     &close,
                                 )))
                                 .await;
-                            advance_to(&control, registered.challenge_deadline + 1).await;
+                            advance_to(&control, registered.deadlines.unwrap().1 + 1).await;
                             assert!(
                                 chain
                                     .admitted(&context, 1)
@@ -1830,6 +1792,7 @@ mod tests {
                 .apply_withdrawal(close.clone(), false)
                 .unwrap();
             assert_eq!(first.action, WithdrawalAction::Close);
+            operator.lock().adopt_at(0, None).unwrap();
             operator.lock().start_close(0).unwrap();
 
             let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
@@ -1901,10 +1864,9 @@ mod tests {
                     .unwrap()
             );
 
-            // A successful registration adopts the chain-assigned deadlines
-            // from the certified record, which moves the payment anchor: the
-            // pre-registration send is now corrective-rejected, exactly what
-            // the wallet's corrective retry handles.
+            // A successful registration adopts the certified record. The
+            // anchor commits only the boundary, so the pre-registration send
+            // already binds the registered anchor.
             let mut good = client(&context, &control);
             assert!(
                 prepare_request(
@@ -1923,25 +1885,16 @@ mod tests {
                 Some(Record::Anchor(anchor)) => anchor,
                 record => panic!("expected the epoch-0 anchor, found {record:?}"),
             };
-            let record = match control.record(registration_key(&deployment())).await {
+            let record = match control.record(registration_key(&deployment(), 0)).await {
                 Some(Record::Registration(record)) => record,
                 record => panic!("expected the registration record, found {record:?}"),
             };
             assert_eq!(record.anchor, registered);
             let live = operator.lock().payment_head(&payer.public_key()).unwrap();
             assert_eq!(live.context.payment().anchor(), &registered);
-            assert_ne!(head.context.payment().anchor(), &registered);
+            assert_eq!(head.context.payment().anchor(), &registered);
 
-            // An adopted epoch accepts its re-signed payment without another chain round trip.
-            let (resigned, resigned_entries) = operator
-                .lock()
-                .sign_send(0, &[(receiver.public_key(), 7)])
-                .unwrap();
-            let request =
-                operator_rpc::OperatorRequest::AcceptSend(operator_rpc::AcceptSendRequest {
-                    authorization: resigned,
-                    entries: resigned_entries,
-                });
+            // An adopted epoch accepts the original payment without another chain round trip.
             assert!(
                 prepare_request(
                     &context,
@@ -2231,49 +2184,39 @@ mod tests {
         });
     }
 
+    /// Startup retries fresh reads while its follower catches up, then records
+    /// the certified inbox before it releases RPC intake.
     #[test]
-    fn startup_observer_releases_catchup_before_fresh_rpc_readiness() {
+    fn startup_observes_the_inbox_before_fresh_rpc_readiness() {
         deterministic::Runner::default().start(|context| async move {
-            let operator = Arc::new(Mutex::new(
-                Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap(),
-            ));
+            let operator =
+                Mutex::new(Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap());
             let mut chain = historical_follower();
-            let (sender, receiver) =
-                commonware_actor::mailbox::new(context.child("observations"), NonZeroUsize::MIN);
-            let (ack, acked) = Exact::handle();
-            let _ = sender.enqueue(node::Observed {
-                height: 1,
-                events: vec![chain.event.clone()],
-                ack,
-            });
+
+            // The follower catches up only after startup has seen a stale read.
+            let stale = chain.stale_reads.clone();
             let caught_up = chain.caught_up.clone();
-            let staged_operator = operator.clone();
-            let account = chain.event.account.clone();
-            let advancing = context.child("catchup").spawn(move |_| async move {
-                acked.await.unwrap();
-                assert_eq!(
-                    staged_operator
-                        .lock()
-                        .payment_head(&account)
-                        .unwrap()
-                        .balance,
-                    107
-                );
+            let catchup = context.child("catchup").spawn(move |_| async move {
+                while stale.load(Ordering::SeqCst) == 0 {
+                    commonware_runtime::reschedule().await;
+                }
                 caught_up.store(true, Ordering::SeqCst);
             });
-            let observer = start_observation(
-                &context,
-                &mut chain,
-                operator.clone(),
-                receiver,
-                Timing::DEFAULT,
-            )
-            .await
-            .unwrap();
-            assert!(chain.caught_up.load(Ordering::SeqCst));
-            assert!(chain.stale_reads.load(Ordering::SeqCst) > 0);
-            advancing.await.unwrap();
-            observer.abort();
+
+            // Synchronization records the deposit applied during catch-up.
+            synchronize(&context, &mut chain, &operator, Timing::DEFAULT)
+                .await
+                .unwrap();
+            catchup.await.unwrap();
+            assert_eq!(operator.lock().observed().unwrap(), 1);
+            assert_eq!(
+                operator
+                    .lock()
+                    .payment_head(&chain.event.account)
+                    .unwrap()
+                    .balance,
+                107
+            );
         });
     }
 
@@ -2282,18 +2225,10 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let mut chain = historical_follower();
             let native = harness::native(crate::protocol::deployments());
-            let (_sender, mut receiver) =
-                mailbox::new(context.child("startup_feed"), NonZeroUsize::MIN);
-            let (registered, held) = registered_operator(
-                &context,
-                &mut chain,
-                native.chain_id(),
-                deployment(),
-                &mut receiver,
-            )
-            .await
-            .unwrap();
-            assert!(held.is_none());
+            let registered =
+                registered_operator(&context, &mut chain, native.chain_id(), deployment())
+                    .await
+                    .unwrap();
             assert_eq!(registered, chain.entry);
             assert!(!chain.caught_up.load(Ordering::SeqCst));
         });
@@ -2305,18 +2240,10 @@ mod tests {
             let mut chain = historical_follower();
             chain.skip_registry_once = true;
             let native = harness::native(crate::protocol::deployments());
-            let (_sender, mut receiver) =
-                mailbox::new(context.child("startup_feed"), NonZeroUsize::MIN);
-            let (registered, held) = registered_operator(
-                &context,
-                &mut chain,
-                native.chain_id(),
-                deployment(),
-                &mut receiver,
-            )
-            .await
-            .unwrap();
-            assert!(held.is_none());
+            let registered =
+                registered_operator(&context, &mut chain, native.chain_id(), deployment())
+                    .await
+                    .unwrap();
             assert_eq!(registered, chain.entry);
             assert_eq!(chain.registry_reads.load(Ordering::SeqCst), 2);
             assert!(!chain.caught_up.load(Ordering::SeqCst));
@@ -2376,10 +2303,24 @@ mod tests {
                         Some(Record::RegistryEntry(self.entry.clone()))
                     }
                 }
-                Lookup::Deposit { id } if id == self.event.id => {
-                    Some(Record::Deposit(self.event.clone()))
-                }
-                Lookup::Fault | Lookup::Registration => None,
+                Lookup::Status => Some(Record::Status(crate::chain::state::StatusRecord {
+                    height: 1,
+                    timestamp: 0,
+                    deployment: deployment(),
+                    state_root: self.entry.deployment.genesis().root(),
+                    last_finalized: None,
+                    next_admission: 0,
+                    next_registration: 0,
+                    intake: 1,
+                    pulled: 0,
+                    custody: self.event.amount,
+                    claimable: 0,
+                    hard_faulted: false,
+                })),
+                Lookup::Intake { index: 0 } => Some(Record::Intake(
+                    crate::chain::state::Intake::Deposit(self.event.clone()),
+                )),
+                Lookup::Fault | Lookup::Registration { .. } => None,
                 _ => bail!("unexpected historical follower read"),
             };
             Ok(Verified {
@@ -2405,6 +2346,13 @@ mod tests {
                 bail!("the local finalized tip is stale");
             }
             self.read(ctx, request).await
+        }
+        async fn inbox<E: Env>(
+            &mut self,
+            ctx: &E,
+            indices: std::ops::Range<u64>,
+        ) -> Result<Vec<crate::chain::state::Intake>> {
+            crate::chain::client::inbox(ctx, self, indices).await
         }
         async fn submit<E: Env>(&mut self, _: &E, _: &SettlementTx) -> Result<Submission> {
             Ok(Submission::Accepted)
@@ -2435,7 +2383,13 @@ mod tests {
                     ),
                 ))
                 .await;
-            operator.lock().observe(&[event]).unwrap();
+            assert_eq!(
+                observe(&context, &mut chain, &operator)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
             for _ in 0..16 {
                 drive_closes(&context, &mut chain, &operator, Timing::DEFAULT)
                     .await
@@ -2446,8 +2400,8 @@ mod tests {
                 control.advance(1).await;
             }
             assert_eq!(operator.lock().status().unwrap().epoch, 1);
-            let registered = chain.registration(&context).await.unwrap().unwrap();
-            assert!(status(&control).await.height <= registered.admission_deadline);
+            let registered = chain.registration_at(&context, 0).await.unwrap().unwrap();
+            assert!(status(&control).await.height <= registered.deadlines.unwrap().0);
             operator.lock().wait_for_closes().unwrap();
         });
     }
@@ -2460,8 +2414,14 @@ mod tests {
             let mut agent = Agent::open(databases.agent(), 0).unwrap();
             let operator =
                 Mutex::new(Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap());
-            let deposit = agent.deposit(&context, &mut chain, 10).await.unwrap();
-            operator.lock().observe(&[deposit]).unwrap();
+            agent.deposit(&context, &mut chain, 10).await.unwrap();
+            assert_eq!(
+                observe(&context, &mut chain, &operator)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
             drive_closes(&context, &mut chain, &operator, Timing::DEFAULT)
                 .await
                 .unwrap();
@@ -2473,17 +2433,18 @@ mod tests {
             }
             assert!(operator.lock().snapshot().unwrap().payments.is_empty());
             assert_eq!(operator.lock().status().unwrap().epoch, 0);
-            assert!(
-                status(&control).await.height
-                    < registered.admission_deadline - Timing::DEFAULT.admission_offset + 4
-            );
+            assert!(status(&control).await.height < registered.height + 4);
             drop(operator);
 
             // The publication boundary survives restart both before and after the
-            // certified deadlines are adopted, even though no receipt was issued.
+            // certified registration is adopted, even though no receipt was issued.
+            // An adopted live registration is authenticated again before intake.
             let operator = Arc::new(Mutex::new(
                 Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap(),
             ));
+            observe_closes(&context, &mut chain, &operator)
+                .await
+                .unwrap();
             let before = operator
                 .lock()
                 .payment_head(&agent.account())
@@ -2582,9 +2543,7 @@ mod tests {
                     .send_requires_epoch_registration(&authorization, &entries)
                     .unwrap()
             );
-            let request = operator
-                .signed_registration(&WithdrawalBatch::empty())
-                .unwrap();
+            let request = operator.signed_registration().unwrap();
             drop(operator);
 
             // Registration preparation is the last local action before an asynchronous
@@ -2592,13 +2551,7 @@ mod tests {
             let operator =
                 Mutex::new(Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap());
             assert_eq!(operator.lock().automatic_epoch().unwrap(), Some(0));
-            assert_eq!(
-                operator
-                    .lock()
-                    .signed_registration(&WithdrawalBatch::empty())
-                    .unwrap(),
-                request
-            );
+            assert_eq!(operator.lock().signed_registration().unwrap(), request);
             for _ in 0..8 {
                 drive_closes(&context, &mut chain, &operator, Timing::DEFAULT)
                     .await
@@ -2622,108 +2575,73 @@ mod tests {
         });
     }
 
+    /// A deposit confirmed after the operator publishes a boundary leaves the
+    /// published bytes registrable and joins the successor at cutover.
     #[test]
-    fn confirmed_deposit_invalidates_unadopted_registration_without_unfreezing_withdrawals() {
+    fn confirmed_deposit_after_publication_joins_the_successor() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let databases = TempDatabases::new();
             let control = harness::start(&context, CHAIN, "chain").await;
             let mut chain = client(&context, &control);
             let mut agent = Agent::open(databases.agent(), 0).unwrap();
-            let mut operator = Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap();
-            let first = agent.deposit(&context, &mut chain, 10).await.unwrap();
-            operator.observe(&[first]).unwrap();
-            let old = operator
-                .signed_registration(&WithdrawalBatch::empty())
-                .unwrap();
+            let operator =
+                Mutex::new(Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap());
+
+            // The operator takes the first deposit and publishes epoch 0 over it.
+            agent.deposit(&context, &mut chain, 10).await.unwrap();
+            assert_eq!(
+                observe(&context, &mut chain, &operator)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let old = operator.lock().signed_registration().unwrap();
+            assert_eq!(old.end, 1);
             drop(operator);
 
-            // Custody accepts the next deposit before the earlier registration can
-            // execute. Its staged root makes the queued request permanently ineligible.
+            // Custody accepts the next deposit before the published registration
+            // executes. The deposit lands past the pulled prefix, so the old
+            // signed bytes still register.
             let next = agent.deposit(&context, &mut chain, 2).await.unwrap();
-            let height = status(&control).await.height;
+            let effect = chain.deposit(&context, next.id).await.unwrap().unwrap();
+            assert_eq!(effect.index, 1);
             chain
                 .deliver(&context, &SettlementTx::RegisterEpoch(old.clone()))
                 .await
                 .unwrap();
-            assert!(chain.registration(&context).await.unwrap().is_none());
+            let registered = chain.registration(&context).await.unwrap().unwrap();
+            assert_eq!(registered.epoch, 0);
+            assert_eq!(registered.pulled, 0..1);
+
+            // A restarted operator observes the later deposit but leaves it
+            // untaken, so the published bytes and the withdrawal freeze hold.
             let operator =
                 Mutex::new(Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap());
-            let (ack, acked) = Exact::handle();
-            observe(
-                &context,
-                &mut chain,
-                &operator,
-                node::Observed {
-                    height,
-                    events: vec![next.clone()],
-                    ack,
-                },
-            )
-            .await
-            .unwrap();
-            acked.await.unwrap();
+            assert!(
+                observe(&context, &mut chain, &operator)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(operator.lock().observed().unwrap(), 2);
             assert_eq!(
                 operator
                     .lock()
                     .payment_head(&agent.account())
                     .unwrap()
                     .balance,
-                112
+                110
             );
-            let replacement = operator
-                .lock()
-                .signed_registration(&WithdrawalBatch::empty())
-                .unwrap();
-            assert_ne!(old.deposits_root, replacement.deposits_root);
+            assert_eq!(operator.lock().signed_registration().unwrap(), old);
             let rejected = operator
                 .lock()
                 .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()))
                 .err()
-                .expect("the replacement publication must keep withdrawals frozen");
+                .expect("the published boundary must keep withdrawals frozen");
             assert!(format!("{rejected:#}").contains("withdrawals are frozen"));
-            assert_eq!(
-                operator
-                    .lock()
-                    .signed_registration(&WithdrawalBatch::empty())
-                    .unwrap(),
-                replacement
-            );
-            drop(operator);
 
-            let operator =
-                Mutex::new(Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap());
-            assert_eq!(
-                operator
-                    .lock()
-                    .signed_registration(&WithdrawalBatch::empty())
-                    .unwrap(),
-                replacement
-            );
-            let (ack, acked) = Exact::handle();
-            assert!(
-                observe(
-                    &context,
-                    &mut chain,
-                    &operator,
-                    node::Observed {
-                        height,
-                        events: vec![next],
-                        ack,
-                    }
-                )
-                .await
-                .unwrap()
-                .is_empty()
-            );
-            acked.await.unwrap();
-            assert_eq!(
-                operator
-                    .lock()
-                    .payment_head(&agent.account())
-                    .unwrap()
-                    .balance,
-                112
-            );
+            // The cutover's successor takes the later deposit and credits it.
             for _ in 0..8 {
                 drive_closes(&context, &mut chain, &operator, Timing::DEFAULT)
                     .await
@@ -2734,6 +2652,147 @@ mod tests {
                 control.advance(1).await;
             }
             assert_eq!(operator.lock().status().unwrap().epoch, 1);
+            assert_eq!(
+                operator
+                    .lock()
+                    .payment_head(&agent.account())
+                    .unwrap()
+                    .balance,
+                112
+            );
+            assert!(!status(&control).await.hard_faulted);
+            operator.lock().wait_for_closes().unwrap();
+        });
+    }
+
+    /// A fresh extra whose reply is lost is escalated onchain after the operator
+    /// publishes its boundary. The queue lands past the published end, so the
+    /// published registration carries it early, and the successor links the
+    /// inbox entry without carrying the request again.
+    #[test]
+    fn rpc_extra_queued_after_publication_is_carried_once() {
+        deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+            let databases = TempDatabases::new();
+            let control = harness::start(&context, CHAIN, "chain").await;
+            let mut chain = client(&context, &control);
+            let mut agent = Agent::open(databases.agent(), 0).unwrap();
+            let account = agent.account();
+            let operator = Arc::new(Mutex::new(
+                Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap(),
+            ));
+
+            // The operator stages the withdrawal as a fresh extra, but its reply
+            // is lost.
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 3)))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = context.child("operator").spawn({
+                let operator = Arc::clone(&operator);
+                let mut chain = client(&context, &control);
+                move |ctx| async move {
+                    serve_operator_requests(
+                        &ctx,
+                        &mut chain,
+                        &mut listener,
+                        &operator,
+                        [operator_rpc::METHOD_WITHDRAWAL_OPENING],
+                    )
+                    .await;
+                    let (_, sink, mut stream) = listener.accept().await.unwrap();
+                    let request = rpc::recv_request(&mut stream).await.unwrap();
+                    assert_eq!(request.method, operator_rpc::METHOD_APPLY_WITHDRAWAL);
+                    let request = operator_rpc::decode_request(request).unwrap();
+                    let prepared =
+                        prepare_request(&ctx, &mut chain, &operator, &request, Timing::DEFAULT)
+                            .await
+                            .unwrap();
+                    let response = prepared.unwrap_or_else(|| {
+                        operator_rpc::handle_decoded(&mut operator.lock(), request)
+                    });
+                    assert!(
+                        matches!(response, rpc::Response::Success { .. }),
+                        "{response:?}"
+                    );
+                    drop(sink);
+                }
+            });
+            let action = WithdrawalAction::Amount(NonZeroU64::new(5).unwrap());
+            let outcome = agent
+                .withdraw(&context, &mut chain, address, action)
+                .await
+                .unwrap();
+            server.await.unwrap();
+            let WithdrawalOutcome::Signed { request, .. } = outcome else {
+                panic!("the lost reply confirmed the withdrawal: {outcome:?}");
+            };
+            assert!(
+                operator
+                    .lock()
+                    .staged_withdrawal(&request)
+                    .unwrap()
+                    .is_some()
+            );
+
+            // The operator publishes epoch 0 over the empty inbox, carrying the
+            // extra.
+            let published = operator.lock().signed_registration().unwrap();
+            assert_eq!(published.end, 0);
+            assert_eq!(
+                published.withdrawals.requests(),
+                std::slice::from_ref(&request)
+            );
+
+            // The wallet escalates the request onchain, and the queue lands past
+            // the published end.
+            assert_eq!(
+                agent
+                    .escalate_withdrawal(&context, &mut chain)
+                    .await
+                    .unwrap(),
+                request
+            );
+            let Some(Record::Withdrawal(queued)) = control
+                .record(withdrawal_key(&deployment(), &account))
+                .await
+            else {
+                panic!("the escalated request was not queued");
+            };
+            assert_eq!(queued.request, request);
+            assert_eq!(queued.index, 0);
+
+            // The published registration carries the queued request early.
+            chain
+                .deliver(&context, &SettlementTx::RegisterEpoch(published))
+                .await
+                .unwrap();
+            let registered = chain.registration(&context).await.unwrap().unwrap();
+            assert_eq!(registered.epoch, 0);
+            assert_eq!(registered.pulled, 0..0);
+
+            // The cutover's successor links the inbox entry without carrying the
+            // request again.
+            for _ in 0..8 {
+                drive_closes(&context, &mut chain, &operator, Timing::DEFAULT)
+                    .await
+                    .unwrap();
+                if operator.lock().status().unwrap().epoch == 1 {
+                    break;
+                }
+                control.advance(1).await;
+            }
+            assert_eq!(operator.lock().status().unwrap().epoch, 1);
+            let successor = operator.lock().signed_registration().unwrap();
+            assert_eq!(successor.end, 1);
+            assert!(successor.withdrawals.requests().is_empty());
+
+            // The successor's pull passes the entry, which it need not carry.
+            register_epoch(&context, &mut chain, &operator, |_| Ok(true))
+                .await
+                .unwrap();
+            let registered = chain.registration_at(&context, 1).await.unwrap().unwrap();
+            assert_eq!(registered.pulled, 0..1);
             assert!(!status(&control).await.hard_faulted);
             operator.lock().wait_for_closes().unwrap();
         });
@@ -2751,7 +2810,7 @@ mod tests {
                 .await
                 .unwrap();
             let registered = chain.registration(&context).await.unwrap().unwrap();
-            advance_to(&control, registered.admission_deadline + 1).await;
+            advance_to(&control, registered.deadlines.unwrap().0 + 1).await;
             assert!(status(&control).await.hard_faulted);
             drop(operator);
 
@@ -2776,11 +2835,8 @@ mod tests {
             let mut operator = Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap();
 
             // The registration lands on the chain, but the operator crashes
-            // before its certified read-back adopts the assigned record: the
-            // store still holds the placeholder context.
-            let request = operator
-                .signed_registration(&WithdrawalBatch::empty())
-                .unwrap();
+            // before its certified read-back adopts the record.
+            let request = operator.signed_registration().unwrap();
             chain
                 .deliver(&context, &SettlementTx::RegisterEpoch(request))
                 .await
@@ -2800,7 +2856,7 @@ mod tests {
             register_epoch(&context, &mut chain, &operator, |_| Ok(true))
                 .await
                 .unwrap();
-            let record = match control.record(registration_key(&deployment())).await {
+            let record = match control.record(registration_key(&deployment(), 0)).await {
                 Some(Record::Registration(record)) => record,
                 record => panic!("expected the registration record, found {record:?}"),
             };
@@ -2845,14 +2901,11 @@ mod tests {
             let operator_server = context.child("operator").spawn({
                 let mut chain = client(&context, &control);
                 move |operator_context| async move {
-                    // The head read stages under the placeholder context, the
-                    // first acceptance registers and answers the corrective.
-                    // The wallet authenticates that old context cannot commit,
-                    // reads the new head, and loses the accepted retry's response.
+                    // The head read stages before registration. The first
+                    // acceptance registers the same anchor and is accepted,
+                    // and its response is lost.
                     let mut accepted = None;
                     for expected_method in [
-                        operator_rpc::METHOD_PAYMENT_HEAD,
-                        operator_rpc::METHOD_ACCEPT_SEND,
                         operator_rpc::METHOD_PAYMENT_HEAD,
                         operator_rpc::METHOD_ACCEPT_SEND,
                     ] {
@@ -2886,10 +2939,9 @@ mod tests {
                 }
             });
 
-            // The wallet stages under the pre-registration head: the
-            // registration at first receipt moves the context, so the wallet
-            // adopts one corrective before the acceptance whose response is
-            // then lost.
+            // The wallet stages under the pre-registration head. Registration
+            // at first receipt leaves the anchor unchanged, so the first
+            // acceptance lands and its response is lost.
             let error = agent
                 .pay(&context, &mut agent_chain, operator_address, &[(1, 7)])
                 .await
@@ -2901,15 +2953,16 @@ mod tests {
             assert_eq!(accepted.acceptance.entries[0].cumulative, 7);
             assert_eq!(accepted.acceptance.ack.body().cumulative_debit(), 7);
 
-            // The accepted send binds the chain-registered anchor, whose
-            // record carries the chain-assigned deadlines.
+            // The accepted send binds the chain-registered anchor. Epoch 0 is
+            // the admission frontier, so its record carries its deadlines.
             let registered = match control.record(anchor_key(&deployment(), 0)).await {
                 Some(Record::Anchor(anchor)) => anchor,
                 record => panic!("expected the epoch-0 anchor, found {record:?}"),
             };
             assert_eq!(accepted.acceptance.ack.body().anchor(), &registered);
-            let admission_deadline = match control.record(registration_key(&deployment())).await {
-                Some(Record::Registration(record)) => record.admission_deadline,
+            let admission_deadline = match control.record(registration_key(&deployment(), 0)).await
+            {
+                Some(Record::Registration(record)) => record.deadlines.unwrap().0,
                 record => panic!("expected the registration record, found {record:?}"),
             };
             drop(agent);
@@ -2922,14 +2975,12 @@ mod tests {
                 .unwrap();
             assert_eq!(retained_opening_count, 1);
             let concluded = agent_database
-                .query_row(
-                    "SELECT COUNT(*), SUM(state = 5) FROM agent_payments",
-                    [],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-                )
+                .query_row("SELECT COUNT(*) FROM agent_payments", [], |row| {
+                    row.get::<_, i64>(0)
+                })
                 .unwrap();
-            // Only the retired pre-registration intent is concluded; the accepted send remains pending.
-            assert_eq!(concluded, (1, 1));
+            // No intent concluded: the accepted send remains pending.
+            assert_eq!(concluded, 0);
             let (persisted_authorization, persisted_entries) = agent_database
                 .query_row(
                     "SELECT authorization, entries FROM agent_pending_payment",
@@ -2955,8 +3006,18 @@ mod tests {
             assert_eq!(recovered_agent.receipt_count(), 0);
             drop(recovered_agent);
 
-            let mut recovered_operator =
-                Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap();
+            // The restarted operator authenticates its adopted live
+            // registration against the chain before it answers the retry.
+            let recovered_operator =
+                Mutex::new(Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap());
+            observe_closes(
+                &context,
+                &mut client(&context, &control),
+                &recovered_operator,
+            )
+            .await
+            .unwrap();
+            let mut recovered_operator = recovered_operator.into_inner();
             let persisted_retry = recovered_operator
                 .accept_send(pending_authorization, pending_entries)
                 .unwrap()
@@ -3126,6 +3187,8 @@ mod tests {
         });
     }
 
+    /// A block holding a rejected deposit ahead of its certified twin records
+    /// one inbox entry, which stages once across reopen.
     #[test]
     fn observed_certified_duplicate_batch_stages_once_after_reopen() {
         for conflicting_first in [false, true] {
@@ -3150,44 +3213,31 @@ mod tests {
                 if conflicting_first {
                     rejected.event.amount += 1;
                 }
-                let raw_events = vec![rejected.event.clone(), event.clone()];
-                let block = Arc::new(
-                    control
-                        .seal_batch(vec![
-                            SettlementTx::Deposit(rejected),
-                            SettlementTx::Deposit(valid),
-                        ])
-                        .await,
-                );
+
+                // The block includes both transactions, but only the valid one
+                // enters custody and the inbox.
+                let block = control
+                    .seal_batch(vec![
+                        SettlementTx::Deposit(rejected),
+                        SettlementTx::Deposit(valid),
+                    ])
+                    .await;
                 assert_eq!(block.transactions.len(), 2);
-                assert_eq!(
-                    chain.deposit(&context, event.id).await.unwrap(),
-                    Some(event.clone())
-                );
-                assert_eq!(status(&control).await.custody, 407);
-                let (sender, mut receiver) =
-                    mailbox::new(context.child("duplicate_observer"), NonZeroUsize::MIN);
-                let mut observer = node::Observer::new(deployment(), sender);
+                let effect = chain.deposit(&context, event.id).await.unwrap().unwrap();
+                assert_eq!(effect.event, event);
+                assert_eq!(effect.index, 0);
+                let recorded = status(&control).await;
+                assert_eq!(recorded.custody, 407);
+                assert_eq!(recorded.intake, 1);
+
+                // Each reopened operator observes the inbox, and only the first
+                // stages the credit.
                 for expected in [1, 0] {
                     let operator = Mutex::new(
                         Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap(),
                     );
-                    let (ack, mut acked) = Exact::handle();
-                    assert!(
-                        observer
-                            .report(Update::Block(block.clone(), ack))
-                            .accepted()
-                    );
-                    let observed = receiver.recv().await.unwrap();
-                    assert_eq!(observed.events, raw_events);
-                    assert_eq!(observed.events.len(), 2);
-                    assert_eq!(observed.events[0].id, observed.events[1].id);
-                    assert!(futures::FutureExt::now_or_never(&mut acked).is_none());
-                    let staged = observe(&context, &mut chain, &operator, observed)
-                        .await
-                        .unwrap();
+                    let staged = observe(&context, &mut chain, &operator).await.unwrap();
                     assert_eq!(staged.len(), expected);
-                    acked.await.unwrap();
                     assert_eq!(
                         operator
                             .lock()
@@ -3201,11 +3251,62 @@ mod tests {
         }
     }
 
-    /// The reporter-ack contract is the observer's recovery mechanism: a
-    /// crash between a block's delivery and the staging commit leaves the
-    /// acknowledgement unfulfilled, so marshal re-delivers the block on
-    /// restart, and the deposit-id dedupe makes any further redelivery a
-    /// no-op.
+    /// A faulted deployment refunds its unadmitted deposits, so an operator that
+    /// observes the inbox only after the fault credits none of them.
+    #[test]
+    fn observation_after_a_fault_credits_nothing() {
+        deterministic::Runner::default().start(|context| async move {
+            let control = harness::start(&context, CHAIN, "chain").await;
+            let mut chain = client(&context, &control);
+            let wallet = wallets().remove(0);
+            let account = wallet.public_key();
+
+            // A deposit enters the inbox, and no operator observes it before it expires.
+            let event = DepositEvent {
+                id: Sha256::hash(&[b"faulted-observation-deposit"]),
+                account: account.clone(),
+                amount: 7,
+            };
+            let request = crate::chain::tx::DepositRequest::sign(
+                chain.genesis().native.chain_id(),
+                deployment(),
+                event,
+                wallet.signer(),
+            );
+            chain
+                .deliver(&context, &SettlementTx::Deposit(request))
+                .await
+                .unwrap();
+            let recorded = status(&control).await;
+            let timeout = crate::protocol::settlement_config(&Timing::DEFAULT)
+                .unwrap()
+                .deposit_inclusion_timeout
+                .get();
+            while !status(&control).await.hard_faulted {
+                assert!(
+                    status(&control).await.height < recorded.height + timeout + 8,
+                    "the expired deposit never faulted the deployment"
+                );
+                control.advance(1).await;
+            }
+
+            // The operator observes after the fault and credits nothing.
+            let operator =
+                Mutex::new(Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap());
+            assert!(
+                observe(&context, &mut chain, &operator)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(operator.lock().observed().unwrap(), 0);
+            assert_eq!(operator.lock().payment_head(&account).unwrap().balance, 100);
+        });
+    }
+
+    /// Inbox entries persist until a registration pulls them, so a crash
+    /// before the observation commit loses nothing, and the observed cursor
+    /// makes any replay a no-op.
     #[test]
     fn observed_deposit_survives_restart_and_dedupes_redelivery() {
         deterministic::Runner::default().start(|context| async move {
@@ -3220,117 +3321,52 @@ mod tests {
                 account: account.clone(),
                 amount: 7,
             };
+            let request = crate::chain::tx::DepositRequest::sign(
+                chain.genesis().native.chain_id(),
+                deployment(),
+                event.clone(),
+                wallets()[0].signer(),
+            );
             chain
-                .deliver(
-                    &context,
-                    &SettlementTx::Deposit(crate::chain::tx::DepositRequest::sign(
-                        chain.genesis().native.chain_id(),
-                        deployment(),
-                        event.clone(),
-                        wallets()[0].signer(),
-                    )),
-                )
+                .deliver(&context, &SettlementTx::Deposit(request.clone()))
                 .await
                 .unwrap();
-            let mut recorded = false;
-            for _ in 0..EFFECT_ATTEMPTS {
-                if chain
-                    .deposit(&context, event.id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .as_ref()
-                    == Some(&event)
-                {
-                    recorded = true;
-                    break;
-                }
-                context.sleep(POLL).await;
-            }
-            assert!(recorded, "the deposit earned no custody record");
-            let height = status(&control).await.height;
+            let effect = chain.deposit(&context, event.id).await.unwrap().unwrap();
+            assert_eq!(effect.event, event);
 
-            // The operator dies between the block's delivery and the staging
-            // commit: the acknowledgement is dropped unfulfilled, which is
-            // exactly the signal that stops marshal from advancing past the
-            // block.
+            // The operator dies after reading the entry but before its
+            // observation commits: the cursor stays put, and the entry stays
+            // certified.
             let operator =
                 Mutex::new(Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap());
-            let (ack, mut lost) = Exact::handle();
-            drop(node::Observed {
-                height,
-                events: vec![event.clone()],
-                ack,
-            });
-            assert!((&mut lost).await.is_err());
+            let record = chain.intake(&context, effect.index).await.unwrap().unwrap();
             drop(operator);
 
-            // Marshal re-delivers the unacknowledged block on restart: the
-            // deposit stages durably and only then does the block
-            // acknowledge.
+            // The restarted operator observes the entry again and stages it.
             let operator =
                 Mutex::new(Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap());
-            let (ack, acked) = Exact::handle();
-            observe(
-                &context,
-                &mut chain,
-                &operator,
-                node::Observed {
-                    height,
-                    events: vec![event.clone()],
-                    ack,
-                },
-            )
-            .await
-            .unwrap();
-            acked.await.unwrap();
+            let staged = observe(&context, &mut chain, &operator).await.unwrap();
+            assert_eq!(staged.len(), 1);
             assert_eq!(operator.lock().payment_head(&account).unwrap().balance, 107);
             drop(operator);
 
-            // A redelivery whose acknowledgement was itself not durable is a
-            // no-op on the id dedupe: staged exactly once, no double credit.
+            // A replay from below the durable cursor stages nothing.
             let operator =
                 Mutex::new(Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap());
-            let (ack, acked) = Exact::handle();
-            let staged = observe(
-                &context,
-                &mut chain,
-                &operator,
-                node::Observed {
-                    height,
-                    events: vec![event.clone()],
-                    ack,
-                },
-            )
-            .await
-            .unwrap();
-            acked.await.unwrap();
-            assert!(staged.is_empty(), "a replayed event staged a new credit");
+            let staged = operator.lock().observe(effect.index, &[record]).unwrap();
+            assert!(staged.is_empty(), "a replayed entry staged a new credit");
             assert_eq!(operator.lock().payment_head(&account).unwrap().balance, 107);
 
-            // An included but rejected transaction earns no custody record,
-            // so the observer skips it: the block still acknowledges, and
-            // nothing stages.
-            let rejected = DepositEvent {
-                id: Sha256::hash(&[b"observed-rejected-deposit"]),
-                account: account.clone(),
-                amount: 9,
-            };
-            let (ack, acked) = Exact::handle();
-            let staged = observe(
-                &context,
-                &mut chain,
-                &operator,
-                node::Observed {
-                    height,
-                    events: vec![rejected],
-                    ack,
-                },
-            )
-            .await
-            .unwrap();
-            acked.await.unwrap();
+            // An included but rejected transaction earns no inbox entry, so
+            // observation finds nothing new.
+            let mut rejected = request;
+            rejected.chain_id = Sha256::hash(&[b"foreign-deposit-chain"]);
+            rejected.event.id = Sha256::hash(&[b"observed-rejected-deposit"]);
+            control.submit(SettlementTx::Deposit(rejected)).await;
+            assert_eq!(status(&control).await.intake, 1);
+            let staged = observe(&context, &mut chain, &operator).await.unwrap();
             assert!(staged.is_empty());
+            assert_eq!(operator.lock().observed().unwrap(), 1);
             assert_eq!(operator.lock().payment_head(&account).unwrap().balance, 107);
         });
     }
@@ -3378,6 +3414,13 @@ mod tests {
                 advance_to(&self.control, 40).await;
             }
             Ok(result)
+        }
+        async fn inbox<E: Env>(
+            &mut self,
+            ctx: &E,
+            indices: std::ops::Range<u64>,
+        ) -> Result<Vec<crate::chain::state::Intake>> {
+            crate::chain::client::inbox(ctx, self, indices).await
         }
         async fn submit<E: Env>(&mut self, ctx: &E, tx: &SettlementTx) -> Result<Submission> {
             if self.on_submit && !self.advanced {
@@ -3452,6 +3495,132 @@ mod tests {
         }
     }
 
+    /// A fresh extra registers although its account queues another request on chain between
+    /// publication and registration. Settlement supersedes the queued request, the successor
+    /// consumes its inbox entry without carrying it, and the successor registers too.
+    #[test]
+    fn queue_after_publication_is_superseded_by_the_extra() {
+        deterministic::Runner::timed(Duration::from_secs(15)).start(|context| async move {
+            let control = harness::start(&context, CHAIN, "chain").await;
+            let mut chain = client(&context, &control);
+            let operator =
+                Mutex::new(Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap());
+            let wallet = wallets().remove(0);
+            let opening = operator
+                .lock()
+                .withdrawal_opening(&wallet.public_key())
+                .unwrap();
+            let deadline = status(&control).await.height
+                + crate::protocol::settlement_config(&Timing::DEFAULT)
+                    .unwrap()
+                    .maximum_withdrawal_notice
+                    .get();
+            let sign = |amount| {
+                SignedWithdrawal::sign(
+                    deployment(),
+                    opening.root.digest,
+                    wallet.public_key().encode(),
+                    WithdrawalAction::Amount(NonZeroU64::new(amount).unwrap()),
+                    deadline,
+                    wallet.signer(),
+                )
+            };
+            let extra = sign(3);
+            let queued = sign(7);
+
+            // The operator stages the extra and publishes epoch 0.
+            let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
+                operator_rpc::ApplyWithdrawalRequest {
+                    request: extra.clone(),
+                },
+            );
+            let response =
+                prepare_request(&context, &mut chain, &operator, &request, Timing::DEFAULT)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| operator_rpc::handle_decoded(&mut operator.lock(), request));
+            assert!(
+                matches!(response, rpc::Response::Success { .. }),
+                "{response:?}"
+            );
+            let published = operator.lock().signed_registration().unwrap();
+            assert_eq!(published.epoch, 0);
+            assert_eq!(
+                published.withdrawals.requests(),
+                std::slice::from_ref(&extra)
+            );
+
+            // The account queues another request before the registration executes.
+            control
+                .submit(SettlementTx::QueueWithdrawal(
+                    crate::chain::tx::QueueWithdrawalRequest {
+                        request: queued.clone(),
+                        opening: opening.opening,
+                    },
+                ))
+                .await;
+            assert_eq!(
+                chain
+                    .withdrawal(&context, wallet.public_key())
+                    .await
+                    .unwrap(),
+                Some(queued.clone())
+            );
+
+            // The registration still executes, and the queued request sits inside the window
+            // its record names.
+            control.submit(SettlementTx::RegisterEpoch(published)).await;
+            let registered = chain.registration_at(&context, 0).await.unwrap().unwrap();
+            assert_eq!(registered.pulled, 0..0);
+            assert_eq!(registered.intake, 1);
+
+            // The successor consumes the superseded entry without carrying it and registers.
+            operator.lock().adopt_registration(&registered).unwrap();
+            observe(&context, &mut chain, &operator).await.unwrap();
+            let close = operator.lock().complete_close(1).unwrap();
+
+            // The operator refuses to stage the superseded request, although the chain still
+            // holds its queue record.
+            let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
+                operator_rpc::ApplyWithdrawalRequest {
+                    request: queued.clone(),
+                },
+            );
+            let Err(error) =
+                prepare_request(&context, &mut chain, &operator, &request, Timing::DEFAULT).await
+            else {
+                panic!("the operator staged a superseded request");
+            };
+            assert!(format!("{error:#}").contains("superseded the queued request"));
+            assert!(
+                operator
+                    .lock()
+                    .staged_withdrawal(&queued)
+                    .unwrap()
+                    .is_none()
+            );
+            let successor = operator.lock().signed_registration().unwrap();
+            assert_eq!(successor.epoch, 1);
+            assert_eq!(successor.end, 1);
+            assert!(successor.withdrawals.requests().is_empty());
+            control.submit(SettlementTx::RegisterEpoch(successor)).await;
+            assert!(chain.registration_at(&context, 1).await.unwrap().is_some());
+
+            // Epoch 0's close releases the extra.
+            control
+                .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
+                    &close,
+                )))
+                .await;
+            let (_, challenge_deadline) = registered.deadlines.unwrap();
+            advance_to(&control, challenge_deadline + 1).await;
+            let status = status(&control).await;
+            assert_eq!(status.last_finalized, Some(0));
+            assert_eq!(status.claimable, 3);
+            assert!(!status.hard_faulted);
+        });
+    }
+
     #[test]
     fn queued_withdrawal_does_not_need_a_second_intake_notice() {
         deterministic::Runner::default().start(|context| async move {
@@ -3504,9 +3673,8 @@ mod tests {
                     .unwrap()
                     .unwrap();
             assert!(matches!(response, rpc::Response::Success { .. }));
-            let registration = registration_request(&context, &mut chain, &operator, 0)
-                .await
-                .unwrap();
+            let registration = operator.lock().signed_registration().unwrap();
+            assert_eq!(registration.epoch, 0);
             control
                 .submit(SettlementTx::RegisterEpoch(registration))
                 .await;
@@ -3518,8 +3686,9 @@ mod tests {
                     &close,
                 )))
                 .await;
-            advance_to(&control, registration.challenge_deadline + 1).await;
-            assert!(registration.challenge_deadline + 1 < deadline);
+            let (_, challenge_deadline) = registration.deadlines.unwrap();
+            advance_to(&control, challenge_deadline + 1).await;
+            assert!(challenge_deadline + 1 < deadline);
             let status = status(&control).await;
             assert_eq!(status.last_finalized, Some(0));
             assert_eq!(status.claimable, 7);
@@ -3549,9 +3718,7 @@ mod tests {
                     wallet.signer(),
                 );
                 operator.apply_withdrawal(request.clone(), false).unwrap();
-                let published = operator
-                    .signed_registration(&WithdrawalBatch::empty())
-                    .unwrap();
+                let published = operator.signed_registration().unwrap();
                 drop(operator);
                 advance_to(&control, 40).await;
                 assert!(!status(&control).await.hard_faulted);

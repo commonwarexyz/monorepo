@@ -67,7 +67,7 @@ impl ReadFixture {
             shares.get_value(&leader).unwrap().clone(),
         )
         .unwrap();
-        Self::configured(context, "native-reads", address, identity, scheme, None).await
+        Self::configured(context, "native-reads", address, identity, scheme).await
     }
 
     pub(super) async fn configured(
@@ -76,7 +76,6 @@ impl ReadFixture {
         address: SocketAddr,
         identity: Genesis,
         scheme: Threshold,
-        observer: Option<node::Observer>,
     ) -> Self {
         let native = identity.native.clone();
         let timing = identity.timing();
@@ -189,10 +188,7 @@ impl ReadFixture {
             },
         );
         actor.start_unbuffered(
-            Reporters::<_, _, node::Observer>::from((
-                Reporters::from((stateful.clone(), ingress.clone())),
-                observer,
-            )),
+            Reporters::from((stateful.clone(), ingress.clone())),
             resolver,
         );
         stateful_actor.start();

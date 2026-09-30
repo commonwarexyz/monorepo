@@ -8,10 +8,10 @@ use commonware_clearing::bajillion::{
     admission::{Committee, Vote, bls12381, seal},
     boundary::{DepositBatch, DepositRecord, WithdrawalBatch},
     challenge::HigherEntryLookup,
-    commitment::{Opening, VectorRoot},
+    commitment::{self, Opening, VectorKind, VectorRoot},
     custody::Epoch,
     logs::{Floors, LogHead, Logs},
-    payment::{EntryReceipt, PaymentContext, VectorAck, VectorSendBody},
+    payment::{EntryReceipt, PaymentContext, SendAuthorization, VectorAck, VectorSendBody},
     qmdb::{State, StateRoot},
     replica::{PreparedReplica, Replica},
     settlement::{EpochDeadlinePolicy, Genesis as ConfiguredGenesis, SettlementConfig},
@@ -48,6 +48,7 @@ use commonware_utils::{Faults as _, N3f1, NZU64, NZUsize, Participant, sync::Mut
 use rand_core::CryptoRng;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
     sync::Arc,
     time::Instant,
 };
@@ -100,10 +101,10 @@ pub(crate) fn deployment_of(operator: &Key) -> Digest {
 }
 
 /// Namespace for chain registrations. The signed payload is the boundary
-/// material and native fee (epoch, predecessor liability, deposit root,
-/// withdrawal batch): execution assigns the absolute block-height deadlines
-/// at the registration's inclusion height, so the operator has nothing about
-/// timing to commit.
+/// material and native fee (epoch, deposit root, withdrawal batch):
+/// settlement binds the predecessor and assigns the absolute block-height
+/// deadlines when the epoch becomes the admission frontier, so the operator
+/// commits nothing about either.
 const CHAIN_REGISTRATION_SIGNATURE_NAMESPACE: &[u8] =
     b"_COMMONWARE_EXAMPLES_TERMINAL_CHAIN_REGISTRATION";
 const VALIDATOR_SEED_START: u64 = 10_000;
@@ -141,8 +142,8 @@ pub(crate) const MAX_DESTINATION_BYTES: usize = 256;
 pub(crate) const INITIAL_BALANCE: u64 = 100;
 /// Largest monetary value that the SQLite operator can persist exactly.
 pub(crate) const SQLITE_U64_MAX: u64 = i64::MAX as u64;
-// Pre-registration contexts and in-process fixtures use this placeholder grid.
-// A native registration adopts the deadlines assigned by its genesis policy.
+// In-process closes bind deadlines from this placeholder grid until the
+// operator adopts the ones settlement assigned from its genesis policy.
 const ADMISSION_OFFSET: u64 = 10;
 const CHALLENGE_DURATION: u64 = 1;
 const CHALLENGE_OFFSET: u64 = ADMISSION_OFFSET + CHALLENGE_DURATION;
@@ -155,11 +156,9 @@ const EPOCH_STRIDE: u64 = CHALLENGE_OFFSET + 1;
 // blocks pass in seconds at live cadence.
 const GENESIS_ADMISSION_OFFSET: u64 = 300;
 
-// A deposit must reach an admitted close within this many blocks of its
-// custody record. A registered boundary's deposits stay pending until that
-// close admits, and the close may consume most of the genesis admission
-// runway (an operator relaunch included), so the timeout dominates it.
-const DEPOSIT_INCLUSION_TIMEOUT: u64 = GENESIS_ADMISSION_OFFSET + 100;
+// Blocks a deposit's inclusion deadline allows beyond one admission offset.
+const DEPOSIT_INCLUSION_SLACK: u64 = 100;
+
 /// Genesis-fixed epoch timing policy, in blocks.
 ///
 /// The policy is fixed once at chain creation (setup writes it into
@@ -171,14 +170,15 @@ const DEPOSIT_INCLUSION_TIMEOUT: u64 = GENESIS_ADMISSION_OFFSET + 100;
 ///
 /// The genesis fixes the policy and the chain assigns the instance: every
 /// window opens at the inclusion of the operator submission that triggers
-/// it. A registration's inclusion assigns its admission and challenge
-/// deadlines from this policy, and an admission opens the challenge window
-/// and the successor epoch's registration eligibility. An operator never
-/// chooses timing, only when to submit.
+/// it. An epoch receives its admission and challenge deadlines from this
+/// policy when it becomes the admission frontier: at its registration's
+/// inclusion when no earlier epoch awaits admission, otherwise at its
+/// predecessor's admission. An operator never chooses timing, only when to
+/// submit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Timing {
-    /// Maximum blocks from a registration's inclusion height to its admission
-    /// deadline.
+    /// Exact blocks from the height an epoch becomes the admission frontier
+    /// to its admission deadline.
     pub(crate) admission_offset: u64,
     /// Exact blocks between a registration's admission deadline and its
     /// challenge deadline.
@@ -186,8 +186,8 @@ pub(crate) struct Timing {
 }
 
 impl Timing {
-    /// The compiled fixture-grid pair the harness and placeholder contexts
-    /// run on.
+    /// The compiled fixture-grid pair the harness and in-process closes that
+    /// have not adopted assigned deadlines run on.
     pub(crate) const DEFAULT: Self = Self {
         admission_offset: ADMISSION_OFFSET,
         challenge_duration: CHALLENGE_DURATION,
@@ -438,14 +438,28 @@ impl Read for DepositEvent {
     }
 }
 
-/// Root-independent epoch authorization paired with its sealed boundary inputs.
+/// Predecessor-independent epoch authorization paired with its sealed boundary inputs.
 #[derive(Clone)]
 pub(crate) struct EpochRegistration {
     /// Deposit records the sealed boundary includes.
     pub(crate) deposits: DepositBatch<Key>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     pub(crate) context: EpochContext<Key, Digest>,
+    /// The operator's own projection of the predecessor liability. Settlement
+    /// derives the bound value independently, and certification requires both
+    /// to agree.
+    pub(crate) liability: u64,
+    /// Log floors captured by the certified registration, once adopted.
     pub(crate) floors: Option<Floors>,
+    /// Admission and challenge deadlines settlement assigned when the epoch
+    /// became the admission frontier, once adopted.
+    pub(crate) deadlines: Option<(u64, u64)>,
+    /// Account rows of the predecessor close. Settlement binds this interval
+    /// itself, so only a close bound in process reads it.
+    pub(crate) rows: Range<u64>,
+    /// Inbox indices the boundary takes: from the first index no earlier
+    /// registration pulled up to the exclusive end the registration signs.
+    pub(crate) intake: Range<u64>,
 }
 
 /// Immutable root-independent input prepared for full-validator execution.
@@ -482,6 +496,10 @@ impl PreparedEpoch {
                 "certified close differs from the adopted native boundary"
             );
         }
+        ensure!(
+            certified.context.predecessor_liability() == self.registration.liability,
+            "certified close binds a predecessor liability the operator did not project"
+        );
         let verifier = bls12381::Scheme::verifier(committee()?);
         ensure!(
             has_consensus_quorum(&certified.certificate)
@@ -552,6 +570,17 @@ pub(crate) struct SettlementResult {
     pub(crate) prepare_micros: u128,
     pub(crate) deal_micros: u128,
     pub(crate) seal_micros: u128,
+}
+
+impl SettlementResult {
+    /// Returns the account rows this close appended, which its successor binds.
+    pub(crate) fn rows(&self) -> Result<Range<u64>> {
+        let range = self
+            .roots
+            .activity_range(&self.context)
+            .context("certified close has no valid activity range")?;
+        Ok(range.start..range.end)
+    }
 }
 
 /// Bounds the retained descriptor, certificate, and metrics for one close.
@@ -1072,30 +1101,31 @@ pub(crate) fn chain_id<'a>(deployments: impl IntoIterator<Item = &'a Deployment>
 
 /// The chain registration message: the named deployment plus exactly the
 /// boundary material the operator legitimately chooses, so the signature
-/// binds the deployment it registers under. The deadlines are not part of it
-/// because execution assigns them at the inclusion height.
+/// binds the deployment it registers under. That material includes the
+/// exclusive end of the inbox prefix the registration pulls. The prefix
+/// starts where the previous registration ended, so the start is not signed.
+/// The predecessor and the deadlines are not part of it because settlement
+/// binds them when the epoch becomes the admission frontier.
 fn chain_registration_message(
     deployment: &Digest,
     epoch: u64,
-    predecessor_liability: u64,
+    end: u64,
     deposits_root: &VectorRoot<Digest>,
-
     withdrawals: &WithdrawalBatch<Key, Digest>,
     fee: u64,
 ) -> Bytes {
     let mut message = BytesMut::with_capacity(
         deployment.encode_size()
             + epoch.encode_size()
-            + predecessor_liability.encode_size()
+            + end.encode_size()
             + deposits_root.encode_size()
             + withdrawals.encode_size()
             + fee.encode_size(),
     );
     deployment.write(&mut message);
     epoch.write(&mut message);
-    predecessor_liability.write(&mut message);
+    end.write(&mut message);
     deposits_root.write(&mut message);
-
     withdrawals.write(&mut message);
     fee.write(&mut message);
     message.freeze()
@@ -1104,13 +1134,11 @@ fn chain_registration_message(
 /// Verifies a chain registration against one configured deployment: the
 /// signature must be the deployment's operator's, over a message naming the
 /// deployment's own digest.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_chain_registration_signature(
     deployment: &Deployment,
     epoch: u64,
-    predecessor_liability: u64,
+    end: u64,
     deposits_root: &VectorRoot<Digest>,
-
     withdrawals: &WithdrawalBatch<Key, Digest>,
     fee: u64,
     signature: &Signature,
@@ -1120,13 +1148,32 @@ pub(crate) fn verify_chain_registration_signature(
         &chain_registration_message(
             deployment.digest(),
             epoch,
-            predecessor_liability,
+            end,
             deposits_root,
             withdrawals,
             fee,
         ),
         signature,
     )
+}
+
+/// Folds deposit events into their canonical per-account aggregate batch.
+pub(crate) fn deposit_batch<'a>(
+    events: impl IntoIterator<Item = &'a DepositEvent>,
+) -> Result<DepositBatch<Key>> {
+    let mut aggregates = std::collections::BTreeMap::<Key, u64>::new();
+    for event in events {
+        let amount = aggregates.entry(event.account.clone()).or_default();
+        *amount = amount
+            .checked_add(event.amount)
+            .context("deposit total overflow")?;
+    }
+    Ok(DepositBatch::new(
+        aggregates
+            .into_iter()
+            .map(|(account, amount)| DepositRecord::new(account, amount))
+            .collect::<Result<Vec<_>, _>>()?,
+    )?)
 }
 
 pub(crate) fn committee() -> Result<Committee> {
@@ -1177,40 +1224,52 @@ pub(crate) const fn limits() -> CloseLimits {
 
 /// Settlement chain configuration under `timing`.
 ///
-/// The chain's own epoch deadline policy is derived from the genesis-fixed
-/// timing: the admission delay mirrors the stride shape (offset plus duration
-/// plus one) so pipelined admission monotonicity keeps its one-block slack,
-/// and the challenge duration is exact. Execution assigns registration
-/// deadlines from the inclusion height ([`crate::chain::state`]), so the
-/// assigned instances satisfy this policy by construction.
+/// Settlement assigns every admission frontier exactly the genesis admission
+/// offset and challenge duration. An epoch registered while no earlier epoch
+/// awaits admission therefore receives the same deadlines as one registered
+/// at its predecessor's admission.
 pub(crate) fn settlement_config(timing: &Timing) -> Result<SettlementConfig> {
-    let delay = timing
-        .admission_offset
-        .checked_add(timing.challenge_duration)
-        .and_then(|delay| delay.checked_add(1))
-        .context("the deployment timing policy exceeds the epoch clock")?;
-    ensure!(
-        timing.admission_offset > 0,
-        "admission offset must be positive"
-    );
+    let admission =
+        NonZeroU64::new(timing.admission_offset).context("admission offset must be positive")?;
     let challenge = NonZeroU64::new(timing.challenge_duration)
         .context("challenge duration must be positive")?;
-    // Native deadlines overlap. Notice covers admission of the current epoch and
-    // finalization of the successor carrying the withdrawal, with inclusion slack.
-    let minimum_notice = delay
+    let window = timing
+        .admission_offset
+        .checked_add(timing.challenge_duration)
+        .and_then(|window| window.checked_add(1))
+        .context("the deployment timing policy exceeds the epoch clock")?;
+
+    // Notice covers the close window of the current epoch and the finalization
+    // of the successor carrying the withdrawal, with inclusion slack.
+    let minimum_notice = window
         .checked_add(2)
-        .and_then(|notice| notice.checked_add(delay.saturating_sub(3)))
+        .and_then(|notice| notice.checked_add(window.saturating_sub(3)))
         .context("withdrawal notice exceeds the epoch clock")?;
     let maximum_notice = minimum_notice
         .checked_add(100)
         .context("withdrawal horizon exceeds the epoch clock")?;
+
+    // A deposit enters the inbox and must be pulled by a registration: the
+    // operator observes it, takes it into the live boundary, and registers
+    // that boundary within one dwell. Once pulled, no timer applies, and the
+    // deposit follows its epoch to admission, or to a refund if the deployment
+    // faults first, however many registrations wait ahead. Registration never
+    // waits for earlier closes, and the operator cuts the live epoch within
+    // its dwell, which never exceeds one admission offset. That offset is also
+    // the runway that covers an operator relaunch. The slack covers
+    // observation and inclusion. Pulls are prefixes and a registration carries
+    // at most `MAX_WITHDRAWALS` requests, so a deposit behind a larger backlog
+    // of chain-queued withdrawals waits one more epoch per capacity. The
+    // operator refuses fresh extras while inbox rows wait, and the timeout
+    // assumes the chain records fewer queued withdrawals within the slack
+    // than the epochs cut in it carry.
+    let deposit_timeout = timing
+        .admission_offset
+        .checked_add(DEPOSIT_INCLUSION_SLACK)
+        .context("deposit inclusion timeout exceeds the epoch clock")?;
     Ok(SettlementConfig::new(
-        EpochDeadlinePolicy::new(
-            NonZeroU64::new(delay).expect("admission delay is nonzero"),
-            challenge,
-            challenge,
-        ),
-        NonZeroU64::new(DEPOSIT_INCLUSION_TIMEOUT).expect("deposit timeout is nonzero"),
+        EpochDeadlinePolicy::new(admission, challenge),
+        NonZeroU64::new(deposit_timeout).expect("deposit timeout is nonzero"),
         NonZeroU64::new(minimum_notice).expect("notice is nonzero"),
         NonZeroU64::new(maximum_notice).expect("notice is nonzero"),
         256,
@@ -1223,49 +1282,28 @@ pub(crate) fn epoch_context(
     epoch: u64,
     deposits: &DepositBatch<Key>,
     withdrawals: &WithdrawalBatch<Key, Digest>,
-    predecessor_liability: u64,
 ) -> Result<EpochContext<Key, Digest>> {
-    let (admission_deadline, challenge_deadline) = deadlines(epoch)?;
-    epoch_context_at(
-        deployment(),
-        operator_key(),
-        epoch,
-        deposits,
-        withdrawals,
-        predecessor_liability,
-        admission_deadline,
-        challenge_deadline,
-    )
+    epoch_context_at(deployment(), operator_key(), epoch, deposits, withdrawals)
 }
 
-/// Builds the epoch context for explicit absolute deadlines: the
-/// chain-assigned block-height deadlines execution derives from a
-/// registration's inclusion height, and the deadlines an operator adopts
-/// from the certified registration record. Pre-registration placeholder
-/// contexts derive deterministic grid deadlines through
-/// [`Protocol::registration`] instead.
-#[allow(clippy::too_many_arguments)]
+/// Builds the epoch context one deployment's operator registers for `epoch`.
+///
+/// The context commits nothing about the predecessor or about timing, so
+/// the chain and the operator derive the same anchor from the same boundary.
 pub(crate) fn epoch_context_at(
     deployment: Digest,
     operator: Key,
     epoch: u64,
     deposits: &DepositBatch<Key>,
     withdrawals: &WithdrawalBatch<Key, Digest>,
-    predecessor_liability: u64,
-    admission_deadline: u64,
-    challenge_deadline: u64,
 ) -> Result<EpochContext<Key, Digest>> {
-    let limits = limits();
     EpochContext::new::<Sha256>(
         deployment,
         epoch,
         operator,
         deposits,
         withdrawals,
-        predecessor_liability,
-        admission_deadline,
-        challenge_deadline,
-        limits,
+        limits(),
         committee()?.commitment::<Sha256>(),
     )
     .context("construct epoch context")
@@ -1316,15 +1354,15 @@ impl Protocol {
         &self.operator_ack_key
     }
 
-    /// Countersigns one accepted endpoint body for the close's complete-close aggregate.
+    /// Countersigns one accepted message for the close's complete-close aggregate.
     pub(crate) fn sign_ack_aggregate(
         &self,
-        body: &VectorSendBody<Key, Digest>,
+        authorization: &SendAuthorization<Key, Digest>,
     ) -> OperatorSignature {
         sign_message::<OperatorVariant>(
             &self.operator_ack,
             commonware_clearing::bajillion::payment::VECTOR_ACK_AGGREGATE_NAMESPACE,
-            body.encode().as_ref(),
+            authorization.message().as_ref(),
         )
     }
 
@@ -1340,15 +1378,15 @@ impl Protocol {
         &self.operator
     }
 
-    /// Signs a chain registration over exactly the boundary material.
-    /// Execution assigns the deadlines at the inclusion height, so the
-    /// signature commits nothing about timing.
+    /// Signs a chain registration over exactly the boundary material, including
+    /// the exclusive end of the inbox prefix it pulls. Settlement binds the
+    /// predecessor and the deadlines, so the signature commits nothing about
+    /// either.
     pub(crate) fn sign_chain_registration(
         &self,
         epoch: u64,
-        predecessor_liability: u64,
+        end: u64,
         deposits_root: &VectorRoot<Digest>,
-
         withdrawals: &WithdrawalBatch<Key, Digest>,
         fee: u64,
     ) -> Signature {
@@ -1357,7 +1395,7 @@ impl Protocol {
             &chain_registration_message(
                 &self.deployment,
                 epoch,
-                predecessor_liability,
+                end,
                 deposits_root,
                 withdrawals,
                 fee,
@@ -1365,48 +1403,21 @@ impl Protocol {
         )
     }
 
+    /// Builds the registration for one boundary and the operator's projected
+    /// predecessor liability. Nothing is adopted from the chain yet.
     pub(crate) fn registration(
         &self,
         epoch: u64,
-        staged: DepositBatch<Key>,
+        deposits: DepositBatch<Key>,
         withdrawals: WithdrawalBatch<Key, Digest>,
-        predecessor_liability: u64,
+        liability: u64,
     ) -> Result<EpochRegistration> {
-        let (admission_deadline, challenge_deadline) = deadlines(epoch)?;
-        self.registration_at(
-            epoch,
-            staged,
-            withdrawals,
-            predecessor_liability,
-            admission_deadline,
-            challenge_deadline,
-        )
-    }
-
-    /// Builds a registration for explicit absolute deadlines, the registered
-    /// path: the chain assigns the deadlines at inclusion and the operator
-    /// adopts them from the certified registration record.
-    /// [`Self::registration`] instead derives deterministic placeholder grid
-    /// deadlines for contexts that have not registered on the chain yet.
-    pub(crate) fn registration_at(
-        &self,
-        epoch: u64,
-        staged: DepositBatch<Key>,
-        withdrawals: WithdrawalBatch<Key, Digest>,
-        predecessor_liability: u64,
-        admission_deadline: u64,
-        challenge_deadline: u64,
-    ) -> Result<EpochRegistration> {
-        let deposits = staged;
         let context = epoch_context_at(
             self.deployment,
             self.operator.public_key(),
             epoch,
             &deposits,
             &withdrawals,
-            predecessor_liability,
-            admission_deadline,
-            challenge_deadline,
         )?;
         ensure!(
             context.deployment() == &self.deployment
@@ -1418,8 +1429,29 @@ impl Protocol {
             deposits,
             withdrawals,
             context,
+            liability,
             floors: None,
+            deadlines: None,
+            rows: 0..0,
+            intake: 0..0,
         })
+    }
+
+    /// Builds a registration whose deadlines were adopted from a certified
+    /// record, so an in-process close binds them.
+    #[cfg(test)]
+    pub(crate) fn registration_at(
+        &self,
+        epoch: u64,
+        deposits: DepositBatch<Key>,
+        withdrawals: WithdrawalBatch<Key, Digest>,
+        liability: u64,
+        admission_deadline: u64,
+        challenge_deadline: u64,
+    ) -> Result<EpochRegistration> {
+        let mut registration = self.registration(epoch, deposits, withdrawals, liability)?;
+        registration.deadlines = Some((admission_deadline, challenge_deadline));
+        Ok(registration)
     }
 
     pub(crate) fn prepare(
@@ -1479,6 +1511,10 @@ impl Protocol {
         S: commonware_parallel::Strategy,
     {
         let started = Instant::now();
+        let (admission_deadline, challenge_deadline) = match epoch.registration.deadlines {
+            Some(deadlines) => deadlines,
+            None => deadlines(epoch.registration.context.payment().epoch())?,
+        };
         let context = epoch
             .registration
             .context
@@ -1487,6 +1523,10 @@ impl Protocol {
                 state,
                 &epoch.registration.deposits,
                 &epoch.registration.withdrawals,
+                epoch.registration.rows.clone(),
+                epoch.registration.liability,
+                admission_deadline,
+                challenge_deadline,
                 epoch.registration.floors.unwrap_or(Floors {
                     activity: state.logs().head().activity.floor,
                     payouts: state.logs().head().payouts.floor,
@@ -1572,11 +1612,12 @@ impl Protocol {
         &self,
         accounts: &[Account],
         history: &[SettlementResult],
-        prepared: PreparedEpoch,
+        mut prepared: PreparedEpoch,
         seed: u64,
     ) -> Result<SettlementResult> {
         use commonware_runtime::Runner as _;
 
+        prepared.registration.rows = history.last().map_or(Ok(0..0), SettlementResult::rows)?;
         let protocol = self.clone();
         let accounts = accounts.to_vec();
         let history = history.to_vec();
@@ -1713,8 +1754,8 @@ where
 }
 
 /// The deterministic placeholder grid pair for `epoch`, from the compiled
-/// default geometry. Pre-registration staging and the fixture harness run on
-/// this grid: a registered epoch adopts the chain-assigned deadlines instead.
+/// default geometry. In-process closes bind these until the operator adopts
+/// the deadlines settlement assigned.
 fn deadlines(epoch: u64) -> Result<(u64, u64)> {
     let base = epoch_start(epoch)?;
     Ok((
@@ -1784,6 +1825,8 @@ pub(crate) struct OmittingClose {
 /// The omitting close's boundary: the bystander deposit event and its
 /// canonical batch, exposed so the fraud arcs can register the boundary on
 /// the chain and learn the assigned deadlines before building the close.
+/// The first epoch becomes the admission frontier at registration, so its
+/// record carries the deadlines immediately.
 pub(crate) fn omitting_boundary() -> Result<(DepositEvent, DepositBatch<Key>)> {
     let bystander = wallets()[2].public_key();
     let deposit = DepositEvent {
@@ -1815,14 +1858,8 @@ where
     let held_credit = 5;
 
     let (_, deposits) = omitting_boundary()?;
-    let registration = protocol.registration_at(
-        0,
-        deposits,
-        WithdrawalBatch::empty(),
-        400,
-        admission_deadline,
-        challenge_deadline,
-    )?;
+    let mut registration = protocol.registration(0, deposits, WithdrawalBatch::empty(), 400)?;
+    registration.deadlines = Some((admission_deadline, challenge_deadline));
     let prepared = protocol.prepare(registration, Vec::new())?;
     let (result, candidate) = protocol.complete(prepared, &state, rng).await?;
 
@@ -1857,7 +1894,12 @@ where
             .root::<Sha256, Digest>()
             .context("commit the omitted receiver's out vector")?,
     );
-    let ack = Ack::sign_by_authorities(body, payer.signer(), protocol.operator());
+    let ack = Ack::sign_by_authorities(
+        body,
+        commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+        payer.signer(),
+        protocol.operator(),
+    );
     let opening = match out_vector
         .lookup::<Sha256, Digest>(&receiver)
         .context("open the omitted receiver's entry")?
@@ -1892,8 +1934,7 @@ pub(crate) fn encoded_artifacts(result: &SettlementResult) -> (Vec<u8>, Vec<u8>,
 mod tests {
     use super::*;
     use commonware_clearing::bajillion::{
-        boundary::SignedWithdrawal, payment::SendAuthorization, qmdb::account_key,
-        transition::WithdrawalClaim,
+        boundary::SignedWithdrawal, qmdb::account_key, transition::WithdrawalClaim,
     };
     use commonware_codec::DecodeExt as _;
     use commonware_runtime::{Runner as _, deterministic};
@@ -2007,9 +2048,14 @@ mod tests {
                 1,
                 vector.root::<Sha256, Digest>().unwrap(),
             );
+            let authorization = SendAuthorization::sign(
+                body,
+                commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+                wallet.signer(),
+            );
             let terminal = Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&body),
-                authorization: SendAuthorization::sign(body, wallet.signer()),
+                operator_signature: protocol.sign_ack_aggregate(&authorization),
+                authorization,
                 vector,
             };
             let prepared = protocol.prepare(registration, vec![terminal]).unwrap();
@@ -2065,17 +2111,16 @@ mod tests {
 
             let mut wrong_context = certification_input.clone();
             wrong_context.registration.context = protocol
-                .registration_at(
-                    0,
-                    DepositBatch::empty(),
-                    certification_input.registration.withdrawals.clone(),
-                    10,
-                    20,
-                    21,
-                )
+                .registration(0, DepositBatch::empty(), WithdrawalBatch::empty(), 10)
                 .unwrap()
                 .context;
             assert!(wrong_context.certify(certified(&result), 0, 0).is_err());
+
+            // The operator fences a certified close whose settlement-derived
+            // liability differs from its own projection.
+            let mut wrong_liability = certification_input.clone();
+            wrong_liability.registration.liability = 11;
+            assert!(wrong_liability.certify(certified(&result), 0, 0).is_err());
 
             let mut wrong_input = certification_input.clone();
             wrong_input.encoded = Bytes::from_static(b"another canonical proposal");

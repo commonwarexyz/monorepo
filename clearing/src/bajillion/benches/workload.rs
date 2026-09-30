@@ -1,5 +1,6 @@
 use crate::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
+    commitment::{self, VectorKind},
     logs::Floors,
     payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
     replica::{Replica, ReplicaHead},
@@ -144,12 +145,6 @@ where
         keys.operator.public_key(),
         &deposits,
         &withdrawals,
-        u64::try_from(case.n)
-            .expect("benchmark account count fits u64")
-            .checked_mul(OPENING_BALANCE)
-            .expect("benchmark liability fits u64"),
-        admission_deadline,
-        challenge_deadline,
         limits,
         committee,
     )
@@ -158,6 +153,13 @@ where
         replica,
         &deposits,
         &withdrawals,
+        0..0,
+        u64::try_from(case.n)
+            .expect("benchmark account count fits u64")
+            .checked_mul(OPENING_BALANCE)
+            .expect("benchmark liability fits u64"),
+        admission_deadline,
+        challenge_deadline,
         Floors {
             activity: 0,
             payouts: 0,
@@ -276,18 +278,25 @@ fn terminal(
         debit,
         vector.root::<Sha256, Digest>().expect("vector root"),
     );
-    let ack = VectorAck::sign_by_authorities(body, &account.1, operator);
+    let ack = VectorAck::sign_by_authorities(
+        body,
+        commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+        &account.1,
+        operator,
+    );
+    let authorization = SendAuthorization::from_raw_unchecked(
+        ack.body().clone(),
+        ack.predecessor(),
+        ack.payer_signature().clone(),
+    );
     Terminal {
-        authorization: SendAuthorization::from_raw_unchecked(
-            ack.body().clone(),
-            ack.payer_signature().clone(),
-        ),
-        vector,
         operator_signature: sign_message::<OperatorVariant>(
             &BlsPrivate::new(Scalar::from(OPERATOR_SEED)),
             VECTOR_ACK_AGGREGATE_NAMESPACE,
-            ack.body().encode().as_ref(),
+            authorization.message().as_ref(),
         ),
+        authorization,
+        vector,
     }
 }
 

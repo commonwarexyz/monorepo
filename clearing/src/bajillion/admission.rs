@@ -23,8 +23,9 @@ pub type Vote = bls12381::Vote;
 
 /// Decodes and authenticates a full proposal before signing its header.
 ///
-/// The caller authenticates the context against settlement registration, which owns the
-/// predecessor liability and its association with the state and log roots.
+/// The caller authenticates the context against the settlement frontier. Settlement binds the
+/// predecessor state and log roots, the predecessor liability, and both deadlines from its own
+/// admitted head when the epoch becomes the frontier.
 ///
 /// The returned candidate contains all three native batches and original proof sources.
 /// Applications apply and synchronize those batches, then durably publish their common

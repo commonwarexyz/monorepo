@@ -58,6 +58,7 @@ struct PaymentCase {
     authorization: SendAuthorization<VerifyingKey, Digest>,
     ack: VectorAck<VerifyingKey, Digest>,
     receipt: EntryReceipt<VerifyingKey, Digest>,
+    predecessor: VectorRoot<Digest>,
     seed: u64,
     amount: u8,
     fanout: u8,
@@ -142,11 +143,19 @@ fn bls_pair(seed: u64) -> (Private, OperatorKey) {
     (private, public)
 }
 
-fn bls_ack(private: &Private, body: &VectorSendBody<VerifyingKey, Digest>) -> OperatorSignature {
+// The predecessor every payer signs in an epoch without predecessor rows.
+fn empty_root() -> VectorRoot<Digest> {
+    commonware_clearing::bajillion::commitment::empty_root::<Sha256>(VectorKind::OutEntry)
+}
+
+fn bls_ack(
+    private: &Private,
+    authorization: &SendAuthorization<VerifyingKey, Digest>,
+) -> OperatorSignature {
     sign_message::<OperatorVariant>(
         private,
         VECTOR_ACK_AGGREGATE_NAMESPACE,
-        body.encode().as_ref(),
+        authorization.message().as_ref(),
     )
 }
 
@@ -181,11 +190,39 @@ fn fuzz_payment(case: PaymentCase) {
         .root::<Sha256, Digest>()
         .expect("bounded vector commits");
     let body = VectorSendBody::new(&context, payer.public_key(), 0, total, root);
-    let ack = VectorAck::sign_by_authorities(body.clone(), &payer, &operator);
+    let ack = VectorAck::sign_by_authorities(body.clone(), case.predecessor, &payer, &operator);
     assert!(ack.verify(&context).is_ok());
-    let authorization = SendAuthorization::sign(body.clone(), &payer);
+    let authorization = SendAuthorization::sign(body.clone(), case.predecessor, &payer);
     assert!(authorization.verify(&context).is_ok());
     assert_eq!(authorization.payer_signature(), ack.payer_signature());
+    assert_eq!(AckWitness::from_ack(&ack).predecessor, case.predecessor);
+
+    // Every signature covers the predecessor, so another predecessor fails verification.
+    let other = VectorRoot {
+        digest: Sha256::hash(&[
+            b"payment-other-predecessor",
+            case.predecessor.digest.as_ref(),
+        ]),
+    };
+    assert!(matches!(
+        SendAuthorization::from_raw_unchecked(
+            body.clone(),
+            other,
+            authorization.payer_signature().clone()
+        )
+        .verify(&context),
+        Err(AckError::InvalidPayerSignature)
+    ));
+    assert!(matches!(
+        VectorAck::from_raw_unchecked(
+            body.clone(),
+            other,
+            ack.payer_signature().clone(),
+            ack.operator_signature().clone()
+        )
+        .verify(&context),
+        Err(AckError::InvalidPayerSignature)
+    ));
 
     let first = vector.entries()[0].recipient.clone();
     for entry in vector.entries() {
@@ -218,10 +255,11 @@ fn fuzz_payment(case: PaymentCase) {
     );
     assert!(matches!(ack.verify(&foreign), Err(AckError::WrongContext)));
     let wrong = SigningKey::from_seed(case.seed.wrapping_add(100));
-    let encoded = body.encode();
+    let message = authorization.message();
     let bad_payer = VectorAck::from_raw_unchecked(
         body.clone(),
-        wrong.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &encoded),
+        case.predecessor,
+        wrong.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &message),
         ack.operator_signature().clone(),
     );
     assert!(matches!(
@@ -230,8 +268,9 @@ fn fuzz_payment(case: PaymentCase) {
     ));
     let bad_operator = VectorAck::from_raw_unchecked(
         body,
+        case.predecessor,
         ack.payer_signature().clone(),
-        wrong.sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &encoded),
+        wrong.sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &message),
     );
     assert!(matches!(
         bad_operator.verify(&context),
@@ -273,8 +312,10 @@ fn invalidate_operator_half(
         ack.cumulative_debit,
         ack.send_root,
     );
-    let encoded = body.encode();
-    ack.operator_signature = wrong.sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &encoded);
+    let message =
+        SendAuthorization::from_raw_unchecked(body, ack.predecessor, ack.payer_signature.clone())
+            .message();
+    ack.operator_signature = wrong.sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &message);
 }
 
 fn invalidate_scope(challenge: &mut TestChallenge) {
@@ -466,6 +507,7 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
         case.seed,
         operator.public_key(),
         &cache,
+        0..0,
         896,
         &deposits,
         &withdrawals,
@@ -503,16 +545,18 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
             .root::<Sha256, Digest>()
             .expect("bounded vector commits"),
     );
-    let committed_ack = VectorAck::sign_by_authorities(body.clone(), &payer, &operator);
+    let committed_ack =
+        VectorAck::sign_by_authorities(body.clone(), empty_root(), &payer, &operator);
+    let authorization = SendAuthorization::sign(body.clone(), empty_root(), &payer);
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &cache,
         &context,
         &deposits,
         &withdrawals,
         vec![Terminal {
-            authorization: SendAuthorization::sign(body.clone(), &payer),
+            operator_signature: bls_ack(&operator_ack, &authorization),
+            authorization,
             vector: out_vector,
-            operator_signature: bls_ack(&operator_ack, &body),
         }],
         &Sequential,
     )
@@ -564,6 +608,7 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
             amount + 1,
             retained_root,
         ),
+        empty_root(),
         &payer,
         &operator,
     );
@@ -580,6 +625,7 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
     let other_public = other.public_key();
     let absent_ack = VectorAck::sign_by_authorities(
         VectorSendBody::new(context.payment(), other_public.clone(), 0, 1, retained_root),
+        empty_root(),
         &other,
         &operator,
     );
@@ -630,6 +676,18 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
                 amount + 5,
                 retained_root,
             ),
+            empty_root(),
+            &payer,
+            &operator,
+        ))),
+    };
+
+    // The same body countersigned over another predecessor also forks.
+    let predecessor_fork = Challenge::AckFork {
+        left: Box::new(AckWitness::from_ack(&committed_ack)),
+        right: Box::new(AckWitness::from_ack(&VectorAck::sign_by_authorities(
+            committed_ack.body().clone(),
+            retained_root,
             &payer,
             &operator,
         ))),
@@ -641,6 +699,7 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
         (ChallengeKind::HigherAckDebit, absent_debit),
         (ChallengeKind::HigherAckEntry, higher_entry),
         (ChallengeKind::AckFork, fork),
+        (ChallengeKind::AckFork, predecessor_fork),
     ];
     for (offset, (kind, challenge)) in challenges.iter().enumerate() {
         exercise_challenge(
@@ -908,6 +967,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         case.seed,
         operator.public_key(),
         &state,
+        0..0,
         balance * 2,
         &deposits,
         &withdrawals,
@@ -942,10 +1002,11 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
             amount,
             vector.root::<Sha256, Digest>().unwrap(),
         );
+        let authorization = SendAuthorization::sign(body, empty_root(), sender);
         terminals.push(Terminal {
-            authorization: SendAuthorization::sign(body.clone(), sender),
+            operator_signature: bls_ack(&ack_key, &authorization),
+            authorization,
             vector,
-            operator_signature: bls_ack(&ack_key, &body),
         });
     }
     terminals.sort_unstable_by(|a, b| {
@@ -978,9 +1039,11 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
     );
     let mut wrong_terminal = terminals.clone();
     let original = wrong_terminal[0].authorization.body().clone();
+    let message = wrong_terminal[0].authorization.message();
     wrong_terminal[0].authorization = SendAuthorization::from_raw_unchecked(
-        original.clone(),
-        absent.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &original.encode()),
+        original,
+        empty_root(),
+        absent.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &message),
     );
     let bad = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
@@ -1091,6 +1154,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         case.seed,
         operator.public_key(),
         &state,
+        0..0,
         balance * 2,
         &deposits,
         &withdrawals,
@@ -1278,6 +1342,88 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
             .is_err()
     );
     assert_eq!(*state.state().head(), current);
+
+    // A successor terminal validates exactly when it binds the payer's root in this close. The
+    // recipient paid back only in the zero-net case, so its root is otherwise empty.
+    let successor = close_context(
+        Sha256::hash(&[b"transition", &case.seed.to_be_bytes()]),
+        case.seed.wrapping_add(1),
+        operator.public_key(),
+        &state,
+        range.start..range.end,
+        balance * 2,
+        &deposits,
+        &withdrawals,
+        98,
+        99,
+        *context.limits(),
+        *context.committee(),
+        commonware_clearing::bajillion::logs::Floors {
+            activity: 0,
+            payouts: 0,
+        },
+    );
+    let root_of = |account: &SigningKey| {
+        terminals
+            .iter()
+            .find(|terminal| terminal.authorization.body().payer() == &account.public_key())
+            .map_or_else(empty_root, |terminal| {
+                terminal.authorization.body().send_root()
+            })
+    };
+    let root = root_of(&recipient);
+    let other = if case.zero_net {
+        empty_root()
+    } else {
+        root_of(&payer)
+    };
+    assert_ne!(root, other);
+    for (predecessor, valid) in [(root, true), (other, false)] {
+        let vector = OutVector::new(
+            successor.payment().epoch(),
+            recipient.public_key(),
+            vec![OutEntry {
+                recipient: payer.public_key(),
+                cumulative: 1,
+                count: 1,
+            }],
+        )
+        .unwrap();
+        let body = VectorSendBody::new(
+            successor.payment(),
+            recipient.public_key(),
+            0,
+            1,
+            vector.root::<Sha256, Digest>().unwrap(),
+        );
+        let authorization = SendAuthorization::sign(body, predecessor, &recipient);
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+            &state,
+            &successor,
+            &deposits,
+            &withdrawals,
+            vec![Terminal {
+                operator_signature: bls_ack(&ack_key, &authorization),
+                authorization,
+                vector,
+            }],
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            validate_bytes(
+                &state,
+                &successor,
+                &operator_bls,
+                &deposits,
+                &withdrawals,
+                prepared.encoded().clone()
+            )
+            .await,
+            valid
+        );
+    }
     drop(state);
     let reopened = support::open_state(runtime.child("replica"), "transition")
         .await
@@ -1317,6 +1463,7 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
         case.seed,
         operator.public_key(),
         &state,
+        0..0,
         0,
         &deposits,
         &withdrawals,

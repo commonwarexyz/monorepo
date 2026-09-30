@@ -5,7 +5,7 @@ use crate::bajillion::{
         BoundaryError, Deadline, DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch,
     },
     commitment::{self, VectorKind, VectorRoot},
-    logs::{self, Heads, LogHead, Opening},
+    logs::{self, ActivityRecord, Heads, LogHead, Logs, Opening},
     payment::{
         AckError, PaymentContext, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE,
         VectorSendBody, verify_ack_signatures,
@@ -35,10 +35,10 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::Spawner;
 use commonware_storage::{
     Context,
-    merkle::{self, Family as _, mmr},
+    merkle::{self, Family as _, Location, mmr},
 };
 use commonware_utils::iter::NonEmpty;
-use core::num::NonZeroU64;
+use core::{cmp::Ordering, num::NonZeroU64, ops::Range};
 use rand_core::CryptoRng;
 use thiserror::Error;
 
@@ -500,11 +500,12 @@ impl Read for CloseLimits {
     }
 }
 
-/// Predecessor-state-root-independent registration shared by every payment in one epoch.
+/// Predecessor-independent registration shared by every payment in one epoch.
 ///
-/// The settlement chain binds this registration to exactly one predecessor state root when the
-/// close is registered. An embedding must never reuse the registration after its ancestry is
-/// invalidated.
+/// The anchor commits nothing about the predecessor close or about timing. When the epoch becomes
+/// the admission frontier, the settlement chain binds it to its predecessor's exact state root,
+/// log heads, and liability, and assigns its admission and challenge deadlines. An embedding must
+/// never reuse the registration after its ancestry is invalidated.
 ///
 /// Decoding checks structure. Call [`Self::verify_anchor`] to verify the committed parameters;
 /// the embedding authenticates registration provenance separately.
@@ -514,9 +515,6 @@ pub struct EpochContext<P: PublicKey, D: Digest> {
     deployment: D,
     deposit_root: VectorRoot<D>,
     withdrawal_root: VectorRoot<D>,
-    predecessor_liability: u64,
-    admission_deadline: Deadline,
-    challenge_deadline: Deadline,
     limits: CloseLimits,
     committee: D,
 }
@@ -524,37 +522,21 @@ pub struct EpochContext<P: PublicKey, D: Digest> {
 impl<P: PublicKey, D: Digest> EpochContext<P, D> {
     /// Authenticates the immutable payment, boundary, and validation parameters for one epoch.
     ///
-    /// Admission must precede the challenge deadline, and the challenge deadline must leave one
-    /// representable later timestamp for finalization or expiry. The predecessor liability remains
-    /// authenticated, but [`CloseContext`] adds its exact state root later so successor payments can
-    /// begin while the predecessor close is constructed.
+    /// Successor payments can begin while the predecessor close is constructed, certified, and
+    /// admitted. [`CloseContext`] adds the predecessor-dependent values and the deadlines later.
     ///
     /// This is the single verification point for the boundary batches. Every later validation
     /// pins its batch arguments to the roots committed here instead of re-verifying them.
-    #[allow(clippy::too_many_arguments)]
     pub fn new<H: Hasher<Digest = D>>(
         deployment: D,
         epoch: u64,
         operator: P,
         deposits: &DepositBatch<P>,
         withdrawals: &WithdrawalBatch<P, D>,
-        predecessor_liability: u64,
-        admission_deadline: Deadline,
-        challenge_deadline: Deadline,
         limits: CloseLimits,
         committee: D,
     ) -> Result<Self, TransitionError> {
-        if admission_deadline >= challenge_deadline || challenge_deadline == u64::MAX {
-            return Err(TransitionError::DeadlineOrder);
-        }
         validate_boundary_batches(&deployment, deposits, withdrawals, &limits)?;
-
-        // A sealed boundary must leave a buildable close. Every account's
-        // post-deposit holdings stay representable because the aggregate does.
-        predecessor_liability
-            .checked_add(deposits.total())
-            .ok_or(TransitionError::LiabilityOverflow)?;
-
         let deposit_root = deposits.root::<H>()?;
         let withdrawal_root = withdrawals.root::<H>()?;
         let mut context = Self {
@@ -562,9 +544,6 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
             deployment,
             deposit_root,
             withdrawal_root,
-            predecessor_liability,
-            admission_deadline,
-            challenge_deadline,
             limits,
             committee,
         };
@@ -578,31 +557,35 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
             self.deployment.as_ref(),
             self.deposit_root.encode().as_ref(),
             self.withdrawal_root.encode().as_ref(),
-            &self.predecessor_liability.to_be_bytes(),
             &self.payment.epoch().to_be_bytes(),
             self.payment.operator().as_ref(),
-            &self.admission_deadline.to_be_bytes(),
-            &self.challenge_deadline.to_be_bytes(),
             self.limits.encode().as_ref(),
             self.committee.encode().as_ref(),
         ])
     }
 
-    /// Checks that the payment anchor binds every registered parameter and valid deadlines.
+    /// Checks that the payment anchor binds every registered parameter.
     ///
     /// Registration provenance must still be authenticated by the settlement owner.
     pub fn verify_anchor<H: Hasher<Digest = D>>(&self) -> bool {
-        self.admission_deadline < self.challenge_deadline
-            && self.challenge_deadline < u64::MAX
-            && self.compute_anchor::<H>() == *self.payment.anchor()
+        self.compute_anchor::<H>() == *self.payment.anchor()
     }
 
     /// Binds registration to the locally validated predecessor and exact boundary.
+    ///
+    /// The predecessor rows, the predecessor liability, both deadlines, and the floors must equal
+    /// the values settlement bound when this epoch became the admission frontier. The state root
+    /// and log heads are checked against the replica, and the rows only against the log heads.
+    #[allow(clippy::too_many_arguments)]
     pub fn bind<H, E, S>(
         self,
         replica: &Replica<E, H, P, S>,
         deposits: &DepositBatch<P>,
         withdrawals: &WithdrawalBatch<P, D>,
+        predecessor_rows: Range<u64>,
+        predecessor_liability: u64,
+        admission_deadline: Deadline,
+        challenge_deadline: Deadline,
         floors: logs::Floors,
     ) -> Result<CloseContext<P, D>, TransitionError>
     where
@@ -614,28 +597,40 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
             epoch: self,
             predecessor_root: replica.state().root(),
             predecessor_logs: *replica.logs().head(),
+            predecessor_rows,
+            predecessor_liability,
+            admission_deadline,
+            challenge_deadline,
             floors,
         };
         validate_predecessor::<H, P, D, E, S>(replica, &context, deposits, withdrawals)?;
         Ok(context)
     }
 
-    /// Binds the root already owned by the settlement state machine.
+    /// Binds the head, rows, and deadlines already owned by the settlement state machine.
     ///
-    /// Settlement intake checks one finalized-root opening for queued requests and one
-    /// predecessor-root opening for each fresh operator-carried request. Certification derives
-    /// releases from the epoch's final balances. Callers outside settlement must use [`Self::bind`]
-    /// with the balance database.
-    pub(crate) const fn bind_settlement_root(
+    /// Settlement intake checks one finalized-root opening for each queued request. Certification
+    /// derives releases from the epoch's final balances. Callers outside settlement must use
+    /// [`Self::bind`] with the balance database.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn bind_settlement(
         self,
         predecessor_root: StateRoot<D>,
         predecessor_logs: Heads<D>,
+        predecessor_rows: Range<u64>,
+        predecessor_liability: u64,
+        admission_deadline: Deadline,
+        challenge_deadline: Deadline,
         floors: logs::Floors,
     ) -> CloseContext<P, D> {
         CloseContext {
             epoch: self,
             predecessor_root,
             predecessor_logs,
+            predecessor_rows,
+            predecessor_liability,
+            admission_deadline,
+            challenge_deadline,
             floors,
         }
     }
@@ -660,21 +655,6 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
         &self.withdrawal_root
     }
 
-    /// Returns the authenticated predecessor liability.
-    pub const fn predecessor_liability(&self) -> u64 {
-        self.predecessor_liability
-    }
-
-    /// Returns the last time at which this close may be admitted.
-    pub const fn admission_deadline(&self) -> Deadline {
-        self.admission_deadline
-    }
-
-    /// Returns the exact challenge deadline.
-    pub const fn challenge_deadline(&self) -> Deadline {
-        self.challenge_deadline
-    }
-
     /// Returns the resource limits authenticated by the epoch anchor.
     pub const fn limits(&self) -> &CloseLimits {
         &self.limits
@@ -691,15 +671,11 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
     /// parts must come from an [`EpochContext`] that was constructed and
     /// authenticated through [`Self::new`] (for example one persisted by the
     /// settlement chain codec).
-    #[allow(clippy::too_many_arguments)]
     pub(crate) const fn from_parts(
         payment: PaymentContext<P, D>,
         deployment: D,
         deposit_root: VectorRoot<D>,
         withdrawal_root: VectorRoot<D>,
-        predecessor_liability: u64,
-        admission_deadline: Deadline,
-        challenge_deadline: Deadline,
         limits: CloseLimits,
         committee: D,
     ) -> Self {
@@ -708,9 +684,6 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
             deployment,
             deposit_root,
             withdrawal_root,
-            predecessor_liability,
-            admission_deadline,
-            challenge_deadline,
             limits,
             committee,
         }
@@ -729,9 +702,6 @@ where
             deployment: u.arbitrary()?,
             deposit_root: u.arbitrary()?,
             withdrawal_root: u.arbitrary()?,
-            predecessor_liability: u.arbitrary()?,
-            admission_deadline: u.arbitrary()?,
-            challenge_deadline: u.arbitrary()?,
             limits: u.arbitrary()?,
             committee: u.arbitrary()?,
         })
@@ -744,20 +714,14 @@ impl<P: PublicKey, D: Digest> Write for EpochContext<P, D> {
         self.deployment.write(writer);
         self.deposit_root.write(writer);
         self.withdrawal_root.write(writer);
-        self.predecessor_liability.write(writer);
-        self.admission_deadline.write(writer);
-        self.challenge_deadline.write(writer);
         self.limits.write(writer);
         self.committee.write(writer);
     }
 }
 
 impl<P: PublicKey, D: Digest> FixedSize for EpochContext<P, D> {
-    const SIZE: usize = PaymentContext::<P, D>::SIZE
-        + D::SIZE * 2
-        + VectorRoot::<D>::SIZE * 2
-        + u64::SIZE * 3
-        + CloseLimits::SIZE;
+    const SIZE: usize =
+        PaymentContext::<P, D>::SIZE + D::SIZE * 2 + VectorRoot::<D>::SIZE * 2 + CloseLimits::SIZE;
 }
 
 impl<P: PublicKey, D: Digest> Read for EpochContext<P, D> {
@@ -769,16 +733,17 @@ impl<P: PublicKey, D: Digest> Read for EpochContext<P, D> {
             D::read(reader)?,
             VectorRoot::read(reader)?,
             VectorRoot::read(reader)?,
-            u64::read(reader)?,
-            u64::read(reader)?,
-            u64::read(reader)?,
             CloseLimits::read(reader)?,
             D::read(reader)?,
         ))
     }
 }
 
-/// Chain-known epoch registration bound to one exact native predecessor.
+/// Chain-known epoch registration bound to one exact native predecessor and its deadlines.
+///
+/// Settlement binds the predecessor's state root, log heads, account rows, and liability from its
+/// own admitted history, and derives both deadlines from its configuration, when the epoch
+/// becomes the admission frontier. The floors are the ones captured when the epoch registered.
 ///
 /// Decoding checks structure. Header and full-close validation recompute the epoch anchor;
 /// the embedding authenticates this exact registration and predecessor through settlement.
@@ -787,6 +752,10 @@ pub struct CloseContext<P: PublicKey, D: Digest> {
     epoch: EpochContext<P, D>,
     predecessor_root: StateRoot<D>,
     predecessor_logs: Heads<D>,
+    predecessor_rows: Range<u64>,
+    predecessor_liability: u64,
+    admission_deadline: Deadline,
+    challenge_deadline: Deadline,
     floors: logs::Floors,
 }
 
@@ -801,6 +770,10 @@ where
             epoch: u.arbitrary()?,
             predecessor_root: u.arbitrary()?,
             predecessor_logs: u.arbitrary()?,
+            predecessor_rows: u.arbitrary()?,
+            predecessor_liability: u.arbitrary()?,
+            admission_deadline: u.arbitrary()?,
+            challenge_deadline: u.arbitrary()?,
             floors: u.arbitrary()?,
         })
     }
@@ -842,24 +815,40 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
         &self.predecessor_logs
     }
 
+    /// Returns the predecessor close's account rows, or `None` when it has none.
+    ///
+    /// Every terminal payer signature in this close covers the payer's vector root in these rows,
+    /// or the empty vector root when the payer has no row.
+    pub const fn predecessor_range(&self) -> Option<ActivityRange<D>> {
+        if self.predecessor_rows.start < self.predecessor_rows.end {
+            Some(ActivityRange {
+                start: self.predecessor_rows.start,
+                end: self.predecessor_rows.end,
+                head: self.predecessor_logs.activity,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Returns the canonical floors captured when settlement registered the epoch.
     pub const fn floors(&self) -> logs::Floors {
         self.floors
     }
 
-    /// Returns the authenticated predecessor liability.
+    /// Returns the predecessor liability derived by settlement.
     pub const fn predecessor_liability(&self) -> u64 {
-        self.epoch.predecessor_liability()
+        self.predecessor_liability
     }
 
     /// Returns the last time at which this close may be admitted.
     pub const fn admission_deadline(&self) -> Deadline {
-        self.epoch.admission_deadline()
+        self.admission_deadline
     }
 
     /// Returns the exact challenge deadline.
     pub const fn challenge_deadline(&self) -> Deadline {
-        self.epoch.challenge_deadline()
+        self.challenge_deadline
     }
 
     /// Returns the resource limits authenticated by the epoch anchor.
@@ -875,16 +864,25 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
     /// Reassembles a bound context from parts retained by an earlier binding.
     ///
     /// See [`EpochContext::from_parts`] for the provenance requirement.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) const fn from_parts(
         epoch: EpochContext<P, D>,
         predecessor_root: StateRoot<D>,
         predecessor_logs: Heads<D>,
+        predecessor_rows: Range<u64>,
+        predecessor_liability: u64,
+        admission_deadline: Deadline,
+        challenge_deadline: Deadline,
         floors: logs::Floors,
     ) -> Self {
         Self {
             epoch,
             predecessor_root,
             predecessor_logs,
+            predecessor_rows,
+            predecessor_liability,
+            admission_deadline,
+            challenge_deadline,
             floors,
         }
     }
@@ -895,13 +893,21 @@ impl<P: PublicKey, D: Digest> Write for CloseContext<P, D> {
         self.epoch.write(writer);
         self.predecessor_root.write(writer);
         self.predecessor_logs.write(writer);
+        self.predecessor_rows.start.write(writer);
+        self.predecessor_rows.end.write(writer);
+        self.predecessor_liability.write(writer);
+        self.admission_deadline.write(writer);
+        self.challenge_deadline.write(writer);
         self.floors.write(writer);
     }
 }
 
 impl<P: PublicKey, D: Digest> FixedSize for CloseContext<P, D> {
-    const SIZE: usize =
-        EpochContext::<P, D>::SIZE + StateRoot::<D>::SIZE + Heads::<D>::SIZE + logs::Floors::SIZE;
+    const SIZE: usize = EpochContext::<P, D>::SIZE
+        + StateRoot::<D>::SIZE
+        + Heads::<D>::SIZE
+        + u64::SIZE * 5
+        + logs::Floors::SIZE;
 }
 
 impl<P: PublicKey, D: Digest> Read for CloseContext<P, D> {
@@ -912,6 +918,10 @@ impl<P: PublicKey, D: Digest> Read for CloseContext<P, D> {
             EpochContext::read(reader)?,
             StateRoot::read(reader)?,
             Heads::read(reader)?,
+            u64::read(reader)?..u64::read(reader)?,
+            u64::read(reader)?,
+            u64::read(reader)?,
+            u64::read(reader)?,
             logs::Floors::read(reader)?,
         ))
     }
@@ -1166,7 +1176,8 @@ impl<P: PublicKey, D: Digest, S: Strategy> PreparedClose<P, D, S> {
 
 /// Constructs a state candidate from terminal activity without authenticating signatures.
 ///
-/// The caller authenticates the registered context, including its predecessor liability.
+/// The caller authenticates the registered context, including its predecessor rows and liability.
+/// Each terminal's predecessor is read from those rows, not from the supplied authorization.
 /// Validators authenticate an untrusted dealing with [`validate_close_with_strategy`].
 /// This constructor is useful when the caller already owns the accepted endpoints.
 pub async fn prepare_close_with_strategy<H, P, D, E, S>(
@@ -1399,7 +1410,18 @@ where
         .iter()
         .map(|row| account_key(&row.account))
         .collect::<Result<Vec<_>, _>>()?;
-    let balances = state.get_many(&keys.iter().collect::<Vec<_>>()).await?;
+    let lookups = keys.iter().collect::<Vec<_>>();
+    let payers = input
+        .iter()
+        .filter(|row| row.outgoing.is_some())
+        .map(|row| &row.account);
+    let (balances, predecessors) = logs::join(
+        state.get_many(&lookups),
+        predecessors::<H, P, D, E, S>(replica.logs(), context, payers),
+    )
+    .await;
+    let balances = balances?;
+    let mut predecessors = predecessors?.into_iter();
     let mut incoming = vec![(0_u64, 0_u64); input.len()];
     let mut edge_count = 0_u64;
     let mut gross = 0_u64;
@@ -1494,6 +1516,9 @@ where
                     debit,
                     send_root,
                 ),
+                predecessors
+                    .next()
+                    .expect("every terminal payer has one predecessor"),
                 signature,
             )
         });
@@ -1562,6 +1587,107 @@ where
     })
 }
 
+// Reads each payer's vector root from the predecessor close's rows, or the empty vector root when
+// the payer has no row there. Payers must be strictly sorted. Each search gallops from the
+// previous match, so k payers among n rows cost O(k log(n/k)) reads. The replica wrote these rows
+// itself, so reads carry no proofs.
+async fn predecessors<'a, H, P, D, E, S>(
+    logs: &Logs<E, H, P, S>,
+    context: &CloseContext<P, D>,
+    payers: impl Iterator<Item = &'a P>,
+) -> Result<Vec<VectorRoot<D>>, TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey + 'a,
+    D: Digest,
+    E: Context + Spawner,
+    S: Strategy,
+{
+    let empty = commitment::empty_root::<H>(VectorKind::OutEntry);
+    let Some(range) = context.predecessor_range() else {
+        return Ok(payers.map(|_| empty).collect());
+    };
+    let mut roots = Vec::new();
+    let mut next = range.start;
+    for payer in payers {
+        match gallop(logs, next, range.end, payer).await? {
+            Ok((index, row)) => {
+                roots.push(row.send_root());
+                next = index + 1;
+            }
+            Err(index) => {
+                roots.push(empty);
+                next = index;
+            }
+        }
+    }
+    Ok(roots)
+}
+
+// Finds `payer` among the account-sorted rows at `[start, end)`. Probes at offsets 0, 1, 3, 7, and
+// so on until a row reaches the payer, then binary searches the last gap. Returns the matching row
+// or the location of the first greater row.
+async fn gallop<E, H, P, S>(
+    logs: &Logs<E, H, P, S>,
+    start: u64,
+    end: u64,
+    payer: &P,
+) -> Result<Result<(u64, AccountChange<P, H::Digest>), u64>, TransitionError>
+where
+    E: Context + Spawner,
+    H: Hasher,
+    P: PublicKey,
+    S: Strategy,
+{
+    let mut low = start;
+    let mut high = end;
+    let mut offset = 0_u64;
+    while let Some(probe) = start.checked_add(offset).filter(|probe| *probe < high) {
+        let row = stored_row(logs, probe).await?;
+        match row.account().as_ref().cmp(payer.as_ref()) {
+            Ordering::Less => {
+                low = probe + 1;
+                offset = offset.saturating_mul(2).saturating_add(1);
+            }
+            Ordering::Equal => return Ok(Ok((probe, row))),
+            Ordering::Greater => high = probe,
+        }
+    }
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let row = stored_row(logs, middle).await?;
+        match row.account().as_ref().cmp(payer.as_ref()) {
+            Ordering::Less => low = middle + 1,
+            Ordering::Equal => return Ok(Ok((middle, row))),
+            Ordering::Greater => high = middle,
+        }
+    }
+    Ok(Err(low))
+}
+
+// Reads the retained activity row at one Append location without a proof. Any other record is
+// LogRange.
+async fn stored_row<E, H, P, S>(
+    logs: &Logs<E, H, P, S>,
+    index: u64,
+) -> Result<AccountChange<P, H::Digest>, TransitionError>
+where
+    E: Context + Spawner,
+    H: Hasher,
+    P: PublicKey,
+    S: Strategy,
+{
+    match logs
+        .activity_source()
+        .get(Location::new(index))
+        .await
+        .map_err(logs::Error::from)?
+    {
+        Some(ActivityRecord::Row(row)) => Ok(row),
+        _ => Err(TransitionError::LogRange),
+    }
+}
+
 fn validate_predecessor<H, P, D, E, S>(
     replica: &Replica<E, H, P, S>,
     context: &CloseContext<P, D>,
@@ -1576,11 +1702,16 @@ where
     S: Strategy,
 {
     let state = replica.state();
+    let rows = &context.predecessor_rows;
+    let activity = &context.predecessor_logs.activity;
     if replica.logs().head() != context.predecessor_logs()
-        || context.floors.activity < context.predecessor_logs.activity.floor
-        || context.floors.activity >= context.predecessor_logs.activity.operations
+        || context.floors.activity < activity.floor
+        || context.floors.activity >= activity.operations
         || context.floors.payouts < context.predecessor_logs.payouts.floor
         || context.floors.payouts >= context.predecessor_logs.payouts.operations
+        || rows.start > rows.end
+        || (rows.start < rows.end
+            && (activity.floor >= rows.start || rows.end >= activity.operations))
     {
         return Err(TransitionError::LogRange);
     }
@@ -1600,14 +1731,14 @@ fn verify_operator_aggregate<P: PublicKey, D: Digest>(
     aggregate: Option<&OperatorAggregate>,
     strategy: &impl Strategy,
 ) -> Result<(), TransitionError> {
-    let encoded = rows
+    let messages = rows
         .iter()
         .filter_map(|row| row.outgoing.as_ref())
-        .map(|send| send.body().encode())
+        .map(SendAuthorization::message)
         .collect::<Vec<_>>();
-    let pairs = encoded
+    let pairs = messages
         .iter()
-        .map(|body| (VECTOR_ACK_AGGREGATE_NAMESPACE, body.as_ref()))
+        .map(|message| (VECTOR_ACK_AGGREGATE_NAMESPACE, message.as_ref()))
         .collect::<Vec<_>>();
     match (NonEmpty::try_new(pairs.iter()), aggregate) {
         (None, None) => Ok(()),
@@ -1790,9 +1921,6 @@ pub enum TransitionError {
     /// Withdrawal outputs do not match their committed root.
     #[error("wrong withdrawal output root")]
     WithdrawalOutputRoot,
-    /// Registration deadlines are not ordered.
-    #[error("invalid deadline order")]
-    DeadlineOrder,
     /// Boundary construction or authentication failed.
     #[error(transparent)]
     Boundary(#[from] BoundaryError),

@@ -32,8 +32,8 @@ use crate::{
         ingress::Mailbox as IngressMailbox,
         state::{
             Record, admitted_key, anchor_key, claimed_key, deposit_key, fault_key, hard_fault_key,
-            native_balance_key, native_transfer_key, payout_head_key, refund_key, registration_key,
-            registry_entry_key, registry_key, status_key, withdrawal_key,
+            intake_key, native_balance_key, native_transfer_key, payout_head_key, refund_key,
+            registration_key, registry_entry_key, registry_key, status_key, withdrawal_key,
         },
         types::{Block, Database, Exclusion, Proof, StateKey},
     },
@@ -110,12 +110,14 @@ pub(crate) enum Lookup {
     PayoutHead,
     /// The custody record for one deposit id.
     Deposit { id: Digest },
-    /// The registration singleton.
-    Registration,
+    /// The registration record for one epoch.
+    Registration { epoch: u64 },
     /// The latest accepted withdrawal receipt, retained after carriage.
     Withdrawal { account: Key },
     /// The claimed range containing this native payout index, if already consumed.
     Claimed { index: u64 },
+    /// The inbox entry at this index, until a registration pulls it.
+    Intake { index: u64 },
     /// One hard-fault release by account.
     HardFault { account: Key },
     /// One deposit refund by account and settlement phase.
@@ -165,9 +167,10 @@ impl ReadRequest {
             Lookup::Admitted { epoch } => admitted_key(deployment, *epoch),
             Lookup::PayoutHead => payout_head_key(deployment),
             Lookup::Deposit { id } => deposit_key(deployment, id),
-            Lookup::Registration => registration_key(deployment),
+            Lookup::Registration { epoch } => registration_key(deployment, *epoch),
             Lookup::Withdrawal { account } => withdrawal_key(deployment, account),
             Lookup::Claimed { index } => claimed_key(deployment, *index),
+            Lookup::Intake { index } => intake_key(deployment, *index),
             Lookup::HardFault { account } => hard_fault_key(deployment, account),
             Lookup::Refund { account, terminal } => refund_key(deployment, account, *terminal),
             Lookup::Fault => fault_key(deployment),
@@ -216,13 +219,20 @@ impl Write for Lookup {
                 4_u8.write(buf);
                 id.write(buf);
             }
-            Self::Registration => 5_u8.write(buf),
+            Self::Registration { epoch } => {
+                5_u8.write(buf);
+                epoch.write(buf);
+            }
             Self::Withdrawal { account } => {
                 6_u8.write(buf);
                 account.write(buf);
             }
             Self::Claimed { index } => {
                 7_u8.write(buf);
+                index.write(buf);
+            }
+            Self::Intake { index } => {
+                8_u8.write(buf);
                 index.write(buf);
             }
             Self::HardFault { account } => {
@@ -276,10 +286,12 @@ impl EncodeSize for Lookup {
             Self::NativeTransfer { chain_id, from, id } => {
                 chain_id.encode_size() + from.encode_size() + id.encode_size()
             }
-            Self::Status | Self::Registration | Self::Fault | Self::PayoutHead => 0,
-            Self::Anchor { epoch } | Self::Admitted { epoch } => epoch.encode_size(),
+            Self::Status | Self::Fault | Self::PayoutHead => 0,
+            Self::Anchor { epoch } | Self::Admitted { epoch } | Self::Registration { epoch } => {
+                epoch.encode_size()
+            }
             Self::Deposit { id } => id.encode_size(),
-            Self::Claimed { index } => index.encode_size(),
+            Self::Claimed { index } | Self::Intake { index } => index.encode_size(),
             Self::Withdrawal { account } | Self::HardFault { account } => account.encode_size(),
             Self::Refund { account, terminal } => account.encode_size() + terminal.encode_size(),
         }
@@ -302,11 +314,16 @@ impl Read for Lookup {
             4 => Ok(Self::Deposit {
                 id: Digest::read(buf)?,
             }),
-            5 => Ok(Self::Registration),
+            5 => Ok(Self::Registration {
+                epoch: u64::read(buf)?,
+            }),
             6 => Ok(Self::Withdrawal {
                 account: Key::read(buf)?,
             }),
             7 => Ok(Self::Claimed {
+                index: u64::read(buf)?,
+            }),
+            8 => Ok(Self::Intake {
                 index: u64::read(buf)?,
             }),
             9 => Ok(Self::HardFault {
@@ -1218,6 +1235,26 @@ mod tests {
         assert_ne!(
             request.key(),
             ReadRequest::new(deployment, Lookup::Registry { chain_id: chain }).key()
+        );
+    }
+
+    #[test]
+    fn registration_lookup_binds_deployment_and_epoch() {
+        let deployment = Sha256::hash(&[b"registration deployment"]);
+        let request =
+            |deployment, epoch| ReadRequest::new(deployment, Lookup::Registration { epoch });
+        for epoch in [0, 1, u64::MAX] {
+            let request = request(deployment, epoch);
+            assert_eq!(ReadRequest::decode(request.encode()).unwrap(), request);
+        }
+        assert_ne!(request(deployment, 0).key(), request(deployment, 1).key());
+        assert_ne!(
+            request(deployment, 0).key(),
+            request(Sha256::hash(&[b"other deployment"]), 0).key()
+        );
+        assert_ne!(
+            request(deployment, 0).key(),
+            ReadRequest::new(deployment, Lookup::Anchor { epoch: 0 }).key()
         );
     }
 

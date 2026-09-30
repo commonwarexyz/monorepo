@@ -40,8 +40,8 @@ impl QualifiedFixture {
             0,
             genesis_cache(),
             b"qualification",
-            11,
             12,
+            13,
         );
         let challenge = SettlementTx::Challenge(ChallengeRequest {
             deployment: deployment(),
@@ -57,18 +57,21 @@ impl QualifiedFixture {
                 amount: 1,
             },
         ));
-        let initial = [fixture.deposit_tx, fixture.register_tx, fixture.admit_tx];
+        let deposit = [fixture.deposit_tx];
+        let initial = [fixture.register_tx, fixture.admit_tx];
         let db = open(context.child("canonical"), "canonical").await;
-        let (root, _) = seal_native(&db, 1, &native, &initial).await;
+        seal_native(&db, 1, &native, &deposit).await;
+        let (root, _) = seal_native(&db, 2, &native, &initial).await;
         let finalized = Finalized::default();
-        finalized.record(1, Digest::EMPTY, root, 1);
+        finalized.record(2, Digest::EMPTY, root, 2);
 
         // Independent real execution proves both honest effects; ingress's own
         // canonical database still has neither effect consumed.
         for (label, tx) in [("proof_deposit", &honest), ("proof_challenge", &challenge)] {
             let proof = open(context.child(label), label).await;
-            seal_native(&proof, 1, &native, &initial).await;
-            seal_native(&proof, 2, &native, std::slice::from_ref(tx)).await;
+            seal_native(&proof, 1, &native, &deposit).await;
+            seal_native(&proof, 2, &native, &initial).await;
+            seal_native(&proof, 3, &native, std::slice::from_ref(tx)).await;
             match tx {
                 SettlementTx::Deposit(request) => assert!(
                     read(&proof, &deposit_key(&deployment(), &request.event.id))
@@ -233,7 +236,7 @@ async fn foreign_flood(context: deterministic::Context, committee_relay: bool, p
     let proposed = provider.drain(MAX_BLOCK_TXS, MAX_BLOCK_BYTES).await;
     assert!(proposed.contains(&fixture.honest));
     assert!(proposed.contains(&fixture.challenge));
-    seal_native(&fixture.db, 2, &fixture.native, &proposed).await;
+    seal_native(&fixture.db, 3, &fixture.native, &proposed).await;
     let SettlementTx::Deposit(deposit) = fixture.honest else {
         unreachable!()
     };
@@ -288,11 +291,11 @@ fn qualified_leases_bytes_retention_and_fitting_drains() {
         );
         assert_eq!(submit(&mailbox, &txs[0]).await, Submission::Duplicate);
         assert_eq!(provider.drain(8, size).await, vec![txs[2].clone()]);
-        for height in [3, 5, 7] {
+        for height in [4, 6, 8] {
             report(&mailbox, height, vec![]).await;
             assert_eq!(provider.drain(8, 3 * size).await, txs[..3]);
         }
-        report(&mailbox, 9, vec![]).await;
+        report(&mailbox, 10, vec![]).await;
         assert!(provider.drain(8, MAX_BLOCK_BYTES).await.is_empty());
         assert_eq!(submit(&mailbox, &txs[3]).await, Submission::Accepted);
         assert_eq!(provider.drain(8, size).await, vec![txs[3].clone()]);
@@ -319,8 +322,8 @@ fn qualified_proof_variants_share_one_action_and_small_work_fits() {
             0,
             genesis_cache(),
             b"qualification",
-            11,
             12,
+            13,
         );
         request.evidence = ack_fork(&close.result, &protocol, (4, 5)).encode();
         assert_ne!(alternative, fixture.challenge);
@@ -389,7 +392,7 @@ fn canceled_rpc_waiters_keep_running_work_charged_and_control_live() {
             Submission::Full,
             "lost RPC waiters must not release queued or running raw reservations"
         );
-        report(&mailbox, 2, vec![]).await;
+        report(&mailbox, 3, vec![]).await;
         assert!(provider.drain(8, MAX_BLOCK_BYTES).await.is_empty());
         slot.put(db);
         for _ in 0..4 {
@@ -401,7 +404,7 @@ fn canceled_rpc_waiters_keep_running_work_charged_and_control_live() {
             submit(&mailbox, &fixture.deposit(4)).await,
             Submission::Accepted
         );
-        seal_native(&fixture.db, 2, &fixture.native, &proposed).await;
+        seal_native(&fixture.db, 3, &fixture.native, &proposed).await;
         for tx in proposed {
             let SettlementTx::Deposit(request) = tx else {
                 unreachable!()
@@ -702,7 +705,7 @@ fn continuously_ready_network_yields_to_qualification_and_proposals() {
             ),
             "qualification/proposal must finish while the network remains ready"
         );
-        seal_native(&fixture.db, 2, &fixture.native, &proposed).await;
+        seal_native(&fixture.db, 3, &fixture.native, &proposed).await;
         let SettlementTx::Deposit(request) = &proposed[0] else {
             unreachable!()
         };

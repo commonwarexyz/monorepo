@@ -211,16 +211,19 @@ pub(crate) async fn run_with_io<E: Env>(
             }
             Ok(false)
         };
-        let summary = {
+        let (summary, convicted) = {
             let assurance = async {
                 let _ = agent.intake_incoming(network, chain, operator).await;
                 agent.ensure_store_usable()?;
-                agent.reconcile(network, chain, operator).await
+                let summary = agent.reconcile(network, chain, operator).await;
+                agent.ensure_store_usable()?;
+                let convicted = agent.enforce(network, chain).await;
+                anyhow::Ok((summary, convicted))
             };
             let mut assurance = std::pin::pin!(assurance);
             loop {
                 select! {
-                    result = &mut assurance => break result,
+                    result = &mut assurance => break result?,
                     _ = network.sleep(REFRESH_BUDGET) => {
                         if poll_input()? { return Ok(()); }
                     },
@@ -228,6 +231,13 @@ pub(crate) async fn run_with_io<E: Env>(
             }
         };
         agent.ensure_store_usable()?;
+        if let Ok(convicted) = convicted {
+            for epoch in convicted {
+                state.log(format!(
+                    "epoch {epoch} omitted an acknowledged send, convicted via HigherAckDebit; the close is invalidated"
+                ));
+            }
+        }
         if let Ok(summary) = summary {
             for epoch in summary.convicted {
                 state.log(format!(
@@ -1082,9 +1092,9 @@ pub(crate) async fn scripted<E: Env>(
     );
 
     // Every close completes only on its certified finalization, which
-    // retires the registration slot, and nothing after the last close
-    // registers, so only validator serving lag separates this read from the
-    // proven absence.
+    // retires that epoch's registration record, and nothing after the last
+    // close registers, so only validator serving lag separates this read from
+    // the proven absence.
     let mut retired = false;
     for _ in 0..100 {
         if chain.registration(network).await?.is_none() {
@@ -1148,45 +1158,40 @@ pub(crate) fn fraud_arc() -> Result<()> {
                 )),
             )
             .await?;
-        let mut recorded = false;
+        let mut recorded = None;
         for _ in 0..EFFECT_ATTEMPTS {
-            if let Ok(Some(_)) = chain.deposit(&context, deposit_id).await {
-                recorded = true;
+            if let Ok(Some(effect)) = chain.deposit(&context, deposit_id).await {
+                recorded = Some(effect.index);
                 break;
             }
             context.sleep(POLL).await;
         }
-        ensure!(recorded, "the fraud deposit earned no custody record");
+        let index = recorded.context("the fraud deposit earned no custody record")?;
         let protocol = Protocol::new(NonZeroUsize::MIN)?;
         let deposits_root = deposits.root::<Sha256>()?;
         let withdrawals = WithdrawalBatch::empty();
         let fee = chain.genesis().native.epoch_fee.checked_mul(
             u64::from(chain.registered(&context).await?.max_dealing_bytes).div_ceil(1024),
         ).context("epoch fee overflow")?;
-        let signature = protocol.sign_chain_registration(
-            0,
-            400,
-            &deposits_root,
-            &withdrawals,
-            fee,
-        );
+        // The registration pulls the inbox through the fraud deposit.
+        let end = index.checked_add(1).context("inbox index overflow")?;
+        let signature =
+            protocol.sign_chain_registration(0, end, &deposits_root, &withdrawals, fee);
         let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
             fee,
             deployment: deployment(),
             epoch: 0,
-            predecessor_liability: 400,
+            end,
             deposits_root,
-
             withdrawals,
-            openings: Vec::new(),
             signature,
         });
         chain.deliver(&context, &register).await?;
 
-        // The registration's effect is its certified record, and the chain
-        // assigned the deadlines at inclusion, so the fraudulent close is
-        // built only after that read-back reveals them: the same completion
-        // the honest operator performs.
+        // The registration's effect is its certified record. The first epoch
+        // becomes the admission frontier at inclusion, so the read-back reveals
+        // its deadlines and the fraudulent close is built only after it: the
+        // same completion the honest operator performs.
         let mut registered = None;
         for _ in 0..EFFECT_ATTEMPTS {
             if let Ok(Some(record)) = chain.registration(&context).await {
@@ -1197,6 +1202,9 @@ pub(crate) fn fraud_arc() -> Result<()> {
         }
         let record = registered.context("the registered epoch left no certified record")?;
         ensure!(record.epoch == 0, "the certified record is not epoch 0");
+        let (admission_deadline, challenge_deadline) = record
+            .deadlines
+            .context("the first registered epoch has no admission deadline")?;
         let state = crate::protocol::init_replica(
             context.child("fraud_replica"), "fraud-replica",
             commonware_parallel::Rayon::new(NonZeroUsize::MIN)?,
@@ -1206,8 +1214,8 @@ pub(crate) fn fraud_arc() -> Result<()> {
         let fraud = Box::pin(omitting_close(
             state,
             &mut fraud_rng,
-            record.admission_deadline,
-            record.challenge_deadline,
+            admission_deadline,
+            challenge_deadline,
         ))
         .await?;
         ensure!(
@@ -1320,7 +1328,6 @@ mod tests {
         protocol::deployment,
         rpc,
     };
-    use commonware_clearing::bajillion::boundary::WithdrawalBatch;
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_runtime::{
         Clock as _, Listener as _, Network as _, Runner as _, Spawner as _, Supervisor as _,
@@ -1404,9 +1411,7 @@ mod tests {
             let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
             control
                 .submit(SettlementTx::RegisterEpoch(
-                    operator
-                        .signed_registration(&WithdrawalBatch::empty())
-                        .unwrap(),
+                    operator.signed_registration().unwrap(),
                 ))
                 .await;
             operator
@@ -1561,6 +1566,10 @@ mod tests {
                     digest: Sha256::hash(&[b"stale-display-root"]),
                 },
                 last_finalized: None,
+                next_admission: 0,
+                next_registration: 0,
+                intake: 0,
+                pulled: 0,
                 custody: 400,
                 claimable: 0,
                 hard_faulted: false,

@@ -10,6 +10,7 @@ use crate::{
 };
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
+    commitment::{self, VectorKind},
     payment::{SendAuthorization, VectorSendBody},
     transition::{PreparedClose, Terminal, prepare_close_with_strategy},
     vector::{OutEntry, OutVector},
@@ -151,17 +152,19 @@ impl Fixture {
         )
         .unwrap();
         let context = protocol
-            .registration_at(
-                epoch,
-                deposits.clone(),
-                withdrawals.clone(),
+            .registration(epoch, deposits.clone(), withdrawals.clone(), self.liability)
+            .unwrap()
+            .context
+            .bind::<Sha256, _, _>(
+                replica,
+                &deposits,
+                &withdrawals,
+                0..0,
                 self.liability,
                 11 + epoch * 20,
                 12 + epoch * 20,
+                floors,
             )
-            .unwrap()
-            .context
-            .bind::<Sha256, _, _>(replica, &deposits, &withdrawals, floors)
             .unwrap();
         let terminals = if outgoing == 0 {
             Vec::new()
@@ -186,9 +189,15 @@ impl Fixture {
                 outgoing as u64,
                 vector.root::<Sha256, Digest>().unwrap(),
             );
+            // The fixture binds no predecessor rows, so every payer binds the empty root.
+            let authorization = SendAuthorization::sign(
+                body,
+                commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+                payer.signer(),
+            );
             vec![Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&body),
-                authorization: SendAuthorization::sign(body, payer.signer()),
+                operator_signature: protocol.sign_ack_aggregate(&authorization),
+                authorization,
                 vector,
             }]
         };
@@ -310,24 +319,14 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
     let deposit_root = deposits.root::<Sha256>().unwrap();
-    let liability = deployment.accounts.iter().fold(0u64, |total, account| {
-        total.checked_add(account.balance).unwrap()
-    });
     let registration = SettlementTx::RegisterEpoch(RegisterEpochRequest {
         deployment: *deployment.digest(),
         epoch: 0,
-        predecessor_liability: liability,
+        end: 0,
         deposits_root: deposit_root,
         withdrawals: withdrawals.clone(),
-        openings: Vec::new(),
         fee: 4096,
-        signature: protocol.sign_chain_registration(
-            0,
-            liability,
-            &deposit_root,
-            &withdrawals,
-            4096,
-        ),
+        signature: protocol.sign_chain_registration(0, 0, &deposit_root, &withdrawals, 4096),
     });
     let (initial, _) = sealer(context, prefix, &deployment).await;
     let db = initial.db.clone();
@@ -396,10 +395,17 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
         &registered,
         &deposits,
         &withdrawals,
-        vec![Terminal {
-            operator_signature: protocol.sign_ack_aggregate(&body),
-            authorization: SendAuthorization::sign(body, wallets[0].signer()),
-            vector,
+        vec![{
+            let authorization = SendAuthorization::sign(
+                body,
+                commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+                wallets[0].signer(),
+            );
+            Terminal {
+                operator_signature: protocol.sign_ack_aggregate(&authorization),
+                authorization,
+                vector,
+            }
         }],
         &strategy,
     ))

@@ -26,9 +26,14 @@ Wallet                    Operator                  Settlement
   |--- acknowledge --------->| retire claim evidence    |
 ```
 
-A wallet can also queue its signed request directly with settlement for the next
-registration. The model tracks chain acceptance separately from the operator's
-view, allowing responses and certified reads to arrive after the chain advances.
+A wallet can also queue its signed request directly with settlement. The request
+waits in the settlement inbox, and the registration that takes it must carry it
+unless an earlier registration carried it or another request for the account in
+its place.
+A registration may also carry it after the queue lands past its pulled prefix,
+or carry another request for the account, which supersedes it.
+The model tracks chain acceptance separately from the operator's view, allowing
+responses and certified reads to arrive after the chain advances.
 
 Certified observations determine whether the operator retains a request or
 releases a stale reservation. Restart preserves stored requests, original

@@ -66,13 +66,15 @@ const CHUNK: usize = 64;
 
 /// Bytes in one state key: 32 entropy bytes, an ordered u64, and a domain tag.
 ///
-/// Claimed ranges share the entropy bytes and sort by their complete native index.
+/// A deployment's claimed ranges share the entropy bytes and sort by their complete native
+/// index, and so do its inbox entries.
 pub(crate) const KEY_BYTES: usize = 41;
 
 /// One settlement state key.
 pub(crate) type StateKey = FixedBytes<KEY_BYTES>;
 
-/// Exact ordered keys keep all starts in a deployment's claimed map independently indexed.
+/// Exact ordered keys keep every claimed start and inbox index of a deployment independently
+/// indexed.
 #[derive(Clone, Default)]
 pub(crate) struct StateTranslator;
 

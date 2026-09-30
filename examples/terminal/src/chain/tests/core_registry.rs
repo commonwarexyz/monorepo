@@ -1,5 +1,5 @@
 use super::*;
-use crate::chain::state::{Machine, machine_key};
+use crate::chain::state::{DepositEffect, Machine, machine_key};
 
 #[test]
 fn registry_enumeration_excludes_genesis_allocations() {
@@ -234,7 +234,10 @@ fn registration_and_deposit_share_an_atomic_directory_update() {
         );
         assert_eq!(
             read(&db, &deposit_key(&accepted.deployment_id(), &event.id)).await,
-            Some(Record::Deposit(event.clone()))
+            Some(Record::Deposit(DepositEffect {
+                event: event.clone(),
+                index: 0,
+            }))
         );
         assert!(
             matches!(read(&db, &status_key(&accepted.deployment_id())).await, Some(Record::Status(status)) if status.custody == 7)
@@ -288,7 +291,7 @@ fn registration_and_deposit_share_an_atomic_directory_update() {
                 &deposit_key(&accepted.deployment_id(), &event.id)
             )
             .await,
-            Some(Record::Deposit(event))
+            Some(Record::Deposit(DepositEffect { event, index: 0 }))
         );
         assert!(
             matches!(read(&reopened, &status_key(&accepted.deployment_id())).await, Some(Record::Status(status)) if status.custody == 7)
@@ -380,7 +383,7 @@ fn non_bootstrap_deposits_are_accepted_and_replay_preserves_finalized_claims() {
         .await;
         assert_eq!(
             read(&db, &deposit_key(&target, &event.id)).await,
-            Some(Record::Deposit(event))
+            Some(Record::Deposit(DepositEffect { event, index: 0 }))
         );
         assert!(claimed(&db, position).await.is_none());
         assert_eq!(read(&db, &claimed_key(&target, position)).await, None);
@@ -411,8 +414,8 @@ fn untouched_registered_deployment_expires_without_transactions() {
         let db = open(context.child("untouched_clock"), "untouched-clock").await;
         let native = native_for(two_deployments());
         seal_native(&db, 1, &native, &[empty_register_tx()]).await;
-        let registration = registration(&db).await;
-        seal_native(&db, registration.admission_deadline + 1, &native, &[]).await;
+        let (admission_deadline, _) = registration(&db).await.deadlines.unwrap();
+        seal_native(&db, admission_deadline + 1, &native, &[]).await;
         assert!(status(&db).await.hard_faulted);
         assert!(matches!(
             read(&db, &fault_key(&deployment())).await,

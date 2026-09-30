@@ -147,7 +147,7 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
             };
             let deposits = DepositBatch::empty();
             let root = deposits.root::<Sha256>().unwrap();
-            let registration = protocol
+            let mut registration = protocol
                 .registration_at(
                     epoch,
                     deposits,
@@ -156,6 +156,10 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
                     epoch + 11,
                     epoch + 12,
                 )
+                .unwrap();
+            registration.rows = results
+                .last()
+                .map_or(Ok(0..0), crate::protocol::SettlementResult::rows)
                 .unwrap();
             let terminals = if epoch == 0 {
                 let payer = &wallets[0];
@@ -176,28 +180,28 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
                     1,
                     vector.root::<Sha256, Digest>().unwrap(),
                 );
+                let authorization = SendAuthorization::sign(
+                    body,
+                    commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+                    payer.signer(),
+                );
                 vec![Terminal {
-                    operator_signature: protocol.sign_ack_aggregate(&body),
-                    authorization: SendAuthorization::sign(body, payer.signer()),
+                    operator_signature: protocol.sign_ack_aggregate(&authorization),
+                    authorization,
                     vector,
                 }]
             } else {
                 Vec::new()
             };
+            // The operator carries every request, so each registration pulls an empty inbox.
             let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
                 deployment: deployment(),
                 epoch,
-                predecessor_liability: liability,
+                end: 0,
                 deposits_root: root,
                 withdrawals: boundary.clone(),
-                openings: boundary
-                    .requests()
-                    .iter()
-                    .map(|request| genesis.opening(request.account()).unwrap())
-                    .collect(),
                 fee: 4096,
-                signature: protocol
-                    .sign_chain_registration(epoch, liability, &root, &boundary, 4096),
+                signature: protocol.sign_chain_registration(epoch, 0, &root, &boundary, 4096),
             });
             let (result, prepared) = protocol
                 .complete(
@@ -456,11 +460,14 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
             db.apply(proposed.merkleized).await;
             assert!(claimed(&db, observed).await.is_some());
             assert_eq!(status(&db).await.last_finalized, Some(epoch as u64));
-            for retired in 0..epoch as u64 {
+
+            // Finality keeps the two latest finalized admissions and the pending suffix.
+            let oldest = (epoch as u64).saturating_sub(1);
+            for retired in 0..oldest {
                 assert_eq!(read(&db, &admitted_key(&deployment(), retired)).await, None);
                 assert_eq!(read(&db, &anchor_key(&deployment(), retired)).await, None);
             }
-            for retained in epoch as u64..4 {
+            for retained in oldest..4 {
                 assert!(matches!(
                     read(&db, &admitted_key(&deployment(), retained)).await,
                     Some(Record::Admitted(_))
@@ -560,7 +567,10 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
                 &withdrawal_key(&deployment(), &wallets[0].public_key())
             )
             .await,
-            Some(Record::Withdrawal(pending))
+            Some(Record::Withdrawal(WithdrawalEffect {
+                request: pending,
+                index: 0,
+            }))
         );
         for height in 18..=deadline {
             seal_native(&db, height, &native, &[]).await;
@@ -724,16 +734,11 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_claimed_merges
         let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
             deployment: deployment(),
             epoch: 0,
-            predecessor_liability: 400,
+            end: 0,
             deposits_root,
             withdrawals: withdrawals.clone(),
-            openings: withdrawals
-                .requests()
-                .iter()
-                .map(|request| state.opening(request.account()).unwrap())
-                .collect(),
             fee: 4096,
-            signature: protocol.sign_chain_registration(0, 400, &deposits_root, &withdrawals, 4096),
+            signature: protocol.sign_chain_registration(0, 0, &deposits_root, &withdrawals, 4096),
         });
         let (before, _) = certified_read(
             &db,
@@ -929,12 +934,13 @@ fn fault_reads_bind_the_finalized_prefix_to_the_same_block() {
         let db = open(context.child("ledger"), "fault-finalized-prefix").await;
         let fixture = epoch_fixture();
         let request = req(Lookup::Fault);
+        seal(&db, 1, &[fixture.deposit_tx]).await;
         let (before, _) = certified_read(
             &db,
             &schemes,
             participants[0].clone(),
-            1,
-            vec![fixture.deposit_tx, fixture.register_tx, fixture.admit_tx],
+            2,
+            vec![fixture.register_tx, fixture.admit_tx],
             &request,
         )
         .await;
@@ -942,7 +948,7 @@ fn fault_reads_bind_the_finalized_prefix_to_the_same_block() {
             &db,
             &schemes,
             participants[0].clone(),
-            13,
+            14,
             Vec::new(),
             &request,
         )
@@ -995,8 +1001,8 @@ fn retired_epoch_reads_keep_their_captured_tip_and_reject_preissuance_absence() 
             0,
             genesis_cache(),
             b"retired-first",
-            11,
             12,
+            13,
         );
         let second = close_fixture(
             native().chain_id(),
@@ -1004,19 +1010,31 @@ fn retired_epoch_reads_keep_their_captured_tip_and_reject_preissuance_absence() 
             1,
             first.successor.clone(),
             b"retired-second",
-            12,
             13,
+            14,
         );
+        let third = close_fixture(
+            native().chain_id(),
+            &protocol,
+            2,
+            second.successor.clone(),
+            b"retired-third",
+            14,
+            15,
+        );
+        // Each deposit lands one block ahead of the registration that pulls
+        // it.
         let future_request = req(Lookup::Admitted { epoch: 1 });
+        seal(&db, 1, std::slice::from_ref(&first.deposit_tx)).await;
         let (preissuance, _) = certified_read(
             &db,
             &schemes,
             participants[0].clone(),
-            1,
+            2,
             vec![
-                first.deposit_tx.clone(),
                 first.register_tx.clone(),
                 first.admit_tx.clone(),
+                second.deposit_tx.clone(),
             ],
             &future_request,
         )
@@ -1034,20 +1052,21 @@ fn retired_epoch_reads_keep_their_captured_tip_and_reject_preissuance_absence() 
         );
         seal(
             &db,
-            2,
+            3,
             &[
-                second.deposit_tx.clone(),
                 second.register_tx.clone(),
                 second.admit_tx.clone(),
+                third.deposit_tx.clone(),
             ],
         )
         .await;
+        seal(&db, 4, &[third.register_tx.clone(), third.admit_tx.clone()]).await;
         let historical_request = req(Lookup::Admitted { epoch: 0 });
         let (captured, _) = certified_read(
             &db,
             &schemes,
             participants[0].clone(),
-            13,
+            14,
             Vec::new(),
             &historical_request,
         )
@@ -1056,12 +1075,16 @@ fn retired_epoch_reads_keep_their_captured_tip_and_reject_preissuance_absence() 
             &db,
             &schemes,
             participants[0].clone(),
-            14,
+            15,
             Vec::new(),
             &future_request,
         )
         .await;
         commonware_runtime::reschedule().await;
+
+        // Epoch 2's finality retires epoch 0's admission and anchor.
+        assert!(read(&db, &admitted_key(&deployment(), 0)).await.is_some());
+        seal(&db, 16, &[]).await;
         assert_eq!(read(&db, &admitted_key(&deployment(), 0)).await, None);
         assert_eq!(read(&db, &anchor_key(&deployment(), 0)).await, None);
         let historical = light::verify_read::<deterministic::Context, Scheme>(

@@ -180,8 +180,10 @@ fn native_activity_accepts_recipient_local_decreasing_totals() {
             3,
             terminal.vector.root::<Sha256, ShaDigest>().unwrap(),
         );
-        terminal.authorization = SendAuthorization::sign(body.clone(), &fixture.accounts[0].1);
-        terminal.operator_signature = bls_ack(&fixture.operator_bls_private, &body);
+        terminal.authorization =
+            SendAuthorization::sign(body, empty_root(), &fixture.accounts[0].1);
+        terminal.operator_signature =
+            bls_ack(&fixture.operator_bls_private, &terminal.authorization);
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &fixture.state,
             &fixture.context,
@@ -248,9 +250,6 @@ fn current_payout_proof_survives_old_activity_retirement() {
             fixture.operator.public_key(),
             &fixture.deposits,
             &withdrawals,
-            fixture.context.predecessor_liability(),
-            98,
-            99,
             CloseLimits::protocol_maximum(),
             *fixture.context.committee(),
         )
@@ -259,6 +258,10 @@ fn current_payout_proof_survives_old_activity_retirement() {
             &state,
             &fixture.deposits,
             &withdrawals,
+            0..0,
+            fixture.context.predecessor_liability(),
+            98,
+            99,
             Floors {
                 activity: 0,
                 payouts: 0,
@@ -279,6 +282,7 @@ fn current_payout_proof_survives_old_activity_retirement() {
         let position = context.predecessor_logs().payouts.operations;
         let (mut state, close) = Box::pin(prepared.apply::<_, Sha256>(state)).await.unwrap();
         let liability = context.predecessor_liability() - close.withdrawal_total;
+        let mut previous = old_range.start..old_range.end;
 
         for offset in 1..=2 {
             let empty = WithdrawalBatch::empty();
@@ -289,9 +293,6 @@ fn current_payout_proof_survives_old_activity_retirement() {
                 fixture.operator.public_key(),
                 &fixture.deposits,
                 &empty,
-                liability,
-                100 + 2 * offset,
-                101 + 2 * offset,
                 *context.limits(),
                 *context.committee(),
             )
@@ -300,6 +301,10 @@ fn current_payout_proof_survives_old_activity_retirement() {
                 &state,
                 &fixture.deposits,
                 &empty,
+                previous,
+                liability,
+                100 + 2 * offset,
+                101 + 2 * offset,
                 Floors {
                     activity: heads.activity.operations - 1,
                     payouts: 0,
@@ -316,6 +321,7 @@ fn current_payout_proof_survives_old_activity_retirement() {
             )
             .await
             .unwrap();
+            previous = rows(&next, batch.close());
             state = Box::pin(batch.apply::<_, Sha256>(state)).await.unwrap().0;
         }
         let checkpoint = state.head();

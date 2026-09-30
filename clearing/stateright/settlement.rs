@@ -6,10 +6,13 @@ use stateright::{Checker, Model, Property};
 
 pub(crate) const ACCOUNT_COUNT: usize = 3;
 const BATCH_COUNT: usize = 8;
+// Intake is accepted while the next registration is at most epoch 4, one past the last fixture.
+pub(crate) const EPOCH_COUNT: usize = 5;
+// At most two registrations await admission: the frontier and one queued epoch.
+const QUEUE_DEPTH: usize = 2;
 const TIME_HORIZON: u8 = 12;
-const MAX_ADMISSION_DELAY: u8 = 3;
-const MIN_CHALLENGE_DURATION: u8 = 2;
-const MAX_CHALLENGE_DURATION: u8 = 2;
+pub(crate) const ADMISSION_DELAY: u8 = 1;
+pub(crate) const CHALLENGE_DURATION: u8 = 2;
 const MIN_WITHDRAWAL_NOTICE: u8 = 2;
 const MAX_WITHDRAWAL_NOTICE: u8 = 20;
 const MAX_DESTINATION_BYTES: usize = 8;
@@ -137,7 +140,7 @@ impl WithdrawalId {
         }
     }
 
-    const fn request(self) -> WithdrawalRequest {
+    pub(crate) const fn request(self) -> WithdrawalRequest {
         match self {
             Self::Amount => WithdrawalRequest {
                 account: Account::Bob,
@@ -347,8 +350,7 @@ impl RegistrationId {
                 predecessor_state: S0,
                 deposits: [0, 2, 0],
                 withdrawals: [None, None, None],
-                admission_deadline: 2,
-                challenge_deadline: 4,
+                latest: 1,
             },
             Self::B1 => Registration {
                 epoch: 1,
@@ -357,8 +359,7 @@ impl RegistrationId {
                 predecessor_state: S1,
                 deposits: [0, 0, 0],
                 withdrawals: [None, None, None],
-                admission_deadline: 3,
-                challenge_deadline: 5,
+                latest: 2,
             },
             // B1's epoch slot with an operator-carried request that was never
             // chain-queued. Registerable only after B0 finalizes, since the
@@ -370,8 +371,7 @@ impl RegistrationId {
                 predecessor_state: S1,
                 deposits: [0, 1, 0],
                 withdrawals: [None, Some(WithdrawalId::Carried.request()), None],
-                admission_deadline: 6,
-                challenge_deadline: 8,
+                latest: 5,
             },
             Self::B2 => Registration {
                 epoch: 2,
@@ -380,8 +380,7 @@ impl RegistrationId {
                 predecessor_state: S2,
                 deposits: [0, 0, 0],
                 withdrawals: [None, Some(WithdrawalId::Amount.request()), None],
-                admission_deadline: 4,
-                challenge_deadline: 6,
+                latest: 3,
             },
             Self::B3 => Registration {
                 epoch: 3,
@@ -390,8 +389,7 @@ impl RegistrationId {
                 predecessor_state: S3,
                 deposits: [0, 0, 0],
                 withdrawals: [Some(WithdrawalId::Close.request()), None, None],
-                admission_deadline: 6,
-                challenge_deadline: 8,
+                latest: 5,
             },
             Self::Offset => Registration {
                 epoch: 0,
@@ -400,8 +398,7 @@ impl RegistrationId {
                 predecessor_state: S0,
                 deposits: [0, 2, 0],
                 withdrawals: [None, Some(WithdrawalId::Offset.request()), None],
-                admission_deadline: 1,
-                challenge_deadline: 3,
+                latest: 0,
             },
             // The carried and queued paths include the same deposit and withdrawal.
             Self::OffsetC => Registration {
@@ -411,8 +408,7 @@ impl RegistrationId {
                 predecessor_state: S0,
                 deposits: [0, 2, 0],
                 withdrawals: [None, Some(WithdrawalId::CarriedOffset.request()), None],
-                admission_deadline: 1,
-                challenge_deadline: 3,
+                latest: 0,
             },
         }
     }
@@ -426,8 +422,9 @@ pub(crate) struct Registration {
     pub(crate) predecessor_state: [AccountState; ACCOUNT_COUNT],
     pub(crate) deposits: [u16; ACCOUNT_COUNT],
     pub(crate) withdrawals: [Option<WithdrawalRequest>; ACCOUNT_COUNT],
-    pub(crate) admission_deadline: u8,
-    pub(crate) challenge_deadline: u8,
+    // The last instant the operator registers this fixture. It bounds the frontier deadlines the
+    // fixture can receive, which keeps the explored schedules finite and small.
+    pub(crate) latest: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -495,8 +492,6 @@ impl Batch {
                 successor_state: S1,
                 deposits: [0, 2, 0],
                 withdrawals: [None, None, None],
-                admission_deadline: 2,
-                challenge_deadline: 4,
                 withdrawal_output: None,
             },
             Self::B1 => Candidate {
@@ -509,8 +504,6 @@ impl Batch {
                 successor_state: S2,
                 deposits: [0, 0, 0],
                 withdrawals: [None, None, None],
-                admission_deadline: 3,
-                challenge_deadline: 5,
                 withdrawal_output: None,
             },
             Self::B2 => Candidate {
@@ -523,8 +516,6 @@ impl Batch {
                 successor_state: S3,
                 deposits: [0, 0, 0],
                 withdrawals: [None, Some(WithdrawalId::Amount.request()), None],
-                admission_deadline: 4,
-                challenge_deadline: 6,
                 withdrawal_output: Some(Output {
                     position: 3,
                     destination: Destination::Bob,
@@ -541,8 +532,6 @@ impl Batch {
                 successor_state: S4,
                 deposits: [0, 0, 0],
                 withdrawals: [Some(WithdrawalId::Close.request()), None, None],
-                admission_deadline: 6,
-                challenge_deadline: 8,
                 withdrawal_output: Some(Output {
                     position: 5,
                     destination: Destination::Alice,
@@ -559,8 +548,6 @@ impl Batch {
                 successor_state: S0,
                 deposits: [0, 2, 0],
                 withdrawals: [None, Some(WithdrawalId::Offset.request()), None],
-                admission_deadline: 1,
-                challenge_deadline: 3,
                 withdrawal_output: Some(Output {
                     position: 1,
                     destination: Destination::Bob,
@@ -578,8 +565,6 @@ impl Batch {
                 successor_state: S2C,
                 deposits: [0, 1, 0],
                 withdrawals: [None, Some(WithdrawalId::Carried.request()), None],
-                admission_deadline: 6,
-                challenge_deadline: 8,
                 withdrawal_output: Some(Output {
                     position: 2,
                     destination: Destination::Bob,
@@ -599,8 +584,6 @@ impl Batch {
                 successor_state: S3D,
                 deposits: [0, 0, 0],
                 withdrawals: [None, Some(WithdrawalId::Amount.request()), None],
-                admission_deadline: 4,
-                challenge_deadline: 6,
                 withdrawal_output: Some(Output {
                     position: 3,
                     destination: Destination::Bob,
@@ -618,8 +601,6 @@ impl Batch {
                 successor_state: S0,
                 deposits: [0, 2, 0],
                 withdrawals: [None, Some(WithdrawalId::CarriedOffset.request()), None],
-                admission_deadline: 1,
-                challenge_deadline: 3,
                 withdrawal_output: Some(Output {
                     position: 1,
                     destination: Destination::Bob,
@@ -648,8 +629,6 @@ pub(crate) struct Candidate {
     pub(crate) successor_state: [AccountState; ACCOUNT_COUNT],
     pub(crate) deposits: [u16; ACCOUNT_COUNT],
     pub(crate) withdrawals: [Option<WithdrawalRequest>; ACCOUNT_COUNT],
-    pub(crate) admission_deadline: u8,
-    pub(crate) challenge_deadline: u8,
     pub(crate) withdrawal_output: Option<Output>,
 }
 
@@ -711,6 +690,31 @@ impl Fault {
     }
 }
 
+// The admission frontier and the deadlines settlement assigned when it was promoted.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct Frontier {
+    pub(crate) registration: RegistrationId,
+    pub(crate) admission_deadline: u8,
+    pub(crate) challenge_deadline: u8,
+}
+
+// One inbox entry in recording order: a deposit with its inclusion deadline, a chain-queued
+// withdrawal, or an entry a registration pulled.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum Entry {
+    Deposit(DepositId, u8),
+    Withdrawal(Account),
+    Pulled,
+}
+
+// A chain-queued withdrawal, its inbox index, and whether a live registration carries it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct Queued {
+    pub(crate) index: u8,
+    pub(crate) request: WithdrawalRequest,
+    pub(crate) carried: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Terminal {
     Dormant,
@@ -728,10 +732,11 @@ pub(crate) enum SettlementEdge {
     Initial,
     RecordDeposit(DepositId),
     QueueWithdrawal(WithdrawalKey),
-    Register(RegistrationId),
+    Register(RegistrationId, u8),
     Admit(Batch),
     Observe,
-    Fault,
+    // The number of registrations the fault dropped.
+    Fault(u8),
     Challenge(Batch, ChallengeKind),
     Finalize(Batch),
     ClaimWithdrawal {
@@ -759,13 +764,21 @@ pub(crate) struct SettlementState {
     pub(crate) total_in: u16,
     pub(crate) released: u16,
     pub(crate) clean_claim_paid: u16,
-    pub(crate) pending_deposits: [u16; ACCOUNT_COUNT],
-    pub(crate) deposit_deadlines: [Option<u8>; ACCOUNT_COUNT],
+    // Deposits and chain-queued withdrawals in recording order. Entries before `pulled` belong to
+    // registrations and no longer affect settlement, so a pull forgets them, except that the
+    // armed variant keeps their deadlines. No entry is ever removed.
+    pub(crate) inbox: Vec<Entry>,
+    pub(crate) pulled: u8,
+    // Unadmitted deposit totals by account, pulled or not.
+    pub(crate) pending: [u16; ACCOUNT_COUNT],
     pub(crate) unfinalized_deposits: [u16; ACCOUNT_COUNT],
-    pub(crate) pending_withdrawals: [Option<WithdrawalRequest>; ACCOUNT_COUNT],
+    pub(crate) pending_withdrawals: [Option<Queued>; ACCOUNT_COUNT],
     pub(crate) outstanding_withdrawals: [Option<WithdrawalRequest>; ACCOUNT_COUNT],
-    pub(crate) registered: Option<RegistrationId>,
+    pub(crate) frontier: Option<Frontier>,
+    pub(crate) queued: Option<RegistrationId>,
     pub(crate) pipeline: Vec<Batch>,
+    // Challenge deadline each pipeline batch received as the frontier, cleared when it leaves.
+    pub(crate) challenge_deadlines: [u8; BATCH_COUNT],
     pub(crate) status: [BatchStatus; BATCH_COUNT],
     pub(crate) fault: Fault,
     pub(crate) clean_prefix_len: u8,
@@ -802,13 +815,16 @@ impl Default for SettlementState {
             total_in: 15,
             released: 0,
             clean_claim_paid: 0,
-            pending_deposits: [0; ACCOUNT_COUNT],
-            deposit_deadlines: [None; ACCOUNT_COUNT],
+            inbox: Vec::new(),
+            pulled: 0,
+            pending: [0; ACCOUNT_COUNT],
             unfinalized_deposits: [0; ACCOUNT_COUNT],
             pending_withdrawals: [None; ACCOUNT_COUNT],
             outstanding_withdrawals: [None; ACCOUNT_COUNT],
-            registered: None,
+            frontier: None,
+            queued: None,
             pipeline: Vec::new(),
+            challenge_deadlines: [0; BATCH_COUNT],
             status: [BatchStatus::Inactive; BATCH_COUNT],
             fault: Fault::Healthy,
             clean_prefix_len: 0,
@@ -837,7 +853,8 @@ pub(crate) enum SettlementAction {
     Observe(u8),
     RecordDeposit(DepositId),
     QueueWithdrawal(WithdrawalAttempt),
-    Register(RegistrationId),
+    // Registers the fixture, pulling the inbox up to the index, exclusive.
+    Register(RegistrationId, u8),
     Admit(CertifiedClose),
     Challenge(ProvenChallenge),
     Finalize,
@@ -851,18 +868,28 @@ pub(crate) enum SettlementAction {
     ClaimState(Account),
 }
 
+// The intake rule a variant applies. Only `Specified` must satisfy every property.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Variant {
+    Specified,
+    // A registration must pull the whole inbox.
+    WholePending,
+    // A registration carries a chain-queued request only when its pull reaches the request.
+    NoEarlyCarriage,
+    // Pulling leaves the pulled deposits' inclusion deadlines armed.
+    ArmedAfterPull,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SettlementModel {
     deposit_timeout: u8,
     certified_closes: [CertifiedClose; BATCH_COUNT],
+    variant: Variant,
 }
 
 impl Default for SettlementModel {
     fn default() -> Self {
-        Self {
-            deposit_timeout: 2,
-            certified_closes: certification::certified_closes(),
-        }
+        Self::new(Variant::Specified)
     }
 }
 
@@ -883,6 +910,14 @@ const fn account_bit(account: Account) -> u8 {
 }
 
 impl SettlementModel {
+    pub(crate) fn new(variant: Variant) -> Self {
+        Self {
+            deposit_timeout: 2,
+            certified_closes: certification::certified_closes(),
+            variant,
+        }
+    }
+
     pub(crate) fn call_at(
         self,
         state: &SettlementState,
@@ -911,8 +946,8 @@ impl SettlementModel {
             SettlementAction::QueueWithdrawal(attempt) => {
                 self.queue_withdrawal(&mut state, attempt)?;
             }
-            SettlementAction::Register(registration) => {
-                self.register(&mut state, registration)?;
+            SettlementAction::Register(registration, end) => {
+                self.register(&mut state, registration, end)?;
             }
             SettlementAction::Admit(certified) => self.admit(&mut state, certified)?,
             SettlementAction::Challenge(proven) => {
@@ -995,90 +1030,130 @@ impl SettlementModel {
             .map_or(state.expected_epoch, |batch| batch.candidate().epoch + 1)
     }
 
-    fn registration_matches(state: &SettlementState, id: RegistrationId) -> bool {
-        let registration = id.registration();
-        let base = state
-            .pipeline
-            .last()
-            .map_or(state.now, |tail| tail.candidate().admission_deadline);
-        let ordered_deadline = if state.pipeline.is_empty() {
-            registration.admission_deadline >= base
-        } else {
-            registration.admission_deadline > base
-        };
-        let duration = registration
-            .challenge_deadline
-            .checked_sub(registration.admission_deadline);
-        registration.epoch == Self::next_admission_epoch(state)
-            && registration.predecessor == Self::head_root(state)
-            && registration.predecessor_state == Self::head_state(state)
-            && registration.deposits == state.pending_deposits
-            && Self::withdrawals_match(state, &registration)
-            && state.now <= registration.admission_deadline
-            && ordered_deadline
-            && registration.admission_deadline <= base.saturating_add(MAX_ADMISSION_DELAY)
-            && duration.is_some_and(|duration| {
-                (MIN_CHALLENGE_DURATION..=MAX_CHALLENGE_DURATION).contains(&duration)
-            })
-            && registration.admission_deadline < TIME_HORIZON
-            && registration.challenge_deadline < TIME_HORIZON
+    // Registered epochs are exactly those from the frontier through the queued tail.
+    fn next_registration_epoch(state: &SettlementState) -> u8 {
+        state
+            .queued
+            .or(state.frontier.map(|frontier| frontier.registration))
+            .map_or_else(
+                || Self::next_admission_epoch(state),
+                |id| id.registration().epoch + 1,
+            )
     }
 
-    // Every request queued before registration appears verbatim. Requests
-    // queued while that boundary is active occupy only its empty account
-    // slots and remain staged for the next registration.
-    fn withdrawals_match(state: &SettlementState, registration: &Registration) -> bool {
+    fn registered(state: &SettlementState) -> impl Iterator<Item = RegistrationId> {
+        state
+            .frontier
+            .map(|frontier| frontier.registration)
+            .into_iter()
+            .chain(state.queued)
+    }
+
+    // Deadlines of an epoch that becomes the frontier at `now`, when they fit the horizon.
+    fn frontier_deadlines(now: u8) -> Option<(u8, u8)> {
+        let admission = now.checked_add(ADMISSION_DELAY)?;
+        let challenge = admission.checked_add(CHALLENGE_DURATION)?;
+        (challenge < TIME_HORIZON).then_some((admission, challenge))
+    }
+
+    // The per-account aggregate of the deposits recorded at inbox indices `start..end`.
+    pub(crate) fn aggregate(state: &SettlementState, start: u8, end: u8) -> [u16; ACCOUNT_COUNT] {
+        let mut totals = [0; ACCOUNT_COUNT];
+        for entry in &state.inbox[usize::from(start)..usize::from(end)] {
+            if let Entry::Deposit(id, _) = entry {
+                let event = id.event();
+                totals[event.account.index()] += event.amount;
+            }
+        }
+        totals
+    }
+
+    // The unpulled deposits and their inclusion deadlines, in inbox order. The armed variant
+    // keeps every deposit's deadline.
+    fn armed(self, state: &SettlementState) -> impl Iterator<Item = (u8, Account)> + '_ {
+        let first = match self.variant {
+            Variant::ArmedAfterPull => 0,
+            _ => usize::from(state.pulled),
+        };
+        state.inbox[first..].iter().filter_map(|entry| match entry {
+            Entry::Deposit(id, deadline) => Some((*deadline, id.event().account)),
+            Entry::Withdrawal(_) | Entry::Pulled => None,
+        })
+    }
+
+    // Every uncarried chain-queued request the pull reaches appears verbatim.
+    fn withdrawals_match(state: &SettlementState, registration: &Registration, end: u8) -> bool {
         Account::ALL.into_iter().all(|account| {
             let index = account.index();
-            state.pending_withdrawals[index].is_none_or(|pending| {
-                registration.withdrawals[index] == Some(pending)
-                    || state.registered.is_some_and(|registered| {
-                        registered.registration() == *registration
-                            && registration.withdrawals[index].is_none()
-                    })
+            state.pending_withdrawals[index].is_none_or(|queued| {
+                queued.carried
+                    || queued.index >= end
+                    || registration.withdrawals[index] == Some(queued.request)
             })
         })
     }
 
-    // Operator-carried extras run the shared intake gates and prove coverage
-    // at the registered predecessor instead of the queue's finalized root.
-    // They must also outlive the admission window so an admitted close never
-    // carries an expired obligation.
-    fn carried_admitted(state: &SettlementState, registration: &Registration) -> bool {
+    // An uncarried chain-queued request skips intake wherever it sits, so one past the pull is
+    // carried early. A carried request cannot be carried again, and every other request is an
+    // operator-carried extra that runs the shared intake gates. An extra supersedes a different
+    // uncarried request its account queued at or past the pull.
+    fn carried_admitted(
+        self,
+        state: &SettlementState,
+        registration: &Registration,
+        end: u8,
+    ) -> bool {
         Account::ALL.into_iter().all(|account| {
             let index = account.index();
-            match (
-                state.pending_withdrawals[index],
-                registration.withdrawals[index],
-            ) {
-                (None, Some(request)) => Self::carried_admissible(state, registration, request),
-                _ => true,
+            let Some(request) = registration.withdrawals[index] else {
+                return true;
+            };
+            match state.pending_withdrawals[index] {
+                Some(queued) if queued.request == request => {
+                    !queued.carried
+                        && (queued.index < end || self.variant != Variant::NoEarlyCarriage)
+                }
+                Some(queued) => {
+                    !queued.carried
+                        && queued.index >= end
+                        && Self::carried_admissible(state, request, Some(queued.request))
+                }
+                None => Self::carried_admissible(state, request, None),
             }
         })
     }
 
-    // The fixture destinations are all adapter-eligible, so the queue's
-    // explicit eligibility bit has no registration-side twin here. Production
-    // proves the predecessor-state facts with one Merkle opening per extra,
-    // which the model reads directly from the registration fixture.
+    fn registered_withdrawal(state: &SettlementState, account: Account) -> bool {
+        Self::registered(state).any(|id| id.registration().withdrawals[account.index()].is_some())
+    }
+
+    // The fixture destinations are all adapter-eligible, so the queue's explicit eligibility
+    // bit has no registration-side twin here. Extras carry no balance proof: the carrying
+    // epoch's tail resolves their release. The deadline must clear the earliest tick the close
+    // can finalize, one past the latest challenge deadline ahead of it. A new frontier's own
+    // deadline is exact, and a queued epoch uses the one it would receive if promoted now. The
+    // only outstanding request the account may hold is the queued one the extra supersedes.
     fn carried_admissible(
         state: &SettlementState,
-        registration: &Registration,
         request: WithdrawalRequest,
+        superseded: Option<WithdrawalRequest>,
     ) -> bool {
         let earliest = state.now.saturating_add(MIN_WITHDRAWAL_NOTICE);
         let latest = state.now.saturating_add(MAX_WITHDRAWAL_NOTICE);
         let index = request.account.index();
-        let predecessor = registration.predecessor_state[index];
-        let deposit = registration.deposits[index];
-        let covered = match request.action {
-            WithdrawalAction::Amount(amount) => {
-                amount <= predecessor.balance.saturating_add(deposit)
-            }
-            WithdrawalAction::Close => true,
+        let Some((_, challenge)) = Self::frontier_deadlines(state.now) else {
+            return false;
         };
+        let finalizes = state
+            .pipeline
+            .iter()
+            .map(|batch| state.challenge_deadlines[batch.index()])
+            .chain(state.frontier.map(|frontier| frontier.challenge_deadline))
+            .fold(challenge, u8::max)
+            + 1;
         state.withdrawal_replay_expiries[request.replay_key().index()].is_none()
-            && state.outstanding_withdrawals[index].is_none()
+            && state.outstanding_withdrawals[index] == superseded
+            && !Self::registered_withdrawal(state, request.account)
             && request.signature_valid
             && request.deployment == Deployment::Current
             && request.context_root == state.current_root
@@ -1086,9 +1161,7 @@ impl SettlementModel {
             && request.deadline >= earliest
             && request.deadline <= latest
             && request.deadline <= TIME_HORIZON
-            && request.deadline > registration.challenge_deadline + 1
-            && predecessor.active
-            && covered
+            && request.deadline > finalizes
     }
 
     fn candidate_matches_registration(batch: Batch, id: RegistrationId) -> bool {
@@ -1101,21 +1174,37 @@ impl SettlementModel {
             && candidate.predecessor_state == registration.predecessor_state
             && candidate.deposits == registration.deposits
             && candidate.withdrawals == registration.withdrawals
-            && candidate.admission_deadline == registration.admission_deadline
-            && candidate.challenge_deadline == registration.challenge_deadline
     }
 
-    fn can_register(self, state: &SettlementState, id: RegistrationId) -> bool {
+    // Registration needs only the previous epoch registered. It binds no predecessor: the
+    // frontier binds the admitted head when promoted. It pulls the inbox from the first unpulled
+    // index up to `end`, and the fixture must commit exactly the deposits recorded there.
+    pub(crate) fn can_register(self, state: &SettlementState, id: RegistrationId, end: u8) -> bool {
+        let registration = id.registration();
         Self::operating(state)
-            && state.registered.is_none()
-            && Self::registration_matches(state, id)
-            && Self::carried_admitted(state, &id.registration())
+            && state.now <= registration.latest
+            && Self::registered(state).count() < QUEUE_DEPTH
+            && registration.epoch == Self::next_registration_epoch(state)
+            && Self::frontier_deadlines(state.now).is_some()
+            && state.pulled <= end
+            && usize::from(end) <= state.inbox.len()
+            && (self.variant != Variant::WholePending || usize::from(end) == state.inbox.len())
+            && registration.deposits == Self::aggregate(state, state.pulled, end)
+            && Self::withdrawals_match(state, &registration, end)
+            && self.carried_admitted(state, &registration, end)
+    }
+
+    // No fixture pulls Alice's deposit, so once recorded it waits in the inbox until it expires
+    // while every other action interleaves. The checker records it only as the first intake at
+    // the start, where it blocks every pull, and the scenarios record it anywhere else.
+    fn explored(state: &SettlementState, id: DepositId) -> bool {
+        id != DepositId::AliceOne || (state.now == 0 && state.inbox.is_empty())
     }
 
     fn can_record_deposit(self, state: &SettlementState, id: DepositId) -> bool {
         let event = id.event();
         Self::operating(state)
-            && state.registered.is_none()
+            && usize::from(Self::next_registration_epoch(state)) < EPOCH_COUNT
             && state.consumed_deposits & (1 << id.index()) == 0
             && event.amount > 0
             && state.now.saturating_add(self.deposit_timeout) <= TIME_HORIZON
@@ -1170,11 +1259,10 @@ impl SettlementModel {
         Self::operating(state)
             && attempt.replay_key == request.replay_key()
             && state.withdrawal_replay_expiries[attempt.replay_key.index()].is_none()
+            && usize::from(Self::next_registration_epoch(state)) < EPOCH_COUNT
             && state.pending_withdrawals[index].is_none()
             && state.outstanding_withdrawals[index].is_none()
-            && state
-                .registered
-                .is_none_or(|registered| registered.registration().withdrawals[index].is_none())
+            && !Self::registered_withdrawal(state, request.account)
             && request.signature_valid
             && request.deployment == Deployment::Current
             && request.context_root == state.current_root
@@ -1195,11 +1283,10 @@ impl SettlementModel {
         let deadline = state.now + self.deposit_timeout;
         state.custody = state.custody.checked_add(event.amount)?;
         state.total_in = state.total_in.checked_add(event.amount)?;
-        state.pending_deposits[index] = state.pending_deposits[index].checked_add(event.amount)?;
+        state.pending[index] = state.pending[index].checked_add(event.amount)?;
         state.unfinalized_deposits[index] =
             state.unfinalized_deposits[index].checked_add(event.amount)?;
-        state.deposit_deadlines[index] =
-            Some(state.deposit_deadlines[index].map_or(deadline, |old| old.min(deadline)));
+        state.inbox.push(Entry::Deposit(id, deadline));
         state.consumed_deposits |= 1 << id.index();
         state.last = SettlementEdge::RecordDeposit(id);
         Some(())
@@ -1215,43 +1302,84 @@ impl SettlementModel {
         }
         let request = attempt.request;
         let index = request.account.index();
-        state.pending_withdrawals[index] = Some(request);
+        state.pending_withdrawals[index] = Some(Queued {
+            index: u8::try_from(state.inbox.len()).ok()?,
+            request,
+            carried: false,
+        });
+        state.inbox.push(Entry::Withdrawal(request.account));
         state.outstanding_withdrawals[index] = Some(request);
         state.withdrawal_replay_expiries[attempt.replay_key.index()] = Some(request.deadline);
         state.last = SettlementEdge::QueueWithdrawal(attempt.replay_key);
         Some(())
     }
 
-    fn register(&self, state: &mut SettlementState, id: RegistrationId) -> Option<()> {
-        if !self.can_register(state, id) {
+    fn register(&self, state: &mut SettlementState, id: RegistrationId, end: u8) -> Option<()> {
+        if !self.can_register(state, id, end) {
             return None;
         }
-        state.registered = Some(id);
-        state.last = SettlementEdge::Register(id);
+        if state.frontier.is_some() {
+            state.queued = Some(id);
+        } else {
+            let (admission_deadline, challenge_deadline) = Self::frontier_deadlines(state.now)?;
+            state.frontier = Some(Frontier {
+                registration: id,
+                admission_deadline,
+                challenge_deadline,
+            });
+        }
+
+        // The pulled deposits follow the epoch from here, and the chain-queued requests the
+        // registration contains are carried. A different request for the account is an extra
+        // that supersedes the queued one, whose deadline no longer applies.
+        let registration = id.registration();
+        for (index, pending) in state.pending_withdrawals.iter_mut().enumerate() {
+            let Some(queued) = pending else {
+                continue;
+            };
+            match registration.withdrawals[index] {
+                Some(request) if request == queued.request => queued.carried = true,
+                Some(_) => {
+                    *pending = None;
+                    state.outstanding_withdrawals[index] = None;
+                }
+                None => {}
+            }
+        }
+        if self.variant != Variant::ArmedAfterPull {
+            state.inbox[usize::from(state.pulled)..usize::from(end)].fill(Entry::Pulled);
+        }
+        state.pulled = end;
+        state.last = SettlementEdge::Register(id, end);
         Some(())
     }
 
     fn admit(&self, state: &mut SettlementState, certified: CertifiedClose) -> Option<()> {
         let batch = certified.batch();
         let candidate = batch.candidate();
-        let registration = state.registered?;
+        let frontier = state.frontier?;
+
+        // The queued epoch becomes the frontier at this admission.
+        let promotion = match state.queued {
+            Some(id) => Some((id, Self::frontier_deadlines(state.now)?)),
+            None => None,
+        };
         if !Self::operating(state)
-            || certified.registration() != registration
-            || state.now > candidate.admission_deadline
-            || !Self::registration_matches(state, registration)
-            || !Self::candidate_matches_registration(batch, registration)
+            || certified.registration() != frontier.registration
+            || state.now > frontier.admission_deadline
+            || candidate.predecessor != Self::head_root(state)
+            || candidate.predecessor_state != Self::head_state(state)
+            || !Self::candidate_matches_registration(batch, frontier.registration)
         {
             return None;
         }
+
+        // Admission removes exactly the deposits the registration pulled.
         for account in Account::ALL {
             let index = account.index();
-            let included = candidate.deposits[index];
-            let old = state.pending_deposits[index];
-            state.pending_deposits[index] = old.checked_sub(included)?;
-            if old == included {
-                state.deposit_deadlines[index] = None;
-            }
+            state.pending[index] = state.pending[index].checked_sub(candidate.deposits[index])?;
         }
+
         // Operator-carried requests consume their replay ids and join the
         // deadline fence at admission. Chain-queued entries re-set the same
         // values, so the loop is idempotent for them.
@@ -1261,23 +1389,31 @@ impl SettlementModel {
                 state.withdrawal_replay_expiries[request.replay_key().index()] =
                     Some(request.deadline);
                 state.outstanding_withdrawals[index] = Some(request);
-                if state.pending_withdrawals[index] == Some(request) {
+                if state.pending_withdrawals[index].is_some_and(|queued| queued.request == request)
+                {
                     state.pending_withdrawals[index] = None;
                 }
             }
         }
-        state.registered = None;
+        state.frontier = promotion.map(
+            |(registration, (admission_deadline, challenge_deadline))| Frontier {
+                registration,
+                admission_deadline,
+                challenge_deadline,
+            },
+        );
+        state.queued = None;
         state.pipeline.push(batch);
+        state.challenge_deadlines[batch.index()] = frontier.challenge_deadline;
         state.status[batch.index()] = BatchStatus::Pending;
         state.last = SettlementEdge::Admit(batch);
         Some(())
     }
 
-    fn registration_expiry(state: &SettlementState) -> Option<(u8, RegistrationId)> {
-        state.registered.map(|id| {
-            let registration = id.registration();
-            (registration.admission_deadline.saturating_add(1), id)
-        })
+    fn registration_expiry(state: &SettlementState) -> Option<(u8, Frontier)> {
+        state
+            .frontier
+            .map(|frontier| (frontier.admission_deadline.saturating_add(1), frontier))
     }
 
     fn withdrawal_expiry(state: &SettlementState) -> Option<(u8, Account)> {
@@ -1290,20 +1426,20 @@ impl SettlementModel {
             .min_by_key(|(deadline, account)| (*deadline, account.index()))
     }
 
-    fn deposit_expiry(state: &SettlementState) -> Option<(u8, Account)> {
-        Account::ALL
-            .into_iter()
-            .filter(|account| state.pending_deposits[account.index()] > 0)
-            .filter_map(|account| {
-                state.deposit_deadlines[account.index()].map(|deadline| (deadline, account))
-            })
-            .min_by_key(|(deadline, account)| (*deadline, account.index()))
+    // Only unpulled deposits carry deadlines. The earliest deadline expires first, attributed to
+    // the latest deposit recorded with it. This oracle scans the inbox instead of following
+    // production's deadline runs.
+    fn deposit_expiry(self, state: &SettlementState) -> Option<(u8, Account)> {
+        let deadline = self.armed(state).map(|(deadline, _)| deadline).min()?;
+        self.armed(state)
+            .filter(|(armed, _)| *armed == deadline)
+            .last()
     }
 
-    fn observed_fault(state: &SettlementState, at: u8) -> Fault {
+    fn observed_fault(self, state: &SettlementState, at: u8) -> Fault {
         let registration = Self::registration_expiry(state);
         let withdrawal = Self::withdrawal_expiry(state);
-        let deposit = Self::deposit_expiry(state);
+        let deposit = self.deposit_expiry(state);
         let first = registration
             .map(|(deadline, _)| deadline)
             .into_iter()
@@ -1316,15 +1452,15 @@ impl SettlementModel {
         if first > at {
             return Fault::Healthy;
         }
-        if let Some((first_expired, id)) = registration
+        if let Some((first_expired, frontier)) = registration
             && first_expired == first
         {
-            let registration = id.registration();
+            let registration = frontier.registration.registration();
             return Fault::ExpiredRegistration {
-                registration: id,
+                registration: frontier.registration,
                 anchor: registration.anchor,
                 epoch: registration.epoch,
-                expired_at: registration.admission_deadline,
+                expired_at: frontier.admission_deadline,
             };
         }
         if let Some((deadline, account)) = withdrawal
@@ -1347,15 +1483,16 @@ impl SettlementModel {
             return None;
         }
         let observed = if state.fault.healthy() {
-            Self::observed_fault(state, at)
+            self.observed_fault(state, at)
         } else {
             state.fault
         };
         let newly_faulted = state.fault.healthy() && !observed.healthy();
+        let dropped = Self::registered(state).count() as u8;
         if newly_faulted {
             state.admission_fence_epoch = Some(Self::next_admission_epoch(state));
             state.clean_prefix_len = state.pipeline.len() as u8;
-            state.registered = None;
+            Self::drop_registrations(state);
         }
         for expiry in &mut state.withdrawal_replay_expiries {
             if expiry.is_some_and(|deadline| deadline <= at) {
@@ -1365,11 +1502,21 @@ impl SettlementModel {
         state.now = at;
         state.fault = observed;
         state.last = if newly_faulted {
-            SettlementEdge::Fault
+            SettlementEdge::Fault(dropped)
         } else {
             SettlementEdge::Observe
         };
         Some(())
+    }
+
+    // A fault drops the frontier and the queue. Unadmitted deposits and chain-queued withdrawals
+    // stay with their owners, and no request stays carried.
+    fn drop_registrations(state: &mut SettlementState) {
+        state.frontier = None;
+        state.queued = None;
+        for queued in state.pending_withdrawals.iter_mut().flatten() {
+            queued.carried = false;
+        }
     }
 
     fn challenge(&self, state: &mut SettlementState, proven: ProvenChallenge) -> Option<()> {
@@ -1377,7 +1524,7 @@ impl SettlementModel {
         let kind = proven.kind();
         if state.terminal != Terminal::Dormant
             || state.status[target.index()] != BatchStatus::Pending
-            || state.now > target.candidate().challenge_deadline
+            || state.now > state.challenge_deadlines[target.index()]
         {
             return None;
         }
@@ -1390,7 +1537,7 @@ impl SettlementModel {
             };
             state.admission_fence_epoch = Some(Self::next_admission_epoch(state));
             state.clean_prefix_len = target_index as u8;
-            state.registered = None;
+            Self::drop_registrations(state);
         }
         for (index, batch) in state.pipeline.iter().copied().enumerate() {
             if index == target_index {
@@ -1414,7 +1561,7 @@ impl SettlementModel {
         let batch = *state.pipeline.first()?;
         let candidate = batch.candidate();
         if state.status[batch.index()] != BatchStatus::Pending
-            || state.now <= candidate.challenge_deadline
+            || state.now <= state.challenge_deadlines[batch.index()]
         {
             return None;
         }
@@ -1433,6 +1580,7 @@ impl SettlementModel {
             }
         }
         state.pipeline.remove(0);
+        state.challenge_deadlines[batch.index()] = 0;
         state.status[batch.index()] = BatchStatus::Finalized;
         state.withdrawal_reserve[batch.index()] =
             state.withdrawal_reserve[batch.index()].checked_add(candidate.withdrawal_total())?;
@@ -1490,7 +1638,7 @@ impl SettlementModel {
         }
         let index = account.index();
         let amount = match state.terminal {
-            Terminal::Dormant => state.pending_deposits[index],
+            Terminal::Dormant => state.pending[index],
             Terminal::Claiming { .. } => state.unfinalized_deposits[index],
             Terminal::Settled => 0,
         };
@@ -1520,8 +1668,7 @@ impl SettlementModel {
         }
         state.custody = state.custody.checked_sub(amount)?;
         state.released = state.released.checked_add(amount)?;
-        state.pending_deposits[index] = 0;
-        state.deposit_deadlines[index] = None;
+        state.pending[index] = 0;
         state.unfinalized_deposits[index] =
             state.unfinalized_deposits[index].checked_sub(amount)?;
         state.refunded_deposits[index] = state.refunded_deposits[index].checked_add(amount)?;
@@ -1554,10 +1701,11 @@ impl SettlementModel {
             return None;
         }
         let immediately_settled = liability == 0 && deposits == 0;
-        state.registered = None;
+        state.frontier = None;
+        state.queued = None;
         state.pipeline.clear();
-        state.pending_deposits = [0; ACCOUNT_COUNT];
-        state.deposit_deadlines = [None; ACCOUNT_COUNT];
+        state.challenge_deadlines = [0; BATCH_COUNT];
+        state.pending = [0; ACCOUNT_COUNT];
         state.pending_withdrawals = [None; ACCOUNT_COUNT];
         state.withdrawal_replay_expiries = [None; WithdrawalKey::COUNT];
         if immediately_settled {
@@ -1757,7 +1905,7 @@ impl SettlementModel {
         }
         if !Account::ALL.into_iter().all(|account| {
             let index = account.index();
-            state.unfinalized_deposits[index] >= state.pending_deposits[index]
+            state.unfinalized_deposits[index] >= state.pending[index]
                 && state.recovered_state[index]
                     == state.terminal_withdrawals[index] + state.terminal_residuals[index]
         }) {
@@ -1795,11 +1943,14 @@ impl SettlementModel {
                 && state.terminal == Terminal::Dormant
         } else {
             state.admission_fence_epoch.is_some()
-                && state.registered.is_none()
+                && state.frontier.is_none()
+                && state.queued.is_none()
                 && state.clean_prefix_len <= 3
         }
     }
 
+    // An expired deposit was unpulled, held the earliest deadline, and was the latest deposit
+    // recorded with it. A fault stops pulls, so the unpulled inbox keeps that deposit.
     fn fault_deadline_exact(state: &SettlementState) -> bool {
         match state.fault {
             Fault::Healthy | Fault::ProvenChallenge { .. } => true,
@@ -1807,10 +1958,15 @@ impl SettlementModel {
                 account,
                 expired_at,
             } => {
-                let index = account.index();
+                let unpulled = Self::default();
                 expired_at <= state.now
-                    && (state.pending_deposits[index] == 0
-                        || state.deposit_deadlines[index] == Some(expired_at))
+                    && unpulled.armed(state).map(|(deadline, _)| deadline).min() == Some(expired_at)
+                    && unpulled
+                        .armed(state)
+                        .filter(|(deadline, _)| *deadline == expired_at)
+                        .last()
+                        .map(|(_, latest)| latest)
+                        == Some(account)
             }
             Fault::ExpiredWithdrawal {
                 account,
@@ -1827,28 +1983,35 @@ impl SettlementModel {
                 expired_at,
             } => {
                 let registered = registration.registration();
-                anchor == registered.anchor
-                    && epoch == registered.epoch
-                    && expired_at == registered.admission_deadline
-                    && expired_at < state.now
+                anchor == registered.anchor && epoch == registered.epoch && expired_at < state.now
             }
         }
     }
 
+    // Every deposit deadline and outstanding withdrawal deadline fits the horizon, and deposits
+    // recorded later never expire earlier.
     fn deadlines_observable(state: &SettlementState) -> bool {
-        Account::ALL.into_iter().all(|account| {
-            let index = account.index();
-            (state.pending_deposits[index] == 0
-                || state.deposit_deadlines[index].is_some_and(|deadline| deadline <= TIME_HORIZON))
-                && state.outstanding_withdrawals[index]
+        let deadlines = state
+            .inbox
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Deposit(_, deadline) => Some(*deadline),
+                Entry::Withdrawal(_) | Entry::Pulled => None,
+            })
+            .collect::<Vec<_>>();
+        deadlines.windows(2).all(|pair| pair[0] <= pair[1])
+            && deadlines.iter().all(|deadline| *deadline <= TIME_HORIZON)
+            && Account::ALL.into_iter().all(|account| {
+                state.outstanding_withdrawals[account.index()]
                     .is_none_or(|request| request.deadline <= TIME_HORIZON)
-        }) && state
-            .registered
-            .is_none_or(|id| id.registration().admission_deadline < TIME_HORIZON)
+            })
+            && state
+                .frontier
+                .is_none_or(|frontier| frontier.challenge_deadline < TIME_HORIZON)
             && state
                 .pipeline
                 .iter()
-                .all(|batch| batch.candidate().challenge_deadline < TIME_HORIZON)
+                .all(|batch| state.challenge_deadlines[batch.index()] < TIME_HORIZON)
             && state
                 .withdrawal_replay_expiries
                 .iter()
@@ -1865,7 +2028,7 @@ impl SettlementModel {
                 Self::terminal_can_begin(state)
                     || state.pipeline.first().is_some_and(|batch| {
                         state.status[batch.index()] == BatchStatus::Pending
-                            && batch.candidate().challenge_deadline < TIME_HORIZON
+                            && state.challenge_deadlines[batch.index()] < TIME_HORIZON
                     })
             }
             Terminal::Claiming {
@@ -1915,11 +2078,8 @@ impl SettlementModel {
                 == state.clean_claim_paid
                     + array_total(&state.refunded_deposits)
                     + array_total(&state.recovered_state);
-        let registration_exact = state.registered.is_none_or(|registration| {
-            state.fault.healthy()
-                && state.terminal == Terminal::Dormant
-                && Self::registration_matches(state, registration)
-        });
+        let registration_exact = Self::queue_exact(state);
+        let deposits_exact = Self::deposits_exact(state);
         Self::fifo_invariant(state)
             && Self::invalidation_invariant(state)
             && finalized_disjoint
@@ -1935,6 +2095,92 @@ impl SettlementModel {
             && Self::deadlines_observable(state)
             && Self::hard_fault_has_progress(state)
             && registration_exact
+            && deposits_exact
+    }
+
+    // Before terminal settlement, each account's unfinalized deposits are its unadmitted
+    // deposits plus its deposits in the admitted pipeline. Terminal settlement keeps no pending
+    // deposit.
+    pub(crate) fn deposits_exact(state: &SettlementState) -> bool {
+        match state.terminal {
+            Terminal::Dormant => Account::ALL.into_iter().all(|account| {
+                let index = account.index();
+                let admitted = state
+                    .pipeline
+                    .iter()
+                    .map(|batch| batch.candidate().deposits[index])
+                    .sum::<u16>();
+                state.pending[index].checked_add(admitted)
+                    == Some(state.unfinalized_deposits[index])
+            }),
+            Terminal::Claiming { .. } | Terminal::Settled => state.pending == [0; ACCOUNT_COUNT],
+        }
+    }
+
+    // Registered epochs are consecutive from the next admission epoch, and the frontier is the
+    // only registration with deadlines. Deadlines are chained, so challenge deadlines never
+    // decrease in FIFO order. The pull stays within the inbox, only pulled entries are forgotten,
+    // and each pending request names its own inbox entry. While operating, a request is carried
+    // exactly when one live registration carries it, no admitted close carries it, and an
+    // uncarried request sits at or past the pull.
+    pub(crate) fn queue_exact(state: &SettlementState) -> bool {
+        let registered = Self::registered(state).collect::<Vec<_>>();
+        let pulled = usize::from(state.pulled);
+        let inbox = pulled <= state.inbox.len()
+            && !state.inbox[pulled..].contains(&Entry::Pulled)
+            && Account::ALL.into_iter().all(|account| {
+                state.pending_withdrawals[account.index()].is_none_or(|queued| {
+                    queued.request.account == account
+                        && state
+                            .inbox
+                            .get(usize::from(queued.index))
+                            .is_some_and(|entry| {
+                                *entry == Entry::Withdrawal(account)
+                                    || (queued.index < state.pulled && *entry == Entry::Pulled)
+                            })
+                })
+            });
+        if !Self::operating(state) {
+            return inbox
+                && registered.is_empty()
+                && state
+                    .pending_withdrawals
+                    .iter()
+                    .flatten()
+                    .all(|queued| !queued.carried);
+        }
+        let first = Self::next_admission_epoch(state);
+        let consecutive = (state.queued.is_none() || state.frontier.is_some())
+            && registered.iter().enumerate().all(|(offset, id)| {
+                usize::from(id.registration().epoch) == usize::from(first) + offset
+            });
+        let deadlines = state
+            .pipeline
+            .iter()
+            .map(|batch| state.challenge_deadlines[batch.index()])
+            .chain(state.frontier.map(|frontier| frontier.challenge_deadline))
+            .collect::<Vec<_>>();
+        let chained = deadlines.windows(2).all(|pair| pair[0] <= pair[1])
+            && state.frontier.is_none_or(|frontier| {
+                frontier.challenge_deadline == frontier.admission_deadline + CHALLENGE_DURATION
+            });
+        let carried = Account::ALL.into_iter().all(|account| {
+            let index = account.index();
+            state.pending_withdrawals[index].is_none_or(|queued| {
+                let carriers = registered
+                    .iter()
+                    .filter(|id| id.registration().withdrawals[index] == Some(queued.request))
+                    .count();
+                queued.carried == (carriers == 1)
+                    && carriers <= 1
+                    && state
+                        .pipeline
+                        .iter()
+                        .all(|batch| batch.candidate().withdrawals[index] != Some(queued.request))
+                    && (queued.carried || queued.index >= state.pulled)
+            })
+        });
+        inbox && consecutive && chained && carried
     }
 
     fn claimed_ranges_exact(state: &SettlementState) -> bool {
@@ -2116,7 +2362,7 @@ fn degraded_zero_finalized(_: &SettlementModel, state: &SettlementState) -> bool
 
 fn carried_offset_included(_: &SettlementModel, state: &SettlementState) -> bool {
     state.status[Batch::OffsetC.index()] == BatchStatus::Pending
-        && state.pending_deposits[Account::Bob.index()] == 0
+        && state.pending[Account::Bob.index()] == 0
 }
 
 // B1C was admitted before a fault froze R1. Bob's outstanding amount of 10
@@ -2206,10 +2452,9 @@ fn registration_prefix_recovers(_: &SettlementModel, state: &SettlementState) ->
 }
 
 fn deposit_deadline_is(state: &SettlementState, deadline: u8) -> bool {
-    Account::ALL.into_iter().any(|account| {
-        let index = account.index();
-        state.pending_deposits[index] > 0 && state.deposit_deadlines[index] == Some(deadline)
-    })
+    SettlementModel::default()
+        .armed(state)
+        .any(|(armed, _)| armed == deadline)
 }
 
 fn withdrawal_deadline_is(state: &SettlementState, deadline: u8) -> bool {
@@ -2240,18 +2485,67 @@ fn all_three_exact_tie(_: &SettlementModel, state: &SettlementState) -> bool {
     deposit_deadline_is(state, first_expired) && withdrawal_deadline_is(state, first_expired)
 }
 
+// Admission at the exact deadline leaves exactly the challenge duration.
 fn exact_admission_boundary(_: &SettlementModel, state: &SettlementState) -> bool {
-    state.now == 2 && state.last == SettlementEdge::Admit(Batch::B0)
+    state.last == SettlementEdge::Admit(Batch::B0)
+        && state.now + CHALLENGE_DURATION == state.challenge_deadlines[Batch::B0.index()]
 }
 
 const fn exact_challenge_boundary(_: &SettlementModel, state: &SettlementState) -> bool {
-    state.now == Batch::B0.candidate().challenge_deadline
+    state.now == state.challenge_deadlines[Batch::B0.index()]
         && matches!(state.last, SettlementEdge::Challenge(Batch::B0, _))
 }
 
-fn first_post_deadline_finalization(_: &SettlementModel, state: &SettlementState) -> bool {
-    state.now == Batch::B0.candidate().challenge_deadline + 1
-        && state.last == SettlementEdge::Finalize(Batch::B0)
+// The FIFO front becomes finalizable at the first instant after its challenge deadline.
+fn first_post_deadline_finalization(model: &SettlementModel, state: &SettlementState) -> bool {
+    state.pipeline.first() == Some(&Batch::B0)
+        && state.now == state.challenge_deadlines[Batch::B0.index()] + 1
+        && model.apply(state, SettlementAction::Finalize).is_some()
+}
+
+const fn successor_queued(_: &SettlementModel, state: &SettlementState) -> bool {
+    state.queued.is_some()
+}
+
+// The only frontier an admission can leave behind is a promoted queued epoch.
+const fn queued_promoted(_: &SettlementModel, state: &SettlementState) -> bool {
+    matches!(state.last, SettlementEdge::Admit(_)) && state.frontier.is_some()
+}
+
+fn deposit_waits_in_the_inbox(_: &SettlementModel, state: &SettlementState) -> bool {
+    state.frontier.is_some()
+        && state.inbox[usize::from(state.pulled)..]
+            .iter()
+            .any(|entry| matches!(entry, Entry::Deposit(..)))
+}
+
+fn withdrawal_waits_in_the_inbox(_: &SettlementModel, state: &SettlementState) -> bool {
+    state.frontier.is_some()
+        && state
+            .pending_withdrawals
+            .iter()
+            .flatten()
+            .any(|queued| !queued.carried && queued.index >= state.pulled)
+}
+
+// A registration pulls a prefix while later intake waits in the inbox.
+fn prefix_pulled(_: &SettlementModel, state: &SettlementState) -> bool {
+    matches!(state.last, SettlementEdge::Register(_, end) if usize::from(end) < state.inbox.len())
+}
+
+// A live registration carries a chain-queued request its pull does not reach.
+fn request_carried_early(_: &SettlementModel, state: &SettlementState) -> bool {
+    state
+        .pending_withdrawals
+        .iter()
+        .flatten()
+        .any(|queued| queued.carried && queued.index >= state.pulled)
+}
+
+// A fault drops the frontier and a queued registration together, and their pulled deposits stay
+// with their owners.
+fn fault_drops_queue(_: &SettlementModel, state: &SettlementState) -> bool {
+    state.last == SettlementEdge::Fault(2) && state.pending != [0; ACCOUNT_COUNT]
 }
 
 impl Model for SettlementModel {
@@ -2269,7 +2563,7 @@ impl Model for SettlementModel {
             }
         }
         for id in DepositId::ALL {
-            if self.can_record_deposit(state, id) {
+            if self.can_record_deposit(state, id) && Self::explored(state, id) {
                 actions.push(SettlementAction::RecordDeposit(id));
             }
         }
@@ -2280,20 +2574,22 @@ impl Model for SettlementModel {
             }
         }
         for registration in RegistrationId::ALL {
-            if self.can_register(state, registration) {
-                actions.push(SettlementAction::Register(registration));
+            for end in state.pulled..=state.inbox.len() as u8 {
+                if self.can_register(state, registration, end) {
+                    actions.push(SettlementAction::Register(registration, end));
+                }
             }
         }
         for batch in Batch::ALL {
-            if state.registered.is_some_and(|registration| {
-                Self::candidate_matches_registration(batch, registration)
+            if state.frontier.is_some_and(|frontier| {
+                Self::candidate_matches_registration(batch, frontier.registration)
             }) {
                 actions.push(SettlementAction::Admit(
                     self.certified_closes[batch.index()],
                 ));
             }
             if state.status[batch.index()] == BatchStatus::Pending
-                && state.now <= batch.candidate().challenge_deadline
+                && state.now <= state.challenge_deadlines[batch.index()]
             {
                 for proven in challenge::adjudicated_proven_challenges(batch) {
                     actions.push(SettlementAction::Challenge(proven));
@@ -2424,6 +2720,34 @@ impl Model for SettlementModel {
                 "finalization begins immediately after the challenge deadline",
                 first_post_deadline_finalization,
             ),
+            Property::sometimes(
+                "a successor registers before its predecessor is admitted",
+                successor_queued,
+            ),
+            Property::sometimes(
+                "a queued epoch becomes the frontier at its predecessor's admission",
+                queued_promoted,
+            ),
+            Property::sometimes(
+                "a deposit during a registered epoch waits in the inbox",
+                deposit_waits_in_the_inbox,
+            ),
+            Property::sometimes(
+                "a withdrawal queued during a registered epoch waits in the inbox",
+                withdrawal_waits_in_the_inbox,
+            ),
+            Property::sometimes(
+                "a registration pulls a prefix while later intake waits",
+                prefix_pulled,
+            ),
+            Property::sometimes(
+                "a registration carries a queued request before its pull reaches it",
+                request_carried_early,
+            ),
+            Property::sometimes(
+                "a fault drops the frontier and a queued registration",
+                fault_drops_queue,
+            ),
         ]
     }
 }
@@ -2444,8 +2768,8 @@ fn settlement_checker_explores_the_complete_finite_graph() {
         .spawn_bfs()
         .join();
     assert!(checker.is_done());
-    assert_eq!(checker.unique_state_count(), 2_766_539);
     checker.assert_properties();
+    assert_eq!(checker.unique_state_count(), 13_542_822);
 }
 
 #[test]
@@ -2524,8 +2848,9 @@ fn settlement_invariants_have_negative_controls() {
 
     let wrong_deposit_deadline = SettlementState {
         now: 2,
-        pending_deposits: [1, 0, 0],
-        deposit_deadlines: [Some(2), None, None],
+        inbox: vec![Entry::Deposit(DepositId::AliceOne, 2)],
+        pending: [1, 0, 0],
+        unfinalized_deposits: [1, 0, 0],
         fault: Fault::ExpiredDeposit {
             account: Account::Alice,
             expired_at: 1,
@@ -2535,6 +2860,55 @@ fn settlement_invariants_have_negative_controls() {
     assert!(!SettlementModel::fault_deadline_exact(
         &wrong_deposit_deadline
     ));
+    let exact_deposit_deadline = SettlementState {
+        fault: Fault::ExpiredDeposit {
+            account: Account::Alice,
+            expired_at: 2,
+        },
+        ..wrong_deposit_deadline
+    };
+    assert!(SettlementModel::fault_deadline_exact(
+        &exact_deposit_deadline
+    ));
+
+    // A pulled deposit carries no deadline, so it cannot be the expired one.
+    let pulled_deposit_expiry = SettlementState {
+        pulled: 1,
+        ..exact_deposit_deadline
+    };
+    assert!(!SettlementModel::fault_deadline_exact(
+        &pulled_deposit_expiry
+    ));
+
+    // Unadmitted deposits must match the unfinalized deposits outside the pipeline.
+    let unbacked_pending = SettlementState {
+        pending: [1, 0, 0],
+        ..SettlementState::default()
+    };
+    assert!(!SettlementModel::deposits_exact(&unbacked_pending));
+
+    // The pull cannot pass the inbox.
+    let pulled_past_inbox = SettlementState {
+        pulled: 1,
+        ..SettlementState::default()
+    };
+    assert!(!SettlementModel::queue_exact(&pulled_past_inbox));
+
+    // A request is carried exactly when a live registration carries it.
+    let request = WithdrawalId::Amount.request();
+    let mut pending_withdrawals = [None; ACCOUNT_COUNT];
+    pending_withdrawals[request.account.index()] = Some(Queued {
+        index: 0,
+        request,
+        carried: true,
+    });
+    let phantom_carriage = SettlementState {
+        inbox: vec![Entry::Withdrawal(request.account)],
+        pulled: 1,
+        pending_withdrawals,
+        ..SettlementState::default()
+    };
+    assert!(!SettlementModel::queue_exact(&phantom_carriage));
 
     let request = WithdrawalId::Amount.request();
     let mut outstanding_withdrawals = [None; ACCOUNT_COUNT];

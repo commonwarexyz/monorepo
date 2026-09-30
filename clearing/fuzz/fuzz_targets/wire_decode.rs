@@ -18,11 +18,11 @@ use commonware_clearing::bajillion::{
     posted,
     qmdb::{StateHead, StateLookup, StateOpening, StateRoot, StateTarget, StateValueOpening},
     replica::ReplicaHead,
-    settlement::ClaimedRange,
+    settlement::{Bounds, ClaimedRange, SettlementChain},
     state::{AccountChange, ChangeValue, ChangeValueCore, SettlementOutput},
     transition::{
-        ActivityRange, BatchId, CloseContext, CloseLimits, Header, ProposalId, RootBundle,
-        WithdrawalClaim, WithdrawalOutput,
+        ActivityRange, BatchId, CloseContext, CloseLimits, EpochContext, Header, ProposalId,
+        RootBundle, WithdrawalClaim, WithdrawalOutput,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
@@ -61,6 +61,57 @@ where
     assert_eq!(decoded, value);
 }
 
+// Decoding a persisted chain is structural, so any accepted encoding must re-encode to the same
+// bytes, including queued registrations, the inbox counters, deposit deadline runs, and
+// chain-queued withdrawals. Truncated and extended encodings must fail.
+fn chain_roundtrip(bytes: &[u8], bounds: &Bounds) {
+    let Ok(chain) = SettlementChain::<Sha256, VerifyingKey>::decode_cfg(Copying(bytes), bounds)
+    else {
+        return;
+    };
+    let encoded = chain.encode();
+    assert_eq!(encoded.len(), chain.encode_size());
+    assert_eq!(encoded.as_ref(), bytes);
+    assert!(
+        SettlementChain::<Sha256, VerifyingKey>::decode_cfg(
+            Copying(&encoded[..encoded.len() - 1]),
+            bounds
+        )
+        .is_err()
+    );
+    let mut trailing = encoded.to_vec();
+    trailing.push(0);
+    assert!(SettlementChain::<Sha256, VerifyingKey>::decode_cfg(trailing, bounds).is_err());
+}
+
+// A generated chain that decodes re-encodes to the same bytes. Carriage is not encoded, so the
+// decoded chain must rebuild it: both owe the same requests to a pull of the whole inbox.
+fn generated_chain_roundtrip(bytes: &[u8]) {
+    let Ok(chain) = <SettlementChain<Sha256, VerifyingKey> as arbitrary::Arbitrary>::arbitrary(
+        &mut arbitrary::Unstructured::new(bytes),
+    ) else {
+        return;
+    };
+    let encoded = chain.encode();
+    assert_eq!(encoded.len(), chain.encode_size());
+    let bounds = Bounds {
+        committee: encoded.len(),
+        items: encoded.len(),
+        destination: encoded.len(),
+    };
+    // Generated values can hold material the decoder rejects, such as a certificate with no
+    // signers, so only an accepted encoding is compared.
+    let Ok(decoded) = SettlementChain::<Sha256, VerifyingKey>::decode_cfg(encoded.clone(), &bounds)
+    else {
+        return;
+    };
+    assert_eq!(decoded.encode(), encoded);
+    assert_eq!(
+        decoded.pending_withdrawals(decoded.intake()),
+        chain.pending_withdrawals(chain.intake())
+    );
+}
+
 async fn semantic_header(
     seed: u8,
     runtime: deterministic::Context,
@@ -79,6 +130,7 @@ async fn semantic_header(
         u64::from(seed),
         operator.public_key(),
         &state,
+        0..0,
         0,
         &deposits,
         &withdrawals,
@@ -138,6 +190,7 @@ async fn dealing_roundtrip(bytes: &[u8], limits: CloseLimits, runtime: determini
         0,
         operator.public_key(),
         &state,
+        0..0,
         0,
         &deposits,
         &withdrawals,
@@ -186,7 +239,7 @@ fuzz_target!(|data: &[u8]| {
         u64::MAX,
         u64::MAX,
     );
-    match selector % 54 {
+    match selector % 57 {
         0 => roundtrip::<DepositBatch<VerifyingKey>>(bytes, &RangeCfg::new(..=item_limit)),
         1 => roundtrip::<WithdrawalBody<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
         2 => roundtrip::<SignedWithdrawal<VerifyingKey, Digest>>(
@@ -255,6 +308,16 @@ fuzz_target!(|data: &[u8]| {
         51 => roundtrip::<StateTarget<Digest>>(bytes, &()),
         52 => roundtrip::<ActivityRecord<VerifyingKey, Digest>>(bytes, &()),
         53 => roundtrip::<ActivityRange<Digest>>(bytes, &()),
+        54 => roundtrip::<EpochContext<VerifyingKey, Digest>>(bytes, &()),
+        55 => chain_roundtrip(
+            bytes,
+            &Bounds {
+                committee: item_limit,
+                items: item_limit,
+                destination: destination_limit,
+            },
+        ),
+        56 => generated_chain_roundtrip(bytes),
         _ => unreachable!(),
     }
 

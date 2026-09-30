@@ -143,9 +143,6 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
                 fixture.operator.public_key(),
                 &fixture.deposits,
                 &fixture.withdrawals,
-                fixture.context.predecessor_liability() - withdrawal_total,
-                100,
-                101,
                 CloseLimits::protocol_maximum(),
                 *fixture.context.committee(),
             )
@@ -154,6 +151,10 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
                 &state,
                 &fixture.deposits,
                 &fixture.withdrawals,
+                rows(&fixture.context, &close),
+                fixture.context.predecessor_liability() - withdrawal_total,
+                100,
+                101,
                 Floors {
                     activity: 0,
                     payouts: 0,
@@ -184,9 +185,11 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
                         1,
                         vector.root::<Sha256, ShaDigest>().unwrap(),
                     );
+                    let authorization =
+                        SendAuthorization::sign(body, predecessor(&close, payer), private);
                     Terminal {
-                        operator_signature: bls_ack(&fixture.operator_bls_private, &body),
-                        authorization: SendAuthorization::sign(body, private),
+                        operator_signature: bls_ack(&fixture.operator_bls_private, &authorization),
+                        authorization,
                         vector,
                     }
                 })

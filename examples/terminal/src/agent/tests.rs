@@ -1,8 +1,11 @@
+mod predecessor;
+
 use super::{
     custody::{DEPOSIT_ID_NAMESPACE, withdrawal_deadline},
     evidence::Holders,
     fixtures::{StateFixture, TempDatabase},
     store::{IncomingSummary, PendingWithdrawalClaim},
+    wallet::{ReceiptEpoch, receipt_epoch},
     *,
 };
 use crate::{
@@ -34,6 +37,7 @@ use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     challenge::{AckWitness, Challenge, EntryWitness, HigherEntryLookup},
+    commitment::{self, VectorKind, VectorRoot},
     payment::{PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE, VectorSendBody},
     qmdb::{StateLookup, StateOpening, StateRoot, StateValueOpening},
     transition::{ActivityRange, BatchId, EpochContext, WithdrawalClaim},
@@ -44,7 +48,7 @@ use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_runtime::{
     Clock as _, Listener as _, Network, Runner as _, Spawner as _, Supervisor as _, deterministic,
 };
-use commonware_utils::{TestRng, sync::Mutex};
+use commonware_utils::{TestRng, channel::oneshot, sync::Mutex};
 use std::{
     fs::File,
     io,
@@ -212,6 +216,115 @@ async fn query_counting_retired_evidence(
             }
         });
     (address, queried)
+}
+
+/// Forwards chain queries at `address` but refuses every read of `epoch`'s admission record, a
+/// failure that is not retirement.
+async fn query_refusing_admission(
+    context: &deterministic::Context,
+    address: SocketAddr,
+    epoch: u64,
+) {
+    let mut listener = context.bind(address).await.unwrap();
+    context
+        .child("query_refusing_admission")
+        .spawn(move |context| async move {
+            loop {
+                let Ok((_, mut sink, mut stream)) = listener.accept().await else {
+                    context.sleep(rpc::ACCEPT_RETRY_DELAY).await;
+                    continue;
+                };
+                let Ok(request) = rpc::recv_request(&mut stream).await else {
+                    continue;
+                };
+                let refused = request.method == METHOD_READ
+                    && matches!(
+                        ReadRequest::decode(request.body.clone()),
+                        Ok(ReadRequest {
+                            lookup: Lookup::Admitted { epoch: read },
+                            ..
+                        }) if read == epoch
+                    );
+                let response = if refused {
+                    rpc::error_response("admission read refused".into())
+                } else {
+                    rpc::call(&context, CHAIN, &request).await.unwrap()
+                };
+                let _ = rpc::send_response(&mut sink, &response).await;
+            }
+        });
+}
+
+/// Starts the settlement chain with admission and challenge windows that only explicit advances
+/// cross.
+async fn wide_chain(context: &deterministic::Context) -> harness::Control {
+    harness::start_with_native(
+        context,
+        CHAIN,
+        "chain",
+        harness::native(crate::protocol::deployments()),
+        crate::protocol::Timing {
+            admission_offset: 100,
+            challenge_duration: 100,
+        },
+    )
+    .await
+}
+
+/// Forwards certified reads to the chain and holds some of them in sequence.
+///
+/// Each hold names the lookup it holds, or none for whatever read comes next, and applies once
+/// the hold before it is released. When a held read arrives its first channel fires, and the read
+/// is served once its second channel fires.
+async fn holding_query(
+    context: &deterministic::Context,
+    control: &harness::Control,
+    holds: Vec<Option<Lookup>>,
+) -> (
+    SocketAddr,
+    Vec<(oneshot::Receiver<()>, oneshot::Sender<()>)>,
+) {
+    let mut listener = context
+        .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let (gates, handles): (Vec<_>, Vec<_>) = holds
+        .into_iter()
+        .map(|lookup| {
+            let (arrived, held) = oneshot::channel();
+            let (release, resume) = oneshot::channel();
+            ((lookup, arrived, resume), (held, release))
+        })
+        .unzip();
+    let source = control.clone();
+    context.child("hold").spawn(move |_| async move {
+        let mut gates = gates.into_iter().peekable();
+        loop {
+            let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+            let request = rpc::recv_request(&mut stream).await.unwrap();
+            assert_eq!(request.method, METHOD_READ);
+            let request = ReadRequest::decode(request.body).unwrap();
+            if let Some((_, arrived, resume)) = gates.next_if(|(lookup, _, _)| {
+                lookup
+                    .as_ref()
+                    .is_none_or(|lookup| *lookup == request.lookup)
+            }) {
+                arrived.send(()).unwrap();
+                resume.await.unwrap();
+            }
+            let response = source.read(request).await;
+            rpc::send_response(
+                &mut sink,
+                &rpc::Response::Success {
+                    body: response.encode(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    (address, handles)
 }
 
 /// Serves evidence at `address` by forwarding every request to the chain,
@@ -493,10 +606,10 @@ async fn applied(control: &harness::Control, tx: &SettlementTx) {
     match tx {
         SettlementTx::Deposit(request) => assert!(matches!(
             control.record(deposit_key(&deployment(), &request.event.id)).await,
-            Some(Record::Deposit(recorded)) if recorded == request.event
+            Some(Record::Deposit(recorded)) if recorded.event == request.event
         )),
         SettlementTx::RegisterEpoch(request) => assert!(matches!(
-            control.record(registration_key(&deployment())).await,
+            control.record(registration_key(&deployment(), request.epoch)).await,
             Some(Record::Registration(record)) if record.epoch == request.epoch
         )),
         SettlementTx::Admit(request) => assert!(matches!(
@@ -509,9 +622,14 @@ async fn applied(control: &harness::Control, tx: &SettlementTx) {
     }
 }
 
-/// The certified registration record on the harness chain.
+/// The latest certified registration record on the harness chain.
 async fn registration_record(control: &harness::Control) -> RegistrationRecord {
-    match control.record(registration_key(&deployment())).await {
+    let epoch = status(control)
+        .await
+        .next_registration
+        .checked_sub(1)
+        .expect("an epoch is registered");
+    match control.record(registration_key(&deployment(), epoch)).await {
         Some(Record::Registration(record)) => record,
         record => panic!("expected the registration record, found {record:?}"),
     }
@@ -524,28 +642,52 @@ async fn register(
     control: &harness::Control,
     operator: &mut Operator,
 ) -> PaymentContext<Key, Digest> {
-    let (_, withdrawals) = operator.registration_boundary().unwrap();
-    let mut queued = Vec::new();
-    for request in withdrawals.requests() {
-        if matches!(control.record(withdrawal_key(&deployment(), request.account())).await,
-            Some(Record::Withdrawal(recorded)) if recorded == *request)
-        {
-            queued.push(request.clone());
-        }
-    }
-    let queued = WithdrawalBatch::new(queued).unwrap();
-    let request = operator.signed_registration(&queued).unwrap();
+    let request = operator.signed_registration().unwrap();
     applied(control, &SettlementTx::RegisterEpoch(request)).await;
     let record = registration_record(control).await;
     operator.adopt_registration(&record).unwrap();
     operator.registration_boundary().unwrap().0
 }
 
+/// Registers a shared operator's live epoch and adopts the certified record,
+/// without holding the operator across the chain round trip.
+async fn register_shared(control: &harness::Control, operator: &Mutex<Operator>) {
+    let request = operator.lock().signed_registration().unwrap();
+    applied(control, &SettlementTx::RegisterEpoch(request)).await;
+    let record = registration_record(control).await;
+    operator.lock().adopt_registration(&record).unwrap();
+}
+
+/// Serves every request against a shared operator until aborted, counting
+/// payment head reads.
+fn serve<L: commonware_runtime::Listener>(
+    context: &deterministic::Context,
+    mut listener: L,
+    operator: Arc<Mutex<Operator>>,
+) -> (commonware_runtime::Handle<()>, Arc<AtomicUsize>) {
+    let heads = Arc::new(AtomicUsize::new(0));
+    let server = context.child("operator").spawn({
+        let heads = heads.clone();
+        move |_| async move {
+            loop {
+                respond(&mut listener, |request| {
+                    if matches!(request, operator_rpc::OperatorRequest::PaymentHead(_)) {
+                        heads.fetch_add(1, Ordering::SeqCst);
+                    }
+                    operator_rpc::handle_decoded(&mut operator.lock(), request)
+                })
+                .await;
+            }
+        }
+    });
+    (server, heads)
+}
+
 /// Admits `result`'s close and drives the chain past its challenge window to
 /// certified finalization.
 async fn finalize(control: &harness::Control, result: &SettlementResult) {
     applied(control, &SettlementTx::Admit(AdmitRequest::from(result))).await;
-    let deadline = result.context.epoch_context().challenge_deadline();
+    let deadline = result.context.challenge_deadline();
     let height = control.advance(0).await;
     if height <= deadline {
         control.advance(deadline - height + 1).await;
@@ -556,6 +698,20 @@ async fn finalize(control: &harness::Control, result: &SettlementResult) {
             .last_finalized
             .is_some_and(|last| last >= result.context.payment().epoch())
     );
+}
+
+/// Registers the operator's live epoch with one payment and finalizes its close, which retires
+/// the admission and anchor two epochs back.
+async fn finalize_next(
+    control: &harness::Control,
+    operator: &mut Operator,
+    seed: u64,
+) -> SettlementResult {
+    register(control, operator).await;
+    operator.pay(2, 3, 1).unwrap();
+    let result = operator.complete_close(seed).unwrap();
+    finalize(control, &result).await;
+    result
 }
 
 /// The chain's status singleton, read directly for assertions.
@@ -574,34 +730,32 @@ async fn registered_context(control: &harness::Control) -> EpochContext<Key, Dig
     let deposits_root = DepositBatch::<Key>::empty().root::<Sha256>().unwrap();
     let withdrawals = WithdrawalBatch::empty();
     let signature =
-        protocol.sign_chain_registration(0, 400, &deposits_root, &withdrawals, epoch_fee(control));
+        protocol.sign_chain_registration(0, 0, &deposits_root, &withdrawals, epoch_fee(control));
     applied(
         control,
         &SettlementTx::RegisterEpoch(RegisterEpochRequest {
             fee: epoch_fee(control),
             deployment: deployment(),
             epoch: 0,
-            predecessor_liability: 400,
+            end: 0,
             deposits_root,
 
             withdrawals: withdrawals.clone(),
-            openings: Vec::new(),
             signature,
         }),
     )
     .await;
     let record = registration_record(control).await;
-    crate::protocol::epoch_context_at(
+    let context = crate::protocol::epoch_context_at(
         deployment(),
         operator_key(),
         0,
         &DepositBatch::empty(),
         &withdrawals,
-        400,
-        record.admission_deadline,
-        record.challenge_deadline,
     )
-    .unwrap()
+    .unwrap();
+    assert_eq!(context.payment().anchor(), &record.anchor);
+    context
 }
 
 async fn respond_rpc<L: commonware_runtime::Listener>(
@@ -669,13 +823,13 @@ async fn accept_and_drop<L: commonware_runtime::Listener>(
 /// Countersigns one payer authorization as the scripted operator, producing the
 /// dual-signed acknowledgment the wire carries.
 fn countersign(authorization: &SendAuthorization<Key, Digest>, operator: &Wallet) -> Ack {
-    let encoded = authorization.body().encode();
     Ack::from_raw_unchecked(
         authorization.body().clone(),
+        authorization.predecessor(),
         authorization.payer_signature().clone(),
         operator
             .signer()
-            .sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &encoded),
+            .sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &authorization.message()),
     )
 }
 
@@ -763,7 +917,7 @@ pub(super) fn issued_receipt(
         vector.root::<Sha256, Digest>().unwrap(),
     );
     let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
-    let ack = Ack::sign_by_authorities(body, payer.signer(), protocol.operator());
+    let ack = Ack::sign_by_authorities(body, empty(), payer.signer(), protocol.operator());
     let OutTipLookup::Present { opening, .. } = vector.lookup::<Sha256, Digest>(recipient).unwrap()
     else {
         panic!("the issued entry is present by construction");
@@ -795,15 +949,25 @@ fn accept_sends_response(accepted: Vec<operator_rpc::AcceptedBatchResponse>) -> 
 }
 
 /// A scripted corrective rejection claiming `cumulative_debit`. Every scripted use claims
-/// an endpoint the wallet refuses to adopt, so the served sequence and vector are empty.
+/// an endpoint the wallet refuses to adopt: the served sequence and vector are empty, and
+/// the reported root is not the empty vector root, so the report is never usable.
 fn stale_response(context: &PaymentContext<Key, Digest>, cumulative_debit: u64) -> Bytes {
-    operator_rpc::AcceptSendResponse::Stale {
+    operator_rpc::AcceptSendResponse::Stale(operator_rpc::StaleResponse {
         context: context.clone(),
+        epoch: context.epoch().saturating_sub(1),
         cumulative_debit,
         seq: 0,
         entries: Vec::new(),
-    }
+        predecessor: VectorRoot {
+            digest: Sha256::hash(&[b"unusable-report"]),
+        },
+    })
     .encode()
+}
+
+/// The root a payer binds without a preceding terminal.
+fn empty() -> VectorRoot<Digest> {
+    commitment::empty_root::<Sha256>(VectorKind::OutEntry)
 }
 
 /// Opens a claim intent around the exact authorization the wallet must retain.
@@ -871,16 +1035,23 @@ fn genesis_cache() -> StateFixture {
     )
 }
 
+/// An epoch context the chain never registered: its boundary holds a deposit
+/// that no registration carries.
 fn unregistered_context(operator: Key, epoch: u64) -> EpochContext<Key, Digest> {
+    let deposits = DepositBatch::new(vec![
+        commonware_clearing::bajillion::boundary::DepositRecord::new(
+            crate::protocol::eve_identity().key,
+            1,
+        )
+        .unwrap(),
+    ])
+    .unwrap();
     crate::protocol::epoch_context_at(
         deployment(),
         operator,
         epoch,
-        &DepositBatch::empty(),
+        &deposits,
         &WithdrawalBatch::empty(),
-        400,
-        100,
-        101,
     )
     .unwrap()
 }
@@ -897,6 +1068,7 @@ fn payment_head_response(
     operator_rpc::PaymentHeadResponse {
         context,
         balance,
+        floor_epoch: 0,
         root: cache.root(),
         opening: cache.opening(&account).unwrap(),
     }
@@ -1457,12 +1629,14 @@ fn finalized_payment_without_a_saved_ack_remains_pending_after_retirement() {
             let result = operator.complete_close(31).unwrap();
             finalize(&control, &result).await;
 
-            // A successor can retire the descriptor before a lost acknowledgement is resolved.
-            // Without retained coverage, the exact durable authorization remains pending.
+            // The epoch after a successor can retire the descriptor before a lost
+            // acknowledgement is resolved. Without retained coverage, the exact durable
+            // authorization remains pending.
             register(&control, &mut operator).await;
             operator.pay(2, 3, 1).unwrap();
             let successor = operator.complete_close(32).unwrap();
             finalize(&control, &successor).await;
+            finalize_next(&control, &mut operator, 33).await;
             assert!(
                 control
                     .record(admitted_key(&deployment(), 0))
@@ -1570,7 +1744,7 @@ fn registration_read_lag_keeps_exact_intent_until_anchor_conflict_is_visible() {
         for lookup in [
             Lookup::Status,
             Lookup::Anchor { epoch: 0 },
-            Lookup::Registration,
+            Lookup::Registration { epoch: 0 },
         ] {
             let request = ReadRequest::new(deployment(), lookup);
             before_registration.push((request.encode(), control.read(request).await.encode()));
@@ -1618,6 +1792,22 @@ fn registration_read_lag_keeps_exact_intent_until_anchor_conflict_is_visible() {
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         let head = operator.payment_head(&wallets()[0].public_key()).unwrap();
         let old = head.context.payment().clone();
+
+        // A confirmed deposit joins the unregistered boundary after the head
+        // read, so the registered anchor differs from the one the wallet signs.
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"lagging-registration-deposit"]),
+            account: wallets()[1].public_key(),
+            amount: 1,
+        };
+        applied(
+            &control,
+            &SettlementTx::Deposit(signed_deposit(&control, event.clone())),
+        )
+        .await;
+        operator
+            .observe(0, &[crate::chain::state::Intake::Deposit(event)])
+            .unwrap();
         let live = register(&control, &mut operator).await;
         assert_ne!(old.anchor(), live.anchor());
         let mut listener = context
@@ -1699,6 +1889,7 @@ fn received_sequence_zero_is_valid_and_survives_reopen() {
         );
         receipt.ack = Ack::sign_by_authorities(
             body,
+            empty(),
             payer.signer(),
             Protocol::new(NonZeroUsize::MIN).unwrap().operator(),
         );
@@ -2018,8 +2209,8 @@ fn admitted_registration_is_not_stageable_without_the_operator_head() {
             .unwrap();
         let operator_address = listener.local_addr().unwrap();
 
-        // The close is admitted but not finalized: the registration singleton
-        // still names its epoch, now marked admitted, and the certified head is
+        // The close is admitted but not finalized: the epoch's registration
+        // record still names it, now marked admitted, and the certified head is
         // still the genesis root.
         operator.pay(1, 2, 1).unwrap();
         let result = operator.complete_close(10).unwrap();
@@ -2432,133 +2623,6 @@ fn admitted_activity_exclusion_allows_a_new_epoch_intent() {
                 finalized.then_some(old.epoch())
             );
             rolling.await.unwrap();
-        });
-    }
-}
-
-#[test]
-fn delayed_admission_retries_the_exact_intent_until_successor_payment_completes() {
-    for entries in [vec![(1, 3)], vec![(1, 3), (2, 4)]] {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let total = entries.iter().map(|(_, amount)| amount).sum::<u64>();
-            let (control, mut chain) = chain(&context).await;
-            let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-            let old = register(&control, &mut operator).await;
-            let mut listener = context
-                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                .await
-                .unwrap();
-            let address = listener.local_addr().unwrap();
-            let staging = context.child("staging").spawn(move |_| async move {
-                relay(&mut listener, &mut operator).await;
-                relay(&mut listener, &mut operator).await;
-                (listener, operator)
-            });
-            let mut agent = Agent::new(0).unwrap();
-            accepted(
-                agent
-                    .pay(&context, &mut chain, address, &[(1, 7)])
-                    .await
-                    .unwrap(),
-            );
-            let (mut listener, mut operator) = staging.await.unwrap();
-            let delayed_control = control.clone();
-            let rolling = context
-                .child("delayed_admission")
-                .spawn(move |context| async move {
-                    let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-                    let operator_rpc::OperatorRequest::AcceptSend(request) =
-                        operator_rpc::decode_request(rpc::recv_request(&mut stream).await.unwrap())
-                            .unwrap()
-                    else {
-                        panic!("the second payment must sign from the cached epoch");
-                    };
-                    assert_eq!(request.authorization.body().epoch(), old.epoch());
-                    assert_eq!(request.authorization.body().seq(), 2);
-                    assert_eq!(request.authorization.body().cumulative_debit(), 7 + total);
-                    let expected = request.encode();
-                    let result = operator.complete_close(12).unwrap();
-                    let response = operator_rpc::handle_decoded(
-                        &mut operator,
-                        operator_rpc::OperatorRequest::AcceptSend(request),
-                    );
-                    rpc::send_response(&mut sink, &response).await.unwrap();
-
-                    // Admission is unavailable while the wallet receives corrective responses.
-                    let admit_at = context.current() + Duration::from_secs(1);
-                    let mut corrections = 1;
-                    let (mut sink, request) = loop {
-                        let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-                        let operator_rpc::OperatorRequest::AcceptSend(request) =
-                            operator_rpc::decode_request(
-                                rpc::recv_request(&mut stream).await.unwrap(),
-                            )
-                            .unwrap()
-                        else {
-                            panic!("the unresolved payment must retry its exact authorization");
-                        };
-                        assert_eq!(request.encode(), expected);
-                        if context.current() >= admit_at {
-                            break (sink, request);
-                        }
-                        let response = operator_rpc::handle_decoded(
-                            &mut operator,
-                            operator_rpc::OperatorRequest::AcceptSend(request),
-                        );
-                        rpc::send_response(&mut sink, &response).await.unwrap();
-                        corrections += 1;
-                    };
-                    assert!(corrections >= 3);
-                    applied(
-                        &delayed_control,
-                        &SettlementTx::Admit(AdmitRequest::from(&result)),
-                    )
-                    .await;
-                    let live = register(&delayed_control, &mut operator).await;
-                    let response = operator_rpc::handle_decoded(
-                        &mut operator,
-                        operator_rpc::OperatorRequest::AcceptSend(request),
-                    );
-                    rpc::send_response(&mut sink, &response).await.unwrap();
-                    relay(&mut listener, &mut operator).await;
-                    relay(&mut listener, &mut operator).await;
-                    live
-                });
-            let started = context.current();
-            let payment = accepted(
-                agent
-                    .pay(&context, &mut chain, address, &entries)
-                    .await
-                    .unwrap(),
-            );
-            let live = rolling.await.unwrap();
-            assert!(context.current().duration_since(started).unwrap() >= Duration::from_secs(1));
-            assert_eq!(payment.epoch, live.epoch());
-            assert_eq!(payment.epoch, 1);
-            assert_eq!(payment.total, total);
-            assert_eq!(payment.acceptance.entries.len(), entries.len());
-            for (recipient, amount) in &entries {
-                let entry = payment
-                    .acceptance
-                    .entries
-                    .iter()
-                    .find(|entry| entry.recipient == wallets()[*recipient].public_key())
-                    .unwrap();
-                assert_eq!(entry.cumulative, *amount);
-                assert_eq!(entry.count, 1);
-            }
-            assert_eq!(agent.store.debits_since(0).unwrap(), 7 + total);
-            assert_eq!(agent.receipt_count(), 1 + entries.len() as u64);
-            assert!(agent.pending_payments.is_empty());
-            assert!(status(&control).await.last_finalized.is_none());
-            assert!(
-                !chain
-                    .admitted(&context, 0)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .finalized
-            );
         });
     }
 }
@@ -3175,24 +3239,24 @@ fn foreign_deployment_head_cannot_authorize(usage: HeadUse) {
             .submit(SettlementTx::RegisterEpoch(RegisterEpochRequest {
                 deployment: foreign,
                 epoch: 0,
-                predecessor_liability: 0,
+                end: 1,
                 deposits_root: root,
 
                 withdrawals: withdrawals.clone(),
-                openings: Vec::new(),
                 fee,
-                signature: protocol.sign_chain_registration(0, 0, &root, &withdrawals, fee),
+                signature: protocol.sign_chain_registration(0, 1, &root, &withdrawals, fee),
             }))
             .await;
         let registered = other.registration(&context).await.unwrap().unwrap();
+        let (admission_deadline, challenge_deadline) = registered.deadlines.unwrap();
         let epoch = protocol
             .registration_at(
                 0,
                 deposits,
                 withdrawals,
                 0,
-                registered.admission_deadline,
-                registered.challenge_deadline,
+                admission_deadline,
+                challenge_deadline,
             )
             .unwrap();
         assert_eq!(
@@ -3253,7 +3317,7 @@ fn foreign_deployment_head_cannot_authorize(usage: HeadUse) {
             )
             .unwrap();
             let terminal = commonware_clearing::bajillion::transition::Terminal {
-                operator_signature: protocol.sign_ack_aggregate(send.authorization.body()),
+                operator_signature: protocol.sign_ack_aggregate(&send.authorization),
                 authorization: send.authorization,
                 vector,
             };
@@ -3278,14 +3342,7 @@ fn foreign_deployment_head_cannot_authorize(usage: HeadUse) {
             assert!(other.admitted(&context, 0).await.unwrap().is_some());
             let height = control.advance(0).await;
             control
-                .advance(
-                    result
-                        .context
-                        .epoch_context()
-                        .challenge_deadline()
-                        .saturating_sub(height)
-                        + 1,
-                )
+                .advance(result.context.challenge_deadline().saturating_sub(height) + 1)
                 .await;
             let finalized = other.status(&context).await.unwrap();
             assert_eq!(finalized.last_finalized, Some(0));
@@ -3510,7 +3567,7 @@ fn unregistered_valid_payment_context_does_not_commit() {
         .await;
         let signature = protocol.sign_chain_registration(
             0,
-            400,
+            1,
             &deposits_root,
             &withdrawals,
             epoch_fee(&control),
@@ -3521,11 +3578,10 @@ fn unregistered_valid_payment_context_does_not_commit() {
                 fee: epoch_fee(&control),
                 deployment: deployment(),
                 epoch: 0,
-                predecessor_liability: 400,
+                end: 1,
                 deposits_root,
 
                 withdrawals,
-                openings: Vec::new(),
                 signature,
             }),
         )
@@ -3706,7 +3762,7 @@ fn maximum_acceptance_survives_exact_retry_and_wallet_restart() {
         .into_accepted();
     accepted.acceptance.verify(head.context.payment()).unwrap();
     let encoded = accepted.acceptance.encode();
-    assert_eq!(encoded.len(), 80_378);
+    assert_eq!(encoded.len(), 80_410);
     assert_eq!(
         Acceptance::decode(encoded.clone()).unwrap(),
         accepted.acceptance
@@ -4464,6 +4520,7 @@ fn consumed_equal_output_cannot_complete_another_exact_request_after_retirement(
         operator.pay(2, 3, 1).unwrap();
         let successor = operator.complete_close(30).unwrap();
         finalize(&control, &successor).await;
+        finalize_next(&control, &mut operator, 31).await;
         assert!(
             control
                 .record(admitted_key(&deployment(), 0))
@@ -4511,7 +4568,11 @@ fn staged_deposit_survives_restart_and_retries_the_same_id() {
         let event = agent.pending_deposit.clone().unwrap();
         control.submit(SettlementTx::Deposit(event.clone())).await;
         assert_eq!(
-            chain.deposit(&context, event.event.id).await.unwrap(),
+            chain
+                .deposit(&context, event.event.id)
+                .await
+                .unwrap()
+                .map(|effect| effect.event),
             Some(event.event.clone())
         );
         assert_eq!(
@@ -4641,7 +4702,7 @@ fn unfinalized_payout_is_not_trusted_before_finalization() {
 
         // Only finalization publishes the payout into the authoritative native MMR. A cold retry
         // discovers the output independently before caching its current payout identity.
-        let deadline = result.context.epoch_context().challenge_deadline();
+        let deadline = result.context.challenge_deadline();
         let height = control.advance(0).await;
         if height <= deadline {
             control.advance(deadline - height + 1).await;
@@ -5102,23 +5163,23 @@ async fn admit_omitting(
     let deposits_root = deposits.root::<Sha256>().unwrap();
     let withdrawals = WithdrawalBatch::empty();
     let signature =
-        protocol.sign_chain_registration(0, 400, &deposits_root, &withdrawals, epoch_fee(control));
+        protocol.sign_chain_registration(0, 1, &deposits_root, &withdrawals, epoch_fee(control));
     applied(
         control,
         &SettlementTx::RegisterEpoch(RegisterEpochRequest {
             fee: epoch_fee(control),
             deployment: deployment(),
             epoch: 0,
-            predecessor_liability: 400,
+            end: 1,
             deposits_root,
 
             withdrawals,
-            openings: Vec::new(),
             signature,
         }),
     )
     .await;
-    let record = registration_record(control).await;
+    let (admission_deadline, challenge_deadline) =
+        registration_record(control).await.deadlines.unwrap();
     let state = crate::protocol::init_replica(
         context.child("omitting_state"),
         "omitting",
@@ -5130,8 +5191,8 @@ async fn admit_omitting(
     let fixture = Box::pin(crate::protocol::omitting_close(
         state,
         &mut TestRng::new(7),
-        record.admission_deadline,
-        record.challenge_deadline,
+        admission_deadline,
+        challenge_deadline,
     ))
     .await
     .unwrap();
@@ -5146,7 +5207,7 @@ async fn admit_omitting(
 /// Drives the admitted omitting close past its challenge window to certified
 /// finalization.
 async fn finalize_omitting(control: &harness::Control, fixture: &crate::protocol::OmittingClose) {
-    let deadline = fixture.result.context.epoch_context().challenge_deadline();
+    let deadline = fixture.result.context.challenge_deadline();
     let height = control.advance(0).await;
     if height <= deadline {
         control.advance(deadline - height + 1).await;
@@ -5720,7 +5781,7 @@ fn withheld_evidence_past_finalization_alarms_once() {
 }
 
 #[test]
-fn successor_finality_withholds_retired_receipts_without_requerying_evidence() {
+fn retired_receipts_are_withheld_without_requerying_evidence() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, _) = chain(&context).await;
@@ -5770,7 +5831,8 @@ fn successor_finality_withholds_retired_receipts_without_requerying_evidence() {
         operator.pay(2, 3, 1).unwrap();
         let successor = operator.complete_close(61).unwrap();
         finalize(&control, &successor).await;
-        assert_eq!(status(&control).await.last_finalized, Some(1));
+        finalize_next(&control, &mut operator, 62).await;
+        assert_eq!(status(&control).await.last_finalized, Some(2));
 
         let before_evidence = evidence_reads.load(Ordering::Relaxed);
         let before_retired = retired_reads.load(Ordering::Relaxed);
@@ -6295,7 +6357,7 @@ fn signed_withdrawal_escalates_to_settlement() {
             control
                 .record(crate::chain::state::withdrawal_key(&deployment(), &account))
                 .await,
-            Some(Record::Withdrawal(queued)) if queued == request
+            Some(Record::Withdrawal(queued)) if queued.request == request
         ));
         assert_eq!(genesis_root.digest, *request.body().state_root());
 
@@ -6398,7 +6460,7 @@ fn head_and_withdrawal_use_validators_with_operator_unreachable() {
             control
                 .record(withdrawal_key(&deployment(), &account))
                 .await,
-            Some(Record::Withdrawal(queued)) if queued == request
+            Some(Record::Withdrawal(queued)) if queued.request == request
         ));
 
         // A wallet that never polled signs over an opening the withdrawal itself
@@ -6976,6 +7038,7 @@ fn uncached_finalized_payouts_require_an_unspent_candidate() {
             operator.pay(2, operator.wallet_count(), 20).unwrap();
             let second = operator.complete_close(2).unwrap();
             finalize(&control, &second).await;
+            finalize_next(&control, &mut operator, 3).await;
 
             // The exact request remains the retry authorization after its point records retire.
             assert!(
@@ -7589,7 +7652,7 @@ fn invalidated_receipt_is_protected_across_fault_order_and_restart() {
                 }
                 FaultOrder::TimeoutFirst => {
                     register(&control, &mut operator).await;
-                    let deadline = registration_record(&control).await.admission_deadline;
+                    let deadline = registration_record(&control).await.deadlines.unwrap().0;
                     let height = control.advance(0).await;
                     control.advance(deadline - height + 1).await;
                     assert!(matches!(
@@ -7614,7 +7677,7 @@ fn invalidated_receipt_is_protected_across_fault_order_and_restart() {
             }
             if settling {
                 // Terminal settlement waits for the valid predecessor closes to finalize.
-                let deadline = result.context.epoch_context().challenge_deadline();
+                let deadline = result.context.challenge_deadline();
                 let height = control.advance(0).await;
                 if height <= deadline {
                     control.advance(deadline - height + 1).await;
@@ -7710,6 +7773,7 @@ fn healthy_expiry_retires_authorization_before_other_actions() {
             let old_head = operator_rpc::PaymentHeadResponse {
                 context: raw.context,
                 balance: raw.balance,
+                floor_epoch: raw.floor_epoch,
                 root: raw.root,
                 opening: raw.opening,
             };
@@ -8256,6 +8320,7 @@ fn stale_finalized_head_cannot_override_admitted_withdrawal() {
         let stale = operator_rpc::PaymentHeadResponse {
             context: current.context,
             balance: first_head.balance,
+            floor_epoch: current.floor_epoch,
             root: first_head.root,
             opening: first_head.opening,
         };
@@ -8352,7 +8417,7 @@ fn frozen_recovery_preserves_finalized_withdrawals_without_history() {
             };
             let fault_at = if carried {
                 register(&control, &mut operator).await;
-                registration_record(&control).await.admission_deadline + 1
+                registration_record(&control).await.deadlines.unwrap().0 + 1
             } else {
                 request.body().deadline()
             };
@@ -8562,6 +8627,7 @@ fn payment_conclusion_retires_its_context_in_the_same_commit() {
             let head = operator_rpc::PaymentHeadResponse {
                 context: raw.context,
                 balance: raw.balance,
+                floor_epoch: raw.floor_epoch,
                 root: raw.root,
                 opening: raw.opening,
             };
@@ -8581,7 +8647,7 @@ fn payment_conclusion_retires_its_context_in_the_same_commit() {
                 7,
                 vector.root::<Sha256, Digest>().unwrap(),
             );
-            let authorization = SendAuthorization::sign(body, agent.wallet.signer());
+            let authorization = SendAuthorization::sign(body, empty(), agent.wallet.signer());
             agent
                 .store
                 .stage_payment(&authorization, &entries, &head.root, 0)
@@ -8704,7 +8770,7 @@ fn receipt_acquisition_after_successor_registration_keeps_the_challenge() {
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&second))).await;
         assert_eq!(registration_record(&control).await.epoch, 1);
         assert!(!chain.admitted(&context, 0).await.unwrap().unwrap().finalized);
-        assert!(status(&control).await.height <= first.context.epoch_context().challenge_deadline());
+        assert!(status(&control).await.height <= first.context.challenge_deadline());
         let mut listener = context.bind(UNREACHABLE).await.unwrap();
         let served = receipt.clone();
         let server = context.child("live_old_receipt").spawn(move |_| async move {
@@ -8884,7 +8950,7 @@ fn late_incoming_requires_both_finalized_endpoints() {
                 recipient: recipient.clone(), cumulative, count,
             }]).unwrap();
             let body = VectorSendBody::new(&payment, payer.public_key(), count, cumulative, vector.root::<Sha256, Digest>().unwrap());
-            let authorization = SendAuthorization::sign(body, payer.signer());
+            let authorization = SendAuthorization::sign(body, empty(), payer.signer());
             let OutTipLookup::Present { opening, .. } = vector.lookup::<Sha256, Digest>(&recipient).unwrap() else {
                 panic!("the receipt entry is present");
             };
@@ -9021,7 +9087,7 @@ fn incoming_fault_page_commits_covered_prefix_and_retries_survivor() {
             .incoming_payments(&wallets()[1].public_key(), 0, 10)
             .unwrap();
         assert_eq!(rows.len(), 3);
-        let deadline = registration_record(&control).await.admission_deadline;
+        let deadline = registration_record(&control).await.deadlines.unwrap().0;
         let height = control.advance(0).await;
         control.advance(deadline - height + 1).await;
         assert!(status(&control).await.hard_faulted);
@@ -9094,7 +9160,7 @@ fn incoming_fault_page_commits_covered_prefix_and_retries_survivor() {
         );
         let height = control.advance(0).await;
         control
-            .advance(survivor.context.epoch_context().challenge_deadline() - height + 1)
+            .advance(survivor.context.challenge_deadline() - height + 1)
             .await;
         assert_eq!(status(&control).await.last_finalized, Some(1));
         assert!(status(&control).await.hard_faulted);
@@ -9474,7 +9540,7 @@ fn accepted_reply_cannot_complete_faulted_work_before_finalized_coverage() {
                 assert_eq!(payment.epoch(), 1);
             } else {
                 if admitted { register(&control, &mut operator).await; }
-                let deadline = registration_record(&control).await.admission_deadline;
+                let deadline = registration_record(&control).await.deadlines.unwrap().0;
                 let height = control.advance(0).await;
                 control.advance(deadline - height + 1).await;
             }
@@ -9506,7 +9572,7 @@ fn accepted_reply_cannot_complete_faulted_work_before_finalized_coverage() {
                 let expected = agent.pending_payments.first().unwrap().authorization.encode();
                 let close = close.unwrap();
                 let height = control.advance(0).await;
-                control.advance(close.context.epoch_context().challenge_deadline() - height + 1).await;
+                control.advance(close.context.challenge_deadline() - height + 1).await;
                 assert!(chain.admitted(&context, payment.epoch()).await.unwrap().unwrap().finalized);
                 let final_response = context.child("finalized_prefix_acceptance").spawn(move |_| async move {
                     respond(&mut listener, |request| {
@@ -9550,6 +9616,7 @@ fn stale_heads_cannot_restore_a_concluded_signing_context() {
             let old_head = operator_rpc::PaymentHeadResponse {
                 context: raw.context,
                 balance: raw.balance,
+                floor_epoch: raw.floor_epoch,
                 root: raw.root,
                 opening: raw.opening,
             };
@@ -9898,7 +9965,7 @@ fn hidden_later_challenge_defers_receipts_until_terminal_settlement() {
         let covered = operator.committed_entry(&wallets()[0].public_key(), &wallets()[1].public_key(), 0).unwrap();
         assert_eq!(covered.resolve::<Sha256>(&activity_range(&close), &wallets()[0].public_key(), &wallets()[1].public_key()).unwrap(), (7, 1));
         register(&control, &mut operator).await;
-        let deadline = registration_record(&control).await.admission_deadline;
+        let deadline = registration_record(&control).await.deadlines.unwrap().0;
         let height = control.advance(0).await;
         control.advance(deadline - height + 1).await;
         assert!(matches!(chain.fault(&context).await.unwrap(), Some(FaultRecord::Faulted(HardFaultReasonResponse::ExpiredRegistration { .. }))));
@@ -9906,7 +9973,7 @@ fn hidden_later_challenge_defers_receipts_until_terminal_settlement() {
         control.submit(receipt_challenge(close.header.batch_id::<Sha256>(), &omitted, omission)).await;
         assert!(matches!(chain.fault(&context).await.unwrap(), Some(FaultRecord::Faulted(HardFaultReasonResponse::ExpiredRegistration { .. }))));
         let height = control.advance(0).await;
-        control.advance(close.context.epoch_context().challenge_deadline() - height + 1).await;
+        control.advance(close.context.challenge_deadline() - height + 1).await;
         assert!(status(&control).await.last_finalized.is_none(), "a surviving clean close would have finalized");
         assert!(!chain.admitted(&context, 0).await.unwrap().unwrap().finalized);
         let expected_retry = expected.clone();
@@ -10137,7 +10204,7 @@ fn clean_prefix_finalizing_during_fault_read_remains_creditable() {
         let close = operator.complete_close(826).unwrap();
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
         register(&control, &mut operator).await;
-        let deadline = registration_record(&control).await.admission_deadline;
+        let deadline = registration_record(&control).await.deadlines.unwrap().0;
         let height = control.advance(0).await;
         control.advance(deadline - height + 1).await;
         assert!(status(&control).await.hard_faulted);
@@ -10177,7 +10244,7 @@ fn clean_prefix_finalizing_during_fault_read_remains_creditable() {
         blocked.await.unwrap();
         assert!(matches!(control.record(admitted_key(&deployment(), 0)).await, Some(Record::Admitted(record)) if !record.finalized));
         let height = control.advance(0).await;
-        control.advance(close.context.epoch_context().challenge_deadline() - height + 1).await;
+        control.advance(close.context.challenge_deadline() - height + 1).await;
         assert_eq!(status(&control).await.last_finalized, Some(0));
         control.submit(SettlementTx::BeginHardFaultSettlement(BeginHardFaultSettlementRequest { deployment: deployment() })).await;
         assert!(matches!(control.record(fault_key(&deployment())).await, Some(Record::Fault(FaultRecord::Settling(snapshot))) if snapshot.invalid_from.is_none()));
@@ -10191,5 +10258,725 @@ fn clean_prefix_finalizing_during_fault_read_remains_creditable() {
         assert_eq!(receiver.incoming(), IncomingSummary { total: 7, count: 1, cursor: 1 });
         query_server.abort();
         operator_server.await.unwrap();
+    });
+}
+
+/// A payment head's floor lies between the first unfinalized epoch and its
+/// context. At the first unfinalized epoch the floor root is the finalized
+/// state root, and above it the successor root of the admitted close just
+/// below the floor. Heads outside those bounds, or over another root, are
+/// refused before anything is retained or cached.
+#[test]
+fn payment_head_floor_lies_between_finality_and_its_context() {
+    deterministic::Runner::default().start(|context| async move {
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let account = wallets()[0].public_key();
+        let genesis = genesis_cache();
+
+        // Epoch 0 is admitted but not finalized, and epoch 1 registers. The
+        // operator's head floors at epoch 0's admitted successor.
+        register(&control, &mut operator).await;
+        operator.pay(0, 1, 7).unwrap();
+        let first = operator.complete_close(1).unwrap();
+        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&first))).await;
+        register(&control, &mut operator).await;
+        let valid =
+            operator_rpc::PaymentHeadResponse::from(operator.payment_head(&account).unwrap());
+        assert_eq!(valid.context.payment().epoch(), 1);
+        assert_eq!(valid.floor_epoch, 1);
+        assert_eq!(valid.root, first.roots.successor);
+        let status = chain.status(&context).await.unwrap();
+        assert_eq!(status.last_finalized, None);
+
+        // A floor above the context, the finalized floor over the admitted
+        // root, the admitted floor over the genesis root, and a floor whose
+        // close is unadmitted are all refused.
+        let mut above = valid.clone();
+        above.floor_epoch = 2;
+        let mut unfinalized = valid.clone();
+        unfinalized.floor_epoch = 0;
+        let mut foreign = valid.clone();
+        foreign.root = genesis.root();
+        foreign.opening = genesis.opening(&account).unwrap();
+        let mut unadmitted = valid.clone();
+        unadmitted.context = crate::protocol::epoch_context_at(
+            deployment(),
+            operator_key(),
+            2,
+            &DepositBatch::empty(),
+            &WithdrawalBatch::empty(),
+        )
+        .unwrap();
+        unadmitted.floor_epoch = 2;
+        let mut agent = Agent::new(0).unwrap();
+        for (head, expected) in [
+            (above, "lies outside the unfinalized epochs"),
+            (unfinalized, "is not the exact settlement head"),
+            (foreign, "differs from its admitted floor close"),
+            (unadmitted, "floor close has not been admitted"),
+        ] {
+            let error = agent
+                .verify_head(&context, &mut chain, &head, &status)
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+            assert!(agent.cache.is_none());
+        }
+        for root in [first.roots.successor, genesis.root()] {
+            assert!(agent.store.recovery_opening(&root).unwrap().is_none());
+        }
+
+        // The operator's head verifies against the admitted successor.
+        agent
+            .verify_head(&context, &mut chain, &valid, &status)
+            .await
+            .unwrap();
+        let cache = agent.cache.as_ref().unwrap();
+        assert_eq!(cache.context.epoch(), 1);
+        assert_eq!(cache.epoch, 1);
+        assert_eq!(cache.root, first.roots.successor);
+
+        // Once epoch 0 finalizes, a floor below the first unfinalized epoch is
+        // refused even over its genuine genesis opening, while the same floor
+        // as before now verifies as the finalized state.
+        let height = control.advance(0).await;
+        control
+            .advance(first.context.challenge_deadline() - height + 1)
+            .await;
+        let finalized = chain.status(&context).await.unwrap();
+        assert_eq!(finalized.last_finalized, Some(0));
+        let mut below = valid.clone();
+        below.floor_epoch = 0;
+        below.root = genesis.root();
+        below.opening = genesis.opening(&account).unwrap();
+        let error = agent
+            .verify_head(&context, &mut chain, &below, &finalized)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lies outside the unfinalized epochs"));
+        agent
+            .verify_head(&context, &mut chain, &valid, &finalized)
+            .await
+            .unwrap();
+    });
+}
+
+/// A floor below the signing epoch bounds spending across the floor epoch
+/// and its successor. With epoch 0's close held, a wallet floored at genesis
+/// spends an epoch-0 credit in epoch 1 from local state, up to genesis plus
+/// that credit minus its epoch-1 debits, and a payment beyond that bound is
+/// refused before staging.
+#[test]
+fn lower_bound_spans_the_floor_epoch_and_its_successor() {
+    deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+        let (control, mut chain) = chain(&context).await;
+        let operator = Arc::new(Mutex::new(
+            Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap(),
+        ));
+        let listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (server, heads) = serve(&context, listener, operator.clone());
+
+        // Alice credits Bob 30 in epoch 0, and Bob holds the verified receipt.
+        register_shared(&control, &operator).await;
+        let mut alice = Agent::new(0).unwrap();
+        let mut bob = Agent::new(1).unwrap();
+        accepted(
+            alice
+                .pay(&context, &mut chain, address, &[(1, 30)])
+                .await
+                .unwrap(),
+        );
+        bob.intake_incoming(&context, &mut chain, address)
+            .await
+            .unwrap();
+        assert_eq!(bob.incoming().total, 30);
+
+        // Epoch 0 is cut with its close held, and epoch 1 registers behind it.
+        let (started, resume) = operator.lock().pause_next_close();
+        operator.lock().start_close(0).unwrap();
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        register_shared(&control, &operator).await;
+
+        // Bob's first epoch-1 payment reads the head, which floors at genesis.
+        let spent = accepted(
+            bob.pay(&context, &mut chain, address, &[(2, 120)])
+                .await
+                .unwrap(),
+        );
+        assert_eq!(spent.epoch, 1);
+        let cache = bob.cache.as_ref().unwrap();
+        assert_eq!(cache.context.epoch(), 1);
+        assert_eq!(cache.epoch, 0);
+        assert_eq!(cache.root, genesis_cache().root());
+
+        // Genesis 100 plus the epoch-0 credit 30 minus the epoch-1 debit 120
+        // leaves 10, which Bob spends from local state without a head read.
+        let reads = heads.load(Ordering::SeqCst);
+        accepted(
+            bob.pay(&context, &mut chain, address, &[(2, 10)])
+                .await
+                .unwrap(),
+        );
+        assert_eq!(heads.load(Ordering::SeqCst), reads);
+
+        // Nothing remains, so the next payment is refused before staging.
+        let error = bob
+            .pay(&context, &mut chain, address, &[(2, 1)])
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("insufficient available balance"));
+        assert!(bob.pending_payments.is_empty());
+        assert_eq!(bob.store.credits_since(0).unwrap(), 30);
+        assert_eq!(bob.store.debits_since(0).unwrap(), 130);
+        assert!(chain.admitted(&context, 0).await.unwrap().is_none());
+        drop(resume);
+        server.abort();
+    });
+}
+
+/// A retired withdrawal forces the floor past its carrying close. Settlement
+/// state older than the authorization's deadline is refused, and once the
+/// carrying close finalizes, a head floored before it is refused even though
+/// its genesis opening verifies.
+#[test]
+fn retired_withdrawal_forces_the_floor_past_its_carrying_close() {
+    deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let mut agent = Agent::new(0).unwrap();
+        let account = agent.account();
+
+        // Alice's withdrawal rides epoch 0, which finalizes before its deadline.
+        let action = WithdrawalAction::Amount(NonZeroU64::new(7).unwrap());
+        let WithdrawalOutcome::Signed { request, .. } = agent
+            .withdraw(&context, &mut chain, UNREACHABLE, action)
+            .await
+            .unwrap()
+        else {
+            panic!("the unavailable operator acknowledged the withdrawal");
+        };
+        operator.apply_withdrawal(request.clone(), false).unwrap();
+        register(&control, &mut operator).await;
+        let first = operator.complete_close(1).unwrap();
+        finalize(&control, &first).await;
+        let before = chain.status(&context).await.unwrap();
+        assert!(before.height < request.body().deadline());
+
+        // The authorization retires once the chain reaches its deadline.
+        let height = control.advance(0).await;
+        control.advance(request.body().deadline() - height).await;
+        agent
+            .observe_withdrawal_expiry(&context, &mut chain)
+            .await
+            .unwrap();
+        assert!(agent.pending_withdrawal.is_none());
+        assert_eq!(
+            agent.store.retired_withdrawal_deadline().unwrap(),
+            Some(request.body().deadline())
+        );
+
+        // A head verified against settlement state older than the deadline is
+        // refused.
+        register(&control, &mut operator).await;
+        let head =
+            operator_rpc::PaymentHeadResponse::from(operator.payment_head(&account).unwrap());
+        assert_eq!(head.floor_epoch, 1);
+        assert_eq!(head.opening.balance.get(), INITIAL_BALANCE - 7);
+        let error = agent
+            .verify_head(&context, &mut chain, &head, &before)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("predates a retired withdrawal authorization"));
+
+        // Past the deadline, a head floored before the finalized carrying close
+        // is refused, and one floored at it verifies.
+        let status = chain.status(&context).await.unwrap();
+        assert_eq!(status.last_finalized, Some(0));
+        let genesis = genesis_cache();
+        let mut prior = head.clone();
+        prior.floor_epoch = 0;
+        prior.root = genesis.root();
+        prior.opening = genesis.opening(&account).unwrap();
+        let error = agent
+            .verify_head(&context, &mut chain, &prior, &status)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lies outside the unfinalized epochs"));
+        agent
+            .verify_head(&context, &mut chain, &head, &status)
+            .await
+            .unwrap();
+        assert_eq!(agent.cache.as_ref().unwrap().root, first.roots.successor);
+    });
+}
+
+/// A registration queued behind an unadmitted frontier is live for new
+/// receipts, and the fault that drops it invalidates them.
+#[test]
+fn queued_registration_is_live_until_a_fault_invalidates_it() {
+    deterministic::Runner::default().start(|context| async move {
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+
+        // Epoch 0 is the frontier, and epoch 1 queues behind it after the cut.
+        let frontier = register(&control, &mut operator).await;
+        operator.pay(0, 1, 5).unwrap();
+        let (started, resume) = operator.pause_next_close();
+        operator.start_close(0).unwrap();
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let queued = register(&control, &mut operator).await;
+        assert_eq!(queued.epoch(), 1);
+        assert_eq!(registration_record(&control).await.deadlines, None);
+
+        // Both epochs are live for new receipts.
+        for payment in [&frontier, &queued] {
+            assert!(matches!(
+                receipt_epoch(&context, &mut chain, deployment(), payment)
+                    .await
+                    .unwrap(),
+                ReceiptEpoch::Live(None)
+            ));
+        }
+
+        // The frontier expires, and the fault drops both registrations.
+        let Some(Record::Registration(record)) =
+            control.record(registration_key(&deployment(), 0)).await
+        else {
+            panic!("epoch 0 is not registered");
+        };
+        let (deadline, _) = record.deadlines.unwrap();
+        let height = control.advance(0).await;
+        control.advance(deadline - height + 1).await;
+        assert!(status(&control).await.hard_faulted);
+        for payment in [&frontier, &queued] {
+            assert!(matches!(
+                receipt_epoch(&context, &mut chain, deployment(), payment)
+                    .await
+                    .unwrap(),
+                ReceiptEpoch::Invalidated
+            ));
+        }
+        drop(resume);
+    });
+}
+
+/// A close admitted after the admission read, while the registration read is in flight,
+/// classifies as live with its admitted descriptor.
+#[test]
+fn admission_during_the_registration_read_is_live_and_admitted() {
+    deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+        let control = wide_chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+
+        // Epoch 0 registers with one payment, and its close completes unadmitted.
+        let payment = register(&control, &mut operator).await;
+        operator.pay(0, 1, 5).unwrap();
+        let close = operator.complete_close(1).unwrap();
+
+        // The classification is held at its registration read.
+        let (query, mut holds) = holding_query(
+            &context,
+            &control,
+            vec![Some(Lookup::Registration { epoch: 0 })],
+        )
+        .await;
+        let (held, release) = holds.remove(0);
+        let mut chain = Client::new(
+            control.identity(),
+            deployment(),
+            vec![query],
+            context.child("held"),
+        )
+        .unwrap();
+        let classifying = context.child("classify").spawn(move |context| async move {
+            receipt_epoch(&context, &mut chain, deployment(), &payment).await
+        });
+
+        // The close admits before the held read is served, so the registration shows it.
+        held.await.unwrap();
+        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
+        release.send(()).unwrap();
+
+        // The classification returns the challengeable admitted descriptor.
+        let batch = close.header.batch_id::<Sha256>();
+        assert!(matches!(
+            classifying.await.unwrap().unwrap(),
+            ReceiptEpoch::Live(Some(admitted)) if admitted.batch_id == batch && !admitted.finalized
+        ));
+    });
+}
+
+/// A close admitted and finalized after the admission read, while the status read is in
+/// flight, classifies as finalized with its retained descriptor.
+#[test]
+fn finality_during_the_status_read_is_finalized() {
+    deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+        let control = wide_chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+
+        // Epoch 0 registers with one payment, and its close completes unadmitted.
+        let payment = register(&control, &mut operator).await;
+        operator.pay(0, 1, 5).unwrap();
+        let close = operator.complete_close(1).unwrap();
+
+        // The classification is held at its status read.
+        let (query, mut holds) =
+            holding_query(&context, &control, vec![Some(Lookup::Status)]).await;
+        let (held, release) = holds.remove(0);
+        let mut chain = Client::new(
+            control.identity(),
+            deployment(),
+            vec![query],
+            context.child("held"),
+        )
+        .unwrap();
+        let classifying = context.child("classify").spawn(move |context| async move {
+            receipt_epoch(&context, &mut chain, deployment(), &payment).await
+        });
+
+        // The close admits and finalizes before the held read is served.
+        held.await.unwrap();
+        finalize(&control, &close).await;
+        release.send(()).unwrap();
+
+        // The retained finalized descriptor decides the receipt.
+        let batch = close.header.batch_id::<Sha256>();
+        assert!(matches!(
+            classifying.await.unwrap().unwrap(),
+            ReceiptEpoch::Finalized(admitted) if admitted.batch_id == batch && admitted.finalized
+        ));
+    });
+}
+
+/// A close admitted late after the admission read, with the status read landing past its
+/// admission deadline, classifies as live with its admitted descriptor.
+#[test]
+fn late_admission_during_the_status_read_is_live_and_admitted() {
+    deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+        let control = wide_chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+
+        // Epoch 0 registers as the frontier with one payment, and its close completes
+        // unadmitted.
+        let payment = register(&control, &mut operator).await;
+        let (deadline, _) = registration_record(&control).await.deadlines.unwrap();
+        operator.pay(0, 1, 5).unwrap();
+        let close = operator.complete_close(1).unwrap();
+
+        // The classification is held at its status read.
+        let (query, mut holds) =
+            holding_query(&context, &control, vec![Some(Lookup::Status)]).await;
+        let (held, release) = holds.remove(0);
+        let mut chain = Client::new(
+            control.identity(),
+            deployment(),
+            vec![query],
+            context.child("held"),
+        )
+        .unwrap();
+        let classifying = context.child("classify").spawn(move |context| async move {
+            receipt_epoch(&context, &mut chain, deployment(), &payment).await
+        });
+
+        // The close admits, and the chain passes its admission deadline but not its challenge
+        // deadline, before the held read is served.
+        held.await.unwrap();
+        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
+        let height = control.advance(0).await;
+        control.advance(deadline - height + 1).await;
+        let current = status(&control).await;
+        assert!(!current.hard_faulted && current.last_finalized.is_none());
+        release.send(()).unwrap();
+
+        // The classification returns the challengeable admitted descriptor.
+        let batch = close.header.batch_id::<Sha256>();
+        assert!(matches!(
+            classifying.await.unwrap().unwrap(),
+            ReceiptEpoch::Live(Some(admitted)) if admitted.batch_id == batch && !admitted.finalized
+        ));
+    });
+}
+
+/// A close finalized after the status read, while the admission read that follows it is in
+/// flight, classifies as finalized rather than live.
+#[test]
+fn finality_during_the_admission_reread_is_finalized() {
+    deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+        let control = wide_chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+
+        // Epoch 0 registers with one payment, and its close completes unadmitted.
+        let payment = register(&control, &mut operator).await;
+        operator.pay(0, 1, 5).unwrap();
+        let close = operator.complete_close(1).unwrap();
+
+        // The classification is held at its registration read and at the admission read after
+        // it.
+        let (query, mut holds) = holding_query(
+            &context,
+            &control,
+            vec![
+                Some(Lookup::Registration { epoch: 0 }),
+                Some(Lookup::Admitted { epoch: 0 }),
+            ],
+        )
+        .await;
+        let (registration_held, registration_release) = holds.remove(0);
+        let (admission_held, admission_release) = holds.remove(0);
+        let mut chain = Client::new(
+            control.identity(),
+            deployment(),
+            vec![query],
+            context.child("held"),
+        )
+        .unwrap();
+        let classifying = context.child("classify").spawn(move |context| async move {
+            receipt_epoch(&context, &mut chain, deployment(), &payment).await
+        });
+
+        // The close admits before the registration read is served.
+        registration_held.await.unwrap();
+        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
+        registration_release.send(()).unwrap();
+
+        // The close finalizes before the admission read is served.
+        admission_held.await.unwrap();
+        let height = control.advance(0).await;
+        control
+            .advance(close.context.challenge_deadline() - height + 1)
+            .await;
+        assert_eq!(status(&control).await.last_finalized, Some(0));
+        admission_release.send(()).unwrap();
+
+        // The finalized descriptor decides the receipt.
+        let batch = close.header.batch_id::<Sha256>();
+        assert!(matches!(
+            classifying.await.unwrap().unwrap(),
+            ReceiptEpoch::Finalized(admitted) if admitted.batch_id == batch && admitted.finalized
+        ));
+    });
+}
+
+/// A queued registration whose predecessor and own close admit and finalize while the status
+/// read is in flight classifies as finalized with its retained descriptor.
+#[test]
+fn queued_finality_during_the_status_read_is_finalized() {
+    deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+        let control = wide_chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+
+        // Epoch 0 is the frontier, and epoch 1 queues behind it after the cut.
+        register(&control, &mut operator).await;
+        operator.pay(0, 1, 5).unwrap();
+        let (started, resume) = operator.pause_next_close();
+        operator.start_close(0).unwrap();
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let queued = register(&control, &mut operator).await;
+        assert_eq!(registration_record(&control).await.deadlines, None);
+
+        // The classification of epoch 1 is held at its status read.
+        let (query, mut holds) =
+            holding_query(&context, &control, vec![Some(Lookup::Status)]).await;
+        let (held, release) = holds.remove(0);
+        let mut chain = Client::new(
+            control.identity(),
+            deployment(),
+            vec![query],
+            context.child("held"),
+        )
+        .unwrap();
+        let classifying = context.child("classify").spawn(move |context| async move {
+            receipt_epoch(&context, &mut chain, deployment(), &queued).await
+        });
+
+        // Epoch 0's close admits, which promotes epoch 1, and both closes finalize before the
+        // held read is served.
+        held.await.unwrap();
+        resume.send(()).unwrap();
+        operator.wait_for_closes().unwrap();
+        let first = operator.retained_result(0).unwrap().unwrap();
+        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&first))).await;
+        operator
+            .adopt_registration(&registration_record(&control).await)
+            .unwrap();
+        operator.pay(2, 3, 1).unwrap();
+        operator.start_close(1).unwrap();
+        operator.wait_for_closes().unwrap();
+        let second = operator.retained_result(1).unwrap().unwrap();
+        finalize(&control, &second).await;
+        release.send(()).unwrap();
+
+        // The retained finalized descriptor decides the receipt.
+        let batch = second.header.batch_id::<Sha256>();
+        assert!(matches!(
+            classifying.await.unwrap().unwrap(),
+            ReceiptEpoch::Finalized(admitted) if admitted.batch_id == batch && admitted.finalized
+        ));
+    });
+}
+
+/// Retirement between a finalized status read and the admission read that follows it
+/// classifies as retired.
+#[test]
+fn retirement_after_the_finalized_status_read_is_retired() {
+    deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+        let control = wide_chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+
+        // Epoch 0 registers with one payment, and its close completes unadmitted.
+        let payment = register(&control, &mut operator).await;
+        operator.pay(0, 1, 5).unwrap();
+        let close = operator.complete_close(1).unwrap();
+
+        // The classification is held at its status read and at the read after it.
+        let (query, mut holds) =
+            holding_query(&context, &control, vec![Some(Lookup::Status), None]).await;
+        let (status_held, status_release) = holds.remove(0);
+        let (next_held, next_release) = holds.remove(0);
+        let mut chain = Client::new(
+            control.identity(),
+            deployment(),
+            vec![query],
+            context.child("held"),
+        )
+        .unwrap();
+        let classifying = context.child("classify").spawn(move |context| async move {
+            receipt_epoch(&context, &mut chain, deployment(), &payment).await
+        });
+
+        // Epoch 0 finalizes before the status read is served.
+        status_held.await.unwrap();
+        finalize(&control, &close).await;
+        status_release.send(()).unwrap();
+
+        // Epochs 1 and 2 finalize before the next read is served, which retires epoch 0.
+        next_held.await.unwrap();
+        finalize_next(&control, &mut operator, 2).await;
+        finalize_next(&control, &mut operator, 3).await;
+        assert_eq!(status(&control).await.last_finalized, Some(2));
+        next_release.send(()).unwrap();
+
+        // The retirement rule decides the receipt.
+        assert!(matches!(
+            classifying.await.unwrap().unwrap(),
+            ReceiptEpoch::Retired
+        ));
+    });
+}
+
+/// A successor that registers while the latest record's close admits, between the reads that
+/// name the latest registration, is reported as the latest registration.
+#[test]
+fn successor_registered_during_the_registration_read_is_the_latest() {
+    deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+        let control = wide_chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+
+        // Epoch 0 registers with one payment.
+        register(&control, &mut operator).await;
+        operator.pay(0, 1, 5).unwrap();
+
+        // The latest-registration read is held at epoch 0's record.
+        let (query, mut holds) = holding_query(
+            &context,
+            &control,
+            vec![Some(Lookup::Registration { epoch: 0 })],
+        )
+        .await;
+        let (held, release) = holds.remove(0);
+        let mut chain = Client::new(
+            control.identity(),
+            deployment(),
+            vec![query],
+            context.child("held"),
+        )
+        .unwrap();
+        let reading = context
+            .child("read")
+            .spawn(move |context| async move { chain.registration(&context).await });
+
+        // Epoch 1 registers and epoch 0's close admits before the held read is served.
+        held.await.unwrap();
+        let close = operator.complete_close(1).unwrap();
+        let live = register(&control, &mut operator).await;
+        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
+        release.send(()).unwrap();
+
+        // The live successor is the latest registration.
+        let latest = reading.await.unwrap().unwrap().unwrap();
+        assert_eq!(latest.epoch, live.epoch());
+        assert_eq!(latest.anchor, *live.anchor());
+        assert!(latest.admitted.is_none());
+    });
+}
+
+/// A recipient funded only by an incoming credit cannot originate payments
+/// in the successor while the close that created it is held, even though
+/// the successor is registered and accepts other payers. Once that close is
+/// admitted, the recipient spends from its admitted successor balance.
+#[test]
+fn credit_only_recipient_waits_for_its_creating_close() {
+    deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+        let (control, mut chain) = chain(&context).await;
+        let operator = Arc::new(Mutex::new(
+            Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap(),
+        ));
+        let listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (server, _) = serve(&context, listener, operator.clone());
+
+        // Eve holds no genesis balance and receives a credit in epoch 0.
+        register_shared(&control, &operator).await;
+        let eve = operator.lock().wallet_count();
+        operator.lock().pay(0, eve, 7).unwrap();
+
+        // Epoch 0 is cut with its close held. Epoch 1 registers and accepts
+        // an eligible payer.
+        let (started, resume) = operator.lock().pause_next_close();
+        operator.lock().start_close(0).unwrap();
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        register_shared(&control, &operator).await;
+        assert_eq!(operator.lock().pay(1, 2, 3).unwrap().epoch, 1);
+
+        // Eve has no usable floor: the operator refuses her head, and
+        // settlement holds no balance for her.
+        let mut recipient = Agent::new(wallets().len()).unwrap();
+        let error = recipient
+            .pay(&context, &mut chain, address, &[(0, 3)])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("first positive close is not admitted"),
+            "{error:#}"
+        );
+        assert!(recipient.pending_payments.is_empty());
+
+        // Epoch 0's close finishes and is admitted, so Eve spends from its
+        // successor balance.
+        resume.send(()).unwrap();
+        operator.lock().wait_for_closes().unwrap();
+        let result = operator.lock().retained_result(0).unwrap().unwrap();
+        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
+        let paid = accepted(
+            recipient
+                .pay(&context, &mut chain, address, &[(0, 3)])
+                .await
+                .unwrap(),
+        );
+        assert_eq!(paid.epoch, 1);
+        assert_eq!(
+            recipient.cache.as_ref().unwrap().root,
+            result.roots.successor
+        );
+        assert!(status(&control).await.last_finalized.is_none());
+        server.abort();
     });
 }

@@ -7,7 +7,7 @@ mod store;
 mod verify;
 
 #[cfg(test)]
-pub(crate) use actor::CloseEvent;
+pub(crate) use actor::{CloseEvent, Stage};
 pub(crate) use actor::{DEFAULT_AMOUNT, Operator, SendsOutcome};
 pub(crate) use store::StagedDeposit;
 pub(crate) use verify::{MAX_VERIFICATION_BATCHES, VerifiedSends, verify_sends};
