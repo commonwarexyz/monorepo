@@ -15,7 +15,7 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
+            batch::{DiffCursors, DiffEntry, PopActiveResult, Staged as AnyStaged, StagedUpdates},
             operation::{Operation, update},
         },
         bitmap::{Shared, fill_from},
@@ -405,7 +405,7 @@ where
         self,
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
         quota: Option<NonZeroUsize>,
-    ) -> Result<(Self, Option<any::batch::ActiveEntry<F, U>>), Error<F>>
+    ) -> PopActiveResult<Self, F, U>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,

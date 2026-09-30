@@ -387,6 +387,10 @@ pub(crate) type RetainedAncestors<F, D, U, S> = Vec<AncestorBatch<F, D, U, S>>;
 /// Result of merkleizing a batch.
 type MerkleizeResult<F, D, U, S> = Result<Arc<MerkleizedBatch<F, D, U, S>>, crate::qmdb::Error<F>>;
 
+/// Result of evicting an active update: the batch and the optional evicted entry.
+pub(crate) type PopActiveResult<B, F, U> =
+    Result<(B, Option<ActiveEntry<F, U>>), crate::qmdb::Error<F>>;
+
 /// Result of a prepared merkleization: the batch and the ancestors retained while building it.
 pub(crate) type RetainedMerkleizeResult<F, D, U, S> = Result<
     (
@@ -1807,12 +1811,11 @@ where
     /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain. Reading
     /// an operation can also return a journal error. Cancellation or an error consumes the batch
     /// without modifying `db`.
-    #[allow(clippy::type_complexity)]
     pub async fn pop_active<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, U, N, S>,
         quota: Option<NonZeroUsize>,
-    ) -> Result<(Self, Option<ActiveEntry<F, U>>), crate::qmdb::Error<F>>
+    ) -> PopActiveResult<Self, F, U>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
