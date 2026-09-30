@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/zoda-card.png"
 katex: true
 ---
 
-*Update (9/29/26): ZODA is no longer part of the Commonware Library. Implementation links point to its last version.*
+*Update (9/29/26): ZODA is no longer implemented in the Commonware Library. Implementation links point to its last version.*
 
 You can come to consensus over a mere fingerprint of the block---a hash for example---
 but doing anything interesting with that fingerprint, like processing transactions or updating
