@@ -116,6 +116,12 @@ pub struct LiftedInfo {
     /// module; their functions replace source functions only through
     /// `#[rewrite]` lemmas and the lifted round trip, `driver::lowered`).
     pub opt: bool,
+    /// A lifted child the host's source declares by its **lowered
+    /// declaration** (`mod a { include!(concat!(env!("OUT_DIR"), "/F")); }`,
+    /// [`open::lowered_include`]): the copy's file name `F`. The lift reads
+    /// the declaration as `mod a;`; the build checks `F` and writes the copy
+    /// (`driver::in_place`).
+    pub lowered_include: Option<String>,
 }
 
 /// Host facts the lift's reading assumed and what it left out, for the

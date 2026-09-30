@@ -7,6 +7,7 @@
 //! | --- | --- |
 //! | `#[lift(in_place)] #[path = "../../src/x.rs"] mod x;` | the host's own file is the lifted source (verified where rustc compiles it) |
 //! | `children = "a"` on an in-place declaration | the source's `mod a;` is lifted too, from rustc's standard location |
+//! | the child declared `mod a { //! docs  include!(concat!(env!("OUT_DIR"), "/<name>-lowered__<path>")); }` | read as `mod a;` (the host compiles the verified lowered copy of `a`'s file, DESIGN.md §2.1; [`lowered_include`]) |
 //! | another out-of-line `mod m;`, an item macro of another crate (`cfg_if::cfg_if!`) | dropped, listed (host code, not part of the lifted meaning) |
 //! | `unverified_impls = "Tr"` | impls of `Tr` (and `Tr`'s declaration) stay unverified host code, listed |
 //! | `instance = "Tr: path::S"` (an **open** trait at its one verified instance) | every type parameter bounded by `Tr` is `path::S`: the parameter is erased (`Position<F>` → `Position`, `F::X` → `path::S::X`); `unverified_instances` names the others |
@@ -152,6 +153,80 @@ pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
         return Err("`items = \"..\"` needs `in_place` (it selects the verified items of a host file; a copied source is lifted whole)".into());
     }
     Ok(o)
+}
+
+// ---------------------------------------------------------------------------
+// the lowered declaration of an in-place module
+// ---------------------------------------------------------------------------
+
+/// The **lowered declaration** of an in-place lifted module (DESIGN.md §2.1
+/// "compiling the lowered copy"): the host declares module `m` as
+///
+/// ```text
+/// pub mod m {
+///     //! (the source's leading `//!` lines, exactly)
+///     include!(concat!(env!("OUT_DIR"), "/<name>-lowered__<path under src/, `/` as `__`>"));
+/// }
+/// ```
+///
+/// so rustc compiles the build's lowered copy of `m`'s file, which the
+/// verifier wrote from that very file (its rewritten functions checked by
+/// the kernel-checked links and the lifted round trip). The lift reads the
+/// declaration exactly as `mod m;`: the verified source stays the file
+/// itself. Returns `None` for an inline module that mentions no `include`
+/// macro (an ordinary inline module), the copy's file name for the exact
+/// form, and an error for any other inline module that includes something:
+/// attributes other than docs, other items, another macro path, another
+/// argument shape, a file name that is not a lowered copy's.
+///
+/// For the IDE, the declaration may carry `#[cfg(not(rust_analyzer))]`
+/// next to its **IDE twin** `#[cfg(rust_analyzer)] mod m;` ([`ide_twin`]):
+/// rust-analyzer (which sets `cfg(rust_analyzer)`) then analyzes `m`'s file
+/// itself, and rustc, which never sets it, compiles the copy. The lift
+/// reads the pair as `mod m;`.
+pub fn lowered_include(m: &syn::ItemMod) -> Option<Result<String, String>> {
+    let (_, items) = m.content.as_ref()?;
+    let is_include = |p: &syn::Path| p.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "include" | "include_str" | "include_bytes"));
+    if !items.iter().any(|i| matches!(i, syn::Item::Macro(mm) if is_include(&mm.mac.path))) {
+        return None;
+    }
+    Some(lowered_include_form(m, items))
+}
+
+/// Whether `a` is exactly `#[cfg(rust_analyzer)]` (`not`: `#[cfg(not(rust_analyzer))]`).
+pub fn is_ide_cfg(a: &syn::Attribute, not: bool) -> bool {
+    let want = if not { "cfg(not(rust_analyzer))" } else { "cfg(rust_analyzer)" };
+    matches!(a.style, syn::AttrStyle::Outer) && a.meta.to_token_stream().to_string().chars().filter(|c| !c.is_whitespace()).collect::<String>() == want
+}
+
+/// Whether `m` is the IDE twin of a lowered declaration: `mod m;` whose
+/// only attributes are docs and exactly one `#[cfg(rust_analyzer)]`.
+pub fn ide_twin(m: &syn::ItemMod) -> bool {
+    m.content.is_none() && m.attrs.iter().filter(|a| is_ide_cfg(a, false)).count() == 1 && m.attrs.iter().all(|a| is_ide_cfg(a, false) || a.path().is_ident("doc"))
+}
+
+fn lowered_include_form(m: &syn::ItemMod, items: &[syn::Item]) -> Result<String, String> {
+    if m.unsafety.is_some() || m.attrs.iter().filter(|a| is_ide_cfg(a, true)).count() > 1 || m.attrs.iter().any(|a| !a.path().is_ident("doc") && !is_ide_cfg(a, true)) {
+        return Err("a lowered declaration carries only doc comments (and, for the IDE, `#[cfg(not(rust_analyzer))]`)".into());
+    }
+    let [syn::Item::Macro(mm)] = items else {
+        return Err("a lowered declaration's only item is the `include!` of the copy".into());
+    };
+    if !mm.attrs.is_empty() || mm.ident.is_some() || mm.semi_token.is_none() || mm.mac.path.leading_colon.is_some() || !mm.mac.path.is_ident("include") {
+        return Err("expected `include!(concat!(env!(\"OUT_DIR\"), \"/<name>-lowered__<path>\"));`".into());
+    }
+    let toks: String = mm.mac.tokens.to_string().chars().filter(|c| !c.is_whitespace()).collect();
+    let file = toks
+        .strip_prefix("concat!(env!(\"OUT_DIR\"),\"/")
+        .and_then(|r| r.strip_suffix("\")"))
+        .ok_or_else(|| format!("the `include!` argument must be `concat!(env!(\"OUT_DIR\"), \"/<name>-lowered__<path>\")`, not `{}`", mm.mac.tokens))?;
+    let (name, flat) = file.split_once("-lowered__").ok_or_else(|| format!("`{file}` is not a lowered copy (`<name>-lowered__<path>`)"))?;
+    let ident = name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    let flat_ok = flat.ends_with(".rs") && flat.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') && !flat.contains("..");
+    if !ident || !flat_ok {
+        return Err(format!("`{file}` is not a lowered copy (`<name>-lowered__<path>`)"));
+    }
+    Ok(file.to_string())
 }
 
 // ---------------------------------------------------------------------------

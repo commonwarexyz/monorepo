@@ -618,7 +618,7 @@ impl Loader<'_> {
     ) -> usize {
         let c = self.modules.len();
         self.modules.push(LoadedModule { name: name.clone(), parent: Some(parent), file: cfile, ghost, vis, decl_span: span, decl_attrs, inner_attrs: cast.attrs.clone(), items: vec![], cfg: cfg.clone(), data_files: HashMap::new(), lifted: true });
-        self.lifted_info.push(crate::lift::LiftedInfo { name: name.clone(), file: cfile, ghost, host: opts.host, unverified: opts.unverified.clone(), in_place: opts.in_place, opt: opts.opt });
+        self.lifted_info.push(crate::lift::LiftedInfo { name: name.clone(), file: cfile, ghost, host: opts.host, unverified: opts.unverified.clone(), in_place: opts.in_place, opt: opts.opt, lowered_include: None });
         // the children to lift with this module
         let dir = if mod_rs_like {
             path.parent().map(Path::to_path_buf).unwrap_or_default()
@@ -627,9 +627,44 @@ impl Loader<'_> {
             path.parent().map(|p| p.join(&stem)).unwrap_or_else(|| PathBuf::from(stem))
         };
         let mut children: Vec<(String, usize)> = Vec::new();
+        // a lowered declaration (`mod m { include!(concat!(env!("OUT_DIR"),
+        // "/<name>-lowered__<path>")); }`: the host compiles the verified
+        // lowered copy of `m`'s file, `lift::open::lowered_include`) is read
+        // as `mod m;` — a lifted child below, else a host module like any
+        // other; an inline module that includes anything else is left to
+        // the lift, which refuses the `include!` (in-place sources only: a
+        // copied or ghost source has no host declaration to read)
+        let mut cast = cast;
+        let mut lowered_decls: HashMap<String, String> = HashMap::new();
+        for it in cast.items.iter_mut().filter(|_| opts.in_place && !ghost) {
+            if let syn::Item::Mod(m) = it
+                && let Some(Ok(f)) = crate::lift::open::lowered_include(m)
+            {
+                let (vis, ident, sp) = (m.vis.clone(), m.ident.clone(), syn::spanned::Spanned::span(&m.mod_token));
+                lowered_decls.insert(ident.to_string(), f);
+                *it = syn::Item::Mod(syn::parse_quote_spanned!(sp=> #vis mod #ident;));
+            }
+        }
+        // the IDE twin of a lowered declaration (`#[cfg(rust_analyzer)] mod
+        // m;`, compiled only by rust-analyzer) is the same declaration
+        if !lowered_decls.is_empty() {
+            cast.items.retain(|it| !matches!(it, syn::Item::Mod(m) if lowered_decls.contains_key(&m.ident.to_string()) && crate::lift::open::ide_twin(m)));
+        }
         for want in &opts.children {
-            let decl = cast.items.iter().find_map(|it| match it {
-                syn::Item::Mod(m) if m.content.is_none() && m.ident == want.as_str() => Some(m.clone()),
+            let lowered: Option<String> = lowered_decls.get(want.as_str()).cloned();
+            let at = cast.items.iter().position(|it| matches!(it, syn::Item::Mod(m) if m.ident == want.as_str()));
+            if let Some(i) = at
+                && let syn::Item::Mod(m) = &cast.items[i]
+                && m.content.is_some()
+            {
+                match crate::lift::open::lowered_include(m) {
+                    Some(Err(e)) => self.diags.error(DiagKind::Load, span, format!("the lifted child module `{want}` is declared inline with an `include!` that is not its lowered declaration: {e}")),
+                    _ => self.diags.error(DiagKind::Load, span, format!("the lifted child module `{want}` is declared inline: a lifted child is `mod {want};` or its lowered declaration `mod {want} {{ include!(concat!(env!(\"OUT_DIR\"), \"/<name>-lowered__<path>\")); }}`")),
+                }
+                continue;
+            }
+            let decl = at.and_then(|i| match &cast.items[i] {
+                syn::Item::Mod(m) if m.content.is_none() => Some(m.clone()),
                 _ => None,
             });
             let Some(m) = decl else {
@@ -651,11 +686,26 @@ impl Loader<'_> {
                 self.diags.error(DiagKind::Load, span, format!("the lifted child module `{want}`: expected exactly one of `{}` and `{}`", a.display(), b.display()));
                 continue;
             };
+            // a lowered declaration names the copy of exactly this file (its
+            // path's tail; the build checks the whole name, `driver::in_place`)
+            if let Some(f) = &lowered {
+                let flat = f.split_once("-lowered__").map(|(_, x)| x).unwrap_or_default();
+                let parts: Vec<&str> = flat.split("__").collect();
+                let comps: Vec<String> = cpath.components().map(|x| x.as_os_str().to_string_lossy().into_owned()).collect();
+                if parts.len() > comps.len() || !comps[comps.len() - parts.len()..].iter().zip(&parts).all(|(a, b)| a == b) {
+                    self.diags.error(DiagKind::Load, span, format!("the lowered declaration of the lifted child module `{want}` includes `{f}`, which is not the lowered copy of `{}`", cpath.display()));
+                    continue;
+                }
+            }
             let Some(parsed) = self.parse_file(&cpath, span) else { continue };
+            let child_file = parsed.0;
             let mut copts = opts.clone();
             copts.children = vec![];
             let cvis = m.vis.clone();
             let cc = self.add_lifted(want.clone(), c, parsed, cpath, cmodrs, ghost, cvis, span, vec![], cfg.clone(), copts);
+            if let Some(li) = self.lifted_info.iter_mut().rev().find(|l| l.file == child_file) {
+                li.lowered_include = lowered;
+            }
             children.push((want.clone(), cc));
         }
         // the module's DSL path (`crate::merkle::mmr`)

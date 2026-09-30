@@ -86,7 +86,7 @@ pub fn module_file_docs_ok(module_text: &str, source_text: &str) -> bool {
 
 /// Whether the text after the docs has a top-level inner attribute or inner
 /// doc comment before its first item (tokens, comments skipped).
-fn has_inner_attribute(body: &str) -> bool {
+pub(crate) fn has_inner_attribute(body: &str) -> bool {
     let mut rest = body;
     loop {
         let t = rest.trim_start();
@@ -277,7 +277,7 @@ mod tests {
     use crate::span::FileId;
 
     fn info(name: &str, ghost: bool, host: bool) -> LiftedInfo {
-        LiftedInfo { name: name.into(), file: FileId::default(), ghost, host, unverified: vec![], in_place: false, opt: false }
+        LiftedInfo { name: name.into(), file: FileId::default(), ghost, host, unverified: vec![], in_place: false, opt: false, lowered_include: None }
     }
 
     #[test]

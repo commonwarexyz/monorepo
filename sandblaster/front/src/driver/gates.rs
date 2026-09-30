@@ -256,9 +256,9 @@ pub struct CrateBuild {
     pub in_place: bool,
     /// In-place lifted modules: every host file lowered by the optimizer
     /// ([`super::lowered::lower_in_place`]; run once every proof checked,
-    /// after the §15 gates ran). rustc compiles the host's own files; the
-    /// lowered copies are written beside the record, marked with the
-    /// build's status.
+    /// after the §15 gates ran). The lowered copies are written beside the
+    /// record, marked with the build's status; rustc compiles a copy where
+    /// the host declares it (`driver::in_place`).
     pub lowered_in_place: Vec<super::lowered::LoweredModule>,
 }
 
@@ -547,7 +547,7 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
             }
             let st = b.v.stats();
             let summary = format!(
-                "{} obligation(s) proven, {} definition(s) kernel-checked; every §15 gate passed (spec mutants: {}); {conf_summary}; lifted in place (rustc compiles the host's own files, so the proven optimizer's residuals are not lowered into them); SPEC.lock: {}",
+                "{} obligation(s) proven, {} definition(s) kernel-checked; every §15 gate passed (spec mutants: {}); {conf_summary}; lifted in place (the proven optimizer's rewrites are in the lowered copies; rustc compiles a copy where the host declares it, else the host's own file); SPEC.lock: {}",
                 st.proven,
                 b.v.defs.len(),
                 b.gates.mutation.as_ref().map(|m| format!("{} killed of {}", m.count(crate::mutate::Verdict::KilledBySpec), m.mutants.len())).unwrap_or_else(|| "none".into()),

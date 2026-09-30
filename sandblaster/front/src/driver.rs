@@ -422,7 +422,19 @@ pub struct BuildOutcome {
     /// Files to write (`OUT_DIR/sandblaster.rs`, `OUT_DIR/sandblaster-report.json`).
     pub outputs: Vec<(std::path::PathBuf, String)>,
     pub ok: bool,
+    /// Outputs that rustc compiles and the build script watches (the
+    /// lowered copies of in-place files, `driver::in_place`): the facade
+    /// writes them read-only with the fixed old modification time
+    /// [`GUARDED_MTIME_SECS`], so the watch does not re-run the build script
+    /// by itself, while any later edit of the file (newer than the build
+    /// script's run) re-runs it, which rewrites the file from the verified
+    /// source.
+    pub guarded: Vec<std::path::PathBuf>,
 }
+
+/// The modification time of guarded outputs ([`BuildOutcome::guarded`]):
+/// 2000-01-01T00:00:00Z, older than any build script run.
+pub const GUARDED_MTIME_SECS: u64 = 946_684_800;
 
 // ---------------------------------------------------------------------------
 // Verified pipeline (phase 2)

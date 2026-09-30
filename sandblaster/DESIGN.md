@@ -262,11 +262,23 @@ green, speed of the result and the human review load.
      emitted module's tail makes rustc check every modeled variant and
      every `SIZE` the lift read against the real host (§2.1).
 
-   About 6.4k code lines today (`lift.rs` 4.0k, of which the macro
+   **and the lowered declaration** (§2.1 "Compiling the optimized
+   output"): the reading of `mod m { //! docs include!(concat!(env!(
+   "OUT_DIR"), "/<name>-lowered__<path>")); }` (and its IDE twin
+   `#[cfg(rust_analyzer)] mod m;`) as `mod m;` — `lift_open.rs`
+   `lowered_include`/`ide_twin` and its use in `loader.rs::add_lifted`
+   (≈ 75 code lines) — plus the in-place emission argument: the copy rustc
+   compiles is the lowering's text (`driver::lowered`, the same argument as
+   an emitted lifted module) behind a header of comments
+   (`driver::in_place::lowered_copies`), and the build's declaration check
+   makes the include name that copy (textual, like module mode's scan).
+
+   About 6.5k code lines today (`lift.rs` 4.0k, of which the macro
    expander ≈ 0.3k; `lift_open.rs` 2.1k; templates 125, prelude 134,
-   model 54, `lift.core` 24): **over the 4k budget** since the in-place
-   extension (the MMR track) — named here as new trust; shrinking it (or
-   moving readings into checked templates) is open work.
+   model 54, `lift.core` 24; the lowered declaration ≈ 75): **over the 4k
+   budget** since the in-place extension (the MMR track) — named here as
+   new trust; shrinking it (or moving readings into checked templates) is
+   open work.
    **Mitigation: the lift conformance check** (`sandblaster/front/src/conform.rs`;
    its module docs are the full description), which every module-mode build of a lifted module
    (and every `compile_lifted` build of an in-place one, §2.1)
@@ -606,12 +618,63 @@ host/
   is the same as for an emitted lifted module — proofs, every §15.8 gate,
   the lift conformance check of every in-place module, then the record.
   The optimizer runs once every proof checked and lowers each host file as
-  above; rustc compiles the host's files as they are, so the lowered copies
-  are written beside the record (`OUT_DIR/<name>-lowered__<path>`, with the
-  index `<name>-lowered.txt`), each headed by the build's status — a
-  preview under `compile_lifted_pending_gates`. How a host opts into
-  compiling the lowered copy of a verified file (a declaration change per
-  file, FRICTION) is not decided yet. **The conformance harness
+  above. **Compiling the optimized output** (`driver::in_place`): every
+  build writes the lowered copy of **every** in-place file
+  (`OUT_DIR/<name>-lowered__<path under src/, `/` as `__`>`, index
+  `<name>-lowered.txt`) — the lowering's text exactly as the lifted round
+  trip checked it, or the source byte for byte when nothing is cheaper —
+  and a host compiles it by changing one declaration, the **lowered
+  declaration**:
+
+  ```rust
+  #[cfg(rust_analyzer)]
+  pub mod iterator;                       // the IDE twin (optional): rust-analyzer analyzes iterator.rs
+  #[cfg(not(rust_analyzer))]
+  pub mod iterator {
+      //! (the leading `//!` lines of iterator.rs, checked equal)
+      include!(concat!(env!("OUT_DIR"), "/mmr-lowered__merkle__mmr__iterator.rs"));
+  }
+  ```
+
+  rustc cannot take a `#[path]` from `OUT_DIR`, so the module includes its
+  copy. The lift reads the lowered declaration (and its IDE twin) exactly
+  as `mod iterator;` (`lift::open::lowered_include`): the verified source
+  stays `iterator.rs` as written. Any other inline module that includes
+  something is refused (by the lift in a lifted file, by the build in the
+  declaring file), as is a copy name other than this build's, docs other
+  than the source's (an `include!`d file cannot carry inner docs), a
+  source whose meaning depends on its file (`file!`, `line!`, `column!`,
+  `include*!`, an out-of-line `mod`, an inner attribute), and any other
+  mention of the build's copies under `src/` (a stale declaration, a copy
+  included twice). **Fail closed:** a failed build (a proof, the
+  emission chain) writes every copy as a `::core::compile_error!` stub, so
+  rustc never compiles a stale, missing or unchecked copy; when the host
+  compiles a copy, a rewrite of that file rejected by the lifted round
+  trip, a failed lowering or an optimizer that did not run fails the build
+  (a function whose replacement is not cheaper keeps its verified source
+  text — not a fallback). Each copy's header says what it is: the status
+  (a pending-gates build says `NOT VERIFIED — DEVELOPMENT BUILD: PROOFS
+  CHECKED, §15 GATES PENDING` and that the rewrites rest on the
+  kernel-checked links and the lifted round trip, which ran), whether
+  rustc compiles it, the rewritten functions and the source's SHA-256.
+  **Edits of a copy** (an IDE's go-to-definition lands in it): the build
+  script watches each copy and the facade writes it read-only with a fixed
+  old modification time (2000-01-01), so the watch alone never re-runs the
+  script, while any edit does, and the re-run rewrites the copy from the
+  verified source before rustc compiles it (cargo re-runs a build script
+  when a watched file is newer than its last run; a file the script wrote
+  itself would otherwise re-run it on every build). A reused verdict needs
+  every copy as written (the key file records their digest). **In an
+  IDE:** rust-analyzer runs build scripts and expands the include, so
+  names from the module resolve and navigation lands in the read-only copy
+  (whose header says to edit the source); with the IDE twin, rust-analyzer
+  (which sets `cfg(rust_analyzer)`) analyzes `iterator.rs` itself, so
+  editing it keeps completion and types — without the twin it reports
+  `iterator.rs` as a file outside the module tree. The build declares
+  `cfg(rust_analyzer)` to rustc's cfg check and warns if a build sets it
+  (that build compiles the source as written: verified, not optimized).
+  Panic locations and `line!`-style debugging in the compiled module
+  point into the copy. **The conformance harness
   does not support in-place modules yet** (it compiles one lifted file on
   its own, and an in-place file names its host crate's other modules and
   dependencies), nor open traits at declared instances: the check fails

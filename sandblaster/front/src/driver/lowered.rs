@@ -83,8 +83,9 @@
 //! When nothing qualifies the emitted file is the source as-is: the
 //! optimizer never makes a lifted module slower or different without a
 //! cheaper, checked replacement. In place (`#[lift(in_place)]`,
-//! [`lower_in_place`]) the same steps run per host file; the lowered files
-//! are written beside the record (the host compiles its own files).
+//! [`lower_in_place`]) the same steps run per host file; the lowered copies
+//! are written beside the record, and rustc compiles a copy where the host
+//! declares the module by its lowered declaration (`driver::in_place`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -115,6 +116,11 @@ pub const ORIG_PREFIX: &str = "__sandblaster_orig_";
 /// bound (`decreases(.., max = N)`): the cost model's default for a
 /// `while` loop (`opt::cost::model`).
 pub const LOOP_TRIPS: u64 = 16;
+
+/// The start of every [`LowerOutcome::Kept`] reason of a function whose
+/// lowering the lifted round trip rejected (or did not reach): a host that
+/// compiles the lowered copy fails the build on it (`driver::in_place`).
+pub const ROUND_TRIP_REJECTED: &str = "the lifted round trip";
 
 /// What became of one source function.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -572,7 +578,34 @@ pub fn lower_lifted(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, o
 /// lowered file per host file, DESIGN.md §2.1 "in place").
 pub fn lower_in_place(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, opts: &OptOptions) -> Vec<LoweredModule> {
     let infos: Vec<LiftedInfo> = c.lifted.iter().filter(|l| l.in_place && !l.ghost).cloned().collect();
-    infos.iter().map(|info| lower_lifted_impl(c, root, out, o, opts, info, None)).collect()
+    #[cfg(any(test, feature = "opt-test-hooks"))]
+    let fault = in_place_fault::get();
+    #[cfg(not(any(test, feature = "opt-test-hooks")))]
+    let fault = None;
+    infos.iter().map(|info| lower_lifted_impl(c, root, out, o, opts, info, fault)).collect()
+}
+
+/// A printer fault injected into every in-place lowering of this process,
+/// for the must-reject suite of the lowered declaration
+/// (`tests/lowered_use.rs`: a host file compiled from its lowered copy
+/// whose rewrite the lifted round trip rejects fails the build). Compiled
+/// only with `cfg(test)` or the `opt-test-hooks` feature (never in a build
+/// script, `opt::hooks`). Process-wide (the lowering runs on the
+/// elaborator's big-stack thread), so its users serialize.
+#[cfg(any(test, feature = "opt-test-hooks"))]
+pub mod in_place_fault {
+    use std::sync::Mutex;
+
+    static FAULT: Mutex<Option<super::LowerFault>> = Mutex::new(None);
+
+    /// Sets (or clears) the fault.
+    pub fn set(f: Option<super::LowerFault>) {
+        *FAULT.lock().unwrap_or_else(|e| e.into_inner()) = f;
+    }
+
+    pub(crate) fn get() -> Option<super::LowerFault> {
+        *FAULT.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// A simulated fault of the (untrusted) lowering printer, for the
@@ -1047,7 +1080,7 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
             Err(e) => {
                 note = Some(format!("lifted round trip: {e}"));
                 for cd in cands.drain(..) {
-                    records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("the lifted round trip failed: {e}")) });
+                    records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} failed: {e}")) });
                 }
                 break;
             }
@@ -1061,14 +1094,14 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
                 for cd in cands.drain(..) {
                     match verdicts.get(&cd.src.key()) {
                         Some(Ok(_)) => keep.push(cd),
-                        Some(Err(e)) => records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("the lifted round trip rejected the lowered code: {e}")) }),
-                        None => records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept("the lifted round trip did not compare it".into()) }),
+                        Some(Err(e)) => records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} rejected the lowered code: {e}")) }),
+                        None => records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} did not compare it")) }),
                     }
                 }
                 if round == 1 {
                     // a second failure: nothing is lowered
                     for cd in keep.drain(..) {
-                        records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept("the lifted round trip failed twice; nothing is lowered".into()) });
+                        records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} failed twice; nothing is lowered")) });
                     }
                 }
                 cands = keep;

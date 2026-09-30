@@ -115,12 +115,15 @@ pub fn compile_module(root: &str, module_file: &str) {
 /// In-place lifted modules (DESIGN.md §2.1 "in place"): verifies the DSL
 /// crate rooted at `root`, whose `#[lift(in_place)]` modules are the host
 /// crate's own files, and writes the record `OUT_DIR/<name>-verified.txt`
-/// (plus `-report.json` and `-timing.json`). Nothing is emitted or
-/// included: rustc compiles the files the verifier read. Every proof,
-/// every §15 gate and the lift conformance check run as in
-/// [`compile_module`] (the proven optimizer cannot rewrite the host's own
-/// files, so nothing is lowered); a failure exits with status 1, so the
-/// host crate does not build.
+/// (plus `-report.json` and `-timing.json`), and the lowered copy of every
+/// in-place file (`OUT_DIR/<name>-lowered__<path>`: the file with the
+/// proven optimizer's checked rewrites). rustc compiles the files the
+/// verifier read, or a file's lowered copy where the host declares the
+/// module by its lowered declaration (DESIGN.md §2.1, "Compiling the
+/// optimized output"). Every proof, every §15 gate and the lift
+/// conformance check run as in [`compile_module`]; a failure exits with
+/// status 1, so the host crate does not build (and every copy is a
+/// `compile_error!` stub).
 ///
 /// ```ignore
 /// // build.rs of a host crate
@@ -185,17 +188,90 @@ fn finish(outcome: driver::BuildOutcome) {
     if !outcome.stderr.is_empty() {
         let _ = write!(std::io::stderr(), "{}", outcome.stderr);
     }
+    let write = |path: &std::path::Path, contents: &str| if outcome.guarded.iter().any(|g| g == path) { write_guarded(path, contents) } else { std::fs::write(path, contents) };
     if !outcome.ok {
-        // the report of a failed verification helps diagnosing it
+        // the report of a failed verification helps diagnosing it (and a
+        // lowered copy of a failed build is a `compile_error!` stub)
         for (path, contents) in &outcome.outputs {
-            let _ = std::fs::write(path, contents);
+            let _ = write(path, contents);
         }
         std::process::exit(1);
     }
     for (path, contents) in &outcome.outputs {
-        if let Err(e) = std::fs::write(path, contents) {
+        if let Err(e) = write(path, contents) {
             let _ = writeln!(std::io::stderr(), "error[build]: cannot write `{}`: {e}", path.display());
             std::process::exit(1);
         }
+    }
+}
+
+/// Writes a guarded output (`BuildOutcome::guarded`: a lowered copy rustc
+/// compiles, which the build script watches): read-only (Unix), with the
+/// modification time `GUARDED_MTIME_SECS`. cargo re-runs a build script when
+/// a watched file is newer than the script's last run; a file the script
+/// itself wrote is newer, so without the old time every build would re-run
+/// it. With it, only a later edit of the copy re-runs the script, which
+/// rewrites the copy from the verified source before rustc compiles it.
+fn write_guarded(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
+        }
+    }
+    std::fs::write(path, contents)?;
+    let f = std::fs::File::options().write(true).open(path)?;
+    f.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(driver::GUARDED_MTIME_SECS))?;
+    drop(f);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A guarded output is written read-only with the old time, and a
+    /// rewrite replaces it (the build script rewrites an edited copy);
+    /// the twin: a plain write leaves the current time.
+    #[test]
+    fn guarded_outputs_are_old_and_read_only() {
+        let dir = std::env::temp_dir().join(std::format!("sandblaster-guarded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("m-lowered__a.rs");
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(driver::GUARDED_MTIME_SECS);
+        write_guarded(&p, "fn a() {}\n").unwrap();
+        let m = std::fs::metadata(&p).unwrap();
+        assert_eq!(m.modified().unwrap(), old);
+        assert!(m.permissions().readonly());
+        // an edit (made writable, as an editor that overrides read-only
+        // would) is newer than any build script run
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        std::fs::write(&p, "fn a() { evil() }\n").unwrap();
+        assert!(std::fs::metadata(&p).unwrap().modified().unwrap() > old);
+        // the re-run rewrites it over a read-only file
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+        write_guarded(&p, "fn a() {}\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "fn a() {}\n");
+        assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), old);
+        // twin: an ordinary output keeps its write time
+        let q = dir.join("m-report.json");
+        std::fs::write(&q, "{}").unwrap();
+        assert!(std::fs::metadata(&q).unwrap().modified().unwrap() > old);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
