@@ -5,9 +5,9 @@ use crate::stateful::{
             mailbox::Message,
             verifications::{Handler as Verifications, Request as VerificationRequest},
         },
-        processor::{Applied, Processor, Publication},
+        processor::{Applied, Processor},
     },
-    db::{Barrier, DatabaseSet, Publisher, SnapshotsOf},
+    db::Barrier,
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -162,8 +162,7 @@ async fn start_barrier<E, A, S, V>(
     context: &E,
     durability: &mut Durability,
     verifications: &mut Verifications<E, A, S, V>,
-    databases: &A::Databases,
-    publisher: &mut Publisher<SnapshotsOf<A::Databases, E>>,
+    processor: &mut Processor<E, A>,
 ) -> bool
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -178,14 +177,11 @@ where
     );
 
     let height = durability.applied();
-    let (snapshots, barrier) = select! {
+    let barrier = select! {
         _ = context.stopped() => return false,
-        result = verifications.drive(databases.finalize()) => result,
+        barrier = verifications.drive(processor.start_sync()) => barrier,
     };
 
-    // The snapshots serve immediately; peers verify what they fetch against a
-    // finalized root, so serving safely runs ahead of disk.
-    publisher.publish(height, snapshots);
     durability.set_barrier(height, barrier);
     true
 }
@@ -239,9 +235,6 @@ where
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
 
-    /// Publishes the latest snapshots for serving.
-    pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
-
     /// Verification requests deferred until processing starts.
     pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 }
@@ -284,8 +277,7 @@ where
                         self.context.as_present(),
                         &mut durability,
                         &mut verifications,
-                        self.processor.databases(),
-                        &mut self.snapshot_publisher,
+                        &mut self.processor,
                     ).await
                 {
                     return;
@@ -444,7 +436,7 @@ where
                             .await;
                         drop(boundary);
                         async {
-                            let Applied { publication, prune } = verifications
+                            let Applied { barrier, prune } = verifications
                                 .drive(self.processor.finalize(
                                     &self.context,
                                     block.as_ref(),
@@ -462,26 +454,8 @@ where
                             let height = block.height();
                             durability.record(height, acknowledgement);
 
-                            // Snapshots serve immediately, ahead of the barrier that covers them.
-                            match publication {
-                                // A compact member serves only the exact states it published,
-                                // so a mixed set refreshes its cheap members every block.
-                                Publication::None if A::Databases::ANY_CHEAP_SNAPSHOT => {
-                                    verifications
-                                        .drive(
-                                            self.processor
-                                                .refresh_snapshot(&mut self.snapshot_publisher),
-                                        )
-                                        .await;
-                                }
-                                Publication::None => {}
-                                Publication::Snapshot(snapshots) => {
-                                    self.snapshot_publisher.publish(height, snapshots);
-                                }
-                                Publication::WithBarrier(snapshots, barrier) => {
-                                    self.snapshot_publisher.publish(height, snapshots);
-                                    durability.set_barrier(height, barrier);
-                                }
+                            if let Some(barrier) = barrier {
+                                durability.set_barrier(height, barrier);
                             }
 
                             if let Some(prune) = prune {
@@ -528,8 +502,7 @@ where
                             self.context.as_present(),
                             &mut durability,
                             &mut verifications,
-                            self.processor.databases(),
-                            &mut self.snapshot_publisher,
+                            &mut self.processor,
                         ).await {
                             return;
                         }
@@ -550,15 +523,12 @@ where
                             self.context.as_present(),
                             &mut durability,
                             &mut verifications,
-                            self.processor.databases(),
-                            &mut self.snapshot_publisher,
+                            &mut self.processor,
                         ).await {
                             return;
                         }
                     } else {
-                        self.processor
-                            .publish_snapshot(&mut self.snapshot_publisher)
-                            .await;
+                        self.processor.publish_snapshot().await;
                     }
                     requeue(retry_mailbox.as_ref(), retry);
                 }
@@ -938,22 +908,22 @@ mod tests {
             false,
         )
         .await;
+        let (publisher, subscriber) = Publisher::new(context);
         let processor = Processor::new(
             app,
             test_databases(),
             anchor(0, 0),
             StatefulMetrics::new(context),
             None,
+            publisher,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-        let (publisher, subscriber) = Publisher::new(context);
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
             processor,
-            snapshot_publisher: publisher,
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
@@ -1012,23 +982,23 @@ mod tests {
             verify_valid: true,
             observed_contexts: Arc::default(),
         };
-        let processor = Processor::new(
+        let (publisher, subscriber) = Publisher::new(context);
+        let mut processor = Processor::new(
             app,
             databases,
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
+            publisher,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-        let (mut publisher, subscriber) = Publisher::new(context);
-        processor.publish_snapshot(&mut publisher).await;
+        processor.publish_snapshot().await;
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
             processor,
-            snapshot_publisher: publisher,
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
@@ -1084,23 +1054,23 @@ mod tests {
         };
         let pruning =
             prune_config.map(|config| Pruning::new(config, marshal.mailbox.max_pending_acks(), 0));
-        let processor = Processor::new(
+        let (publisher, _subscriber) = Publisher::new(context);
+        let mut processor = Processor::new(
             app,
             databases,
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
+            publisher,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-        let (mut publisher, _subscriber) = Publisher::new(context);
-        processor.publish_snapshot(&mut publisher).await;
+        processor.publish_snapshot().await;
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
             processor,
-            snapshot_publisher: publisher,
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
@@ -1380,6 +1350,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -1389,7 +1360,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -1465,6 +1435,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -1474,7 +1445,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -1987,6 +1957,7 @@ mod tests {
                 anchor(1, 1),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -1996,7 +1967,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -2070,6 +2040,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mut mailbox = Mailbox::new(sender);
@@ -2079,7 +2050,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -2124,6 +2094,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
 
             // Defer a verification as the syncing actor does before its
@@ -2165,7 +2136,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: vec![request],
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -2225,6 +2195,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -2234,7 +2205,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -2326,6 +2296,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -2335,7 +2306,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -2422,6 +2392,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -2431,7 +2402,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -2531,6 +2501,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -2540,7 +2511,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -2659,6 +2629,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 Some(pruning),
+                Publisher::new(&context).0,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -2668,7 +2639,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox.clone(),
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -2789,6 +2759,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 Some(pruning),
+                Publisher::new(&context).0,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
@@ -2798,7 +2769,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -3150,6 +3120,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                Publisher::new(&context).0,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(2));
             let mut mailbox = Mailbox::new(sender);
@@ -3159,7 +3130,6 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -3333,8 +3303,8 @@ mod tests {
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
                     None,
+                    Publisher::new(&context).0,
                 ),
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
@@ -3517,8 +3487,8 @@ mod tests {
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
                     None,
+                    Publisher::new(&context).0,
                 ),
-                snapshot_publisher: Publisher::new(&context).0,
                 deferred_verifications: Vec::new(),
             };
             let _actor = context.child("loop").spawn(move |_| processing.run());

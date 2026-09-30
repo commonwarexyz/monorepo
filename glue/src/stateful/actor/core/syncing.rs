@@ -6,10 +6,10 @@ use crate::stateful::{
             mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
-        processor::{Applied, Processor, Pruning, Publication},
+        processor::{Applied, Processor, Pruning},
         syncer::{self, Artifact, SyncPlan},
     },
-    db::{Anchor, DatabaseSet as _, Publisher, SnapshotsOf},
+    db::{Anchor, Publisher, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -263,13 +263,12 @@ where
             artifact.anchor,
             self.metrics.clone(),
             self.pruning,
+            self.snapshot_publisher,
         );
 
         // Serving must not wait for the next finalization, so the synced state
         // alone publishes first.
-        processor
-            .publish_snapshot(&mut self.snapshot_publisher)
-            .await;
+        processor.publish_snapshot().await;
 
         let mut pending_prune = None;
         let mut pending_acknowledgements = Vec::new();
@@ -282,25 +281,14 @@ where
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(block.as_ref()) {
-                        let Applied { publication, prune } = processor
+                        let Applied { barrier, prune } = processor
                             .finalize(self.context.as_present(), block.as_ref(), false)
                             .await;
 
-                        // Cheap members serve every replayed block, as in processing.
-                        match publication {
-                            Publication::Snapshot(snapshots) => {
-                                self.snapshot_publisher.publish(block.height(), snapshots);
-                            }
-                            Publication::None if A::Databases::ANY_CHEAP_SNAPSHOT => {
-                                processor
-                                    .refresh_snapshot(&mut self.snapshot_publisher)
-                                    .await;
-                            }
-                            Publication::None => {}
-                            Publication::WithBarrier(..) => {
-                                unreachable!("the handoff requests no barrier per block")
-                            }
-                        }
+                        assert!(
+                            barrier.is_none(),
+                            "the handoff requests no barrier per block"
+                        );
                         pending_prune = prune.or(pending_prune);
                         completed_height = block.height();
                     }
@@ -312,11 +300,7 @@ where
         // Acknowledge applied handoffs only after one barrier makes the whole applied suffix
         // durable.
         if !pending_acknowledgements.is_empty() {
-            let (snapshots, barrier) = processor.databases().finalize().await;
-
-            // The snapshots serve immediately; peers verify what they fetch
-            // against a finalized root, so serving safely runs ahead of disk.
-            self.snapshot_publisher.publish(completed_height, snapshots);
+            let barrier = processor.start_sync().await;
             if !barrier.durable().await {
                 return;
             }
@@ -338,9 +322,7 @@ where
             // The published snapshots were captured before this prune. Republish
             // so serving stops pinning the pruned state. Every handoff barrier
             // was awaited above, so the republished state is already durable.
-            processor
-                .publish_snapshot(&mut self.snapshot_publisher)
-                .await;
+            processor.publish_snapshot().await;
         }
 
         for subscriber in self.database_subscribers.drain(..) {
@@ -353,7 +335,6 @@ where
             provider: self.provider,
             marshal: self.marshal,
             processor,
-            snapshot_publisher: self.snapshot_publisher,
             deferred_verifications: self.deferred_verifications,
         }
         .run()
