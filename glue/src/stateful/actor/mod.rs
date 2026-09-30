@@ -13,7 +13,7 @@ pub use syncer::SyncPlan;
 
 mod processor;
 
+pub(super) mod ordered;
+
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type SyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
-
-pub(super) mod ordered;

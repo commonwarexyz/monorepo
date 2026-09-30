@@ -17,7 +17,7 @@ pub(super) struct Durability {
     /// Applied heights whose marshal acknowledgements await durability, in nondecreasing order.
     acknowledgements: VecDeque<(Height, Exact)>,
     /// Active barrier, whose output is the height of its captured prefix once durable.
-    pub(super) barrier: Option<Handle<Option<Height>>>,
+    barrier: Option<Handle<Option<Height>>>,
 }
 
 impl Durability {
@@ -76,6 +76,11 @@ impl Durability {
             .expect("an undurable applied height must retain its acknowledgement");
         self.acknowledgements
             .insert(index + 1, (height, acknowledgement));
+    }
+
+    /// Returns whether a barrier is active.
+    pub(super) const fn has_barrier(&self) -> bool {
+        self.barrier.is_some()
     }
 
     /// Returns whether applied state is not yet durable and no barrier is active.
