@@ -52,6 +52,15 @@ pub fn option_map_or<T, U, F: FnOnce(T) -> U>(self_: Option<T>, default: U, f: F
     }
 }
 
+/// `Option::copied` (of an `Option<&T>`; lifted code reads `&T` as `T`,
+/// so it is the identity there).
+pub fn option_copied<T: Copy>(self_: Option<&T>) -> Option<T> {
+    match self_ {
+        Some(&v) => Some(v),
+        None => None,
+    }
+}
+
 /// `Option::ok_or`.
 pub fn option_ok_or<T, E>(self_: Option<T>, err: E) -> Result<T, E> {
     match self_ {

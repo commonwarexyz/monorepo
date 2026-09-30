@@ -150,6 +150,10 @@ pub struct LiftFacts {
     pub host_obligations: Vec<(String, String)>,
     /// Open traits at their verified instance (`(trait, instance)`).
     pub open_instances: Vec<(String, String)>,
+    /// The host models of a crate lifted in place (`#[lift(host)]` type
+    /// aliases, unit structs and open-trait impls whose methods are spec
+    /// models): trusted, listed in the record (`host_checks`).
+    pub host_models: Vec<String>,
     /// Declared unverified instances of open traits.
     pub unverified_instances: Vec<(String, String)>,
     /// Lifted functions the conformance check does not call directly, and
@@ -258,10 +262,29 @@ impl LiftFacts {
 /// The rustc-checked items of a host-model module (`#[lift(host)]`): every
 /// item must be an enum (with unit or tuple variants), each variant checked
 /// by one `const _` item that names it through the lifted code's own scope.
-pub fn host_checks(file: &syn::File, fid: FileId, diags: &mut Diagnostics) -> Vec<String> {
+/// In a crate lifted in place (`in_place`: nothing is emitted, so there is
+/// no tail to check against) a host module may also model host types and
+/// functions: `pub type T = <exec type>;` (a host type read as that type), a
+/// unit struct, and an impl of an open trait for it at its instance whose
+/// methods are the models (their bodies call spec functions; the lift reads
+/// the host's calls of the instance's methods as these). Each is a trusted
+/// host model, returned in `models` for the record.
+pub fn host_checks(file: &syn::File, fid: FileId, in_place: bool, models: &mut Vec<String>, diags: &mut Diagnostics) -> Vec<String> {
     let mut out = Vec::new();
     for it in &file.items {
         match it {
+            syn::Item::Type(t) if in_place && t.generics.params.is_empty() => models.push(format!("type `{}` = `{}`", t.ident, ty_key(&t.ty))),
+            syn::Item::Struct(st) if in_place && st.generics.params.is_empty() && matches!(st.fields, syn::Fields::Unit) => models.push(format!("unit struct `{}`", st.ident)),
+            syn::Item::Impl(im) if in_place && im.trait_.is_some() && im.generics.params.is_empty() => {
+                let tn = im.trait_.as_ref().map(|(_, p, _)| path_key(p)).unwrap_or_default();
+                for ii in &im.items {
+                    match ii {
+                        syn::ImplItem::Fn(f) => models.push(format!("`<{} as {tn}>::{}` modeled as `{}`", ty_key(&im.self_ty), f.sig.ident, f.block.to_token_stream().to_string())),
+                        syn::ImplItem::Type(ty) => models.push(format!("`<{} as {tn}>::{}` = `{}`", ty_key(&im.self_ty), ty.ident, ty_key(&ty.ty))),
+                        other => diags.push(Diagnostic::error(DiagKind::Unsupported, Span::from_pm2(fid, other.span()), "lift: a host model impl holds methods and associated types only")),
+                    }
+                }
+            }
             syn::Item::Enum(e) if e.generics.params.is_empty() => {
                 let en = e.ident.to_string();
                 for v in &e.variants {
@@ -276,7 +299,7 @@ pub fn host_checks(file: &syn::File, fid: FileId, diags: &mut Diagnostics) -> Ve
                     }
                 }
             }
-            other => diags.push(Diagnostic::error(DiagKind::Unsupported, Span::from_pm2(fid, other.span()), "lift: a `#[lift(host)]` module holds only non-generic enums (each variant is checked against the host in the emitted module)")),
+            other => diags.push(Diagnostic::error(DiagKind::Unsupported, Span::from_pm2(fid, other.span()), if in_place { "lift: a `#[lift(host)]` module holds only non-generic enums, type aliases, unit structs and their open-trait impls (host models)" } else { "lift: a `#[lift(host)]` module holds only non-generic enums (each variant is checked against the host in the emitted module)" })),
         }
     }
     out
@@ -314,6 +337,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     }
     // open traits at their verified instance (crate-wide; every declaration agrees)
     let mut unverified_instances: Vec<(String, String)> = Vec::new();
+    let in_place_crate = sources.iter().any(|s| s.opts.in_place);
     for src in &sources {
         for (t, p) in &src.opts.instances {
             let Ok(path) = syn::parse_str::<syn::Path>(p) else {
@@ -337,6 +361,15 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
         cx.open.module_paths.insert(src.name.clone(), src.module_path.clone());
     }
     cx.load_templates();
+    // the generic items whose open-trait parameters erasure drops
+    {
+        let instances = cx.open.instances.clone();
+        let mut erased = HashMap::new();
+        for src in &sources {
+            open::collect_erased_params(&src.ast.items, &instances, &mut erased);
+        }
+        cx.open.erased_params = erased;
+    }
     for src in &sources {
         for t in &src.unverified {
             if cx.unverified.insert(t.clone()) {
@@ -359,7 +392,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
         }
         if s.host {
             let f = syn::File { shebang: None, attrs: vec![], items: items.clone() };
-            facts.host_checks.extend(host_checks(&f, s.file, diags));
+            facts.host_checks.extend(host_checks(&f, s.file, in_place_crate, &mut facts.host_models, diags));
         }
         if s.opts.in_place {
             in_place.insert(s.module_index);
@@ -711,17 +744,26 @@ impl Ctx {
 
     fn collect(&mut self, modname: &str, items: &[syn::Item]) {
         for item in items {
+            if let syn::Item::Enum(e) = item
+                && e.generics.params.is_empty()
+            {
+                self.open.enums.insert(e.ident.to_string());
+            }
             match item {
                 syn::Item::Trait(t) => {
                     let name = t.ident.to_string();
                     let sealed = t.attrs.iter().any(|a| a.path().is_ident("lift_sealed"));
+                    // an open trait declared in a lifted file, read at its instance
+                    let open_decl = !sealed && self.open.instances.contains_key(&name);
                     let mut from = None;
                     let mut shift_amount = None;
                     for b in &t.supertraits {
                         if let syn::TypeParamBound::Trait(tb) = b {
                             let seg = tb.path.segments.last().unwrap();
                             let sname = seg.ident.to_string();
-                            if !OPERATOR_SUPERTRAITS.contains(&sname.as_str()) && !self.traits.contains_key(&sname) {
+                            // (an open trait's `Clone`/`Send`/`Sync` bounds constrain its
+                            // impls, never the meaning of a call at the instance)
+                            if !OPERATOR_SUPERTRAITS.contains(&sname.as_str()) && !self.traits.contains_key(&sname) && !(open_decl && open::OPEN_MARKER_SUPERTRAITS.contains(&sname.as_str())) {
                                 self.err(tb.span(), format!("supertrait `{sname}` of `{name}` is not known to the lift"));
                             }
                             if let syn::PathArguments::AngleBracketed(a) = &seg.arguments
@@ -741,7 +783,12 @@ impl Ctx {
                         match ti {
                             syn::TraitItem::Fn(f) => {
                                 if f.default.is_some() {
-                                    self.err(f.span(), "trait methods with default bodies are not lifted yet");
+                                    if open_decl {
+                                        // lifted at the instance, unless its impl overrides it
+                                        self.open.trait_defaults.entry(name.clone()).or_default().push(f.clone());
+                                    } else {
+                                        self.err(f.span(), "trait methods with default bodies are not lifted yet (except provided methods of an open trait declared in the file, read at its instance)");
+                                    }
                                 }
                                 methods.insert(f.sig.ident.to_string(), f.sig.clone());
                             }
@@ -763,6 +810,7 @@ impl Ctx {
                             let owner_params = self.structs.get(&sname).map(|s| s.params.clone()).unwrap_or_default();
                             for ii in &im.items {
                                 if let syn::ImplItem::Fn(f) = ii {
+                                    self.open.inherent_fns.insert((sname.clone(), f.sig.ident.to_string()), f.clone());
                                     let mi = method_info(&f.sig, owner_params.clone());
                                     self.methods.insert((sname.clone(), f.sig.ident.to_string()), mi);
                                 }
@@ -795,6 +843,14 @@ impl Ctx {
                         }
                         self.impls.push(ImplInfo { trait_name: tname, module: modname.to_string(), self_ty: (*im.self_ty).clone(), fns, assoc });
                     } else if let Some(sname) = type_name(&im.self_ty) {
+                        // an impl of a trait the lift does not know (not sealed or
+                        // declared here, not an open trait at its instance, not an
+                        // operator, method, host or dropped trait): an error, never
+                        // a guess at how its calls resolve (declare it `unverified_impls`)
+                        if !HOST_TRAITS.contains(&tname.as_str()) && tname != "From" && !self.traits.contains_key(&tname) {
+                            self.err(tpath.span(), format!("impl of the trait `{tname}`, which the lift does not know: declare it host code with `unverified_impls = \"{tname}\"`"));
+                            continue;
+                        }
                         // host-trait impl of a lifted struct: its methods become inherent
                         let owner_params = self.structs.get(&sname).map(|s| s.params.clone()).unwrap_or_default();
                         for ii in &im.items {
@@ -816,7 +872,8 @@ impl Ctx {
                     }
                 }
                 syn::Item::Fn(f) => {
-                    let params = self.generic_params(&f.sig.generics);
+                    let iters = open::byte_iter_params(&f.sig.generics);
+                    let params: Vec<GenericParam> = self.generic_params(&f.sig.generics).into_iter().filter(|p| !iters.contains(&p.name)).collect();
                     let impl_body = matches!(&f.sig.output, syn::ReturnType::Type(_, t) if matches!(&**t, syn::Type::ImplTrait(_))).then(|| (*f.block).clone());
                     self.fns.insert(f.sig.ident.to_string(), FnInfo { module: modname.to_string(), params, sig: f.sig.clone(), impl_body });
                 }
@@ -873,6 +930,11 @@ impl Ctx {
         let names: Vec<String> = self.traits.keys().cloned().collect();
         for n in names {
             let t = self.traits[&n].clone();
+            // an open trait declared in the file is read at its instance (its
+            // parameters were erased; `open::open_impl_items`)
+            if !t.sealed && self.open.instances.contains_key(&n) {
+                continue;
+            }
             if !t.sealed {
                 self.errors.push((t.span, format!("trait `{n}` is not sealed (declared outside a private module): its impl set is open, so its generic users cannot be monomorphized"), vec![]));
                 continue;
@@ -1060,7 +1122,9 @@ impl Ctx {
                     // `const fn` compile-time assertions (used only in `const { .. }` blocks, which the lift evaluates)
                 }
                 syn::Item::Fn(f) => {
-                    let params = self.generic_params(&f.sig.generics);
+                    // byte-string iterator parameters are states, not instances (`open::state_param`)
+                    let iters = open::byte_iter_params(&f.sig.generics);
+                    let params: Vec<GenericParam> = self.generic_params(&f.sig.generics).into_iter().filter(|p| !iters.contains(&p.name)).collect();
                     if params.is_empty() {
                         let lifted = self.lift_fn(f, HashMap::new(), None, ghost, None);
                         out.extend(lifted);
@@ -1126,6 +1190,12 @@ impl Ctx {
                                 rw.bounds = abounds;
                                 rw.expr(&mut e, None);
                                 drop(rw);
+                                // in place, host code builds values of the type too (unchecked):
+                                // the invariant is an obligation of host code, listed like a
+                                // `requires` (the record's preconditions)
+                                if self.open.cur_in_place && !ghost {
+                                    self.open.host_obligations.push((format!("type {}", s2.ident), e.to_token_stream().to_string()));
+                                }
                                 s2.attrs.push(syn::parse_quote!(#[invariant(#e)]));
                             }
                         }
@@ -1141,6 +1211,14 @@ impl Ctx {
                 }
                 syn::Item::Enum(e) => {
                     let mut e = e;
+                    // `#[derive(thiserror::Error)]`'s `#[error("..")]` on variants: the
+                    // `Display` text (formatting, host code; the derive is dropped below)
+                    let thiserror = e.attrs.iter().any(|a| a.path().is_ident("derive") && a.to_token_stream().to_string().replace(' ', "").contains("Error"));
+                    if thiserror {
+                        for v in e.variants.iter_mut() {
+                            v.attrs.retain(|a| !a.path().is_ident("error"));
+                        }
+                    }
                     e.attrs = self.lift_derives(&e.attrs, e.span());
                     out.push(syn::Item::Enum(e));
                 }
@@ -1364,7 +1442,12 @@ impl Ctx {
             let mut fns = Vec::new();
             self.cur_impl = Some((trait_written.clone(), modpath.clone(), ty_key(&subst_names(&im.self_ty, &sigma))));
             self.open.cur_impl_assoc = assoc.clone();
-            for ii in &im.items {
+            // an open trait's impl at its instance: its methods and the trait's provided ones
+            let impl_items: Vec<syn::ImplItem> = match &tname {
+                Some(t) if self.open.instances.contains_key(t) => self.open_impl_items(&sname, t, &im),
+                _ => im.items.clone(),
+            };
+            for ii in &impl_items {
                 match ii {
                     syn::ImplItem::Fn(f) => {
                         let mut sig = f.sig.clone();
@@ -1373,7 +1456,16 @@ impl Ctx {
                             // the harness calls the trait's method by its own name
                             self.conform_src_method = Some(f.sig.ident.to_string());
                         }
-                        let item_fn = syn::ItemFn { attrs: keep_fn_attrs(&f.attrs), vis: if tname.is_some() { syn::Visibility::Public(Default::default()) } else { f.vis.clone() }, sig, block: Box::new(f.block.clone()) };
+                        // in place, a private method is crate-visible in the model (rustc
+                        // enforces privacy on the host's own files; proofs may name it)
+                        let vis = if tname.is_some() {
+                            syn::Visibility::Public(Default::default())
+                        } else if self.open.cur_in_place && matches!(f.vis, syn::Visibility::Inherited) && !ghost {
+                            syn::parse_quote!(pub(crate))
+                        } else {
+                            f.vis.clone()
+                        };
+                        let item_fn = syn::ItemFn { attrs: keep_fn_attrs(&f.attrs), vis, sig, block: Box::new(f.block.clone()) };
                         let mut lifted = self.lift_fn_b(item_fn, sigma.clone(), Some(self_ty.clone()), ghost, None, &params);
                         // the first item is the method; helpers (loop functions) go outside
                         // the impl, except method helpers (`#[lift_method]`: they take `self`)
@@ -1453,6 +1545,8 @@ impl Ctx {
         if let Some(n) = rename {
             f.sig.ident = Ident::new(&n, f.sig.ident.span());
         }
+        // type parameters read as the byte-string iterator model (`open::state_param`)
+        let byte_iters = open::byte_iter_params(&f.sig.generics);
         f.sig.generics = syn::Generics::default();
         // `const fn`: the same function (constness only allows compile-time calls)
         f.sig.constness = None;
@@ -1506,14 +1600,17 @@ impl Ctx {
                 syn::FnArg::Typed(pt) => {
                     let mut pt = pt.clone();
                     let name = pat_ident(&pt.pat);
-                    if let Some(kind) = state_kind(&pt.ty) {
-                        let sty: syn::Type = syn::parse_quote!(Seq<u8>);
+                    if let Some((mut sty, mut bty, marker)) = open::state_param(&pt.ty, &byte_iters) {
+                        if !marker {
+                            rw.ty(&mut sty);
+                            rw.ty(&mut bty);
+                        }
                         if let Some(n) = &name {
                             rw.states.push((n.clone(), sty.clone()));
-                            rw.bind(n, syn::parse_quote!(#kind));
+                            rw.bind(n, bty);
                         }
                         let id = format_ident!("{}", name.clone().unwrap_or_else(|| "buf".into()));
-                        new_inputs.push(syn::parse_quote!(mut #id: Seq<u8>));
+                        new_inputs.push(syn::parse_quote!(mut #id: #sty));
                         continue;
                     }
                     rw.ty(&mut pt.ty);
@@ -1632,8 +1729,27 @@ impl Ctx {
                     f.attrs.push(syn::parse_quote!(#[requires(#e)]));
                     continue;
                 }
+                // `decreases(e, max = C);`: the measure and depth bound of a
+                // non-tail recursive function (DESIGN.md §3.7; checked like any)
+                if let syn::Stmt::Expr(syn::Expr::Call(c), _) = st
+                    && matches!(&*c.func, syn::Expr::Path(p) if p.path.is_ident("decreases"))
+                    && !c.args.is_empty()
+                {
+                    let mut args: Vec<syn::Expr> = c.args.iter().cloned().collect();
+                    let ab = self.attach_bounds.clone();
+                    let mut rw = FnRw::new(self, sigma2.clone(), true);
+                    rw.bounds = ab;
+                    rw.self_ty = self_ty.clone();
+                    rw.expr(&mut args[0], None);
+                    drop(rw);
+                    if f.attrs.iter().any(|a| a.path().is_ident("decreases")) {
+                        self.err(st.span(), "`decreases(..);` twice for the same function");
+                    }
+                    f.attrs.push(syn::parse_quote!(#[decreases(#(#args),*)]));
+                    continue;
+                }
                 let Some(mut e) = attach_call(st, "ensures") else {
-                    self.err(st.span(), "a function attachment holds `requires(..);`, `ensures(..);`, `opaque();` and `at_start! { .. }` only");
+                    self.err(st.span(), "a function attachment holds `requires(..);`, `ensures(..);`, `decreases(..);`, `opaque();` and `at_start! { .. }` only");
                     continue;
                 };
                 let ab = self.attach_bounds.clone();
@@ -1707,6 +1823,13 @@ impl Ctx {
         // function returns its concrete type)
         if matches!(&f.sig.output, syn::ReturnType::Type(_, t) if matches!(&**t, syn::Type::ImplTrait(_))) {
             self.conform_skipped.push(ConformSkip { module: self.cur_module.clone(), lifted, why: "it returns `impl Trait` (an opaque value the harness cannot compare: compared through its callers)".into() });
+            return;
+        }
+        // state parameters the harness does not drive yet (a byte-string
+        // iterator, `&mut` of a value, `Option<&mut Vec<T>>`, `&mut Vec<T>`)
+        let iters = open::byte_iter_params(&f.sig.generics);
+        if f.sig.inputs.iter().any(|i| matches!(i, syn::FnArg::Typed(pt) if state_kind(&pt.ty).is_none() && open::state_param(&pt.ty, &iters).is_some())) {
+            self.conform_skipped.push(ConformSkip { module: self.cur_module.clone(), lifted, why: "a state parameter the harness does not drive yet (`&mut` of a value, a byte-string iterator, `Vec` states)".into() });
             return;
         }
         let params = f.sig.inputs.iter().map(|i| match i {
@@ -1812,6 +1935,10 @@ impl<'c> FnRw<'c> {
         }
         let mut s = TySubst { sigma: &self.sigma, cx: self.cx };
         s.visit_type_mut(t);
+        // `S::X` for an associated type of an open trait's impl at its instance `S`
+        if !self.cx.open.assoc_types.is_empty() {
+            open::resolve_instance_assoc(t, &self.cx.open.assoc_types);
+        }
         // `&mut impl Buf` etc. are handled at parameters; `Self` in a method on a primitive
         if let Some(st) = &self.self_ty {
             let mut r = ReplaceSelfTy { ty: st.clone() };
@@ -1990,6 +2117,10 @@ impl<'c> FnRw<'c> {
                     }
                     _ => src_ty,
                 };
+                // a tuple (or tuple-struct) pattern: each binding gets its component's type
+                if pat_ident(&l.pat).is_none() {
+                    self.bind_pat(&l.pat, ty.as_ref());
+                }
                 if let Some(n) = pat_ident(&l.pat) {
                     match ty {
                         Some(t) => self.bind(&n, t),
@@ -2061,6 +2192,13 @@ impl<'c> FnRw<'c> {
             && matches!(&*u.expr, syn::Expr::Path(p) if p.path.is_ident("self"))
         {
             *e = syn::parse_quote!(self);
+            return;
+        }
+        // the value, iterator and `Vec` states (`open::state_rewrite`)
+        if !self.ghost
+            && let Some(new) = self.state_rewrite(e)
+        {
+            *e = new;
             return;
         }
         // operators on lifted structs (`open`)
@@ -2576,6 +2714,18 @@ impl<'c> FnRw<'c> {
                 let x = self.fresh("e");
                 let ret_err: syn::Expr = syn::parse_quote!(Err(#x));
                 let ret_e = if self.states.is_empty() { ret_err } else { self.wrap_state_ret(ret_err) };
+                // `o.ok_or(e)?` with no expected type: the template's `Ok(v)` arm
+                // leaves the error type open to the type checker, so the
+                // scrutinee is annotated with the type the lift read off it
+                if expected.is_none()
+                    && matches!(&*t.expr, syn::Expr::MethodCall(mc) if mc.method == "ok_or")
+                    && let Some(it) = &inner_ty
+                    && generic_arg(it, "Result", 0).is_some()
+                    && generic_arg(it, "Result", 1).is_some()
+                {
+                    let s = self.fresh("s");
+                    return Some(syn::parse_quote!(match { let #s: #it = #inner; #s } { Ok(#v) => #v, Err(#x) => return #ret_e }));
+                }
                 Some(syn::parse_quote!(match #inner { Ok(#v) => #v, Err(#x) => return #ret_e }))
             }
             syn::Expr::MethodCall(mc) => self.rewrite_method(mc, expected),
@@ -2845,12 +2995,11 @@ impl<'c> FnRw<'c> {
                     let mi = self.cx.methods.get(&(sname.clone(), mname)).cloned().unwrap_or_default();
                     let mut args: Vec<syn::Expr> = c.args.iter().cloned().collect();
                     let mut places = Vec::new();
+                    let mut pre: Vec<syn::Stmt> = Vec::new();
                     for (i, a) in args.iter_mut().enumerate() {
                         if mi.state_params.contains(&i) {
-                            let place = match &*a {
-                                syn::Expr::Reference(r) if r.mutability.is_some() => (*r.expr).clone(),
-                                other => other.clone(),
-                            };
+                            let sty = mi.sig.clone().and_then(|sg| self.state_param_ty(&sg, i));
+                            let place = self.state_arg_place_ty(a, &mut pre, sty);
                             places.push(place.clone());
                             *a = place;
                         } else {
@@ -2866,11 +3015,11 @@ impl<'c> FnRw<'c> {
                     let has_ret = mi.sig.as_ref().is_some_and(|s| !matches!(s.output, syn::ReturnType::Default));
                     if has_ret {
                         let r = self.fresh("r");
-                        return Some(syn::parse_quote!({ let (#(#tmps,)* #r) = #call; #(#places = #tmps;)* #r }));
+                        return Some(syn::parse_quote!({ #(#pre)* let (#(#tmps,)* #r) = #call; #(#places = #tmps;)* #r }));
                     }
                     let t0 = &tmps[0];
                     let p0 = &places[0];
-                    return Some(syn::parse_quote!({ let #t0 = #call; #p0 = #t0; }));
+                    return Some(syn::parse_quote!({ #(#pre)* let #t0 = #call; #p0 = #t0; }));
                 }
                 self.cx.err(span, format!("`{sname}::..` needs its type arguments written (`{sname}::<T>::..`)"));
             }
@@ -2982,15 +3131,11 @@ impl<'c> FnRw<'c> {
         let sigma_callee: HashMap<String, syn::Type> = pnames.iter().cloned().zip(targs.iter().map(|t| t.clone().unwrap_or_else(|| syn::parse_quote!(()))) ).collect();
         // rewrite value arguments; state arguments are places
         let mut state_places: Vec<syn::Expr> = Vec::new();
+        let mut pre: Vec<syn::Stmt> = Vec::new();
         for (i, a) in args.iter_mut().enumerate() {
             if states.contains(&i) {
-                let place = match &*a {
-                    syn::Expr::Reference(r) if r.mutability.is_some() => (*r.expr).clone(),
-                    other => other.clone(),
-                };
-                if !self.is_place_state(&place) {
-                    self.cx.err(a.span(), "a buffer argument must be a local variable (or `&mut` of one)");
-                }
+                let sty = self.state_param_ty(&fi.sig, i);
+                let place = self.state_arg_place_ty(a, &mut pre, sty);
                 state_places.push(place.clone());
                 *a = place;
                 continue;
@@ -3012,14 +3157,55 @@ impl<'c> FnRw<'c> {
         let places = &state_places;
         if has_ret {
             let r = self.fresh("r");
-            syn::parse_quote!({ let (#(#tmps,)* #r) = #lead(#(#args),*); #(#places = #tmps;)* #r })
+            syn::parse_quote!({ #(#pre)* let (#(#tmps,)* #r) = #lead(#(#args),*); #(#places = #tmps;)* #r })
         } else if tmps.len() == 1 {
             let t = &tmps[0];
             let p = &places[0];
-            syn::parse_quote!({ let #t = #lead(#(#args),*); #p = #t; })
+            syn::parse_quote!({ #(#pre)* let #t = #lead(#(#args),*); #p = #t; })
         } else {
-            syn::parse_quote!({ let (#(#tmps),*) = #lead(#(#args),*); #(#places = #tmps;)* })
+            syn::parse_quote!({ #(#pre)* let (#(#tmps),*) = #lead(#(#args),*); #(#places = #tmps;)* })
         }
+    }
+
+    /// The place of a state argument (`open::state_place`); a value that is
+    /// not a place (`None`, `&mut 0`) is a fresh temporary, as Rust passes
+    /// `&mut <temporary>`: its final value is dropped.
+    fn state_arg_place(&mut self, a: &syn::Expr, pre: &mut Vec<syn::Stmt>) -> syn::Expr {
+        self.state_arg_place_ty(a, pre, None)
+    }
+
+    /// The model type of the `i`-th state parameter of `sig` (`open::state_param`).
+    fn state_param_ty(&mut self, sig: &syn::Signature, i: usize) -> Option<syn::Type> {
+        let iters = open::byte_iter_params(&sig.generics);
+        let pt = sig.inputs.iter().filter_map(|x| match x {
+            syn::FnArg::Typed(pt) => Some((*pt.ty).clone()),
+            _ => None,
+        }).nth(i)?;
+        let (mut sty, _, marker) = open::state_param(&pt, &iters)?;
+        if !marker {
+            self.ty(&mut sty);
+        }
+        Some(sty)
+    }
+
+    fn state_arg_place_ty(&mut self, a: &syn::Expr, pre: &mut Vec<syn::Stmt>, ty: Option<syn::Type>) -> syn::Expr {
+        let place = open::state_place(a);
+        // a variable (or a field of one) is a place, whether or not the lift's
+        // local typing knows its type (a copy would lose the write-back);
+        // only `None`, a constant, a literal or another non-place expression
+        // is a value, which Rust passes as `&mut <temporary>` too
+        let is_place = matches!(&place, syn::Expr::Path(p) if p.qself.is_none() && p.path.get_ident().is_some_and(|i| i != "None" && !self.cx.consts.contains_key(&i.to_string()))) || matches!(&place, syn::Expr::Field(_));
+        if is_place {
+            return place;
+        }
+        let mut v = place;
+        self.expr(&mut v, ty.as_ref());
+        let t = self.fresh("tmp");
+        match ty {
+            Some(ty) => pre.push(syn::parse_quote!(let mut #t: #ty = #v;)),
+            None => pre.push(syn::parse_quote!(let mut #t = #v;)),
+        }
+        syn::parse_quote!(#t)
     }
 
     fn is_place_state(&self, p: &syn::Expr) -> bool {
@@ -3079,6 +3265,16 @@ impl<'c> FnRw<'c> {
                     return None;
                 }
             });
+        }
+        // `b.as_ref()` of a byte slice (`<[u8] as AsRef<[u8]>>::as_ref`,
+        // through the reference): the slice itself
+        if m == "as_ref"
+            && mc.args.is_empty()
+            && recv_ty.as_ref().is_some_and(is_byte_slice)
+        {
+            let mut r = (*mc.receiver).clone();
+            self.expr(&mut r, None);
+            return Some(r);
         }
         // `x.unwrap()` on `Option`: its panic is an obligation
         if m == "unwrap" && mc.args.is_empty() {
@@ -3198,12 +3394,11 @@ impl<'c> FnRw<'c> {
             self.expr(&mut r, None);
             let mut args: Vec<syn::Expr> = mc.args.iter().cloned().collect();
             let mut places = Vec::new();
+            let mut pre: Vec<syn::Stmt> = Vec::new();
             for (i, a) in args.iter_mut().enumerate() {
                 if mi.state_params.contains(&i) {
-                    let place = match &*a {
-                        syn::Expr::Reference(rf) if rf.mutability.is_some() => (*rf.expr).clone(),
-                        other => other.clone(),
-                    };
+                    let sty = mi.sig.clone().and_then(|sg| self.state_param_ty(&sg, i));
+                    let place = self.state_arg_place_ty(a, &mut pre, sty);
                     places.push(place.clone());
                     *a = place;
                 } else {
@@ -3215,12 +3410,12 @@ impl<'c> FnRw<'c> {
             let has_ret = mi.sig.as_ref().is_some_and(|s| !matches!(s.output, syn::ReturnType::Default));
             if has_ret {
                 let rr = self.fresh("r");
-                return Some(syn::parse_quote!({ let (#(#tmps,)* #rr) = (#r).#mid(#(#args),*); #(#places = #tmps;)* #rr }));
+                return Some(syn::parse_quote!({ #(#pre)* let (#(#tmps,)* #rr) = (#r).#mid(#(#args),*); #(#places = #tmps;)* #rr }));
             }
             if tmps.len() == 1 {
                 let t0 = &tmps[0];
                 let p0 = &places[0];
-                return Some(syn::parse_quote!({ let #t0 = (#r).#mid(#(#args),*); #p0 = #t0; }));
+                return Some(syn::parse_quote!({ #(#pre)* let #t0 = (#r).#mid(#(#args),*); #p0 = #t0; }));
             }
         }
         // a core method with a template (`open`): its definition inlined
@@ -3399,6 +3594,11 @@ impl<'c> FnRw<'c> {
                 {
                     return self.cx.consts.get(id).cloned();
                 }
+                // `E::V`, a unit variant of a non-generic enum of the lifted sources
+                if segs.len() >= 2 && self.cx.open.enums.contains(&segs[segs.len() - 2]) {
+                    let id = format_ident!("{}", segs[segs.len() - 2]);
+                    return Some(syn::parse_quote!(#id));
+                }
                 None
             }
             syn::Expr::Lit(l) => match &l.lit {
@@ -3435,6 +3635,14 @@ impl<'c> FnRw<'c> {
             },
             syn::Expr::Field(f) => {
                 let bt = self.ty_of(&f.base)?;
+                // `range.start`, `range.end` of the prelude's `Range<T>` (`open`)
+                if let syn::Member::Named(n) = &f.member
+                    && (n == "start" || n == "end")
+                    && type_name(&strip_refs(&bt)).as_deref() == Some("Range")
+                    && let Some(t) = generic_arg(&strip_refs(&bt), "Range", 0)
+                {
+                    return Some(t);
+                }
                 let sn = type_name(&bt)?;
                 let base = self.struct_base_of(&sn)?;
                 let si = self.cx.structs.get(&base)?.clone();
@@ -3474,6 +3682,16 @@ impl<'c> FnRw<'c> {
                         return Some(syn::parse_quote!(Result<#ok, crate::Error>));
                     }
                     "div_ceil" | "max" | "min" | "wrapping_add" | "wrapping_sub" => return rt,
+                    // `s.get(i)` of a slice: `Option<&T>`
+                    "get" if mc.args.len() == 1 && rt.as_ref().is_some_and(|t| matches!(strip_refs(t), syn::Type::Slice(_))) => {
+                        let syn::Type::Slice(sl) = strip_refs(rt.as_ref()?) else { return None };
+                        let el = &*sl.elem;
+                        return Some(syn::parse_quote!(Option<&#el>));
+                    }
+                    // `it.next()` of the byte-string iterator state (`open::state_param`)
+                    "next" if rt.as_ref().and_then(type_name).as_deref() == Some("__BytesIter") => return Some(syn::parse_quote!(Option<&[u8]>)),
+                    // `b.as_ref()` of a byte slice: the slice
+                    "as_ref" if mc.args.is_empty() && rt.as_ref().is_some_and(|t| is_byte_slice(t)) => return Some(syn::parse_quote!(&[u8])),
                     _ => {}
                 }
                 let t = rt?;
@@ -3956,6 +4174,11 @@ fn subst_names(t: &syn::Type, sigma: &HashMap<String, syn::Type>) -> syn::Type {
     t
 }
 
+/// `[u8]` or `&[u8]` (any number of references).
+fn is_byte_slice(t: &syn::Type) -> bool {
+    matches!(strip_refs(t), syn::Type::Slice(sl) if matches!(&*sl.elem, syn::Type::Path(p) if p.path.is_ident("u8")))
+}
+
 fn type_name(t: &syn::Type) -> Option<String> {
     match t {
         syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
@@ -4074,13 +4297,14 @@ fn state_kind(t: &syn::Type) -> Option<syn::Type> {
 
 /// Indices (receiver excluded) of the state parameters of a signature.
 fn fn_states(sig: &syn::Signature) -> Vec<usize> {
+    let iters = open::byte_iter_params(&sig.generics);
     let mut out = Vec::new();
     let mut i = 0;
     for input in &sig.inputs {
         match input {
             syn::FnArg::Receiver(_) => {}
             syn::FnArg::Typed(pt) => {
-                if state_kind(&pt.ty).is_some() {
+                if open::state_param(&pt.ty, &iters).is_some() {
                     out.push(i);
                 }
                 i += 1;

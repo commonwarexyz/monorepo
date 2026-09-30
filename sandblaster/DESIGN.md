@@ -617,7 +617,10 @@ host/
   dependencies), nor open traits at declared instances: the check fails
   with that reason, so `compile_lifted` issues no verdict for such a crate
   until it does. commonware-storage's MMR position arithmetic is the first
-  in-place crate (`storage/sandblaster/mmr`).
+  in-place crate (`storage/sandblaster/mmr`); the first set of its Merkle
+  proof verifier (`hasher.rs` at `Standard<Sha256>`, `proof.rs`'s subtree
+  reconstruction; SEMANTICS.md §19.10) is the second
+  (`storage/sandblaster/verifier`).
 * **Development aid, to be removed before any landing:
   `sandblaster::build::compile_lifted_pending_gates(root, name)`.** While an
   in-place crate's specification lock is not accepted, it checks every

@@ -36,6 +36,15 @@ pub fn buf_try_get_u8(buf: Seq<u8>) -> (Seq<u8>, Result<u8, TryGetError>) {
     }
 }
 
+/// `Vec::push(x)`: appends `x` (lifted code reads a `Vec<T>` as the
+/// sequence of its elements; allocation failure is host behavior, outside
+/// the model, like a `BufMut` running out of capacity).
+#[example(vec_push(seq![1u8], 2u8) == seq![1u8, 2u8])]
+#[example(vec_push(seq![3u64], 7u64) == seq![3u64, 7u64])]
+pub fn vec_push<T: Copy>(v: Seq<T>, x: T) -> Seq<T> {
+    seq![..v, x]
+}
+
 /// The value of the `i16` whose two's complement bits are `x.0` (what lifted
 /// ghost code means by `x as Int` for a signed `x`). These conversions are
 /// opaque in proofs (their uses stay folded; a proof unfolds them by name).

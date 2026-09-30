@@ -9,6 +9,11 @@
 //! | `folds` | `fold_left`, `fold_right`, `fold_right1`, `map`, `all`, `any`, `all2`, `zip`, `scan` over any function (ghost function values `fn(A, T) -> A`): their laws over `++`, `take`, `skip`, fusion, induction, relations and injectivity |
 //! | `seqs` | lengths, elements and splits of `take` / `skip` / `++` |
 //! | `bridges` | the code's words, slices and options against `Nat` and `Seq` (rules of the prover) |
+//!
+//! `sha256.rs` (FIPS 180-4 SHA-256, `concat`, `sha256_parts`, `collision` and the
+//! `collision_resistance` assumption) is an optional part: not declared here, a crate that hashes
+//! mounts it on its own (`#[cfg(sandblaster)] #[path = ".../stdlib/sha256.rs"] mod sha256;`), so
+//! crates that do not hash never evaluate its examples.
 
 pub mod bits;
 pub mod folds;
