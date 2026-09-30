@@ -126,10 +126,11 @@
 //!   ignored.
 //!
 //! Peers found violating these rules are blocked via the [`Blocker`] trait.
-//! Validation and blocking rules are applied while a commitment is actively
-//! tracked in reconstruction state. Buffered shards are verified only as
-//! reconstruction needs them. Once a block is already reconstructed and
-//! cached, additional shards for that commitment are ignored.
+//! The width rule is enforced on receipt of every shard. The other rules are
+//! applied while a commitment is actively tracked in reconstruction state.
+//! Buffered shards are verified only as reconstruction needs them. Once a
+//! block is already reconstructed and cached, additional shards for that
+//! commitment are ignored.
 //!
 //! _Before proposal context is known, shards are buffered in fixed-size per-peer
 //! queues until consensus signals the proposal via [`Mailbox::discovered`]
@@ -380,9 +381,9 @@ where
     /// [`Mailbox::discovered`] or reports a notarization via
     /// [`Mailbox::notarized`].
     ///
-    /// The shard buffers hold at most `num_participants * peer_buffer_size` shards, each no
-    /// wider than the coding scheme produces for a `max_block_size` block under the coding
-    /// config the shard claims.
+    /// The shard buffers hold at most `peer_buffer_size` shards per `latest.primary` peer. Each
+    /// shard is no wider than the coding scheme produces for a `max_block_size` block under the
+    /// coding config the shard claims.
     pub peer_buffer_size: NonZeroUsize,
 
     /// Capacity of the channel between the background receiver and the engine.
@@ -652,7 +653,8 @@ where
         Vec<oneshot::Sender<Arc<CodedBlock<B, C, H>>>>,
     >,
 
-    /// Reconstruction jobs. The state each job reconstructs holds its [`Aborter`].
+    /// Reconstruction jobs. Each job's [`Aborter`] is held by the reconstruction state of its
+    /// commitment.
     #[allow(clippy::type_complexity)]
     jobs: AbortablePool<'static, Reconstructed<P, B, C, H>>,
 
@@ -959,6 +961,11 @@ where
     }
 
     /// Applies a finished reconstruction job to the record that started it.
+    ///
+    /// A successful reconstruction caches the block while retaining any shard state still
+    /// needed for assigned-shard readiness. A failed reconstruction retires the commitment and
+    /// its commitment-specific subscriptions. With too few valid shards, the checked shards
+    /// return to the record and another job starts once enough shards are available.
     fn complete(&mut self, reconstructed: Reconstructed<P, B, C, H>) {
         let Reconstructed {
             commitment,
@@ -1407,10 +1414,6 @@ where
 
     /// Broadcasts any pending validated shard and starts reconstruction when enough shards
     /// are available.
-    ///
-    /// A successful reconstruction caches the block while retaining any shard state still
-    /// needed for assigned-shard readiness. A failed reconstruction retires the commitment and
-    /// its commitment-specific subscriptions.
     fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
@@ -1555,7 +1558,8 @@ where
     }
 
     /// Retires reconstruction state without a cached block for every commitment other than
-    /// `finalized` last observed at or before `round`.
+    /// `finalized` last observed at or before `round`, and closes its assigned-shard
+    /// subscriptions.
     ///
     /// Cached blocks remain until durable application progress, and block subscriptions remain
     /// open.
@@ -1615,8 +1619,8 @@ where
     H: Hasher,
 {
     /// Stage 1: accumulate shards. The shard for our assigned index is verified
-    /// immediately. All other shards are buffered until a reconstruction job
-    /// verifies them and decodes the block.
+    /// immediately. Other shards are buffered, and reconstruction jobs verify those
+    /// that decoding needs.
     AwaitingQuorum(AwaitingQuorumState<P, B, C, H>),
     /// Stage 2: the block is cached. Only the assigned shard is still accepted.
     Ready(ReadyState<P, B, C, H>),
@@ -4754,7 +4758,7 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // The leader delivers peer 3's shard and peer 1 gossips its own, reaching the
-                // minimum for a block one rounding step over the maximum.
+                // minimum for a block over the maximum whose shards share the maximum's width.
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let receiver = peers[3].public_key.clone();
@@ -5201,6 +5205,66 @@ mod tests {
                     .await
                     .expect("block should reconstruct after additional valid shard");
                 assert_eq!(reconstructed.commitment(), commitment1);
+            },
+        );
+    }
+
+    /// A pending shard left over from a reconstruction job replaces a shard that fails
+    /// verification, without waiting for another shard to arrive.
+    #[test_traced]
+    fn test_surplus_pending_shard_replaces_invalid_shard() {
+        let fixture: Fixture<C> = Fixture {
+            num_primary_peers: 10,
+            ..Default::default()
+        };
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let block = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let other = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let commitment = block.commitment();
+                let receiver = peers[3].public_key.clone();
+
+                // Before discovery, peer 1 sends a shard of another block under this commitment
+                // and peers 2, 4, 5, and 6 send valid shards, one more than the minimum needs.
+                let mut invalid = other
+                    .shard(peers[1].index.get() as u16)
+                    .expect("missing shard");
+                invalid.commitment = commitment;
+                peers[1]
+                    .sender
+                    .send(Recipients::One(receiver.clone()), invalid.encode(), true);
+                for sender in [2, 4, 5, 6] {
+                    let shard = block
+                        .shard(peers[sender].index.get() as u16)
+                        .expect("missing shard");
+                    peers[sender].sender.send(
+                        Recipients::One(receiver.clone()),
+                        shard.encode(),
+                        true,
+                    );
+                }
+                context.sleep(config.link.latency * 2).await;
+
+                // Discovery ingests all five shards. The first job verifies four of them, finds
+                // peer 1's shard invalid, and the leftover shard completes a second job.
+                let mut subscription = peers[3].mailbox.subscribe(commitment);
+                peers[3].mailbox.discovered(
+                    commitment,
+                    peers[0].public_key.clone(),
+                    Round::new(Epoch::zero(), View::new(1)),
+                );
+                context.sleep(config.link.latency).await;
+                let reconstructed = subscription.try_recv().expect("block reconstructed");
+                assert_eq!(reconstructed.commitment(), commitment);
+                assert_blocked(&oracle, &receiver, &peers[1].public_key).await;
             },
         );
     }

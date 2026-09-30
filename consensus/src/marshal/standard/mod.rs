@@ -8451,6 +8451,111 @@ mod tests {
         });
     }
 
+    /// Counts block decodes through a zero-byte mock context.
+    #[derive(Clone, Debug, Default)]
+    struct DecodeCounter;
+
+    /// The number of [`DecodeCounter`] decodes.
+    static DECODES: AtomicUsize = AtomicUsize::new(0);
+
+    impl FixedSize for DecodeCounter {
+        const SIZE: usize = 0;
+    }
+
+    impl Write for DecodeCounter {
+        fn write(&self, _: &mut impl BufMut) {}
+    }
+
+    impl Read for DecodeCounter {
+        type Cfg = ();
+
+        fn read_cfg(_: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+            DECODES.fetch_add(1, Ordering::Relaxed);
+            Ok(Self)
+        }
+    }
+
+    /// A notarized delivery's block is decoded only after its certificate verifies.
+    #[test_traced("WARN")]
+    fn test_standard_notarized_delivery_decodes_after_verification() {
+        type CountedBlock = crate::marshal::mocks::block::Block<D, DecodeCounter>;
+        const PREFIX: &str = "notarized-decode";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                schemes: forged, ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, b"forged", NUM_VALIDATORS);
+            let genesis =
+                CountedBlock::new::<Sha256>(DecodeCounter, Sha256::hash(&[b""]), Height::zero(), 0);
+            let parent = genesis.digest();
+            let (finalizations, blocks) = prunable_finalized_stores(&context, PREFIX).await;
+            let (actor, mailbox, _) = Actor::<_, Standard<CountedBlock>, _, _, _, _, _>::init(
+                context.child("actor"),
+                finalizations,
+                blocks,
+                Config {
+                    provider: ConstantProvider::new(schemes[0].clone()),
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    start: Start::Genesis(genesis.into()),
+                    mailbox_size: NZUsize!(100),
+                    view_retention: ViewDelta::new(10),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(1),
+                    block_codec_config: (),
+                    partition_prefix: PREFIX.to_string(),
+                    prunable_items_per_section: NZU64!(10),
+                    replay_buffer: NZUsize!(1024),
+                    key_write_buffer: NZUsize!(1024),
+                    value_write_buffer: NZUsize!(1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let _actor_handle = actor.start_unbuffered(
+                Application::<CountedBlock>::default(),
+                (resolver_rx, resolver.clone()),
+            );
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = CountedBlock::new::<Sha256>(DecodeCounter, parent, Height::new(1), 1);
+            let proposal = Proposal::new(round, View::zero(), block.digest());
+            let deliver = |notarization: Notarization<S, D>| {
+                let (response, response_rx) = oneshot::channel();
+                assert!(
+                    resolver
+                        .enqueue(handler::Message::Deliver {
+                            delivery: Delivery {
+                                key: handler::Key::Notarized { round },
+                                subscribers: NonEmptyVec::new((
+                                    handler::Annotation::Notarization { round },
+                                    tracing::Span::none(),
+                                )),
+                            },
+                            value: (notarization, block.clone()).encode(),
+                            response,
+                        })
+                        .accepted()
+                );
+                response_rx
+            };
+
+            // A notarization from another committee fails verification before the block decodes.
+            mailbox.get_processed().await;
+            let before = DECODES.load(Ordering::Relaxed);
+            let forged = StandardHarness::make_notarization(proposal.clone(), &forged, QUORUM);
+            assert!(!deliver(forged).await.unwrap());
+            assert_eq!(DECODES.load(Ordering::Relaxed), before);
+
+            // A verified notarization decodes the block.
+            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
+            assert!(deliver(notarization).await.unwrap());
+            assert!(DECODES.load(Ordering::Relaxed) > before);
+        });
+    }
+
     /// A slow finalized-archive sync must not block the marshal mailbox.
     ///
     /// Processing a finalization requires making the finalized archives

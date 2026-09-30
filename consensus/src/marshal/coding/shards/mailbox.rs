@@ -278,9 +278,11 @@ where
 
     /// Inform the engine that consensus finalized a [`Commitment`].
     ///
+    /// `round` MUST come from a verified finalization of `commitment`.
+    ///
     /// Reconstruction state without a cached block is retired for every other commitment last
-    /// observed at or before `round`. Cached blocks remain until [`Self::retire`], and block
-    /// subscriptions remain open.
+    /// observed at or before `round`, and assigned-shard subscriptions for retired state are
+    /// closed. Cached blocks remain until [`Self::retire`], and block subscriptions remain open.
     pub fn finalized(&self, commitment: Commitment<B, C, H>, round: Round) {
         let _ = self
             .sender

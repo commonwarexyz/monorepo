@@ -2050,9 +2050,8 @@ mod tests {
         }
     }
 
-    /// All `k` originals provided under a parallel strategy must round-trip via the striped
-    /// re-encode-and-verify path (`striped::decode`), which other tests only reach in the rejection
-    /// direction.
+    /// All `k` originals provided under a parallel strategy must round-trip via the multi-stripe
+    /// re-encode-and-verify path (`striped::decode`).
     #[test]
     fn test_striped_all_originals_decode() {
         let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
@@ -2498,8 +2497,7 @@ mod tests {
         }
     }
 
-    /// Shards of zero or odd width are rejected at admission, individually and in batches, so
-    /// no checked shard reaches decode with a width that no codeword has.
+    /// Shards of zero or odd width are rejected at admission, individually and in batches.
     #[test]
     fn test_check_rejects_invalid_shard_width() {
         let config = Config {
@@ -2515,9 +2513,13 @@ mod tests {
                         if *shard_bytes == width
                 )
             };
+
+            // Each shard is rejected individually.
             for chunk in &chunks {
                 assert!(invalid(&RS::check(&config, &root, chunk.index, chunk)));
             }
+
+            // The same shards are rejected as a batch.
             let batch = chunks
                 .iter()
                 .map(|chunk| (chunk.index, chunk))

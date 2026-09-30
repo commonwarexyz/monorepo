@@ -41,8 +41,9 @@
 //! Notarized data and certificates live in prunable archives managed internally, while finalized
 //! blocks are migrated into immutable archives. Any gaps are filled by asking peers for specific
 //! commitments through the resolver pipeline. The shard engine keeps only ephemeral, in-memory
-//! caches. Reconstruction state without a block is evicted once a finalization of another
-//! commitment covers its round, and cached blocks once marshal durably processes them.
+//! caches. Reconstruction state without a block is evicted once consensus reports a
+//! finalization of another commitment covering its round, and cached blocks once marshal
+//! durably processes them.
 //!
 //! # When to Use
 //!
