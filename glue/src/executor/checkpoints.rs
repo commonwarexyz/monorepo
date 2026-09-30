@@ -86,7 +86,7 @@ impl<S: Scheme, B: Block> Automaton for Checkpoints<S, B> {
     ///
     /// Dropping the answer, which aggregation treats as declining the checkpoint, means the block
     /// was executed but is no longer retained, or lies below the block a state sync started the
-    /// chain from.
+    /// chain from and was never offered as a target.
     async fn propose(&mut self, checkpoint: Height) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
         if let Some(height) = self.height(checkpoint) {

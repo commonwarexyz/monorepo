@@ -41,10 +41,11 @@ where
     },
     /// A checkpoint certified an executed block.
     Certified(Digested<A::Block>),
-    /// Returns batches holding the state after the block at `height - 1`.
+    /// Returns batches holding the state after the block at `height - 1`, with that block's sync
+    /// targets.
     Fork {
         height: Height,
-        response: oneshot::Sender<Unmerkleized<A, E>>,
+        response: oneshot::Sender<(Unmerkleized<A, E>, SyncTargets<A, E>)>,
     },
     /// The block at `height` was executed on the batches forked for it.
     Executed {
@@ -88,7 +89,9 @@ where
 /// The executor's application and consumer, backed by the ordered
 /// [`Stateful`](super::Stateful) actor.
 ///
-/// Pass one clone as the executor's `execute` and another as its `consumer`.
+/// Pass one clone as the executor's `execute` and another as its `consumer`. Each execution
+/// reports its block to the actor before returning it, so the actor sees a block executed before
+/// the executor delivers it.
 pub struct Mailbox<E, A, T>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -180,7 +183,8 @@ where
         }
     }
 
-    /// Executes `input` in the caller's task, on batches the actor forks from the parent's state.
+    /// Executes `input` on batches the actor forks from the parent's state, and checks that the
+    /// block commits to the state it produced before the executor archives it.
     async fn execute(
         mut self,
         context: (E, Context<<A::Input as Digestible>::Digest>),
@@ -190,7 +194,7 @@ where
         let height = context.1.height;
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Fork { height, response });
-        let Ok(batches) = receiver.await else {
+        let Ok((batches, parent)) = receiver.await else {
             // The actor stopped, and the executor stops without this block.
             return future::pending().await;
         };
@@ -203,10 +207,21 @@ where
             Execution::Unchanged { block } => (block, None),
         };
         let block = Digested::compute(block, &self.strategy).await;
+        let targets = A::sync_targets(block.inner());
+        match &merkleized {
+            Some(batches) => assert!(
+                A::Databases::matches_sync_targets(batches, &targets),
+                "executed block does not commit to the batches it produced"
+            ),
+            None => assert!(
+                targets == parent,
+                "unchanged block does not commit to its parent's state"
+            ),
+        }
         let _ = self.sender.enqueue(Message::Executed {
             height,
             digest: block.digest(),
-            targets: A::sync_targets(block.inner()),
+            targets,
             merkleized,
         });
         block
