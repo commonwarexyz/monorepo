@@ -2504,7 +2504,6 @@ dependencies = [
  "commonware-math",
  "commonware-runtime",
  "commonware-utils",
- "criterion",
  "futures",
  "rand 0.10.2",
  "rand_core 0.10.1",
