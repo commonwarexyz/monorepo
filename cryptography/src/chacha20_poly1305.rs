@@ -253,8 +253,8 @@ mod tests {
 
         impl Conformance for Seal {
             async fn commit(seed: u64) -> Vec<u8> {
-                let mut log = Vec::new();
                 let mut rng = TestRng::new(seed);
+                let mut log = Vec::new();
                 let mut cipher = ChaCha20Poly1305::random(&mut rng);
 
                 // Seal enough messages that successive nonces are covered.

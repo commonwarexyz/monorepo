@@ -16,8 +16,8 @@ use rand::RngExt as _;
 /// Runs a full handshake for `version`, logging every message and the summary of the resulting
 /// transcript.
 fn exchange(seed: u64, version: Version) -> Vec<u8> {
-    let mut log = Vec::new();
     let mut rng = TestRng::new(seed);
+    let mut log = Vec::new();
 
     // Namespaces of 128 bytes or more reach the multi-byte packet lengths where transcript
     // framings differ, and a nonzero high byte pins the timestamp byte order. The listener's clock
