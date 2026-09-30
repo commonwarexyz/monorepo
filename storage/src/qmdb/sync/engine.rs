@@ -434,9 +434,12 @@ where
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, S>> {
+        let start_moved = self.target.range.start() != new_target.range.start();
         self.journal = self.journal.resize(new_target.range.start()).await?;
-        self.fetched_operations.clear();
-        self.pinned_nodes = None;
+        if start_moved {
+            self.fetched_operations.clear();
+            self.pinned_nodes = None;
+        }
 
         // Retain the prior target size so its fetches stay eligible until eviction.
         if self.max_retained_roots > 0 {
@@ -446,12 +449,17 @@ where
             }
         }
 
-        // Preserve operation fetches for retained targets beyond the new lower bound.
-        // The lower bound never decreases, so this cancels old boundary requests and
-        // leaves the new boundary free for fetching pinned nodes.
+        // Preserve fetches for retained targets at or beyond the new lower bound;
+        // their late responses verify against retained roots. A boundary request at
+        // the unchanged start also survives (it seeds the journal position), while
+        // one whose start moved is cancelled so the fresh size can fetch pinned nodes.
         let new_start = new_target.range.start();
         self.outstanding_requests.retain(|request| {
-            request.start() > new_start && self.retained_sizes.contains(&request.size())
+            let eligible = match request {
+                Request::Operations { .. } => request.start() >= new_start,
+                Request::Boundary { start, .. } => *start == new_start,
+            };
+            eligible && self.retained_sizes.contains(&request.size())
         });
 
         self.target = new_target;
@@ -1035,9 +1043,12 @@ mod tests {
             let mut engine = engine.reset_for_target_update(target_2).await.unwrap();
 
             assert_eq!(engine.retained_sizes, BTreeSet::from([Location::new(10)]));
-            assert!(!engine.outstanding_requests.contains(&Location::new(5)));
+            // The boundary request at the unchanged start survives: it seeds the
+            // journal position, and its late response verifies against the
+            // retained size. Root eviction below still cancels it.
+            assert!(engine.outstanding_requests.contains(&Location::new(5)));
             assert!(engine.outstanding_requests.contains(&Location::new(6)));
-            assert_eq!(engine.outstanding_requests.len(), 1);
+            assert_eq!(engine.outstanding_requests.len(), 2);
 
             insert_pending_request(
                 &mut engine,
@@ -1047,7 +1058,7 @@ mod tests {
                     max_ops: NZU64!(1),
                 },
             );
-            assert_eq!(engine.outstanding_requests.len(), 2);
+            assert_eq!(engine.outstanding_requests.len(), 3);
             let queued_old_result = stale_fetch_result(old_operation_id);
             let target_3 = Target {
                 root: sha256::Digest::from([3u8; 32]),
@@ -1077,6 +1088,39 @@ mod tests {
             ));
             assert!(engine.outstanding_requests.contains(&Location::new(7)));
             assert_eq!(engine.outstanding_requests.len(), 1);
+        });
+    }
+
+    #[test]
+    fn target_updates_preserve_verified_data_only_while_the_floor_is_unchanged() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut engine = Engine::new(test_engine_config(
+                context,
+                5,
+                Arc::new(AtomicUsize::new(0)),
+            ))
+            .await
+            .unwrap();
+            engine.fetched_operations.insert(Location::new(7), vec![42]);
+            let pinned = vec![sha256::Digest::from([7; 32])];
+            engine.pinned_nodes = Some(pinned.clone());
+            let next = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            let engine = engine.reset_for_target_update(next).await.unwrap();
+            assert_eq!(
+                engine.fetched_operations.get(&Location::new(7)),
+                Some(&vec![42])
+            );
+            assert_eq!(engine.pinned_nodes, Some(pinned));
+            let next = Target {
+                root: sha256::Digest::from([3; 32]),
+                range: non_empty_range!(Location::new(6), Location::new(14)),
+            };
+            let engine = engine.reset_for_target_update(next).await.unwrap();
+            assert!(engine.fetched_operations.is_empty());
+            assert!(engine.pinned_nodes.is_none());
         });
     }
 
