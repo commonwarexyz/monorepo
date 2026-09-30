@@ -1034,10 +1034,10 @@ where
 /// mixed set as for an all-compact one, even while barriers span several blocks.
 ///
 /// A compact member serves only the tips it published. A mixed set that published only when a
-/// barrier starts would leave its compact member behind for the whole barrier, and with a 250 ms
-/// barrier and an acknowledgement window of 4 the servers' barrier starts phase-lock against a
-/// joiner's retargets so none of its compact targets is ever published. Checks cover servers and a
-/// joiner's state-sync handoff alike.
+/// barrier starts would leave its compact member behind for the whole barrier. Checks cover
+/// servers and a joiner's state-sync handoff alike, so the joiner must converge: a 250 ms barrier
+/// with a window of 8 spans several blocks while servers still keep pace (see
+/// [`late_joiner_converges`]).
 #[test_group("slow")]
 #[test]
 fn cheap_members_serve_every_finalized_block() {
@@ -1045,8 +1045,8 @@ fn cheap_members_serve_every_finalized_block() {
     let mut joiner_checks = 0;
     for seed in [3u64, 4] {
         for (layout, outcome) in [
-            ("all-compact", run::<AllCompact>(delay, 4, seed, BOUND)),
-            ("mixed", run::<Mixed>(delay, 4, seed, BOUND)),
+            ("all-compact", run::<AllCompact>(delay, 8, seed, BOUND)),
+            ("mixed", run::<Mixed>(delay, 8, seed, BOUND)),
         ] {
             assert!(
                 outcome.served_checks > 0,
