@@ -30,7 +30,7 @@ use commonware_consensus::{
         checkpoint::Scheme as CheckpointScheme,
         config::Tuning,
         marshal::{
-            self as marshal, ArchiveConfig, ArchiveMode, Floor, Inline, Retention, SchemeVerifier,
+            self as marshal, ArchiveConfig, ArchiveMode, Inline, Retention, SchemeVerifier,
             ServiceHandle, Start,
         },
         mocks::{Committee, MockBody},
@@ -302,10 +302,12 @@ impl Cluster {
                     update_channel_size: NZUsize!(4),
                 },
                 mailbox_size: NZUsize!(256),
+                // Multimmit finalizes several blocks a view, so peers must retain a checkpoint's
+                // state for longer than a joining validator waits between sampled targets.
                 prune_config: Some(PruneConfig {
                     maintenance_interval: NZUsize!(4),
-                    retained_marshal_blocks: 8,
-                    retained_qmdb_blocks: 8,
+                    retained_marshal_blocks: 64,
+                    retained_qmdb_blocks: 64,
                 }),
             },
         );
@@ -370,22 +372,15 @@ impl Cluster {
         handles.push(aggregation.start(channel(AGGREGATION)));
 
         // Every validator serves its newest checkpoint; a joining one also samples its peers'.
-        let lqc_verifier = self.committee.verifier.clone();
-        let mut rng = context.child("floor_verifier");
         let (probe, sampler) = Probe::new(probe::Config {
             context: context.child("probe"),
             scheme,
-            floor_verifier: move |floor: &Floor<MinPk, Digest>| {
-                lqc_verifier
-                    .verify_lqc::<_, Sha256, _>(&mut rng, floor.anchor(), &Sequential)
-                    .is_some()
-            },
             strategy: Sequential,
             blocker: control.clone(),
-            interval: INTERVAL,
             block_codec: (),
             floor_codec: self.committee.codec(),
             retry_timeout: NZDuration!(Duration::from_millis(500)),
+            max_response_size: NZUsize!(1024 * 1024),
             mailbox_size: NZUsize!(16),
         });
         handles.push(probe.start(
@@ -433,7 +428,13 @@ impl Cluster {
             handles.push(context.child("join").spawn({
                 let (marshal, chain) = (marshal.clone(), chain.clone());
                 move |context| {
-                    probe::join(context, sampler, marshal, chain, Duration::from_millis(500))
+                    probe::join(
+                        context,
+                        sampler,
+                        marshal,
+                        chain,
+                        NZDuration!(Duration::from_millis(500)),
+                    )
                 }
             }));
         }
@@ -533,15 +534,23 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
             }
         }
 
-        // The late validator executes only the chain after the checkpoint it synced to.
+        // The late validator holds the chain only from the checkpoint it synced to. Blocks after
+        // it that change no state skip the application's hook, so the first applied block may be
+        // later.
         let late = committee.start(VALIDATORS as usize - 1, true).await;
+        until_applied(&context, [&late.tally], 1).await;
+        let first = late.tally.applied.lock()[0];
+        let base = first / INTERVAL.get() * INTERVAL.get() - 1;
+        assert!(
+            base > INTERVAL.get()
+                && late.chain.block_at(Height::new(base)).await.is_some()
+                && late.chain.block_at(Height::new(base - 1)).await.is_none(),
+            "the late validator applied height {first}, not after a checkpoint"
+        );
+
+        // It then follows the chain the validators execute.
         let target = validators[0].tally.applied() + 16;
         until_applied(&context, [&late.tally, &validators[0].tally], target).await;
-        let first = late.tally.applied.lock()[0];
-        assert!(
-            first > INTERVAL.get() && first % INTERVAL.get() == 0,
-            "the late validator executed from height {first}, not after a checkpoint"
-        );
         let reference = validators[0]
             .chain
             .block_at(Height::new(target))

@@ -1,9 +1,15 @@
 //! Probe tests.
 
-use super::{Checkpoint, Config, Mailbox, Probe, Sampled, Source, wire};
+use super::{
+    Checkpoint, Config, Mailbox, Probe, Sampled, Source,
+    join::{Chain, drive},
+    mailbox::Message,
+    wire,
+};
 use bytes::BufMut;
+use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{
-    Buf, Encode as _, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
+    Buf, Decode as _, Encode as _, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
     Block, Epochable, Heightable, Viewable,
@@ -11,7 +17,8 @@ use commonware_consensus::{
         scheme::ed25519,
         types::{Ack, Certificate, Item},
     },
-    types::{Epoch, Height, View},
+    marshal::{Floors, Ledger},
+    types::{Epoch, Height, OutputIndex, View},
 };
 use commonware_cryptography::{
     Digest as _, Digestible, Hasher as _, Sha256, Signer as _,
@@ -19,14 +26,25 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
 };
+use commonware_macros::select;
 use commonware_p2p::{
-    Recipients, Sender as _,
-    simulated::{Config as NetworkConfig, Link, Network, Oracle},
+    Receiver as _, Recipients, Sender as _,
+    simulated::{self, Config as NetworkConfig, Link, Network, Oracle},
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Clock as _, Handle, Quota, Runner as _, Supervisor as _, deterministic};
-use commonware_utils::{NZDuration, NZU64, NZUsize, non_empty, probability, sync::Mutex};
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
+use commonware_runtime::{
+    Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
+};
+use commonware_utils::{
+    NZDuration, NZU64, NZUsize, channel::fallible::OneshotExt as _, non_empty, probability,
+    sync::Mutex,
+};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    sync::Arc,
+    time::Duration,
+};
 
 const CHANNEL: u64 = 0;
 const QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -38,6 +56,8 @@ const LINK: Link = Link {
 
 /// Blocks per checkpoint: checkpoint `k` certifies the block at height `2k + 1`.
 const INTERVAL: u64 = 2;
+
+const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_EXECUTOR_PROBE_TEST";
 
 /// An executed block.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,11 +149,6 @@ impl Viewable for Floor {
     }
 }
 
-/// Returns whether `floor`'s certificate verifies.
-fn verify_floor(floor: &Floor) -> bool {
-    floor.0 != u64::MAX
-}
-
 type TestCheckpoint = Checkpoint<ed25519::Scheme, Executed, Floor>;
 type TestMailbox = Mailbox<ed25519::Scheme, Executed, Floor>;
 
@@ -151,6 +166,17 @@ impl Source for Fixed {
     type Scheme = ed25519::Scheme;
     type Block = Executed;
     type Floor = Floor;
+
+    fn interval(&self) -> NonZeroU64 {
+        NZU64!(INTERVAL)
+    }
+
+    fn latest(&self) -> Option<Height> {
+        self.0
+            .lock()
+            .as_ref()
+            .map(|checkpoint| checkpoint.certificate.item.height)
+    }
 
     async fn newest(&self) -> Option<TestCheckpoint> {
         self.0.lock().clone()
@@ -173,11 +199,19 @@ struct Validators {
 
 impl Validators {
     async fn start(context: &mut deterministic::Context, n: u32) -> Self {
+        Self::start_with(context, n, NZUsize!(1024 * 1024)).await
+    }
+
+    async fn start_with(
+        context: &mut deterministic::Context,
+        n: u32,
+        max_response_size: NonZeroUsize,
+    ) -> Self {
         let Fixture {
             participants,
             schemes,
             ..
-        } = ed25519::fixture(context, b"probe", n);
+        } = ed25519::fixture(context, NAMESPACE, n);
         let outsider = PrivateKey::from_seed(u64::MAX).public_key();
         let peers: Vec<_> = participants
             .iter()
@@ -214,13 +248,12 @@ impl Validators {
             let (probe, mailbox) = Probe::new(Config {
                 context: context.child("probe"),
                 scheme: schemes[index].clone(),
-                floor_verifier: verify_floor,
                 strategy: Sequential,
                 blocker: control,
-                interval: NZU64!(INTERVAL),
                 block_codec: (),
                 floor_codec: (),
                 retry_timeout: NZDuration!(Duration::from_millis(100)),
+                max_response_size,
                 mailbox_size: NZUsize!(16),
             });
             let source = Fixed::default();
@@ -322,50 +355,62 @@ fn a_sample_waits_for_enough_validators() {
 }
 
 #[test]
-fn invalid_checkpoints_block_their_senders() {
+fn invalid_checkpoints_block_their_senders_and_unverifiable_ones_are_ignored() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
         let validators = Validators::start(&mut context, 10).await;
 
-        // A block other than the certified one, a floor whose certificate does not verify, a block
-        // at another height, and a certificate over another block.
+        // A block other than the certified one and a block at another height are invalid. A
+        // certificate that does not verify may come from a validator set this node does not
+        // know.
         let mut misnamed = validators.checkpoint(4, 40, None);
         misnamed.block = Arc::new(Executed {
             height: misnamed.block.height,
             value: 41,
         });
         validators.sources[1].set(misnamed);
-        validators.sources[2].set(validators.checkpoint(4, 40, Some(u64::MAX)));
         let mut misplaced = validators.checkpoint(4, 40, None);
         misplaced.certificate.item.height = Height::new(5);
-        validators.sources[3].set(misplaced);
+        validators.sources[2].set(misplaced);
         let mut forged = validators.checkpoint(4, 41, None);
         let block = validators.checkpoint(4, 40, None).block;
         forged.certificate.item.digest = block.digest();
         forged.block = block;
-        validators.sources[4].set(forged);
-        for index in 5..8 {
+        validators.sources[3].set(forged);
+        for index in 4..7 {
             validators.sources[index].set(validators.checkpoint(2, 20, None));
         }
 
-        // Three faults are tolerated, so the sample waits for a fourth valid reply, and verifies
-        // every invalid one meanwhile.
+        // Three faults are tolerated, so the sample waits for a fourth valid reply, and checks
+        // every other one meanwhile.
         let sample = validators.sampler.sample();
         let fourth = async {
             context.sleep(Duration::from_millis(250)).await;
-            validators.sources[8].set(validators.checkpoint(2, 20, None));
+            validators.sources[7].set(validators.checkpoint(2, 20, None));
         };
         let (sampled, ()) = futures::join!(sample, fourth);
         assert_eq!(sampled.unwrap().certificate.item.height, Height::new(2));
         let mut blocked = validators.blocked_by_first().await;
         blocked.sort();
-        let mut expected = validators.participants[1..5].to_vec();
+        let mut expected = validators.participants[1..3].to_vec();
         expected.sort();
         assert_eq!(blocked, expected);
     });
 }
 
 #[test]
-fn replies_from_non_validators_block_their_senders() {
+fn floors_are_left_for_marshal_to_verify() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let validators = Validators::start(&mut context, 4).await;
+        validators.sources[1].set(validators.checkpoint(1, 10, Some(u64::MAX)));
+        validators.sources[2].set(validators.checkpoint(1, 10, Some(3)));
+        let sampled = validators.sampler.sample().await.unwrap();
+        assert_eq!(sampled.floors, vec![Floor(u64::MAX), Floor(3)]);
+        assert!(validators.blocked_by_first().await.is_empty());
+    });
+}
+
+#[test]
+fn replies_from_non_validators_are_ignored() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
         let validators = Validators::start(&mut context, 4).await;
         validators.sources[1].set(validators.checkpoint(1, 10, None));
@@ -392,10 +437,102 @@ fn replies_from_non_validators_block_their_senders() {
         };
         let (sampled, ()) = futures::join!(sample, replies);
         assert_eq!(sampled.unwrap().certificate.item.height, Height::new(1));
+        assert!(validators.blocked_by_first().await.is_empty());
+    });
+}
+
+/// Asks the first validator for its checkpoint as a peer outside the validator set, and returns
+/// the height of the checkpoint it answers with, if any.
+async fn request_as_outsider(
+    context: &deterministic::Context,
+    validators: &Validators,
+    (outsider, receiver): &mut (
+        simulated::Sender<PublicKey, deterministic::Context>,
+        simulated::Receiver<PublicKey>,
+    ),
+) -> Option<Height> {
+    outsider.send(
+        Recipients::One(validators.participants[0].clone()),
+        wire::Message::<ed25519::Scheme, Executed, Floor>::Request.encode(),
+        false,
+    );
+    select! {
+        message = receiver.recv() => {
+            let (_, message) = message.unwrap();
+            let codec = wire::Message::<ed25519::Scheme, Executed, Floor>::codec(
+                &validators.schemes[0],
+                (),
+                (),
+            );
+            match wire::Message::<ed25519::Scheme, Executed, Floor>::decode_cfg(message, &codec)
+                .unwrap()
+            {
+                wire::Message::Response(checkpoint) => Some(checkpoint.certificate.item.height),
+                wire::Message::Request => panic!("a validator answers with a response"),
+            }
+        },
+        _ = context.sleep(Duration::from_millis(100)) => None,
+    }
+}
+
+#[test]
+fn requests_are_answered_from_a_response_built_in_the_background() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let validators = Validators::start(&mut context, 4).await;
+        let mut outsider = validators
+            .oracle
+            .control(validators.outsider.clone())
+            .register(CHANNEL, QUOTA)
+            .await
+            .unwrap();
+
+        // Without a certified checkpoint, a node stays silent.
         assert_eq!(
-            validators.blocked_by_first().await,
-            vec![validators.outsider.clone()]
+            request_as_outsider(&context, &validators, &mut outsider).await,
+            None
         );
+
+        // The first request after a checkpoint is certified starts building its response, which
+        // later requests receive, until a newer checkpoint replaces it.
+        validators.sources[0].set(validators.checkpoint(1, 10, None));
+        assert_eq!(
+            request_as_outsider(&context, &validators, &mut outsider).await,
+            None
+        );
+        assert_eq!(
+            request_as_outsider(&context, &validators, &mut outsider).await,
+            Some(Height::new(1))
+        );
+        validators.sources[0].set(validators.checkpoint(2, 20, None));
+        assert_eq!(
+            request_as_outsider(&context, &validators, &mut outsider).await,
+            Some(Height::new(1))
+        );
+        assert_eq!(
+            request_as_outsider(&context, &validators, &mut outsider).await,
+            Some(Height::new(2))
+        );
+        assert!(validators.blocked_by_first().await.is_empty());
+    });
+}
+
+#[test]
+fn a_response_above_the_size_limit_is_not_served() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let validators = Validators::start_with(&mut context, 4, NZUsize!(8)).await;
+        let mut outsider = validators
+            .oracle
+            .control(validators.outsider.clone())
+            .register(CHANNEL, QUOTA)
+            .await
+            .unwrap();
+        validators.sources[0].set(validators.checkpoint(1, 10, None));
+        for _ in 0..2 {
+            assert_eq!(
+                request_as_outsider(&context, &validators, &mut outsider).await,
+                None
+            );
+        }
     });
 }
 
@@ -446,6 +583,265 @@ fn replies_nobody_awaits_are_ignored() {
         );
         context.sleep(Duration::from_millis(100)).await;
         assert!(validators.blocked_by_first().await.is_empty());
+    });
+}
+
+/// Marshal could not serve a request.
+#[derive(Debug, thiserror::Error)]
+#[error("marshal is busy")]
+struct Busy;
+
+/// An engine marshal that installs the floors a test accepts, recording each attempt.
+#[derive(Clone, Default)]
+struct Marshal {
+    /// The index each accepted floor, by view, resumes after.
+    accepts: Arc<Mutex<BTreeMap<u64, u64>>>,
+    /// Whether marshal is too busy to install anything.
+    busy: Arc<Mutex<bool>>,
+    /// The view of every floor offered, in order.
+    installs: Arc<Mutex<Vec<u64>>>,
+}
+
+impl Ledger for Marshal {
+    type Block = Executed;
+    type Error = Busy;
+
+    async fn prune(&self, _: OutputIndex) -> Result<(), Busy> {
+        Ok(())
+    }
+
+    fn ack_window(&self) -> NonZeroUsize {
+        NZUsize!(1)
+    }
+}
+
+impl Floors for Marshal {
+    type Floor = Floor;
+
+    async fn floor_at(&self, _: OutputIndex) -> Result<Option<(OutputIndex, Floor)>, Busy> {
+        Ok(None)
+    }
+
+    async fn install(&self, floor: Floor) -> Result<Option<OutputIndex>, Busy> {
+        self.installs.lock().push(floor.0);
+        if *self.busy.lock() {
+            return Err(Busy);
+        }
+        Ok(self
+            .accepts
+            .lock()
+            .get(&floor.0)
+            .copied()
+            .map(OutputIndex::new))
+    }
+}
+
+/// An executed chain that records the targets it is offered.
+#[derive(Clone, Default)]
+struct TestChain {
+    /// Whether the chain has a state sync target or a base already.
+    resumed: bool,
+    /// The height of every block offered, in order.
+    offered: Arc<Mutex<Vec<u64>>>,
+    /// Whether the chain has a base.
+    based: Arc<Mutex<bool>>,
+    /// Every index marshal never delivers an input after.
+    stalled: BTreeSet<u64>,
+}
+
+impl Chain<Executed> for TestChain {
+    async fn awaits_floor(&self) -> bool {
+        !self.resumed && !*self.based.lock()
+    }
+
+    async fn has_base(&self) -> bool {
+        *self.based.lock()
+    }
+
+    async fn resumed_after(&self, index: OutputIndex) -> bool {
+        *self.based.lock() || !self.stalled.contains(&index.get())
+    }
+
+    async fn sync_to(&self, block: Arc<Executed>) -> bool {
+        self.offered.lock().push(block.height.get());
+        !*self.based.lock()
+    }
+}
+
+/// Runs [`drive`] against `samples`, answered in order, then stops the probe.
+async fn join_with(
+    context: &mut deterministic::Context,
+    marshal: &Marshal,
+    chain: &TestChain,
+    samples: Vec<(u64, Vec<u64>)>,
+) -> usize {
+    let Fixture { schemes, .. } = ed25519::fixture(context, NAMESPACE, 4);
+    let mut samples: VecDeque<_> = samples
+        .into_iter()
+        .map(|(checkpoint, floors)| {
+            let block = Executed {
+                height: Height::new((checkpoint + 1) * INTERVAL - 1),
+                value: checkpoint,
+            };
+            let item = Item {
+                height: Height::new(checkpoint),
+                digest: block.digest(),
+            };
+            let acks = schemes
+                .iter()
+                .map(|scheme| Ack::sign(scheme, Epoch::zero(), item.clone()).unwrap())
+                .collect::<Vec<_>>();
+            Sampled {
+                certificate: Certificate::from_acks(
+                    &schemes[0],
+                    non_empty![@acks.iter()],
+                    &Sequential,
+                )
+                .unwrap(),
+                block: Arc::new(block),
+                floors: floors.into_iter().map(Floor).collect(),
+            }
+        })
+        .collect();
+    let (sender, mut requests) = actor_mailbox::new(context.child("probe"), NZUsize!(16));
+    let answered = Arc::new(Mutex::new(0));
+    let responder = context.child("responder").spawn({
+        let answered = Arc::clone(&answered);
+        move |_| async move {
+            while let Some(Message::Sample { response }) = requests.recv().await {
+                let Some(sampled) = samples.pop_front() else {
+                    return;
+                };
+                *answered.lock() += 1;
+                response.send_lossy(sampled);
+            }
+        }
+    });
+    drive(
+        context.child("join"),
+        TestMailbox::new(sender),
+        marshal.clone(),
+        chain.clone(),
+        NZDuration!(Duration::from_millis(10)),
+    )
+    .await;
+    responder.abort();
+    *answered.lock()
+}
+
+#[test]
+fn join_installs_the_newest_floor_marshal_accepts() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let marshal = Marshal::default();
+        marshal.accepts.lock().insert(5, 4);
+        let chain = TestChain::default();
+        join_with(&mut context, &marshal, &chain, vec![(3, vec![9, 5, 2])]).await;
+        assert_eq!(*marshal.installs.lock(), vec![9, 5]);
+        assert_eq!(*chain.offered.lock(), vec![7]);
+    });
+}
+
+#[test]
+fn join_replaces_a_floor_marshal_does_not_resume_from() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        // Peers pruned what marshal needs after the first floor, so it never resumes from it.
+        let marshal = Marshal::default();
+        marshal.accepts.lock().insert(5, 4);
+        marshal.accepts.lock().insert(9, 16);
+        let chain = TestChain {
+            stalled: BTreeSet::from([4]),
+            ..TestChain::default()
+        };
+        join_with(
+            &mut context,
+            &marshal,
+            &chain,
+            vec![(3, vec![5]), (5, vec![5]), (8, vec![9, 5])],
+        )
+        .await;
+        assert_eq!(*marshal.installs.lock(), vec![5, 9]);
+        assert_eq!(*chain.offered.lock(), vec![17]);
+    });
+}
+
+#[test]
+fn join_offers_only_checkpoints_at_or_above_the_floor() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let marshal = Marshal::default();
+        marshal.accepts.lock().insert(5, 10);
+        let chain = TestChain::default();
+        join_with(
+            &mut context,
+            &marshal,
+            &chain,
+            vec![(3, vec![5]), (5, vec![5])],
+        )
+        .await;
+        assert_eq!(*marshal.installs.lock(), vec![5]);
+        assert_eq!(*chain.offered.lock(), vec![11]);
+    });
+}
+
+#[test]
+fn join_samples_again_until_marshal_installs_a_floor() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        // No sampled validator serves a floor, then marshal is busy, then it installs one.
+        let marshal = Marshal::default();
+        marshal.accepts.lock().insert(3, 2);
+        let chain = TestChain::default();
+        let busy = context.child("busy").spawn({
+            let marshal = marshal.clone();
+            move |context| async move {
+                *marshal.busy.lock() = true;
+                while marshal.installs.lock().is_empty() {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                *marshal.busy.lock() = false;
+            }
+        });
+        join_with(
+            &mut context,
+            &marshal,
+            &chain,
+            vec![(1, vec![]), (2, vec![3]), (3, vec![3])],
+        )
+        .await;
+        busy.await.unwrap();
+        assert_eq!(*marshal.installs.lock(), vec![3, 3]);
+        assert_eq!(*chain.offered.lock(), vec![7]);
+    });
+}
+
+#[test]
+fn join_after_a_restart_keeps_marshal_where_it_is() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let marshal = Marshal::default();
+        let chain = TestChain {
+            resumed: true,
+            ..TestChain::default()
+        };
+        join_with(
+            &mut context,
+            &marshal,
+            &chain,
+            vec![(3, vec![5]), (4, vec![5])],
+        )
+        .await;
+        assert!(marshal.installs.lock().is_empty());
+        assert_eq!(*chain.offered.lock(), vec![7, 9]);
+    });
+}
+
+#[test]
+fn join_returns_once_the_chain_has_a_base() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let marshal = Marshal::default();
+        let chain = TestChain::default();
+        *chain.based.lock() = true;
+        let answered = join_with(&mut context, &marshal, &chain, vec![(3, vec![5])]).await;
+        assert_eq!(answered, 0);
+        assert!(marshal.installs.lock().is_empty());
+        assert!(chain.offered.lock().is_empty());
     });
 }
 

@@ -41,7 +41,7 @@ use commonware_consensus::{
             standard::{Inline, Standard},
         },
         scheme::ed25519 as simplex_ed25519,
-        types::{Context as Producing, Finalization},
+        types::Context as Producing,
     },
     types::{Epoch, EpochDelta, FixedEpocher, Height, HeightDelta, ViewDelta},
 };
@@ -455,20 +455,15 @@ impl Cluster {
         handles.push(aggregation.start(channel(AGGREGATION)));
 
         // Every validator serves its newest checkpoint; a joining one also samples its peers'.
-        let verifier = self.fixture.verifier.clone();
-        let mut rng = context.child("floor_verifier");
         let (probe, sampler) = Probe::new(probe::Config {
             context: context.child("probe"),
             scheme: checkpoint_scheme,
-            floor_verifier: move |finalization: &Finalization<ConsensusScheme, Digest>| {
-                finalization.verify(&mut rng, &verifier, &Sequential)
-            },
             strategy: Sequential,
             blocker: control.clone(),
-            interval: INTERVAL,
             block_codec: (),
             floor_codec: scheme.certificate_codec_config(),
             retry_timeout: NZDuration!(Duration::from_millis(500)),
+            max_response_size: NZUsize!(1024 * 1024),
             mailbox_size: NZUsize!(16),
         });
         handles.push(probe.start(
@@ -528,7 +523,13 @@ impl Cluster {
             handles.push(context.child("join").spawn({
                 let (marshal, chain) = (marshal.clone(), chain.clone());
                 move |context| {
-                    probe::join(context, sampler, marshal, chain, Duration::from_millis(500))
+                    probe::join(
+                        context,
+                        sampler,
+                        marshal,
+                        chain,
+                        NZDuration!(Duration::from_millis(500)),
+                    )
                 }
             }));
         }

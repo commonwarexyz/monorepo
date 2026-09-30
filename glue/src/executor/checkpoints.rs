@@ -83,9 +83,14 @@ impl<S: Scheme, B: Block> Checkpoints<S, B> {
         self.latest.lock().clone()
     }
 
+    /// Returns the number of blocks per checkpoint.
+    pub const fn interval(&self) -> NonZeroU64 {
+        self.interval
+    }
+
     /// Returns the newest certified checkpoint and the executed block it certifies, if that
     /// block is retained and is the one the checkpoint certifies.
-    pub async fn newest(&self) -> Option<(Certificate<S, B::Digest>, Arc<B>)> {
+    pub async fn latest_retained(&self) -> Option<(Certificate<S, B::Digest>, Arc<B>)> {
         let certificate = self.latest()?;
         let block = self
             .chain

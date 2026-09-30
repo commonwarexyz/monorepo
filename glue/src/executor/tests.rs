@@ -978,6 +978,29 @@ fn checkpoint_start_executes_after_the_synced_block() {
 }
 
 #[test]
+fn checkpoint_start_reports_whether_marshal_resumed_after_its_floor() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts {
+            checkpoint: true,
+            ..Parts::default()
+        };
+        let (_executor, mut inbox, mailbox) = parts.start(&context).await;
+        assert!(!mailbox.resumed_after(OutputIndex::new(1)).await);
+
+        let _first = report(&mut inbox, &[(2, 1)]);
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(mailbox.resumed_after(OutputIndex::new(1)).await);
+        assert!(!mailbox.resumed_after(OutputIndex::new(2)).await);
+
+        // A newer floor supersedes the inputs delivered after the old one.
+        let _second = report(&mut inbox, &[(5, 4)]);
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(!mailbox.resumed_after(OutputIndex::new(5)).await);
+        assert!(mailbox.resumed_after(OutputIndex::new(4)).await);
+    });
+}
+
+#[test]
 fn sync_follows_newer_targets_and_resumes_after_a_crash() {
     deterministic::Runner::default().start(|context| async move {
         let parts = Parts {
