@@ -53,11 +53,16 @@ pub trait Ledger: Clone + Send + Sync + 'static {
     /// The block type of the stream.
     type Block: Block;
 
+    /// Why the marshal could not serve a request, such as a full queue or a stopped marshal.
+    ///
+    /// The same request may succeed if retried.
+    type Error: std::error::Error + Send + Sync + 'static;
+
     /// Allows the marshal to drop finalized data below `below`.
     ///
     /// Blocks at and above `below` stay retained, and so does everything the marshal still needs
     /// to deliver unacknowledged blocks. A marshal may keep more.
-    fn prune(&self, below: OutputIndex) -> impl Future<Output = ()> + Send;
+    fn prune(&self, below: OutputIndex) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Returns how many delivered blocks may await acknowledgement at once.
     fn ack_window(&self) -> NonZeroUsize;
@@ -78,15 +83,22 @@ pub trait Floors: Ledger {
     fn floor_at(
         &self,
         at: OutputIndex,
-    ) -> impl Future<Output = Option<(OutputIndex, Self::Floor)>> + Send;
+    ) -> impl Future<Output = Result<Option<(OutputIndex, Self::Floor)>, Self::Error>> + Send;
 
-    /// Makes the marshal resume the stream from `floor`, and returns the index it resumes after
-    /// once the marshal holds the floor, or `None` if it rejected it.
+    /// Makes the marshal resume the stream from `floor`, and returns the index it resumes after,
+    /// or `None` if the marshal rejected the floor.
     ///
-    /// `floor`'s certificate must verify. A floor does not always state where it resumes, so the
-    /// index is known only once the marshal holds it. A marshal rejects a floor of a round it
-    /// already passed. A node installs one floor, before relying on anything the marshal delivers.
-    fn install(&self, floor: Self::Floor) -> impl Future<Output = Option<OutputIndex>> + Send;
+    /// `floor` may come from an untrusted peer: the marshal verifies it and rejects one that does
+    /// not verify, or of a round it already passed. It returns once the floor is durably installed,
+    /// which may wait for the marshal to fetch the floor's data from peers. After a rejection, the
+    /// caller may install another floor.
+    ///
+    /// A node installs a floor before relying on anything the marshal delivers. Once one is
+    /// installed, acknowledging a block the marshal delivered before it has no effect.
+    fn install(
+        &self,
+        floor: Self::Floor,
+    ) -> impl Future<Output = Result<Option<OutputIndex>, Self::Error>> + Send;
 }
 
 /// A [`Ledger`] whose stream is one chain: the block at index `i` has height `i`, and its parent is

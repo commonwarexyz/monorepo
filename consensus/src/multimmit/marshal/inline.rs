@@ -116,8 +116,10 @@ where
 /// it builds, and `verify` from the block itself. A chain's first block builds on its genesis tip,
 /// which is not a block, so the ancestry ends there at the latest. It also ends early at a block
 /// marshal no longer holds: marshal prunes a chain's blocks at or below the height the engine
-/// releases (see [`Activity::CertificateRecorded`](crate::multimmit::types::Activity)), so an
-/// application should read only the recent ancestry it needs.
+/// releases (see [`Activity::CertificateRecorded`]), so an application should read only the
+/// recent ancestry it needs.
+///
+/// [`Activity::CertificateRecorded`]: crate::multimmit::types::Activity::CertificateRecorded
 pub struct Inline<E, H, V, B, A>
 where
     E: Rng + Spawner + Metrics + Clock,

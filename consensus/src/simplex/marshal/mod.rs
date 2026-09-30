@@ -77,7 +77,6 @@ use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 use std::sync::Arc;
 
 mod config;
-pub use crate::ancestry;
 pub use config::{Config, Start};
 pub mod core;
 pub mod resolver;
