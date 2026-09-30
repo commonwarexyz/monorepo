@@ -1459,3 +1459,81 @@ host code, compiled by rustc as written, unchecked); each is listed in the
 lift's diagnostics and the build record. A lifted item that calls one
 does not load (the call has no definition), so the gap cannot hide inside
 checked code.
+
+### 19.10 The Merkle proof verifier's extensions (`storage/sandblaster/verifier`)
+
+The rules below let the lift read commonware-storage's `merkle/hasher.rs`
+and `merkle/proof.rs` in place. Each rule is part of the lift's reading
+(TCB); `tests/lift_verifier.rs` has a positive test and a negative twin
+for each.
+
+* **Item selection.** `items = "A, B"` on an in-place declaration lifts
+  only the named structs, enums, traits, functions, constants and type
+  aliases of the file, and the impls whose self type is named (never an
+  impl for a reference type); every other item is unchecked host code,
+  listed. A lifted item that calls one left out does not load.
+  `unverified_fns = "Tr::m"` also names a provided method of a trait
+  declared in the file.
+* **An open trait declared in the lifted file** (`instance = "Tr: path::S"`
+  with `Tr`'s declaration in the file): the declaration disappears; the
+  instance's impl becomes inherent methods of `S`, and each provided method
+  it does not override is lifted as an inherent method of `S` too (`Self`
+  is `S`, `Self::X` the impl's associated type). Its `Clone`/`Send`/`Sync`
+  supertraits are ignored (they constrain impls, not calls). **A name
+  shared with an inherent method of `S`**: Rust resolves `x.m()` and
+  `S::m(x)` on the concrete type to the inherent method, and the lift reads
+  every call at the instance that way; so an impl method of that name must
+  be a pure delegation to it (`Self::m(self, a, ..)` or `self.m(a, ..)`), and
+  a provided method of that name must have the inherent method's parameters
+  and body token for token (its calls go to trait methods, which agree with
+  the inherent ones by the same rule). Anything else is refused. An impl of
+  the open trait for another type, a reference or a blanket impl included,
+  is another instance (dropped, listed), judged after erasure (so
+  `Standard<H>` at `H`'s instance is `Standard`).
+* **Erasure only where a parameter was erased.** An open-trait parameter is
+  dropped from a type's arguments only at a position where that generic
+  item's own parameter was erased (`Position<F>` → `Position`, `Proof<F, D>`
+  → `Proof`, `PhantomData<F>` → the unit marker); elsewhere it is
+  substituted by its instance (`Result<D, E>` → `Result<path::S, E>`). `S::X`
+  for an associated type of the instance's impl is that type.
+* **Host models** (in place only: nothing is emitted, so no tail can check
+  them): a `#[lift(host)]` module may also hold `pub type T = <exec type>;`
+  (a host type read as that type), unit structs, and impls of an open trait
+  for them at its instance whose methods are models (bodies calling spec
+  functions). Each is a trusted host model, listed in the record
+  (`LiftFacts::host_models`). The verifier's: `Digest = [u8; 32]`
+  (commonware's SHA-256 digest is a newtype of its 32 bytes, whose
+  `Deref`/`AsRef` are those bytes and whose `==` compares them) and
+  `<Sha256 as CHasher>::hash(parts) = sha256(concat(parts))` (FIPS 180-4,
+  the standard library's `sha256.rs`); the model is compared with a native
+  FIPS implementation on generated part lists
+  (`the_sha256_model_agrees_with_fips_180_4`).
+* **State parameters** (§19.1's argument: rustc checked the exclusive
+  borrow; the function takes the state by value and returns it):
+
+  | parameter | state | body |
+  | --- | --- | --- |
+  | `&mut T`, `T` an integer, `bool`, a named type, a tuple or an array | `T` | `*x` is `x` |
+  | `&mut E`, `E: Iterator<Item: AsRef<[u8]>>` (or `Item = &[u8]`) | `&[&[u8]]`, the items not yet yielded as the bytes their `as_ref()` returns | `x.next()` is `crate::__lift::bytes_iter_next` |
+  | `&mut Vec<T>` | `Seq<T>` | `v.push(e)` is `v = crate::__lift_model::vec_push(v, e)` |
+  | `Option<&mut Vec<T>>` | `Option<Seq<T>>` | `if let Some(ref mut v) = o { B }` is `if let Some(mut v) = o { B; o = Some(v); }`; `o.as_deref_mut()` as a state argument is `o` |
+
+  Host assumption for the iterator: it yields a fixed sequence and `as_ref`
+  is pure (slice iterators over `&[u8]`, `Vec<u8>`, `[u8; N]`). A state
+  argument that is not a place (`None`, `&mut 0`) is a fresh temporary
+  whose final value is dropped, as Rust's `&mut <temporary>`. `Vec<T>` is
+  `Seq<T>` everywhere in lifted code (allocation failure is host behavior,
+  like a `BufMut` out of capacity).
+* **Also:** `core::ops::Range<T>` is the prelude struct `crate::__lift::Range`
+  (its `start`/`end` fields); `b.as_ref()` of a byte slice is `b`;
+  `Option::copied` is a template; `o.ok_or(e)?` with no expected type
+  annotates its scrutinee with the type the lift read off it (the checker
+  cannot infer the template's error type); a `let` with a tuple pattern
+  types each binding; `E::V` of a non-generic enum of the lifted sources
+  has type `E`; thiserror's `#[error("..")]` on the variants of an enum that
+  derives it is dropped (the `Display` text); a function attachment may say
+  `decreases(e, max = C);` (the depth bound of non-tail recursion, §3.7); in
+  place, a private method is crate-visible in the model (rustc enforces
+  privacy on the host's files; proofs may name it), and a type attachment's
+  `invariant` is listed as an obligation of host code (host code builds the
+  type's values too).

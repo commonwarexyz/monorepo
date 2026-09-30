@@ -456,7 +456,10 @@ fn declared_unverified_impls_and_item_macros_are_left_out_and_listed() {
 
 #[test]
 fn an_undeclared_host_impl_is_an_error() {
-    let c = check(&[(R, &root("", false)), (A, HOSTY)]);
+    // (`codec::Write` is a host trait the lift knows, and `&mut Vec<u8>` is a
+    // state since the verifier's extensions: an unknown trait is the case)
+    let src = HOSTY.replace("impl codec::Write for Q", "impl codec::Frob for Q");
+    let c = check(&[(R, &root("", false)), (A, &src)]);
     assert!(!c.ok(), "an impl of an unknown trait must be declared unverified:\n{}", c.render());
 }
 
@@ -591,6 +594,7 @@ fn the_option_and_result_templates_agree_with_core() {
         assert_eq!(templates::option_map(o, |v| v / 3), o.map(|v| v / 3));
         assert_eq!(templates::option_map_or(o, 7, |v| v % 5), o.map_or(7, |v| v % 5));
         assert_eq!(templates::option_ok_or(o, 3u8), o.ok_or(3u8));
+        assert_eq!(templates::option_copied(o.as_ref()), o.as_ref().copied());
         assert_eq!(templates::option_filter(o, |v| *v > 1), o.filter(|v| *v > 1));
         assert_eq!(templates::option_or(o, Some(9)), o.or(Some(9)));
         assert_eq!(templates::option_is_some_and(o, |v| v % 2 == 1), o.is_some_and(|v| v % 2 == 1));

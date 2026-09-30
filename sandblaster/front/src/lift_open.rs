@@ -25,6 +25,12 @@
 //! | `while c { .. return .. continue .. }` followed by the rest of the body | a tail-recursive helper whose `else` branch is the rest |
 //! | `for p in it { .. }` over a non-range iterator (or with `break`/`continue`/`return`) | a tail-recursive helper calling `next` |
 //! | an unannotated `let x = <unsuffixed integer expression>;` | annotated with the type its uses force (what rustc infers); a wrong guess cannot type check |
+//! | `items = "A, B"` on an in-place declaration | only those items (and impls of those types) are lifted; the rest is host code, listed (SEMANTICS.md §19.10) |
+//! | an open trait declared in the lifted file, at its instance | the instance's impl and the provided methods it does not override are inherent methods of the instance; a name shared with an inherent method must be a pure delegation (impl) or the same parameters and body (provided) |
+//! | an open-trait parameter in a type's arguments | dropped only where that item's own parameter was erased; substituted elsewhere (`Result<D, E>`) |
+//! | `#[lift(host)]` type aliases, unit structs and their open-trait impls (in place) | host models (trusted, listed): `S::m` calls and `S::X` types read as the model |
+//! | `&mut T` (a value), `&mut E` (`E: Iterator<Item: AsRef<[u8]>>`), `&mut Vec<T>`, `Option<&mut Vec<T>>` parameters | state passing: `T`, the items not yet yielded, `Seq<T>`, `Option<Seq<T>>` |
+//! | `core::ops::Range<T>`, `Vec<T>` | `crate::__lift::Range<T>`, `Seq<T>` |
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -61,8 +67,14 @@ pub struct LiftOpts {
     pub unverified_impls: Vec<String>,
     /// `unverified_fns = "Type::method, .."`: methods of the lifted file left
     /// as unverified host code (dropped from their impl, listed; a lifted
-    /// caller of one is an error).
+    /// caller of one is an error). `Trait::method` names a provided method
+    /// of a trait declared in the file.
     pub unverified_fns: Vec<String>,
+    /// `items = "A, B"` (in place only): the items of the file to lift —
+    /// the named structs, enums, traits, functions, constants and type
+    /// aliases, and the impls whose self type is named; every other item is
+    /// unverified host code, listed. Empty: every item.
+    pub items: Vec<String>,
 }
 
 impl LiftOpts {
@@ -75,6 +87,7 @@ impl LiftOpts {
         self.unverified_instances.extend(o.unverified_instances);
         self.unverified_impls.extend(o.unverified_impls);
         self.unverified_fns.extend(o.unverified_fns);
+        self.items.extend(o.items);
     }
 }
 
@@ -93,7 +106,7 @@ fn split_pairs(s: &str) -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
-const LIFT_USAGE: &str = "expected `#[lift]`, `#[lift(host)]` or `#[lift(unverified = \"T, ..\")]`, and for the host's own files `#[lift(in_place, children = \"m\", instance = \"Trait: path::Type\", unverified_instances = \"Trait: path::Type\", unverified_impls = \"Trait, ..\", unverified_fns = \"Type::method, ..\")]`";
+const LIFT_USAGE: &str = "expected `#[lift]`, `#[lift(host)]` or `#[lift(unverified = \"T, ..\")]`, and for the host's own files `#[lift(in_place, children = \"m\", instance = \"Trait: path::Type\", unverified_instances = \"Trait: path::Type\", unverified_impls = \"Trait, ..\", unverified_fns = \"Type::method, ..\", items = \"Item, ..\")]`";
 
 /// Parses one `#[lift]` / `#[lift(..)]` attribute.
 pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
@@ -115,6 +128,7 @@ pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
                     "unverified_instances" => o.unverified_instances.extend(split_pairs(&v)?),
                     "unverified_impls" => o.unverified_impls.extend(split_list(&v)),
                     "unverified_fns" => o.unverified_fns.extend(split_list(&v)),
+                    "items" => o.items.extend(split_list(&v)),
                     _ => return Err(LIFT_USAGE.into()),
                 }
             }
@@ -123,6 +137,9 @@ pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
     }
     if !o.children.is_empty() && !o.in_place {
         return Err("`children = \"..\"` needs `in_place` (the children are the host's own files next to the source)".into());
+    }
+    if !o.items.is_empty() && !o.in_place {
+        return Err("`items = \"..\"` needs `in_place` (it selects the verified items of a host file; a copied source is lifted whole)".into());
     }
     Ok(o)
 }
@@ -165,7 +182,29 @@ pub struct OpenCtx {
     pub host_obligations: Vec<(String, String)>,
     /// The module being emitted is lifted in place.
     pub cur_in_place: bool,
+    /// Provided methods of the open traits declared in a lifted file, by
+    /// trait: lifted at the instance unless its impl overrides them.
+    pub trait_defaults: HashMap<String, Vec<syn::TraitItemFn>>,
+    /// Inherent methods of the lifted structs, `(struct, method)` (a trait
+    /// method of the same name must agree with them, `open_impl_method`).
+    pub inherent_fns: HashMap<(String, String), syn::ImplItemFn>,
+    /// Associated types of the impls of open traits at their instance,
+    /// `(instance type, name)` → type: `S::Digest` names it.
+    pub assoc_types: HashMap<(String, String), syn::Type>,
+    /// The generic items of the lifted sources whose type parameters are
+    /// erased (bounded by an open trait): name → the positions (among its
+    /// type parameters) of the erased ones. Only there does erasure drop a
+    /// type argument (`Position<F>` → `Position`); anywhere else an erased
+    /// parameter is substituted (`Result<D, E>` → `Result<path::S, E>`).
+    pub erased_params: HashMap<String, Vec<usize>>,
+    /// The non-generic enums of the lifted sources (the local typing of
+    /// `E::V`).
+    pub enums: HashSet<String>,
 }
+
+/// Supertraits of an open trait declared in a lifted file that constrain
+/// its impls only (never the meaning of a call at the instance).
+pub const OPEN_MARKER_SUPERTRAITS: &[&str] = &["Clone", "Send", "Sync"];
 
 /// Operator traits whose impls become inherent methods (their trait
 /// argument, when not `Self`, is part of the name).
@@ -256,6 +295,8 @@ struct Erase<'a> {
     /// Erased parameter → instance path.
     params: HashMap<String, syn::Path>,
     instances: &'a HashMap<String, syn::Path>,
+    /// [`OpenCtx::erased_params`].
+    erased: &'a HashMap<String, Vec<usize>>,
 }
 
 impl Erase<'_> {
@@ -274,8 +315,20 @@ impl Erase<'_> {
 
     fn erase_args(&self, p: &mut syn::Path) {
         for seg in p.segments.iter_mut() {
+            // only an item whose own parameter at that position was erased
+            // loses the argument (`Position<F>`, `Proof<F, D>`); elsewhere the
+            // parameter is substituted by its instance (`Result<D, E>`)
+            let Some(pos) = self.erased.get(&seg.ident.to_string()) else { continue };
             if let syn::PathArguments::AngleBracketed(a) = &mut seg.arguments {
-                let kept: syn::punctuated::Punctuated<syn::GenericArgument, syn::Token![,]> = a.args.iter().filter(|x| !self.erasable_arg(x)).cloned().collect();
+                let mut ti = 0usize;
+                let kept: syn::punctuated::Punctuated<syn::GenericArgument, syn::Token![,]> = a.args.iter().filter(|x| {
+                    if !matches!(x, syn::GenericArgument::Type(_)) {
+                        return true;
+                    }
+                    let i = ti;
+                    ti += 1;
+                    !(pos.contains(&i) && self.erasable_arg(x))
+                }).cloned().collect();
                 if kept.is_empty() {
                     seg.arguments = syn::PathArguments::None;
                 } else {
@@ -344,6 +397,366 @@ impl VisitMut for Erase<'_> {
     fn visit_path_mut(&mut self, p: &mut syn::Path) {
         self.erase_args(p);
         syn::visit_mut::visit_path_mut(self, p);
+    }
+}
+
+/// Whether `item` is left out by an `items = ".."` selection: `None` when
+/// it is lifted (a `use`, a named item, an impl of a named type), else a
+/// description for the list of items left out.
+fn not_selected(item: &syn::Item, sel: &[String]) -> Option<String> {
+    let named = |i: &syn::Ident| sel.iter().any(|s| i == s.as_str());
+    let (keep, what) = match item {
+        syn::Item::Use(_) => (true, String::new()),
+        syn::Item::Struct(s) => (named(&s.ident), format!("struct `{}`", s.ident)),
+        syn::Item::Enum(e) => (named(&e.ident), format!("enum `{}`", e.ident)),
+        syn::Item::Trait(t) => (named(&t.ident), format!("trait `{}`", t.ident)),
+        syn::Item::Fn(f) => (named(&f.sig.ident), format!("function `{}`", f.sig.ident)),
+        syn::Item::Const(c) => (named(&c.ident), format!("constant `{}`", c.ident)),
+        syn::Item::Type(t) => (named(&t.ident), format!("type alias `{}`", t.ident)),
+        syn::Item::Impl(im) => {
+            let keep = super::type_name(&im.self_ty).is_some_and(|n| sel.contains(&n)) && !matches!(&*im.self_ty, syn::Type::Reference(_));
+            let tn = im.trait_.as_ref().map(|(_, p, _)| format!("{} for ", p.to_token_stream().to_string().replace(' ', ""))).unwrap_or_default();
+            (keep, format!("impl `{tn}{}`", super::ty_key(&im.self_ty)))
+        }
+        other => (false, describe_item(other)),
+    };
+    (!keep).then_some(what)
+}
+
+fn describe_item(item: &syn::Item) -> String {
+    match item {
+        syn::Item::Macro(m) => format!("item macro `{}!`", m.mac.path.to_token_stream().to_string().replace(' ', "")),
+        syn::Item::Static(s) => format!("static `{}`", s.ident),
+        syn::Item::Mod(m) => format!("module `{}`", m.ident),
+        _ => "item".to_string(),
+    }
+}
+
+/// Replaces `path::S::X` by the associated type `X` of the impl of an open
+/// trait at its instance `S` (`Sha256::Digest` → the model's digest type),
+/// repeatedly (an associated type may name another one: `type Digest =
+/// H::Digest`), at most 8 rounds.
+pub fn resolve_instance_assoc(t: &mut syn::Type, assoc: &HashMap<(String, String), syn::Type>) {
+    struct R<'a> {
+        assoc: &'a HashMap<(String, String), syn::Type>,
+        changed: bool,
+    }
+    impl VisitMut for R<'_> {
+        fn visit_type_mut(&mut self, t: &mut syn::Type) {
+            if let syn::Type::Path(tp) = t
+                && tp.qself.is_none()
+                && tp.path.segments.len() >= 2
+            {
+                let n = tp.path.segments.len();
+                let s = tp.path.segments[n - 2].ident.to_string();
+                let x = tp.path.segments[n - 1].ident.to_string();
+                if matches!(tp.path.segments[n - 1].arguments, syn::PathArguments::None)
+                    && let Some(new) = self.assoc.get(&(s, x))
+                {
+                    *t = new.clone();
+                    self.changed = true;
+                    return;
+                }
+            }
+            syn::visit_mut::visit_type_mut(self, t);
+        }
+    }
+    for _ in 0..8 {
+        let mut r = R { assoc, changed: false };
+        r.visit_type_mut(t);
+        if !r.changed {
+            break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// state parameters beyond `&mut self` and the buffers (SEMANTICS.md §19.1)
+// ---------------------------------------------------------------------------
+
+/// The type parameters of `g` bounded by `Iterator<Item: AsRef<[u8]>>` (or
+/// `Iterator<Item = &[u8]>`): an iterator of byte strings, which the lift
+/// reads as the items it has not yielded yet (`state_param`).
+pub fn byte_iter_params(g: &syn::Generics) -> HashSet<String> {
+    fn is_bytes_ref(t: &syn::Type) -> bool {
+        matches!(t, syn::Type::Reference(r) if r.mutability.is_none() && matches!(&*r.elem, syn::Type::Slice(sl) if matches!(&*sl.elem, syn::Type::Path(p) if p.path.is_ident("u8"))))
+    }
+    fn as_ref_bytes(b: &syn::TypeParamBound) -> bool {
+        let syn::TypeParamBound::Trait(tb) = b else { return false };
+        let Some(last) = tb.path.segments.last() else { return false };
+        if last.ident != "AsRef" {
+            return false;
+        }
+        let syn::PathArguments::AngleBracketed(a) = &last.arguments else { return false };
+        a.args.len() == 1 && matches!(a.args.first(), Some(syn::GenericArgument::Type(syn::Type::Slice(sl))) if matches!(&*sl.elem, syn::Type::Path(p) if p.path.is_ident("u8")))
+    }
+    fn byte_iter_bound(b: &syn::TypeParamBound) -> bool {
+        let syn::TypeParamBound::Trait(tb) = b else { return false };
+        let Some(last) = tb.path.segments.last() else { return false };
+        if last.ident != "Iterator" {
+            return false;
+        }
+        let syn::PathArguments::AngleBracketed(a) = &last.arguments else { return false };
+        a.args.len() == 1
+            && match a.args.first() {
+                Some(syn::GenericArgument::Constraint(c)) => c.ident == "Item" && c.bounds.len() == 1 && c.bounds.iter().all(as_ref_bytes),
+                Some(syn::GenericArgument::AssocType(at)) => at.ident == "Item" && is_bytes_ref(&at.ty),
+                _ => false,
+            }
+    }
+    let mut out = HashSet::new();
+    for p in &g.params {
+        if let syn::GenericParam::Type(tp) = p
+            && tp.bounds.len() == 1
+            && tp.bounds.iter().all(byte_iter_bound)
+        {
+            out.insert(tp.ident.to_string());
+        }
+    }
+    if let Some(w) = &g.where_clause {
+        for pred in &w.predicates {
+            if let syn::WherePredicate::Type(pt) = pred
+                && let syn::Type::Path(tp) = &pt.bounded_ty
+                && let Some(id) = tp.path.get_ident()
+                && pt.bounds.len() == 1
+                && pt.bounds.iter().all(byte_iter_bound)
+            {
+                out.insert(id.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// `T` of `Option<&mut Vec<T>>`.
+fn option_mut_vec(t: &syn::Type) -> Option<syn::Type> {
+    let syn::Type::Path(p) = t else { return None };
+    let last = p.path.segments.last()?;
+    if last.ident != "Option" || p.qself.is_some() {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(a) = &last.arguments else { return None };
+    let Some(syn::GenericArgument::Type(syn::Type::Reference(r))) = a.args.first() else { return None };
+    r.mutability?;
+    vec_elem(&r.elem)
+}
+
+/// `T` of `Vec<T>` (`alloc::vec::Vec`, `std::vec::Vec`), or of the `Seq<T>`
+/// the lift already read it as (`CorePaths` runs before the parameters are
+/// read).
+pub fn vec_elem(t: &syn::Type) -> Option<syn::Type> {
+    let syn::Type::Path(p) = t else { return None };
+    if p.qself.is_some() || !(core_prefixed(&p.path, "Vec", &[&[], &["vec"], &["alloc", "vec"], &["std", "vec"]]) || p.path.is_ident("Seq") || matches!(p.path.segments.first(), Some(s) if s.ident == "Seq" && p.path.segments.len() == 1)) {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(a) = &p.path.segments.last()?.arguments else { return None };
+    match a.args.first() {
+        Some(syn::GenericArgument::Type(t)) if a.args.len() == 1 => Some(t.clone()),
+        _ => None,
+    }
+}
+
+/// A state parameter (state passing, SEMANTICS.md §19.1: rustc checked the
+/// exclusive borrow, so nothing else observes the state during the call; the
+/// function takes it by value and returns it): the model type, the type its
+/// name has in the body, and whether that is a marker (`__Buf`, ..).
+///
+/// | parameter | state | body |
+/// | --- | --- | --- |
+/// | `&mut impl Buf`, `&mut impl BufMut` | `Seq<u8>` | the buffer marker |
+/// | `&mut E`, `E: Iterator<Item: AsRef<[u8]>>` | `&[&[u8]]`: the items not yet yielded, each as the bytes its `as_ref()` returns (host assumption: the iterator yields a fixed sequence and `as_ref` is pure, as for slice iterators over `&[u8]`, `Vec<u8>`, `[u8; N]`) | the iterator marker `__BytesIter` |
+/// | `&mut Vec<T>` | `Seq<T>` (its elements) | the same |
+/// | `Option<&mut Vec<T>>` | `Option<Seq<T>>` | the same |
+/// | `&mut T`, `T` a value type (an integer, `bool`, a lifted struct) | `T` | `T` (`*x` is `x`) |
+pub fn state_param(t: &syn::Type, byte_iters: &HashSet<String>) -> Option<(syn::Type, syn::Type, bool)> {
+    if let Some(kind) = super::state_kind(t) {
+        return Some((syn::parse_quote!(Seq<u8>), kind, true));
+    }
+    if let Some(inner) = option_mut_vec(t) {
+        let st: syn::Type = syn::parse_quote!(Option<Seq<#inner>>);
+        return Some((st.clone(), st, false));
+    }
+    let syn::Type::Reference(r) = t else { return None };
+    r.mutability?;
+    if let syn::Type::Path(p) = &*r.elem
+        && p.qself.is_none()
+        && let Some(id) = p.path.get_ident()
+        && byte_iters.contains(&id.to_string())
+    {
+        return Some((syn::parse_quote!(&[&[u8]]), syn::parse_quote!(__BytesIter), true));
+    }
+    if let Some(inner) = vec_elem(&r.elem) {
+        let st: syn::Type = syn::parse_quote!(Seq<#inner>);
+        return Some((st.clone(), st, false));
+    }
+    match &*r.elem {
+        syn::Type::Path(p) if p.qself.is_none() => {
+            let n = p.path.segments.last()?.ident.to_string();
+            // a value type: an integer, `bool`, or a named (lifted) type; never a
+            // type parameter the lift does not know (it would not type check)
+            (super::is_prim(&n) || n == "bool" || p.path.segments.len() > 1 || n.chars().next().is_some_and(|c| c.is_ascii_uppercase())).then(|| ((*r.elem).clone(), (*r.elem).clone(), false))
+        }
+        syn::Type::Tuple(_) | syn::Type::Array(_) => Some(((*r.elem).clone(), (*r.elem).clone(), false)),
+        _ => None,
+    }
+}
+
+/// The place a state argument names: `&mut x` and `x` are `x`; `x.as_deref_mut()`
+/// of an `Option<&mut Vec<T>>` state is `x` (the same exclusive borrow).
+pub fn state_place(a: &syn::Expr) -> syn::Expr {
+    match a {
+        syn::Expr::Reference(r) if r.mutability.is_some() => (*r.expr).clone(),
+        syn::Expr::MethodCall(mc) if mc.method == "as_deref_mut" && mc.args.is_empty() => (*mc.receiver).clone(),
+        syn::Expr::Paren(p) => state_place(&p.expr),
+        other => other.clone(),
+    }
+}
+
+impl FnRw<'_> {
+    /// The body's reading of the value, iterator and `Vec` states
+    /// (`state_param`): `*x` is `x`; `x.next()` of the byte-string iterator is
+    /// `crate::__lift::bytes_iter_next`; `v.push(e)` of a `Vec` state is
+    /// `v = crate::__lift_model::vec_push(v, e)`; `if let Some(ref mut v) = o
+    /// { B }` of an `Option<Seq<T>>` state is `if let Some(mut v) = o { B; o =
+    /// Some(v); }` (the borrow writes back).
+    pub(super) fn state_rewrite(&mut self, e: &syn::Expr) -> Option<syn::Expr> {
+        let span = e.span();
+        let state_ty = |me: &Self, x: &syn::Expr| -> Option<(String, syn::Type)> {
+            let syn::Expr::Path(p) = x else { return None };
+            let n = p.path.get_ident()?.to_string();
+            let (_, t) = me.states.iter().rev().find(|(s, _)| *s == n)?;
+            Some((n, t.clone()))
+        };
+        match e {
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                let (n, t) = state_ty(self, &u.expr)?;
+                // a value state (not a buffer, an iterator or a `Vec`)
+                if matches!(type_name_of(&t).as_deref(), Some("Seq" | "Option")) || matches!(t, syn::Type::Reference(_)) {
+                    return None;
+                }
+                let id = format_ident!("{}", n, span = span);
+                Some(syn::parse_quote_spanned!(span=> #id))
+            }
+            syn::Expr::MethodCall(mc) if mc.method == "next" && mc.args.is_empty() => {
+                let syn::Expr::Path(p) = &*mc.receiver else { return None };
+                let n = p.path.get_ident()?.to_string();
+                if !self.is_state(&n) || self.ty_of(&mc.receiver).as_ref().and_then(super::type_name).as_deref() != Some("__BytesIter") {
+                    return None;
+                }
+                let id = format_ident!("{}", n, span = span);
+                let t = self.fresh("it");
+                let r = self.fresh("r");
+                Some(syn::parse_quote_spanned!(span=> { let (#t, #r) = crate::__lift::bytes_iter_next(#id); #id = #t; #r }))
+            }
+            syn::Expr::MethodCall(mc) if mc.method == "push" && mc.args.len() == 1 => {
+                let syn::Expr::Path(p) = &*mc.receiver else { return None };
+                let n = p.path.get_ident()?.to_string();
+                let t = self.ty_of(&mc.receiver)?;
+                if type_name_of(&t).as_deref() != Some("Seq") {
+                    return None;
+                }
+                let mut a = mc.args[0].clone();
+                self.expr(&mut a, None);
+                let id = format_ident!("{}", n, span = span);
+                Some(syn::parse_quote_spanned!(span=> { #id = crate::__lift_model::vec_push(#id, #a); }))
+            }
+            syn::Expr::If(i) => {
+                let syn::Expr::Let(l) = &*i.cond else { return None };
+                let (n, t) = state_ty(self, &l.expr)?;
+                if type_name_of(&t).as_deref() != Some("Option") {
+                    return None;
+                }
+                let syn::Pat::TupleStruct(ts) = &*l.pat else { return None };
+                if !ts.path.is_ident("Some") || ts.elems.len() != 1 || i.else_branch.is_some() {
+                    return None;
+                }
+                let syn::Pat::Ident(pi) = &ts.elems[0] else { return None };
+                if pi.by_ref.is_none() || pi.mutability.is_none() || pi.subpat.is_some() {
+                    return None;
+                }
+                let o = format_ident!("{}", n, span = span);
+                let v = pi.ident.clone();
+                let body = &i.then_branch;
+                let mut new: syn::Expr = syn::parse_quote_spanned!(span=> if let Some(mut #v) = #o { #body #o = Some(#v); });
+                // the rewritten `if let` binds `v` with the payload type
+                if let syn::Expr::If(ni) = &mut new {
+                    self.push_scope();
+                    let inner: Option<syn::Type> = match &t {
+                        syn::Type::Path(tp) => match &tp.path.segments.last().map(|s| s.arguments.clone()) {
+                            Some(syn::PathArguments::AngleBracketed(a)) => a.args.first().and_then(|x| match x {
+                                syn::GenericArgument::Type(t) => Some(t.clone()),
+                                _ => None,
+                            }),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(it) = inner {
+                        self.bind(&v.to_string(), it);
+                    }
+                    self.block(&mut ni.then_branch);
+                    self.pop_scope();
+                }
+                Some(new)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn type_name_of(t: &syn::Type) -> Option<String> {
+    match t {
+        syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// The positions of the type parameters of `g` bounded by an open trait
+/// (inline or in the `where` clause).
+pub fn open_param_positions(g: &syn::Generics, instances: &HashMap<String, syn::Path>) -> Vec<usize> {
+    let bound_open = |bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>| bounds.iter().any(|b| matches!(b, syn::TypeParamBound::Trait(tb) if tb.path.segments.last().is_some_and(|s| instances.contains_key(&s.ident.to_string()))));
+    let mut out = Vec::new();
+    for (i, tp) in g.type_params().enumerate() {
+        let mut open = bound_open(&tp.bounds);
+        if let Some(w) = &g.where_clause {
+            for pred in &w.predicates {
+                if let syn::WherePredicate::Type(pt) = pred
+                    && matches!(&pt.bounded_ty, syn::Type::Path(p) if p.path.is_ident(&tp.ident))
+                    && bound_open(&pt.bounds)
+                {
+                    open = true;
+                }
+            }
+        }
+        if open {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// [`OpenCtx::erased_params`] of `items` (inline modules included).
+pub fn collect_erased_params(items: &[syn::Item], instances: &HashMap<String, syn::Path>, out: &mut HashMap<String, Vec<usize>>) {
+    // `PhantomData<F>` loses its argument (it becomes the prelude's unit marker)
+    out.insert("PhantomData".into(), vec![0]);
+    for it in items {
+        let (name, g) = match it {
+            syn::Item::Struct(s) => (s.ident.to_string(), &s.generics),
+            syn::Item::Enum(e) => (e.ident.to_string(), &e.generics),
+            syn::Item::Trait(t) => (t.ident.to_string(), &t.generics),
+            syn::Item::Type(t) => (t.ident.to_string(), &t.generics),
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    collect_erased_params(inner, instances, out);
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        let pos = open_param_positions(g, instances);
+        if !pos.is_empty() {
+            out.insert(name, pos);
+        }
     }
 }
 
@@ -444,20 +857,26 @@ impl Ctx {
             }
             let mut all = params;
             all.extend(method_params);
-            // an impl of an open trait for another type than its instance:
-            // an unverified instance
+            let written = match &item {
+                syn::Item::Impl(im) => super::ty_key(&im.self_ty),
+                _ => String::new(),
+            };
+            let erased = std::mem::take(&mut self.open.erased_params);
+            let mut er = Erase { params: all, instances: &instances, erased: &erased };
+            er.visit_item_mut(&mut item);
+            self.open.erased_params = erased;
+            // an impl of an open trait for another type than its instance (a
+            // reference or blanket impl included; judged after erasure, so
+            // `Standard<H>` at `H`'s instance is `Standard`): an unverified instance
             if let syn::Item::Impl(im) = &item
                 && let Some((_, tp, _)) = &im.trait_
                 && let Some(tn) = tp.segments.last().map(|s| s.ident.to_string())
                 && let Some(inst) = instances.get(&tn)
-                && let syn::Type::Path(st) = &*im.self_ty
-                && !is_instance_path(&st.path, inst)
+                && !matches!(&*im.self_ty, syn::Type::Path(st) if is_instance_path(&st.path, inst))
             {
-                self.drop_item(im.span(), format!("impl `{tn}` for `{}`", super::ty_key(&im.self_ty)), "an instance of the open trait other than the verified one (`instance = ..`): unverified host code");
+                self.drop_item(im.span(), format!("impl `{tn}` for `{written}`"), "an instance of the open trait other than the verified one (`instance = ..`): unverified host code");
                 continue;
             }
-            let mut er = Erase { params: all, instances: &instances };
-            er.visit_item_mut(&mut item);
             keep.push(item);
         }
         *items = keep;
@@ -471,6 +890,16 @@ impl Ctx {
         let unverified_impl = |p: &syn::Path| p.segments.last().is_some_and(|s| opts.unverified_impls.iter().any(|u| u.rsplit("::").next() == Some(&s.ident.to_string())));
         let mut out = Vec::new();
         for item in items {
+            // `items = ".."`: only the named items (and the impls of named types) are lifted
+            if !opts.items.is_empty()
+                && let Some(what) = not_selected(&item, &opts.items)
+            {
+                if let syn::Item::Impl(im) = &item {
+                    self.record_methods(im);
+                }
+                self.drop_item(item.span(), what, "not among the file's selected `items`: unchecked host code");
+                continue;
+            }
             match &item {
                 syn::Item::Mod(m) if m.content.is_none() => {
                     if !children.iter().any(|c| m.ident == c.as_str()) {
@@ -503,6 +932,22 @@ impl Ctx {
             }
             // declared unverified methods: dropped from their impl
             let mut item = item;
+            if let syn::Item::Trait(t) = &mut item
+                && !opts.unverified_fns.is_empty()
+            {
+                let tn = t.ident.to_string();
+                let mut dropped = Vec::new();
+                t.items.retain(|ti| match ti {
+                    syn::TraitItem::Fn(f) if f.default.is_some() && opts.unverified_fns.iter().any(|u| *u == format!("{tn}::{}", f.sig.ident)) => {
+                        dropped.push((f.sig.ident.span(), format!("{tn}::{}", f.sig.ident)));
+                        false
+                    }
+                    _ => true,
+                });
+                for (sp, name) in dropped {
+                    self.drop_item(sp, format!("provided method `{name}`"), "declared `unverified_fns`: unchecked host code (the verified instance has no such method; a lifted caller does not load)");
+                }
+            }
             if let syn::Item::Impl(im) = &mut item
                 && !opts.unverified_fns.is_empty()
                 && let Some(tn) = super::type_name(&im.self_ty)
@@ -860,6 +1305,38 @@ fn pt_ident(t: &syn::Type) -> Option<String> {
 }
 
 /// Whether an expression calls a function or a method.
+/// A method whose body is exactly a call of the method of the same name
+/// on `self` with its parameters in order: `Self::m(self, a, ..)` or
+/// `self.m(a, ..)` (`open_impl_items`).
+pub fn is_delegation(f: &syn::ImplItemFn) -> bool {
+    let m = f.sig.ident.to_string();
+    let mut params: Vec<String> = Vec::new();
+    for i in &f.sig.inputs {
+        match i {
+            syn::FnArg::Receiver(r) if r.reference.is_some() && r.mutability.is_none() => {}
+            syn::FnArg::Typed(pt) => match &*pt.pat {
+                syn::Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => params.push(pi.ident.to_string()),
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+    if !matches!(f.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) || f.block.stmts.len() != 1 {
+        return false;
+    }
+    let syn::Stmt::Expr(e, None) = &f.block.stmts[0] else { return false };
+    let is_param = |e: &syn::Expr, want: &str| matches!(e, syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident(want));
+    match e {
+        syn::Expr::Call(c) => {
+            let syn::Expr::Path(fp) = &*c.func else { return false };
+            let segs: Vec<String> = fp.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            fp.qself.is_none() && segs == ["Self".to_string(), m] && c.args.len() == params.len() + 1 && is_param(&c.args[0], "self") && c.args.iter().skip(1).zip(&params).all(|(a, p)| is_param(a, p))
+        }
+        syn::Expr::MethodCall(mc) => mc.method == m.as_str() && mc.turbofish.is_none() && is_param(&mc.receiver, "self") && mc.args.len() == params.len() && mc.args.iter().zip(&params).all(|(a, p)| is_param(a, p)),
+        _ => false,
+    }
+}
+
 pub fn has_call(e: &syn::Expr) -> bool {
     struct V(bool);
     impl<'ast> syn::visit::Visit<'ast> for V {
@@ -945,6 +1422,23 @@ impl VisitMut for CorePaths {
             }
             if core_prefixed(&tp.path, "PhantomData", &[&[], &["marker"], &["core", "marker"], &["std", "marker"]]) && tp.path.segments.last().is_some_and(|s| matches!(s.arguments, syn::PathArguments::None)) {
                 *t = syn::parse_quote!(crate::__lift::PhantomData);
+                return;
+            }
+            // `core::ops::Range<T>`: the prelude struct with its two fields
+            if core_prefixed(&tp.path, "Range", &[&[], &["ops"], &["core", "ops"], &["std", "ops"]])
+                && let Some(syn::PathArguments::AngleBracketed(a)) = tp.path.segments.last().map(|s| s.arguments.clone())
+                && a.args.len() == 1
+            {
+                let args = a.args.clone();
+                *t = syn::parse_quote!(crate::__lift::Range<#args>);
+                syn::visit_mut::visit_type_mut(self, t);
+                return;
+            }
+            // `Vec<T>`: the sequence of its elements (ghost `Seq<T>`: lifted code
+            // is checked, never printed)
+            if let Some(el) = vec_elem(t) {
+                *t = syn::parse_quote!(Seq<#el>);
+                syn::visit_mut::visit_type_mut(self, t);
                 return;
             }
         }
@@ -1395,6 +1889,16 @@ impl FnRw<'_> {
         }).skip(1).collect();
         for (pt, a) in ptys.iter().zip(args) {
             let Some(g) = pt_ident(pt) else { continue };
+            // a plain argument typed by a parameter of the template (`ok_or(err)`)
+            if !bounds.contains_key(&g)
+                && !matches!(a, syn::Expr::Closure(_))
+                && let Some(i) = gens.iter().position(|x| *x == g)
+                && out[i].is_none()
+                && let Some(at) = self.ty_of(a)
+            {
+                out[i] = Some(at);
+                continue;
+            }
             let Some(syn::TypeParamBound::Trait(tb)) = bounds.get(&g) else { continue };
             let syn::Expr::Closure(cl) = a else { continue };
             let Some(seg) = tb.path.segments.last() else { continue };
@@ -1887,8 +2391,21 @@ impl Ctx {
         let Some(sn) = super::type_name(&im.self_ty) else { return false };
         let prim_self = super::is_prim(&sn);
         if self.open.instances.contains_key(&tname) {
+            // provided methods the impl does not override are methods of the instance too
+            let overridden: HashSet<String> = im.items.iter().filter_map(|ii| match ii {
+                syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),
+                _ => None,
+            }).collect();
+            for f in self.open.trait_defaults.get(&tname).cloned().unwrap_or_default() {
+                if !overridden.contains(&f.sig.ident.to_string()) {
+                    self.methods.insert((sn.clone(), f.sig.ident.to_string()), super::method_info(&f.sig, vec![]));
+                }
+            }
             for ii in &im.items {
                 match ii {
+                    syn::ImplItem::Type(t) => {
+                        self.open.assoc_types.insert((sn.clone(), t.ident.to_string()), t.ty.clone());
+                    }
                     syn::ImplItem::Const(c) => {
                         self.open.assoc_consts.insert((sn.clone(), c.ident.to_string()));
                         self.consts.insert(const_name(&sn, &c.ident.to_string()), c.ty.clone());
@@ -1941,6 +2458,56 @@ impl Ctx {
             return true;
         }
         false
+    }
+
+    /// The methods an impl of the open trait `tname` contributes at its
+    /// instance `sname`: its own methods and the trait's provided methods
+    /// it does not override. A method whose name is also an inherent method
+    /// of `sname` is not lifted a second time: Rust resolves `x.m()` and
+    /// `S::m(x)` on the concrete type to the inherent method, the lift reads
+    /// every call at the instance that way, so the trait's method must mean
+    /// the same — an impl method must be a pure delegation to the inherent
+    /// one (`Self::m(self, a, ..)`, `self.m(a, ..)`), a provided method must
+    /// have the inherent method's parameters and body, token for token (its
+    /// calls resolve to the trait's methods, which agree with the inherent
+    /// ones by the same rule). Anything else is refused.
+    pub(super) fn open_impl_items(&mut self, sname: &str, tname: &str, im: &syn::ItemImpl) -> Vec<syn::ImplItem> {
+        let mut out = Vec::new();
+        let mut own: HashSet<String> = HashSet::new();
+        for ii in &im.items {
+            if let syn::ImplItem::Fn(f) = ii {
+                let m = f.sig.ident.to_string();
+                own.insert(m.clone());
+                if self.open.inherent_fns.contains_key(&(sname.to_string(), m.clone())) {
+                    if is_delegation(f) {
+                        self.drop_item(f.sig.ident.span(), format!("method `{tname}::{m}` of `{sname}`"), "a pure delegation to the inherent method of the same name (both resolutions agree; the inherent method is lifted)");
+                    } else {
+                        self.err_note(f.sig.ident.span(), format!("`{tname}::{m}` of `{sname}` has the name of an inherent method of `{sname}` but is not a pure delegation to it"), "at the instance the lift reads every call of `m` as the inherent method (Rust's resolution on the concrete type); a trait method with other behavior would be read wrongly");
+                    }
+                    continue;
+                }
+            }
+            out.push(ii.clone());
+        }
+        for f in self.open.trait_defaults.get(tname).cloned().unwrap_or_default() {
+            let m = f.sig.ident.to_string();
+            if own.contains(&m) {
+                continue;
+            }
+            let Some(block) = f.default.clone() else { continue };
+            if let Some(inh) = self.open.inherent_fns.get(&(sname.to_string(), m.clone())).cloned() {
+                let same_inputs = f.sig.inputs.to_token_stream().to_string() == inh.sig.inputs.to_token_stream().to_string();
+                let same_body = block.to_token_stream().to_string() == inh.block.to_token_stream().to_string();
+                if same_inputs && same_body {
+                    self.drop_item(f.sig.ident.span(), format!("provided method `{tname}::{m}` at `{sname}`"), "the same parameters and body as the inherent method of the same name (the inherent method is lifted)");
+                } else {
+                    self.err_note(f.sig.ident.span(), format!("the provided method `{tname}::{m}` has the name of an inherent method of `{sname}` but not its parameters and body"), "at the instance the lift reads every call of `m` as the inherent method; a generic caller reaches the provided one");
+                }
+                continue;
+            }
+            out.push(syn::ImplItem::Fn(syn::ImplItemFn { attrs: f.attrs.clone(), vis: syn::Visibility::Inherited, defaultness: None, sig: f.sig.clone(), block }));
+        }
+        out
     }
 
     /// An operator impl on a primitive: one free function per method,

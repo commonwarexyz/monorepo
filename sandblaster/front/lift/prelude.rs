@@ -219,3 +219,21 @@ pub fn once<T: Copy>(v: T) -> Once<T> {
 pub fn once_next<T: Copy>(it: Once<T>) -> (Once<T>, Option<T>) {
     (Once { v: None }, it.v)
 }
+
+/// `core::ops::Range<T>` (`start..end`) as a value: lifted code reads its
+/// fields (a range the code iterates is `RangeU32`/`RangeU64`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Range<T: Copy> {
+    pub start: T,
+    pub end: T,
+}
+
+/// `Iterator::next` of an iterator of byte strings (`E: Iterator<Item:
+/// AsRef<[u8]>>` taken as `&mut E`), read as the items not yet yielded, each
+/// as the bytes its `as_ref()` returns: the first item, and the rest.
+pub fn bytes_iter_next<'a>(it: &'a [&'a [u8]]) -> (&'a [&'a [u8]], Option<&'a [u8]>) {
+    match it.split_first() {
+        Some((h, t)) => (t, Some(*h)),
+        None => (it, None),
+    }
+}

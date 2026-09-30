@@ -13,6 +13,12 @@
 //! `compile_lifted` (which also runs the lift conformance check; with the
 //! current sandblaster toolchain that check does not support in-place modules yet,
 //! so `compile_lifted` issues no verdict for this crate until it does).
+//!
+//! It also verifies the first set of the Merkle proof verifier in place
+//! (`sandblaster/verifier`: the hashing of `src/merkle/hasher.rs` at
+//! `Standard<Sha256>` and the subtree reconstruction of `src/merkle/proof.rs`),
+//! with the same development aid: `OUT_DIR/verifier-pending.txt`.
 fn main() {
     sandblaster::build::compile_lifted_pending_gates("sandblaster/mmr/mod.rs", "mmr");
+    sandblaster::build::compile_lifted_pending_gates("sandblaster/verifier/mod.rs", "verifier");
 }
