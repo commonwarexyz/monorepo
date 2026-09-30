@@ -23,13 +23,25 @@ use commonware_cryptography::{Digest, certificate};
 /// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type. It is automatically
 /// implemented for any compatible scheme.
 ///
-/// The scheme's fault model sets both of aggregation's thresholds: a quorum of acknowledgements
-/// certifies an item, and `max_faults + 1` validators reporting a tip make it safe to adopt. A
-/// quorum always exceeds the tolerated faults, so it contains an honest signer, and a certified
-/// digest is one an honest validator computed. For deterministic digests, such as the state roots
-/// of a replicated execution, honest validators agree on each height's digest, so a height has at
-/// most one certified digest. Any fault model whose quorum exceeds its faults is therefore sound,
-/// even one whose quorums do not intersect in an honest signer.
+/// # Fault model
+///
+/// The scheme's fault model sets aggregation's thresholds: a quorum of acknowledgements certifies
+/// an item, `max_faults + 1` validators reporting a tip make it safe to adopt, and
+/// `max_faults + 1` signers of one epoch acknowledging another digest diverge a height (see
+/// [Divergence](super#divergence)). The engine panics unless each epoch's committee of `n` has
+/// `max_faults < quorum <= n - max_faults`, so a quorum contains an honest signer and honest
+/// validators alone can certify.
+///
+/// A certified digest is then one an honest validator computed. If honest validators agree on
+/// each height's digest, as for the state roots of a deterministic replicated execution, a
+/// height has at most one certified digest even when quorums do not intersect in an honest
+/// signer, such as `2f + 1` of `5f + 1`. With such a model, an honest automaton that returns
+/// different digests for one height, including across restarts, may see two certified.
+///
+/// For [`bls12381_threshold`], the model also sets the degree of the group polynomial, so a DKG
+/// over it needs `2 * max_faults < quorum` (see [`Faults::quorum`]).
+///
+/// [`Faults::quorum`]: commonware_utils::Faults::quorum
 pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>> {}
 
 impl<D: Digest, S> Scheme<D> for S where S: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>>
