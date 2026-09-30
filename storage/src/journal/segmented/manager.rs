@@ -83,25 +83,25 @@ pub(super) async fn truncate_paged_tail<E: Storage>(
 }
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
-pub trait SectionBuffer: Send + Sync {
+pub trait SectionBuffer: Sized + Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> u64;
 
     /// Ensure all data accepted by this buffer is durably persisted.
-    fn sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
+    fn sync(self) -> impl Future<Output = Result<Self, RError>> + Send;
 
     /// Start making data currently accepted by this buffer durable.
     ///
     /// The returned handle covers every write accepted before this call returns; later writes
     /// need a new sync. Implementations must wait for an outstanding sync before mutating the
     /// underlying blob and may reuse an in-flight handle when no newer writes need syncing.
-    fn start_sync(&mut self) -> impl Future<Output = Handle<()>> + Send;
+    fn start_sync(self) -> impl Future<Output = (Self, Handle<()>)> + Send;
 
     /// Wait for any started sync to complete without starting a new sync.
-    fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
+    fn wait_for_sync(self) -> impl Future<Output = Result<Self, RError>> + Send;
 
     /// Shorten the buffer. A shorter length is durable when this returns.
-    fn truncate(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
+    fn truncate(self, len: u64) -> impl Future<Output = Result<Self, RError>> + Send;
 }
 
 impl<B: Blob> SectionBuffer for PagedRecovery<B> {
@@ -109,19 +109,19 @@ impl<B: Blob> SectionBuffer for PagedRecovery<B> {
         Self::size(self)
     }
 
-    async fn sync(&mut self) -> Result<(), RError> {
+    async fn sync(self) -> Result<Self, RError> {
         Self::sync(self).await
     }
 
-    async fn start_sync(&mut self) -> Handle<()> {
+    async fn start_sync(self) -> (Self, Handle<()>) {
         Self::start_sync(self).await
     }
 
-    async fn wait_for_sync(&mut self) -> Result<(), RError> {
+    async fn wait_for_sync(self) -> Result<Self, RError> {
         Self::wait_for_sync(self).await
     }
 
-    async fn truncate(&mut self, len: u64) -> Result<(), RError> {
+    async fn truncate(self, len: u64) -> Result<Self, RError> {
         Self::truncate(self, len).await
     }
 }
@@ -132,24 +132,23 @@ impl<B: Blob> SectionBuffer for Write<B> {
         Self::size(self)
     }
 
-    async fn sync(&mut self) -> Result<(), RError> {
+    async fn sync(self) -> Result<Self, RError> {
         Self::sync(self).await
     }
 
-    async fn start_sync(&mut self) -> Handle<()> {
+    async fn start_sync(self) -> (Self, Handle<()>) {
         Self::start_sync(self).await
     }
 
-    async fn wait_for_sync(&mut self) -> Result<(), RError> {
+    async fn wait_for_sync(self) -> Result<Self, RError> {
         Self::wait_for_sync(self).await
     }
 
-    async fn truncate(&mut self, len: u64) -> Result<(), RError> {
+    async fn truncate(self, len: u64) -> Result<Self, RError> {
         if len < self.size() {
-            self.resize(len).await?;
-            self.sync().await?;
+            return self.resize(len).await?.sync().await;
         }
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -254,16 +253,14 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
 
 impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Wait for all started syncs to complete before their blobs are dropped.
-    async fn wait_for_syncs<'a>(
-        blobs: impl IntoIterator<Item = &'a mut F::Buffer>,
-    ) -> Result<(), Error>
-    where
-        F::Buffer: 'a,
-    {
-        try_join_all(blobs.into_iter().map(|blob| blob.wait_for_sync()))
-            .await
-            .map(|_| ())
-            .map_err(Error::Runtime)
+    async fn wait_for_syncs(
+        blobs: BTreeMap<u64, F::Buffer>,
+    ) -> Result<Vec<(u64, F::Buffer)>, Error> {
+        try_join_all(blobs.into_iter().map(|(section, blob)| async move {
+            blob.wait_for_sync().await.map(|blob| (section, blob))
+        }))
+        .await
+        .map_err(Error::Runtime)
     }
 
     /// Initialize a new `Manager`.
@@ -320,14 +317,6 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
     }
 
-    /// Get a mutable reference to a blob for a section, if it exists.
-    ///
-    /// Unlike [Self::get], skips the prune guard: the caller (an owned replay reader)
-    /// holds the journal, so no prune can interleave.
-    pub fn get_mut(&mut self, section: u64) -> Option<&mut F::Buffer> {
-        self.blobs.get_mut(&section)
-    }
-
     /// Get a reference to a blob for a section, if it exists.
     pub fn get(&self, section: u64) -> Result<Option<&F::Buffer>, Error> {
         self.prune_guard(section)?;
@@ -354,6 +343,30 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
     }
 
+    /// Remove a section's blob for an owned operation, creating it if it doesn't exist. Return it
+    /// with [Self::put].
+    pub async fn take(&mut self, section: u64) -> Result<F::Buffer, Error> {
+        self.prune_guard(section)?;
+        assert!(
+            section <= self.ceiling,
+            "sections above the initialization ceiling must be truncated before creation"
+        );
+        if let Some(buffer) = self.blobs.remove(&section) {
+            return Ok(buffer);
+        }
+        let name = section.to_be_bytes();
+        let (blob, size) = self.context.open(&self.partition, &name).await?;
+        let buffer = self.factory.create(blob, size).await?;
+        self.tracked.inc();
+        Ok(buffer)
+    }
+
+    /// Return a blob removed by [Self::take].
+    pub fn put(&mut self, section: u64, buffer: F::Buffer) {
+        let previous = self.blobs.insert(section, buffer);
+        assert!(previous.is_none(), "section {section} was not taken");
+    }
+
     /// Sync the given `sections` to storage.
     pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
         let sections = sections.sections().collect::<BTreeSet<_>>();
@@ -362,12 +375,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
         let futures: Vec<_> = self
             .blobs
-            .iter_mut()
-            .filter(|(section, _)| sections.contains(section))
-            .map(|(_, blob)| blob.sync())
+            .extract_if(.., |section, _| sections.contains(section))
+            .map(|(section, blob)| async move { blob.sync().await.map(|blob| (section, blob)) })
             .collect();
         let count = futures.len() as u64;
-        try_join_all(futures).await.map_err(Error::Runtime)?;
+        let blobs = try_join_all(futures).await.map_err(Error::Runtime)?;
+        self.blobs.extend(blobs);
         self.synced.inc_by(count);
         Ok(())
     }
@@ -391,15 +404,18 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
         let futures: Vec<_> = self
             .blobs
-            .iter_mut()
-            .filter(|(section, _)| sections.contains(section))
-            .map(|(_, blob)| blob.start_sync())
+            .extract_if(.., |section, _| sections.contains(section))
+            .map(|(section, blob)| async move {
+                let (blob, handle) = blob.start_sync().await;
+                ((section, blob), handle)
+            })
             .collect();
 
         // Count every selected section, including reused and clean no-op syncs, matching
         // `sync` and `sync_all`.
         self.synced.inc_by(futures.len() as u64);
-        let handles = join_all(futures).await;
+        let (blobs, handles): (Vec<_>, Vec<_>) = join_all(futures).await.into_iter().unzip();
+        self.blobs.extend(blobs);
         Ok(Handle::from_future(async move {
             try_join_all(handles).await.map(|_| ())
         }))
@@ -408,9 +424,11 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Sync all sections to storage.
     pub async fn sync_all(&mut self) -> Result<(), Error> {
         let count = self.blobs.len() as u64;
-        try_join_all(self.blobs.values_mut().map(|b| b.sync()))
-            .await
-            .map_err(Error::Runtime)?;
+        let futures = take(&mut self.blobs)
+            .into_iter()
+            .map(|(section, blob)| async move { blob.sync().await.map(|blob| (section, blob)) });
+        let blobs = try_join_all(futures).await.map_err(Error::Runtime)?;
+        self.blobs.extend(blobs);
         self.synced.inc_by(count);
         Ok(())
     }
@@ -426,8 +444,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             }
 
             // Remove blob from map
-            let mut blob = self.blobs.remove(&section).unwrap();
-            blob.wait_for_sync().await?;
+            let blob = self.blobs.remove(&section).unwrap().wait_for_sync().await?;
             let size = blob.size();
 
             // Remove blob from storage
@@ -474,12 +491,11 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.blobs.len()
     }
 
-    /// Returns an iterator over all sections starting from `start_section`.
-    pub fn sections_from(
-        &mut self,
-        start_section: u64,
-    ) -> impl Iterator<Item = (&u64, &mut F::Buffer)> {
-        self.blobs.range_mut(start_section..)
+    /// Returns an iterator over all section numbers starting from `start_section`.
+    pub fn sections_from(&self, start_section: u64) -> impl Iterator<Item = u64> + '_ {
+        self.blobs
+            .range(start_section..)
+            .map(|(&section, _)| section)
     }
 
     /// Returns an iterator over all section numbers.
@@ -491,8 +507,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
         self.prune_guard(section)?;
 
-        if let Some(mut blob) = self.blobs.remove(&section) {
-            blob.wait_for_sync().await?;
+        if let Some(blob) = self.blobs.remove(&section) {
+            let blob = blob.wait_for_sync().await?;
             let size = blob.size();
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
@@ -507,9 +523,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     }
 
     /// Remove all underlying blobs.
-    pub async fn destroy(mut self) -> Result<(), Error> {
-        Self::wait_for_syncs(self.blobs.values_mut()).await?;
-        for (section, blob) in self.blobs.into_iter() {
+    pub async fn destroy(self) -> Result<(), Error> {
+        for (section, blob) in Self::wait_for_syncs(self.blobs).await? {
             let size = blob.size();
             debug!(section, size, "destroyed blob");
             self.context
@@ -531,9 +546,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Unlike `destroy`, this keeps the manager alive so it can be reused.
     pub async fn clear(&mut self) -> Result<(), Error> {
         self.remove_discarded().await?;
-        Self::wait_for_syncs(self.blobs.values_mut()).await?;
-        let blobs = take(&mut self.blobs);
-        for (section, blob) in blobs {
+        for (section, blob) in Self::wait_for_syncs(take(&mut self.blobs)).await? {
             let size = blob.size();
             debug!(section, size, "cleared blob");
             self.context
@@ -566,8 +579,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
         for s in sections_to_remove {
             // Remove the underlying blob from storage
-            let mut blob = self.blobs.remove(&s).unwrap();
-            blob.wait_for_sync().await?;
+            let blob = self.blobs.remove(&s).unwrap().wait_for_sync().await?;
             self.context
                 .remove(&self.partition, Some(&s.to_be_bytes()))
                 .await?;
@@ -598,11 +610,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.prune_guard(section)?;
 
         // Get the blob at the given section
-        if let Some(blob) = self.blobs.get_mut(&section) {
+        if let Some(blob) = self.blobs.get(&section) {
             // Truncate the blob to the given size
             let current = blob.size();
             if size < current {
-                blob.truncate(size).await?;
+                let blob = self.blobs.remove(&section).unwrap().truncate(size).await?;
+                self.blobs.insert(section, blob);
                 debug!(section, from = current, to = size, "truncated section");
             }
         }
@@ -621,11 +634,18 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         for &section in sizes.keys() {
             self.prune_guard(section)?;
         }
-        let futures = self.blobs.iter_mut().filter_map(|(section, blob)| {
-            let &size = sizes.get(section)?;
-            (size < blob.size()).then(|| blob.truncate(size))
-        });
-        try_join_all(futures).await.map_err(Error::Runtime)?;
+        let futures: Vec<_> = self
+            .blobs
+            .extract_if(.., |section, blob| {
+                sizes.get(section).is_some_and(|&size| size < blob.size())
+            })
+            .map(|(section, blob)| {
+                let size = sizes[&section];
+                async move { blob.truncate(size).await.map(|blob| (section, blob)) }
+            })
+            .collect();
+        let blobs = try_join_all(futures).await.map_err(Error::Runtime)?;
+        self.blobs.extend(blobs);
         Ok(())
     }
 
@@ -677,11 +697,11 @@ pub(super) mod tests {
             (page.len() as u16).try_into().unwrap(),
             commonware_utils::NZUsize!(4),
         );
-        let mut writer = Writer::new(Arc::clone(&raw), size, 2 * page.len(), cache)
+        let writer = Writer::new(Arc::clone(&raw), size, 2 * page.len(), cache)
             .await
             .unwrap();
-        writer.append(page).await.unwrap();
-        writer.sync().await.unwrap();
+        let (writer, _) = writer.append(page).await.unwrap();
+        let writer = writer.sync().await.unwrap();
         let acknowledged = raw
             .read_at(0, physical, ReadOptions::default())
             .await
@@ -690,7 +710,7 @@ pub(super) mod tests {
 
         // The empty tip and page-aligned direct append issue one unsynced write wholly beyond
         // the acknowledged page. The raw handle shares the writer's open and observes those bytes.
-        writer
+        let (writer, _) = writer
             .append_owned(page.repeat(suffix_pages).into())
             .await
             .unwrap();
@@ -766,13 +786,14 @@ pub(super) mod tests {
             0
         }
 
-        async fn sync(&mut self) -> Result<(), RError> {
-            Ok(())
+        async fn sync(self) -> Result<Self, RError> {
+            Ok(self)
         }
 
-        async fn start_sync(&mut self) -> Handle<()> {
+        async fn start_sync(mut self) -> (Self, Handle<()>) {
             if let Some(syncing) = &self.syncing {
-                return Handle::from_future(syncing.clone());
+                let handle = Handle::from_future(syncing.clone());
+                return (self, handle);
             }
             let (sender, receiver) = oneshot::channel();
             self.pending.lock().push(sender);
@@ -783,19 +804,19 @@ pub(super) mod tests {
             .boxed()
             .shared();
             self.syncing = Some(sync.clone());
-            Handle::from_future(sync)
+            (self, Handle::from_future(sync))
         }
 
-        async fn wait_for_sync(&mut self) -> Result<(), RError> {
+        async fn wait_for_sync(mut self) -> Result<Self, RError> {
             if let Some(syncing) = self.syncing.take() {
                 self.wait_for_syncs.fetch_add(1, Ordering::Relaxed);
                 syncing.await?;
             }
-            Ok(())
+            Ok(self)
         }
 
-        async fn truncate(&mut self, _len: u64) -> Result<(), RError> {
-            Ok(())
+        async fn truncate(self, _len: u64) -> Result<Self, RError> {
+            Ok(self)
         }
     }
 

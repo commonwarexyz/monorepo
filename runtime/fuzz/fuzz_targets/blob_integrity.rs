@@ -117,15 +117,15 @@ fn fuzz(input: FuzzInput) {
             .expect("cannot open blob");
         let blob = Arc::new(blob);
 
-        let mut append = Writer::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
+        let append = Writer::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
             .await
             .expect("cannot create append wrapper");
 
-        append
+        let (append, _) = append
             .append(&expected_data)
             .await
             .expect("cannot append data");
-        append.sync().await.expect("cannot sync");
+        let append = append.sync().await.expect("cannot sync");
         drop(append);
 
         // Step 2: Corrupt a single bit in the blob.
@@ -207,9 +207,10 @@ fn fuzz(input: FuzzInput) {
                         ReadOptions::default(),
                     )
                     .await;
-                let mut replay = match replay_result {
+                let mut replay;
+                (append, replay) = match replay_result {
                     Ok(r) => r,
-                    Err(_) => continue, // Replay creation failed due to corruption, skip.
+                    Err(_) => return, // Replay creation failed and dropped the writer.
                 };
 
                 // Skip to the offset by ensuring and advancing

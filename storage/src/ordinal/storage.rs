@@ -11,7 +11,7 @@ use commonware_runtime::{
 use commonware_utils::bitmap::BitMap;
 use futures::future::try_join_all;
 use std::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
     sync::Arc,
 };
@@ -299,27 +299,25 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         self.puts.inc();
 
-        // Check if blob exists
+        // Remove the section's writer, opening it if absent
         let items_per_blob = self.config.items_per_blob.get();
         let section = index / items_per_blob;
-        if let Entry::Vacant(entry) = self.blobs.entry(section) {
-            let (blob, len) = self
-                .context
-                .open(&self.config.partition, &section.to_be_bytes())
-                .await?;
-            entry.insert(Write::from_pooler(
-                &self.context,
-                blob,
-                len,
-                self.config.write_buffer,
-            ));
-            debug!(section, "created blob");
-        }
+        let blob = match self.blobs.remove(&section) {
+            Some(blob) => blob,
+            None => {
+                let (blob, len) = self
+                    .context
+                    .open(&self.config.partition, &section.to_be_bytes())
+                    .await?;
+                debug!(section, "created blob");
+                Write::from_pooler(&self.context, blob, len, self.config.write_buffer)
+            }
+        };
 
         // Write the value to the blob
-        let blob = self.blobs.get_mut(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        blob.write_at(offset, Record::encode(&value)).await?;
+        let blob = blob.write_at(offset, Record::encode(&value)).await?;
+        self.blobs.insert(section, blob);
         self.pending.insert(section);
 
         // Add to intervals
@@ -433,11 +431,11 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
 
         let futures: Vec<_> = self
             .blobs
-            .iter_mut()
-            .filter(|(section, _)| self.pending.contains(section))
-            .map(|(_, blob)| blob.sync())
+            .extract_if(.., |section, _| self.pending.contains(section))
+            .map(|(section, blob)| async move { blob.sync().await.map(|blob| (section, blob)) })
             .collect();
-        try_join_all(futures).await?;
+        let blobs = try_join_all(futures).await?;
+        self.blobs.extend(blobs);
 
         // Clear pending sections.
         self.pending.clear();

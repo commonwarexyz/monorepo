@@ -194,11 +194,10 @@ fn fuzz(input: FuzzInput) {
                     cache_capacity,
                 } => {
                     // Reopening requires exclusive ownership and a durable source tail.
-                    if let Some(mut previous) = append_buffer.take() {
-                        if previous.sync().await.is_err() {
-                            return;
-                        }
-                        drop(previous);
+                    if let Some(previous) = append_buffer.take()
+                        && previous.sync().await.is_err()
+                    {
+                        return;
                     }
                     let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
                     let cache_page_size = cache_page_size.max(1);
@@ -264,60 +263,59 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 FuzzOperation::WriteAt { data, offset } => {
-                    if let Some(ref mut writer) = write_buffer {
-                        let data = if data.len() > MAX_SIZE {
-                            &data[..MAX_SIZE]
-                        } else {
-                            &data
-                        };
-                        let offset = offset as u64;
-                        if offset.checked_add(data.len() as u64).is_some() {
-                            let _ = writer.write_at(offset, data.to_vec()).await;
-                        }
+                    let data = if data.len() > MAX_SIZE {
+                        &data[..MAX_SIZE]
+                    } else {
+                        &data
+                    };
+                    let offset = offset as u64;
+                    if offset.checked_add(data.len() as u64).is_some()
+                        && let Some(writer) = write_buffer.take()
+                    {
+                        write_buffer = writer.write_at(offset, data.to_vec()).await.ok();
                     }
                 }
 
                 FuzzOperation::WriteResize { new_size } => {
-                    if let Some(ref mut writer) = write_buffer {
-                        let _ = writer.resize(new_size as u64).await;
+                    if let Some(writer) = write_buffer.take() {
+                        write_buffer = writer.resize(new_size as u64).await.ok();
                     }
                 }
 
                 FuzzOperation::WriteSync => {
-                    if let Some(ref mut writer) = write_buffer {
-                        let _ = writer.sync().await;
+                    if let Some(writer) = write_buffer.take() {
+                        write_buffer = writer.sync().await.ok();
                     }
                 }
 
                 FuzzOperation::AppendData { data } => {
-                    if let Some(append) = append_buffer.as_mut() {
-                        // Limit data size and check for overflow
-                        let data = if data.len() > MAX_SIZE {
-                            data[..MAX_SIZE].to_vec()
-                        } else {
-                            data
-                        };
-                        let current_size = append.size();
-                        if current_size.checked_add(data.len() as u64).is_some()
-                            && append.append(&data).await.is_err()
-                        {
+                    // Limit data size and check for overflow
+                    let data = if data.len() > MAX_SIZE {
+                        data[..MAX_SIZE].to_vec()
+                    } else {
+                        data
+                    };
+                    if let Some(append) = append_buffer
+                        .take_if(|append| append.size().checked_add(data.len() as u64).is_some())
+                    {
+                        let Ok((append, _)) = append.append(&data).await else {
                             return;
-                        }
+                        };
+                        append_buffer = Some(append);
                     }
                 }
 
                 FuzzOperation::AppendReopenAtMost { new_size } => {
-                    if let Some(mut append) = append_buffer.take() {
+                    if let Some(append) = append_buffer.take() {
                         // Close the live writer before selecting a shorter durable prefix.
                         if append.sync().await.is_err() {
                             return;
                         }
-                        drop(append);
                         let (blob, size) = context
                             .open("test_partition", b"append_blob")
                             .await
                             .unwrap();
-                        let mut recovery = match Recovery::open(
+                        let recovery = match Recovery::open(
                             blob,
                             size,
                             MAX_SIZE,
@@ -328,18 +326,19 @@ fn fuzz(input: FuzzInput) {
                             Ok(recovery) => recovery,
                             Err(_) => return,
                         };
-                        if recovery.truncate(new_size as u64).await.is_err() {
+                        let Ok(recovery) = recovery.truncate(new_size as u64).await else {
                             return;
-                        }
+                        };
                         append_buffer = Some(recovery.into());
                     }
                 }
 
                 FuzzOperation::AppendSync => {
-                    if let Some(append) = append_buffer.as_mut()
-                        && append.sync().await.is_err()
-                    {
-                        return;
+                    if let Some(append) = append_buffer.take() {
+                        let Ok(append) = append.sync().await else {
+                            return;
+                        };
+                        append_buffer = Some(append);
                     }
                 }
 
@@ -409,14 +408,15 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 FuzzOperation::AppendAsReader { buffer_size } => {
-                    if let Some(append) = append_buffer.as_mut() {
+                    if let Some(append) = append_buffer.take() {
                         let buffer_size = NZUsize!((buffer_size as usize).clamp(1, MAX_SIZE));
                         // This fuzzer never corrupts data, so CRC validation in replay
                         // should always succeed. A failure here indicates a bug.
-                        let _ = append
+                        let (append, _) = append
                             .replay(buffer_size, ReadOptions::default())
                             .await
                             .expect("Failed to create replay");
+                        append_buffer = Some(append);
                     }
                 }
 

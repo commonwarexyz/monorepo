@@ -581,11 +581,11 @@ mod tests {
 
             // Write data spanning multiple pages
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
-            append.append(&data).await.unwrap();
-            append.sync().await.unwrap();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
 
             // Create Replay
-            let mut replay = append
+            let (_, mut replay) = append
                 .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
                 .await
                 .unwrap();
@@ -622,10 +622,10 @@ mod tests {
 
             // Write data that doesn't fill the last page
             let data: Vec<u8> = (1u8..=(PAGE_SIZE.get() + 10) as u8).collect();
-            append.append(&data).await.unwrap();
-            append.sync().await.unwrap();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
 
-            let mut replay = append
+            let (_, mut replay) = append
                 .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
                 .await
                 .unwrap();
@@ -654,13 +654,13 @@ mod tests {
 
             // Write data spanning 4 pages (4 * 103 = 412 bytes, with last page partial)
             let data: Vec<u8> = (0u8..=255).cycle().take(400).collect();
-            append.append(&data).await.unwrap();
-            append.sync().await.unwrap();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
 
             // Create Replay with buffer size that results in prefetch_count=1.
             // Physical page size = 103 + 12 = 115 bytes.
             // Buffer size of 115 gives prefetch_pages = 115/115 = 1.
-            let mut replay = append
+            let (_, mut replay) = append
                 .replay(NZUsize!(115), ReadOptions::default())
                 .await
                 .unwrap();
@@ -707,7 +707,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let mut append = Writer::new(blob, blob_size, BUFFER_PAGES * 115, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 
@@ -715,7 +715,7 @@ mod tests {
             assert_eq!(append.size(), 0);
 
             // Create Replay on empty blob
-            let mut replay = append
+            let (_, mut replay) = append
                 .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
                 .await
                 .unwrap();
@@ -755,10 +755,10 @@ mod tests {
 
             // Write data spanning multiple pages
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
-            append.append(&data).await.unwrap();
-            append.sync().await.unwrap();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
 
-            let mut replay = append
+            let (_, mut replay) = append
                 .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
                 .await
                 .unwrap();

@@ -435,10 +435,10 @@ mod tests {
                 .unwrap();
             let data: Vec<_> = (0..page * 20 + 13).map(|i| (i % 251) as u8).collect();
             let persisted = page * 3 + 17;
-            writer.append(&data[..persisted]).await.unwrap();
-            writer.sync().await.unwrap();
+            (writer, _) = writer.append(&data[..persisted]).await.unwrap();
+            writer = writer.sync().await.unwrap();
             for chunk in data[persisted..].chunks(97) {
-                writer.append(chunk).await.unwrap();
+                (writer, _) = writer.append(chunk).await.unwrap();
             }
 
             let mut all = vec![0; data.len()];
@@ -502,7 +502,7 @@ mod tests {
                     .as_ref(),
                 data
             );
-            writer.sync().await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
             cache.clear();
             let (blob, size) = context
@@ -562,9 +562,9 @@ mod tests {
 
             // A full page (flushed to the blob) followed by a partial tail kept in the tip buffer.
             let page_size = PAGE_SIZE.get() as usize;
-            writer.append(&vec![0xAA; page_size]).await.unwrap();
-            writer.append(b"TAIL").await.unwrap();
-            writer.sync().await.unwrap();
+            (writer, _) = writer.append(&vec![0xAA; page_size]).await.unwrap();
+            (writer, _) = writer.append(b"TAIL").await.unwrap();
+            writer = writer.sync().await.unwrap();
 
             // Warm the cache for the first page, then read across the page/tail boundary.
             writer.read_at(0, page_size).await.unwrap();

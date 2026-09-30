@@ -32,9 +32,9 @@ where
                     let start = Instant::now();
                     for _ in 0..iters {
                         for _ in 0..per_sync {
-                            writer.append(&data).await.unwrap();
+                            (writer, _) = writer.append(&data).await.unwrap();
                         }
-                        writer.sync().await.unwrap();
+                        writer = writer.sync().await.unwrap();
                     }
                     let elapsed = start.elapsed();
 

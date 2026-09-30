@@ -125,10 +125,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
 
 impl<E: Storage + Metrics, A: CodecFixed> Inner<E, A> {
     /// The section's writer. A replayed section cannot be removed while the replay owns the journal.
-    fn writer(&mut self, section: u64) -> &mut PagedRecovery<E::Blob> {
-        self.manager
-            .get_mut(section)
-            .expect("replayed section is present")
+    fn writer(&self, section: u64) -> Result<&PagedRecovery<E::Blob>, Error> {
+        Ok(self
+            .manager
+            .get(section)?
+            .expect("replayed section is present"))
     }
 }
 
@@ -364,7 +365,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         // Encode the item
         let offset = match blob.try_append_value(item) {
             Some(offset) => offset,
-            None => blob.append_owned(item.encode_mut().into()).await?,
+            None => {
+                let blob = self.manager.take(section).await?;
+                let (blob, offset) = blob.append_owned(item.encode_mut().into()).await?;
+                self.manager.put(section, blob);
+                offset
+            }
         };
         if !offset.is_multiple_of(Self::CHUNK_SIZE_U64) {
             return Err(Error::InvalidBlobSize(section, offset));
@@ -771,9 +777,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         read_options: ReadOptions,
     ) -> Result<Replay<E, A>, Error> {
         let mut sections = VecDeque::new();
-        for (&section, blob) in self.0.manager.sections_from(start_section) {
+        let replayed: Vec<_> = self.0.manager.sections_from(start_section).collect();
+        for section in replayed {
+            let blob = self.0.manager.take(section).await?;
             let blob_size = blob.size();
-            let mut reader = blob.replay(buffer, read_options).await?;
+            let (blob, mut reader) = blob.replay(buffer, read_options).await?;
+            self.0.manager.put(section, blob);
             // For the first section, seek to the start position
             let position = if section == start_section {
                 let start = start_position
@@ -943,7 +952,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
         let recoverable = self
             .journal
             .0
-            .writer(section)
+            .writer(section)?
             .recoverable_prefix_len(valid_size, self.buffer, self.read_options)
             .await?;
 
@@ -991,13 +1000,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             .pop_front()
             .expect("repaired section is present");
         drop(current.reader);
-        self.journal.0.writer(section).truncate(target).await?;
-        let mut reader = self
-            .journal
-            .0
-            .writer(section)
-            .replay(self.buffer, self.read_options)
-            .await?;
+        let writer = self.journal.0.manager.take(section).await?;
+        let writer = writer.truncate(target).await?;
+        let (writer, mut reader) = writer.replay(self.buffer, self.read_options).await?;
+        self.journal.0.manager.put(section, writer);
         reader.seek_to(valid_size)?;
         self.sections.push_front(SectionReplay {
             section,
@@ -1026,7 +1032,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     /// next section. Errors while mutating storage to repair a section, and
     /// [Error::ReplayInterrupted], end the replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, A), Error>> {
-        // A cancelled repair leaves the section's writer unusable.
+        // A cancelled repair drops the section's writer.
         if self.repairing {
             self.repairing = false;
             self.sections.clear();
@@ -1066,10 +1072,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                         if let Err(err) = self
                             .journal
                             .0
-                            .writer(section)
-                            .truncate(valid_size)
+                            .manager
+                            .truncate_pending_section(section, valid_size)
                             .await
-                            .map_err(Error::from)
                         {
                             self.sections.pop_front();
                             return self.fail(err);
@@ -1417,7 +1422,7 @@ mod tests {
                     .open(&cfg.partition, &0u64.to_be_bytes())
                     .await
                     .unwrap();
-                let mut partial = commonware_runtime::buffer::paged::Recovery::open(
+                let partial = commonware_runtime::buffer::paged::Recovery::open(
                     blob,
                     size,
                     cfg.write_buffer.get(),
@@ -1426,7 +1431,6 @@ mod tests {
                 .await
                 .unwrap();
                 partial.truncate(tail).await.unwrap();
-                drop(partial);
 
                 // A valid later page survives after the torn page in section zero.
                 corrupt_page(&context, &cfg.partition, &0u64.to_be_bytes(), 4, 5).await;
@@ -2821,7 +2825,7 @@ mod tests {
                 .open(&cfg.partition, &SECTION.to_be_bytes())
                 .await
                 .unwrap();
-            let mut writer = commonware_runtime::buffer::paged::Recovery::open(
+            let writer = commonware_runtime::buffer::paged::Recovery::open(
                 blob,
                 size,
                 128,
@@ -2829,9 +2833,8 @@ mod tests {
             )
             .await
             .unwrap();
-            writer.truncate(30).await.unwrap();
+            let writer = writer.truncate(30).await.unwrap();
             writer.sync().await.unwrap();
-            drop(writer);
 
             // Five-byte integrity pages crossed by eight-byte journal items:
             //

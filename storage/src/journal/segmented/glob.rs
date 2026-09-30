@@ -115,9 +115,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // Write to blob
         let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
-        let writer = self.manager.get_or_create(section).await?;
+        let writer = self.manager.take(section).await?;
         let offset = writer.size();
-        writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
+        let writer = writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
+        self.manager.put(section, writer);
 
         Ok((offset, entry_size))
     }
@@ -191,8 +192,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Glob::inject].
     #[cfg(test)]
     async fn inject(&mut self, section: u64, offset: u64, buf: Vec<u8>) -> Result<(), Error> {
-        let writer = self.manager.get_or_create(section).await?;
-        writer.write_at(offset, buf).await.map_err(Error::Runtime)
+        let writer = self.manager.take(section).await?;
+        let writer = writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
+        self.manager.put(section, writer);
+        Ok(())
     }
 
     /// See [Glob::sync].
@@ -755,12 +758,13 @@ mod tests {
             let mut glob = glob.sync(1).await.expect("Failed to sync");
 
             // Corrupt the data by writing directly to the underlying blob
-            let writer = glob.0.manager.blobs.get_mut(&1).unwrap();
-            writer
+            let writer = glob.0.manager.take(1).await.unwrap();
+            let writer = writer
                 .write_at(offset, vec![0xFF, 0xFF, 0xFF, 0xFF])
                 .await
                 .expect("Failed to corrupt");
-            writer.sync().await.expect("Failed to sync");
+            let writer = writer.sync().await.expect("Failed to sync");
+            glob.0.manager.put(1, writer);
 
             // Get should fail with checksum mismatch
             let result = glob.get(1, offset, size).await;

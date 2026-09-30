@@ -26,6 +26,9 @@ use std::num::NonZeroUsize;
 /// buffer state and [Self::sync] may use [Blob::write_at] with [WriteOptions::SYNC], which is
 /// not a durability barrier for those external mutations.
 ///
+/// Asynchronous mutating methods consume the writer and return it only on success: an error (or
+/// a dropped future) destroys the writer.
+///
 /// # Example
 ///
 /// ```
@@ -39,14 +42,14 @@ use std::num::NonZeroUsize;
 ///     assert_eq!(size, 0);
 ///
 ///     // Create a buffered writer with 16-byte buffer
-///     let mut blob = Write::from_pooler(&context, blob, 0, NZUsize!(16));
-///     blob.write_at(0, b"hello").await.expect("write failed");
-///     blob.sync().await.expect("sync failed");
+///     let blob = Write::from_pooler(&context, blob, 0, NZUsize!(16));
+///     let blob = blob.write_at(0, b"hello").await.expect("write failed");
+///     let blob = blob.sync().await.expect("sync failed");
 ///
 ///     // Write more data in multiple flushes
-///     blob.write_at(5, b" world").await.expect("write failed");
-///     blob.write_at(11, b"!").await.expect("write failed");
-///     blob.sync().await.expect("sync failed");
+///     let blob = blob.write_at(5, b" world").await.expect("write failed");
+///     let blob = blob.write_at(11, b"!").await.expect("write failed");
+///     let blob = blob.sync().await.expect("sync failed");
 ///
 ///     // Release the writer and read back the persisted data through a new open.
 ///     drop(blob);
@@ -152,10 +155,10 @@ impl<B: Blob> Write<B> {
     ///
     /// Returns [Error::OffsetOverflow] when `offset + bufs.len()` overflows.
     pub async fn write_at(
-        &mut self,
+        mut self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
+    ) -> Result<Self, Error> {
         let mut bufs = bufs.into();
 
         // Ensure the write doesn't overflow.
@@ -208,14 +211,14 @@ impl<B: Blob> Write<B> {
             self.buffer.offset = self.buffer.offset.max(current_offset);
         }
 
-        Ok(())
+        Ok(self)
     }
 
     /// Resize the logical blob to `len`.
     ///
     /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
     /// before resizing the underlying blob.
-    pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
+    pub async fn resize(mut self, len: u64) -> Result<Self, Error> {
         // Flush buffered data to the underlying blob.
         //
         // This can only happen if the new size is greater than the current size.
@@ -227,16 +230,16 @@ impl<B: Blob> Write<B> {
 
         self.sync_state.resize(&self.blob, len).await?;
 
-        Ok(())
+        Ok(self)
     }
 
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        if let Some((buf, offset)) = self.buffer.take() {
-            return self.write_blob_sync(offset, buf).await;
+    pub async fn sync(mut self) -> Result<Self, Error> {
+        match self.buffer.take() {
+            Some((buf, offset)) => self.write_blob_sync(offset, buf).await?,
+            None => self.sync_blob().await?,
         }
-
-        self.sync_blob().await
+        Ok(self)
     }
 
     /// Flush buffered bytes and begin durably syncing mutations tracked by this writer.
@@ -245,22 +248,26 @@ impl<B: Blob> Write<B> {
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
     /// mutate the blob wait before issuing blob operations. A flush failure is retained the same
     /// way: the handle reports it, and so does the next such call.
-    pub async fn start_sync(&mut self) -> Handle<()> {
+    #[must_use]
+    pub async fn start_sync(mut self) -> (Self, Handle<()>) {
         if let Some((buf, offset)) = self.buffer.take()
             && let Err(err) = self
                 .sync_state
                 .write_at(&self.blob, offset, buf, WriteOptions::default())
                 .await
         {
-            return self.sync_state.fail(err);
+            let handle = self.sync_state.fail(err);
+            return (self, handle);
         }
 
-        self.sync_state.start_sync(&self.blob).await
+        let handle = self.sync_state.start_sync(&self.blob).await;
+        (self, handle)
     }
 
     /// Wait for any started sync to complete without starting a new sync.
-    pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
-        self.sync_state.wait_for_pending().await
+    pub async fn wait_for_sync(mut self) -> Result<Self, Error> {
+        self.sync_state.wait_for_pending().await?;
+        Ok(self)
     }
 
     /// Write bytes to the underlying blob and make them durable.

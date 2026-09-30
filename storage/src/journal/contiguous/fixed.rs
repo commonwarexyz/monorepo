@@ -159,6 +159,7 @@ use std::{
     collections::{BTreeMap, btree_map::Entry},
     future::Future,
     marker::PhantomData,
+    mem::take,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
     sync::Arc,
@@ -497,7 +498,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             } else {
                 0
             };
-            let writer = pending.get_mut(&blob).expect("suspect blob is present");
+            let writer = pending.get(&blob).expect("suspect blob is present");
             let required_items = ceiling
                 .saturating_sub(first_in_blob(pruning_boundary, blob, items_per_blob)?)
                 .min(items_per_blob);
@@ -537,7 +538,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 size = writer.size(),
                 "truncating to recoverable item prefix"
             );
-            writer.truncate(valid).await?;
+            let writer = pending.remove(&blob).expect("suspect blob is present");
+            pending.insert(blob, writer.truncate(valid).await?);
         }
 
         let RecoveredBounds {
@@ -718,23 +720,24 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let pos = self.bounds.end;
         let end = pos.checked_add(1).ok_or(Error::SizeOverflow)?;
         let blob = super::position_to_blob(pos, self.cfg.items_per_blob.get());
-        let writer = match self.pending.entry(blob) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(self.partition.open_recovery(blob).await?),
+        let mut writer = match self.pending.remove(&blob) {
+            Some(writer) => writer,
+            None => self.partition.open_recovery(blob).await?,
         };
 
         // Encode directly into the write buffer when the item fits. The owned fallback handles
         // flushing and items larger than the buffer.
         if writer.try_append_value(item).is_none() {
-            writer.append_owned(item.encode_mut().into()).await?;
+            (writer, _) = writer.append_owned(item.encode_mut().into()).await?;
         }
 
         // Completed blobs remain open until publication. Flush them here so each retains at most a
         // partial page while recovery continues appending. Keep the checkpoint unchanged: flushing
         // a blob alone does not establish that this prefix is ready to publish.
         if end.is_multiple_of(self.cfg.items_per_blob.get()) {
-            writer.sync().await?;
+            writer = writer.sync().await?;
         }
+        self.pending.insert(blob, writer);
         self.bounds.end = end;
         Ok(self)
     }
@@ -776,9 +779,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             // An empty prefix needs a durable boundary blob before its last backing blob is
             // removed.
             if let Entry::Vacant(entry) = self.pending.entry(tail_blob) {
-                let mut writer = self.partition.open_recovery(tail_blob).await?;
-                writer.sync().await?;
-                entry.insert(writer);
+                let writer = self.partition.open_recovery(tail_blob).await?;
+                entry.insert(writer.sync().await?);
             }
             self.discarded.retain(|&blob| blob != tail_blob);
         }
@@ -799,22 +801,29 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
 
         // A truncated tail is made durable by truncation. An appended tail needs an explicit
         // barrier before publication can raise the watermark.
-        if let Some(writer) = self.pending.get_mut(&tail_blob) {
-            if bytes < writer.size() {
-                writer.truncate(bytes).await?;
+        if let Some(writer) = self.pending.remove(&tail_blob) {
+            let writer = if bytes < writer.size() {
+                writer.truncate(bytes).await?
             } else {
-                writer.sync().await?;
-            }
+                writer.sync().await?
+            };
+            self.pending.insert(tail_blob, writer);
         }
         self.bounds.end = size;
         Ok(self)
     }
 
+    /// Make every recovered blob durable.
+    async fn sync_pending(&mut self) -> Result<(), Error> {
+        for (blob, writer) in take(&mut self.pending) {
+            self.pending.insert(blob, writer.sync().await?);
+        }
+        Ok(())
+    }
+
     /// Flush recovery data and publish the current end as the watermark.
     pub(crate) async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
-        for writer in self.pending.values_mut() {
-            writer.sync().await?;
-        }
+        self.sync_pending().await?;
         self.watermark = self.bounds.end;
         self.checkpoint = self
             .checkpoint
@@ -848,9 +857,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         }
 
         // The retained anchor must be durable before any older blob is removed.
-        for writer in self.pending.values_mut() {
-            writer.sync().await?;
-        }
+        self.sync_pending().await?;
         while let Some((&oldest, _)) = self.pending.first_key_value() {
             if oldest >= blob {
                 break;
@@ -1173,7 +1180,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     /// Begin durably persisting the data blobs.
     pub(super) async fn start_data_sync(mut self: Box<Self>) -> (Box<Self>, Handle<()>) {
-        let handle = self.blobs.start_sync().await;
+        let (blobs, handle) = self.blobs.start_sync().await;
+        self.blobs = blobs;
         let completion: SyncCompletion = handle.boxed().shared();
         self.barrier.record(self.bounds.end, completion.clone());
         (self, Handle::from_future(completion))
@@ -1208,7 +1216,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         let size = self.bounds.end;
-        let handle = self.blobs.start_sync().await;
+        let (blobs, handle) = self.blobs.start_sync().await;
+        self.blobs = blobs;
         handle.await?;
         self.barrier.mark_durable(size);
         Ok(self)
@@ -1219,7 +1228,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         let size = self.bounds.end;
-        let handle = self.blobs.start_sync().await;
+        let (blobs, handle) = self.blobs.start_sync().await;
+        self.blobs = blobs;
         handle.await?;
         self.barrier.mark_durable(size);
         self.checkpoint = self
@@ -1230,14 +1240,19 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::snapshot].
-    pub(crate) async fn snapshot(&mut self) -> Result<Reader<'static, E, A>, Error> {
-        Ok(Reader {
-            blobs: self.blobs.snapshot().await?,
+    pub(crate) async fn snapshot(
+        mut self: Box<Self>,
+    ) -> Result<(Box<Self>, Reader<'static, E, A>), Error> {
+        let (blobs, snapshot) = self.blobs.snapshot().await?;
+        self.blobs = blobs;
+        let reader = Reader {
+            blobs: snapshot,
             bounds: self.bounds.clone(),
             items_per_blob: self.items_per_blob,
             metrics: self.metrics.clone(),
             _phantom: PhantomData,
-        })
+        };
+        Ok((self, reader))
     }
 
     /// A reader borrowing the journal's live state.
@@ -1258,28 +1273,35 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::append].
-    pub(crate) async fn append(&mut self, item: &A) -> Result<u64, Error> {
+    pub(crate) async fn append(mut self: Box<Self>, item: &A) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
         let new_size = self.bounds.end.checked_add(1).ok_or(Error::SizeOverflow)?;
-        if self.blobs.tail_writer().try_append_value(item).is_none() {
+        if self.blobs.try_append_value(item).is_none() {
             return self
                 .append_many_inner(Many::Flat(std::slice::from_ref(item)))
                 .await;
         }
         self.advance_tail(new_size).await?;
-        Ok(self.finish_append())
+        let position = self.finish_append();
+        Ok((self, position))
     }
 
     /// See [Journal::append_many].
-    pub(crate) async fn append_many<'a>(&'a mut self, items: Many<'a, A>) -> Result<u64, Error> {
+    pub(crate) async fn append_many(
+        self: Box<Self>,
+        items: Many<'_, A>,
+    ) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_many_timer();
         self.metrics.append_many_calls.inc();
         self.append_many_inner(items).await
     }
 
     // Shared implementation for `append` and `append_many`; public wrappers record metrics.
-    async fn append_many_inner<'a>(&'a mut self, items: Many<'a, A>) -> Result<u64, Error> {
+    async fn append_many_inner(
+        self: Box<Self>,
+        items: Many<'_, A>,
+    ) -> Result<(Box<Self>, u64), Error> {
         let prepared = self.prepare_append(items);
         self.write_encoded(prepared).await
     }
@@ -1311,16 +1333,19 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     /// See [Journal::append_prepared].
     pub(crate) async fn append_prepared(
-        &mut self,
+        self: Box<Self>,
         prepared: PreparedAppend<A>,
-    ) -> Result<u64, Error> {
+    ) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_prepared_timer();
         self.metrics.append_prepared_calls.inc();
         self.write_encoded(prepared).await
     }
 
     // Write pre-encoded items; shared by all append paths. Records no call metrics.
-    async fn write_encoded(&mut self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+    async fn write_encoded(
+        mut self: Box<Self>,
+        prepared: PreparedAppend<A>,
+    ) -> Result<(Box<Self>, u64), Error> {
         let items_buf = prepared.buf;
         let items_count = items_buf.len() / A::SIZE;
         if items_count == 0 {
@@ -1347,15 +1372,13 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             // Overflow checked above.
             let new_size = self.bounds.end + batch_count as u64;
 
-            self.blobs
-                .tail_writer()
-                .append_owned(items_buf.slice(start..end))
-                .await?;
+            (self.blobs, _) = self.blobs.append_owned(items_buf.slice(start..end)).await?;
             self.advance_tail(new_size).await?;
             written += batch_count;
         }
 
-        Ok(self.finish_append())
+        let position = self.finish_append();
+        Ok((self, position))
     }
 
     // Advance appended bounds and rotate a full tail. Both append paths use the same ordering.
@@ -1404,7 +1427,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // survivors above the boundary: removal may be interrupted, and recovery truncates at
         // the first torn item, so an unsynced survivor could discard every synced blob
         // behind it.
-        let sync = self.blobs.start_sync().await;
+        let (blobs, sync) = self.blobs.start_sync().await;
+        self.blobs = blobs;
         sync.await?;
         self.barrier.mark_durable(self.bounds.end);
 
@@ -1614,7 +1638,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// the journal's blobs open, so reopening a partition that still holds one of them fails
     /// while the snapshot is alive.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, A>), Error> {
-        let reader = self.0.snapshot().await?;
+        let (inner, reader) = self.0.snapshot().await?;
+        self.0 = inner;
         Ok((self, reader))
     }
 
@@ -1630,7 +1655,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn append(mut self, item: &A) -> Result<(Self, u64), Error> {
-        let position = self.0.append(item).await?;
+        let (inner, position) = self.0.append(item).await?;
+        self.0 = inner;
         Ok((self, position))
     }
 
@@ -1638,7 +1664,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Returns [Error::EmptyAppend] if items is empty.
     pub async fn append_many(mut self, items: Many<'_, A>) -> Result<(Self, u64), Error> {
-        let position = self.0.append_many(items).await?;
+        let (inner, position) = self.0.append_many(items).await?;
+        self.0 = inner;
         Ok((self, position))
     }
 
@@ -1658,7 +1685,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         mut self,
         prepared: PreparedAppend<A>,
     ) -> Result<(Self, u64), Error> {
-        let position = self.0.append_prepared(prepared).await?;
+        let (inner, position) = self.0.append_prepared(prepared).await?;
+        self.0 = inner;
         Ok((self, position))
     }
 
@@ -2118,8 +2146,9 @@ impl<E: crate::Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// Test helper: Make one blob durable (sealed history or the tail).
-    pub(crate) async fn test_sync_blob(&mut self, blob: u64) -> Result<(), Error> {
-        self.blobs.sync_blob(blob).await
+    pub(crate) async fn test_sync_blob(mut self: Box<Self>, blob: u64) -> Result<Box<Self>, Error> {
+        self.blobs = self.blobs.sync_blob(blob).await?;
+        Ok(self)
     }
 
     /// Test helper: Set and persist the recovery watermark directly.
@@ -2165,8 +2194,9 @@ impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Test helper: Make one blob durable (sealed history or the tail).
-    pub(crate) async fn test_sync_blob(&mut self, blob: u64) -> Result<(), Error> {
-        self.0.test_sync_blob(blob).await
+    pub(crate) async fn test_sync_blob(mut self, blob: u64) -> Result<Self, Error> {
+        self.0 = self.0.test_sync_blob(blob).await?;
+        Ok(self)
     }
 
     /// Test helper: Set and persist the recovery watermark directly.
@@ -2247,8 +2277,8 @@ mod tests {
                 .await
                 .unwrap();
             let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
-            writer.append(&[1; 32]).await.unwrap();
-            writer.sync().await.unwrap();
+            (writer, _) = writer.append(&[1; 32]).await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
             corrupt_page(
                 &context,
@@ -2511,7 +2541,7 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
             for blob in 0..3 {
-                journal.test_sync_blob(blob).await.unwrap();
+                journal = journal.test_sync_blob(blob).await.unwrap();
             }
             drop(journal);
 
@@ -2770,7 +2800,7 @@ mod tests {
             let mut journal = Box::new(Inner::<_, u64>::init(context, cfg).await.unwrap());
 
             // Rollover starts a predecessor sync.
-            journal
+            (journal, _) = journal
                 .append_many(Many::Flat(&[1, 2, 3, 4]))
                 .await
                 .unwrap();
@@ -2804,7 +2834,7 @@ mod tests {
             let mut journal = Box::new(make(pending.clone()).await.unwrap());
 
             // Nothing proven while the first sync is parked: the watermark must not move.
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let (mut journal, h1) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 0);
 
@@ -2813,7 +2843,7 @@ mod tests {
 
             // The first sync is proven, so the next call advances the watermark to its size,
             // one interval behind the tip.
-            journal.append(&4).await.unwrap();
+            (journal, _) = journal.append(&4).await.unwrap();
             let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 3);
             drive_pending_syncs(&pending, h2).await.unwrap();
@@ -2853,7 +2883,7 @@ mod tests {
                 .unwrap(),
             );
 
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let (journal, h1) = journal.start_sync().await.unwrap();
             fail_pending_syncs(&pending);
             assert!(h1.await.is_err());
@@ -2883,13 +2913,13 @@ mod tests {
             };
             let mut journal = Box::new(make(pending.clone()).await.unwrap());
 
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let (mut journal, h1) = journal.start_sync().await.unwrap();
             release_pending_syncs(&pending);
             h1.await.unwrap();
 
             // This parks the metadata sync advancing the watermark to 3.
-            journal.append(&4).await.unwrap();
+            (journal, _) = journal.append(&4).await.unwrap();
             let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 3);
 
@@ -2929,10 +2959,10 @@ mod tests {
 
             // Prove three items durable (watermark 3), then one more so the next call has an
             // advance to start.
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let (mut journal, h1) = journal.start_sync().await.unwrap();
             h1.await.unwrap();
-            journal.append(&4).await.unwrap();
+            (journal, _) = journal.append(&4).await.unwrap();
             let journal = journal.commit().await.unwrap();
 
             // The advance's inline metadata writes fail: the call fails, consuming the
@@ -2969,7 +2999,7 @@ mod tests {
                 .unwrap(),
             );
 
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let (journal, h1) = journal.start_sync().await.unwrap();
             release_pending_syncs(&pending);
             h1.await.unwrap();
@@ -2982,7 +3012,7 @@ mod tests {
 
             // An advance at or below the staged value is skipped, so the next handle succeeds:
             // the failure is observed only by the next checkpoint write.
-            journal.append(&4).await.unwrap();
+            (journal, _) = journal.append(&4).await.unwrap();
             let (journal, h3) = journal.start_sync().await.unwrap();
             drive_pending_syncs(&pending, h3).await.unwrap();
 
@@ -3018,7 +3048,7 @@ mod tests {
                 )
             };
             let mut journal = Box::new(make(faults.clone()).await.unwrap());
-            journal
+            (journal, _) = journal
                 .append_many(Many::Flat(&[1, 2, 3, 4]))
                 .await
                 .unwrap();
@@ -3055,7 +3085,7 @@ mod tests {
                 .await
                 .unwrap(),
             );
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
             assert_eq!(journal.recovery_watermark(), 3);
 
@@ -3064,7 +3094,7 @@ mod tests {
             let mut journal = drive_pending_syncs(&pending, journal.test_truncate(2))
                 .await
                 .unwrap();
-            journal.append(&9).await.unwrap();
+            (journal, _) = journal.append(&9).await.unwrap();
             let (journal, handle) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 2);
 
@@ -3090,7 +3120,7 @@ mod tests {
 
             // Buffer an item, then fail the flush inside start_sync, dropping the returned
             // handle unobserved.
-            journal.append(&0).await.unwrap();
+            (journal, _) = journal.append(&0).await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
                     failure_rate: probability!(1.0),
@@ -3099,7 +3129,7 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            let (mut journal, handle) = journal.start_sync().await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
             drop(handle);
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
@@ -3125,10 +3155,10 @@ mod tests {
             // Prove one item durable, then buffer more so the next start_sync rewrites the
             // tail page. Fail that flush and drop the returned handle unobserved. The failed
             // completion leaves the barrier unchanged, so no watermark write is attempted.
-            journal.append(&0).await.unwrap();
+            (journal, _) = journal.append(&0).await.unwrap();
             let (mut journal, handle) = journal.start_sync().await.unwrap();
             handle.await.unwrap();
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
                     failure_rate: probability!(1.0),
@@ -3137,7 +3167,7 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            let (mut journal, handle) = journal.start_sync().await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
             drop(handle);
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
@@ -3925,7 +3955,7 @@ mod tests {
                 let mut append = PagedRecovery::open(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 1");
-                append
+                append = append
                     .truncate(4 * Digest::SIZE as u64)
                     .await
                     .expect("failed to shorten blob 1");
@@ -4038,8 +4068,8 @@ mod tests {
                 .unwrap();
             let mut append = Writer::new(blob, blob_size, 2048, cache_ref).await.unwrap();
             let extra = test_digest(999);
-            append.append(extra.as_ref()).await.unwrap();
-            append.sync().await.unwrap();
+            (append, _) = append.append(extra.as_ref()).await.unwrap();
+            append = append.sync().await.unwrap();
             drop(append);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
@@ -4145,7 +4175,7 @@ mod tests {
                 let mut append = PagedRecovery::open(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 2");
-                append
+                append = append
                     .truncate(2 * Digest::SIZE as u64)
                     .await
                     .expect("failed to shorten anchored blob");
@@ -4444,7 +4474,7 @@ mod tests {
                 let mut append = Writer::new(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 0");
-                append
+                (append, _) = append
                     .append(extra.as_ref())
                     .await
                     .expect("failed to append extra item");
@@ -5142,9 +5172,9 @@ mod tests {
             for value in values {
                 bytes.extend_from_slice(&value.to_be_bytes());
             }
-            writer.append(&bytes).await.unwrap();
-            writer.truncate(30).await.unwrap();
-            writer.sync().await.unwrap();
+            (writer, _) = writer.append(&bytes).await.unwrap();
+            writer = writer.truncate(30).await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
 
             // Five-byte integrity pages crossed by eight-byte journal items:
@@ -5203,9 +5233,9 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(writer.size(), 16);
-            writer.append(&[0; 4]).await.unwrap();
+            (writer, _) = writer.append(&[0; 4]).await.unwrap();
             assert_eq!(writer.size(), 20);
-            writer.sync().await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
 
             let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
@@ -5244,8 +5274,8 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(writer.size(), 24);
-            writer.append(&44u64.to_be_bytes()[..3]).await.unwrap();
-            writer.sync().await.unwrap();
+            (writer, _) = writer.append(&44u64.to_be_bytes()[..3]).await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
 
             // Recovery floors to whole items and the journal appends aligned afterward.
@@ -5303,8 +5333,8 @@ mod tests {
             for value in [33u64, 44] {
                 bytes.extend_from_slice(&value.to_be_bytes());
             }
-            writer.append(&bytes).await.unwrap();
-            writer.sync().await.unwrap();
+            (writer, _) = writer.append(&bytes).await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
             corrupt_page(
                 &context,
@@ -5660,8 +5690,8 @@ mod tests {
             // Wait for blobs 0 and 1 to become durable, then drop without flushing
             // blob 2's buffered items.
             {
-                journal.test_sync_blob(0).await.unwrap();
-                journal.test_sync_blob(1).await.unwrap();
+                journal = journal.test_sync_blob(0).await.unwrap();
+                journal = journal.test_sync_blob(1).await.unwrap();
             }
             drop(journal);
 
@@ -5730,7 +5760,7 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
             {
-                journal.test_sync_blob(2).await.unwrap();
+                journal = journal.test_sync_blob(2).await.unwrap();
             }
             drop(journal);
             let (blob, _) = context

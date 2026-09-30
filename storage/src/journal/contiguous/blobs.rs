@@ -8,10 +8,10 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use commonware_codec::{Buf, Codec, Error as CodecError, ReadExt};
+use commonware_codec::{Buf, Codec, EncodeSize, Error as CodecError, ReadExt, Write};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob as RBlob, Buf as _, Error as RError, Handle, IoBufMut, IoBufs, ReadOptions,
+    Blob as RBlob, Buf as _, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
@@ -294,9 +294,17 @@ impl<E: Context> Writable<E> {
         self.oldest_blob_index + self.sealed.len() as u64
     }
 
-    /// A write handle for the tail.
-    pub(super) const fn tail_writer(&mut self) -> &mut Writer<E::Blob> {
-        &mut self.tail
+    /// Encode a value directly into the tail's write buffer if it fits, returning its logical
+    /// offset. See [Writer::try_append_value].
+    pub(super) fn try_append_value<T: EncodeSize + Write>(&mut self, value: &T) -> Option<u64> {
+        self.tail.try_append_value(value)
+    }
+
+    /// Append owned bytes to the tail, returning the logical offset of the first byte.
+    pub(super) async fn append_owned(mut self, buf: IoBuf) -> Result<(Self, u64), Error> {
+        let (tail, offset) = self.tail.append_owned(buf).await?;
+        self.tail = tail;
+        Ok((self, offset))
     }
 
     /// Borrow the current blobs for a live reader.
@@ -309,7 +317,7 @@ impl<E: Context> Writable<E> {
     }
 
     /// Capture owned blob handles for a snapshot reader.
-    pub(super) async fn snapshot(&mut self) -> Result<Blobs<'static, E::Blob>, Error> {
+    pub(super) async fn snapshot(mut self) -> Result<(Self, Blobs<'static, E::Blob>), Error> {
         let sealed = match &self.sealed_snapshot {
             Some(sealed) => sealed.clone(),
             None => {
@@ -318,11 +326,14 @@ impl<E: Context> Writable<E> {
                 sealed
             }
         };
-        Ok(Blobs {
+        let (tail, snapshot) = self.tail.snapshot().await?;
+        self.tail = tail;
+        let blobs = Blobs {
             oldest_blob_index: self.oldest_blob_index,
             sealed: SealedBlobs::Owned(sealed),
-            tail: Blob::Sealed(self.tail.snapshot().await?),
-        })
+            tail: Blob::Sealed(snapshot),
+        };
+        Ok((self, blobs))
     }
 
     /// Seal the tail, start syncing it, and open the next blob as the new tail.
@@ -420,19 +431,21 @@ impl<E: Context> Writable<E> {
 
     /// Start syncing the tail, returning a handle that completes once both the tail and its
     /// predecessor are durable.
-    pub(super) async fn start_sync(&mut self) -> Handle<()> {
+    pub(super) async fn start_sync(mut self) -> (Self, Handle<()>) {
         // Keep at most one tail sync in flight. A pending predecessor sync is not awaited here:
         // the returned handle joins it, so handles from consecutive calls can be pending at once.
         if let Some(prior) = self.tail_sync.clone()
             && let Err(err) = prior.await
         {
-            return Handle::ready(Err(err));
+            return (self, Handle::ready(Err(err)));
         }
-        let tail = self.tail.start_sync().await.boxed().shared();
+        let (tail, handle) = self.tail.start_sync().await;
+        self.tail = tail;
+        let tail = handle.boxed().shared();
         self.metrics.synced.inc();
         self.tail_sync = Some(tail.clone());
         let predecessor = self.tail_predecessor_sync.clone();
-        Handle::from_future(async move {
+        let handle = Handle::from_future(async move {
             if let Some(predecessor) = predecessor {
                 let (predecessor, tail) = future::join(predecessor, tail).await;
                 predecessor?;
@@ -440,7 +453,8 @@ impl<E: Context> Writable<E> {
             } else {
                 tail.await
             }
-        })
+        });
+        (self, handle)
     }
 
     /// Remove every blob and the partition itself.
@@ -856,16 +870,16 @@ impl<E: Context> Writable<E> {
     }
 
     /// Make one blob durable.
-    pub(crate) async fn sync_blob(&mut self, blob: u64) -> Result<(), Error> {
+    pub(crate) async fn sync_blob(mut self, blob: u64) -> Result<Self, Error> {
         if blob == self.tail_blob_index() {
-            self.tail.sync().await?;
-            return Ok(());
+            self.tail = self.tail.sync().await?;
+            return Ok(self);
         }
         if blob < self.oldest_blob_index || blob >= self.tail_blob_index() {
-            return Ok(());
+            return Ok(self);
         }
         self.drain_tail_predecessor_sync().await?;
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -914,9 +928,10 @@ mod tests {
                 .open("paged-replay-bulk-fields", b"blob")
                 .await
                 .unwrap();
-            let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
-            writer.append(&encoded).await.unwrap();
-            let source = Blob::Sealed(writer.snapshot().await.unwrap());
+            let writer = Writer::new(blob, size, 128, cache).await.unwrap();
+            let (writer, _) = writer.append(&encoded).await.unwrap();
+            let (_, snapshot) = writer.snapshot().await.unwrap();
+            let source = Blob::Sealed(snapshot);
             let mut replay = source
                 .replay_from(0, NZUsize!(128), ReadOptions::default())
                 .unwrap();
@@ -950,9 +965,9 @@ mod tests {
         executor.start(|context| async move {
             let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
             let (blob, size) = context.open("replay-views", b"blob").await.unwrap();
-            let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
-            writer.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
-            let snapshot = writer.snapshot().await.unwrap();
+            let writer = Writer::new(blob, size, 128, cache).await.unwrap();
+            let (writer, _) = writer.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
+            let (writer, snapshot) = writer.snapshot().await.unwrap();
 
             for source in [Blob::Writer(&writer), Blob::Sealed(snapshot)] {
                 let paged = matches!(source, Blob::Sealed(_));
@@ -1001,9 +1016,9 @@ mod tests {
                     .open("replay-frames", &[compression.unwrap_or(0)])
                     .await
                     .unwrap();
-                let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
-                writer.append(&encoded).await.unwrap();
-                let snapshot = writer.snapshot().await.unwrap();
+                let writer = Writer::new(blob, size, 128, cache).await.unwrap();
+                let (writer, _) = writer.append(&encoded).await.unwrap();
+                let (writer, snapshot) = writer.snapshot().await.unwrap();
 
                 for source in [Blob::Writer(&writer), Blob::Sealed(snapshot)] {
                     let mut replay = source
@@ -1075,8 +1090,8 @@ mod tests {
                 .open("read_up_to_eof_parity", b"blob")
                 .await
                 .unwrap();
-            let mut writer = Writer::new(blob, size, 128, cache_ref).await.unwrap();
-            writer.append(b"abc").await.unwrap();
+            let writer = Writer::new(blob, size, 128, cache_ref).await.unwrap();
+            let (writer, _) = writer.append(b"abc").await.unwrap();
 
             let size = writer.size();
             let tail = Blob::Writer(&writer);
@@ -1089,7 +1104,7 @@ mod tests {
                 0
             );
 
-            let snapshot = writer.snapshot().await.unwrap();
+            let (writer, snapshot) = writer.snapshot().await.unwrap();
             let snapshot_blob = Blob::Sealed(snapshot);
             assert_insufficient_length(
                 snapshot_blob
