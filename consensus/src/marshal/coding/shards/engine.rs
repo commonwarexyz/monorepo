@@ -602,7 +602,7 @@ where
     /// The maximum encoded size of a block.
     max_block_size: NonZeroUsize,
 
-    /// [`Read`] configuration for decoding [`CodedBlock`]s.
+    /// [`commonware_codec::Read`] configuration for decoding [`CodedBlock`]s.
     block_codec_cfg: B::Cfg,
 
     /// The strategy used for parallel shard verification.
