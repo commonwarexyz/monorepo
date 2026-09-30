@@ -111,6 +111,7 @@ impl Recoverer for Recovery {
 pub struct RecoveryCoordinator<E, R>
 where
     E: Spawner + Metrics,
+    R: Resolver<Key = RecoveryKey, Subscriber = ()>,
 {
     context: ContextCell<E>,
     resolver: R,
@@ -168,11 +169,6 @@ where
                 }
             },
         }
-        let mut admission = self.admission.lock();
-        admission.keys.clear();
-        admission.closed = true;
-        drop(admission);
-        self.cancel_active();
     }
 
     /// Returns `false` if the resolver is closed.
@@ -218,6 +214,21 @@ where
         let active = std::mem::take(&mut self.active);
         self.resolver
             .retain(move |key, ()| !active.contains_key(key));
+    }
+}
+
+impl<E, R> Drop for RecoveryCoordinator<E, R>
+where
+    E: Spawner + Metrics,
+    R: Resolver<Key = RecoveryKey, Subscriber = ()>,
+{
+    // Runs on normal exit, abort, and drop before start.
+    fn drop(&mut self) {
+        let mut admission = self.admission.lock();
+        admission.keys.clear();
+        admission.closed = true;
+        drop(admission);
+        self.cancel_active();
     }
 }
 
@@ -461,6 +472,53 @@ mod tests {
             assert_eq!(recovery.cancel(key(1, 0)), Feedback::Closed);
             assert_eq!(clone.fetch(key(1, 1)), Unreliable::new(Feedback::Closed));
             assert_eq!(clone.cancel(key(1, 1)), Feedback::Closed);
+            assert!(state.lock().events.is_empty());
+        });
+    }
+
+    #[test]
+    fn abort_cancels_active_requests_and_closes_handles() {
+        deterministic::Runner::default().start(|context| async move {
+            let resolver = MockResolver::default();
+            let state = resolver.state.clone();
+            let (coordinator, mut recovery) = RecoveryCoordinator::new(
+                context.child("coordinator"),
+                resolver,
+                NZUsize!(1),
+                NZUsize!(4),
+            );
+            let handle = coordinator.start();
+            let requested = key(1, 0);
+            assert!(recovery.fetch(requested).accepted());
+            while state.lock().active.is_empty() {
+                context.sleep(std::time::Duration::from_millis(1)).await;
+            }
+
+            handle.abort();
+            assert!(handle.await.is_err());
+
+            assert!(state.lock().active.is_empty());
+            assert_eq!(recovery.fetch(key(1, 1)), Unreliable::new(Feedback::Closed));
+        });
+    }
+
+    #[test]
+    fn unstarted_drop_closes_handles() {
+        deterministic::Runner::default().start(|context| async move {
+            let resolver = MockResolver::default();
+            let state = resolver.state.clone();
+            let (coordinator, mut recovery) = RecoveryCoordinator::new(
+                context.child("coordinator"),
+                resolver,
+                NZUsize!(1),
+                NZUsize!(1),
+            );
+            assert!(recovery.fetch(key(1, 0)).accepted());
+
+            drop(coordinator);
+
+            assert_eq!(recovery.fetch(key(1, 1)), Unreliable::new(Feedback::Closed));
+            assert_eq!(recovery.cancel(key(1, 0)), Feedback::Closed);
             assert!(state.lock().events.is_empty());
         });
     }
