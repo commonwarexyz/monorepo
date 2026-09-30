@@ -150,11 +150,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             record.dial_failure(ingress);
         }
 
-        // We may have to update the primary sets.
-        let want = record.want(self.dial_fail_limit);
-        for entry in self.peer_sets.values_mut() {
-            entry.primary.update(peer, !want);
-        }
+        self.update_knowledge(peer);
         self.delete_if_needed(peer);
     }
 
@@ -176,11 +172,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .get_or_create_by(peer)
             .try_set(self.context.current().epoch_millis());
 
-        // We may have to update the primary sets.
-        let want = record.want(self.dial_fail_limit);
-        for entry in self.peer_sets.values_mut() {
-            entry.primary.update(peer, !want);
-        }
+        self.update_knowledge(peer);
     }
 
     /// Using a list of (already-validated) peer information, update the records.
@@ -200,11 +192,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
             self.metrics.updates.get_or_create_by(&peer).inc();
 
-            // We may have to update the primary sets.
-            let want = record.want(self.dial_fail_limit);
-            for entry in self.peer_sets.values_mut() {
-                entry.primary.update(&peer, !want);
-            }
+            self.update_knowledge(&peer);
             debug!(?peer, "updated peer record");
         }
     }
@@ -504,13 +492,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             self.metrics.blocked.remove_by(&peer);
             any_unblocked = true;
 
-            // Update primary-set knowledge (BitVec gossip); secondaries have no bitmap.
-            if let Some(record) = self.peers.get(&peer) {
-                let want = record.want(self.dial_fail_limit);
-                for entry in self.peer_sets.values_mut() {
-                    entry.primary.update(&peer, !want);
-                }
-            }
+            self.update_knowledge(&peer);
         }
 
         any_unblocked
@@ -533,6 +515,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     // --------- Helpers ----------
+
+    /// Update primary-set knowledge bits for a peer; secondaries have no bitmap.
+    fn update_knowledge(&mut self, peer: &C) {
+        let Some(record) = self.peers.get(peer) else {
+            return;
+        };
+        let want = record.want(self.dial_fail_limit);
+        for entry in self.peer_sets.values_mut() {
+            entry.primary.update(peer, !want);
+        }
+    }
 
     /// Attempt to reserve a peer.
     ///
