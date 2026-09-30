@@ -251,11 +251,9 @@ O’Grady</a></div>
         class="math inline">b</span>’s entry and signs the updated
         sequence number <span class="math inline">n_a</span> for the
         epoch, cumulative debit, vector’s Merkle root, and predecessor
-        root. The predecessor root commits to <span
-        class="math inline">a</span>’s final vector <span
-        class="math inline">V_a^{e-1}</span> in the previous epoch, or
-        to the empty vector if <span class="math inline">a</span> paid
-        no one there. The operator’s receipt <span
+        root: the root of its final vector <span
+        class="math inline">V_a^{e-1}</span> in the previous epoch,
+        empty if it paid no one there. The operator’s receipt <span
         class="math inline">R</span> countersigns that state:</p>
         <p><span class="math display">
         S=\mathsf{Sign}_a\bigl(\mathcal
@@ -539,10 +537,9 @@ O’Grady</a></div>
         Every account can authorize an exact withdrawal or an account
         close. Normally the operator includes that signed request when
         registering the next epoch. A censored user can instead queue it
-        directly onchain, even during an active epoch. The registration
-        that takes it from the settlement chain’s inbox must include it,
-        unless an earlier registration already included it or replaced
-        it with another request from the same account.</p>
+        directly onchain, even during an active epoch. The operator must
+        include it in a registration unless another request from the
+        same account replaces it.</p>
         <p>Once a withdrawal request is queued onchain or included in an
         admitted close, the close that carries it must finalize before
         the signed deadline <span class="math inline">T_w</span> to
@@ -625,12 +622,12 @@ O’Grady</a></div>
         <p>Once <span class="math inline">e</span>’s close is admitted
         and <span class="math inline">e+1</span> is registered, the
         settlement chain binds <span class="math inline">e+1</span> to
-        that close’s state root. The operator never states it. Admission
-        and finality stay first-in, first-out, so <span
-        class="math inline">e+1</span> can only be admitted on top of
-        <span class="math inline">e</span>. The admission and challenge
-        deadlines of <span class="math inline">e+1</span> start when
-        <span class="math inline">e</span> is admitted, or when <span
+        that close’s state root. Admission and finality stay first-in,
+        first-out, so <span class="math inline">e+1</span> can only be
+        admitted on top of <span class="math inline">e</span>. The
+        admission and challenge deadlines of <span
+        class="math inline">e+1</span> start when <span
+        class="math inline">e</span> is admitted, or when <span
         class="math inline">e+1</span> registers if <span
         class="math inline">e</span> already was. If <span
         class="math inline">e</span> misses its admission deadline, the
@@ -638,13 +635,12 @@ O’Grady</a></div>
         registration.</p>
         <p>The operator can cut and register later epochs behind <span
         class="math inline">e</span> with no fixed limit. Deposits and
-        withdrawal requests queued onchain wait in an inbox ordered by
-        arrival. Each registration takes the inbox from where the
-        previous one stopped up to a position the operator names, and
-        its anchor commits exactly the deposits in that range. A deposit
-        must be taken within a fixed time after it arrives. It then
-        follows its epoch’s close, however many registrations wait
-        ahead, and is refunded if that close never finalizes.</p>
+        onchain withdrawal requests wait in an ordered inbox. Each
+        registration takes the next range, ending where the operator
+        chooses, so later arrivals cannot change it. A deposit must be
+        taken within a fixed time after it arrives. It then follows its
+        epoch’s close, however many registrations wait ahead, and is
+        refunded if that close never finalizes.</p>
         <p>Accounts without deposits or withdrawals can start paying in
         the new epoch while the operator is still adding incoming
         credits from the previous one. When <span
@@ -694,22 +690,17 @@ O’Grady</a></div>
         Signing the payment again in <span
         class="math inline">e+1</span> would pay it twice if the
         operator also included the original.</p>
-        <p>For this reason, a state signed in <span
-        class="math inline">e+1</span> carries the payer’s final root in
-        <span class="math inline">e</span> as its predecessor root. That
-        root fixes exactly what <span class="math inline">e</span> paid
-        on the payer’s behalf, including how the debit was split across
-        recipients.</p>
-        <p>The operator countersigns a request only if its predecessor
-        root matches the operator’s record of <span
-        class="math inline">e</span>. The close for <span
-        class="math inline">e+1</span> does not repeat the root, because
-        <span class="math inline">e</span>’s account rows already record
-        it. Validators check <span class="math inline">e+1</span> only
-        after <span class="math inline">e</span> is admitted, reading
-        the root from <span class="math inline">e</span>’s rows.
-        Receipts and challenges carry it so the payer and operator
-        signatures can be verified.</p>
+        <p>The predecessor root prevents this. It fixes exactly what
+        <span class="math inline">e</span> paid for the payer, including
+        how the debit was split across recipients.</p>
+        <p>The operator countersigns only a predecessor root that
+        matches its record of <span class="math inline">e</span>.
+        Validators check <span class="math inline">e+1</span> only after
+        <span class="math inline">e</span> is admitted and read the root
+        from <span class="math inline">e</span>’s account rows, so the
+        close for <span class="math inline">e+1</span> omits it.
+        Receipts and challenges carry it so their signatures can be
+        verified.</p>
         <p>When a request from <span class="math inline">e</span>
         arrives after the cut, the operator refuses it as stale and
         replies with the payer’s final state in <span
@@ -718,12 +709,11 @@ O’Grady</a></div>
         class="math inline">e+1</span> against its root. If the operator
         still includes a refused request in <span
         class="math inline">e</span>, <span class="math inline">e</span>
-        ends at a different root, and honest validators reject any close
-        for <span class="math inline">e+1</span> that carries the
-        re-signed state. Every certificate includes an honest signer, so
-        at most one copy of each payment settles. If the operator
-        acknowledged the re-signed state, that receipt proves a debit
-        mismatch against <span class="math inline">e+1</span>.</p>
+        ends at a different root and no certified close for <span
+        class="math inline">e+1</span> can carry the re-signed state, so
+        at most one copy settles. A receipt for the re-signed state then
+        proves a debit mismatch against <span
+        class="math inline">e+1</span>.</p>
         <p>The signature reaches back only one epoch. If the new request
         also misses <span class="math inline">e+1</span>, the payer
         signs the payment again only after <span

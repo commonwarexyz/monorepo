@@ -105,7 +105,7 @@ Payments are grouped into settlement periods called **epochs**. Every signature 
 
 The payer tracks a balance $B_a$ and an epoch's total debit $D_a$, initially zero. It keeps a vector $V_a$ ordered by recipient, with one entry $(G,J)$ recording the cumulative amount and payment count for each. These entries form the leaves of a binary Merkle tree (BMT). Before the example payment, $B_a=100$, $D_a=0$, and $V_a$ is empty.
 
-To send $x>0$, $a$ updates $b$'s entry and signs the updated sequence number $n_a$ for the epoch, cumulative debit, vector's Merkle root, and predecessor root. The predecessor root commits to $a$'s final vector $V_a^{e-1}$ in the previous epoch, or to the empty vector if $a$ paid no one there. The operator's receipt $R$ countersigns that state:
+To send $x>0$, $a$ updates $b$'s entry and signs the updated sequence number $n_a$ for the epoch, cumulative debit, vector's Merkle root, and predecessor root: the root of its final vector $V_a^{e-1}$ in the previous epoch, empty if it paid no one there. The operator's receipt $R$ countersigns that state:
 
 $$
 S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with }b:(G+x,\,J+1)),\;\mathsf{root}(V_a^{e-1})\bigr),
@@ -265,7 +265,7 @@ Suppose $b$ has already served the API response, but the operator leaves $a$'s p
 
 ## A Deadline to Exit
 
-A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request when registering the next epoch. A censored user can instead queue it directly onchain, even during an active epoch. The registration that takes it from the settlement chain's inbox must include it, unless an earlier registration already included it or replaced it with another request from the same account.
+A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request when registering the next epoch. A censored user can instead queue it directly onchain, even during an active epoch. The operator must include it in a registration unless another request from the same account replaces it.
 
 Once a withdrawal request is queued onchain or included in an admitted close, the close that carries it must finalize before the signed deadline $T_w$ to avoid a hard fault, unless another request replaces it first. With challenge deadline $\Delta_e$,
 
@@ -303,9 +303,9 @@ A payment reaches finality through an admitted close, after that close's challen
 
 The operator cuts $e$ when it stops acknowledging payments in $e$. It can then register $e+1$ without waiting for $e$'s close to be built, certified, or admitted, and start payments once that registration is included onchain. Registration fixes deposits and signed withdrawal authorizations before the first payment is acknowledged. The anchor commits nothing about $e$'s close.
 
-Once $e$'s close is admitted and $e+1$ is registered, the settlement chain binds $e+1$ to that close's state root. The operator never states it. Admission and finality stay first-in, first-out, so $e+1$ can only be admitted on top of $e$. The admission and challenge deadlines of $e+1$ start when $e$ is admitted, or when $e+1$ registers if $e$ already was. If $e$ misses its admission deadline, the deployment permanently faults and drops every later registration.
+Once $e$'s close is admitted and $e+1$ is registered, the settlement chain binds $e+1$ to that close's state root. Admission and finality stay first-in, first-out, so $e+1$ can only be admitted on top of $e$. The admission and challenge deadlines of $e+1$ start when $e$ is admitted, or when $e+1$ registers if $e$ already was. If $e$ misses its admission deadline, the deployment permanently faults and drops every later registration.
 
-The operator can cut and register later epochs behind $e$ with no fixed limit. Deposits and withdrawal requests queued onchain wait in an inbox ordered by arrival. Each registration takes the inbox from where the previous one stopped up to a position the operator names, and its anchor commits exactly the deposits in that range. A deposit must be taken within a fixed time after it arrives. It then follows its epoch's close, however many registrations wait ahead, and is refunded if that close never finalizes.
+The operator can cut and register later epochs behind $e$ with no fixed limit. Deposits and onchain withdrawal requests wait in an ordered inbox. Each registration takes the next range, ending where the operator chooses, so later arrivals cannot change it. A deposit must be taken within a fixed time after it arrives. It then follows its epoch's close, however many registrations wait ahead, and is refunded if that close never finalizes.
 
 Accounts without deposits or withdrawals can start paying in the new epoch while the operator is still adding incoming credits from the previous one. When $e$ is cut, the starting spendable balance $\widetilde B_a$ is the previous epoch's starting balance minus accepted outgoing payments, plus incoming credits already added. Let $\rho_a$ be the remaining credit from that epoch:
 
@@ -337,11 +337,11 @@ Deposits fixed at registration are available immediately. A new account created 
 
 A request sent just before the cut can reach the operator too late, or its reply can be lost. The payer then cannot tell whether $e$ will include it. Signing the payment again in $e+1$ would pay it twice if the operator also included the original.
 
-For this reason, a state signed in $e+1$ carries the payer's final root in $e$ as its predecessor root. That root fixes exactly what $e$ paid on the payer's behalf, including how the debit was split across recipients.
+The predecessor root prevents this. It fixes exactly what $e$ paid for the payer, including how the debit was split across recipients.
 
-The operator countersigns a request only if its predecessor root matches the operator's record of $e$. The close for $e+1$ does not repeat the root, because $e$'s account rows already record it. Validators check $e+1$ only after $e$ is admitted, reading the root from $e$'s rows. Receipts and challenges carry it so the payer and operator signatures can be verified.
+The operator countersigns only a predecessor root that matches its record of $e$. Validators check $e+1$ only after $e$ is admitted and read the root from $e$'s account rows, so the close for $e+1$ omits it. Receipts and challenges carry it so their signatures can be verified.
 
-When a request from $e$ arrives after the cut, the operator refuses it as stale and replies with the payer's final state in $e$. The payer obtains receipts up to that state and signs the remaining payments again in $e+1$ against its root. If the operator still includes a refused request in $e$, $e$ ends at a different root, and honest validators reject any close for $e+1$ that carries the re-signed state. Every certificate includes an honest signer, so at most one copy of each payment settles. If the operator acknowledged the re-signed state, that receipt proves a debit mismatch against $e+1$.
+When a request from $e$ arrives after the cut, the operator refuses it as stale and replies with the payer's final state in $e$. The payer obtains receipts up to that state and signs the remaining payments again in $e+1$ against its root. If the operator still includes a refused request in $e$, $e$ ends at a different root and no certified close for $e+1$ can carry the re-signed state, so at most one copy settles. A receipt for the re-signed state then proves a debit mismatch against $e+1$.
 
 The signature reaches back only one epoch. If the new request also misses $e+1$, the payer signs the payment again only after $e$ is admitted, which decides whether the original was paid.
 
