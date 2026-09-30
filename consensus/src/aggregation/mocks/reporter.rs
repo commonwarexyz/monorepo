@@ -1,7 +1,7 @@
 use crate::{
     aggregation::{
         scheme,
-        types::{Ack, Activity, Certificate},
+        types::{Ack, Activity, Certificate, Item},
     },
     types::{Epoch, Height},
 };
@@ -21,9 +21,9 @@ enum Message<S: Scheme, D: Digest> {
     Ack(Ack<S, D>),
     Certified(Certificate<S, D>),
     Tip(Height),
-    Diverged(Height),
+    Diverged(Item<D>),
     GetTip(oneshot::Sender<Option<(Height, Epoch)>>),
-    GetDiverged(oneshot::Sender<Vec<Height>>),
+    GetDiverged(oneshot::Sender<BTreeMap<Height, D>>),
     GetContiguousTip(oneshot::Sender<Option<Height>>),
     Get(Height, oneshot::Sender<Option<(D, Epoch)>>),
 }
@@ -61,8 +61,8 @@ pub struct Reporter<R: CryptoRng, S: Scheme, D: Digest> {
     // Current epoch (tracked from acks)
     current_epoch: Epoch,
 
-    // Heights whose digest diverged from honest validators
-    diverged: Vec<Height>,
+    // Heights whose digest diverged from honest validators, with the diverging digest
+    diverged: BTreeMap<Height, D>,
 }
 
 impl<R, S, D> Reporter<R, S, D>
@@ -83,7 +83,7 @@ where
                 contiguous: None,
                 highest: None,
                 current_epoch: Epoch::new(111), // Initialize with the expected epoch
-                diverged: Vec::new(),
+                diverged: BTreeMap::new(),
             },
             Mailbox { sender },
         )
@@ -163,10 +163,8 @@ where
                         self.highest = Some((height, self.current_epoch));
                     }
                 }
-                Message::Diverged(height) => {
-                    // Divergence is reported once per height
-                    assert!(!self.diverged.contains(&height));
-                    self.diverged.push(height);
+                Message::Diverged(item) => {
+                    self.diverged.insert(item.height, item.digest);
                 }
                 Message::GetTip(sender) => {
                     sender.send(self.highest).unwrap();
@@ -205,7 +203,7 @@ where
                 self.sender.enqueue(Message::Certified(certificate))
             }
             Activity::Tip(height) => self.sender.enqueue(Message::Tip(height)),
-            Activity::Diverged(item) => self.sender.enqueue(Message::Diverged(item.height)),
+            Activity::Diverged(item) => self.sender.enqueue(Message::Diverged(item)),
         }
     }
 }
@@ -243,7 +241,8 @@ where
         );
         receiver.await.unwrap()
     }
-    pub async fn get_diverged(&mut self) -> Vec<Height> {
+
+    pub async fn get_diverged(&mut self) -> BTreeMap<Height, D> {
         let (sender, receiver) = oneshot::channel();
         assert!(
             self.sender.enqueue(Message::GetDiverged(sender)).accepted(),
