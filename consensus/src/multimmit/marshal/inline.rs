@@ -123,9 +123,10 @@ where
 /// it builds, and `verify` from the block itself. A chain's first block builds on its genesis tip,
 /// which is not a block, so the ancestry ends there at the latest. It also ends early at a block
 /// marshal no longer holds: [`Mailbox::prune`] drops a chain's blocks below the pruning floor's
-/// boundary once the engine released them (see
-/// [`Activity::CertificateRecorded`](crate::multimmit::types::Activity)), so an application
-/// should read only the recent ancestry it needs.
+/// boundary once the engine released them (see [`Activity::CertificateRecorded`]), so an
+/// application should read only the recent ancestry it needs.
+///
+/// [`Activity::CertificateRecorded`]: crate::multimmit::types::Activity::CertificateRecorded
 pub struct Inline<E, H, S, B, A>
 where
     E: Rng + Spawner + Metrics + Clock,

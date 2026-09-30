@@ -24,31 +24,16 @@
 //! # Caveats
 //!
 //! Aggregation signatures do not cover the epoch, so a checkpoint certificate verifies under
-//! every epoch that reuses the same nullification key. And because a quorum is only `2f + 1`, a
-//! bug that makes `f + 1` honest validators compute the same wrong digest, together with `f`
-//! faulty ones, certifies that digest, where an `n - f` quorum would need `3f + 1` of them.
+//! every epoch that shares its nullification identity. A reshare keeps that identity, so this is
+//! every epoch of the deployment. And because a quorum is only `2f + 1`, a bug that makes `f + 1`
+//! honest validators compute the same wrong digest, together with `f` faulty ones, certifies that
+//! digest, where an `n - f` quorum would need `3f + 1` of them.
 
 use crate::aggregation::types::{Item, Namespace};
 use commonware_cryptography::impl_certificate_bls12381_threshold;
-use commonware_utils::{Faults, N5f1};
-use num_traits::ToPrimitive;
+use commonware_utils::faults::N5f1Nullification;
 
-/// Multimmit's fault model with the nullification quorum: `n = 5f + 1` validators tolerate `f`
-/// faults, and `2f + 1` of them certify.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct NullificationQuorum;
-
-impl Faults for NullificationQuorum {
-    fn max_faults(n: impl ToPrimitive) -> u32 {
-        N5f1::max_faults(n)
-    }
-
-    fn quorum(n: impl ToPrimitive) -> u32 {
-        N5f1::nullification_quorum(n)
-    }
-}
-
-impl_certificate_bls12381_threshold!(&'a Item<D>, Namespace, NullificationQuorum);
+impl_certificate_bls12381_threshold!(&'a Item<D>, Namespace, N5f1Nullification);
 
 #[cfg(test)]
 mod tests {
@@ -60,15 +45,7 @@ mod tests {
     };
     use commonware_cryptography::{Hasher as _, Sha256, bls12381::primitives::variant::MinPk};
     use commonware_parallel::Sequential;
-    use commonware_utils::{non_empty, test_rng};
-
-    #[test]
-    fn quorum_is_two_faults_plus_one() {
-        for (n, faults, quorum) in [(6, 1, 3), (11, 2, 5), (16, 3, 7), (50, 9, 19)] {
-            assert_eq!(NullificationQuorum::max_faults(n), faults);
-            assert_eq!(NullificationQuorum::quorum(n), quorum);
-        }
-    }
+    use commonware_utils::{Faults as _, non_empty, test_rng};
 
     #[test]
     fn committee_nullification_keys_certify_checkpoints() {
@@ -91,7 +68,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Of six validators, 2f + 1 = 3 certify and two do not.
-        let quorum = NullificationQuorum::quorum(schemes.len()) as usize;
+        let quorum = N5f1Nullification::quorum(schemes.len()) as usize;
         assert_eq!(quorum, 3);
         let below = &acks[..quorum - 1];
         assert!(Certificate::from_acks(&schemes[0], non_empty![@below], &Sequential).is_err());

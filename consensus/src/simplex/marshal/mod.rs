@@ -193,7 +193,6 @@ use commonware_storage::archive;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 
 mod config;
-pub use crate::ancestry;
 pub use config::{Config, Start};
 mod limits;
 pub use limits::max_payload_size;

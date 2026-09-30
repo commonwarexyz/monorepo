@@ -1107,18 +1107,39 @@ fn engine_neutral_floors_install_at_the_floor_index() {
 
         let first = harness.script.views[0].ordered().len() as u64;
         let (index, floor) = loop {
-            if let Some(found) = Floors::floor_at(&holder, OutputIndex::new(first)).await {
+            if let Some(found) = Floors::floor_at(&holder, OutputIndex::new(first))
+                .await
+                .unwrap()
+            {
                 break found;
             }
             harness.settle(Duration::from_millis(10)).await;
         };
         assert_eq!(index.get(), first);
 
+        // Pruning below the next index keeps that floor servable, and every output after it.
+        Ledger::prune(&holder, OutputIndex::new(first + 1))
+            .await
+            .unwrap();
+        let (pruned, kept) = Floors::floor_at(&holder, OutputIndex::new(first + 1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((pruned, &kept), (index, &floor));
+        for block in harness.script.views[1].ordered() {
+            let held = holder.get_block(block.reference()).await.unwrap();
+            assert_eq!(held.as_deref(), Some(block.as_ref()));
+        }
+
+        // A fresh node installs the served floor and resumes after the same index, then rejects
+        // it once installed, as stale.
         harness.start(1).await;
         let follower = harness.mailbox(1);
-        assert_eq!(Floors::install(&follower, floor.clone()).await, Some(index));
-        // A floor the follower is no longer behind is rejected.
-        assert_eq!(Floors::install(&follower, floor).await, None);
+        assert_eq!(
+            Floors::install(&follower, floor.clone()).await.unwrap(),
+            Some(index)
+        );
+        assert_eq!(Floors::install(&follower, floor).await.unwrap(), None);
         assert_eq!(Ledger::ack_window(&follower), follower.max_pending_acks());
     });
 }
