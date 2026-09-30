@@ -71,9 +71,9 @@ where
     /// Samples the validators' newest checkpoints and returns the newest one, with every floor
     /// the replies carried, or `None` if the probe stopped first.
     ///
-    /// Each call requests every validator's checkpoint anew and counts replies that arrive while
-    /// it waits; replies carry no request identifier, so a late reply to an earlier request may
-    /// count too. Concurrent calls share one sample.
+    /// A call joins the sample in progress, or starts one that asks every validator, and counts
+    /// the replies that arrive while it waits. Replies carry no request identifier, so a late reply
+    /// to an earlier request may count too.
     pub async fn sample(&self) -> Option<Sampled<S, B, F>> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Sample { response });
