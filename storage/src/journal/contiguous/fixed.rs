@@ -159,7 +159,6 @@ use std::{
     collections::{BTreeMap, btree_map::Entry},
     future::Future,
     marker::PhantomData,
-    mem::take,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
     sync::Arc,
@@ -813,11 +812,16 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         Ok(self)
     }
 
-    /// Make every recovered blob durable.
+    /// Make every recovered blob durable. Clean blobs stay in place. An error drops the extracted
+    /// blobs.
     async fn sync_pending(&mut self) -> Result<(), Error> {
-        for (blob, writer) in take(&mut self.pending) {
-            self.pending.insert(blob, writer.sync().await?);
-        }
+        let futures: Vec<_> = self
+            .pending
+            .extract_if(.., |_, writer| writer.needs_sync())
+            .map(|(blob, writer)| async move { writer.sync().await.map(|writer| (blob, writer)) })
+            .collect();
+        let synced = try_join_all(futures).await?;
+        self.pending.extend(synced);
         Ok(())
     }
 

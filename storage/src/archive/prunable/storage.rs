@@ -9,6 +9,7 @@ use crate::{
     rmap::RMap,
 };
 use commonware_codec::{Buf, CodecShared, FixedSize, Read, ReadExt, Write};
+use commonware_macros::boxed;
 use commonware_runtime::{
     BufMut, Handle,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
@@ -604,6 +605,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     ///
     /// Replays the index journal to rebuild the in-memory index, CRC-validating every value
     /// above its section's durable marker.
+    #[boxed]
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }

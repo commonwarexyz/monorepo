@@ -1650,6 +1650,66 @@ mod tests {
         });
     }
 
+    /// `try_write_at` merges a write that fits the tip buffer and leaves the writer unchanged
+    /// otherwise.
+    #[test_traced]
+    fn test_write_try_write_at_merges_only_when_it_fits() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, _) = context.open("partition", b"try_write_at").await.unwrap();
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            // A write within the buffer's capacity merges without I/O.
+            assert!(writer.try_write_at(0, b"abc"));
+            assert_eq!(writer.size(), 3);
+
+            // A write past the buffer's capacity is refused and changes nothing.
+            assert!(!writer.try_write_at(3, b"0123456789"));
+            assert_eq!(writer.size(), 3);
+
+            // An overflowing offset is refused, leaving write_at to report the overflow.
+            assert!(!writer.try_write_at(u64::MAX, b"x"));
+            assert_eq!(writer.size(), 3);
+
+            // The merged bytes read back and persist through a sync.
+            let writer = writer.sync().await.unwrap();
+            let read = writer.read_at(0, 3).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"abc");
+        });
+    }
+
+    /// `needs_sync` reports whether `sync` has work: buffered bytes, unsynced mutations, or a
+    /// started sync that the writer has not observed.
+    #[test_traced]
+    fn test_write_needs_sync_tracks_sync_work() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, pending) = DelayedSyncBlob::new(SyncTrackingBlob::new());
+            let writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            // A fresh writer may wrap unsynced bytes, so it starts dirty. Syncing cleans it.
+            assert!(writer.needs_sync());
+            let mut writer = writer.sync().await.unwrap();
+            assert!(!writer.needs_sync());
+
+            // A buffered write is flush work even though the blob is clean.
+            writer = writer.write_at(0, b"abc").await.unwrap();
+            assert!(writer.needs_sync());
+            writer = writer.sync().await.unwrap();
+            assert!(!writer.needs_sync());
+
+            // A started sync needs observation while it is in flight and after it completes.
+            writer = writer.write_at(3, b"d").await.unwrap();
+            let (writer, handle) = writer.start_sync().await;
+            assert!(writer.needs_sync());
+            next_pending_sync(&pending).release.send(Ok(())).unwrap();
+            handle.await.unwrap();
+            assert!(writer.needs_sync());
+            let writer = writer.wait_for_sync().await.unwrap();
+            assert!(!writer.needs_sync());
+        });
+    }
+
     // Verifies start_sync flushes current bytes, completes durability, and marks the writer clean.
     #[test_traced]
     fn test_write_start_sync_persists_and_marks_clean() {

@@ -87,6 +87,10 @@ pub trait SectionBuffer: Sized + Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> u64;
 
+    /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync or
+    /// retained failure. When false, [Self::sync] and [Self::start_sync] perform no I/O.
+    fn needs_sync(&self) -> bool;
+
     /// Ensure all data accepted by this buffer is durably persisted.
     fn sync(self) -> impl Future<Output = Result<Self, RError>> + Send;
 
@@ -107,6 +111,10 @@ pub trait SectionBuffer: Sized + Send + Sync {
 impl<B: Blob> SectionBuffer for PagedRecovery<B> {
     fn size(&self) -> u64 {
         Self::size(self)
+    }
+
+    fn needs_sync(&self) -> bool {
+        Self::needs_sync(self)
     }
 
     async fn sync(self) -> Result<Self, RError> {
@@ -130,6 +138,10 @@ impl<B: Blob> SectionBuffer for PagedRecovery<B> {
 impl<B: Blob> SectionBuffer for Write<B> {
     fn size(&self) -> u64 {
         Self::size(self)
+    }
+
+    fn needs_sync(&self) -> bool {
+        Self::needs_sync(self)
     }
 
     async fn sync(self) -> Result<Self, RError> {
@@ -220,6 +232,9 @@ pub struct Config<F> {
 /// Each section is stored in a separate blob, named by its section number
 /// (big-endian u64). This component handles initialization, pruning, syncing,
 /// and metrics.
+///
+/// Mutating methods other than [Self::get_or_create], [Self::take], and [Self::put] consume the
+/// manager and return it only on success: an error (or a dropped future) destroys it.
 ///
 /// # In-flight syncs
 ///
@@ -367,22 +382,36 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         assert!(previous.is_none(), "section {section} was not taken");
     }
 
-    /// Sync the given `sections` to storage.
-    pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
-        let sections = sections.sections().collect::<BTreeSet<_>>();
-        for &section in &sections {
-            self.prune_guard(section)?;
-        }
+    /// Sync every `selected` section that needs a sync. Clean sections stay in place. An error
+    /// drops the extracted sections.
+    async fn sync_selected(&mut self, selected: impl Fn(u64) -> bool) -> Result<(), Error> {
+        let mut count = 0;
         let futures: Vec<_> = self
             .blobs
-            .extract_if(.., |section, _| sections.contains(section))
+            .extract_if(.., |&section, blob| {
+                if !selected(section) {
+                    return false;
+                }
+                count += 1;
+                blob.needs_sync()
+            })
             .map(|(section, blob)| async move { blob.sync().await.map(|blob| (section, blob)) })
             .collect();
-        let count = futures.len() as u64;
         let blobs = try_join_all(futures).await.map_err(Error::Runtime)?;
         self.blobs.extend(blobs);
         self.synced.inc_by(count);
         Ok(())
+    }
+
+    /// Sync the given `sections` to storage.
+    pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
+        let sections = sections.sections().collect::<BTreeSet<_>>();
+        for &section in &sections {
+            self.prune_guard(section)?;
+        }
+        self.sync_selected(|section| sections.contains(&section))
+            .await?;
+        Ok(self)
     }
 
     /// Start syncing the given `sections` to storage.
@@ -395,46 +424,46 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// the started sync, or of the flush that precedes it, resurfaces from the buffer on the
     /// section's next sync or flushing operation.
     pub async fn start_sync(
-        &mut self,
+        mut self,
         sections: impl crate::Sections,
-    ) -> Result<Handle<()>, Error> {
+    ) -> Result<(Self, Handle<()>), Error> {
         let sections = sections.sections().collect::<BTreeSet<_>>();
         for &section in &sections {
             self.prune_guard(section)?;
         }
+        let mut count = 0;
         let futures: Vec<_> = self
             .blobs
-            .extract_if(.., |section, _| sections.contains(section))
+            .extract_if(.., |section, blob| {
+                if !sections.contains(section) {
+                    return false;
+                }
+                count += 1;
+                blob.needs_sync()
+            })
             .map(|(section, blob)| async move {
                 let (blob, handle) = blob.start_sync().await;
                 ((section, blob), handle)
             })
             .collect();
 
-        // Count every selected section, including reused and clean no-op syncs, matching
-        // `sync` and `sync_all`.
-        self.synced.inc_by(futures.len() as u64);
+        // Count every selected section, including reused syncs and clean sections left in place,
+        // matching `sync` and `sync_all`.
+        self.synced.inc_by(count);
         let (blobs, handles): (Vec<_>, Vec<_>) = join_all(futures).await.into_iter().unzip();
         self.blobs.extend(blobs);
-        Ok(Handle::from_future(async move {
-            try_join_all(handles).await.map(|_| ())
-        }))
+        let handle = Handle::from_future(async move { try_join_all(handles).await.map(|_| ()) });
+        Ok((self, handle))
     }
 
     /// Sync all sections to storage.
-    pub async fn sync_all(&mut self) -> Result<(), Error> {
-        let count = self.blobs.len() as u64;
-        let futures = take(&mut self.blobs)
-            .into_iter()
-            .map(|(section, blob)| async move { blob.sync().await.map(|blob| (section, blob)) });
-        let blobs = try_join_all(futures).await.map_err(Error::Runtime)?;
-        self.blobs.extend(blobs);
-        self.synced.inc_by(count);
-        Ok(())
+    pub async fn sync_all(mut self) -> Result<Self, Error> {
+        self.sync_selected(|_| true).await?;
+        Ok(self)
     }
 
     /// Prune all sections less than `min`. Returns true if any were pruned.
-    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
+    pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         // Prune any blobs that are smaller than the minimum
         let mut pruned = false;
         while let Some((&section, _)) = self.blobs.first_key_value() {
@@ -463,7 +492,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             self.oldest_retained_section = min;
         }
 
-        Ok(pruned)
+        Ok((self, pruned))
     }
 
     /// Returns true when `section` is below the prune floor.
@@ -504,7 +533,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     }
 
     /// Remove a specific section. Returns true if the section existed and was removed.
-    pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
+    pub async fn remove_section(mut self, section: u64) -> Result<(Self, bool), Error> {
         self.prune_guard(section)?;
 
         if let Some(blob) = self.blobs.remove(&section) {
@@ -516,9 +545,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             drop(blob);
             self.tracked.dec();
             debug!(section, size, "removed section");
-            Ok(true)
+            Ok((self, true))
         } else {
-            Ok(false)
+            Ok((self, false))
         }
     }
 
@@ -544,7 +573,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Clear all blobs, resetting the manager to an empty state.
     ///
     /// Unlike `destroy`, this keeps the manager alive so it can be reused.
-    pub async fn clear(&mut self) -> Result<(), Error> {
+    pub async fn clear(mut self) -> Result<Self, Error> {
         self.remove_discarded().await?;
         for (section, blob) in Self::wait_for_syncs(take(&mut self.blobs)).await? {
             let size = blob.size();
@@ -556,12 +585,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
         let _ = self.tracked.try_set(0);
         self.oldest_retained_section = 0;
-        Ok(())
+        Ok(self)
     }
 
     /// Truncate by removing all sections after `section` and resizing the target section. A
     /// shorter section length is durable when this returns.
-    pub async fn truncate_pending(&mut self, section: u64, size: u64) -> Result<(), Error> {
+    pub async fn truncate_pending(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.prune_guard(section)?;
         assert!(
             section <= self.ceiling,
@@ -588,7 +617,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             debug!(section = s, "removed blob during truncate");
         }
 
-        self.truncate_pending_section(section, size).await
+        self.truncate_section(section, size).await?;
+        Ok(self)
     }
 
     /// Remove unopened suffix sections newest-first and lift the ceiling that held them. Callers
@@ -606,9 +636,19 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Truncate only the given section without affecting other sections. A shorter length is
     /// durable when this returns.
-    pub async fn truncate_pending_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+    pub async fn truncate_pending_section(
+        mut self,
+        section: u64,
+        size: u64,
+    ) -> Result<Self, Error> {
         self.prune_guard(section)?;
+        self.truncate_section(section, size).await?;
+        Ok(self)
+    }
 
+    /// Shorten an open section to `size`. A shorter length is durable when this returns. An error
+    /// drops the section.
+    async fn truncate_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
         // Get the blob at the given section
         if let Some(blob) = self.blobs.get(&section) {
             // Truncate the blob to the given size
@@ -619,17 +659,16 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
                 debug!(section, from = current, to = size, "truncated section");
             }
         }
-
         Ok(())
     }
 
     /// Durably truncate independent sections to their selected upper bounds.
     pub async fn truncate_pending_sections(
-        &mut self,
+        mut self,
         sizes: &BTreeMap<u64, u64>,
-    ) -> Result<(), Error> {
+    ) -> Result<Self, Error> {
         if sizes.is_empty() {
-            return Ok(());
+            return Ok(self);
         }
         for &section in sizes.keys() {
             self.prune_guard(section)?;
@@ -646,7 +685,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             .collect();
         let blobs = try_join_all(futures).await.map_err(Error::Runtime)?;
         self.blobs.extend(blobs);
-        Ok(())
+        Ok(self)
     }
 
     /// Returns the byte size of the given section.
@@ -761,6 +800,7 @@ pub(super) mod tests {
     struct TestFactory {
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
+        syncs: Arc<AtomicUsize>,
         on_drop: Option<Arc<dyn Fn() + Send + Sync>>,
     }
 
@@ -769,7 +809,10 @@ pub(super) mod tests {
         _blob: B,
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
+        syncs: Arc<AtomicUsize>,
         syncing: Option<SharedSync>,
+        /// Whether accepted writes await a sync, as for a freshly opened runtime buffer.
+        dirty: bool,
         on_drop: Option<Arc<dyn Fn() + Send + Sync>>,
     }
 
@@ -786,7 +829,16 @@ pub(super) mod tests {
             0
         }
 
-        async fn sync(self) -> Result<Self, RError> {
+        fn needs_sync(&self) -> bool {
+            self.dirty || self.syncing.is_some()
+        }
+
+        async fn sync(mut self) -> Result<Self, RError> {
+            self.syncs.fetch_add(1, Ordering::Relaxed);
+            if let Some(syncing) = self.syncing.take() {
+                syncing.await?;
+            }
+            self.dirty = false;
             Ok(self)
         }
 
@@ -795,6 +847,7 @@ pub(super) mod tests {
                 let handle = Handle::from_future(syncing.clone());
                 return (self, handle);
             }
+            self.dirty = false;
             let (sender, receiver) = oneshot::channel();
             self.pending.lock().push(sender);
             let sync = async move {
@@ -828,7 +881,9 @@ pub(super) mod tests {
                 _blob: blob,
                 pending: self.pending.clone(),
                 wait_for_syncs: self.wait_for_syncs.clone(),
+                syncs: self.syncs.clone(),
                 syncing: None,
+                dirty: true,
                 on_drop: self.on_drop.clone(),
             })
         }
@@ -840,6 +895,7 @@ pub(super) mod tests {
             factory: TestFactory {
                 pending,
                 wait_for_syncs,
+                syncs: Arc::default(),
                 on_drop: None,
             },
         }
@@ -949,7 +1005,7 @@ pub(super) mod tests {
             cfg.factory.on_drop = Some(Arc::new(move || {
                 observed.fetch_add(1, Ordering::Relaxed);
             }));
-            let mut manager = Manager::init_bounded(context.child("bounded"), cfg.clone(), 2)
+            let manager = Manager::init_bounded(context.child("bounded"), cfg.clone(), 2)
                 .await
                 .unwrap();
             assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1, 2]);
@@ -957,7 +1013,7 @@ pub(super) mod tests {
             assert_eq!(context.scan("test").await.unwrap().len(), 3);
 
             // Truncating to the ceiling removes the unopened section 5 and keeps both opened ones.
-            manager.truncate_pending(2, 0).await.unwrap();
+            let manager = manager.truncate_pending(2, 0).await.unwrap();
             assert_eq!(
                 context.scan("test").await.unwrap(),
                 vec![1u64.to_be_bytes().to_vec(), 2u64.to_be_bytes().to_vec()]
@@ -974,12 +1030,12 @@ pub(super) mod tests {
 
             // A ceiling below every stored section opens nothing and truncation removes them all.
             // Section 0 has no blob, and truncating to it does not create one.
-            let mut manager = Manager::init_bounded(context.child("empty"), cfg, 0)
+            let manager = Manager::init_bounded(context.child("empty"), cfg, 0)
                 .await
                 .unwrap();
             assert!(manager.sections().next().is_none());
             assert_eq!(manager.newest_section(), None);
-            manager.truncate_pending(0, 0).await.unwrap();
+            let manager = manager.truncate_pending(0, 0).await.unwrap();
             assert!(context.scan("test").await.unwrap().is_empty());
 
             // This manager built no buffers, so the drop count is unchanged.
@@ -1006,7 +1062,7 @@ pub(super) mod tests {
 
             // The ceiling bounds the target even when a gap separates it from the first unopened
             // section. Truncation removes every unopened section, so it cannot retain one.
-            let mut manager = Manager::init_bounded(context.child("bounded"), cfg, 2)
+            let manager = Manager::init_bounded(context.child("bounded"), cfg, 2)
                 .await
                 .unwrap();
             manager.truncate_pending(4, 0).await.unwrap();
@@ -1056,13 +1112,13 @@ pub(super) mod tests {
                 inner: context.child("bounded"),
                 removals: removals.clone(),
             };
-            let mut manager = Manager::init_bounded(reversed, cfg, 2).await.unwrap();
+            let manager = Manager::init_bounded(reversed, cfg, 2).await.unwrap();
             assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1, 2]);
 
             // Truncation removes unopened sections newest-first, so a crash mid-removal leaves a
             // prefix of the stored sections. No opened section lies above target 2, so the log
             // holds only unopened-section removals. Without the sort they would run 5, 6, 7.
-            manager.truncate_pending(2, 0).await.unwrap();
+            let manager = manager.truncate_pending(2, 0).await.unwrap();
             assert_eq!(*removals.lock(), removed(&[7, 6, 5]));
 
             // Both opened sections survive in the manager and in storage. The plain context lists
@@ -1120,10 +1176,10 @@ pub(super) mod tests {
             drop(manager);
 
             // Clearing a bounded manager removes the unopened section along with the opened one.
-            let mut manager = Manager::init_bounded(context.child("bounded"), cfg, 2)
+            let manager = Manager::init_bounded(context.child("bounded"), cfg, 2)
                 .await
                 .unwrap();
-            manager.clear().await.unwrap();
+            let mut manager = manager.clear().await.unwrap();
             assert!(context.scan("test").await.unwrap().is_empty());
 
             // No stored section remains above the ceiling, so it no longer restricts creation. The
@@ -1159,14 +1215,15 @@ pub(super) mod tests {
 
                 // Every cleanup path must remove persistent names before releasing their owners.
                 match operation {
-                    "prune" => assert!(manager.prune(3).await.unwrap()),
+                    "prune" => assert!(manager.prune(3).await.unwrap().1),
                     "remove_section" => {
-                        assert!(manager.remove_section(1).await.unwrap());
-                        assert!(manager.remove_section(2).await.unwrap());
+                        let (manager, removed) = manager.remove_section(1).await.unwrap();
+                        assert!(removed);
+                        assert!(manager.remove_section(2).await.unwrap().1);
                     }
                     "destroy" => manager.destroy().await.unwrap(),
-                    "clear" => manager.clear().await.unwrap(),
-                    "truncate_pending" => manager.truncate_pending(0, 0).await.unwrap(),
+                    "clear" => drop(manager.clear().await.unwrap()),
+                    "truncate_pending" => drop(manager.truncate_pending(0, 0).await.unwrap()),
                     _ => unreachable!(),
                 }
 
@@ -1183,6 +1240,34 @@ pub(super) mod tests {
                         Some(Vec::new())
                     ],
                     "{operation}",
+                );
+            });
+        }
+    }
+
+    /// Mutations naming a section pruned during this execution report the prune floor.
+    #[test]
+    fn test_mutations_below_prune_floor_fail() {
+        for operation in ["sync", "truncate_pending", "truncate_pending_section"] {
+            deterministic::Runner::default().start(|context| async move {
+                // Prune section 1, which raises the floor to section 2.
+                let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+                let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+                manager.get_or_create(1).await.unwrap();
+                manager.get_or_create(2).await.unwrap();
+                let (manager, pruned) = manager.prune(2).await.unwrap();
+                assert!(pruned);
+
+                // Each mutation of section 1 fails with the floor.
+                let result = match operation {
+                    "sync" => manager.sync(1).await,
+                    "truncate_pending" => manager.truncate_pending(1, 0).await,
+                    "truncate_pending_section" => manager.truncate_pending_section(1, 0).await,
+                    _ => unreachable!(),
+                };
+                assert!(
+                    matches!(result, Err(Error::AlreadyPrunedToSection(2))),
+                    "{operation}"
                 );
             });
         }
@@ -1222,7 +1307,7 @@ pub(super) mod tests {
                 .get_or_create(2)
                 .await
                 .expect("failed to create second section");
-            let handle = manager
+            let (manager, handle) = manager
                 .start_sync([1, 2])
                 .await
                 .expect("failed to start sync");
@@ -1260,10 +1345,10 @@ pub(super) mod tests {
                 .get_or_create(1)
                 .await
                 .expect("failed to create section");
-            let first = manager.start_sync(1).await.expect("failed to start sync");
+            let (manager, first) = manager.start_sync(1).await.expect("failed to start sync");
             assert_eq!(pending.lock().len(), 1);
 
-            let second = manager
+            let (manager, second) = manager
                 .start_sync(1)
                 .await
                 .expect("failed to observe in-flight sync");
@@ -1287,6 +1372,43 @@ pub(super) mod tests {
         });
     }
 
+    /// Syncs leave clean sections in place, sync only sections with sync work, and count every
+    /// selected section.
+    #[test]
+    fn test_sync_skips_clean_sections() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = test_config(pending.clone(), Arc::new(AtomicUsize::new(0)));
+            let syncs = cfg.factory.syncs.clone();
+            let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+            manager.get_or_create(1).await.unwrap();
+            manager.get_or_create(2).await.unwrap();
+
+            // Freshly opened sections are dirty, so the first sync_all syncs both.
+            let manager = manager.sync_all().await.unwrap();
+            assert_eq!(syncs.load(Ordering::Relaxed), 2);
+
+            // Clean sections need no work from sync_all, sync, or start_sync.
+            let manager = manager.sync_all().await.unwrap();
+            let manager = manager.sync([1, 2]).await.unwrap();
+            let (mut manager, handle) = manager.start_sync([1, 2]).await.unwrap();
+            assert_eq!(syncs.load(Ordering::Relaxed), 2);
+            assert!(pending.lock().is_empty());
+            handle.await.unwrap();
+
+            // Only the section with new writes is synced, and every section stays in place.
+            let mut buffer = manager.take(1).await.unwrap();
+            buffer.dirty = true;
+            manager.put(1, buffer);
+            let manager = manager.sync_all().await.unwrap();
+            assert_eq!(syncs.load(Ordering::Relaxed), 3);
+            assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1, 2]);
+
+            // The metric counts every selected section, whether synced or clean.
+            assert!(context.encode().contains("manager_synced_total 10"));
+        });
+    }
+
     #[test]
     fn test_truncate_waits_for_in_flight_start_sync() {
         for fails in [false, true] {
@@ -1298,7 +1420,7 @@ pub(super) mod tests {
                 let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
                 manager.get_or_create(1).await.unwrap();
                 manager.get_or_create(2).await.unwrap();
-                let handle = manager.start_sync(2).await.unwrap();
+                let (manager, handle) = manager.start_sync(2).await.unwrap();
 
                 // Truncation must wait for that sync and surface its completion result.
                 let result = {
@@ -1318,7 +1440,7 @@ pub(super) mod tests {
                     assert!(matches!(result, Err(Error::Runtime(RError::Closed))));
                     assert!(matches!(handle.await, Err(RError::Closed)));
                 } else {
-                    result.unwrap();
+                    let manager = result.unwrap();
                     handle.await.unwrap();
                     assert_eq!(manager.newest_section(), Some(1));
                     manager.destroy().await.unwrap();
@@ -1342,13 +1464,14 @@ pub(super) mod tests {
                 .get_or_create(1)
                 .await
                 .expect("failed to create section");
-            let handle = manager.start_sync(1).await.expect("failed to start sync");
+            let (manager, handle) = manager.start_sync(1).await.expect("failed to start sync");
             assert_eq!(pending.lock().len(), 1);
 
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
             let waiter = context.child("prune").spawn(|_| async move {
-                assert!(manager.prune(2).await.expect("prune failed"));
+                let (manager, pruned) = manager.prune(2).await.expect("prune failed");
+                assert!(pruned);
                 completed_clone.fetch_add(1, Ordering::Relaxed);
                 manager
             });
@@ -1388,7 +1511,7 @@ pub(super) mod tests {
                 .get_or_create(1)
                 .await
                 .expect("failed to create section");
-            let handle = manager.start_sync(1).await.expect("failed to start sync");
+            let (manager, handle) = manager.start_sync(1).await.expect("failed to start sync");
             assert_eq!(pending.lock().len(), 1);
 
             let completed = Arc::new(AtomicUsize::new(0));
@@ -1432,7 +1555,7 @@ pub(super) mod tests {
                 .get_or_create(1)
                 .await
                 .expect("failed to create section");
-            let handle = manager.start_sync(1).await.expect("failed to start sync");
+            let (manager, handle) = manager.start_sync(1).await.expect("failed to start sync");
             complete_next_pending_sync(&pending, Err(RError::Closed));
 
             let err = manager

@@ -122,7 +122,8 @@ pub type Recovery<B> = Writer<B, Recovering>;
 /// Unique writer to a cache-wrapped [Blob].
 ///
 /// Asynchronous mutating methods consume the writer and return it only on success: an error (or
-/// a dropped future) destroys the writer.
+/// a dropped future) destroys the writer. [Self::start_sync] returns the writer even when its
+/// flush fails. The returned handle reports that failure.
 pub struct Writer<B: Blob, Phase = Append> {
     /// Distinguishes the recovery owner from the append-only writer.
     phase: PhantomData<Phase>,
@@ -950,6 +951,12 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// Returns the size of the blob.
     pub const fn size(&self) -> u64 {
         self.buffer.size()
+    }
+
+    /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync or
+    /// retained failure.
+    pub fn needs_sync(&self) -> bool {
+        !self.sync_state.is_clean() || self.has_flush_work(true)
     }
 
     /// Returns a borrowed view over this blob.
@@ -3188,6 +3195,57 @@ mod tests {
             assert!(handle.await.is_err());
 
             // The writer retains the flush failure and reports it on the next sync.
+            assert!(writer.sync().await.is_err());
+        });
+    }
+
+    /// `needs_sync` reports whether `sync` has work: buffered pages, unsynced mutations, or a
+    /// started sync (including a retained flush failure) that the writer has not observed.
+    #[test_traced("DEBUG")]
+    fn test_needs_sync_tracks_sync_work() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let faults = WriteFaults::default();
+            let context = WriteFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let (blob, size) = context.open("test_partition", b"needs_sync").await.unwrap();
+            let (blob, pending) = DelayedSyncBlob::new(blob);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let writer = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // A fresh writer may wrap unsynced bytes, so it starts dirty. Syncing cleans it.
+            assert!(writer.needs_sync());
+            let mut writer = writer.sync().await.unwrap();
+            assert!(!writer.needs_sync());
+
+            // A buffered partial page is flush work even though the blob is clean.
+            (writer, _) = writer.append(&[1u8; 20]).await.unwrap();
+            assert!(writer.needs_sync());
+            writer = writer.sync().await.unwrap();
+            assert!(!writer.needs_sync());
+
+            // A started sync needs observation while it is in flight and after it completes.
+            (writer, _) = writer.append(&[2u8; 4]).await.unwrap();
+            let (writer, handle) = writer.start_sync().await;
+            assert!(writer.needs_sync());
+            next_pending_sync(&pending).release.send(Ok(())).unwrap();
+            handle.await.unwrap();
+            assert!(writer.needs_sync());
+            let mut writer = writer.wait_for_sync().await.unwrap();
+            assert!(!writer.needs_sync());
+
+            // A failed flush inside start_sync keeps the writer in need of a sync, which then
+            // reports the failure.
+            (writer, _) = writer.append(&[3u8; 8]).await.unwrap();
+            faults.arm();
+            let (writer, handle) = writer.start_sync().await;
+            faults.disarm();
+            assert!(writer.needs_sync());
+            assert!(handle.await.is_err());
             assert!(writer.sync().await.is_err());
         });
     }

@@ -113,12 +113,15 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             buf
         };
 
-        // Write to blob
+        // Write to blob, taking the writer only when the entry does not fit in its buffer
         let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
-        let writer = self.manager.take(section).await?;
+        let writer = self.manager.get_or_create(section).await?;
         let offset = writer.size();
-        let writer = writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
-        self.manager.put(section, writer);
+        if !writer.try_write_at(offset, &buf) {
+            let writer = self.manager.take(section).await?;
+            let writer = writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
+            self.manager.put(section, writer);
+        }
 
         Ok((offset, entry_size))
     }
@@ -199,18 +202,25 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Glob::sync].
-    async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
-        self.manager.sync(sections).await
+    async fn sync(mut self: Box<Self>, sections: impl crate::Sections) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync(sections).await?;
+        Ok(self)
     }
 
     /// See [Glob::start_sync].
-    async fn start_sync(&mut self, sections: impl crate::Sections) -> Result<Handle<()>, Error> {
-        self.manager.start_sync(sections).await
+    async fn start_sync(
+        mut self: Box<Self>,
+        sections: impl crate::Sections,
+    ) -> Result<(Box<Self>, Handle<()>), Error> {
+        let (manager, handle) = self.manager.start_sync(sections).await?;
+        self.manager = manager;
+        Ok((self, handle))
     }
 
     /// See [Glob::sync_all].
-    async fn sync_all(&mut self) -> Result<(), Error> {
-        self.manager.sync_all().await
+    async fn sync_all(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync_all().await?;
+        Ok(self)
     }
 
     /// See [Glob::size].
@@ -219,13 +229,20 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// Truncate an initialization-owned suffix.
-    async fn truncate_pending(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.truncate_pending(section, size).await
+    async fn truncate_pending(
+        mut self: Box<Self>,
+        section: u64,
+        size: u64,
+    ) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.truncate_pending(section, size).await?;
+        Ok(self)
     }
 
     /// See [Glob::prune].
-    async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        self.manager.prune(min).await
+    async fn prune(mut self: Box<Self>, min: u64) -> Result<(Box<Self>, bool), Error> {
+        let (manager, pruned) = self.manager.prune(min).await?;
+        self.manager = manager;
+        Ok((self, pruned))
     }
 
     /// See [Glob::pruned].
@@ -249,8 +266,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Glob::remove_section].
-    async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
-        self.manager.remove_section(section).await
+    async fn remove_section(mut self: Box<Self>, section: u64) -> Result<(Box<Self>, bool), Error> {
+        let (manager, removed) = self.manager.remove_section(section).await?;
+        self.manager = manager;
+        Ok((self, removed))
     }
 
     /// See [Glob::destroy].
@@ -317,7 +336,7 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 
     /// Sync the given `sections` to disk (flushes write buffers).
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
-        self.0.sync(sections).await?;
+        self.0 = self.0.sync(sections).await?;
         Ok(self)
     }
 
@@ -329,13 +348,14 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
         mut self,
         sections: impl crate::Sections,
     ) -> Result<(Self, Handle<()>), Error> {
-        let handle = self.0.start_sync(sections).await?;
+        let (inner, handle) = self.0.start_sync(sections).await?;
+        self.0 = inner;
         Ok((self, handle))
     }
 
     /// Sync all sections to disk.
     pub async fn sync_all(mut self) -> Result<Self, Error> {
-        self.0.sync_all().await?;
+        self.0 = self.0.sync_all().await?;
         Ok(self)
     }
 
@@ -346,7 +366,8 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 
     /// Prune sections before min.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
-        let pruned = self.0.prune(min).await?;
+        let (inner, pruned) = self.0.prune(min).await?;
+        self.0 = inner;
         Ok((self, pruned))
     }
 
@@ -375,7 +396,8 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 
     /// Remove a specific section. Returns true if the section existed and was removed.
     pub async fn remove_section(mut self, section: u64) -> Result<(Self, bool), Error> {
-        let removed = self.0.remove_section(section).await?;
+        let (inner, removed) = self.0.remove_section(section).await?;
+        self.0 = inner;
         Ok((self, removed))
     }
 
@@ -416,7 +438,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     /// Truncates the section to the given size and removes all sections after it. A shorter
     /// length is durable when this returns.
     pub(crate) async fn truncate(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0.truncate_pending(section, size).await?;
+        self.0 = self.0.truncate_pending(section, size).await?;
         Ok(self)
     }
 
@@ -424,7 +446,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     ///
     /// Other sections are unaffected. A shorter length is durable when this returns.
     pub(crate) async fn truncate_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0
+        self.0.manager = self
+            .0
             .manager
             .truncate_pending_section(section, size)
             .await?;
@@ -436,7 +459,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         mut self,
         sizes: &BTreeMap<u64, u64>,
     ) -> Result<Self, Error> {
-        self.0.manager.truncate_pending_sections(sizes).await?;
+        self.0.manager = self.0.manager.truncate_pending_sections(sizes).await?;
         Ok(self)
     }
 
@@ -452,13 +475,14 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 
     /// Make repaired value sections durable.
     pub(crate) async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
-        self.0.sync(sections).await?;
+        self.0 = self.0.sync(sections).await?;
         Ok(self)
     }
 
     /// Remove an orphaned value section.
     pub(crate) async fn remove_section(mut self, section: u64) -> Result<Self, Error> {
-        self.0.remove_section(section).await?;
+        let (inner, _) = self.0.remove_section(section).await?;
+        self.0 = inner;
         Ok(self)
     }
 }

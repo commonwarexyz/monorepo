@@ -27,7 +27,8 @@ use std::num::NonZeroUsize;
 /// not a durability barrier for those external mutations.
 ///
 /// Asynchronous mutating methods consume the writer and return it only on success: an error (or
-/// a dropped future) destroys the writer.
+/// a dropped future) destroys the writer. [Self::start_sync] returns the writer even when its
+/// flush fails. The returned handle reports that failure.
 ///
 /// # Example
 ///
@@ -99,6 +100,12 @@ impl<B: Blob> Write<B> {
         self.buffer.size()
     }
 
+    /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync or
+    /// retained failure.
+    pub const fn needs_sync(&self) -> bool {
+        !self.buffer.is_empty() || !self.sync_state.is_clean()
+    }
+
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         // Ensure the read doesn't overflow.
@@ -146,6 +153,15 @@ impl<B: Blob> Write<B> {
             .read_at(offset, len, ReadOptions::default())
             .await?
             .freeze())
+    }
+
+    /// Merge `buf` into the in-memory tip buffer at `offset`.
+    ///
+    /// Returns whether `buf` fit. Returns `false` without changing the writer when it does not
+    /// fit. Performs no I/O and does not make the write durable. Callers can fall back to
+    /// [`Self::write_at`] when it does not fit.
+    pub fn try_write_at(&mut self, offset: u64, buf: &[u8]) -> bool {
+        offset.checked_add(buf.len() as u64).is_some() && self.buffer.merge(buf, offset)
     }
 
     /// Write bytes from `buf` at `offset`.

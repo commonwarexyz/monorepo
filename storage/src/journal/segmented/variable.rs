@@ -320,27 +320,35 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::sync].
-    async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
-        self.manager.sync(sections).await
+    async fn sync(mut self: Box<Self>, sections: impl crate::Sections) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync(sections).await?;
+        Ok(self)
     }
 
     /// See [Journal::start_sync].
-    async fn start_sync(&mut self, sections: impl crate::Sections) -> Result<Handle<()>, Error> {
-        self.manager.start_sync(sections).await
+    async fn start_sync(
+        mut self: Box<Self>,
+        sections: impl crate::Sections,
+    ) -> Result<(Box<Self>, Handle<()>), Error> {
+        let (manager, handle) = self.manager.start_sync(sections).await?;
+        self.manager = manager;
+        Ok((self, handle))
     }
 
     /// See [Journal::sync_all].
-    async fn sync_all(&mut self) -> Result<(), Error> {
-        self.manager.sync_all().await
+    async fn sync_all(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync_all().await?;
+        Ok(self)
     }
 
     /// See [Journal::prune].
-    async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        let pruned = self.manager.prune(min).await?;
+    async fn prune(mut self: Box<Self>, min: u64) -> Result<(Box<Self>, bool), Error> {
+        let (manager, pruned) = self.manager.prune(min).await?;
+        self.manager = manager;
         if pruned {
             self.unrecovered.retain(|section| *section >= min);
         }
-        Ok(pruned)
+        Ok((self, pruned))
     }
 
     /// See [Journal::pruned].
@@ -374,10 +382,10 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::clear].
-    async fn clear(&mut self) -> Result<(), Error> {
-        self.manager.clear().await?;
+    async fn clear(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.clear().await?;
         self.unrecovered.clear();
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -446,7 +454,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                     .await?,
             );
         }
-        journal.0.manager.truncate_pending(section, end).await?;
+        journal.0.manager = journal.0.manager.truncate_pending(section, end).await?;
         let mut replay = journal
             .replay(0, 0, replay_buffer, ReadOptions::default())
             .await?;
@@ -582,7 +590,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// If a selected section does not exist (and has not been pruned), no error will be
     /// returned.
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
-        self.0.sync(sections).await?;
+        self.0 = self.0.sync(sections).await?;
         Ok(self)
     }
 
@@ -594,19 +602,21 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         mut self,
         sections: impl crate::Sections,
     ) -> Result<(Self, Handle<()>), Error> {
-        let handle = self.0.start_sync(sections).await?;
+        let (inner, handle) = self.0.start_sync(sections).await?;
+        self.0 = inner;
         Ok((self, handle))
     }
 
     /// Syncs all open sections.
     pub async fn sync_all(mut self) -> Result<Self, Error> {
-        self.0.sync_all().await?;
+        self.0 = self.0.sync_all().await?;
         Ok(self)
     }
 
     /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
-        let pruned = self.0.prune(min).await?;
+        let (inner, pruned) = self.0.prune(min).await?;
+        self.0 = inner;
         Ok((self, pruned))
     }
 
@@ -647,7 +657,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     pub async fn clear(mut self) -> Result<Self, Error> {
-        self.0.clear().await?;
+        self.0 = self.0.clear().await?;
         Ok(self)
     }
 }
@@ -777,11 +787,9 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         // track replay-time repaired sections separately. Keep the interruption guard set
         // until the repair is durable.
         self.repairing = true;
-        self.journal
-            .0
-            .manager
-            .truncate_pending_section(section, valid_offset)
-            .await?;
+        let writer = self.journal.0.manager.take(section).await?;
+        let writer = writer.truncate(valid_offset).await?;
+        self.journal.0.manager.put(section, writer);
         self.repairing = false;
         Ok(())
     }
@@ -1008,7 +1016,7 @@ mod tests {
             };
             _ = self.sync_all().await?;
             let mut journal = Self::init(context, cfg).await?;
-            journal
+            journal.0.manager = journal
                 .0
                 .manager
                 .truncate_pending_section(section, end)
@@ -1665,30 +1673,15 @@ mod tests {
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
-            // Test truncate on pruned section
-            match journal.0.manager.truncate_pending(2, 0).await {
-                Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
-            }
-
-            // Test truncate_section on pruned section
-            match journal.0.manager.truncate_pending_section(1, 0).await {
-                Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
-            }
-
-            // Test sync on pruned section
-            match journal.0.sync(2).await {
-                Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
-            }
-
             // Test that accessing sections at or after the threshold works
             assert!(journal.get(3, 0).await.is_ok());
             assert!(journal.get(4, 0).await.is_ok());
             assert!(journal.get(5, 0).await.is_ok());
             assert!(journal.size(3).is_ok());
-            assert!(journal.0.sync(4).await.is_ok());
+            journal = journal
+                .sync(4)
+                .await
+                .expect("Should be able to sync section 4");
 
             // Append to section at threshold should work
             (journal, _, _) = journal
@@ -1714,6 +1707,12 @@ mod tests {
 
             // Section 5 should still be accessible
             assert!(journal.get(5, 0).await.is_ok());
+
+            // Test sync on pruned section. The failure destroys the journal.
+            match journal.sync(4).await {
+                Err(Error::AlreadyPrunedToSection(5)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(5), got {other:?}"),
+            }
         });
     }
 
