@@ -138,7 +138,7 @@ fn work_dir(name: &str) -> PathBuf {
 }
 
 fn config(name: &str) -> Config {
-    Config { rustc: PathBuf::from(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into())), work_dir: work_dir(name), edition: "2021".into(), toolchain_id: "tests/lift_conformance.rs".into() }
+    Config::new(PathBuf::from(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into())), work_dir(name), "2021", "tests/lift_conformance.rs")
 }
 
 /// Elaborates the crate (every definition must check) and runs the check.
@@ -507,4 +507,119 @@ fn pilot() {
     } else {
         assert!(r.passed(), "{:#?}", r.failures());
     }
+}
+
+// ---------------------------------------------------------------------
+// in-place modules: the harness is a copy of the host crate
+// ---------------------------------------------------------------------
+
+/// A host crate (no dependencies) whose `src/a.rs` is lifted in place: a
+/// private-field state, a function with an attached precondition, a
+/// signed shift.
+const IN_PLACE_A: &str = r#"pub struct Acc {
+    total: u32,
+    count: u8,
+}
+
+impl Acc {
+    pub fn new() -> Self {
+        Self { total: 0, count: 0 }
+    }
+
+    pub fn add(&mut self, b: u8) -> bool {
+        if self.count >= 100 {
+            return false;
+        }
+        self.total = self.total.wrapping_add(b as u32);
+        self.count += 1;
+        true
+    }
+}
+
+pub fn inc(x: u32) -> u32 {
+    x + 1
+}
+
+pub fn half(x: i32) -> i32 {
+    x >> 1
+}
+"#;
+
+const IN_PLACE_ROOT: &str = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n\n#[lift(in_place)]\n#[path = \"../../src/a.rs\"]\npub mod a;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n";
+
+const IN_PLACE_PROOF: &str = "use sandblaster::prelude::*;\n\n#[lift_attach(crate::a::Acc)]\nfn acc_state() {\n    invariant(self.count <= 100u8);\n}\n\n#[lift_attach(crate::a::inc)]\nfn inc_pre() {\n    requires((x as Int) < 1000);\n}\n";
+
+/// Writes the host crate under a fresh directory; returns it.
+fn in_place_crate(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("sandblaster-inplace-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    for (p, t) in [
+        ("Cargo.toml", "[package]\nname = \"inplace-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[workspace]\n"),
+        ("src/lib.rs", "mod a;\npub use a::{half, inc, Acc};\n"),
+        ("src/a.rs", IN_PLACE_A),
+        ("sandblaster/m/mod.rs", IN_PLACE_ROOT),
+        ("sandblaster/m/PROOF.rs", IN_PLACE_PROOF),
+    ] {
+        let f = d.join(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, t).unwrap();
+    }
+    d
+}
+
+fn in_place_conformance(dir: &Path, hook: Option<test_hook::WrongRule>, cfg: &Config) -> Report {
+    test_hook::set(hook);
+    let c = driver::check(&dir.join("sandblaster/m/mod.rs"), &sandblaster_front::loader::RealFs, &TargetInfo::aarch64_apple_darwin());
+    test_hook::set(None);
+    assert!(c.ok(), "front end rejected the in-place crate:\n{}", c.render());
+    let k = c.krate.as_ref().unwrap();
+    let infos: Vec<&sandblaster_front::lift::LiftedInfo> = c.lifted.iter().filter(|l| l.in_place && !l.ghost).collect();
+    let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: false };
+    driver::stage::with_elaboration(k, &opts, |out| conform::check_in_place(out, k, &c, &infos, cfg))
+}
+
+fn in_place_config(dir: &Path, name: &str) -> Config {
+    let mut cfg = config(&format!("inplace-{name}"));
+    cfg.manifest_dir = Some(dir.to_path_buf());
+    cfg.cargo = PathBuf::from(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    cfg
+}
+
+#[test]
+fn an_in_place_module_agrees_with_rustc_through_a_copy_of_its_crate() {
+    let dir = in_place_crate("pass");
+    let cfg = in_place_config(&dir, "pass");
+    let r = in_place_conformance(&dir, None, &cfg);
+    assert!(r.passed(), "{:#?}\n{}", r.failures(), r.json().render());
+    for l in ["crate::a::Acc::new", "crate::a::Acc::add", "crate::a::inc", "crate::a::half"] {
+        let e = entry(&r, l);
+        assert!(e.skipped.is_none() && e.cases > 0, "{l}: {e:?}");
+    }
+    // the precondition is decided by its checker: inputs that break it are
+    // not compared (the original would overflow on `u32::MAX`)
+    assert!(entry(&r, "crate::a::inc").rejected > 0, "{:?}", entry(&r, "crate::a::inc"));
+    // the private-field state is built in its own file (invariant kept)
+    assert!(entry(&r, "crate::a::Acc::add").rejected > 0);
+    // the host's own source is not changed
+    assert_eq!(std::fs::read_to_string(dir.join("src/a.rs")).unwrap(), IN_PLACE_A);
+    let _ = std::fs::remove_dir_all(&cfg.work_dir);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_in_place_harness_catches_a_wrong_lift_rule_and_needs_its_crate() {
+    let dir = in_place_crate("hook");
+    let cfg = in_place_config(&dir, "hook");
+    let r = in_place_conformance(&dir, Some(test_hook::WrongRule::SignedShrLogical), &cfg);
+    assert!(!r.passed(), "the wrong rule went unnoticed: {}", r.summary());
+    assert!(r.mismatches.iter().any(|m| m.lifted == "crate::a::half"), "{:#?}", r.mismatches);
+    assert!(r.mismatches.iter().all(|m| m.lifted == "crate::a::half"), "{:#?}", r.mismatches);
+    assert!(!cfg.work_dir.join("conformance.key").exists(), "a failure left a cache key");
+    // without the host crate's directory the check cannot run: it fails
+    let mut no_crate = in_place_config(&dir, "nocrate");
+    no_crate.manifest_dir = None;
+    let r = in_place_conformance(&dir, None, &no_crate);
+    assert!(!r.passed() && r.errors.iter().any(|e| e.contains("copy of the host crate")), "{:#?}", r.errors);
+    let _ = std::fs::remove_dir_all(&cfg.work_dir);
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -96,6 +96,7 @@ fn usage() -> ExitCode {
     eprintln!("       sandblaster spec <crate-dir|root.rs> [--accept [ITEM...] [--equivalent-only] | --diff <rev-or-path> | --preview <file>] [--target aarch64|x86_64]");
     eprintln!("       sandblaster coverage <crate-dir|root.rs> [--json] [--no-sheet] [--mutants-max N] [--time-budget SECS] [--only ITEM...] [--target aarch64|x86_64]");
     eprintln!("       sandblaster profile <crate-dir|root.rs> --entry <fn> --fixtures <dir>... --args <field,...> [--out <file>] [--append] [--target aarch64|x86_64]");
+    eprintln!("       sandblaster conform <crate-dir|root.rs> --manifest-dir <host-crate-dir> --work-dir <dir> [--target aarch64|x86_64]");
     ExitCode::from(2)
 }
 
@@ -140,6 +141,7 @@ fn main() -> ExitCode {
     let mut spec = SpecArgs::default();
     let mut cov = CoverageArgs::default();
     let mut prof = ProfileArgs::default();
+    let mut conform_dirs: (Option<PathBuf>, Option<PathBuf>) = (None, None);
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -168,6 +170,14 @@ fn main() -> ExitCode {
                 }
             }
             "--append" => prof.append = true,
+            "--manifest-dir" | "--work-dir" => {
+                let Some(v) = it.next() else { return usage() };
+                if a == "--manifest-dir" {
+                    conform_dirs.0 = Some(PathBuf::from(v));
+                } else {
+                    conform_dirs.1 = Some(PathBuf::from(v));
+                }
+            }
             "--accept" => {
                 spec.accept = true;
                 while let Some(item) = it.next_if(|x| !x.starts_with("--")) {
@@ -207,7 +217,11 @@ fn main() -> ExitCode {
     if positional.len() == 1 && positional[0] == "coverage" && !cov.only.is_empty() {
         positional.push(cov.only.pop().expect("an item"));
     }
-    if !matches!(cmd.as_str(), "check" | "emit" | "report" | "eval" | "spec" | "coverage" | "profile") || positional.len() != expected {
+    if !matches!(cmd.as_str(), "check" | "emit" | "report" | "eval" | "spec" | "coverage" | "profile" | "conform") || positional.len() != expected {
+        return usage();
+    }
+    if (cmd == "conform") != (conform_dirs.0.is_some() && conform_dirs.1.is_some()) && (cmd == "conform" || conform_dirs.0.is_some() || conform_dirs.1.is_some()) {
+        eprintln!("error: `sandblaster conform` needs --manifest-dir and --work-dir, and they belong to it alone");
         return usage();
     }
     if cmd != "coverage" && cov.used() {
@@ -278,6 +292,29 @@ fn main() -> ExitCode {
     }
     if cmd == "spec" {
         return spec_command(&checked, &root, &root_display, &target, &spec);
+    }
+    if cmd == "conform" {
+        // a stage tool: the lift conformance check of the in-place modules, never a verdict
+        let (Some(manifest), Some(work)) = conform_dirs else { return usage() };
+        let rustc = PathBuf::from(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into()));
+        let edition = sandblaster_front::conform::edition_of(&RealFs, &manifest).unwrap_or_else(|| "2021".into());
+        let mut cfg = sandblaster_front::conform::Config::new(rustc, work, &edition, "sandblaster conform");
+        cfg.manifest_dir = Some(manifest);
+        cfg.cargo = PathBuf::from(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+        return match driver::stage::conform_in_place(&checked, &cfg) {
+            Ok(r) => {
+                println!("{}", r.summary());
+                println!("{}", r.json().render());
+                for f in r.failures() {
+                    eprintln!("error[lift-conformance]: {f}");
+                }
+                if r.passed() { ExitCode::SUCCESS } else { ExitCode::from(1) }
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            }
+        };
     }
     // the crate path: every gate, the optimizer, the round trip
     let b = driver::build_crate(&checked, LockUse::Enforce, &root_display);

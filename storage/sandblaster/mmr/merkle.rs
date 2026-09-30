@@ -15,10 +15,10 @@ pub mod position;
 pub mod location;
 
 // Two functions stay unchecked host code (listed in the record):
-// `subtree_root_position` (the prover does not yet close its
-// `checked_add(..).and_then(..).expect(..)` chain) and `leftmost_leaf`
-// (its final `expect` needs `position_to_location`'s completeness on
-// leaves, which is not proven).
+// `subtree_root_position` and `leftmost_leaf`: the prover does not yet
+// close their `checked_shl(..).expect(..)` and
+// `checked_add(..).and_then(..).expect(..)` chains (`leftmost_leaf`'s final
+// `expect` is what `position_to_location_is_complete` justifies).
 #[lift(in_place, children = "iterator", instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_fns = "Family::subtree_root_position, Family::leftmost_leaf")]
 #[path = "../../src/merkle/mmr/mod.rs"]
 pub mod mmr;

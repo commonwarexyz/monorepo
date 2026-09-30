@@ -129,6 +129,7 @@ const KEYWORDS: &[&str] = &[
     "assert",
     "witness",
     "use_hyp",
+    "use_real",
     "unfold",
     "rewrite",
     "rewrite_rev",
@@ -886,16 +887,17 @@ impl<'c, 'a> Cx<'c, 'a> {
                     }
                 },
                 "witness" => ScriptKind::Witness(args.iter().map(|a| self.infer(a)).collect()),
-                "use_hyp" => {
+                "use_hyp" | "use_real" => {
+                    let real = kw == "use_real";
                     let index = match args.first().map(strip_parens) {
                         Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(l), .. })) if l.suffix().is_empty() => l.base10_parse::<u32>().ok(),
                         _ => None,
                     };
                     let Some(index) = index else {
-                        self.err(DiagKind::Script, span, "expected `use_hyp(i, e1, .., en);`: `i` is the index of a hypothesis of the completeness statement (a literal)");
+                        self.err(DiagKind::Script, span, format!("expected `{kw}(i, e1, .., en);`: `i` is the index of a hypothesis of the completeness statement (a literal)"));
                         return;
                     };
-                    ScriptKind::UseHyp { index, args: args[1..].iter().map(|a| self.infer(a)).collect() }
+                    ScriptKind::UseHyp { index, args: args[1..].iter().map(|a| self.infer(a)).collect(), real }
                 }
                 "unfold" => match args.as_slice() {
                     [syn::Expr::Path(p)] => match self.unfold_target(p, "unfold") {

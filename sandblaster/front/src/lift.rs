@@ -1561,6 +1561,9 @@ impl Ctx {
         if let Some(at) = self.attach_fn.get(&orig_name).cloned() {
             self.attach_used.insert(format!("fn {orig_name}"));
             let sigma2: HashMap<String, syn::Type> = self.attach_sigma.clone();
+            // several `ensures(..)` (a law file's contract, a proof file's
+            // summary) are one contract: their conjunction
+            let mut ensures: Vec<syn::Expr> = Vec::new();
             for st in &at.stmts {
                 // `at_start! { .. }`: proof steps before the body (facts about the parameters)
                 if let syn::Stmt::Macro(m) = st
@@ -1619,7 +1622,12 @@ impl Ctx {
                 rw.self_ty = self_ty.clone();
                 rw.expr(&mut e, None);
                 drop(rw);
-                f.attrs.push(syn::parse_quote!(#[ensures(#e)]));
+                ensures.push(e);
+            }
+            match conjoin_ensures(ensures) {
+                Ok(Some(e)) => f.attrs.push(syn::parse_quote!(#[ensures(#e)])),
+                Ok(None) => {}
+                Err(msg) => self.errors.push((at.span, msg, vec![])),
             }
         }
         if !ghost {
@@ -4148,6 +4156,46 @@ fn collect_idents(b: &syn::Block, out: &mut Vec<String>) {
         }
     }
     syn::visit::Visit::visit_block(&mut V(out), b);
+}
+
+/// The conjunction of several attached `ensures(..)` of one function: the
+/// same closure `|ret: T| a && b` when each binds the result with the same
+/// pattern and type, `a && b` when none does (no result); anything else is
+/// refused (the contracts are about different things).
+fn conjoin_ensures(es: Vec<syn::Expr>) -> Result<Option<syn::Expr>, String> {
+    let mut it = es.into_iter();
+    let Some(first) = it.next() else { return Ok(None) };
+    let rest: Vec<syn::Expr> = it.collect();
+    if rest.is_empty() {
+        return Ok(Some(first));
+    }
+    let binder = |e: &syn::Expr| -> Option<(String, syn::Expr)> {
+        match e {
+            syn::Expr::Closure(c) if c.inputs.len() == 1 => Some((c.inputs[0].to_token_stream().to_string(), (*c.body).clone())),
+            _ => None,
+        }
+    };
+    match binder(&first) {
+        Some((pat, body)) => {
+            let mut bodies = vec![body];
+            for e in &rest {
+                match binder(e) {
+                    Some((p, b)) if p == pat => bodies.push(b),
+                    _ => return Err(format!("the attached `ensures(..)` of one function must bind the result alike (`{pat}`) to be conjoined")),
+                }
+            }
+            let syn::Expr::Closure(mut c) = first else { return Err("internal: not a closure".into()) };
+            c.body = Box::new(syn::parse_quote!(#((#bodies))&&*));
+            Ok(Some(syn::Expr::Closure(c)))
+        }
+        None => {
+            if rest.iter().any(|e| binder(e).is_some()) {
+                return Err("the attached `ensures(..)` of one function must all bind the result, or none".into());
+            }
+            let all: Vec<syn::Expr> = std::iter::once(first).chain(rest).collect();
+            Ok(Some(syn::parse_quote!(#((#all))&&*)))
+        }
+    }
 }
 
 /// Whether `st` is the argument-less attachment statement `name();`.

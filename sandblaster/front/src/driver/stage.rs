@@ -147,6 +147,20 @@ pub fn with_elaboration<T: Send>(krate: &Crate, opts: &VerifyOptions, f: impl Fn
     })
 }
 
+/// The lift conformance check of a crate's in-place modules on its own (a
+/// stage tool, `sandblaster conform`; never a verdict): elaborates the
+/// crate and runs [`crate::conform::check_in_place`], whatever the proofs
+/// and the §15 gates say (a build runs it only after they pass).
+pub fn conform_in_place(c: &Checked, cfg: &crate::conform::Config) -> Result<crate::conform::Report, String> {
+    let k = c.krate.as_ref().filter(|_| c.ok()).ok_or("the front end rejected the crate")?;
+    let infos: Vec<&crate::lift::LiftedInfo> = c.lifted.iter().filter(|l| l.in_place && !l.ghost).collect();
+    if infos.is_empty() {
+        return Err("the crate has no `#[lift(in_place)]` module".into());
+    }
+    let opts = VerifyOptions { provers: super::ProverSet::Standard, exec_only: false };
+    Ok(with_elaboration(k, &opts, |out| crate::conform::check_in_place(out, k, c, &infos, cfg)))
+}
+
 /// Elaborates and checks the crate: every definition, obligation and law,
 /// the law audit and the resource gate (the proofs of a crate; no §15
 /// gate). Without a source map, law statements in the audit are printed

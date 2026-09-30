@@ -708,8 +708,11 @@ fn cargo_env(k: &str) -> Option<String> {
 #[test]
 fn an_in_place_build_runs_the_conformance_check_after_the_gates() {
     // the lock its own gates accepted: every §15 gate passes, so the
-    // enforcing build reaches the lift conformance check, which does not
-    // support in-place modules yet — no verdict, and the reason is named
+    // enforcing build reaches the lift conformance check, whose harness is
+    // a copy of the host crate on disk (`conform::check_in_place`); this
+    // crate exists only in memory, so the check cannot run — no verdict,
+    // and the reason is named (the check on a crate on disk:
+    // tests/lift_conformance.rs)
     let target = TargetInfo::from_cargo_env(&cargo_env).expect("target");
     let dsl_root = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n#[lift(in_place)]\n#[path = \"../../src/a.rs\"]\nmod a;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"LAWS.rs\"]\nmod laws;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n\npub use a::half;\n";
     let laws = "use sandblaster::prelude::*;\nuse crate::a::half;\n\n/// `half` rounds down.\n#[law]\nfn half_rounds_down(x: u64) {\n    ensures(half(x) as Nat == (x as Nat) / 2);\n}\n";
@@ -719,7 +722,7 @@ fn an_in_place_build_runs_the_conformance_check_after_the_gates() {
     let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
     let o = driver::build_lifted_with("sandblaster/m/mod.rs", "m", None, &cargo_env, &fs, driver::GateUse::Enforce);
     assert!(!o.ok, "no verdict without the lift conformance check");
-    assert!(o.stderr.contains("lift conformance") && o.stderr.contains("lifted in place"), "{}", o.stderr);
+    assert!(o.stderr.contains("lift conformance") && o.stderr.contains("cargo metadata"), "{}", o.stderr);
     assert!(!o.outputs.iter().any(|(p, c)| p.ends_with("m-verified.txt") && c.contains("VERIFIED +")), "no verified record");
     // the pending build of the same crate: every gate passed, the check
     // ran and failed; still no verdict, and the record says so
