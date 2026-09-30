@@ -70,7 +70,7 @@
 //! let (db, _) = db.apply_batch(merkleized).await?;
 //!
 //! let (mut batch, popped) = db.new_batch().pop_active(&db, None).await?;
-//! if let Some(entry) = popped {
+//! if let Popped::Evicted(entry) = popped {
 //!     let update = entry.update;
 //!     batch = batch.write(update.key().clone(), Some(update.into_value()));
 //! }
@@ -1862,6 +1862,7 @@ pub(crate) mod test {
     }
 
     use crate::qmdb::any::{
+        batch::Popped,
         ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
         unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
     };
@@ -2281,13 +2282,13 @@ pub(crate) mod test {
             if i == 3 {
                 let (next, popped) = batch.pop_active(&db, NonZeroUsize::new(2)).await.unwrap();
                 assert!(
-                    popped.is_none(),
+                    matches!(popped, Popped::QuotaReached),
                     "pending update and delete exhaust the quota"
                 );
                 batch = next;
             }
             let (next, popped) = batch.pop_active(&db, NonZeroUsize::new(2)).await.unwrap();
-            let popped = popped.expect("next active update");
+            let popped = popped.into_evicted().expect("next active update");
             assert_eq!(popped.location, original[i].0);
             let update = popped.update;
             assert_eq!(operation::Update::key(&update), &original[i].1);
@@ -2302,10 +2303,13 @@ pub(crate) mod test {
             };
         }
         let (next, exhausted) = batch.pop_active(&db, None).await.unwrap();
-        assert!(exhausted.is_none(), "None only at the original tip");
+        assert!(
+            matches!(exhausted, Popped::Done),
+            "done only at the original tip"
+        );
         let (batch, exhausted) = next.pop_active(&db, None).await.unwrap();
         assert!(
-            exhausted.is_none(),
+            matches!(exhausted, Popped::Done),
             "reinserts are outside the original tip"
         );
 
@@ -2392,7 +2396,7 @@ pub(crate) mod test {
             let mut seen = Vec::new();
             for i in 0..3 {
                 let (next, popped) = child.pop_active(&db, None).await.unwrap();
-                let popped = popped.expect("next active ancestor update");
+                let popped = popped.into_evicted().expect("next active ancestor update");
                 let update = popped.update;
                 let k = *operation::Update::key(&update);
                 let expected = if k == key(0) {
@@ -2418,15 +2422,15 @@ pub(crate) mod test {
             }
             assert_eq!(seen.len(), 3);
             let (child, exhausted) = child.pop_active(&db, None).await.unwrap();
-            assert!(exhausted.is_none());
+            assert!(matches!(exhausted, Popped::Done));
             let mut sibling = parent.new_batch::<Sha256>();
             for _ in 0..3 {
                 let (next, popped) = sibling.pop_active(&db, None).await.unwrap();
-                assert!(popped.is_some());
+                assert!(matches!(popped, Popped::Evicted(_)));
                 sibling = next;
             }
             let (sibling, exhausted) = sibling.pop_active(&db, None).await.unwrap();
-            assert!(exhausted.is_none());
+            assert!(matches!(exhausted, Popped::Done));
             let child = child.merkleize(&db, None).await.unwrap();
             let (db, _) = db.apply_batch(child).await.unwrap();
 
@@ -2464,11 +2468,11 @@ pub(crate) mod test {
                 .unwrap();
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let (batch, popped) = db.new_batch().pop_active(&db, None).await.unwrap();
-            let update = popped.expect("one live key").update;
+            let update = popped.into_evicted().expect("one live key").update;
             assert_eq!(operation::Update::key(&update), &key(0));
             assert_eq!(operation::Update::value(&update), &val(0));
             let (batch, exhausted) = batch.pop_active(&db, None).await.unwrap();
-            assert!(exhausted.is_none());
+            assert!(matches!(exhausted, Popped::Done));
 
             let merkleized = batch.merkleize(&db, None).await.unwrap();
             let (start, operations) = merkleized.operations();
@@ -2550,20 +2554,51 @@ pub(crate) mod test {
             let mut batch = db.new_batch();
             for (location, k) in expected {
                 let (next, popped) = batch.pop_active(&db, None).await.unwrap();
-                let popped = popped.expect("inactive operations are skipped");
+                let popped = popped
+                    .into_evicted()
+                    .expect("inactive operations are skipped");
                 assert_eq!(popped.location, location);
                 assert_eq!(*operation::Update::key(&popped.update), key(k));
                 assert_eq!(*operation::Update::value(&popped.update), val(k));
                 batch = next;
             }
             let (batch, exhausted) = batch.pop_active(&db, None).await.unwrap();
-            assert!(exhausted.is_none(), "None only after the original tip");
+            assert!(
+                matches!(exhausted, Popped::Done),
+                "done only after the original tip"
+            );
             let merkleized = batch.merkleize(&db, None).await.unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), None);
             assert_eq!(db.get(&key(1)).await.unwrap(), None);
             assert_eq!(db.get(&key(2)).await.unwrap(), None);
             assert_eq!(db.get(&key(3)).await.unwrap(), None);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A quota that runs out exactly at the original tip reports the tip, not the quota.
+    #[test_traced("INFO")]
+    fn test_any_pop_active_tip_takes_precedence_over_quota() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("pop-tip-precedence", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // A fresh database holds only its initial commit, so one skip reaches the tip.
+            let (batch, popped) = db
+                .new_batch()
+                .pop_active(&db, NonZeroUsize::new(1))
+                .await
+                .unwrap();
+            assert!(matches!(popped, Popped::Done));
+            drop(batch);
             db.destroy().await.unwrap();
         });
     }
@@ -2617,7 +2652,7 @@ pub(crate) mod test {
                 NonZeroUsize::new((*seed_range.start - *db.inactivity_floor_loc() + 1) as usize);
             let (batch, popped) = db.new_batch().pop_active(&db, quota).await.unwrap();
             assert!(
-                popped.is_none(),
+                matches!(popped, Popped::QuotaReached),
                 "quota stops immediately before the live update"
             );
             assert_eq!(
@@ -2628,14 +2663,14 @@ pub(crate) mod test {
             let expected_floor = seed_range.start + 1;
             // A fresh call can resume at the active operation without spending its skip quota.
             let (resumed, popped) = db.new_batch().pop_active(&db, quota).await.unwrap();
-            assert!(popped.is_none());
+            assert!(matches!(popped, Popped::QuotaReached));
             let (resumed, popped) = resumed.pop_active(&db, NonZeroUsize::new(1)).await.unwrap();
-            let popped = popped.expect("quota resets for each call");
+            let popped = popped.into_evicted().expect("quota resets for each call");
             assert_eq!(popped.location, expected_floor);
             assert_eq!(*operation::Update::key(&popped.update), keys[1]);
             let before = read_calls();
             let (resumed, exhausted) = resumed.pop_active(&db, None).await.unwrap();
-            assert!(exhausted.is_none());
+            assert!(matches!(exhausted, Popped::Done));
             assert_eq!(
                 read_calls(),
                 before,

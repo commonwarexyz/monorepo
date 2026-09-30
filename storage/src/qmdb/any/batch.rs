@@ -291,6 +291,27 @@ pub struct ActiveEntry<F: Family, U: update::Update> {
     pub update: U,
 }
 
+/// The outcome of one [`UnmerkleizedBatch::pop_active`] call.
+pub enum Popped<F: Family, U: update::Update> {
+    /// The next active update was evicted, and the batch records its deletion.
+    Evicted(ActiveEntry<F, U>),
+    /// The call skipped its quota of inactive operations before finding an active update. The
+    /// batch retains the advanced floor, so a later call resumes the scan there.
+    QuotaReached,
+    /// The scan reached the batch's original tip, so no active update remains before it.
+    Done,
+}
+
+impl<F: Family, U: update::Update> Popped<F, U> {
+    /// Returns the evicted entry, if this call evicted one.
+    pub fn into_evicted(self) -> Option<ActiveEntry<F, U>> {
+        match self {
+            Self::Evicted(entry) => Some(entry),
+            Self::QuotaReached | Self::Done => None,
+        }
+    }
+}
+
 /// Pending mutations whose old locations were already resolved by staged reads, sorted
 /// by location. Each value is `Some` for an update and `None` for a delete. Only the unordered
 /// path stages deletes (an ordered delete cannot skip the deleted key's predecessor-bucket scan,
@@ -388,8 +409,7 @@ pub(crate) type RetainedAncestors<F, D, U, S> = Vec<AncestorBatch<F, D, U, S>>;
 type MerkleizeResult<F, D, U, S> = Result<Arc<MerkleizedBatch<F, D, U, S>>, crate::qmdb::Error<F>>;
 
 /// Result of evicting an active update: the batch and the optional evicted entry.
-pub(crate) type PopActiveResult<B, F, U> =
-    Result<(B, Option<ActiveEntry<F, U>>), crate::qmdb::Error<F>>;
+pub(crate) type PopActiveResult<B, F, U> = Result<(B, Popped<F, U>), crate::qmdb::Error<F>>;
 
 /// Result of a prepared merkleization: the batch and the ancestors retained while building it.
 pub(crate) type RetainedMerkleizeResult<F, D, U, S> = Result<
@@ -1789,12 +1809,13 @@ where
     /// Evict the next active update, skipping inactive operations.
     ///
     /// `quota` limits the number of inactive operations skipped in this call; `None` is unlimited.
-    /// Reaching the quota returns `None` immediately, retaining the advanced floor so a subsequent
-    /// call resumes there. Also returns `None` at the batch's original tip. New writes and
+    /// Reaching the quota returns [`Popped::QuotaReached`] immediately, retaining the advanced floor
+    /// so a subsequent call resumes there. Reaching the batch's original tip returns
+    /// [`Popped::Done`], which takes precedence when both occur together. New writes and
     /// reinserts are outside the scan. Pending writes and deletions make old updates inactive;
     /// deletes and commits are always inactive for floor raising.
     ///
-    /// Calling this method selects [`Self::with_manual_floor`], even when it returns `None`.
+    /// Calling this method selects [`Self::with_manual_floor`], even when it evicts nothing.
     /// Merkleization performs no additional automatic moves; an empty final state sets the floor to
     /// the new commit location. Eviction records a deletion; write the returned update's key and
     /// value back to preserve it, or write a replacement value. Changes remain speculative until
@@ -1872,7 +1893,7 @@ where
                         unreachable!("active operation is an update");
                     };
                     batch.manual_floor = Some(location + 1);
-                    return Ok((batch, Some(ActiveEntry { location, update })));
+                    return Ok((batch, Popped::Evicted(ActiveEntry { location, update })));
                 }
             }
             location += 1;
@@ -1881,7 +1902,12 @@ where
         // Ancestors must remain alive until every operation read has completed.
         drop(ancestors);
         batch.manual_floor = Some(location);
-        Ok((batch, None))
+        let popped = if location < tip {
+            Popped::QuotaReached
+        } else {
+            Popped::Done
+        };
+        Ok((batch, popped))
     }
 
     /// Validate that `current` is a state on this batch's live chain, returning strong ancestor
@@ -3400,7 +3426,7 @@ mod trait_impls {
             self,
             db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             quota: Option<NonZeroUsize>,
-        ) -> Result<(Self, Option<ActiveEntry<F, Self::Update>>), crate::qmdb::Error<F>> {
+        ) -> Result<(Self, Popped<F, Self::Update>), crate::qmdb::Error<F>> {
             Self::pop_active(self, db, quota).await
         }
 
@@ -3446,7 +3472,7 @@ mod trait_impls {
             self,
             db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             quota: Option<NonZeroUsize>,
-        ) -> Result<(Self, Option<ActiveEntry<F, Self::Update>>), crate::qmdb::Error<F>> {
+        ) -> Result<(Self, Popped<F, Self::Update>), crate::qmdb::Error<F>> {
             Self::pop_active(self, db, quota).await
         }
 
@@ -3612,13 +3638,16 @@ mod tests {
             let child = parent.new_batch::<Sha256>().write(first, None);
             clones.store(0, AtomicOrdering::Relaxed);
             let (child, popped) = child.pop_active(&db, None).await.unwrap();
-            assert_eq!(*update::Update::key(&popped.unwrap().update), second);
+            assert_eq!(
+                *update::Update::key(&popped.into_evicted().unwrap().update),
+                second
+            );
             assert_eq!(clones.load(AtomicOrdering::Relaxed), 1);
             let (_, popped) = child
                 .pop_active(&db, Some(NonZeroUsize::MAX))
                 .await
                 .unwrap();
-            assert!(popped.is_none());
+            assert!(matches!(popped, Popped::Done));
             assert_eq!(clones.load(AtomicOrdering::Relaxed), 1);
             drop(parent);
             db.destroy().await.unwrap();

@@ -388,12 +388,13 @@ where
 
     /// Evict the next active update, skipping inactive operations.
     ///
-    /// `quota` limits inactive skips per call; `None` is unlimited. Returns `None` immediately
-    /// upon reaching the quota or the original tip, retaining the advanced floor for the next
-    /// call. New writes and reinserts are outside the scan. Write the returned update's key and
-    /// value back to preserve it. See [`any::batch::UnmerkleizedBatch::pop_active`].
+    /// `quota` limits inactive skips per call; `None` is unlimited. Returns
+    /// [`any::batch::Popped::QuotaReached`] upon reaching the quota and [`any::batch::Popped::Done`]
+    /// upon reaching the original tip, retaining the advanced floor for the next call. New writes
+    /// and reinserts are outside the scan. Write the evicted update's key and value back to
+    /// preserve it. See [`any::batch::UnmerkleizedBatch::pop_active`].
     ///
-    /// Calling this method selects manual floor advancement even when it returns `None`.
+    /// Calling this method selects manual floor advancement even when it evicts nothing.
     /// Merkleization performs no additional automatic moves; an empty final state sets the floor
     /// to the new commit location.
     ///
@@ -1383,7 +1384,7 @@ mod trait_impls {
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             quota: Option<NonZeroUsize>,
-        ) -> Result<(Self, Option<any::batch::ActiveEntry<F, Self::Update>>), Error<F>> {
+        ) -> Result<(Self, any::batch::Popped<F, Self::Update>), Error<F>> {
             Self::pop_active(self, db, quota).await
         }
 
@@ -1429,7 +1430,7 @@ mod trait_impls {
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             quota: Option<NonZeroUsize>,
-        ) -> Result<(Self, Option<any::batch::ActiveEntry<F, Self::Update>>), Error<F>> {
+        ) -> Result<(Self, any::batch::Popped<F, Self::Update>), Error<F>> {
             Self::pop_active(self, db, quota).await
         }
 

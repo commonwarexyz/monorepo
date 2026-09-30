@@ -33,10 +33,7 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
         quota: Option<NonZeroUsize>,
     ) -> impl Future<
         Output = Result<
-            (
-                Self,
-                Option<super::batch::ActiveEntry<Self::Family, Self::Update>>,
-            ),
+            (Self, super::batch::Popped<Self::Family, Self::Update>),
             Error<Self::Family>,
         >,
     >;

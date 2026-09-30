@@ -518,6 +518,7 @@ pub mod tests {
         merkle::{self, mmb, mmr, storage::Storage as _},
         qmdb::{
             any::{
+                batch::Popped,
                 test::{build, colliding_digest},
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
@@ -5044,9 +5045,12 @@ pub mod tests {
                 .pop_active(&db, NonZeroUsize::new(1))
                 .await
                 .unwrap();
-            assert!(initial.is_none(), "initial commit exhausts the quota");
+            assert!(
+                matches!(initial, Popped::QuotaReached),
+                "initial commit exhausts the quota"
+            );
             let (child, first) = child.pop_active(&db, None).await.unwrap();
-            let first = first.expect("oldest key should be evicted");
+            let first = first.into_evicted().expect("oldest key should be evicted");
             assert_eq!(*first.update.key(), keys[0]);
             assert_eq!(first.update.into_value(), val(0));
             let (child, middle) = child
@@ -5055,11 +5059,13 @@ pub mod tests {
                 .await
                 .unwrap();
             assert!(
-                middle.is_none(),
+                matches!(middle, Popped::QuotaReached),
                 "inactive ancestor update exhausts the quota"
             );
             let (child, second) = child.pop_active(&db, None).await.unwrap();
-            let second = second.expect("last base key should be evicted");
+            let second = second
+                .into_evicted()
+                .expect("last base key should be evicted");
             assert_eq!(*second.update.key(), keys[2]);
             assert_eq!(second.update.into_value(), val(2));
             assert_eq!(second.location, Location::new(*first.location + 2));
@@ -5133,11 +5139,11 @@ pub mod tests {
                 .unwrap();
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let (batch, evicted) = db.new_batch().pop_active(&db, None).await.unwrap();
-            let evicted = evicted.expect("one live key");
+            let evicted = evicted.into_evicted().expect("one live key");
             let update = evicted.update;
             assert_eq!((*update.key(), update.into_value()), (k, val(7)));
             let (batch, none) = batch.pop_active(&db, None).await.unwrap();
-            assert!(none.is_none());
+            assert!(matches!(none, Popped::Done));
             let batch = batch.merkleize(&db, None).await.unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&k).await.unwrap(), None);
@@ -5204,7 +5210,11 @@ pub mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                *popped.expect("surviving committed key").update.key(),
+                *popped
+                    .into_evicted()
+                    .expect("surviving committed key")
+                    .update
+                    .key(),
                 keys[9]
             );
             assert_eq!(log_reads() - before, 1);
@@ -5242,7 +5252,7 @@ pub mod tests {
             let db = db.commit().await.unwrap();
 
             let (batch, evicted) = db.new_batch().pop_active(&db, None).await.unwrap();
-            let evicted = evicted.expect("oldest committed key");
+            let evicted = evicted.into_evicted().expect("oldest committed key");
             let update = evicted.update;
             assert_eq!((*update.key(), update.into_value()), (keys[0], val(0)));
             let expected_floor = Location::new(*evicted.location + 1);
