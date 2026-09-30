@@ -12,7 +12,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt as _, mpsc, oneshot},
     sync::Mutex,
 };
-use std::{marker::PhantomData, num::NonZeroU64, sync::Arc};
+use std::{num::NonZeroU64, sync::Arc};
 
 /// The newest certified checkpoint, shared by every clone of [`Checkpoints`].
 type Latest<S, D> = Arc<Mutex<Option<Certificate<S, D>>>>;
@@ -29,8 +29,8 @@ type Subscriptions = Arc<Mutex<Vec<mpsc::Sender<Epoch>>>>;
 /// As aggregation's [`Automaton`], it answers each checkpoint with the digest of the executed block
 /// once the executor produces it. As aggregation's [`Reporter`], it keeps the newest certificate,
 /// keeps the executor from pruning the certified block or the inputs after it, and halts the
-/// executor once honest validators certified a different block. As aggregation's [`Monitor`], it
-/// reports the executor's single epoch.
+/// executor once a certificate or aggregation's divergence report names a block other than the
+/// executed one. As aggregation's [`Monitor`], it reports the executor's single epoch.
 ///
 /// [`aggregation`]: commonware_consensus::aggregation
 pub struct Checkpoints<S: Scheme, B: Block> {
@@ -38,7 +38,6 @@ pub struct Checkpoints<S: Scheme, B: Block> {
     interval: NonZeroU64,
     latest: Latest<S, B::Digest>,
     subscriptions: Subscriptions,
-    _scheme: PhantomData<S>,
 }
 
 impl<S: Scheme, B: Block> Clone for Checkpoints<S, B> {
@@ -48,7 +47,6 @@ impl<S: Scheme, B: Block> Clone for Checkpoints<S, B> {
             interval: self.interval,
             latest: Arc::clone(&self.latest),
             subscriptions: Arc::clone(&self.subscriptions),
-            _scheme: PhantomData,
         }
     }
 }
@@ -61,7 +59,6 @@ impl<S: Scheme, B: Block> Checkpoints<S, B> {
             interval,
             latest: Arc::new(Mutex::new(None)),
             subscriptions: Arc::default(),
-            _scheme: PhantomData,
         }
     }
 
@@ -140,16 +137,14 @@ impl<S: Scheme, B: Block> Reporter for Checkpoints<S, B> {
                         *latest = Some(certificate);
                     }
                 }
-                self.chain.certified(height, digest);
+                self.chain.certified(height, digest)
             }
-            Activity::Diverged(item) => {
-                if let Some(height) = self.height(item.height) {
-                    self.chain.diverged(height);
-                }
-            }
-            Activity::Ack(_) | Activity::Tip(_) => {}
+            Activity::Diverged(item) => match self.height(item.height) {
+                Some(height) => self.chain.diverged(height),
+                None => Feedback::Ok,
+            },
+            Activity::Ack(_) | Activity::Tip(_) => Feedback::Ok,
         }
-        Feedback::Ok
     }
 }
 
