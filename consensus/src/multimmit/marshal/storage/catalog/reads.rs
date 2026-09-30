@@ -88,6 +88,11 @@ where
     /// Floors are recorded at their L-QC's finalized ordinal, and their indices never decrease as
     /// ordinals grow, so a binary search over the retained ordinals finds it. Records past
     /// `through` belong to commits whose checkpoint is not published, so they are ignored.
+    ///
+    /// A crash can leave records past the published ordinal that reopen skips, and replay then
+    /// records the same floors again at higher ordinals, so once `through` passes both copies the
+    /// indices can repeat out of order. The search may then return an older floor than the newest
+    /// one at or below `at`, but never one above it, so a caller only resumes or prunes less.
     pub(super) async fn floor_record_at(
         &self,
         at: OutputIndex,
