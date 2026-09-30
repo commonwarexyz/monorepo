@@ -119,7 +119,7 @@ pub(crate) enum CheckpointError {
     /// A frontier is empty, out of chain order, behind, or conflicting.
     #[error("checkpoint frontier is not canonical: {0}")]
     Frontier(#[from] FrontierError),
-    /// The emitted frontier's heights sum past the output index space.
+    /// The emitted frontier's heights sum to the last output index or past it.
     #[error("checkpoint emitted frontier overflows the output index")]
     IndexOverflow,
     /// The floor index lies above the committed index.
@@ -314,8 +314,8 @@ impl<D: Digest> Checkpoint<D> {
         &self.emitted
     }
 
-    /// Returns the canonical index of the highest committed output, or the stream's genesis if
-    /// none has been committed.
+    /// Returns the canonical index of the highest committed output, or the floor index if no
+    /// output has been committed above the floor.
     pub(crate) const fn committed(&self) -> OutputIndex {
         self.committed
     }
@@ -672,7 +672,7 @@ impl<D: Digest> Read for CatalogState<D> {
 }
 
 /// Returns the canonical index of the last output emitted through `frontier`: the sum of its
-/// heights, or `None` if the sum overflows.
+/// heights, or `None` if the sum reaches `u64::MAX`, which leaves no index for the next output.
 ///
 /// Producer chains start at height zero and every output advances one chain by one height, so
 /// this counts the outputs the frontier covers.
@@ -680,6 +680,7 @@ pub(crate) fn frontier_index<D: Digest>(frontier: &[BlockRef<D>]) -> Option<Outp
     frontier
         .iter()
         .try_fold(0u64, |sum, tip| sum.checked_add(tip.height().get()))
+        .filter(|sum| *sum < u64::MAX)
         .map(OutputIndex::new)
 }
 
@@ -909,14 +910,17 @@ mod tests {
 
     #[test]
     fn emitted_sum_overflow_is_rejected() {
-        let mut parts = parts();
-        parts.ordered = vec![reference(0, 0, b"zero"), reference(1, 0, b"zero")];
-        parts.emitted = vec![reference(0, u64::MAX, b"max 0"), reference(1, 1, b"one")];
-        parts.floor_index = OutputIndex::zero();
-        assert_eq!(
-            TestCheckpoint::try_from(parts),
-            Err(CheckpointError::IndexOverflow)
-        );
+        // The second frontier ends at the last index, which leaves no index for the next output.
+        for top in [u64::MAX, u64::MAX - 1] {
+            let mut parts = parts();
+            parts.ordered = vec![reference(0, 0, b"zero"), reference(1, 0, b"zero")];
+            parts.emitted = vec![reference(0, top, b"max 0"), reference(1, 1, b"one")];
+            parts.floor_index = OutputIndex::zero();
+            assert_eq!(
+                TestCheckpoint::try_from(parts),
+                Err(CheckpointError::IndexOverflow)
+            );
+        }
     }
 
     #[test]
