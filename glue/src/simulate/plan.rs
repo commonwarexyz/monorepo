@@ -17,7 +17,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Clock, Runner as _, Spawner, Supervisor as _, deterministic};
 use commonware_utils::{NZUsize, TryCollect, channel::mpsc, ordered::Set, probability};
-use rand::seq::IndexedRandom;
+use rand::seq::{IndexedRandom, SliceRandom};
 use std::{
     collections::{BTreeSet, HashSet},
     ops::RangeInclusive,
@@ -664,8 +664,10 @@ impl<D: EngineDefinition> Plan<D> {
                 // Start delayed validators after enough progress
                 if !delayed_started && !delayed.is_empty() && self.delay_reached(&tracker) {
                     info!(target: "simulator", "starting delayed participants");
-                    for pk in &delayed {
-                        team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
+                    let mut order: Vec<_> = delayed.iter().cloned().collect();
+                    order.shuffle(&mut ctx);
+                    for pk in order {
+                        team.start_one(&ctx, &oracle, pk, monitor_tx.clone(), true)
                             .await;
                     }
                     delayed_started = true;
