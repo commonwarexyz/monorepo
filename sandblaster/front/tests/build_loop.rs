@@ -418,8 +418,9 @@ fn kept(f: &str, why: &str) -> LowerRecord {
 /// frequent first; a rewritten module says how many were rewritten.
 #[test]
 fn the_optimizer_summary_states_why_functions_were_kept() {
-    let generic = "a generic source function (its instances would need a type dispatch the lift reads; FRICTION)";
-    let reader = "a parameter with state other than one `&mut impl BufMut` of a function without a result (`&mut self`, `impl Buf`, a returned value beside the state): lowering of that state passing is not built yet";
+    // the reasons exactly as `driver::lowered` states them
+    let generic = "a generic function with buffer state (the dispatch call does not thread the state yet; FRICTION)";
+    let reader = "a parameter with state other than one `&mut impl Buf`, or one `&mut impl BufMut` of a function without a result: lowering of that state passing is not built yet";
     let low = LoweredModule {
         records: vec![
             kept("crate::v::a", generic),
@@ -436,16 +437,33 @@ fn the_optimizer_summary_states_why_functions_were_kept() {
     let s = driver::gates::lowering_note(&low);
     assert_eq!(
         s,
-        "optimized: none of the 8 source function(s) rewritten, the source is emitted as-is; source kept: 3 generic (lowering generic functions needs a per-type dispatch the lift reads; not built yet), 2 residual not 3% cheaper, 1 methods (receivers are not lowered yet), 1 not specialized (symbolic execution failed), 1 other state passing (`&mut self`, `impl Buf` readers, a result beside the state; lowering not built yet)"
+        "optimized: none of the 8 source function(s) rewritten, the source is emitted as-is; source kept: 3 generic with buffer state (the per-type dispatch does not thread the state yet), 2 residual not 3% cheaper, 1 methods (receivers are not lowered yet), 1 not specialized (symbolic execution failed), 1 other state passing (`&mut` or `dyn` parameters, two buffers, a `BufMut` writer with a result; lowering not built yet)"
     );
-    // twin: the old wording blamed every kept function on its residual
+    // twins: the old wording blamed every kept function on its residual,
+    // and later called generic and `Buf` reader lowering unbuilt (both are
+    // built: per-type dispatch, reader lowering)
     assert!(!s.contains("is cheaper and printable"));
+    assert!(!s.contains("needs a per-type dispatch the lift reads") && !s.contains("`impl Buf` readers"), "{s}");
+    // every generic refusal of `driver::lowered` has its class
+    assert_eq!(
+        driver::gates::kept_reason_class("a generic function without a by-value parameter of type `T` (the dispatch needs one as its receiver; FRICTION)"),
+        "generic without a by-value parameter of its type (the per-type dispatch needs one as its receiver)"
+    );
+    for why in ["a generic function whose parameter is not bounded by one trait", "a generic function with other than one type parameter bounded by one trait"] {
+        assert_eq!(driver::gates::kept_reason_class(why), "generic beyond one type parameter bounded by one trait (no per-type dispatch)");
+    }
+    // a generic function's failed instance is classed by the instance's reason, not per type
+    assert_eq!(
+        driver::gates::kept_reason_class("instance `u16`: the residual is not 3% cheaper than the source (portable model: 9 vs 9 milli-cycles)"),
+        "generic instance: residual not 3% cheaper"
+    );
+    assert_eq!(driver::gates::kept_reason_class("instance `u8`: not specialized: a loop"), "generic instance: not specialized (a loop)");
     // a rewritten module
     let mut low2 = low.clone();
-    low2.records.push(LowerRecord { function: "crate::v::z".into(), outcome: LowerOutcome::Lowered { rung: "Driven".into(), cost_source: 10, cost_residual: 5, helpers: vec![] } });
+    low2.records.push(LowerRecord { function: "crate::v::z".into(), outcome: LowerOutcome::Lowered { rung: "Driven".into(), cost_source: 10, cost_residual: 5, helpers: vec![], via: String::new() } });
     low2.compared = 2;
     let s2 = driver::gates::lowering_note(&low2);
-    assert!(s2.starts_with("optimized: 1 of 9 source function(s) rewritten to their residuals (lifted round trip: 2 definition(s) compared); source kept: 3 generic"), "{s2}");
+    assert!(s2.starts_with("optimized: 1 of 9 source function(s) rewritten to their residuals (lifted round trip: 2 definition(s) compared); source kept: 3 generic with buffer state"), "{s2}");
     // an unknown reason is shown up to its details
     assert_eq!(driver::gates::kept_reason_class("the source already uses the name `x`"), "the source already uses the name `x`");
     assert_eq!(driver::gates::kept_reason_class("the residual cannot be printed as Rust: a loop"), "residual not printable as Rust");

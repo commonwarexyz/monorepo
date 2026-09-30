@@ -173,7 +173,7 @@ fn unverified_instances_are_left_out_and_reported() {
 fn a_malformed_lift_attribute_is_an_error() {
     let r = root("#[lift(skip = \"u32\")]\nmod w;\npub use w::{Counter, Wrap};\n");
     let c = check(&[("r/mod.rs", &r), ("r/w.rs", W)]);
-    rejects(&c, DiagKind::Load, "expected `#[lift]`, `#[lift(host)]` or `#[lift(unverified");
+    rejects(&c, DiagKind::Load, "expected `#[lift]`, `#[lift(host)]`, `#[lift(opt)]` or `#[lift(unverified");
 }
 
 #[test]

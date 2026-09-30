@@ -800,8 +800,9 @@ fn run_gates(out: &elab::Output, krate: &crate::hir::Crate, c: &Checked, spec: &
 /// reason ([`kept_reason_class`]) and counted, most frequent first; the
 /// report's `lifted_optimizer` lists each function with its full reason.
 /// (It used to say "no residual … is cheaper and printable" whatever the
-/// reason, although most functions of a real module are never candidates:
-/// generic functions and `Buf` readers are not lowered yet.)
+/// reason, although many functions of a real module are never candidates:
+/// methods, other state passing, generic functions outside the per-type
+/// dispatch.)
 pub fn lowering_note(low: &super::lowered::LoweredModule) -> String {
     let n = low.records.len();
     let mut s = if low.lowered() == 0 {
@@ -829,12 +830,17 @@ pub fn lowering_note(low: &super::lowered::LoweredModule) -> String {
 
 /// The reason class of a kept function's reason (`driver::lowered`): the
 /// known reasons in a few words that still say what is missing, the
-/// optimizer's own reason for an unspecialized function, and any other
-/// reason up to its details (the first `: ` or ` (`).
+/// optimizer's own reason for an unspecialized function, a generic
+/// function's failed instance by the instance's reason, and any other
+/// reason up to its details (the first `: ` or ` (`). Generic functions
+/// over one sealed trait (per-type dispatch) and `impl Buf` readers are
+/// lowered; the classes name only what is still refused.
 pub fn kept_reason_class(why: &str) -> String {
     let known: &[(&str, &str)] = &[
-        ("a generic source function", "generic (lowering generic functions needs a per-type dispatch the lift reads; not built yet)"),
-        ("a parameter with state other than", "other state passing (`&mut self`, `impl Buf` readers, a result beside the state; lowering not built yet)"),
+        ("a generic function with buffer state", "generic with buffer state (the per-type dispatch does not thread the state yet)"),
+        ("a generic function without a by-value parameter", "generic without a by-value parameter of its type (the per-type dispatch needs one as its receiver)"),
+        ("a generic function", "generic beyond one type parameter bounded by one trait (no per-type dispatch)"),
+        ("a parameter with state other than", "other state passing (`&mut` or `dyn` parameters, two buffers, a `BufMut` writer with a result; lowering not built yet)"),
         ("a method", "methods (receivers are not lowered yet)"),
         ("the residual is not 3% cheaper", "residual not 3% cheaper"),
         ("the residual cannot be printed", "residual not printable as Rust"),
@@ -848,6 +854,11 @@ pub fn kept_reason_class(why: &str) -> String {
     };
     if let Some(r) = why.strip_prefix("not specialized: ") {
         return format!("not specialized ({})", head(r));
+    }
+    // a generic function's instance (`instance `u8`: <reason>`): by the
+    // instance's reason, not per type
+    if let Some(r) = why.strip_prefix("instance `").and_then(|r| r.split_once("`: ")).map(|(_, r)| r) {
+        return format!("generic instance: {}", kept_reason_class(r));
     }
     for (prefix, class) in known {
         if why.starts_with(prefix) {
