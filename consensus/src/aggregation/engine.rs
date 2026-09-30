@@ -223,7 +223,6 @@ where
             epoch: cfg.epoch,
             first: cfg.first,
             last: cfg.last,
-            window: cfg.window,
             write_buffer: cfg.journal_write_buffer,
             replay_buffer: cfg.journal_replay_buffer,
             heights_per_section: cfg.journal_heights_per_section,
@@ -468,7 +467,7 @@ where
                 self.fetch_recovery(position);
             }
         }
-        debug_assert!(self.pending.len() + self.confirmed.len() <= self.window as usize);
+        debug_assert!(self.pending.len() <= self.window as usize);
     }
 
     fn request_digest(&mut self, position: Height) -> Aborter {
