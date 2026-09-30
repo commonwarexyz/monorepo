@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/29/26): Payments continue in epoch $e+1$ while epoch $e$'s close is built, certified, and admitted, and each registration takes a prefix of an ordered inbox of deposits and onchain withdrawal requests. When $e$ is admitted, the settlement chain binds $e+1$ to $e$'s state root and liability and starts $e+1$'s deadlines. Each payment also signs where the payer's vector ended in the previous epoch, so a payment that misses the cut can be signed again in the next epoch without settling twice.*
+*Update (9/29/26): Payments continue in epoch $e+1$ while epoch $e$'s close is built, certified, and admitted. A payment that misses the cut can be signed again in $e+1$ without settling twice.*
 
 *Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 
