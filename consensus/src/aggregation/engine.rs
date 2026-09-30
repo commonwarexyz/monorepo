@@ -37,7 +37,8 @@ use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use std::{
     cmp::max,
-    collections::BTreeMap,
+    collections::{BTreeMap, btree_map::Entry},
+    mem,
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -447,18 +448,24 @@ impl<
             TipAck<P::Scheme, D>,
         >,
     ) -> Self {
-        // Entry must be `Pending::Unverified`, or return early
-        if !matches!(self.pending.get(&height), Some(Pending::Unverified(_))) {
-            debug!(%height, "digest height not pending");
-            return self;
-        };
-
         // Move the entry to `Pending::Verified`
-        let Some(Pending::Unverified(acks)) = self.pending.remove(&height) else {
-            panic!("Pending::Unverified entry not found");
+        let acks = match self.pending.entry(height) {
+            Entry::Occupied(mut entry) => match entry.get_mut() {
+                Pending::Unverified(acks) => {
+                    let acks = mem::take(acks);
+                    entry.insert(Pending::Verified(digest, BTreeMap::new()));
+                    acks
+                }
+                Pending::Verified(..) => {
+                    debug!(%height, "digest height not pending");
+                    return self;
+                }
+            },
+            Entry::Vacant(_) => {
+                debug!(%height, "digest height not pending");
+                return self;
+            }
         };
-        self.pending
-            .insert(height, Pending::Verified(digest, BTreeMap::new()));
 
         // Handle each `ack` as if it was received over the network. This inserts the values into
         // the new map, and may form a certificate if enough acks are present. Only process acks
