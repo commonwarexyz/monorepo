@@ -138,9 +138,9 @@ fn printer_faults_are_rejected_by_the_lifted_round_trip() {
 }
 
 /// What the lowering refuses, each kept as written with its reason: a
-/// generic function (FRICTION: its instances would need a type dispatch),
-/// a function with buffer state, a helper name the source already uses, a
-/// residual that is not cheaper.
+/// `BufMut` state beside a result, a helper name the source already uses, a
+/// residual that is not cheaper. (A generic function over a sealed trait is
+/// lowered through a per-type dispatch: `generic_functions_*` below.)
 #[test]
 fn what_is_not_lowered_keeps_its_source_text() {
     let extra = r#"
@@ -171,10 +171,10 @@ pub fn popcount_generic<T: Prim>(x: T) -> u32 {
     let bits = format!("{BITS}{extra}{state}");
     let r = root("rank_above, popcount_loop, low_byte, popcount_generic, put_counted");
     let low = lower(&[("r/mod.rs", &r), ("r/bits.rs", &bits)]);
-    kept(&low, "crate::bits::popcount_generic", "generic source function");
-    kept(&low, "crate::bits::put_counted", "a parameter with state other than one `&mut impl BufMut` of a function without a result");
+    assert!(matches!(outcome(&low, "crate::bits::popcount_generic"), LowerOutcome::Lowered { via, .. } if via.contains("per-type dispatch")), "{:?}", low.records);
+    kept(&low, "crate::bits::put_counted", "one `&mut impl BufMut` of a function without a result");
     kept(&low, "crate::bits::low_byte", "not 3% cheaper");
-    assert_eq!(low.lowered(), 2);
+    assert_eq!(low.lowered(), 3);
     // a source that already uses a helper's name
     let taken = format!("{BITS}\n/// Taken.\npub fn __sandblaster_opt_popcount_loop() -> u32 {{ 0 }}\n");
     let r = root("rank_above, popcount_loop, low_byte, __sandblaster_opt_popcount_loop");
@@ -517,5 +517,487 @@ fn buffer_printer_faults_are_rejected() {
         println!("{fault:?}: {:?}", low.records);
         kept(&low, "crate::bits::put_low3", "round trip");
         assert!(low.body.contains("    buf.put_u8(low3(x));\n    buf.put_u8(0xFF);"), "{fault:?}: {}", low.body);
+    }
+}
+
+/// Scratch probe (`#[ignore]`d): the optimizer and the lowering on a real
+/// lifted crate at `LIFT_OPT_ROOT` (with `SANDBLASTER_LOWER_PROBE=1`, every
+/// lifted function's residual cost and lowered text is printed).
+#[test]
+#[ignore]
+fn probe_real_root() {
+    let root = std::env::var("LIFT_OPT_ROOT").expect("LIFT_OPT_ROOT");
+    let c = driver::check(Path::new(&root), &sandblaster_front::loader::RealFs, &TargetInfo::aarch64_apple_darwin());
+    assert!(c.ok(), "{}", c.render());
+    let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: std::env::var_os("LIFT_OPT_EXEC_ONLY").is_some() };
+    let t = std::time::Instant::now();
+    let lows = if c.lifted.iter().any(|l| l.in_place) {
+        let (v, lows) = driver::stage::lower_in_place(&c, Path::new(&root), &opts, &OptOptions::default()).unwrap();
+        println!("verified: {:?}", v.stats());
+        lows
+    } else {
+        vec![driver::stage::lower_lifted(&c, Path::new(&root), &opts, &OptOptions::default()).unwrap().2]
+    };
+    println!("elapsed {:?}", t.elapsed());
+    for low in &lows {
+        println!("{}", low.json().render());
+        if let Ok(p) = std::env::var("LIFT_OPT_DUMP") {
+            let name = std::path::Path::new(&low.file).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(std::path::Path::new(&p).join(name), low.text()).unwrap();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// generic functions over a sealed trait: a per-type dispatch the lift reads
+// ---------------------------------------------------------------------
+
+/// A generic function over a sealed trait with three impl types; the
+/// root declares `u64` unverified.
+const GEN: &str = r#"//! Generic bit counting over a sealed trait.
+mod sealed {
+    /// The primitive types the counter takes.
+    pub trait Prim: Copy {
+        fn low(self) -> u8;
+    }
+    impl Prim for u16 {
+        fn low(self) -> u8 { self as u8 }
+    }
+    impl Prim for u32 {
+        fn low(self) -> u8 { self as u8 }
+    }
+    impl Prim for u64 {
+        fn low(self) -> u8 { self as u8 }
+    }
+}
+pub use sealed::Prim;
+
+/// Set bits of the low byte, one bit per iteration.
+pub fn popcount_low<T: Prim>(x: T) -> u32 {
+    let b = x.low();
+    let mut c: u32 = 0;
+    for i in 0..8u32 {
+        c = c.wrapping_add(((b >> i) & 1) as u32);
+    }
+    c
+}
+
+/// Set bits of the low byte of `x`, plus `k`.
+pub fn popcount_low_plus<T: Prim>(x: T, k: u32) -> u32 {
+    popcount_low(x).wrapping_add(k)
+}
+"#;
+
+fn gen_root() -> String {
+    "//! A lifted generic example.\n#![forbid(unsafe_code)]\n#[lift(unverified = \"u64\")]\nmod bits;\npub use bits::{popcount_low, popcount_low_plus};\n".to_string()
+}
+
+fn lower_gen(fault: Option<LowerFault>) -> LoweredModule {
+    let r = gen_root();
+    let files = [("r/mod.rs", r.as_str()), ("r/bits.rs", GEN)];
+    match fault {
+        None => lower(&files),
+        Some(f) => lower_faulty(&files, f),
+    }
+}
+
+/// Every verified instance (`u16`, `u32`) of a generic function has a
+/// cheaper residual: the function is lowered through the per-type dispatch
+/// — a sealed dispatch trait made a supertrait of `Prim`, implemented for
+/// every impl type (`u64`, declared unverified, calls a copy of the
+/// original generic code) —, read back by the lift and compared per
+/// instance. The emitted module compiles with rustc and agrees with the
+/// source on every `u16`, every `u32` low byte and sampled `u64`s.
+#[test]
+fn generic_functions_are_lowered_through_a_per_type_dispatch() {
+    let low = lower_gen(None);
+    println!("{}\n{:?}", low.body, low.records);
+    assert!(low.note.is_none(), "{:?}", low.note);
+    for f in ["crate::bits::popcount_low", "crate::bits::popcount_low_plus"] {
+        match outcome(&low, f) {
+            LowerOutcome::Lowered { via, .. } => assert!(via.contains("per-type dispatch `__sandblaster_dispatch_Prim` over u16, u32"), "{via}"),
+            other => panic!("`{f}`: {other:?}"),
+        }
+    }
+    let b = &low.body;
+    assert!(b.contains("pub trait Prim: Copy + __sandblaster_dispatch_Prim {"), "{b}");
+    assert!(b.contains("pub trait __sandblaster_dispatch_Prim: Sized {\n        fn __sandblaster_opt_popcount_low(self) -> u32;\n        fn __sandblaster_opt_popcount_low_plus(self, k: u32) -> u32;\n    }"), "{b}");
+    assert!(b.contains("pub fn popcount_low<T: Prim>(x: T) -> u32 {\n    x.__sandblaster_opt_popcount_low()\n}"), "{b}");
+    assert!(b.contains("pub fn popcount_low_plus<T: Prim>(x: T, k: u32) -> u32 {\n    x.__sandblaster_opt_popcount_low_plus(k)\n}"), "{b}");
+    assert!(b.contains("impl sealed::__sandblaster_dispatch_Prim for u16 {"), "{b}");
+    assert!(b.contains("__sandblaster_opt_popcount_low_for_u16(self)"), "{b}");
+    // the unverified instance keeps the original code
+    assert!(b.contains("impl sealed::__sandblaster_dispatch_Prim for u64 {"), "{b}");
+    assert!(b.contains("__sandblaster_orig_popcount_low::<u64>(self)"), "{b}");
+    assert!(b.contains("fn __sandblaster_orig_popcount_low<T: Prim>(x: T) -> u32 {\n    let b = x.low();"), "{b}");
+    assert!(!b.contains("__sandblaster_opt_popcount_low_for_u64"), "{b}");
+    let (_, body) = driver::lifted::split_docs(GEN);
+    let main = r#"
+fn main() {
+    let mut n = 0u64;
+    for x in 0..=u16::MAX {
+        assert_eq!(orig::popcount_low(x), opt::popcount_low(x));
+        assert_eq!(orig::popcount_low_plus(x, 7), opt::popcount_low_plus(x, 7));
+        n += 1;
+    }
+    let mut y: u64 = 0x9E37_79B9_7F4A_7C15;
+    for _ in 0..100_000 {
+        y ^= y << 13; y ^= y >> 7; y ^= y << 17;
+        assert_eq!(orig::popcount_low(y as u32), opt::popcount_low(y as u32));
+        assert_eq!(orig::popcount_low(y), opt::popcount_low(y));
+        assert_eq!(orig::popcount_low_plus(y, u32::MAX), opt::popcount_low_plus(y, u32::MAX));
+        n += 1;
+    }
+    println!("agree {n}");
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("sandblaster-lift-opt-gen-{}", std::process::id()));
+    let out = run_ab(&dir, body, &low.body, main);
+    assert!(out.contains("agree 165536"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Must-reject twins of the dispatch: two instance types calling each
+/// other's helper, an instance calling the original code instead of its
+/// checked residual, an impl type left out. The lifted round trip rejects
+/// each; the generic function keeps its source text.
+#[test]
+fn dispatch_faults_are_rejected() {
+    for fault in [LowerFault::SwapDispatch, LowerFault::DispatchToOrig, LowerFault::DropDispatchImpl] {
+        let low = lower_gen(Some(fault));
+        println!("{fault:?}: {:?} {:?}", low.note, low.records);
+        kept(&low, "crate::bits::popcount_low", "round trip");
+        assert!(low.body.contains("pub fn popcount_low<T: Prim>(x: T) -> u32 {\n    let b = x.low();"), "{fault:?}: {}", low.body);
+        assert!(!low.body.contains("__sandblaster_dispatch_Prim"), "{fault:?}: {}", low.body);
+    }
+}
+
+/// What the dispatch refuses (each keeps its source text): a generic
+/// function with buffer state (FRICTION: the dispatch call does not thread
+/// the state yet); and the all-or-nothing rule — an instance whose residual
+/// is not cheaper keeps every instance on the source. (A generic function
+/// without a by-value parameter of its type is refused by the source scan:
+/// the unit tests of `driver::lowered`.)
+#[test]
+fn what_the_dispatch_refuses() {
+    let extra = "\nuse bytes::BufMut;\n\n/// A generic writer.\npub fn put_low<T: Prim>(x: T, buf: &mut impl BufMut) {\n    buf.put_u8(x.low());\n}\n\n/// Already cheap at every instance.\npub fn low_byte<T: Prim>(x: T) -> u8 {\n    x.low()\n}\n";
+    let src = format!("{GEN}{extra}");
+    let r = gen_root().replace("popcount_low_plus}", "popcount_low_plus, put_low, low_byte}");
+    let low = lower(&[("r/mod.rs", &r), ("r/bits.rs", &src)]);
+    println!("{:?}", low.records);
+    kept(&low, "crate::bits::put_low", "a generic function with buffer state");
+    kept(&low, "crate::bits::low_byte", "instance `u16`: the residual is not 3% cheaper");
+    assert!(matches!(outcome(&low, "crate::bits::popcount_low"), LowerOutcome::Lowered { .. }));
+}
+
+// ---------------------------------------------------------------------
+// readers: `buf: &mut impl Buf` with a result, lowered to `try_get_u8`
+// ---------------------------------------------------------------------
+
+const RD: &str = r#"//! Buffer reads, the obvious way.
+use bytes::Buf;
+
+/// The low three bits, clamped to 7.
+fn low3(x: u8) -> u8 {
+    let y = x & 7;
+    if y > 7 { 7 } else { y }
+}
+
+/// One byte's low three bits, clamped to 7, or `None` at the end of the
+/// buffer.
+pub fn get_low3(buf: &mut impl Buf) -> Option<u8> {
+    match buf.try_get_u8() {
+        Ok(b) => {
+            let y = b & 7;
+            Some(if y > 7 { 7 } else { y })
+        }
+        Err(_) => None,
+    }
+}
+
+/// Two bytes' low three bits added (`None` when fewer are left).
+pub fn get_two(buf: &mut impl Buf) -> Option<u8> {
+    let a = match buf.try_get_u8() {
+        Ok(a) => low3(a),
+        Err(_) => return None,
+    };
+    let b = match buf.try_get_u8() {
+        Ok(b) => low3(b),
+        Err(_) => return None,
+    };
+    Some(a + b)
+}
+
+/// A byte as it is (nothing cheaper).
+pub fn get_raw(buf: &mut impl Buf) -> Option<u8> {
+    match buf.try_get_u8() {
+        Ok(b) => Some(b),
+        Err(_) => None,
+    }
+}
+"#;
+
+fn lower_rd(fault: Option<LowerFault>) -> LoweredModule {
+    let r = root("get_low3, get_two, get_raw");
+    let c = check_files(&[("r/mod.rs", &r), ("r/bits.rs", RD)]);
+    assert!(c.ok(), "{}", c.render());
+    let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: false };
+    let (_, _, low) = match fault {
+        None => driver::stage::lower_lifted(&c, Path::new("r/mod.rs"), &opts, &OptOptions::default()),
+        Some(f) => driver::stage::lower_lifted_with_fault(&c, Path::new("r/mod.rs"), &opts, &OptOptions::default(), f),
+    }
+    .unwrap();
+    low
+}
+
+/// A reader (`buf: &mut impl Buf` with a result): its residual — the
+/// callee's branch pruned, the buffer model's `try_get_u8` kept — is lowered
+/// as `try_get_u8()` calls on the original parameter with the result as
+/// the value, read back by the lift as the same state passing, and agrees
+/// with the source (rustc, every buffer of up to two bytes).
+#[test]
+fn readers_are_lowered_to_try_get_calls() {
+    let low = lower_rd(None);
+    println!("{}\n{:?}", low.body, low.records);
+    assert!(low.note.is_none(), "{:?}", low.note);
+    assert!(matches!(outcome(&low, "crate::bits::get_two"), LowerOutcome::Lowered { .. }), "{:?}", low.records);
+    kept(&low, "crate::bits::get_raw", "not 3% cheaper");
+    // OPEN (optimizer): the driven residual of `get_low3` does not
+    // elaborate (a `Result` arm binding typed as the error payload), so it
+    // keeps its source text: a sound fallback, recorded
+    kept(&low, "crate::bits::get_low3", "did not elaborate");
+    assert!(low.body.contains("pub fn get_two(buf: &mut impl Buf) -> Option<u8> {\n    __sandblaster_opt_get_two(buf)\n}"), "{}", low.body);
+    assert!(low.body.contains("l0_buf.try_get_u8();"), "{}", low.body);
+    let fix = |t: &str| t.replace("use bytes::Buf;", "use crate::bytes::Buf;");
+    let (_, body) = driver::lifted::split_docs(RD);
+    let main = r#"
+mod bytes {
+    pub struct TryGetError;
+    pub trait Buf {
+        fn try_get_u8(&mut self) -> Result<u8, TryGetError>;
+    }
+    impl Buf for &[u8] {
+        fn try_get_u8(&mut self) -> Result<u8, TryGetError> {
+            match self.split_first() {
+                Some((h, t)) => { *self = t; Ok(*h) }
+                None => Err(TryGetError),
+            }
+        }
+    }
+}
+fn main() {
+    let mut n = 0;
+    let mut bufs: Vec<Vec<u8>> = vec![vec![]];
+    for a in 0..=255u8 { bufs.push(vec![a]); for b in [0u8, 1, 7, 8, 200, 255] { bufs.push(vec![a, b]); bufs.push(vec![b, a, 9]); } }
+    for v in &bufs {
+        let (mut p, mut q) = (&v[..], &v[..]);
+        assert_eq!(orig::get_low3(&mut p), opt::get_low3(&mut q));
+        assert_eq!(p.len(), q.len());
+        let (mut p, mut q) = (&v[..], &v[..]);
+        assert_eq!(orig::get_two(&mut p), opt::get_two(&mut q));
+        assert_eq!(p.len(), q.len());
+        assert_eq!(orig::get_raw(&mut p), opt::get_raw(&mut q));
+        n += 1;
+    }
+    println!("agree {n}");
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("sandblaster-lift-opt-rd-{}", std::process::id()));
+    let out = run_ab(&dir, &fix(body), &fix(&low.body), main);
+    assert!(out.contains("agree"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Must-reject twins in reader mode: one more byte read, or the last
+/// read dropped. The lifted round trip rejects both; the reader keeps its
+/// source text.
+#[test]
+fn reader_faults_are_rejected() {
+    for fault in [LowerFault::ReadTwice, LowerFault::DropBufferCall] {
+        let low = lower_rd(Some(fault));
+        println!("{fault:?}: {:?}\n{}", low.records, low.body);
+        kept(&low, "crate::bits::get_two", "round trip");
+        assert!(low.body.contains("    let a = match buf.try_get_u8() {"), "{fault:?}: {}", low.body);
+    }
+}
+
+// ---------------------------------------------------------------------
+// `#[rewrite]` optimization lemmas and in-place modules
+// ---------------------------------------------------------------------
+
+const IP_BITS: &str = r#"//! Bit tests of a byte, the obvious way.
+
+/// Whether at most one bit of `x` is set.
+pub fn at_most_one_bit(x: u8) -> bool {
+    x.count_ones() <= 1
+}
+
+/// The number of set bits, plus one.
+pub fn ones_plus_one(x: u8) -> u32 {
+    x.count_ones() + 1
+}
+"#;
+
+const IP_OPT: &str = r#"//! Faster alternatives, each tied to a source function by a `#[rewrite]`
+//! lemma in PROOF.rs.
+
+/// `x` has at most one bit set: clearing its lowest set bit leaves zero.
+pub fn at_most_one_bit_fast(x: u8) -> bool {
+    x & x.wrapping_sub(1) == 0
+}
+
+/// Slower than the source (a multiply, a mask and a remainder).
+pub fn ones_plus_one_slow(x: u8) -> u32 {
+    let v = ((x as u64) * 0x0804_0201 >> 3) & 0x1111_1111;
+    (v % 15) as u32 + 1
+}
+"#;
+
+const IP_PROOF: &str = r#"//! Optimization lemmas (proven, so they need no human review).
+use sandblaster::prelude::*;
+use crate::bits::{at_most_one_bit, ones_plus_one};
+use crate::opt::{at_most_one_bit_fast, ones_plus_one_slow};
+
+/// The alternative is the source function (by the 256 cases).
+#[lemma]
+#[rewrite]
+fn at_most_one_bit_is_fast(x: u8) {
+    ensures(at_most_one_bit(x) == at_most_one_bit_fast(x));
+    by_cases(x, 0..=255);
+}
+
+/// Equal, but not cheaper.
+#[lemma]
+#[rewrite]
+fn ones_plus_one_is_slow(x: u8) {
+    ensures(ones_plus_one(x) == ones_plus_one_slow(x));
+    by_cases(x, 0..=255);
+}
+"#;
+
+fn ip_root(in_place: bool, extra: &str) -> String {
+    let decl = if in_place { "#[lift(in_place)]\n#[path = \"../../src/bits.rs\"]" } else { "#[lift]" };
+    format!("//! Bit tests, with optimization alternatives.\n#![forbid(unsafe_code)]\n\n{decl}\npub mod bits;\n\n#[lift(opt)]\nmod opt;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n{extra}\npub use bits::{{at_most_one_bit, ones_plus_one}};\n")
+}
+
+fn ip_files(in_place: bool, proof: &str, opt: &str) -> Vec<(String, String)> {
+    let root = ip_root(in_place, "");
+    let mut v = vec![
+        ("/host/sandblaster/bits/mod.rs".to_string(), root),
+        ("/host/sandblaster/bits/opt.rs".to_string(), opt.to_string()),
+        ("/host/sandblaster/bits/PROOF.rs".to_string(), proof.to_string()),
+    ];
+    if in_place {
+        v.push(("/host/src/lib.rs".into(), "//! A host crate.\nmod bits;\npub fn f(x: u8) -> bool { bits::at_most_one_bit(x) }\n".into()));
+        v.push(("/host/src/bits.rs".into(), IP_BITS.to_string()));
+    } else {
+        v.push(("/host/sandblaster/bits/bits.rs".into(), IP_BITS.to_string()));
+    }
+    v
+}
+
+fn lower_ip(in_place: bool, proof: &str, opt: &str, fault: Option<LowerFault>) -> Vec<LoweredModule> {
+    let files = ip_files(in_place, proof, opt);
+    let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+    let root = Path::new("/host/sandblaster/bits/mod.rs");
+    let c = driver::check(root, &fs, &TargetInfo::aarch64_apple_darwin());
+    assert!(c.ok(), "{}", c.render());
+    let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: false };
+    if in_place {
+        assert!(fault.is_none());
+        let (_, lows) = driver::stage::lower_in_place(&c, root, &opts, &OptOptions::default()).unwrap();
+        lows
+    } else {
+        let (_, _, low) = match fault {
+            None => driver::stage::lower_lifted(&c, root, &opts, &OptOptions::default()),
+            Some(f) => driver::stage::lower_lifted_with_fault(&c, root, &opts, &OptOptions::default(), f),
+        }
+        .unwrap();
+        vec![low]
+    }
+}
+
+/// A `#[rewrite]` lemma `f(x) == g(x)` with `g` an optimization
+/// alternative (`#[lift(opt)]`, host Rust over the original API): `g`'s own
+/// text replaces `f`'s body when it is cheaper, linked by the new
+/// kernel-checked `<f>::rewrite_equiv` and checked by the lifted round trip;
+/// an alternative that is not cheaper is not used. In place, the host's own
+/// file is lowered (the file rustc compiles stays as it is; the lowered
+/// copy is written beside the record). Both agree with the source on every
+/// byte (rustc).
+#[test]
+fn rewrite_lemmas_replace_source_functions_in_place_and_in_module_mode() {
+    for in_place in [true, false] {
+        let lows = lower_ip(in_place, IP_PROOF, IP_OPT, None);
+        assert_eq!(lows.len(), 1);
+        let low = &lows[0];
+        println!("in place {in_place}: {}\n{:?}", low.body, low.records);
+        assert!(low.note.is_none(), "{:?}", low.note);
+        match outcome(low, "crate::bits::at_most_one_bit") {
+            LowerOutcome::Lowered { rung, via, .. } => {
+                assert_eq!(rung, "Rewrite");
+                assert!(via.contains("`crate::proof::at_most_one_bit_is_fast`") && via.contains("crate::bits::at_most_one_bit::rewrite_equiv"), "{via}");
+            }
+            other => panic!("{other:?}"),
+        }
+        kept(low, "crate::bits::ones_plus_one", "is not 3% cheaper");
+        assert!(low.body.contains("pub fn at_most_one_bit(x: u8) -> bool {\n    __sandblaster_opt_at_most_one_bit_fast(x)\n}"), "{}", low.body);
+        assert!(low.body.contains("/// `x` has at most one bit set: clearing its lowest set bit leaves zero.\nfn __sandblaster_opt_at_most_one_bit_fast(x: u8) -> bool {\n    x & x.wrapping_sub(1) == 0\n}"), "{}", low.body);
+        assert!(!low.body.contains("ones_plus_one_slow"), "{}", low.body);
+        if in_place {
+            assert_eq!(low.file, "/host/src/bits.rs");
+        }
+        let (_, body) = driver::lifted::split_docs(IP_BITS);
+        let main = "fn main() {\n    for x in 0..=255u8 {\n        assert_eq!(orig::at_most_one_bit(x), opt::at_most_one_bit(x));\n        assert_eq!(orig::ones_plus_one(x), opt::ones_plus_one(x));\n    }\n    println!(\"agree\");\n}\n";
+        let dir = std::env::temp_dir().join(format!("sandblaster-lift-opt-rw-{}-{in_place}", std::process::id()));
+        let out = run_ab(&dir, body, &low.body, main);
+        assert!(out.contains("agree"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Must-reject twins of rewrites: a wrong copy of the alternative (the
+/// lifted round trip compares it with the verified alternative); a lemma
+/// with a precondition the source function does not have (the link's
+/// statement is not the lemma's: the kernel-checked link is refused); a
+/// `#[rewrite]` lemma whose right side is not an alternative (not used).
+#[test]
+fn rewrite_faults_are_rejected() {
+    let lows = lower_ip(false, IP_PROOF, IP_OPT, Some(LowerFault::WrongAlternative));
+    println!("{:?}", lows[0].records);
+    kept(&lows[0], "crate::bits::at_most_one_bit", "round trip");
+    assert!(lows[0].body.contains("pub fn at_most_one_bit(x: u8) -> bool {\n    x.count_ones() <= 1\n}"), "{}", lows[0].body);
+    // a precondition of the lemma only
+    let pre = IP_PROOF.replace("    ensures(at_most_one_bit(x) == at_most_one_bit_fast(x));\n    by_cases(x, 0..=255);", "    requires(x < 128u8);\n    ensures(at_most_one_bit(x) == at_most_one_bit_fast(x));\n    by_cases(x, 0..=255);");
+    let lows = lower_ip(false, &pre, IP_OPT, None);
+    println!("{:?}", lows[0].records);
+    kept(&lows[0], "crate::bits::at_most_one_bit", "do not have the same parameters and preconditions");
+    // the right side is a source function, not an alternative: the lemma
+    // is not used, and the residual (not cheaper) is not either
+    let not_alt = format!("{IP_PROOF}\n/// A rewrite to another source function.\n#[lemma]\n#[rewrite]\nfn ones_twice(x: u8) {{\n    ensures(ones_plus_one(x) == ones_plus_one(x));\n}}\n");
+    let lows = lower_ip(false, &not_alt, IP_OPT, None);
+    kept(&lows[0], "crate::bits::ones_plus_one", "not 3% cheaper");
+    assert!(lows[0].unused_rewrites.iter().any(|n| n.contains("`crate::proof::ones_twice` is not used") && n.contains("is not a function of a `#[lift(opt)]` module")), "{:?}", lows[0].unused_rewrites);
+    assert!(lows[0].json().render().contains("unused_rewrite_lemmas"));
+}
+
+/// `#[lift(opt)]` is lifted like any module and never emitted; combined
+/// with `host` or `in_place` it is refused (negative twins).
+#[test]
+fn the_opt_option_and_its_twins() {
+    let files = ip_files(false, IP_PROOF, IP_OPT);
+    let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+    let c = driver::check(Path::new("/host/sandblaster/bits/mod.rs"), &fs, &TargetInfo::aarch64_apple_darwin());
+    assert!(c.ok(), "{}", c.render());
+    assert!(c.lifted.iter().any(|l| l.opt && l.name == "opt"));
+    // the emitted module is the source, never the alternatives
+    assert_eq!(driver::lifted::emitted_module(&c.lifted).unwrap().map(|l| l.name.as_str()), Some("bits"));
+    for bad in ["#[lift(opt, host)]", "#[lift(opt, in_place)]"] {
+        let mut files = ip_files(false, IP_PROOF, IP_OPT);
+        files[0].1 = files[0].1.replace("#[lift(opt)]", bad);
+        let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+        let c = driver::check(Path::new("/host/sandblaster/bits/mod.rs"), &fs, &TargetInfo::aarch64_apple_darwin());
+        assert!(!c.ok() && c.render().contains("`opt` (optimization alternatives) cannot be combined"), "{bad}: {}", c.render());
     }
 }

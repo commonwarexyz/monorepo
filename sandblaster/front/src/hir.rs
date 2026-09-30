@@ -921,9 +921,11 @@ pub struct FnDef {
     pub law_proof: Option<LawProof>,
     /// For `#[proof]` items: the law they prove.
     pub proves: Option<ItemId>,
-    /// `#[rewrite]` on a law (an optimizer rewrite, later milestone, §4.5;
-    /// recorded only: it gives no assurance and the optimizer does not use
-    /// it yet).
+    /// `#[rewrite]` on a law or lemma (§4.5): on a lemma `f(x̄) == g(x̄)`
+    /// with `f` a lifted source function and `g` an optimization
+    /// alternative (`#[lift(opt)]`), the lowering may replace `f`'s body
+    /// by a call of `g` (`driver::lowered`, kernel-checked link); elsewhere
+    /// recorded only.
     pub rewrite: bool,
     /// `#[induction(x)]` on a lemma/proof/inline law: the parameter `x`
     /// (§4.4).

@@ -1063,7 +1063,9 @@ impl<'a> Checker<'a> {
             FnKind::Exec if lifted_mod => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern", "opaque"],
             FnKind::Exec => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern"],
             FnKind::Spec => &["spec", "requires", "decreases", "inline", "must_use", "example", "examples", "mirrors_impl", "assumption", "opaque"],
-            FnKind::Lemma => &["lemma", "decreases", "induction", "fuel_sufficient"],
+            // `#[rewrite]` on a lemma: an optimization lemma (`f(x̄) == g(x̄)`,
+            // `driver::lowered`); proven, so it needs no human review
+            FnKind::Lemma => &["lemma", "decreases", "induction", "fuel_sufficient", "rewrite"],
             FnKind::Law => &["law", "rewrite", "induction", "reduces_to", "definitional", "corollary"],
             FnKind::Proof => &["proof", "decreases", "induction"],
         };

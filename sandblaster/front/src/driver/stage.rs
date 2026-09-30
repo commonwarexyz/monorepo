@@ -549,6 +549,31 @@ pub fn lower_lifted_with_fault(c: &Checked, root: &std::path::Path, opts: &Verif
     lower_lifted_stage(c, root, opts, oopts, &|c, root, out, o, oopts, info| super::lowered::lower_lifted_with_fault(c, root, out, o, oopts, info, fault))
 }
 
+/// [`lower_lifted`] for a crate verified in place (`#[lift(in_place)]`):
+/// every in-place file lowered and round-tripped (DESIGN.md §2.1). Not a
+/// verdict: no §15 gate runs.
+pub fn lower_in_place(c: &Checked, root: &std::path::Path, opts: &VerifyOptions, oopts: &crate::opt::OptOptions) -> Result<(Verification, Vec<super::lowered::LoweredModule>), String> {
+    let krate = c.krate.as_ref().ok_or("front-end errors")?;
+    let exec_only = opts.exec_only;
+    elab::with_big_stack(|| {
+        let mut chain = opts.chain();
+        let mut out = elab::elaborate(krate, &mut chain, &opts.elab_options());
+        let v = Verification::of(&out, exec_only);
+        if !out.verified() && !exec_only {
+            let failed: Vec<String> = out.obligations.iter().filter(|o| !o.proven()).take(12).map(|o| format!("{} [{:?}] {}:{:?}: {:?}\n    goal: {}", o.def, o.kind, c.sm.path(o.span.file).display(), o.span.lo, o.status, o.goal.chars().take(1500).collect::<String>())).collect();
+            let defs: Vec<String> = out.defs.iter().filter(|d| !matches!(d.status, elab::DefStatus::Checked)).take(12).map(|d| format!("{}: {:?}", d.name, d.status)).collect();
+            let diags: Vec<String> = out.diags.list.iter().filter(|d| d.severity == Severity::Error).take(12).map(|d| d.render(&c.sm)).collect();
+            return Err(format!("the crate did not verify: {}\n{}\n{}\n{}", super::status_str(&v), failed.join("\n"), defs.join("\n"), diags.join("\n")));
+        }
+        let o = crate::opt::optimize(&mut out, krate, oopts);
+        if !o.errors.is_empty() {
+            return Err(format!("optimizer errors: {:?}", o.errors));
+        }
+        let low = super::lowered::lower_in_place(c, root, &mut out, &o, oopts);
+        Ok((v, low))
+    })
+}
+
 type LowerStep<'a> = dyn Fn(&Checked, &std::path::Path, &mut elab::Output, &crate::opt::Optimized, &crate::opt::OptOptions, &crate::lift::LiftedInfo) -> super::lowered::LoweredModule + Sync + 'a;
 
 fn lower_lifted_stage(c: &Checked, root: &std::path::Path, opts: &VerifyOptions, oopts: &crate::opt::OptOptions, step: &LowerStep<'_>) -> Result<(Verification, Vec<crate::opt::FnReport>, super::lowered::LoweredModule), String> {

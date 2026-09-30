@@ -254,6 +254,12 @@ pub struct CrateBuild {
     /// The verdict is the record of in-place lifted modules
     /// (`Emission::InPlace`).
     pub in_place: bool,
+    /// In-place lifted modules: every host file lowered by the optimizer
+    /// ([`super::lowered::lower_in_place`]; run once every proof checked,
+    /// after the §15 gates ran). rustc compiles the host's own files; the
+    /// lowered copies are written beside the record, marked with the
+    /// build's status.
+    pub lowered_in_place: Vec<super::lowered::LoweredModule>,
 }
 
 impl CrateBuild {
@@ -437,6 +443,7 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
         lowered: None,
         lifted_opt_warnings: vec![],
         in_place: false,
+        lowered_in_place: vec![],
     };
     let krate = match c.krate.as_ref() {
         Some(k) if c.ok() => k,
@@ -475,6 +482,34 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
         let surface_root = b.spec.computed_root;
         let target = surface.target.clone();
         b.surface = Some(surface);
+        // in place: the optimizer and the lowering of the host's files (the
+        // host compiles its own files; the lowered copies carry the build's
+        // status, `driver::in_place`)
+        if b.v.proofs_ok && lock != LockUse::Accepting && matches!(emission, Emission::InPlace { .. }) && c.lifted.iter().any(|l| l.in_place && !l.ghost) {
+            let t_opt = Instant::now();
+            let o = crate::opt::optimize(&mut out, krate, &oopts);
+            let optimizer_ms = t_opt.elapsed().as_millis();
+            resource_gate(&mut b.v);
+            if !b.v.proofs_ok {
+                return b;
+            }
+            if o.errors.is_empty() {
+                let t_low = Instant::now();
+                let mut lows = super::lowered::lower_in_place(c, std::path::Path::new(root_display), &mut out, &o, &oopts);
+                let lowering_ms = t_low.elapsed().as_millis();
+                for l in lows.iter_mut() {
+                    l.optimizer_ms = optimizer_ms;
+                    l.lowering_ms = lowering_ms;
+                }
+                resource_gate(&mut b.v);
+                if !b.v.proofs_ok {
+                    return b;
+                }
+                b.lowered_in_place = lows;
+            } else {
+                b.lifted_opt_warnings.extend(o.errors.iter().map(|e| format!("optimizer: {e}")));
+            }
+        }
         if !b.v.proofs_ok || !b.gates.passed() {
             return b;
         }
@@ -494,7 +529,7 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
                     return b;
                 }
             };
-            if let Some(other) = c.lifted.iter().find(|l| !l.ghost && !l.host && !l.in_place) {
+            if let Some(other) = c.lifted.iter().find(|l| !l.ghost && !l.host && !l.in_place && !l.opt) {
                 b.gates.chain.push(format!("lifted module `{}` is neither in place nor a host model: a crate verified in place emits no module", other.name));
                 return b;
             }
@@ -690,6 +725,13 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
     let status = b.status();
     b.report = render_report(c, &b.v, &b.law_audit, root_display, b.emit.as_ref(), Some(&b.spec), Some(&b.spec15), &status, Some(&b.gates));
     b.timing = timing_json_with(&b.v, b.emit.as_ref(), Some(&b.gates));
+    if !b.lowered_in_place.is_empty() {
+        let arr = crate::json::Json::Arr(b.lowered_in_place.iter().map(|l| l.json()).collect());
+        b.report = splice_json_field(&b.report, "lifted_optimizer", &arr.render());
+        let ms = b.lowered_in_place.first().map(|l| (l.optimizer_ms, l.lowering_ms)).unwrap_or_default();
+        b.timing = splice_json_field(&b.timing, "lifted_optimizer_ms", &ms.0.to_string());
+        b.timing = splice_json_field(&b.timing, "lifted_lowering_ms", &ms.1.to_string());
+    }
     if let Some(l) = &b.lowered {
         b.report = splice_json_field(&b.report, "lifted_optimizer", &l.json().render());
         b.timing = splice_json_field(&b.timing, "lifted_optimizer_ms", &l.optimizer_ms.to_string());

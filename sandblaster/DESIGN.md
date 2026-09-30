@@ -483,44 +483,96 @@ host/
 * **The optimizer on lifted modules** (`driver::lowered`, `crate::lower`).
   The optimizer is always on here too: it runs on the lifted meaning like on
   any crate (summaries, Σ2 loop summaries, facts from proven laws, the
-  aegraph) and every function gets its kernel-checked residual. A top-level,
-  non-generic source function — without state, or with one `buf: &mut impl
-  BufMut` and no result — whose residual is ≥ 3% cheaper under the portable
-  cost model is **rewritten in place**: its signature text stays, its body
-  becomes the call `{ __sandblaster_opt_f(params..) }`, and the residual (and
-  every optimizer helper it calls) is **lowered** — printed by
-  `crate::lower` (untrusted) as plain Rust in the source's dialect, a
-  `BufMut` state as `buf.put_u8(..)`/`buf.put_slice(..)` calls on the
-  original parameter, each state value used once and in order (the driver
-  keeps the buffer model's operations folded for this,
-  `drive::KEPT_LIFT_MODEL`) — into private helpers appended to the file. The
-  **lifted round trip** accepts a rewrite: the source plus, per rewritten
-  function, a copy `__sandblaster_check__f` with the same signature text and
-  the new body plus the helpers is read back by the same front end and lift
-  as the source, its new items are elaborated in generated mode against the
-  verified environment, and each helper must equal its residual in all
+  aegraph) and every function gets its kernel-checked residual. A source
+  function — top level, or an associated function of an impl, without a
+  receiver, with plain parameters and at most one buffer state (`buf: &mut
+  impl BufMut` without a result, or `buf: &mut impl Buf` with or without
+  one) — is **rewritten in place** when a replacement is ≥ 3% cheaper under
+  the portable cost model: its signature text stays, its body becomes the
+  call of the replacement, and the replacement is appended to the file as
+  private helpers. There are three kinds of replacement:
+  * **its residual**, **lowered** — printed by `crate::lower` (untrusted) as
+    plain Rust in the source's dialect: a `BufMut` state as
+    `buf.put_u8(..)`/`buf.put_slice(..)` calls on the original parameter, a
+    `Buf` state as `buf.try_get_u8()` calls with the result as the value,
+    each state value used once and in order (the driver keeps the buffer
+    model's operations folded for this, `drive::KEPT_LIFT_MODEL`);
+  * for a **generic function over one sealed trait** (`fn size<T:
+    UPrim>(value: T)`), one lowered residual per verified instance and a
+    **per-type dispatch the lift reads**: a sealed trait
+    `__sandblaster_dispatch_UPrim`, declared next to `UPrim` and made its
+    supertrait (so every `T: UPrim` has it), with one method per rewritten
+    function, implemented for every impl type of `UPrim` (the lift records
+    them, `LiftFacts::sealed_impls`): a verified instance calls its residual,
+    a type declared `#[lift(unverified = ..)]` calls a renamed copy of the
+    original generic code (`__sandblaster_orig_<f>`), so an unverified
+    instance keeps its original code. The body becomes the method call on
+    the by-value parameter of type `T`, which the lift reads, per instance,
+    as that impl's method. All verified instances must qualify, or none is
+    rewritten. (Not yet: a generic function with a buffer state, or without
+    a by-value parameter of its type — FRICTION, listed.)
+  * an **optimization alternative** named by a **`#[rewrite]` lemma**
+    `f(x̄) == g(x̄)` (proven like any lemma, so it needs no review — North
+    star principle 3): `g` is a function of a `#[lift(opt)]` module of the
+    DSL root, written by the agent in the host's dialect over the original
+    API (verified and lifted like any code, never emitted as a module), and
+    `g`'s own text — with the alternatives it calls, renamed, private — is
+    the replacement. The link is a new kernel-checked definition
+    `<f>::rewrite_equiv : Π x̄ (h̄ : Req_f). Eq(R, f x̄ h̄, g x̄ h̄)` whose
+    proof is the lemma applied to the binders: the kernel checks that the
+    lemma states exactly that (the alternative takes the source function's
+    parameters and preconditions). This is how a faster algorithm that no
+    optimizer derives (a closed form of a bit walk, a narrower search)
+    enters code that is verified as written. (`#[lift(opt)]` lifts its
+    module exactly like `#[lift]`; SEMANTICS.md §19 gets that sentence at
+    the next lock acceptance — the file is part of the lock's `semantics`
+    hash.)
+
+  The cost model prices the source as rustc compiles it: the buffer model's
+  operations as calls and the lift prelude's functions (`crate::__lift::*`:
+  signed shifts and negation, core's methods) as one operation, never their
+  model bodies (so a residual that only "improves" the model is not
+  emitted); a loop at its literal trip count, `decreases(.., max = N)` or 16
+  iterations, with its loop-carried chain on the critical path. The
+  **lifted round trip** accepts a rewrite: the source (with the dispatch
+  declarations) plus, per rewritten function, a copy
+  `__sandblaster_check__f` with the same signature text and the new body
+  plus the helpers and dispatch impls is read back by the same front end
+  and lift as the source, its new items are elaborated in generated mode
+  against the verified environment, every printed helper must equal its
+  residual and every copied alternative its verified definition in all
   relevant positions (`alpha_eq_relevant`, as §8.3, modulo only `let x = v;
-  x` ≡ `v`, the lift's reading of a last state update), the copy must have
-  the source function's type and be exactly the delegation `λ x̄. r_f x̄`.
-  The rewritten function in the emitted file is the copy's text under the
-  source name (token-identical signature tail and body, no self-reference),
-  so it means `r_f`, which the optimizer's kernel-checked link proves equal
-  to `f`. A function that fails keeps its source text (the rest is checked
-  again; a second failure lowers nothing), and with no cheaper printable
-  residual the file is the source as-is, so the optimizer never makes a
-  lifted module slower. The lowered text gets its meaning exactly like the
-  source, by the lift (SEMANTICS.md §19); nothing new is trusted: the
-  printer writes only what the lift already reads (suffixed literals, locals
-  `l<k>_<name>`, plain operators — a checked operator of the residual prints
-  as Rust's operator, which agrees with it because the residual's proof slot
-  shows it does not overflow —, `as` casts, builtin methods as method calls,
-  calls by name, constructors, `if`, `match`, `let`, blocks) plus the
-  semantics-free attributes `#[inline(always)]` and `#[allow(..)]`, and a
-  construct it gets wrong is a round-trip failure, never a different
-  program. Not built yet: lowering of the other state passing (`&mut self`,
-  `&mut impl Buf` readers, a result beside a state), of generic functions
-  (their instances need a per-type dispatch the lift can read), and of
-  residuals with loops or recursion.
+  x` ≡ `v`, the lift's reading of a last state update, and for readers the
+  reader normal form: a pure read — the buffer model's `try_get_u8` of a
+  pure read, or a field of one — bound by `let` is substituted, a tuple of
+  one is projected, and a constructor over pure reads is pushed into the
+  tails of a `let`/`match`; β, η for the one-constructor tuple and a pure
+  total term read once or twice), and every copy and dispatch method must
+  have the source function's type and be exactly the delegation `λ x̄. r x̄`
+  to its replacement (per instance; for a reader, the lift's
+  `let (s, r) = f(..); buf = s; (buf, r)` is the call by η). The rewritten
+  function in the emitted file is the copy's text under the source name
+  (token-identical signature tail and body, no self-reference), so it means
+  its replacement, which the kernel-checked link (`Link::Conversion`,
+  `r_f::equiv` or `<f>::rewrite_equiv`) proves equal to `f`. A function
+  that fails keeps its source text (the rest is checked again; a second
+  failure lowers nothing), and with no cheaper printable replacement the
+  file is the source as-is, so the optimizer never makes a lifted module
+  slower. The lowered text gets its meaning exactly like the source, by the
+  lift (SEMANTICS.md §19); nothing new is trusted: the printer writes only
+  what the lift already reads (suffixed literals, locals `l<k>_<name>`,
+  plain operators — a checked operator of the residual prints as Rust's
+  operator, which agrees with it because the residual's proof slot shows it
+  does not overflow —, `as` casts, builtin methods as method calls, calls by
+  name, constructors, `if`, `match`, `let`, blocks, the buffer calls, a
+  sealed trait and its impls) plus the semantics-free attributes
+  `#[inline(always)]`, `#[doc(hidden)]` and `#[allow(..)]`, and a construct
+  it gets wrong is a round-trip failure, never a different program. Not
+  built yet: lowering of `&mut self` state passing and of residuals with
+  loops or recursion (an alternative may have loops: its text is copied,
+  not printed — but loop helpers are not yet matched by the round trip, so
+  write alternatives loop-free), and the lift conformance check of the
+  alternatives' texts.
 * **In place.** When the verified code is the crate's own files (not a
   copy), a DSL root inside the crate lifts them by path (`#[lift(in_place,
   ..)] #[path = "../../src/x.rs"] mod x;`, SEMANTICS.md §19.5) and the
@@ -529,9 +581,14 @@ host/
   (`OUT_DIR/<name>-verified.txt`: verified items, preconditions host callers
   must meet, every item left out) instead of emitting a module. The order
   is the same as for an emitted lifted module — proofs, every §15.8 gate,
-  the lift conformance check of every in-place module, then the record
-  (the optimizer still runs, but rustc compiles the host's files as they
-  are, so no residual is lowered into them). **The conformance harness
+  the lift conformance check of every in-place module, then the record.
+  The optimizer runs once every proof checked and lowers each host file as
+  above; rustc compiles the host's files as they are, so the lowered copies
+  are written beside the record (`OUT_DIR/<name>-lowered__<path>`, with the
+  index `<name>-lowered.txt`), each headed by the build's status — a
+  preview under `compile_lifted_pending_gates`. How a host opts into
+  compiling the lowered copy of a verified file (a declaration change per
+  file, FRICTION) is not decided yet. **The conformance harness
   does not support in-place modules yet** (it compiles one lifted file on
   its own, and an in-place file names its host crate's other modules and
   dependencies), nor open traits at declared instances: the check fails

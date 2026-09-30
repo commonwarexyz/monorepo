@@ -42,7 +42,8 @@ pub const LIFTED_OPTIMIZED: &str = "VERIFIED + LIFTED + OPTIMIZED (module mode)"
 /// exec modules, an error for more than one that is not `#[lift(host)]` or
 /// for lifted exec modules that are all host models.
 pub fn emitted_module(lifted: &[LiftedInfo]) -> Result<Option<&LiftedInfo>, String> {
-    let exec: Vec<&LiftedInfo> = lifted.iter().filter(|l| !l.ghost).collect();
+    // optimization alternatives (`#[lift(opt)]`) are never emitted
+    let exec: Vec<&LiftedInfo> = lifted.iter().filter(|l| !l.ghost && !l.opt).collect();
     if exec.is_empty() {
         return Ok(None);
     }
@@ -170,8 +171,9 @@ pub fn module_code_with(source_text: &str, info: &LiftedInfo, facts: &LiftFacts,
                 h.source_display, h.module_file
             ));
             for r in &l.records {
-                if let super::lowered::LowerOutcome::Lowered { rung, cost_source, cost_residual, helpers } = &r.outcome {
-                    s.push_str(&format!("//   rewritten: `{}` (rung {rung}; portable cost {} -> {} milli-cycles; {})\n", r.function, cost_source, cost_residual, helpers.join(", ")));
+                if let super::lowered::LowerOutcome::Lowered { rung, cost_source, cost_residual, helpers, via } = &r.outcome {
+                    let via = if via.is_empty() { String::new() } else { format!("; {via}") };
+                    s.push_str(&format!("//   rewritten: `{}` (rung {rung}; portable cost {} -> {} milli-cycles; {}{via})\n", r.function, cost_source, cost_residual, helpers.join(", ")));
                 }
             }
         }
@@ -275,7 +277,7 @@ mod tests {
     use crate::span::FileId;
 
     fn info(name: &str, ghost: bool, host: bool) -> LiftedInfo {
-        LiftedInfo { name: name.into(), file: FileId::default(), ghost, host, unverified: vec![], in_place: false }
+        LiftedInfo { name: name.into(), file: FileId::default(), ghost, host, unverified: vec![], in_place: false, opt: false }
     }
 
     #[test]
