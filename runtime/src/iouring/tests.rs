@@ -5,7 +5,7 @@ use super::{
         driver::tests::fail_after_completion,
         operation::Operation,
         request::{RecvRequest, Request},
-        task::tests::live,
+        task::tests::AFTER_INSERT,
     },
     *,
 };
@@ -1645,7 +1645,7 @@ fn test_unpolled_task_disposal_is_contained() {
 #[test]
 fn test_self_woken_task_requeues_behind_queued_work() {
     // A task that wakes itself during its poll runs again only after the work
-    // already queued, and completed tasks leave the arena.
+    // already queued, and completed tasks leave the owned-task set.
     let order = Runner::new(config()).start(|context| async move {
         let order = Arc::new(Mutex::new(Vec::new()));
         let first = context.child("first").spawn({
@@ -1664,7 +1664,7 @@ fn test_self_woken_task_requeues_behind_queued_work() {
         second.await.unwrap();
 
         // Only the runner's service task is still registered.
-        assert_eq!(live(&Local::current().unwrap().borrow().tasks), 1);
+        assert_eq!(context.shared.owned.live(), 1);
         order.lock().clone()
     });
     assert_eq!(order, ["first", "second", "first again"]);
@@ -1699,7 +1699,8 @@ fn test_shutdown_cancels_tasks_before_destruction() {
     enum Placement {
         /// Registered locally but never polled.
         Local,
-        /// Published from another thread but not taken from the mailbox.
+        /// Registered from another thread, with its first token not taken
+        /// from the mailbox.
         Foreign,
         /// Polled once and suspended before shutdown.
         Pending,
@@ -1741,13 +1742,16 @@ fn test_shutdown_cancels_tasks_before_destruction() {
                         tree.clone(),
                     );
                     tree.register(handle.aborter().unwrap());
-                    let task = Task::new(future, context.origin.clone());
+                    let shared = context.shared.clone();
+                    let task = Task::new(future, &shared.owned, context.origin.clone());
                     if matches!(placement, Placement::Foreign) {
-                        thread::spawn(move || assert!(Tasks::register(task).is_ok()))
-                            .join()
-                            .unwrap();
+                        thread::spawn(move || {
+                            assert!(Tasks::register(&shared.owned, task).is_ok())
+                        })
+                        .join()
+                        .unwrap();
                     } else {
-                        assert!(Tasks::register(task).is_ok());
+                        assert!(Tasks::register(&shared.owned, task).is_ok());
                     }
 
                     handles.push(handle);
@@ -1777,6 +1781,191 @@ fn test_shutdown_cancels_tasks_before_destruction() {
             assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
         }
     }
+}
+
+#[test]
+fn test_foreign_spawn_joins_the_owned_set_before_its_worker_runs() {
+    Runner::new(config()).start(|context| async move {
+        // Only the runner's service task is registered.
+        assert_eq!(context.shared.owned.live(), 1);
+
+        // The root has not yielded, so the worker has not taken the first
+        // token from its mailbox, yet the set already retains the task.
+        let remote = context.child("foreign");
+        let handle = thread::spawn(move || remote.spawn(|_| async {}))
+            .join()
+            .unwrap();
+        assert_eq!(context.shared.owned.live(), 2);
+
+        // Completion on the worker removes it again.
+        handle.await.unwrap();
+        assert_eq!(context.shared.owned.live(), 1);
+    });
+}
+
+#[test]
+fn test_shutdown_between_registration_and_first_token_clears_the_task() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let polled = Arc::new(AtomicBool::new(false));
+    let payload = DropCount(drops.clone());
+    let future_polled = polled.clone();
+    let (release, released) = mpsc::channel::<()>();
+
+    let publisher = Runner::new(config()).start(|context| async move {
+        let (inserted, inserting) = oneshot::channel();
+        let publisher = thread::spawn(move || {
+            // Pause this thread's registration once the set holds the task,
+            // before its first token reaches the worker.
+            AFTER_INSERT.set(Some(Box::new(move || {
+                inserted.send(()).unwrap();
+                released.recv_timeout(TEST_TIMEOUT).unwrap();
+            })));
+            context.child("foreign").spawn(move |_| async move {
+                let _payload = payload;
+                future_polled.store(true, Ordering::Relaxed);
+            })
+        });
+
+        // Shut down while the publisher holds the only token.
+        inserting.await.unwrap();
+        publisher
+    });
+
+    // Teardown drained the set and dropped the future without polling it.
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert!(!polled.load(Ordering::Relaxed));
+
+    // The worker is gone, so delivery drops the token, and the handle is
+    // already closed.
+    release.send(()).unwrap();
+    let handle = publisher.join().unwrap();
+    assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert!(!polled.load(Ordering::Relaxed));
+}
+
+#[test]
+fn test_spawn_refused_by_the_closed_owned_set_is_disposed_on_its_caller() {
+    /// Record the thread that drops a future.
+    struct ThreadDrop(Arc<Mutex<Vec<thread::ThreadId>>>);
+
+    impl Drop for ThreadDrop {
+        fn drop(&mut self) {
+            self.0.lock().push(thread::current().id());
+        }
+    }
+
+    for foreign in [false, true] {
+        let drops = Arc::new(Mutex::new(Vec::new()));
+        Runner::new(config()).start(|context| {
+            let drops = drops.clone();
+            async move {
+                // Close the set as the worker does when it begins closing,
+                // leaving the origin open so the factory runs and only
+                // registration can refuse the task.
+                context.shared.owned.close();
+                let spawner = context.child("refused");
+                let spawn = move || {
+                    let payload = ThreadDrop(drops.clone());
+                    let handle = spawner.spawn(move |_| async move {
+                        let _payload = payload;
+                        pending::<()>().await;
+                    });
+
+                    // The caller disposed of the future before spawn returned.
+                    assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+                    assert_eq!(*drops.lock(), [thread::current().id()]);
+                };
+                if foreign {
+                    thread::spawn(spawn).join().unwrap();
+                } else {
+                    spawn();
+                }
+            }
+        });
+        assert_eq!(drops.lock().len(), 1, "foreign={foreign}");
+    }
+}
+
+#[test]
+fn test_teardown_drops_every_future_before_clearing_timers() {
+    /// Record whether the worker still holds timers when a future is dropped.
+    struct TimerCheck {
+        /// Futures dropped.
+        drops: Arc<AtomicUsize>,
+        /// Futures dropped while the worker's timer table was still open.
+        early: Arc<AtomicUsize>,
+    }
+
+    impl Drop for TimerCheck {
+        fn drop(&mut self) {
+            // The future's own sleep drops after this guard, so its timer is
+            // still registered unless teardown has already closed the table.
+            let local = Local::current().expect("future dropped off its worker");
+            if local.borrow_mut().timers.next_deadline().is_some() {
+                self.early.fetch_add(1, Ordering::Relaxed);
+            }
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    const TASKS: usize = 32;
+    let drops = Arc::new(AtomicUsize::new(0));
+    let early = Arc::new(AtomicUsize::new(0));
+    let idle = Runner::new(config()).start(|context| {
+        let (drops, early) = (drops.clone(), early.clone());
+        async move {
+            let mut started = Vec::new();
+            let mut wakes = Vec::new();
+            for index in 0..TASKS {
+                let (ready, ready_receiver) = oneshot::channel();
+                let (wake, woken) = oneshot::channel::<()>();
+                let guard = TimerCheck {
+                    drops: drops.clone(),
+                    early: early.clone(),
+                };
+                let spawner = context.child("pending");
+                let spawn = move || {
+                    spawner.spawn(move |context| async move {
+                        let mut sleep = Box::pin(context.sleep(Duration::from_secs(3600)));
+                        assert!(futures::poll!(&mut sleep).is_pending());
+                        let _guard = guard;
+                        ready.send(()).unwrap();
+                        let _ = woken.await;
+                        sleep.await;
+                    })
+                };
+
+                // Half the tasks are spawned from another thread.
+                if index % 2 == 0 {
+                    spawn();
+                } else {
+                    thread::spawn(spawn).join().unwrap();
+                }
+                started.push(ready_receiver);
+                wakes.push(wake);
+            }
+            for ready in started {
+                ready.await.unwrap();
+            }
+
+            // Wake half the tasks, whose tokens stay queued since the root
+            // returns without yielding. The rest stay idle, since their
+            // senders outlive the runner.
+            let (woken, idle): (Vec<_>, Vec<_>) = wakes
+                .into_iter()
+                .enumerate()
+                .partition(|(index, _)| index % 4 < 2);
+            for (_, wake) in woken {
+                wake.send(()).unwrap();
+            }
+            idle
+        }
+    });
+
+    assert_eq!(drops.load(Ordering::Relaxed), TASKS);
+    assert_eq!(early.load(Ordering::Relaxed), TASKS);
+    drop(idle);
 }
 
 #[test]
