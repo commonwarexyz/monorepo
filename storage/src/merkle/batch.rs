@@ -182,9 +182,8 @@ fn mark_dirty_subtree<F: Family>(
 pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     parent: Arc<MerkleizedBatch<F, D, S>>,
     appended: Vec<D>,
+    /// Until [`Self::merkleize`] hashes internal nodes, holds only overwritten parent leaves.
     overwrites: Overwrites<F, D>,
-    /// Leaves from the parent batch that this batch overwrites, recorded once each.
-    overwritten_leaves: Vec<Location<F>>,
     /// Internal nodes created by this batch, recorded once each and grouped by height.
     new_internal_nodes: Vec<Vec<Position<F>>>,
 }
@@ -196,7 +195,6 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             parent,
             appended: Vec::new(),
             overwrites: Overwrites::default(),
-            overwritten_leaves: Vec::new(),
             new_internal_nodes: Vec::new(),
         }
     }
@@ -260,16 +258,14 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
-    /// Overwrite a leaf. Record its location once if it exists in the parent batch.
-    fn write_leaf(&mut self, loc: Location<F>, pos: Position<F>, digest: D) {
-        let parent_size = self.parent.size();
-        if pos >= parent_size {
-            // Every ancestor of an appended leaf was created by this batch, so it is already in
-            // `new_internal_nodes`.
-            self.store_node(pos, digest);
-        } else if self.overwrites.insert(pos, digest).is_none() {
-            self.overwritten_leaves.push(loc);
-        }
+    /// Locations of the parent's leaves this batch overwrites.
+    fn overwritten_leaves(&self) -> Vec<Location<F>> {
+        self.overwrites
+            .keys()
+            .map(|&pos| {
+                Location::try_from(pos).expect("only leaves are overwritten before merkleize")
+            })
+            .collect()
     }
 
     /// Add a pre-computed leaf digest.
@@ -376,7 +372,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ) -> Result<Self, Error<F>> {
         let pos = self.validate_loc(loc)?;
         let digest = hasher.leaf_digest(pos, element);
-        self.write_leaf(loc, pos, digest);
+        self.store_node(pos, digest);
         Ok(self)
     }
 
@@ -384,7 +380,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     #[cfg(any(feature = "std", test))]
     pub fn update_leaf_digest(mut self, loc: Location<F>, digest: D) -> Result<Self, Error<F>> {
         let pos = self.validate_loc(loc)?;
-        self.write_leaf(loc, pos, digest);
+        self.store_node(pos, digest);
         Ok(self)
     }
 
@@ -397,7 +393,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
         for (loc, digest) in updates {
             let pos = Position::try_from(*loc).expect("validated above");
-            self.write_leaf(*loc, pos, *digest);
+            self.store_node(pos, *digest);
         }
         Ok(self)
     }
@@ -411,7 +407,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ) -> Arc<MerkleizedBatch<F, D, S>> {
         let levels = plan_hashes(
             self.parent.size(),
-            core::mem::take(&mut self.overwritten_leaves),
+            self.overwritten_leaves(),
             core::mem::take(&mut self.new_internal_nodes),
         );
         for (height, positions) in levels.iter().enumerate() {
@@ -1339,7 +1335,7 @@ mod tests {
                 batch = batch.add_leaf_digest(Sha256::fill(252));
                 expected.push(Sha256::fill(252));
                 // Only overwritten leaves from the parent batch are recorded, once each.
-                assert_eq!(batch.overwritten_leaves.len(), mask.count_ones() as usize);
+                assert_eq!(batch.overwrites.len(), mask.count_ones() as usize);
                 let batch = batch.merkleize(&base, &hasher);
 
                 let empty = Mem::<F, D>::new();
@@ -1413,7 +1409,7 @@ mod tests {
 
             let levels = plan_hashes(
                 batch.parent.size(),
-                batch.overwritten_leaves,
+                batch.overwritten_leaves(),
                 batch.new_internal_nodes,
             );
             let actual: Vec<_> = levels
