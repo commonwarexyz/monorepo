@@ -544,9 +544,7 @@ mod tests {
                     let root_p = db.root();
                     let floor = db.inactivity_floor_loc();
                     (db, _) = apply_append(db, U64::new(11), floor).await;
-                    db = Box::pin(drive_pending_syncs(&pending, db.sync()))
-                        .await
-                        .unwrap();
+                    db = drive_pending_syncs(&pending, db.sync()).await.unwrap();
                     let root_a = db.root();
                     assert_eq!(db.bounds().end, Location::new(3));
                     drop(db);

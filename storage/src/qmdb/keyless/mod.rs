@@ -423,6 +423,7 @@ where
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
     #[tracing::instrument(name = "qmdb.keyless.db.sync", level = "info", skip_all)]
+    #[boxed]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
