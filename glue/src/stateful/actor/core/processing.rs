@@ -20,7 +20,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, reschedule};
 use commonware_utils::{
     Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt,
 };
@@ -424,6 +424,8 @@ where
                     acknowledgement,
                     retry_mailbox,
                 }) => {
+                    // Let tasks woken by earlier messages run before this arm's synchronous work.
+                    reschedule().await;
                     // Redelivery still waits for durability but leaves active verifications running.
                     if self.processor.redelivered(block.as_ref()) {
                         durability.record_duplicate(block.height(), acknowledgement);
