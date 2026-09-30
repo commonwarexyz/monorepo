@@ -3,6 +3,7 @@ use crate::simplex::{
     scheme::Scheme,
     types::{Finalization, Notarization},
 };
+use bytes::Bytes;
 use commonware_cryptography::certificate::{Scheme as CertificateScheme, Scoped};
 use commonware_utils::channel::oneshot;
 
@@ -17,7 +18,7 @@ where
     Notarized {
         scoped: Scoped<S>,
         notarization: Notarization<S, V::Commitment>,
-        block: V::Block,
+        block: Bytes,
         response: oneshot::Sender<bool>,
     },
     Finalized {

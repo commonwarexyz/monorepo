@@ -1,4 +1,4 @@
-use crate::{Config, Scheme};
+use crate::{CodecConfig, Config, Scheme};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
@@ -279,12 +279,12 @@ fn prepare_data(mut data: impl bytes::Buf, k: usize) -> (Vec<u8>, usize) {
 /// Reed-Solomon implementation. Decode uses the same calculation to reject
 /// commitments that decode to the same payload with a non-canonical shard width.
 const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
-    let prefixed_len = u32::SIZE + data_len;
+    let prefixed_len = data_len.saturating_add(u32::SIZE);
     let mut shard_len = prefixed_len.div_ceil(k);
 
     // Ensure shard length is even, as required by the Reed-Solomon implementation.
     if !shard_len.is_multiple_of(2) {
-        shard_len += 1;
+        shard_len = shard_len.saturating_add(1);
     }
 
     shard_len
@@ -1223,6 +1223,15 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         )
     }
 
+    fn codec_config(config: &Config, maximum_data: usize) -> CodecConfig {
+        // Encoding rejects longer data, and the width grows with the data length, so the widest
+        // shard encodes the most data.
+        let data = maximum_data.min(u32::MAX as usize);
+        CodecConfig {
+            maximum_shard_size: canonical_shard_len(data, usize::from(config.minimum_shards.get())),
+        }
+    }
+
     fn check(
         config: &Config,
         commitment: &Self::Commitment,
@@ -1288,7 +1297,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 mod tests {
     use super::*;
     use bytes::Buf as _;
-    use commonware_codec::Encode;
+    use commonware_codec::{Decode as _, Encode};
     use commonware_cryptography::Sha256;
     use commonware_invariants::minifuzz;
     use commonware_parallel::{Rayon, Sequential};
@@ -2445,6 +2454,48 @@ mod tests {
         );
         assert!(matches!(result, Err(Error::Inconsistent)), "{result:?}");
         assert_eq!(cached_decoder_width(), tile);
+    }
+
+    /// The codec config for a data bound admits the widest shard that much data produces and
+    /// rejects the next width.
+    #[test]
+    fn test_codec_config_bounds_widest_shard() {
+        for (min, extra) in [(1u16, 1u16), (2, 2), (4, 6), (34, 66)] {
+            let config = Config {
+                minimum_shards: NZU16!(min),
+                extra_shards: NZU16!(extra),
+            };
+            for data_len in [0, 1, 2 * usize::from(min), 1000, 4099] {
+                // Encoding exactly the bound produces the widest admitted shard.
+                let cfg = RS::codec_config(&config, data_len);
+                let (_, chunks) =
+                    RS::encode(&config, vec![0; data_len].as_slice(), &STRATEGY).unwrap();
+                assert_eq!(chunks[0].shard.len(), cfg.maximum_shard_size);
+                assert!(
+                    Chunk::<<Sha256 as Hasher>::Digest>::decode_cfg(chunks[0].encode(), &cfg)
+                        .is_ok()
+                );
+
+                // Enough extra data to widen the shard is rejected.
+                let wider = (data_len..)
+                    .find(|&len| {
+                        canonical_shard_len(len, usize::from(min)) > cfg.maximum_shard_size
+                    })
+                    .unwrap();
+                let (_, chunks) =
+                    RS::encode(&config, vec![0; wider].as_slice(), &STRATEGY).unwrap();
+                assert!(
+                    Chunk::<<Sha256 as Hasher>::Digest>::decode_cfg(chunks[0].encode(), &cfg)
+                        .is_err()
+                );
+            }
+
+            // Encoding rejects data longer than a u32 can describe, so it does not widen the bound.
+            assert_eq!(
+                RS::codec_config(&config, usize::MAX).maximum_shard_size,
+                RS::codec_config(&config, u32::MAX as usize).maximum_shard_size
+            );
+        }
     }
 
     /// Shards of zero or odd width are rejected at admission, individually and in batches, so

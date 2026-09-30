@@ -1461,6 +1461,7 @@ where
     /// Handle a deliver message from the resolver. Block delivers are handled
     /// immediately. Finalized/Notarized delivers are parsed and structurally
     /// validated, then collected into `delivers` for batch certificate verification.
+    /// A notarized delivery's block is decoded only after its certificate verifies.
     async fn handle_deliver<Buf: Buffer<V>>(
         mut self: Box<Self>,
         message: ResolverDelivery<V>,
@@ -1650,30 +1651,15 @@ where
                     return self;
                 }
 
-                // Notarization alone does not prove the commitment encodes the block,
-                // so decoding must recompute it
-                let commitment = notarization.proposal.payload;
-                if !V::check_payload(scheme.as_ref(), commitment) {
-                    response.send_lossy(false);
-                    return self;
-                }
-                let block_cfg = V::block_cfg(
-                    &self.block_codec_config,
-                    ExpectedCommitment::Untrusted(commitment),
-                );
-                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
-                    response.send_lossy(false);
-                    return self;
-                };
-
-                if V::commitment(&block) != notarization.proposal.payload {
+                // The payload must be valid under the epoch's scheme.
+                if !V::check_payload(scheme.as_ref(), notarization.proposal.payload) {
                     response.send_lossy(false);
                     return self;
                 }
                 delivers.push(PendingVerification::Notarized {
                     scoped: Scoped::scheme(scheme),
                     notarization,
-                    block,
+                    block: value,
                     response,
                 });
             }
@@ -1785,10 +1771,25 @@ where
                     response,
                     ..
                 } => {
+                    // Notarization alone does not prove the commitment encodes the block,
+                    // so decoding must recompute it.
+                    let commitment = notarization.proposal.payload;
+                    let block_cfg = V::block_cfg(
+                        &self.block_codec_config,
+                        ExpectedCommitment::Untrusted(commitment),
+                    );
+                    let Ok(block) = V::Block::decode_cfg(block, &block_cfg) else {
+                        response.send_lossy(false);
+                        continue;
+                    };
+                    if V::commitment(&block) != commitment {
+                        response.send_lossy(false);
+                        continue;
+                    }
+
                     // Valid notarization received.
                     response.send_lossy(true);
                     let round = notarization.round();
-                    let commitment = notarization.proposal.payload;
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");
 

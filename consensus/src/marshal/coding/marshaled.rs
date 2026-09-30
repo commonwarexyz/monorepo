@@ -1145,8 +1145,6 @@ where
     fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
         // Coding variant does not support targeted forwarding;
         // peers reconstruct blocks from erasure-coded shards.
-        //
-        // TODO(#3389): Support checked data forwarding for PhasedScheme.
         let Plan::Propose { round } = plan else {
             return Feedback::Ok;
         };
