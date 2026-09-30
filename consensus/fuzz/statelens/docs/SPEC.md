@@ -388,7 +388,7 @@ prefixed with `statelens:`.
 | `lint` | `lint [PATH...]` | 0 clean, 3 problems |
 | `extract` | `extract [--agent A] [--registry R] KIND SOURCE...`, where `R` is `simplex` (default) or `marshal` | 0 done (including zero files), 1 usage, 2 agent failed, 3 lint problems |
 | `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, or a section that is not state-bearing, 2 no readable corpus root |
-| `clean` | `clean [--yes]`; prints what it would undo and acts only with `--yes` | 0 done or nothing to undo, 1 no `--yes` given |
+| `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing | 0 in every case; a preview is not a failure |
 | `campaign` | `campaign [--agent A] [--profile P] [--stop-after STEP]`, where `P` is `simplex` (default) or `marshal` | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
 
 `--stop-after` accepts `materialize`, `instrument` or `build`. It exists for

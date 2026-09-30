@@ -1246,8 +1246,13 @@ def cmd_clean(args):
     for path in restore:
         print(f"  restore  {path}")
     if not args.yes:
-        say("clean: nothing done; pass --yes to proceed")
-        return 1
+        # A preview is the default and is not a failure, so it exits 0: `just` would
+        # otherwise report the safe path as a broken recipe.
+        say(
+            f"clean: nothing done. Rerun as `just clean --yes` to delete {len(created)} "
+            f"file(s) and restore {len(restore) + len(roots)} path(s)"
+        )
+        return 0
     # Restore first: a failure then leaves every generated file in place, so the
     # checkout is still recoverable. Only pathspecs git can resolve are passed, because
     # one unknown pathspec aborts the whole checkout.
