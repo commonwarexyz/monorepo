@@ -341,9 +341,17 @@ The predecessor root prevents this. It fixes exactly what $e$ paid for the payer
 
 The operator countersigns only a predecessor root that matches its record of $e$. Validators check $e+1$ only after $e$ is admitted and read the root from $e$'s account rows, so the close for $e+1$ omits it. Receipts and challenges carry it so their signatures can be verified.
 
-When a request from $e$ arrives after the cut, the operator refuses it as stale and replies with the payer's final state in $e$. The payer obtains receipts up to that state and signs the remaining payments again in $e+1$ against its root. If the operator still includes a refused request in $e$, $e$ ends at a different root and no certified close for $e+1$ can carry the re-signed state, so at most one copy settles. A receipt for the re-signed state then proves a debit mismatch against $e+1$.
+When a request from $e$ arrives after the cut, the operator refuses it as stale and replies with the payer's final state in $e$. The payer obtains receipts up to that state and signs the remaining payments again in $e+1$ against its root. If the operator still includes a refused request, the payer's row in $e$ ends at a different root and validators reject the re-signed state. A receipt for that state proves a debit mismatch against $e+1$.
 
 The signature reaches back only one epoch. If the new request also misses $e+1$, the payer signs the payment again only after $e$ is admitted, which decides whether the original was paid.
+
+```{=html}
+<img class="clearing-benchmark-plot" src="/imgs/clearing-retry.svg" alt="Payer a's chain in epoch e reaches state n-1 with vector root P, then forks on how e's close ends a's row. If the close omits the late request r, a's row ends at P, and the retry r' in e+1, which signs predecessor root P, is paid in e+1. If the close includes r as state n with root P', r is paid in e, and validators reject r' because P' is not P. A receipt for r' then proves a debit mismatch. Each outcome pays once.">
+```
+
+::: {.image-caption}
+Figure 7: $r'$ signs predecessor root $P$, so it is valid only if $e$ ends at $P$. Either $e$ pays $r$ or $e+1$ pays $r'$, never both.
+:::
 
 ## Atomic Batches and Collecting Fees
 
@@ -358,7 +366,7 @@ The operator can price each transfer type or payer independently, including volu
 ```
 
 ::: {.image-caption}
-Figure 7: The fee shares the same signed payment root as the recipient payments. Recipient $b$ receives the countersigned payer state and an opening for its own entry.
+Figure 8: The fee shares the same signed payment root as the recipient payments. Recipient $b$ receives the countersigned payer state and an opening for its own entry.
 :::
 
 ## The Cost of Settlement
@@ -392,7 +400,7 @@ We benchmarked the Commonware Library's [reference implementation](https://githu
 The close descriptor is 192 B, and the commitment with its 100-validator certificate is 101 B.
 
 ::: {.image-caption}
-Figure 8: Means of three runs with no warmup. The validator timer covers validation, sealing, signing, and durable writes to the public and private QMDBs. It starts with an encoded dealing and the previous close's databases already open and durably stored. Setup and reopen checks are excluded. Sizes use decimal KB and MB.
+Figure 9: Means of three runs with no warmup. The validator timer covers validation, sealing, signing, and durable writes to the public and private QMDBs. It starts with an encoded dealing and the previous close's databases already open and durably stored. Setup and reopen checks are excluded. Sizes use decimal KB and MB.
 
 AWS c8a.4xlarge: 16 AMD EPYC vCPUs, 32 GiB RAM, and a 160 GiB gp3 EBS SSD (6,000 IOPS, 250 MiB/s, ext4). Votes wait for the filesystem to confirm durable writes to network-attached EBS. Validation and the three public databases share 16 workers, with two I/O workers. The shared cache is 1 GiB with 4 KiB pages. State/activity write buffers are 256 MiB, other write and replay buffers 8 MiB. Full state/activity sections occupy 2.1–2.3 GiB, Merkle blobs about 2 GiB. Fixtures fit in RAM. All fixtures use benchmark limits, since one million accounts exceed the account limit set at deployment.
 :::
@@ -404,7 +412,7 @@ Repeated payments between the same pairs reuse these settlement records, spreadi
 ```
 
 ::: {.image-caption}
-Figure 9: Every account repeatedly pays one unit to its next neighbor. More payments share the byte cost of the operator's dealing and the 100-validator committee's certificate. The right plot includes the 101-byte commitment and certificate. The 192-byte close descriptor is separate.
+Figure 10: Every account repeatedly pays one unit to its next neighbor. More payments share the byte cost of the operator's dealing and the 100-validator committee's certificate. The right plot includes the 101-byte commitment and certificate. The 192-byte close descriptor is separate.
 :::
 
 ### Proof Sizes and Verification
@@ -436,7 +444,7 @@ Complete challenges include the signed receipts and any required Merkle openings
 ```
 
 ::: {.image-caption}
-Figure 10: All measured challenges fit in 1.1 KB. An omitted payer is the absence case of debit mismatch.
+Figure 11: All measured challenges fit in 1.1 KB. An omitted payer is the absence case of debit mismatch.
 :::
 
 A payout proof shows that a withdrawal output is included under the current finalized root.
@@ -464,7 +472,7 @@ A payout proof shows that a withdrawal output is included under the current fina
 ```
 
 ::: {.image-caption}
-Figure 11: Each proof includes a 30-byte output and its MMR opening, measured at the middle payout. Verification starts from decoded inputs, with times averaged over 20 samples. The trusted root and transaction framing are separate.
+Figure 12: Each proof includes a 30-byte output and its MMR opening, measured at the middle payout. Verification starts from decoded inputs, with times averaged over 20 samples. The trusted root and transaction framing are separate.
 :::
 
 Balance proofs authenticate withdrawal requests and recovery claims. With one million live accounts, all three measured payloads are under 1 KB.
@@ -485,7 +493,7 @@ Balance proofs authenticate withdrawal requests and recovery claims. With one mi
 ```
 
 ::: {.image-caption}
-Figure 12: Current Ordered QMDB proofs after updating all one million balances. Recovery includes the account identity as well as its balance proof. The trusted root and transaction framing are separate.
+Figure 13: Current Ordered QMDB proofs after updating all one million balances. Recovery includes the account identity as well as its balance proof. The trusted root and transaction framing are separate.
 :::
 
 Adjust the workload and committee size below to estimate the operator's traffic.
@@ -498,7 +506,7 @@ Adjust the workload and committee size below to estimate the operator's traffic.
 ```
 
 ::: {.image-caption}
-Figure 13: Modeled operator dealing per validator, with total operator traffic in parentheses. The dotted line shows all live account records at 40 bytes each, before database overhead and retained evidence. Both axes are logarithmic. The model excludes the close descriptor, certificate, and transport framing.
+Figure 14: Modeled operator dealing per validator, with total operator traffic in parentheses. The dotted line shows all live account records at 40 bytes each, before database overhead and retained evidence. Both axes are logarithmic. The model excludes the close descriptor, certificate, and transport framing.
 
 Each sender signs one batch of unit payments. Recipients per account is averaged over all live accounts. Below an average of one, the first senders pay the last recipients in key order. Otherwise, every account pays its next neighbors cyclically. All accounts stay live, with no deposits or withdrawals. Estimates beyond the prototype's per-close limits extrapolate the same encoding.
 :::

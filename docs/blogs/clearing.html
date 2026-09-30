@@ -709,11 +709,9 @@ O’Grady</a></div>
         class="math inline">e</span>. The payer obtains receipts up to
         that state and signs the remaining payments again in <span
         class="math inline">e+1</span> against its root. If the operator
-        still includes a refused request in <span
-        class="math inline">e</span>, <span class="math inline">e</span>
-        ends at a different root and no certified close for <span
-        class="math inline">e+1</span> can carry the re-signed state, so
-        at most one copy settles. A receipt for the re-signed state then
+        still includes a refused request, the payer’s row in <span
+        class="math inline">e</span> ends at a different root and
+        validators reject the re-signed state. A receipt for that state
         proves a debit mismatch against <span
         class="math inline">e+1</span>.</p>
         <p>The signature reaches back only one epoch. If the new request
@@ -721,6 +719,17 @@ O’Grady</a></div>
         signs the payment again only after <span
         class="math inline">e</span> is admitted, which decides whether
         the original was paid.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-retry.svg" alt="Payer a's chain in epoch e reaches state n-1 with vector root P, then forks on how e's close ends a's row. If the close omits the late request r, a's row ends at P, and the retry r' in e+1, which signs predecessor root P, is paid in e+1. If the close includes r as state n with root P', r is paid in e, and validators reject r' because P' is not P. A receipt for r' then proves a debit mismatch. Each outcome pays once.">
+        <div class="image-caption">
+        <p>Figure 7: <span class="math inline">r&#39;</span> signs
+        predecessor root <span class="math inline">P</span>, so it is
+        valid only if <span class="math inline">e</span> ends at <span
+        class="math inline">P</span>. Either <span
+        class="math inline">e</span> pays <span
+        class="math inline">r</span> or <span
+        class="math inline">e+1</span> pays <span
+        class="math inline">r&#39;</span>, never both.</p>
+        </div>
         <h2 id="atomic-batches-and-collecting-fees">Atomic Batches and
         Collecting Fees</h2>
         <p>Because a payer can send an atomic batch of payments with one
@@ -741,7 +750,7 @@ O’Grady</a></div>
         protocol change.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="Payer a signs one batch paying 20 to b, 7 to c, and the operator's quoted fee of 2 to its designated fee recipient. The signed state binds the epoch, sequence 1, cumulative debit 29, payment root, and an empty predecessor root. Recipient b's receipt contains the operator-countersigned payer state and an opening for b's entry, with amount 20 and payment count 1.">
         <div class="image-caption">
-        <p>Figure 7: The fee shares the same signed payment root as the
+        <p>Figure 8: The fee shares the same signed payment root as the
         recipient payments. Recipient <span class="math inline">b</span>
         receives the countersigned payer state and an opening for its
         own entry.</p>
@@ -778,7 +787,7 @@ O’Grady</a></div>
         <p>The close descriptor is 192 B, and the commitment with its
         100-validator certificate is 101 B.</p>
         <div class="image-caption">
-        <p>Figure 8: Means of three runs with no warmup. The validator
+        <p>Figure 9: Means of three runs with no warmup. The validator
         timer covers validation, sealing, signing, and durable writes to
         the public and private QMDBs. It starts with an encoded dealing
         and the previous close’s databases already open and durably
@@ -800,7 +809,7 @@ O’Grady</a></div>
         payments.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two log-log plots show modeled bytes per payment as one million to one billion unit payments pass between fixed pairs. The left shows one validator's keyed update for four account counts, including growing cumulative counters. The right shows the 101-byte commitment and certificate.">
         <div class="image-caption">
-        <p>Figure 9: Every account repeatedly pays one unit to its next
+        <p>Figure 10: Every account repeatedly pays one unit to its next
         neighbor. More payments share the byte cost of the operator’s
         dealing and the 100-validator committee’s certificate. The right
         plot includes the 101-byte commitment and certificate. The
@@ -834,7 +843,7 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 10: All measured challenges fit in 1.1 KB. An omitted
+        <p>Figure 11: All measured challenges fit in 1.1 KB. An omitted
         payer is the absence case of debit mismatch.</p>
         </div>
         <p>A payout proof shows that a withdrawal output is included
@@ -859,7 +868,7 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 11: Each proof includes a 30-byte output and its MMR
+        <p>Figure 12: Each proof includes a 30-byte output and its MMR
         opening, measured at the middle payout. Verification starts from
         decoded inputs, with times averaged over 20 samples. The trusted
         root and transaction framing are separate.</p>
@@ -880,7 +889,7 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 12: Current Ordered QMDB proofs after updating all one
+        <p>Figure 13: Current Ordered QMDB proofs after updating all one
         million balances. Recovery includes the account identity as well
         as its balance proof. The trusted root and transaction framing
         are separate.</p>
@@ -892,7 +901,7 @@ O’Grady</a></div>
         </div>
         <script type="module" src="clearing.calculator.js"></script>
         <div class="image-caption">
-        <p>Figure 13: Modeled operator dealing per validator, with total
+        <p>Figure 14: Modeled operator dealing per validator, with total
         operator traffic in parentheses. The dotted line shows all live
         account records at 40 bytes each, before database overhead and
         retained evidence. Both axes are logarithmic. The model excludes
