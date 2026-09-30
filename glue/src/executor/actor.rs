@@ -28,7 +28,8 @@ use commonware_runtime::{
 use commonware_storage::{Context as StorageContext, translator::Translator};
 use commonware_utils::{
     Acknowledgement,
-    acknowledgement::{Exact, ExactWaiter},
+    acknowledgement::{Canceled, Exact, ExactWaiter},
+    channel::fallible::OneshotExt as _,
 };
 use futures::{FutureExt as _, future::BoxFuture};
 use rand_core::Rng;
@@ -49,12 +50,28 @@ pub struct Config<X, R, T: Translator, C> {
     /// The engine marshal's acknowledgement window: how many inputs it delivers before one is
     /// acknowledged.
     pub ack_window: NonZeroUsize,
-    /// The epoch of every input.
+    /// The epoch [`Checkpoints`](super::Checkpoints) reports to aggregation, whose validator set
+    /// certifies every checkpoint.
     pub epoch: Epoch,
     /// Storage of the executed chain.
     pub store: StoreConfig<T, C>,
     /// Capacity of the executor's mailbox.
     pub mailbox_size: NonZeroUsize,
+}
+
+/// Why an [`Executor`] halted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Halt {
+    /// Validators certified or signed a block other than the executed one at this height, so
+    /// the executed chain diverges from the one honest validators executed.
+    #[error("executed block at height {0} diverges from honest validators")]
+    Diverged(Height),
+    /// The consumer stopped accepting blocks.
+    #[error("consumer stopped accepting blocks")]
+    ConsumerClosed,
+    /// The consumer dropped a block without acknowledging it.
+    #[error("consumer dropped a block without acknowledging it")]
+    Unacknowledged,
 }
 
 /// The execution of one input.
@@ -78,6 +95,9 @@ struct Delivered<A> {
 
 /// Executes a finalized stream of inputs into a chain of blocks.
 ///
+/// Marshal must deliver every input after the applied one, once and in index order. The executor
+/// does not follow a floor installed on marshal.
+///
 /// See the [module documentation](super).
 pub struct Executor<E, X, L, R, T, A>
 where
@@ -94,7 +114,6 @@ where
     /// the executor starts.
     marshal: Option<L>,
     consumer: R,
-    epoch: Epoch,
     store: Store<E, T, X::Block>,
     /// Inputs from the engine's marshal, until it drops every [`Inbox`].
     inbox: Option<Receiver<Input<X::Input, A>>>,
@@ -191,7 +210,6 @@ where
             execute,
             marshal: None,
             consumer,
-            epoch,
             store,
             inbox: Some(inbox),
             mailbox,
@@ -215,10 +233,12 @@ where
 
     /// Starts the executor on `marshal`, the engine's marshal that reports to its [`Inbox`].
     ///
+    /// The handle resolves once the executor stops, or with why it halted.
+    ///
     /// # Panics
     ///
     /// Panics if `marshal`'s acknowledgement window is not the configured one.
-    pub fn start(mut self, marshal: L) -> Handle<()> {
+    pub fn start(mut self, marshal: L) -> Handle<Result<(), Halt>> {
         assert_eq!(
             marshal.ack_window(),
             self.chain.ack_window(),
@@ -228,7 +248,7 @@ where
         spawn_cell!(self.context, self.run())
     }
 
-    async fn run(mut self) {
+    async fn run(mut self) -> Result<(), Halt> {
         select_loop! {
             self.context,
             on_start => {
@@ -238,87 +258,85 @@ where
                 debug!("executor stopped");
             },
             input = next_input(&mut self.inbox) => match input {
-                Some(input) => self.admit(input),
+                Some(input) => self.admit(input).await,
                 None => self.inbox = None,
             },
             Some(message) = self.mailbox.recv() else break => {
-                if !self.handle(message).await {
-                    break;
-                }
+                self.handle(message).await?;
             },
             block = next_execution(&mut self.execution) => {
-                if !self.executed(block).await {
-                    break;
-                }
+                self.executed(block).await?;
             },
             applied = next_applied(&mut self.delivered) => {
-                if applied.is_err() || !self.applied().await {
-                    warn!("consumer dropped a block without acknowledging it");
-                    break;
+                if applied.is_err() {
+                    return Err(Halt::Unacknowledged);
                 }
+                self.applied().await?;
             },
         }
+        Ok(())
     }
 
-    /// Handles a request. Returns `false` if the executor must halt.
-    async fn handle(&mut self, message: Message<X::Block>) -> bool {
+    /// Handles a request.
+    async fn handle(&mut self, message: Message<X::Block>) -> Result<(), Halt> {
         match message {
             Message::Block { height, response } => {
-                let _ = response.send(self.block(height).await);
+                response.send_lossy(self.block(height).await);
             }
             Message::Subscribe { height, subscriber } => self.subscribe(height, subscriber).await,
             Message::Prune { below } => self.prune(below).await,
             Message::Certified { height, digest } => return self.certified(height, digest).await,
             Message::Diverged { height } => {
-                error!(%height, "executed block diverges from the one honest validators certified");
-                return false;
+                error!(%height, "executed block diverges from the one honest validators signed");
+                return Err(Halt::Diverged(height));
             }
         }
-        true
+        Ok(())
     }
 
     /// Records that a checkpoint certified `digest` as the block at `height`, checking it against
-    /// the executed chain now or once that block executes. Returns `false` if the executed chain
-    /// diverges from it.
+    /// the executed chain now or once that block executes.
     async fn certified(
         &mut self,
         height: Height,
         digest: <X::Block as Digestible>::Digest,
-    ) -> bool {
+    ) -> Result<(), Halt> {
         let newest = self
             .certified
             .map(|(certified, _)| certified)
             .max(self.checkpoint);
         if newest.is_some_and(|newest| newest >= height) {
-            return true;
+            return Ok(());
         }
         let executed = self.line.back().expect("line holds the applied block");
         if height > executed.height() {
             self.certified = Some((height, digest));
-            return true;
+            return Ok(());
         }
-        // Nothing is pruned past the newest checkpoint, so a newer one's block is retained.
-        let block = self
-            .block(height)
-            .await
-            .expect("a block above the newest checkpoint is retained");
+        // Pruning never passes a checkpoint this executor verified, so a block that is no longer
+        // retained is covered by a newer one. Aggregation replays such certificates on restart,
+        // before the newest checkpoint is verified again.
+        let Some(block) = self.block(height).await else {
+            debug!(%height, "certified block is no longer retained");
+            return Ok(());
+        };
         self.matches_certified(height, &block, digest)
     }
 
     /// Checks `block`, executed at `height`, against the digest a checkpoint certified there,
-    /// making it the newest checkpoint if they match. Returns `false` if they differ.
+    /// making it the newest checkpoint if they match.
     fn matches_certified(
         &mut self,
         height: Height,
         block: &X::Block,
         digest: <X::Block as Digestible>::Digest,
-    ) -> bool {
+    ) -> Result<(), Halt> {
         if block.digest() != digest {
             error!(%height, "executed block diverges from the one honest validators certified");
-            return false;
+            return Err(Halt::Diverged(height));
         }
         self.checkpoint = Some(height);
-        true
+        Ok(())
     }
 
     /// Calls `subscriber` with the block at `height` once it is executed, or drops it if that
@@ -339,9 +357,19 @@ where
     }
 
     /// Queues an input for execution, or acknowledges one the consumer already applied.
-    fn admit(&mut self, input: Finalized<X::Input, A>) {
+    async fn admit(&mut self, input: Finalized<X::Input, A>) {
         let index = Height::new(input.index.get());
         if index <= self.store.applied() {
+            // An applied block is durable, so a retained one must have executed this input.
+            if !index.is_zero()
+                && let Some(block) = self.store.get(index).await
+            {
+                assert_eq!(
+                    block.input(),
+                    Some(input.block.digest()),
+                    "marshal redelivered an input other than the one executed"
+                );
+            }
             input.acknowledgement.acknowledge();
             return;
         }
@@ -363,7 +391,6 @@ where
         };
         let parent = Arc::clone(self.line.back().expect("line holds the applied block"));
         let context = Context {
-            epoch: self.epoch,
             height: parent.height().next(),
             input: input.block.digest(),
         };
@@ -373,22 +400,21 @@ where
             [parent],
             self.ancestor_fetch_duration.clone(),
         );
-        let mut execute = self.execute.clone();
+        let execute = self.execute.clone();
         let runtime = self.context.child("execute");
         let block = input.block;
         self.execution = Some(Execution {
             height: context.height,
             input: context.input,
             acknowledgement: input.acknowledgement,
-            block: async move { execute.execute((runtime, context), ancestry, block).await }
-                .boxed(),
+            block: execute.execute((runtime, context), ancestry, block).boxed(),
             timer: self.execution_duration.timer(self.context.as_ref()),
         });
     }
 
-    /// Archives and delivers a block the application executed. Returns whether the consumer still
-    /// accepts blocks.
-    async fn executed(&mut self, block: X::Block) -> bool {
+    /// Archives and delivers a block the application executed, unless it diverges from a
+    /// certified checkpoint or the consumer stopped.
+    async fn executed(&mut self, block: X::Block) -> Result<(), Halt> {
         let Execution {
             height,
             input,
@@ -414,33 +440,23 @@ where
             "executed block has the wrong input"
         );
 
-        // A block archived before a crash must be the one execution produces again.
-        if self
-            .store
-            .executed()
-            .is_some_and(|executed| height <= executed)
-        {
-            let archived = self
-                .store
-                .get(height)
-                .await
-                .expect("archived block above the applied cursor is missing");
-            assert_eq!(
+        // A block archived before a crash must be the one execution produces again. A crash may
+        // lose any unsynced block, not only a suffix, so each height is checked on its own.
+        match self.store.get(height).await {
+            Some(archived) => assert_eq!(
                 archived.digest(),
                 block.digest(),
                 "execution is not deterministic"
-            );
-        } else {
-            self.store.put(&block).await;
+            ),
+            None => self.store.put(&block).await,
         }
         let _ = self.executed_height.try_set(height.get());
 
         if let Some((_, digest)) = self
             .certified
             .take_if(|(certified, _)| *certified == height)
-            && !self.matches_certified(height, &block, digest)
         {
-            return false;
+            self.matches_certified(height, &block, digest)?;
         }
 
         let block = Arc::new(block);
@@ -461,16 +477,16 @@ where
         };
         if self.consumer.report(delivery) == Feedback::Closed {
             warn!("consumer stopped accepting blocks");
-            return false;
+            return Err(Halt::ConsumerClosed);
         }
-        true
+        Ok(())
     }
 
     /// Makes the oldest delivered block, which the consumer applied, durable along with every
     /// contiguous block it has also applied, then acknowledges their inputs to marshal.
     ///
-    /// Returns `false` if the consumer dropped one of those blocks without acknowledging it.
-    async fn applied(&mut self) -> bool {
+    /// Halts if the consumer dropped one of those blocks without acknowledging it.
+    async fn applied(&mut self) -> Result<(), Halt> {
         let oldest = self
             .delivered
             .pop_front()
@@ -480,7 +496,7 @@ where
         while let Some(next) = self.delivered.front_mut() {
             match (&mut next.applied).now_or_never() {
                 Some(Ok(())) => {}
-                Some(Err(_)) => return false,
+                Some(Err(_)) => return Err(Halt::Unacknowledged),
                 None => break,
             }
             let next = self
@@ -502,7 +518,7 @@ where
         for acknowledgement in released {
             acknowledgement.acknowledge();
         }
-        true
+        Ok(())
     }
 
     /// Returns the executed block at `height`, if retained.
@@ -541,9 +557,11 @@ where
             .marshal
             .clone()
             .expect("a running executor has a marshal");
-        self.context
-            .child("prune")
-            .spawn(move |_| async move { marshal.prune(OutputIndex::new(below.get())).await });
+        self.context.child("prune").spawn(move |_| async move {
+            if let Err(error) = marshal.prune(OutputIndex::new(below.get())).await {
+                warn!(%error, %below, "marshal did not prune");
+            }
+        });
     }
 }
 
@@ -568,9 +586,7 @@ where
 }
 
 /// Waits for the consumer to acknowledge the oldest delivered block, if any.
-async fn next_applied<A>(
-    delivered: &mut VecDeque<Delivered<A>>,
-) -> Result<(), commonware_utils::acknowledgement::Canceled> {
+async fn next_applied<A>(delivered: &mut VecDeque<Delivered<A>>) -> Result<(), Canceled> {
     match delivered.front_mut() {
         Some(delivered) => (&mut delivered.applied).await,
         None => future::pending().await,

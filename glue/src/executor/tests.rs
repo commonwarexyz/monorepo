@@ -3,15 +3,17 @@
 use super::*;
 use bytes::BufMut;
 use commonware_actor::Feedback;
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Buf, Encode as _, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
+};
 use commonware_consensus::{
-    Automaton as _, Heightable, Monitor as _, Reporter as _,
+    Automaton as _, Heightable, Monitor as _, Reporter,
     aggregation::{
         scheme::ed25519,
         types::{Ack, Activity, Certificate, Item},
     },
     marshal::{Finalized, Ledger},
-    types::OutputIndex,
+    types::{Epoch, OutputIndex},
 };
 use commonware_cryptography::{
     Digest as _, Hasher as _, Sha256, certificate::mocks::Fixture, sha256::Digest,
@@ -24,11 +26,12 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{
     Acknowledgement as _, NZU16, NZU64, NZUsize,
     acknowledgement::{Exact, ExactWaiter},
+    channel::mpsc::error::TryRecvError,
     non_empty,
     sync::Mutex,
 };
 use futures::{FutureExt as _, StreamExt as _};
-use std::{num::NonZeroUsize, time::Duration};
+use std::{convert::Infallible, num::NonZeroUsize, time::Duration};
 
 /// A finalized input: an amount to add.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,7 +132,7 @@ impl Digestible for Total {
     type Digest = Digest;
 
     fn digest(&self) -> Digest {
-        Sha256::hash(&[b"total", &commonware_codec::Encode::encode(self)])
+        Sha256::hash(&[b"total", &self.encode()])
     }
 }
 
@@ -180,7 +183,7 @@ impl Execute<deterministic::Context> for Adder {
     }
 
     async fn execute(
-        &mut self,
+        self,
         (_, context): (deterministic::Context, Context<Digest>),
         ancestry: impl Ancestry<Total>,
         input: Arc<Input>,
@@ -207,9 +210,11 @@ struct Marshal {
 
 impl Ledger for Marshal {
     type Block = Input;
+    type Error = Infallible;
 
-    async fn prune(&self, below: OutputIndex) {
+    async fn prune(&self, below: OutputIndex) -> Result<(), Infallible> {
         self.pruned.lock().push(below);
+        Ok(())
     }
 
     fn ack_window(&self) -> NonZeroUsize {
@@ -228,6 +233,8 @@ struct Delivery {
 #[derive(Clone, Default)]
 struct Consumer {
     delivered: Arc<Mutex<Vec<Delivery>>>,
+    /// Whether the consumer stopped accepting blocks.
+    closed: Arc<Mutex<bool>>,
 }
 
 impl Consumer {
@@ -257,8 +264,8 @@ impl Consumer {
         Arc::clone(&delivery.block)
     }
 
-    /// Applies the newest delivery of the block at `height`.
-    fn apply(&self, height: u64) {
+    /// Takes the acknowledgement of the newest delivery of the block at `height`.
+    fn take(&self, height: u64) -> Exact {
         let mut delivered = self.delivered.lock();
         let delivery = delivered
             .iter_mut()
@@ -269,14 +276,21 @@ impl Consumer {
             .acknowledgement
             .take()
             .expect("block is not applied yet")
-            .acknowledge();
+    }
+
+    /// Applies the newest delivery of the block at `height`.
+    fn apply(&self, height: u64) {
+        self.take(height).acknowledge();
     }
 }
 
-impl commonware_consensus::Reporter for Consumer {
+impl Reporter for Consumer {
     type Activity = Finalized<Total>;
 
     fn report(&mut self, finalized: Finalized<Total>) -> Feedback {
+        if *self.closed.lock() {
+            return Feedback::Closed;
+        }
         assert_eq!(finalized.index.get(), finalized.block.height.get());
         self.delivered.lock().push(Delivery {
             height: finalized.index.get(),
@@ -303,7 +317,7 @@ impl Parts {
     async fn start(
         &self,
         context: &deterministic::Context,
-    ) -> (Handle<()>, TestInbox, TestMailbox) {
+    ) -> (Handle<Result<(), Halt>>, TestInbox, TestMailbox) {
         let config = Config {
             execute: self.adder.clone(),
             consumer: self.consumer.clone(),
@@ -516,6 +530,51 @@ fn nondeterministic_execution_halts() {
 }
 
 #[test]
+#[should_panic(expected = "marshal redelivered an input other than the one executed")]
+fn a_redelivered_input_below_applied_must_match_the_archive() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (executor, mut inbox, _) = parts.start(&context).await;
+        let mut waiters = report(&mut inbox, &[(1, 5)]);
+        until(&context, || parts.consumer.heights() == vec![1]).await;
+        parts.consumer.apply(1);
+        until_acknowledged(&context, &mut waiters[0]).await;
+        executor.abort();
+        let _ = executor.await;
+
+        // After a restart, marshal redelivers an applied input with a different payload.
+        let restarted_context = context.child("restarted");
+        let (executor, mut inbox, _) = parts.start(&restarted_context).await;
+        report(&mut inbox, &[(1, 6)]);
+        let _ = executor.await;
+    });
+}
+
+#[test]
+fn a_closed_consumer_halts_the_executor() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (executor, mut inbox, _) = parts.start(&context).await;
+        *parts.consumer.closed.lock() = true;
+        report(&mut inbox, &[(1, 5)]);
+        assert_eq!(executor.await.unwrap(), Err(Halt::ConsumerClosed));
+    });
+}
+
+#[test]
+fn a_dropped_acknowledgement_halts_the_executor() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (executor, mut inbox, _) = parts.start(&context).await;
+        let mut waiters = report(&mut inbox, &[(1, 5)]);
+        until(&context, || parts.consumer.heights() == vec![1]).await;
+        drop(parts.consumer.take(1));
+        assert_eq!(executor.await.unwrap(), Err(Halt::Unacknowledged));
+        assert!(!acknowledged(&mut waiters[0]));
+    });
+}
+
+#[test]
 fn ledger_reads_the_executed_chain_and_prunes_behind_applied() {
     deterministic::Runner::default().start(|context| async move {
         let parts = Parts::default();
@@ -534,20 +593,54 @@ fn ledger_reads_the_executed_chain_and_prunes_behind_applied() {
         assert!(mailbox.block_at(Height::new(5)).await.is_none());
 
         // Nothing is pruned before a checkpoint is certified.
-        Ledger::prune(&mailbox, OutputIndex::new(9)).await;
+        Ledger::prune(&mailbox, OutputIndex::new(9)).await.unwrap();
         context.sleep(Duration::from_millis(10)).await;
         assert!(parts.marshal.pruned.lock().is_empty());
 
         // Pruning never passes the applied block, and prunes marshal alike.
         let certified = mailbox.block_at(Height::new(4)).await.unwrap();
         mailbox.certified(Height::new(4), certified.digest());
-        Ledger::prune(&mailbox, OutputIndex::new(9)).await;
+        Ledger::prune(&mailbox, OutputIndex::new(9)).await.unwrap();
         until(&context, || !parts.marshal.pruned.lock().is_empty()).await;
         assert_eq!(*parts.marshal.pruned.lock(), vec![OutputIndex::new(3)]);
         assert!(mailbox.block_at(Height::new(2)).await.is_none());
         for height in 3..=4 {
             assert!(mailbox.block_at(Height::new(height)).await.is_some());
         }
+    });
+}
+
+#[test]
+fn a_replayed_checkpoint_below_the_pruned_chain_is_ignored_after_restart() {
+    deterministic::Runner::default().start(|context| async move {
+        let parts = Parts::default();
+        let (executor, mut inbox, mailbox) = parts.start(&context).await;
+        let mut waiters = report(&mut inbox, &[(1, 1), (2, 2), (3, 3), (4, 4)]);
+        until(&context, || parts.consumer.heights().len() == 4).await;
+        for height in 1..=4 {
+            parts.consumer.apply(height);
+        }
+        until_acknowledged(&context, &mut waiters[3]).await;
+        let older = parts.consumer.block(1).digest();
+        let newer = parts.consumer.block(3).digest();
+        mailbox.certified(Height::new(1), older);
+        mailbox.certified(Height::new(3), newer);
+        Ledger::prune(&mailbox, OutputIndex::new(4)).await.unwrap();
+        until(&context, || !parts.marshal.pruned.lock().is_empty()).await;
+        assert!(mailbox.block_at(Height::new(1)).await.is_none());
+        executor.abort();
+        let _ = executor.await;
+
+        // Aggregation replays its journal oldest first: the pruned checkpoint is covered by the
+        // newer one, which is retained and verified again.
+        let restarted_context = context.child("restarted");
+        let (executor, _inbox, mailbox) = parts.start(&restarted_context).await;
+        mailbox.certified(Height::new(1), older);
+        mailbox.certified(Height::new(3), newer);
+        Ledger::prune(&mailbox, OutputIndex::new(4)).await.unwrap();
+        until(&context, || parts.marshal.pruned.lock().len() == 2).await;
+        assert!(mailbox.block_at(Height::new(3)).await.is_some());
+        assert!(executor.now_or_never().is_none());
     });
 }
 
@@ -561,7 +654,7 @@ fn a_checkpoint_ahead_of_execution_that_diverges_halts_the_executor() {
         // never delivered.
         mailbox.certified(Height::new(2), Sha256::hash(&[b"another block"]));
         report(&mut inbox, &[(1, 5), (2, 7)]);
-        assert!(executor.await.is_ok());
+        assert_eq!(executor.await.unwrap(), Err(Halt::Diverged(Height::new(2))));
         assert_eq!(parts.consumer.heights(), vec![1]);
     });
 }
@@ -575,7 +668,7 @@ fn a_checkpoint_of_an_executed_block_that_diverges_halts_the_executor() {
         until(&context, || parts.consumer.heights() == vec![1]).await;
 
         mailbox.certified(Height::new(1), Sha256::hash(&[b"another block"]));
-        assert!(executor.await.is_ok());
+        assert_eq!(executor.await.unwrap(), Err(Halt::Diverged(Height::new(1))));
     });
 }
 
@@ -675,7 +768,7 @@ fn certified_checkpoints_are_retained() {
         assert_eq!(latest.certificate, newest.certificate);
 
         // Pruning stops at the certified block and the inputs after it.
-        Ledger::prune(&mailbox, OutputIndex::new(4)).await;
+        Ledger::prune(&mailbox, OutputIndex::new(4)).await.unwrap();
         until(&context, || !parts.marshal.pruned.lock().is_empty()).await;
         assert_eq!(*parts.marshal.pruned.lock(), vec![OutputIndex::new(1)]);
         assert!(mailbox.block_at(Height::new(0)).await.is_none());
@@ -694,10 +787,7 @@ fn checkpoints_monitor_the_executors_epoch() {
         let (epoch, mut updates) = checkpoints.subscribe().await;
         assert_eq!(epoch, Epoch::zero());
         context.sleep(Duration::from_millis(10)).await;
-        assert!(matches!(
-            updates.try_recv(),
-            Err(commonware_utils::channel::mpsc::error::TryRecvError::Empty)
-        ));
+        assert!(matches!(updates.try_recv(), Err(TryRecvError::Empty)));
     });
 }
 
@@ -712,6 +802,6 @@ fn divergence_halts_the_executor() {
             digest: Sha256::hash(&[b"ours"]),
         };
         assert_eq!(checkpoints.report(Activity::Diverged(item)), Feedback::Ok);
-        executor.await.unwrap();
+        assert_eq!(executor.await.unwrap(), Err(Halt::Diverged(Height::new(1))));
     });
 }
