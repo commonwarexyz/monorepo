@@ -13,6 +13,8 @@ use crate::{
     },
     types::{Epoch, View},
 };
+#[cfg(feature = "arbitrary")]
+use crate::{multimmit::types::ChainId, types::Height};
 use bytes::BufMut;
 use commonware_codec::{
     Buf, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
@@ -425,8 +427,8 @@ where
             .map(|chain| {
                 // Heights stay small enough that the floor's index fits the output index.
                 Ok(BlockRef::new(
-                    crate::multimmit::types::ChainId::new(chain as u32),
-                    crate::types::Height::new(u64::from(u.arbitrary::<u32>()?)),
+                    ChainId::new(chain as u32),
+                    Height::new(u64::from(u.arbitrary::<u32>()?)),
                     u.arbitrary()?,
                 ))
             })
@@ -446,9 +448,9 @@ pub struct MarshalProgress<D: Digest> {
     pub floor_generation: u64,
     /// Retained L-QC floor anchor.
     pub floor: CertificateId<D>,
-    /// Highest durably committed output, or the stream's genesis if none.
+    /// Highest durably committed output, or the floor index if none is committed above it.
     pub committed: OutputIndex,
-    /// Highest durably acknowledged output, or the stream's genesis if none.
+    /// Highest durably acknowledged output, or the floor index if none is acknowledged above it.
     pub acknowledged: OutputIndex,
 }
 
@@ -587,11 +589,7 @@ mod tests {
                     .emitted()
                     .iter()
                     .map(|reference| {
-                        BlockRef::new(
-                            reference.chain(),
-                            crate::types::Height::new(u64::MAX),
-                            reference.digest(),
-                        )
+                        BlockRef::new(reference.chain(), Height::new(u64::MAX), reference.digest())
                     })
                     .collect();
                 let overflowing = Floor::new(
