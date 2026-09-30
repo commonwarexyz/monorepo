@@ -166,6 +166,11 @@ pub enum DepHow {
     Constant,
     /// A derived `PartialEq` (determined by its type, §7.7).
     Derived,
+    /// A function of the lift prelude (`crate::__lift`: core's
+    /// definitions transcribed, SEMANTICS.md §19), a trusted primitive of
+    /// the toolchain whose definition the lock header pins (§15.5: a
+    /// dependency may be "a trusted primitive (prelude, intrinsic model)").
+    Prelude,
     /// Fully specified only up to the lossy view of an `Abstract` type (by
     /// its refinement, or in the section at this position of ≺ when it is
     /// `Some`): not accepted as a dependency, since a hypothesis may observe
@@ -254,6 +259,9 @@ struct Info {
     code_mentions: BTreeMap<ItemId, BTreeSet<ItemId>>,
     /// Exec items mentioned by spec definitions of the crate.
     spec_mentions: BTreeSet<ItemId>,
+    /// Exec functions of the lift prelude (`crate::__lift::…`): trusted
+    /// primitives, never candidates (their definitions are the toolchain's).
+    prelude: BTreeSet<ItemId>,
 }
 
 impl<'a> Elab<'a> {
@@ -277,6 +285,11 @@ impl<'a> Elab<'a> {
         }
         for g in info.consts.keys() {
             fully.insert(*g, DepHow::Constant);
+        }
+        for id in &info.prelude {
+            if let Some(g) = info.exec.get(id) {
+                fully.insert(*g, DepHow::Prelude);
+            }
         }
         for e in self.eq_fns.values() {
             fully.insert(e.eq, DepHow::Derived);
@@ -472,7 +485,8 @@ impl<'a> Elab<'a> {
                 }
             }
         }
-        Info { exec, item_of, helper_owner, failed, stop_all, consts, determined, exported, laws, definitional, failed_laws, failed_contracts, contract, contract_mentions, code_mentions, spec_mentions }
+        let prelude: BTreeSet<ItemId> = exec.keys().copied().filter(|id| krate.item(*id).path.to_string().starts_with("crate::__lift::")).collect();
+        Info { exec, item_of, helper_owner, failed, stop_all, consts, determined, exported, laws, definitional, failed_laws, failed_contracts, contract, contract_mentions, code_mentions, spec_mentions, prelude }
     }
 
     /// The candidates, the graph, the merges and its SCCs in ≺ (see the
@@ -519,7 +533,7 @@ impl<'a> Elab<'a> {
         // close under the hypotheses of the (undetermined) candidates
         let mut work: Vec<ItemId> = cand.iter().copied().collect();
         while let Some(f) = work.pop() {
-            if info.determined.contains(&f) {
+            if info.determined.contains(&f) || info.prelude.contains(&f) {
                 continue;
             }
             for g in self.hyp_mentions(info, f) {
@@ -528,7 +542,7 @@ impl<'a> Elab<'a> {
                 }
             }
         }
-        let cand: BTreeSet<ItemId> = cand.into_iter().filter(|id| !info.determined.contains(id)).collect();
+        let cand: BTreeSet<ItemId> = cand.into_iter().filter(|id| !info.determined.contains(id) && !info.prelude.contains(id)).collect();
         // union-find of the merges
         let mut parent: BTreeMap<ItemId, ItemId> = cand.iter().map(|c| (*c, *c)).collect();
         fn find(p: &mut BTreeMap<ItemId, ItemId>, x: ItemId) -> ItemId {

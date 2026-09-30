@@ -1580,6 +1580,7 @@ pub fn section_reports(out: &elab::Output, krate: &Crate) -> Vec<SectionReport> 
                         DepHow::Section(k) => format!("fully specified in section {k}"),
                         DepHow::Constant => "exec constant (value locked)".to_string(),
                         DepHow::Derived => "derived PartialEq (determined by its type)".to_string(),
+                        DepHow::Prelude => "lift prelude function (a trusted primitive)".to_string(),
                         DepHow::UpToView(None) => "determined by its refinement only up to a lossy view (not accepted as a dependency)".to_string(),
                         DepHow::UpToView(Some(k)) => format!("fully specified in section {k} only up to a lossy view (not accepted as a dependency)"),
                         DepHow::Unspecified => "NOT fully specified in an earlier section".to_string(),

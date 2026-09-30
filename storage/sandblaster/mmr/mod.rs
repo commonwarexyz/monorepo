@@ -19,6 +19,11 @@ mod stdlib;
 #[path = "WORDS.rs"]
 mod words;
 
+// iterators as step functions (generic ghost definitions)
+#[cfg(sandblaster)]
+#[path = "ITER.rs"]
+mod iter;
+
 #[cfg(sandblaster)]
 #[lift]
 #[path = "LAWS.rs"]

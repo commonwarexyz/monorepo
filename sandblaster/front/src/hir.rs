@@ -1741,7 +1741,9 @@ pub enum ScriptKind {
     /// `e1, .., en`, its `requires` proven, as a fact. What E-matching
     /// cannot find (a quantified hypothesis whose conclusion auto splits
     /// before matching it) is written out.
-    UseHyp { index: u32, args: Vec<Expr> },
+    /// `use_real(i, e1, .., en);` is the same instance of the hypothesis's
+    /// statement about the real functions (the fact `l{i}`).
+    UseHyp { index: u32, args: Vec<Expr>, real: bool },
     /// `unfold(f);`
     Unfold(UnfoldTarget),
     /// `f::step(args);` — the one-step unfolding of a spec or exec function

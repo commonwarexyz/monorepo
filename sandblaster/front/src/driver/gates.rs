@@ -501,10 +501,8 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
             b.gates.emitted_file = out_name.clone();
             // the lift conformance check (DESIGN.md §1.1 item 8) of every
             // in-place module, before the record is sealed
-            let mut conf = crate::conform::Report::default();
-            for info in c.lifted.iter().filter(|l| l.in_place && !l.ghost) {
-                conf.absorb(crate::conform::check(&out, krate, c, info, &cfg));
-            }
+            let infos: Vec<&crate::lift::LiftedInfo> = c.lifted.iter().filter(|l| l.in_place && !l.ghost).collect();
+            let conf = crate::conform::check_in_place(&out, krate, c, &infos, &cfg);
             b.gates.results.push(GateResult { gate: "lift-conformance", ran: true, errors: conf.failures().len(), warnings: 0, note: conf.summary() });
             let conf_ok = conf.passed();
             let conf_summary = conf.header_line();

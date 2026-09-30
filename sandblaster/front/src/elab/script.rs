@@ -506,10 +506,13 @@ impl<'a> Elab<'a> {
                 Ok(t)
             }
             ScriptKind::Witness(es) => self.witness(es, 0, rest, goal, kind, span, sp),
-            ScriptKind::UseHyp { index, args } => {
-                let name = format!("h{index}");
+            ScriptKind::UseHyp { index, args, real } => {
+                // `use_hyp`: the hypothesis `h{i}` (about the hypothetical
+                // members `F'`); `use_real`: its statement about the real
+                // functions, the fact `l{i}` (`Elab::complete_script`)
+                let (name, what) = if *real { (format!("l{index}"), "use_real") } else { (format!("h{index}"), "use_hyp") };
                 let Some(lvl) = self.f.scope.facts.iter().rev().map(|f| f.lvl.0).find(|l| self.f.scope.ctx.entries.get(*l as usize).is_some_and(|e| &*e.name == name.as_str())) else {
-                    return unsupported(sp, format!("`use_hyp({index}, ..)`: no hypothesis `{name}` in scope (it names a hypothesis of the statement of a `#[proof(complete = ..)]` item)"));
+                    return unsupported(sp, format!("`{what}({index}, ..)`: no hypothesis `{name}` in scope (it names a hypothesis of the statement of a `#[proof(complete = ..)]` item)"));
                 };
                 let Some(ty_t) = self.f.scope.fact_tys.get(&lvl).cloned() else { return internal(sp, "use_hyp: the hypothesis has no type term") };
                 let d = self.depth();

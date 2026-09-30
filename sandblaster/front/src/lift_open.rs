@@ -571,6 +571,13 @@ fn used_idents(items: &[syn::Item], skip: &[usize]) -> HashSet<String> {
             syn::visit::visit_macro(self, m);
         }
         fn visit_attribute(&mut self, a: &'ast syn::Attribute) {
+            // a contract is an expression: its paths name what they use (a
+            // qualified `crate::m::T::f` does not use an import of `T`)
+            let contract = ["requires", "ensures", "invariant"].iter().any(|k| a.path().is_ident(k));
+            if contract && let Ok(e) = a.parse_args::<syn::Expr>() {
+                syn::visit::Visit::visit_expr(self, &e);
+                return;
+            }
             if let syn::Meta::List(ml) = &a.meta {
                 fn walk(ts: proc_macro2::TokenStream, out: &mut HashSet<String>) {
                     for tt in ts {
@@ -2035,9 +2042,45 @@ impl Ctx {
                 has_ret: true,
             });
         }
+        // an attached contract (`#[lift_attach(S::default)]`: `ensures(..)`,
+        // and `at_start! { .. }` proof steps before the body — the derive
+        // has no precondition)
+        let mut contract: Vec<syn::Attribute> = Vec::new();
+        let mut steps: Vec<syn::Stmt> = Vec::new();
+        let key = format!("{}::default", s.ident);
+        if let Some(at) = self.attach_fn.get(&key).cloned() {
+            self.attach_used.insert(format!("fn {key}"));
+            for st in &at.stmts {
+                if let syn::Stmt::Macro(m) = st
+                    && m.mac.path.is_ident("at_start")
+                {
+                    match m.mac.parse_body_with(syn::Block::parse_within) {
+                        Ok(v) => {
+                            let mut rw = super::FnRw::new(self, HashMap::new(), true);
+                            for mut s2 in v {
+                                rw.ghost_stmt(&mut s2);
+                                steps.push(s2);
+                            }
+                        }
+                        Err(e) => self.err(m.span(), format!("malformed `at_start!`: {e}")),
+                    }
+                    continue;
+                }
+                let Some(mut e) = super::attach_call(st, "ensures") else {
+                    self.err(st.span(), "an attachment to a derived `default` holds `ensures(..);` and `at_start! { .. }` only");
+                    continue;
+                };
+                let mut rw = super::FnRw::new(self, HashMap::new(), true);
+                rw.expr(&mut e, None);
+                drop(rw);
+                contract.push(syn::parse_quote!(#[ensures(#e)]));
+            }
+        }
+        let proof: Option<syn::Stmt> = (!steps.is_empty()).then(|| syn::parse_quote!(proof! { #(#steps)* }));
         Some(syn::parse_quote!(impl #name {
             /// `#[derive(Default)]`: every field's default.
-            pub fn default() -> Self { #body }
+            #(#contract)*
+            pub fn default() -> Self { #proof #body }
         }))
     }
 }

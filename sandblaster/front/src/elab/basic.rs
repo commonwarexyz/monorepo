@@ -1669,10 +1669,55 @@ fn collect_splits(t: &Tm, bool_: IndId, out: &mut Vec<SplitCand>, seen: &mut Vec
 /// with `y` (`Var(0)` at its root) such that `motive[y := t] ≡ goal`.
 pub fn abstract_all(env: &Env, ctx: &Ctx, goal: &V, t: &V, b: &mut Budget) -> Result<Tm, String> {
     let m1 = env.abstract_occurrences(ctx, goal, t, b).map_err(|e| e.to_string())?;
+    let m1 = restore_unit_fields(env, &m1);
     let m1 = crate::auto::util::kernel_friendly(env, &m1);
     let tt = env.quote_typed(ctx, t, None, false);
     let target = shift(&tt, 1);
     Ok(replace_occ(env, &m1, &target))
+}
+
+/// Puts back the unit constructors that an abstraction replaced by the
+/// motive variable. The kernel's abstraction test is an untyped conversion,
+/// under which the constructor of a unit struct (one constructor without
+/// fields, e.g. `PhantomData`) is convertible with anything (η), so a
+/// rewrite of a `bool` or integer equation would also replace the
+/// `PhantomData` field of every struct value in the goal (an ill-typed
+/// motive, which the kernel then rejects). A constructor field of a unit
+/// type holds that constructor whatever the rewrite, so restoring it keeps
+/// `motive[y := t] ≡ goal`.
+fn restore_unit_fields(env: &Env, m: &Tm) -> Tm {
+    use std::collections::HashMap;
+    let mut unit: HashMap<u32, bool> = HashMap::new();
+    let mut fields: HashMap<(u32, u32), Vec<Option<sandblaster_kernel::term::IndId>>> = HashMap::new();
+    let mut is_unit = |env: &Env, ind: sandblaster_kernel::term::IndId| -> bool {
+        *unit.entry(ind.0).or_insert_with(|| env.inductive_decl(ind).is_some_and(|d| d.params.is_empty() && d.ctors.len() == 1 && d.ctors[0].fields.is_empty()))
+    };
+    super::tm::map_post(m, 0, &mut |node, depth| {
+        let Term::Ctor { ind, ctor, params, args } = &*node else { return Some(node) };
+        // the unit-typed fields of this constructor (closed field types)
+        let fs = fields
+            .entry((ind.0, *ctor))
+            .or_insert_with(|| {
+                env.inductive_decl(*ind)
+                    .and_then(|d| d.ctors.get(*ctor as usize).map(|c| c.fields.iter().map(|f| match &*f.2 { Term::Ind { ind: u, params: ps } if ps.is_empty() => Some(*u), _ => None }).collect()))
+                    .unwrap_or_default()
+            })
+            .clone();
+        let motive_var = |a: &Tm| matches!(&**a, Term::Var(i) if i.0 == depth);
+        if !args.iter().enumerate().any(|(i, a)| motive_var(a) && fs.get(i).copied().flatten().is_some_and(|u| is_unit(env, u))) {
+            return Some(node);
+        }
+        let args = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| match fs.get(i).copied().flatten() {
+                Some(u) if motive_var(a) && is_unit(env, u) => Rc::new(Term::Ctor { ind: u, ctor: 0, params: vec![], args: vec![] }),
+                _ => a.clone(),
+            })
+            .collect();
+        Some(Rc::new(Term::Ctor { ind: *ind, ctor: *ctor, params: params.clone(), args }))
+    })
+    .unwrap_or_else(|| m.clone())
 }
 
 /// Syntactic abstraction of `t` in the term `goal` (both in `ctx`): a
@@ -1751,4 +1796,50 @@ fn zeta_top(t: &Tm) -> Tm {
         t = super::tm::subst0(body, val);
     }
     t
+}
+
+#[cfg(test)]
+mod unit_field_tests {
+    use super::*;
+    use sandblaster_kernel::term::{CtorDecl, InductiveDecl};
+
+    /// `W { v: u64, u: U }` with the unit struct `U`, and `V { a: u64, b: u64 }`.
+    fn env() -> (Env, IndId, IndId, IndId) {
+        let mut env = Env::with_prelude();
+        let u = env.add_inductive(InductiveDecl { name: mk::name("U"), params: vec![], ctors: vec![CtorDecl { name: mk::name("U"), fields: vec![] }] }).expect("U");
+        let w = env
+            .add_inductive(InductiveDecl { name: mk::name("W"), params: vec![], ctors: vec![CtorDecl { name: mk::name("W"), fields: vec![(mk::name("v"), Rel::Rel, mk::int_ty(Width::U64)), (mk::name("u"), Rel::Rel, mk::ind(u, vec![]))] }] })
+            .expect("W");
+        let v = env
+            .add_inductive(InductiveDecl { name: mk::name("V"), params: vec![], ctors: vec![CtorDecl { name: mk::name("V"), fields: vec![(mk::name("a"), Rel::Rel, mk::int_ty(Width::U64)), (mk::name("b"), Rel::Rel, mk::int_ty(Width::U64))] }] })
+            .expect("V");
+        (env, u, w, v)
+    }
+
+    /// A unit-typed field that came back as the motive variable (the
+    /// kernel's untyped abstraction test: η for unit structs) is restored.
+    #[test]
+    fn a_unit_field_abstracted_by_eta_is_restored() {
+        let (env, u, w, _) = env();
+        // under one binder: the motive variable is `Var(1)` there
+        let m = mk::lam("z", Rel::Rel, mk::int_ty(Width::U64), mk::ctor(w, 0, vec![], vec![mk::var(1), mk::var(1)]));
+        let r = restore_unit_fields(&env, &m);
+        let Term::Lam { body, .. } = &*r else { panic!("{r:?}") };
+        let Term::Ctor { args, .. } = &**body else { panic!("{body:?}") };
+        assert!(matches!(&*args[0], Term::Var(i) if i.0 == 1), "the `u64` field stays abstracted: {args:?}");
+        assert!(matches!(&*args[1], Term::Ctor { ind, args, .. } if *ind == u && args.is_empty()), "the unit field is the constructor again: {args:?}");
+    }
+
+    /// Negative twins: a field of another type keeps the motive variable,
+    /// and a variable that is not the motive's is left alone.
+    #[test]
+    fn other_fields_and_variables_are_untouched() {
+        let (env, _, w, v) = env();
+        let m = mk::ctor(v, 0, vec![], vec![mk::var(0), mk::var(0)]);
+        let r = restore_unit_fields(&env, &m);
+        assert!(matches!(&*r, Term::Ctor { args, .. } if args.iter().all(|a| matches!(&**a, Term::Var(i) if i.0 == 0))), "{r:?}");
+        let m = mk::ctor(w, 0, vec![], vec![mk::var(0), mk::var(3)]);
+        let r = restore_unit_fields(&env, &m);
+        assert!(matches!(&*r, Term::Ctor { args, .. } if matches!(&*args[1], Term::Var(i) if i.0 == 3)), "{r:?}");
+    }
 }

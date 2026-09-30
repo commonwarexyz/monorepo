@@ -40,6 +40,17 @@ pub(super) trait WalkGoal<'a> {
     fn eq_on_projections(&self) -> bool {
         false
     }
+    /// Whether a getter's tail projection of a *variable* (`self.0`
+    /// returned as is: a plain match on a single-constructor value that is
+    /// a binder of the context, whose arm is one of its field binders) is
+    /// mirrored with its path equation `s = C(f̄)`, so that a goal about `s`
+    /// (`ret == self.0`) meets the field binder the arm returns. On for
+    /// `ensures`: without it a getter's contract names a field binder the
+    /// goal cannot relate to `s`. (Only for that shape: an arm that goes on
+    /// computing keeps its facts about `s` as they are.)
+    fn eq_on_var_projections(&self) -> bool {
+        false
+    }
     /// Whether the walk splits a match on `scrut` (a term at the current
     /// depth); otherwise the match is a tail value. Always, except for the
     /// value walks of a lockstep (`elab::refines`), which split the choices
@@ -83,6 +94,10 @@ struct EnsGoal<'a> {
 }
 
 impl<'a> WalkGoal<'a> for EnsGoal<'a> {
+    fn eq_on_var_projections(&self) -> bool {
+        true
+    }
+
     fn goal(&mut self, el: &mut Elab<'a>, v: &Tm) -> R<Tm> {
         let rt = shift(&self.ret_ty, (el.depth() - self.base) as i64);
         match self.en {
@@ -806,7 +821,11 @@ impl<'a> Elab<'a> {
                 if let Some(p) = self.walk_known_ctor(*ind, params, scrut, arms, false, g)? {
                     return Ok(p);
                 }
-                let proj = (g.eq_on_projections() && self.env.inductive_decl(*ind).is_some_and(|d| d.ctors.len() == 1)) || g.eq_on_all();
+                let single = self.env.inductive_decl(*ind).is_some_and(|d| d.ctors.len() == 1);
+                // a getter's tail `match s { C(f̄) => f_i }`: the arm is a field binder
+                let getter = arms.len() == 1 && matches!(&*arms[0].body, Term::Var(i) if (i.0 as usize) < arms[0].names.len());
+                let var_proj = g.eq_on_var_projections() && getter && matches!(&**scrut, Term::Var(_));
+                let proj = ((g.eq_on_projections() || var_proj) && single) || g.eq_on_all();
                 if proj { self.walk_match_eq(*ind, params, scrut, motive, arms, g) } else { self.walk_match(*ind, params, scrut, motive, arms, false, g) }
             }
             // an unreachable tail (`unreachable!()`, the `else` of a `let ..

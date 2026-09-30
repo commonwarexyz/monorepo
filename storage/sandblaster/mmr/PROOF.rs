@@ -4,7 +4,8 @@
 //! the host files.
 
 use sandblaster::prelude::*;
-use crate::laws::{fits, height_in, items, mmr_size, mountains, node_height, peaks, valid_size};
+use crate::laws::{fits, height_in, mmr_size, mountains, node_height, peaks, valid_size};
+use crate::iter::yields;
 use crate::merkle::{Location, Position};
 use crate::merkle::mmr::Family;
 use crate::merkle::mmr::iterator::PeakIterator;
@@ -534,6 +535,8 @@ fn peak_iterator_state() {
 /// `log2(t) - 1` whose root is `p`, with `s + t - (p + 2)` nodes from its
 /// first one on making mountains of distinct heights below `log2(t)`.
 #[spec]
+#[opaque]
+#[example(iter_ok(0u64, 0u64, 0u64) && iter_ok(19u64, 30u64, 32u64) && !iter_ok(1u64, 0u64, 4u64) && !iter_ok(2u64, 30u64, 32u64))]
 pub fn iter_ok(s: u64, p: u64, t: u64) -> bool {
     t <= 1u64 || (2 <= (t as Int) && (t as Int) <= pow2(63) && pow2(log2(t as Nat)) == (t as Int)
         && 1 <= (s as Int) && (s as Int) < pow2(63) && (t as Int) <= (p as Int) + 2 && (p as Int) + 2 <= (s as Int) + (t as Int)
@@ -597,10 +600,12 @@ fn new_start(s: u64) {
 /// state's remaining peaks are the MMR's peaks by size.
 #[lift_attach(crate::merkle::mmr::iterator::PeakIterator::new)]
 fn new_facts() {
+    opaque();
     at_start! {
         crate::proof::new_facts(size.0);
+        crate::proof::new_bits(size.0);
     }
-    ensures(|ret: PeakIterator| crate::proof::peak_list(ret) == crate::proof::srow(0, size.0 as Nat, 63));
+    ensures(|ret: PeakIterator| crate::proof::plist(ret.size.0, ret.node_pos.0, ret.two_h) == crate::proof::srow(0, size.0 as Nat, 63));
 }
 
 /// A peak at the state's tree: the tree to its right, of the same height,
@@ -647,10 +652,12 @@ fn descend_step(s: Nat, p: Nat, t: Nat) {
 #[lift_attach(crate::merkle::mmr::iterator::PeakIterator::next, loop_nr = 0)]
 fn next_loop() {
     decreases(self.two_h);
-    ensures(|ret: (PeakIterator, Option<(Position, u32)>)| crate::proof::peak_list(self) == crate::proof::step_list(ret.1, crate::proof::peak_list(ret.0)));
+    ensures(|ret: (PeakIterator, Option<(Position, u32)>)| ret.0.size == self.size
+        && crate::laws::search_step(self.size.0 as Int, self.node_pos.0 as Int, self.two_h as Int)
+            == ((ret.0.node_pos.0 as Int), (ret.0.two_h as Int), match ret.1 { None => None, Some(x) => Some((x.0.0 as Int, x.1 as Int)) }));
     at_start! {
-        crate::proof::pos_lt(self.node_pos, self.size);
         crate::proof::next_facts(self.size, self.node_pos, self.two_h);
+        crate::proof::step_facts(self.size, self.node_pos, self.two_h);
     }
 }
 
@@ -659,7 +666,6 @@ fn next_loop() {
 #[lift_attach(crate::merkle::mmr::iterator::PeakIterator::next)]
 fn next_summary() {
     opaque();
-    ensures(|ret: (PeakIterator, Option<(Position, u32)>)| crate::proof::peak_list(self) == crate::proof::step_list(ret.1, crate::proof::peak_list(ret.0)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,29 +1048,36 @@ fn valid_sizes_have_leaves(s: Nat) {
 /// `size` would need more than `L` leaves, hence at least `mmr_size(L + 1)`
 /// nodes.
 #[proof]
-fn to_nearest_size_rounds_down(size: crate::merkle::Position, s: Nat) {
+fn to_nearest_size_rounds_down(size: crate::merkle::Position) {
     let r = crate::merkle::mmr::iterator::PeakIterator::to_nearest_size(size);
     leaves_nonneg(r.0 as Nat, 63);
     let l = leaves(r.0 as Nat, 63);
     crate::stdlib::bits::pow2_mono(63, 64);
     mmr_size_fits(l, 63);
-    if valid_size(s) && s <= size.0 as Nat {
-        leaves_fits(s, 63);
-        leaves_nonneg(s, 63);
-        if leaves(s, 63) > l {
-            if leaves(s, 63) == l + 1 {
-                follows();
-            } else {
-                mmr_size_mono(l + 1, leaves(s, 63));
-                follows();
-            }
-        } else if leaves(s, 63) == l {
+    follows();
+}
+
+/// As above: a larger MMR size up to `size` would need more leaves.
+#[proof]
+fn to_nearest_size_is_largest(size: crate::merkle::Position, s: Nat) {
+    let r = crate::merkle::mmr::iterator::PeakIterator::to_nearest_size(size);
+    leaves_nonneg(r.0 as Nat, 63);
+    let l = leaves(r.0 as Nat, 63);
+    crate::stdlib::bits::pow2_mono(63, 64);
+    mmr_size_fits(l, 63);
+    leaves_fits(s, 63);
+    leaves_nonneg(s, 63);
+    if leaves(s, 63) > l {
+        if leaves(s, 63) == l + 1 {
             follows();
         } else {
-            mmr_size_mono(leaves(s, 63), l);
+            mmr_size_mono(l + 1, leaves(s, 63));
             follows();
         }
+    } else if leaves(s, 63) == l {
+        follows();
     } else {
+        mmr_size_mono(leaves(s, 63), l);
         follows();
     }
 }
@@ -1167,6 +1180,7 @@ fn search_descend(s: Nat, p: Nat, t: Nat) {
 /// (opaque: the search's facts name it whole).
 #[spec]
 #[opaque]
+#[example(search_ok(19u64, 30u64, 32u64) && !search_ok(19u64, 30u64, 3u64) && !search_ok(0u64, 0u64, 1u64))]
 pub fn search_ok(s: u64, p: u64, t: u64) -> bool {
     1 <= (t as Int) && (t as Int) <= pow2(63) && pow2(log2(t as Nat)) == (t as Int) && 1 <= (s as Int) && (s as Int) < pow2(63)
         && (t as Int) <= (p as Int) + 2 && (p as Int) + 2 <= (s as Int) + (t as Int) && (s as Int) <= (p as Int) + (t as Int)
@@ -1211,9 +1225,11 @@ fn is_valid_size_loop() {
     }
 }
 
-/// `is_valid_size` decides "an MMR size up to `MAX_NODES`".
+/// `is_valid_size` decides "an MMR size up to `MAX_NODES`" (opaque to its
+/// callers: they use this summary).
 #[lift_attach(crate::merkle::mmr::Family::is_valid_size)]
 fn is_valid_size_summary() {
+    opaque();
     at_start! {
         crate::proof::valid_facts(size.0);
     }
@@ -1251,26 +1267,12 @@ pub fn srow(at: Int, r: Int, h: Int) -> Seq<(Int, Int)> {
 /// (`next_facts` states what `next` needs of it).
 #[spec]
 #[opaque]
+#[example(plist(19u64, 30u64, 32u64) == seq![(14 as Int, 3 as Int), (17 as Int, 1 as Int), (18 as Int, 0 as Int)] && plist(19u64, 18u64, 1u64) == seq![])]
 pub fn plist(s: u64, p: u64, t: u64) -> Seq<(Int, Int)> {
     if t <= 1u64 {
         seq![]
     } else {
         srow((p as Int) + 2 - (t as Int), (s as Int) + (t as Int) - ((p as Int) + 2), (log2(t as Nat) as Int) - 1)
-    }
-}
-
-/// The remaining peaks of an iterator.
-#[spec]
-pub fn peak_list(it: PeakIterator) -> Seq<(Int, Int)> {
-    plist(it.size.0, it.node_pos.0, it.two_h)
-}
-
-/// An item as numbers before `rest`, or nothing.
-#[spec]
-pub fn step_list(o: Option<(Position, u32)>, rest: Seq<(Int, Int)>) -> Seq<(Int, Int)> {
-    match o {
-        None => seq![],
-        Some(x) => seq![(x.0.0 as Int, x.1 as Int), ..rest],
     }
 }
 
@@ -1486,25 +1488,83 @@ fn new_list(s: u64) {
     follows();
 }
 
-/// With enough fuel, `items` yields exactly the state's remaining peaks.
+/// With enough fuel, the iterator yields exactly the state's remaining
+/// peaks (`next`'s contract, and `search_list`).
 #[lemma]
 #[decreases(k)]
-fn items_list(it: PeakIterator, k: Int) {
-    requires(peak_list(it).len() < k);
-    ensures(items(it, k) == peak_list(it));
+fn yields_list(it: PeakIterator, k: Int) {
+    requires(plist(it.size.0, it.node_pos.0, it.two_h).len() < k);
+    ensures(yields(it, k, |it: PeakIterator| {
+        let r = PeakIterator::next(it);
+        (r.0, match r.1 { None => None, Some(p) => Some((p.0.0 as Int, p.1 as Int)) })
+    }) == plist(it.size.0, it.node_pos.0, it.two_h));
     let mut i = it;
     let r = i.next();
-    unfold(crate::laws::items);
+    search_list(it.size.0, it.node_pos.0, it.two_h);
+    assert(plist(it.size.0, it.node_pos.0, it.two_h) == (match r { None => seq![], Some(x) => seq![(x.0.0 as Int, x.1 as Int), ..plist(i.size.0, i.node_pos.0, i.two_h)] }), {
+        u64_eq_int(i.node_pos.0, crate::laws::search_step(it.size.0 as Int, it.node_pos.0 as Int, it.two_h as Int).0);
+        u64_eq_int(i.two_h, crate::laws::search_step(it.size.0 as Int, it.node_pos.0 as Int, it.two_h as Int).1);
+        match r {
+            None => follows(),
+            Some(x) => follows(),
+        }
+    });
+    assert(0 <= plist(it.size.0, it.node_pos.0, it.two_h).len() && (k <= 0) == false, { follows(); });
+    unfold(crate::iter::yields);
     match r {
-        None => follows(),
-        Some(x) => {
-            assert(peak_list(it) == seq![(x.0.0 as Int, x.1 as Int), ..peak_list(i)], { follows(); });
-            assert(peak_list(it).len() == (seq![(x.0.0 as Int, x.1 as Int), ..peak_list(i)]).len(), { follows(); });
-            assert((seq![(x.0.0 as Int, x.1 as Int), ..peak_list(i)]).len() == peak_list(i).len() + 1, { follows(); });
-            assert(peak_list(i).len() < k - 1, { follows(); });
-            items_list(i, k - 1);
+        None => {
+            assert(plist(it.size.0, it.node_pos.0, it.two_h) == seq![], { follows(); });
             follows();
         }
+        Some(x) => {
+            assert(plist(it.size.0, it.node_pos.0, it.two_h) == seq![(x.0.0 as Int, x.1 as Int), ..plist(i.size.0, i.node_pos.0, i.two_h)], { follows(); });
+            len_cons(plist(it.size.0, it.node_pos.0, it.two_h), (x.0.0 as Int, x.1 as Int), plist(i.size.0, i.node_pos.0, i.two_h));
+            yields_list(i, k - 1);
+            follows();
+        }
+    }
+}
+
+/// A sequence that is an item before `b` is one longer than `b`.
+#[lemma]
+fn len_cons(a: Seq<(Int, Int)>, x: (Int, Int), b: Seq<(Int, Int)>) {
+    requires(a == seq![x, ..b]);
+    ensures(a.len() == b.len() + 1);
+    follows();
+}
+
+/// `search_step` from a state of the iterator: the peak it finds is the
+/// first of the state's remaining peaks, and the state it leaves (again a
+/// state) has the others.
+#[lemma]
+#[decreases(t)]
+fn search_list(s: u64, p: u64, t: u64) {
+    requires(iter_ok(s, p, t));
+    ensures(0 <= crate::laws::search_step(s as Int, p as Int, t as Int).0 && crate::laws::search_step(s as Int, p as Int, t as Int).0 < pow2(64)
+        && 0 <= crate::laws::search_step(s as Int, p as Int, t as Int).1 && crate::laws::search_step(s as Int, p as Int, t as Int).1 < pow2(64)
+        && iter_ok(s, crate::laws::search_step(s as Int, p as Int, t as Int).0 as u64, crate::laws::search_step(s as Int, p as Int, t as Int).1 as u64)
+        && plist(s, p, t) == (match crate::laws::search_step(s as Int, p as Int, t as Int).2 {
+            None => seq![],
+            Some(x) => seq![x, ..plist(s, crate::laws::search_step(s as Int, p as Int, t as Int).0 as u64, crate::laws::search_step(s as Int, p as Int, t as Int).1 as u64)],
+        }));
+    step_facts_u64(s, p, t);
+    if t <= 1u64 {
+        assert((t > 1u64) == false, { follows(); });
+        next_done(s, p, t);
+        u64_of_int(p as Int);
+        u64_of_int(t as Int);
+        follows();
+    } else if p < s {
+        assert((t > 1u64) == true && (p < s) == true, { follows(); });
+        next_peak(s, p, t);
+        u64_of_int((p + (t - 1u64)) as Int);
+        u64_of_int(t as Int);
+        follows();
+    } else {
+        assert((t > 1u64) == true && (p < s) == false, { follows(); });
+        next_desc(s, p, t);
+        search_list(s, p - (t >> 1u32), t >> 1u32);
+        follows();
     }
 }
 
@@ -1527,21 +1587,22 @@ fn seq_chain(a: Seq<(Int, Int)>, b: Seq<(Int, Int)>, c: Seq<(Int, Int)>, d: Seq<
 
 /// From `new`'s and `next`'s summaries.
 #[proof]
-fn peak_iterator_yields_the_peaks(n: Nat) {
-    let size = Position::new(mmr_size(n) as u64);
+fn peak_iterator_yields_the_peaks(n: Nat, size: Position) {
     let it = PeakIterator::new(size);
     mmr_sizes_are_valid_lemma(n);
     mmr_size_ge(n);
     crate::stdlib::bits::pow2_mono(63, 64);
-    u64_of_int(mmr_size(n));
     srow_mountains(0, n, 63);
-    srow_cong(0, (mmr_size(n) as u64) as Int, 63, 0, mmr_size(n), 63);
+    srow_cong(0, size.0 as Int, 63, 0, mmr_size(n), 63);
     srow_down(0, mmr_size(n), 63, 62);
     srow_len(0, mmr_size(n), 62);
-    seq_chain(peak_list(it), srow(0, (mmr_size(n) as u64) as Int, 63), srow(0, mmr_size(n), 63), srow(0, mmr_size(n), 62));
-    seq_chain(peak_list(it), srow(0, (mmr_size(n) as u64) as Int, 63), srow(0, mmr_size(n), 63), mountains(0, n, 63));
-    items_list(it, 64);
-    seq_chain(items(it, 64), peak_list(it), mountains(0, n, 63), mountains(0, n, 63));
+    seq_chain(plist(it.size.0, it.node_pos.0, it.two_h), srow(0, size.0 as Int, 63), srow(0, mmr_size(n), 63), srow(0, mmr_size(n), 62));
+    seq_chain(plist(it.size.0, it.node_pos.0, it.two_h), srow(0, size.0 as Int, 63), srow(0, mmr_size(n), 63), mountains(0, n, 63));
+    yields_list(it, 64);
+    seq_chain(yields(it, 64, |it: PeakIterator| {
+        let r = PeakIterator::next(it);
+        (r.0, match r.1 { None => None, Some(p) => Some((p.0.0 as Int, p.1 as Int)) })
+    }), plist(it.size.0, it.node_pos.0, it.two_h), mountains(0, n, 63), mountains(0, n, 63));
     follows();
 }
 
@@ -1686,7 +1747,7 @@ fn next_peak(s: u64, p: u64, t: u64) {
         && plist(s, p, t) == seq![(p as Int, (t.trailing_zeros() - 1u32) as Int), ..plist(s, p + (t - 1u64), t)]);
     assert(2 <= (t as Int) && (t as Int) <= pow2(63) && pow2(log2(t as Nat)) == (t as Int)
         && 1 <= (s as Int) && (s as Int) < pow2(63) && (t as Int) <= (p as Int) + 2 && (p as Int) + 2 <= (s as Int) + (t as Int)
-        && fits((s as Int) + (t as Int) - ((p as Int) + 2), (log2(t as Nat) as Int) - 1), { follows(); });
+        && fits((s as Int) + (t as Int) - ((p as Int) + 2), (log2(t as Nat) as Int) - 1), { by_unfolding(iter_ok); });
     two_pow(t as Nat);
     assert(log2(t as Nat) < 64, {
         if log2(t as Nat) >= 64 {
@@ -1716,7 +1777,7 @@ fn next_desc(s: u64, p: u64, t: u64) {
     ensures((t >> 1u32) <= p && iter_ok(s, p - (t >> 1u32), t >> 1u32) && plist(s, p, t) == plist(s, p - (t >> 1u32), t >> 1u32));
     assert(2 <= (t as Int) && (t as Int) <= pow2(63) && pow2(log2(t as Nat)) == (t as Int)
         && 1 <= (s as Int) && (s as Int) < pow2(63) && (t as Int) <= (p as Int) + 2 && (p as Int) + 2 <= (s as Int) + (t as Int)
-        && fits((s as Int) + (t as Int) - ((p as Int) + 2), (log2(t as Nat) as Int) - 1), { follows(); });
+        && fits((s as Int) + (t as Int) - ((p as Int) + 2), (log2(t as Nat) as Int) - 1), { by_unfolding(iter_ok); });
     two_pow(t as Nat);
     assert(log2(t as Nat) < 64, {
         if log2(t as Nat) >= 64 {
@@ -1757,27 +1818,25 @@ fn next_desc(s: u64, p: u64, t: u64) {
 #[lemma]
 fn next_facts(s: Position, p: Position, t: u64) {
     requires(iter_ok(s.0, p.0, t));
-    ensures(implies((t > 1u64) == false, plist(s.0, p.0, t) == seq![])
-        && implies(p.0 < s.0, implies(t > 1u64,
+    ensures(implies(t > 1u64, implies(crate::__lift::ord_lt(p.partial_cmp(&s)) == true,
             1u32 <= t.trailing_zeros() && (p.0 as Int) + ((t - 1u64) as Int) < pow2(64)
-            && s.0 <= crate::merkle::position::Position::add_assign__u64(p, t - 1u64).0
-            && iter_ok(s.0, crate::merkle::position::Position::add_assign__u64(p, t - 1u64).0, t)
-            && plist(s.0, p.0, t) == seq![(p.0 as Int, (t.trailing_zeros() - 1u32) as Int), ..plist(s.0, crate::merkle::position::Position::add_assign__u64(p, t - 1u64).0, t)]))
-        && implies((p.0 < s.0) == false, implies(t > 1u64,
+            && s.0 <= (p.0 + (t - 1u64))
+            && iter_ok(s.0, (p.0 + (t - 1u64)), t)))
+        && implies(t > 1u64, implies(crate::__lift::ord_lt(p.partial_cmp(&s)) == false,
             (t >> 1u32) <= p.0
-            && iter_ok(s.0, crate::merkle::position::Position::sub_assign__u64(p, t >> 1u32).0, t >> 1u32)
-            && plist(s.0, p.0, t) == plist(s.0, crate::merkle::position::Position::sub_assign__u64(p, t >> 1u32).0, t >> 1u32))));
-    if t <= 1u64 {
-        next_done(s.0, p.0, t);
-        follows();
-    } else if p.0 < s.0 {
-        next_peak(s.0, p.0, t);
-        assert(crate::merkle::position::Position::add_assign__u64(p, t - 1u64).0 == p.0 + (t - 1u64), { follows(); });
-        assert(iter_ok(s.0, crate::merkle::position::Position::add_assign__u64(p, t - 1u64).0, t), { follows(); });
-        assert(plist(s.0, p.0, t) == seq![(p.0 as Int, (t.trailing_zeros() - 1u32) as Int), ..plist(s.0, crate::merkle::position::Position::add_assign__u64(p, t - 1u64).0, t)], { follows(); });
-        follows();
+            && iter_ok(s.0, (p.0 - (t >> 1u32)), t >> 1u32))));
+    crate::words::position_lt(p, s);
+    if t > 1u64 {
+        if p.0 < s.0 {
+            next_peak(s.0, p.0, t);
+            assert(crate::__lift::ord_lt(p.partial_cmp(&s)) == true, { follows(); });
+            follows();
+        } else {
+            next_desc(s.0, p.0, t);
+            assert(crate::__lift::ord_lt(p.partial_cmp(&s)) == false, { follows(); });
+            follows();
+        }
     } else {
-        next_desc(s.0, p.0, t);
         follows();
     }
 }
@@ -1966,6 +2025,7 @@ fn height_down(p: Int, big: Nat, k: Nat) {
 /// root and beyond, the height of the root last peeled plus the steps since.
 #[spec]
 #[example(alg_height(0, 0) == 0 && alg_height(2, 1) == 1 && alg_height(3, 1) == 2 && alg_height(1, 0) == 1)]
+#[example(alg_height(0, 1) == 0)]
 pub fn alg_height(q: Int, k: Int) -> Int {
     if q + 1 >= pow2(k + 1) {
         q + 1 + k + 1 - pow2(k + 1)
@@ -2270,20 +2330,11 @@ fn double_fits(x: u64) {
     follows();
 }
 
-/// A location found for `pos` is that of the leaf at `pos`.
-#[spec]
-pub fn sound_loc(o: Option<Location>, pos: Int) -> bool {
-    match o {
-        None => true,
-        Some(l) => crate::laws::mmr_size(l.0 as Int) == pos,
-    }
-}
-
 /// `position_to_location`: every candidate is checked exactly.
 #[lift_attach(crate::merkle::mmr::Family::position_to_location)]
 fn position_to_location_summary() {
     opaque();
-    ensures(|ret: Option<Location>| crate::proof::sound_loc(ret, pos.0 as Int));
+    ensures(|ret: Option<Location>| match ret { None => true, Some(l) => crate::laws::mmr_size(l.0 as Int) == pos.0 as Int });
 }
 
 /// `Position`'s `PartialOrd` is opaque to its callers (a comparison is a
@@ -2338,22 +2389,11 @@ fn chunk_end_le(r: crate::__lift::Result<Position, crate::merkle::Error>, size: 
     }
 }
 
-/// `Position::try_from(loc)`'s answer: a location up to `MAX_LEAVES`
-/// converts to its leaf's position.
-#[spec]
-pub fn try_from_ok(loc: Location, r: crate::__lift::Result<Position, crate::merkle::Error>) -> bool {
-    match r {
-        crate::__lift::Result::Ok(q) => (loc.0 as Int) <= pow2(62) && (q.0 as Int) == crate::laws::mmr_size(loc.0 as Int),
-        crate::__lift::Result::Err(_) => (loc.0 as Int) > pow2(62),
-    }
-}
-
 /// `Position::checked_add` (opaque to its callers, which see its answer as
 /// a value: the sum up to `MAX_NODES`, else `None`).
 #[lift_attach(crate::merkle::position::Position::checked_add)]
 fn checked_add_summary() {
     opaque();
-    ensures(|ret: Option<Position>| ret == (if (self.0 as Int) + (rhs as Int) <= pow2(63) - 1 { Some(Position::new(self.0 + rhs)) } else { None }));
 }
 
 
@@ -2361,19 +2401,52 @@ fn checked_add_summary() {
 #[lift_attach(crate::merkle::position::Position::try_from__Location)]
 fn try_from_summary() {
     opaque();
-    ensures(|ret: crate::__lift::Result<Position, crate::merkle::Error>| crate::proof::try_from_ok(loc, ret));
+    ensures(|ret: crate::__lift::Result<Position, crate::merkle::Error>| match ret {
+        crate::__lift::Result::Ok(q) => (loc.0 as Int) <= pow2(62) && (q.0 as Int) == crate::laws::mmr_size(loc.0 as Int),
+        crate::__lift::Result::Err(_) => (loc.0 as Int) > pow2(62),
+    });
 }
 
 /// `chunk_peaks`: the chunk's bounds and the root's offset.
 #[lift_attach(crate::merkle::mmr::Family::chunk_peaks)]
 fn chunk_peaks_facts() {
+    opaque();
     at_start! {
         crate::proof::chunk_facts(chunk_idx, grafting_height);
         crate::proof::chunk_valid(chunk_idx, grafting_height);
         crate::proof::chunk_end_le(crate::merkle::position::Position::try_from__Location(crate::merkle::location::Location::new((chunk_idx + 1u64) << grafting_height)), size);
         crate::proof::mmr_size_cong(((chunk_idx + 1u64) << grafting_height) as Int, ((chunk_idx as Int) + 1) * pow2(grafting_height as Int));
         crate::proof::mmr_size_le((chunk_idx << grafting_height) as Int);
+        sandblaster::lemmas::nat::pow2_succ(grafting_height as Int);
+        crate::proof::mmr_size_cong((chunk_idx << grafting_height) as Int, (chunk_idx as Int) * pow2(grafting_height as Int));
+        crate::proof::chunk_root(chunk_idx, grafting_height);
     }
+}
+
+/// Names a position (its contract becomes a fact where the call is
+/// written: `Position::new(x)` is the position with value `x`).
+#[lemma]
+fn position_named(p: Position) {
+    ensures(p.0 == p.0);
+    follows();
+}
+
+/// `chunk_peaks`'s root as its contract states it: the first leaf's
+/// position `q` plus `2^(g+1) - 2` (for any `q` that is that position, in
+/// the words the conversion leaves it).
+#[lemma]
+fn chunk_root(c: u64, g: u32) {
+    requires(g <= 62u32 && ((c as Int) + 1) * pow2(g as Int) <= pow2(62));
+    ensures(forall(|q: u64| implies(
+        (q as Int) == mmr_size((c << g) as Int) && (q as Int) + ((1u64 << (g + 1u32)) as Int) < pow2(64) && 2 <= (q as Int) + ((1u64 << (g + 1u32)) as Int),
+        (q + (1u64 << (g + 1u32))) - 2u64 == ((mmr_size((c as Int) * pow2(g as Int)) + pow2((g as Int) + 1) - 2) as u64))));
+    chunk_facts(c, g);
+    sandblaster::lemmas::nat::pow2_succ(g as Int);
+    mmr_size_cong((c << g) as Int, (c as Int) * pow2(g as Int));
+    assert(forall(|q: u64| implies(
+        (q as Int) == mmr_size((c << g) as Int) && (q as Int) + ((1u64 << (g + 1u32)) as Int) < pow2(64) && 2 <= (q as Int) + ((1u64 << (g + 1u32)) as Int),
+        (((q + (1u64 << (g + 1u32))) - 2u64) as Int) == mmr_size((c as Int) * pow2(g as Int)) + pow2((g as Int) + 1) - 2)), { follows(); });
+    follows();
 }
 
 /// From the summary (the call in a proof step brings it in).
@@ -2388,7 +2461,7 @@ fn location_to_position_counts_nodes(loc: Location) {
 #[proof]
 fn position_to_location_is_sound(pos: Position, loc: Location) {
     let o = Family::position_to_location(pos);
-    assert(mmr_size(loc.0 as Int) == pos.0 as Int, { by_unfolding(sound_loc); });
+    assert(mmr_size(loc.0 as Int) == pos.0 as Int, { follows(); });
     if (loc.0 as Int) > pow2(62) {
         mmr_size_mono(pow2(62), loc.0 as Int);
         by_contradiction();
@@ -2404,4 +2477,1359 @@ fn children_facts() {
     at_start! {
         crate::proof::shl_one(height);
     }
+}
+
+// ---------------------------------------------------------------------------
+// The iterator's steps as `search_step` (`next`'s contract)
+// ---------------------------------------------------------------------------
+
+/// `search_step` by cases, in the form `next`'s loop tests leave them.
+#[lemma]
+fn step_facts_u64(s: u64, p: u64, t: u64) {
+    requires(iter_ok(s, p, t));
+    ensures(implies((t > 1u64) == false, crate::laws::search_step(s as Int, p as Int, t as Int) == (p as Int, t as Int, None))
+        && implies(t > 1u64, implies(p < s, 1u32 <= t.trailing_zeros()
+            && crate::laws::search_step(s as Int, p as Int, t as Int) == ((p as Int) + (t as Int) - 1, t as Int, Some((p as Int, (t.trailing_zeros() - 1u32) as Int)))))
+        && implies(t > 1u64, implies((p < s) == false, (t >> 1u32) <= p
+            && crate::laws::search_step(s as Int, p as Int, t as Int) == crate::laws::search_step(s as Int, (p - (t >> 1u32)) as Int, (t >> 1u32) as Int))));
+    if t <= 1u64 {
+        by_unfolding(crate::laws::search_step);
+    } else {
+        assert(2 <= (t as Int) && (t as Int) <= pow2(63) && pow2(log2(t as Nat)) == (t as Int)
+            && 1 <= (s as Int) && (t as Int) <= (p as Int) + 2, { by_unfolding(iter_ok); });
+        two_pow(t as Nat);
+        assert(log2(t as Nat) < 64, {
+            if log2(t as Nat) >= 64 {
+                crate::stdlib::bits::pow2_mono(64, log2(t as Nat));
+                by_contradiction();
+            } else {
+                follows();
+            }
+        });
+        tz_pow2(t, log2(t as Nat));
+        assert(((t >> 1u32) as Int) == (t as Int) / 2, { follows(); });
+        if p < s {
+            by_unfolding(crate::laws::search_step);
+        } else {
+            by_unfolding(crate::laws::search_step);
+        }
+    }
+}
+
+/// `search_step` by cases, in the form `next`'s loop tests leave them
+/// (`node_pos < size` as the comparison of positions).
+#[lemma]
+fn step_facts(sz: Position, np: Position, t: u64) {
+    requires(iter_ok(sz.0, np.0, t));
+    ensures(implies((t > 1u64) == false, crate::laws::search_step(sz.0 as Int, np.0 as Int, t as Int) == (np.0 as Int, t as Int, None))
+        && implies(t > 1u64, implies(crate::__lift::ord_lt(np.partial_cmp(&sz)) == true, 1u32 <= t.trailing_zeros()
+            && crate::laws::search_step(sz.0 as Int, np.0 as Int, t as Int) == ((np.0 as Int) + (t as Int) - 1, t as Int, Some((np.0 as Int, (t.trailing_zeros() - 1u32) as Int)))))
+        && implies(t > 1u64, implies(crate::__lift::ord_lt(np.partial_cmp(&sz)) == false, (t >> 1u32) <= np.0
+            && crate::laws::search_step(sz.0 as Int, np.0 as Int, t as Int) == crate::laws::search_step(sz.0 as Int, (np.0 - (t >> 1u32)) as Int, (t >> 1u32) as Int))));
+    crate::words::position_lt(np, sz);
+    step_facts_u64(sz.0, np.0, t);
+    if t > 1u64 {
+        if np.0 < sz.0 {
+            assert(crate::__lift::ord_lt(np.partial_cmp(&sz)) == true, { follows(); });
+            follows();
+        } else {
+            assert(crate::__lift::ord_lt(np.partial_cmp(&sz)) == false, { follows(); });
+            follows();
+        }
+    } else {
+        follows();
+    }
+}
+
+/// `64 - lz(s)` is the bit length `log2(s) + 1` of `s != 0` (in the form
+/// the size test leaves the case).
+#[lemma]
+fn new_bits(s: u64) {
+    ensures(implies((s == 0u64) == false, 64 - (s.leading_zeros() as Int) == log2(s as Nat) + 1
+        && pow2(64 - (s.leading_zeros() as Int)) == pow2(log2(s as Nat) + 1)));
+    if s == 0u64 {
+        follows();
+    } else {
+        lz_bits_u64(s);
+        sandblaster::lemmas::nat::pow2_succ(63 - (s.leading_zeros() as Int));
+        pow2_eq(63 - (s.leading_zeros() as Int) + 1, 64 - (s.leading_zeros() as Int));
+        crate::stdlib::bits::log2_unique(s as Nat, (63 - (s.leading_zeros() as Int)) as Nat);
+        pow2_eq(64 - (s.leading_zeros() as Int), log2(s as Nat) + 1);
+        follows();
+    }
+}
+
+/// A word equal to an integer is that integer as a word.
+#[lemma]
+fn u64_eq_int(v: u64, x: Int) {
+    requires((v as Int) == x);
+    ensures(v == (x as u64));
+    follows();
+}
+
+// ---------------------------------------------------------------------------
+// Extensionality: values with equal parts are equal (the determinacy
+// proofs of the functions whose contracts state their results by parts)
+// ---------------------------------------------------------------------------
+
+/// Positions with equal values are equal (the marker carries nothing).
+#[lemma]
+fn position_ext(a: Position, b: Position) {
+    requires(a.0 == b.0);
+    ensures(a == b);
+    match a {
+        Position(x, p) => match b {
+            Position(y, q) => match p {
+                crate::__lift::PhantomData => match q {
+                    crate::__lift::PhantomData => follows(),
+                },
+            },
+        },
+    }
+}
+
+/// Locations with equal values are equal (the marker carries nothing).
+#[lemma]
+fn location_ext(a: Location, b: Location) {
+    requires(a.0 == b.0);
+    ensures(a == b);
+    match a {
+        Location(x, p) => match b {
+            Location(y, q) => match p {
+                crate::__lift::PhantomData => match q {
+                    crate::__lift::PhantomData => follows(),
+                },
+            },
+        },
+    }
+}
+
+/// Iterator states with equal fields are equal (the invariant is a proof).
+#[lemma]
+fn peak_iterator_ext(a: PeakIterator, b: PeakIterator) {
+    requires(a.size == b.size && (a.node_pos.0 as Int) == (b.node_pos.0 as Int) && (a.two_h as Int) == (b.two_h as Int));
+    ensures(a == b);
+    position_ext(a.node_pos, b.node_pos);
+    match a {
+        PeakIterator { size: s1, node_pos: p1, two_h: t1 } => match b {
+            PeakIterator { size: s2, node_pos: p2, two_h: t2 } => follows(),
+        },
+    }
+}
+
+/// `next`'s results with equal parts are equal.
+#[lemma]
+fn step_ext(a: (PeakIterator, Option<(Position, u32)>), b: (PeakIterator, Option<(Position, u32)>)) {
+    requires(a.0.size == b.0.size && (a.0.node_pos.0 as Int) == (b.0.node_pos.0 as Int) && (a.0.two_h as Int) == (b.0.two_h as Int)
+        && (match a.1 { None => None, Some(x) => Some((x.0.0 as Int, x.1 as Int)) }) == (match b.1 { None => None, Some(x) => Some((x.0.0 as Int, x.1 as Int)) }));
+    ensures(a == b);
+    peak_iterator_ext(a.0, b.0);
+    match a {
+        (x, y) => match b {
+            (u, v) => match y {
+                None => match v {
+                    None => follows(),
+                    Some(q) => by_contradiction(),
+                },
+                Some(p) => match v {
+                    None => by_contradiction(),
+                    Some(q) => {
+                        assert((p.0.0 as Int) == (q.0.0 as Int) && (p.1 as Int) == (q.1 as Int), { follows(); });
+                        position_ext(p.0, q.0);
+                        match p {
+                            (p0, p1) => match q {
+                                (q0, q1) => follows(),
+                            },
+                        }
+                    }
+                },
+            },
+        },
+    }
+}
+
+/// `PeakIterator::default` is pinned by its contract.
+#[proof(complete = crate::merkle::mmr::iterator::PeakIterator::default)]
+fn peak_iterator_default_determined() {
+    apply(peak_iterator_ext);
+}
+
+/// `PeakIterator::new` is pinned by its contract.
+#[proof(complete = crate::merkle::mmr::iterator::PeakIterator::new)]
+fn peak_iterator_new_determined(size: Position) {
+    use_hyp(1, size);
+    use_real(1, size);
+    if size.0 == 0u64 {
+        apply(peak_iterator_ext);
+    } else {
+        apply(peak_iterator_ext);
+    }
+}
+
+/// `next` is pinned by its contract.
+#[proof(complete = crate::merkle::mmr::iterator::PeakIterator::next)]
+fn peak_iterator_next_determined(it: PeakIterator) {
+    use_hyp(3, it);
+    use_real(3, it);
+    apply(step_ext);
+}
+
+// ---------------------------------------------------------------------------
+// Comparisons: `order` (opaque) by its definition, where the code compares
+// ---------------------------------------------------------------------------
+
+/// `order` by cases (its definition).
+#[lemma]
+fn order_def(a: Int, b: Int) {
+    ensures(crate::laws::order(a, b) == (if a < b { crate::__lift::Ordering::Less } else if a == b { crate::__lift::Ordering::Equal } else { crate::__lift::Ordering::Greater }));
+    by_unfolding(crate::laws::order);
+}
+
+/// `Position::cmp` compares the values.
+#[lift_attach(crate::merkle::position::Position::cmp)]
+fn position_cmp_facts() {
+    at_start! {
+        crate::proof::order_def(self.0 as Int, other.0 as Int);
+    }
+}
+
+/// `Position::partial_cmp` with a `u64` compares the value.
+#[lift_attach(crate::merkle::position::Position::partial_cmp__u64)]
+fn position_partial_cmp_u64_facts() {
+    at_start! {
+        crate::proof::order_def(self.0 as Int, *other as Int);
+    }
+}
+
+/// `Location::cmp` compares the values.
+#[lift_attach(crate::merkle::location::Location::cmp)]
+fn location_cmp_facts() {
+    at_start! {
+        crate::proof::order_def(self.0 as Int, other.0 as Int);
+    }
+}
+
+/// `Location::partial_cmp` with a `u64` compares the value.
+#[lift_attach(crate::merkle::location::Location::partial_cmp__u64)]
+fn location_partial_cmp_u64_facts() {
+    at_start! {
+        crate::proof::order_def(self.0 as Int, *other as Int);
+    }
+}
+
+/// `Position::partial_cmp` compares the values (through `cmp`).
+#[lift_attach(crate::merkle::position::Position::partial_cmp)]
+fn position_partial_cmp_facts() {
+    at_start! {
+        crate::proof::order_def(self.0 as Int, other.0 as Int);
+    }
+}
+
+/// `Location::partial_cmp` compares the values (through `cmp`).
+#[lift_attach(crate::merkle::location::Location::partial_cmp)]
+fn location_partial_cmp_facts() {
+    at_start! {
+        crate::proof::order_def(self.0 as Int, other.0 as Int);
+    }
+}
+
+/// Answers of `partial_cmp` that agree on `<`, `<=`, `>` and `>=` are
+/// equal (the four tests tell the four answers apart).
+#[lemma]
+fn ordering_ext(a: Option<crate::__lift::Ordering>, b: Option<crate::__lift::Ordering>) {
+    requires(crate::__lift::ord_lt(a) == crate::__lift::ord_lt(b) && crate::__lift::ord_le(a) == crate::__lift::ord_le(b)
+        && crate::__lift::ord_gt(a) == crate::__lift::ord_gt(b) && crate::__lift::ord_ge(a) == crate::__lift::ord_ge(b));
+    ensures(a == b);
+    by_cases(a, b);
+}
+
+/// `Position::partial_cmp` is pinned by its contract.
+#[proof(complete = crate::merkle::position::Position::partial_cmp)]
+fn position_partial_cmp_determined(a: Position, other: &Position) {
+    apply(ordering_ext);
+}
+
+/// `Location::partial_cmp` is pinned by its contract.
+#[proof(complete = crate::merkle::location::Location::partial_cmp)]
+fn location_partial_cmp_determined(a: Location, other: &Location) {
+    apply(ordering_ext);
+}
+
+/// `Position::partial_cmp` with a `u64` is pinned by its contract.
+#[proof(complete = crate::merkle::position::Position::partial_cmp__u64)]
+fn position_partial_cmp_u64_determined(a: Position, other: &u64) {
+    apply(ordering_ext);
+}
+
+/// `Location::partial_cmp` with a `u64` is pinned by its contract.
+#[proof(complete = crate::merkle::location::Location::partial_cmp__u64)]
+fn location_partial_cmp_u64_determined(a: Location, other: &u64) {
+    apply(ordering_ext);
+}
+
+/// The default iterator is finished (`two_h = 0`), a state of the
+/// invariant.
+#[lift_attach(crate::merkle::mmr::iterator::PeakIterator::default)]
+fn peak_iterator_default_facts() {
+    at_start! {
+        crate::proof::done_ok(crate::merkle::position::Position::default().0, crate::merkle::position::Position::default().0, 0u64);
+    }
+}
+
+
+/// An answer of `chunk_peaks` is its root position and height.
+#[lemma]
+fn once_canon(a: crate::__lift::Once<(Position, u32)>, n: Int, g: u32) {
+    requires(0 <= n && n < pow2(64));
+    requires(a.v.is_some() && (a.v.unwrap_or((Position::new(0u64), 0u32)).0.0 as Int) == n && a.v.unwrap_or((Position::new(0u64), 0u32)).1 == g);
+    ensures(a == crate::__lift::once((Position::new(n as u64), g)));
+    match a {
+        crate::__lift::Once { v: va } => match va {
+            None => by_contradiction(),
+            Some(x) => {
+                u64_eq_int(x.0.0, n);
+                position_ext(x.0, Position::new(n as u64));
+                match x {
+                    (x0, x1) => follows(),
+                }
+            }
+        },
+    }
+}
+
+/// `once_canon`, the other way round.
+#[lemma]
+fn once_canon_sym(b: crate::__lift::Once<(Position, u32)>, n: Int, g: u32) {
+    requires(0 <= n && n < pow2(64));
+    requires(b.v.is_some() && (b.v.unwrap_or((Position::new(0u64), 0u32)).0.0 as Int) == n && b.v.unwrap_or((Position::new(0u64), 0u32)).1 == g);
+    ensures(crate::__lift::once((Position::new(n as u64), g)) == b);
+    once_canon(b, n, g);
+    follows();
+}
+
+/// `chunk_peaks` is pinned by its contract.
+#[proof(complete = crate::merkle::mmr::Family::chunk_peaks)]
+fn chunk_peaks_determined(size: Position, chunk_idx: u64, grafting_height: u32) {
+    use_hyp(0, size, chunk_idx, grafting_height);
+    use_real(0, size, chunk_idx, grafting_height);
+    chunk_facts(chunk_idx, grafting_height);
+    mmr_size_le((chunk_idx as Int) * pow2(grafting_height as Int));
+    sandblaster::lemmas::nat::popcount_nonneg((chunk_idx as Int) * pow2(grafting_height as Int));
+    sandblaster::lemmas::nat::pow2_succ(grafting_height as Int);
+    crate::stdlib::bits::pow2_mono(62, 64);
+    let e = once_canon(crate::merkle::mmr::Family::chunk_peaks(size, chunk_idx, grafting_height),
+        mmr_size((chunk_idx as Int) * pow2(grafting_height as Int)) + pow2((grafting_height as Int) + 1) - 2, grafting_height);
+    rewrite(e);
+    apply(once_canon_sym);
+}
+
+// ---------------------------------------------------------------------------
+// `position_to_location` finds every leaf: its three Newton steps land
+// within 1 of the leaf's location (the claim its comments check by
+// enumerating behavior classes, proven here the same way: a computation
+// over the classes, and the lemmas that reduce every leaf to its class)
+// ---------------------------------------------------------------------------
+
+/// `popcount(N + e)` of a leaf count `N = 32 H + l`, `popcount(H) = ch`,
+/// `popcount(H + 1) = a`, `popcount(H - 1) = b`, for an error `e` given as
+/// `x = e + 64` (`|e| <= 31`): by where `l + e` falls.
+#[spec]
+#[example(pcw(3u64, 2u64, 1u64, 1u64, 64u64) == 4u64 && pcw(31u64, 2u64, 1u64, 1u64, 66u64) == 2u64 && pcw(0u64, 2u64, 1u64, 5u64, 63u64) == 10u64 && pcw(0u64, 0u64, 0u64, 0u64, 0u64) == 0u64)]
+pub fn pcw(l: u64, ch: u64, a: u64, b: u64, x: u64) -> u64 {
+    if l >= 32u64 { 0u64 } else if x >= 128u64 { 0u64 } else if ch > 60u64 { 0u64 } else if a > 60u64 { 0u64 } else if b > 60u64 { 0u64 } else {
+        let r = l + x;
+        if r >= 96u64 {
+            a + ((r - 96u64).count_ones() as u64)
+        } else if r >= 64u64 {
+            ch + ((r - 64u64).count_ones() as u64)
+        } else if r >= 32u64 {
+            b + ((r - 32u64).count_ones() as u64)
+        } else {
+            0u64
+        }
+    }
+}
+
+/// One Newton step on the error (as `e + 64`): `floor((popcount(N + e) -
+/// popcount(N)) / 2)`, `popcount(N) = ch + popcount(l)`.
+#[spec]
+#[example(stepw(3u64, 2u64, 1u64, 1u64, 64u64) == 64u64 && stepw(0u64, 2u64, 1u64, 5u64, 63u64) == 68u64 && stepw(40u64, 2u64, 1u64, 5u64, 63u64) == 62u64 && stepw(0u64, 61u64, 1u64, 5u64, 63u64) == 0u64)]
+pub fn stepw(l: u64, ch: u64, a: u64, b: u64, x: u64) -> u64 {
+    let q = pcw(l, ch, a, b, x);
+    let c = l.count_ones() as u64;
+    if q > 200u64 { 0u64 } else if ch > 60u64 { 0u64 } else if c > 64u64 { 0u64 } else { (q + 128u64 - (ch + c)) >> 1u32 }
+}
+
+/// The first error (as `e + 64`) of a leaf count with `popcount = ch +
+/// popcount(l)`: `floor(-popcount(N) / 2)`.
+#[spec]
+#[example(x0w(3u64, 2u64) == 62u64 && x0w(0u64, 61u64) == 0u64)]
+pub fn x0w(l: u64, ch: u64) -> u64 {
+    let c = l.count_ones() as u64;
+    if ch > 60u64 { 0u64 } else if c > 64u64 { 0u64 } else { (128u64 - (ch + c)) >> 1u32 }
+}
+
+/// The class `(l, ch, a, b)` lands: the first three errors stay within 31
+/// (and `l + e >= 0` when `H = 0`, `hz`), the fourth is within 1.
+#[spec]
+#[example(okw(3u64, 2u64, 1u64, 1u64, false) && !okw(40u64, 2u64, 1u64, 1u64, false))]
+pub fn okw(l: u64, ch: u64, a: u64, b: u64, hz: bool) -> bool {
+    let x0 = x0w(l, ch);
+    let x1 = stepw(l, ch, a, b, x0);
+    let x2 = stepw(l, ch, a, b, x1);
+    let x3 = stepw(l, ch, a, b, x2);
+    l < 32u64 && ch <= 60u64 && a <= 60u64 && b <= 60u64
+        && 33u64 <= x0 && x0 <= 95u64 && 33u64 <= x1 && x1 <= 95u64 && 33u64 <= x2 && x2 <= 95u64 && 63u64 <= x3 && x3 <= 65u64
+        && (!hz || ((l as Int) + (x0 as Int) >= 64 && (l as Int) + (x1 as Int) >= 64 && (l as Int) + (x2 as Int) >= 64))
+}
+
+/// The classes of an odd `H`: `popcount(H + 1) = a` for every `a` from 1 to
+/// `a` (and `popcount(H - 1) = ch - 1`).
+#[spec]
+#[decreases(a)]
+#[example(nw_odd(3u64, 2u64, 2u64) && nw_odd(0u64, 0u64, 0u64) && !nw_odd(40u64, 2u64, 1u64))]
+pub fn nw_odd(l: u64, ch: u64, a: u64) -> bool {
+    if a == 0u64 { true } else if ch == 0u64 { true } else { let j = a - 1u64; let cm = ch - 1u64; okw(l, ch, a, cm, false) && nw_odd(l, ch, j) }
+}
+
+/// The classes of an even `H >= 2`: `popcount(H - 1) = 58 - k` for every
+/// `k` from 1 to `k` (and `popcount(H + 1) = ch + 1`).
+#[spec]
+#[decreases(k)]
+#[example(nw_even(3u64, 2u64, 3u64) && nw_even(0u64, 0u64, 0u64) && !nw_even(40u64, 2u64, 1u64))]
+pub fn nw_even(l: u64, ch: u64, k: u64) -> bool {
+    if k == 0u64 { true } else if k > 58u64 { true } else if ch > 57u64 { true } else { let j = k - 1u64; let cp = ch + 1u64; let b = 58u64 - k; okw(l, ch, cp, b, false) && nw_even(l, ch, j) }
+}
+
+/// Every `popcount(H) = ch` from 1 to `ch`: both parities.
+#[spec]
+#[decreases(ch)]
+#[example(nw_ch(3u64, 2u64) && nw_ch(0u64, 0u64) && !nw_ch(40u64, 1u64))]
+pub fn nw_ch(l: u64, ch: u64) -> bool {
+    if ch == 0u64 { true } else if ch > 57u64 { true } else { let j = ch - 1u64; let k = 58u64 - ch; nw_odd(l, ch, ch) && nw_even(l, ch, k) && nw_ch(l, j) }
+}
+
+/// Every class of the low part `l`: `H = 0`, or `popcount(H)` from 1 to
+/// `cm` (57 for a leaf count up to `2^62`).
+#[spec]
+#[example(nw_low(3u64, 2u64) && !nw_low(40u64, 2u64))]
+pub fn nw_low(l: u64, cm: u64) -> bool {
+    okw(l, 0u64, 1u64, 0u64, true) && nw_ch(l, cm)
+}
+
+/// `nw_low`, opaque (its computed instances are large terms: proofs name
+/// them whole and unfold one where it is used).
+#[spec]
+#[opaque]
+#[example(nw_low_ok(3u64, 2u64) && !nw_low_ok(40u64, 2u64))]
+pub fn nw_low_ok(l: u64, cm: u64) -> bool {
+    nw_low(l, cm)
+}
+/// The classes of low part 0 land (a computation).
+#[lemma]
+fn nw_low_0() {
+    ensures(nw_low_ok(0u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 1 land (a computation).
+#[lemma]
+fn nw_low_1() {
+    ensures(nw_low_ok(1u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 2 land (a computation).
+#[lemma]
+fn nw_low_2() {
+    ensures(nw_low_ok(2u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 3 land (a computation).
+#[lemma]
+fn nw_low_3() {
+    ensures(nw_low_ok(3u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 4 land (a computation).
+#[lemma]
+fn nw_low_4() {
+    ensures(nw_low_ok(4u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 5 land (a computation).
+#[lemma]
+fn nw_low_5() {
+    ensures(nw_low_ok(5u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 6 land (a computation).
+#[lemma]
+fn nw_low_6() {
+    ensures(nw_low_ok(6u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 7 land (a computation).
+#[lemma]
+fn nw_low_7() {
+    ensures(nw_low_ok(7u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 8 land (a computation).
+#[lemma]
+fn nw_low_8() {
+    ensures(nw_low_ok(8u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 9 land (a computation).
+#[lemma]
+fn nw_low_9() {
+    ensures(nw_low_ok(9u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 10 land (a computation).
+#[lemma]
+fn nw_low_10() {
+    ensures(nw_low_ok(10u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 11 land (a computation).
+#[lemma]
+fn nw_low_11() {
+    ensures(nw_low_ok(11u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 12 land (a computation).
+#[lemma]
+fn nw_low_12() {
+    ensures(nw_low_ok(12u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 13 land (a computation).
+#[lemma]
+fn nw_low_13() {
+    ensures(nw_low_ok(13u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 14 land (a computation).
+#[lemma]
+fn nw_low_14() {
+    ensures(nw_low_ok(14u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 15 land (a computation).
+#[lemma]
+fn nw_low_15() {
+    ensures(nw_low_ok(15u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 16 land (a computation).
+#[lemma]
+fn nw_low_16() {
+    ensures(nw_low_ok(16u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 17 land (a computation).
+#[lemma]
+fn nw_low_17() {
+    ensures(nw_low_ok(17u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 18 land (a computation).
+#[lemma]
+fn nw_low_18() {
+    ensures(nw_low_ok(18u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 19 land (a computation).
+#[lemma]
+fn nw_low_19() {
+    ensures(nw_low_ok(19u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 20 land (a computation).
+#[lemma]
+fn nw_low_20() {
+    ensures(nw_low_ok(20u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 21 land (a computation).
+#[lemma]
+fn nw_low_21() {
+    ensures(nw_low_ok(21u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 22 land (a computation).
+#[lemma]
+fn nw_low_22() {
+    ensures(nw_low_ok(22u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 23 land (a computation).
+#[lemma]
+fn nw_low_23() {
+    ensures(nw_low_ok(23u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 24 land (a computation).
+#[lemma]
+fn nw_low_24() {
+    ensures(nw_low_ok(24u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 25 land (a computation).
+#[lemma]
+fn nw_low_25() {
+    ensures(nw_low_ok(25u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 26 land (a computation).
+#[lemma]
+fn nw_low_26() {
+    ensures(nw_low_ok(26u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 27 land (a computation).
+#[lemma]
+fn nw_low_27() {
+    ensures(nw_low_ok(27u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 28 land (a computation).
+#[lemma]
+fn nw_low_28() {
+    ensures(nw_low_ok(28u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 29 land (a computation).
+#[lemma]
+fn nw_low_29() {
+    ensures(nw_low_ok(29u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 30 land (a computation).
+#[lemma]
+fn nw_low_30() {
+    ensures(nw_low_ok(30u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// The classes of low part 31 land (a computation).
+#[lemma]
+fn nw_low_31() {
+    ensures(nw_low_ok(31u64, 57u64));
+    unfold(nw_low_ok);
+    by_computation();
+}
+
+/// Every low part's classes land.
+#[lemma]
+fn nw_low_all(l: u64) {
+    requires(l < 32u64);
+    ensures(nw_low_ok(l, 57u64));
+    nw_low_0(); nw_low_1(); nw_low_2(); nw_low_3(); nw_low_4(); nw_low_5(); nw_low_6(); nw_low_7();
+    nw_low_8(); nw_low_9(); nw_low_10(); nw_low_11(); nw_low_12(); nw_low_13(); nw_low_14(); nw_low_15();
+    nw_low_16(); nw_low_17(); nw_low_18(); nw_low_19(); nw_low_20(); nw_low_21(); nw_low_22(); nw_low_23();
+    nw_low_24(); nw_low_25(); nw_low_26(); nw_low_27(); nw_low_28(); nw_low_29(); nw_low_30(); nw_low_31();
+    by_cases(l, 0..32);
+}
+
+/// `nw_odd`, one step.
+#[lemma]
+fn nw_odd_step(l: u64, ch: u64, a: u64) {
+    requires(nw_odd(l, ch, a) && 1u64 <= a && 1u64 <= ch);
+    ensures(okw(l, ch, a, ch - 1u64, false) && nw_odd(l, ch, a - 1u64));
+    by_unfolding(nw_odd);
+}
+
+/// `nw_even`, one step.
+#[lemma]
+fn nw_even_step(l: u64, ch: u64, k: u64) {
+    requires(nw_even(l, ch, k) && 1u64 <= k && k <= 58u64 && ch <= 57u64);
+    ensures(okw(l, ch, ch + 1u64, 58u64 - k, false) && nw_even(l, ch, k - 1u64));
+    by_unfolding(nw_even);
+}
+
+/// `nw_ch`, one step.
+#[lemma]
+fn nw_ch_step(l: u64, ch: u64) {
+    requires(nw_ch(l, ch) && 1u64 <= ch && ch <= 57u64);
+    ensures(nw_odd(l, ch, ch) && nw_even(l, ch, 58u64 - ch) && nw_ch(l, ch - 1u64));
+    by_unfolding(nw_ch);
+}
+
+/// An odd-`H` class of the enumeration.
+#[lemma]
+#[decreases(a0)]
+fn nw_odd_at(l: u64, ch: u64, a0: u64, a: u64) {
+    requires(nw_odd(l, ch, a0) && 1u64 <= a && a <= a0 && 1u64 <= ch);
+    ensures(okw(l, ch, a, ch - 1u64, false));
+    nw_odd_step(l, ch, a0);
+    if a == a0 {
+        rewrite(a == a0);
+        follows();
+    } else {
+        nw_odd_at(l, ch, a0 - 1u64, a);
+        follows();
+    }
+}
+
+/// An even-`H` class of the enumeration (`b = 58 - k`, `k <= k0`).
+#[lemma]
+#[decreases(k0)]
+fn nw_even_at(l: u64, ch: u64, k0: u64, b: u64) {
+    requires(nw_even(l, ch, k0) && ch <= 57u64 && k0 <= 58u64 && 58 <= (b as Int) + (k0 as Int) && b <= 57u64);
+    ensures(okw(l, ch, ch + 1u64, b, false));
+    assert(1u64 <= k0, { by_arithmetic(); });
+    nw_even_step(l, ch, k0);
+    if (b as Int) + (k0 as Int) == 58 {
+        assert(b == 58u64 - k0, { by_arithmetic(); });
+        rewrite(b == 58u64 - k0);
+        follows();
+    } else {
+        nw_even_at(l, ch, k0 - 1u64, b);
+        follows();
+    }
+}
+
+/// The classes of `popcount(H) = ch` of the enumeration.
+#[lemma]
+#[decreases(c0)]
+fn nw_ch_at(l: u64, c0: u64, ch: u64) {
+    requires(nw_ch(l, c0) && 1u64 <= ch && ch <= c0 && c0 <= 57u64);
+    ensures(nw_odd(l, ch, ch) && nw_even(l, ch, 58u64 - ch));
+    nw_ch_step(l, c0);
+    if ch == c0 {
+        follows();
+    } else {
+        nw_ch_at(l, c0 - 1u64, ch);
+        follows();
+    }
+}
+
+/// `popcount(2 q + b) = popcount(q) + b` for a bit `b`, as used below.
+#[lemma]
+fn pop_half(x: Nat) {
+    ensures(popcount(x) == popcount(x / 2) + x % 2 && x == 2 * (x / 2) + x % 2 && x % 2 <= 1);
+    crate::stdlib::bits::popcount_step(x);
+    crate::stdlib::bits::halves(x);
+    by_arithmetic();
+}
+
+/// One halving of `2q' + s` and `s`: the same low bit, and the halves
+/// differ by the same multiple.
+#[lemma]
+fn pop_halve2(x: Nat, q: Nat, s: Nat) {
+    requires(x == 2 * q + s);
+    ensures(x / 2 == q + s / 2 && x % 2 == s % 2 && popcount(x) == popcount(x / 2) + s % 2 && popcount(s) == popcount(s / 2) + s % 2);
+    pop_half(x);
+    pop_half(s);
+    by_arithmetic();
+}
+
+/// `popcount(32 q + s) = popcount(q) + popcount(s)` for `s < 32`: five
+/// halvings take the same five low bits off both.
+#[lemma]
+fn pop32(q: Nat, s: Nat) {
+    requires(s < 32);
+    ensures(popcount(32 * q + s) == popcount(q) + popcount(s));
+    let x = 32 * q + s;
+    pop_halve2(x, 16 * q, s);
+    pop_halve2(x / 2, 8 * q, s / 2);
+    pop_halve2(x / 2 / 2, 4 * q, s / 2 / 2);
+    pop_halve2(x / 2 / 2 / 2, 2 * q, s / 2 / 2 / 2);
+    pop_halve2(x / 2 / 2 / 2 / 2, q, s / 2 / 2 / 2 / 2);
+    assert(s / 2 / 2 / 2 / 2 / 2 == 0 && x / 2 / 2 / 2 / 2 / 2 == q, { by_arithmetic(); });
+    assert(popcount(0) == 0, { by_computation(); });
+    crate::stdlib::bits::popcount_same(s / 2 / 2 / 2 / 2 / 2, 0);
+    crate::stdlib::bits::popcount_same(x / 2 / 2 / 2 / 2 / 2, q);
+    by_arithmetic();
+}
+
+/// A positive number has a set bit.
+#[lemma]
+#[decreases(x)]
+fn pop_pos(x: Nat) {
+    requires(x >= 1);
+    ensures(popcount(x) >= 1);
+    crate::stdlib::bits::popcount_step(x);
+    crate::stdlib::bits::halves(x);
+    sandblaster::lemmas::nat::popcount_nonneg(x / 2);
+    if x % 2 == 1 {
+        by_arithmetic();
+    } else {
+        pop_pos(x / 2);
+        by_arithmetic();
+    }
+}
+
+/// Around an odd `h`: `h - 1` has one bit less, `h + 1` at most as many
+/// (and at least one).
+#[lemma]
+fn pop_odd(h: Nat) {
+    requires(h % 2 == 1);
+    ensures(popcount(h - 1) + 1 == popcount(h) && popcount(h + 1) <= popcount(h) && 1 <= popcount(h + 1));
+    crate::stdlib::bits::halves(h);
+    crate::stdlib::bits::popcount_double_plus(h / 2, 1);
+    crate::stdlib::bits::popcount_same(2 * (h / 2) + 1, h);
+    crate::stdlib::bits::popcount_double(h / 2);
+    crate::stdlib::bits::popcount_same(2 * (h / 2), h - 1);
+    crate::stdlib::bits::popcount_double(h / 2 + 1);
+    crate::stdlib::bits::popcount_same(2 * (h / 2 + 1), h + 1);
+    popcount_succ_le(h / 2);
+    pop_pos(h / 2 + 1);
+    by_arithmetic();
+}
+
+/// Around an even `h >= 2`: `h + 1` has one bit more, `h - 1` at least as
+/// many.
+#[lemma]
+fn pop_even(h: Nat) {
+    requires(h % 2 == 0 && h >= 2);
+    ensures(popcount(h + 1) == popcount(h) + 1 && popcount(h) <= popcount(h - 1));
+    crate::stdlib::bits::halves(h);
+    crate::stdlib::bits::popcount_double_plus(h / 2, 1);
+    crate::stdlib::bits::popcount_same(2 * (h / 2) + 1, h + 1);
+    crate::stdlib::bits::popcount_double(h / 2);
+    crate::stdlib::bits::popcount_same(2 * (h / 2), h);
+    crate::stdlib::bits::popcount_double_plus(h / 2 - 1, 1);
+    crate::stdlib::bits::popcount_same(2 * (h / 2 - 1) + 1, h - 1);
+    popcount_succ_le(h / 2 - 1);
+    by_arithmetic();
+}
+
+/// A number up to `2^57` has at most 57 set bits.
+#[lemma]
+fn pop_le57(h: Nat) {
+    requires(h <= pow2(57));
+    ensures(popcount(h) <= 57);
+    if h < pow2(57) {
+        crate::stdlib::bits::popcount_below(h, 57);
+        follows();
+    } else {
+        crate::stdlib::bits::popcount_pow2(57);
+        crate::stdlib::bits::popcount_same(h, pow2(57));
+        by_arithmetic();
+    }
+}
+
+/// The class of the leaf count `n = 32 h + l` lands (`ch`, `a`, `b` the set
+/// bits of `h` and its neighbours, by the parity of `h`).
+#[lemma]
+fn nw_class(n: u64, h: u64, l: u64, ch: u64, a: u64, b: u64, hz: bool) {
+    requires((n as Int) <= pow2(62) && (h as Int) == (n as Int) / 32 && (l as Int) == (n as Int) % 32 && (h as Int) <= pow2(57));
+    requires((ch as Int) == popcount(h as Nat) && (a as Int) == popcount((h as Nat) + 1) && implies(h != 0u64, (b as Int) == popcount((h as Nat) - 1)));
+    requires(implies(h == 0u64, b == 0u64) && hz == (h == 0u64));
+    ensures(okw(l, ch, a, b, hz));
+    assert(pow2(62) == 32 * pow2(57), { by_arithmetic(); });
+    assert(l < 32u64, { by_arithmetic(); });
+    pop_le57(h as Nat);
+    if h == 0u64 {
+        assert(h == 0u64, { follows(); });
+        assert(b == 0u64 && hz == true, { follows(); });
+        assert((h as Nat) == 0 && (h as Nat) + 1 == 1 && pow2(0) == 1, { by_arithmetic(); });
+        assert(popcount(0) == 0, { by_computation(); });
+        crate::stdlib::bits::popcount_pow2(0);
+        crate::stdlib::bits::popcount_same(h as Nat, 0);
+        crate::stdlib::bits::popcount_same((h as Nat) + 1, pow2(0));
+        assert(ch == 0u64 && a == 1u64, { by_arithmetic(); });
+        nw_low_all(l);
+        assert(nw_low(l, 57u64), { by_unfolding(nw_low_ok); });
+        assert(okw(l, 0u64, 1u64, 0u64, true), { by_unfolding(nw_low); });
+        rewrite(ch == 0u64);
+        rewrite(a == 1u64);
+        rewrite(b == 0u64);
+        rewrite(hz == true);
+        follows();
+    } else if h % 2u64 == 1u64 {
+        assert(h != 0u64, { follows(); });
+        assert((b as Int) == popcount((h as Nat) - 1) && hz == false, { follows(); });
+        assert((h as Nat) % 2 == 1, { by_arithmetic(); });
+        pop_odd(h as Nat);
+        assert(1u64 <= ch && ch <= 57u64 && 1u64 <= a && a <= ch && b == ch - 1u64, { by_arithmetic(); });
+        nw_low_all(l);
+        assert(nw_low(l, 57u64), { by_unfolding(nw_low_ok); });
+        assert(nw_ch(l, 57u64), { by_unfolding(nw_low); });
+        nw_ch_at(l, 57u64, ch);
+        nw_odd_at(l, ch, ch, a);
+        rewrite(b == ch - 1u64);
+        rewrite(hz == false);
+        follows();
+    } else {
+        assert(h != 0u64, { follows(); });
+        assert((b as Int) == popcount((h as Nat) - 1) && hz == false, { follows(); });
+        assert((h as Nat) % 2 == 0 && (h as Nat) >= 2, { by_arithmetic(); });
+        pop_even(h as Nat);
+        pop_le57((h as Nat) - 1);
+        pop_pos(h as Nat);
+        assert(1u64 <= ch && ch <= 57u64 && ch <= b && b <= 57u64 && a == ch + 1u64, { by_arithmetic(); });
+        nw_low_all(l);
+        assert(nw_low(l, 57u64), { by_unfolding(nw_low_ok); });
+        assert(nw_ch(l, 57u64), { by_unfolding(nw_low); });
+        nw_ch_at(l, 57u64, ch);
+        nw_even_at(l, ch, 58u64 - ch, b);
+        rewrite(a == ch + 1u64);
+        rewrite(hz == false);
+        follows();
+    }
+}
+
+/// The set bits of `h - 1` (0 for `h = 0`), as `newton` names them.
+#[lemma]
+fn nw_below(h: u64) {
+    ensures(implies(h != 0u64, ((if h == 0u64 { 0u64 } else { (h - 1u64).count_ones() as u64 }) as Int) == popcount((h as Nat) - 1)));
+    if h == 0u64 {
+        follows();
+    } else {
+        crate::stdlib::bits::count_ones_u64(h - 1u64);
+        assert(((h - 1u64) as Nat) == (h as Nat) - 1, { by_arithmetic(); });
+        crate::stdlib::bits::popcount_same((h - 1u64) as Nat, (h as Nat) - 1);
+        follows();
+    }
+}
+
+/// `x0w`, opaque: the Newton proof reasons about the errors as numbers
+/// (`x0o_def` says what the first one is).
+#[spec]
+#[opaque]
+#[example(x0o(3u64, 2u64) == 62u64 && x0o(3u64, 0u64) == 63u64)]
+pub fn x0o(l: u64, ch: u64) -> u64 {
+    x0w(l, ch)
+}
+
+/// `stepw`, opaque (`nw_step` says what a step is).
+#[spec]
+#[opaque]
+#[example(stepo(3u64, 2u64, 1u64, 1u64, 64u64) == 64u64 && stepo(3u64, 0u64, 0u64, 0u64, 0u64) == 63u64)]
+pub fn stepo(l: u64, ch: u64, a: u64, b: u64, x: u64) -> u64 {
+    stepw(l, ch, a, b, x)
+}
+
+/// What a landing class says, term by term.
+#[lemma]
+fn okw_facts(l: u64, ch: u64, a: u64, b: u64, hz: bool) {
+    requires(okw(l, ch, a, b, hz));
+    ensures(l < 32u64 && ch <= 60u64 && a <= 60u64 && b <= 60u64
+        && 33u64 <= x0o(l, ch) && x0o(l, ch) <= 95u64
+        && 33u64 <= stepo(l, ch, a, b, x0o(l, ch)) && stepo(l, ch, a, b, x0o(l, ch)) <= 95u64
+        && 33u64 <= stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch))) && stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch))) <= 95u64
+        && 63u64 <= stepo(l, ch, a, b, stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch))))
+        && stepo(l, ch, a, b, stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch)))) <= 65u64);
+    unfold(x0o);
+    unfold(stepo);
+    by_unfolding(okw);
+}
+
+/// The class facts of the leaf count `n = 32 h + l`, as numbers.
+#[lemma]
+fn nw_facts(n: u64, h: u64, l: u64, ch: u64, a: u64, b: u64, hz: bool) {
+    requires((n as Int) <= pow2(62) && (h as Int) == (n as Int) / 32 && (l as Int) == (n as Int) % 32 && (h as Int) <= pow2(57));
+    requires((ch as Int) == popcount(h as Nat) && (a as Int) == popcount((h as Nat) + 1) && implies(h != 0u64, (b as Int) == popcount((h as Nat) - 1)));
+    requires(implies(h == 0u64, b == 0u64) && hz == (h == 0u64));
+    ensures(l < 32u64 && ch <= 60u64 && a <= 60u64 && b <= 60u64
+        && 33u64 <= x0o(l, ch) && x0o(l, ch) <= 95u64
+        && 33u64 <= stepo(l, ch, a, b, x0o(l, ch)) && stepo(l, ch, a, b, x0o(l, ch)) <= 95u64
+        && 33u64 <= stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch))) && stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch))) <= 95u64
+        && 63u64 <= stepo(l, ch, a, b, stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch))))
+        && stepo(l, ch, a, b, stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch)))) <= 65u64);
+    nw_class(n, h, l, ch, a, b, hz);
+    okw_facts(l, ch, a, b, hz);
+    follows();
+}
+
+/// The first error: `x0 = floor((128 - popcount(N)) / 2)`.
+#[lemma]
+fn x0o_def(l: u64, ch: u64) {
+    requires(l < 32u64 && ch <= 60u64);
+    ensures(x0o(l, ch) == (128u64 - (ch + (l.count_ones() as u64))) >> 1u32);
+    pop_word(0u64, l);
+    let c = l.count_ones() as u64;
+    assert((ch > 60u64) == false && (c > 64u64) == false, { by_arithmetic(); });
+    unfold(x0o);
+    by_unfolding(x0w);
+}
+
+/// `popcount(N + e)` for an error `x = e + 64` of a leaf count `N = 32 h +
+/// l` (`ch`, `a`, `b` the set bits of `h`, `h + 1`, `h - 1`): `pcw`.
+#[lemma]
+fn nw_pc(n: u64, h: u64, l: u64, ch: u64, a: u64, b: u64, x: u64, m: u64) {
+    requires((n as Int) == 32 * (h as Int) + (l as Int) && l < 32u64 && (h as Int) <= pow2(57));
+    requires((ch as Int) == popcount(h as Nat) && (a as Int) == popcount((h as Nat) + 1) && implies(h != 0u64, (b as Int) == popcount((h as Nat) - 1)));
+    requires(ch <= 60u64 && a <= 60u64 && b <= 60u64);
+    requires(33u64 <= x && x <= 95u64 && (m as Int) == (n as Int) + (x as Int) - 64);
+    ensures((m.count_ones() as Int) == (pcw(l, ch, a, b, x) as Int));
+    crate::stdlib::bits::count_ones_u64(m);
+    assert((l >= 32u64) == false && (x >= 128u64) == false && (ch > 60u64) == false && (a > 60u64) == false && (b > 60u64) == false, { follows(); });
+    let r = l + x;
+    if r >= 96u64 {
+        let s = r - 96u64;
+        assert((m as Int) == 32 * ((h as Int) + 1) + (s as Int) && s < 32u64, { follows(); });
+        pop32((h as Nat) + 1, s as Nat);
+        crate::stdlib::bits::count_ones_u64(s);
+        crate::stdlib::bits::popcount_same(m as Nat, 32 * ((h as Nat) + 1) + (s as Nat));
+        assert(pcw(l, ch, a, b, x) == a + (s.count_ones() as u64), { unfold(pcw); follows(); });
+        by_arithmetic();
+    } else if r >= 64u64 {
+        let s = r - 64u64;
+        assert((m as Int) == 32 * (h as Int) + (s as Int) && s < 32u64, { follows(); });
+        pop32(h as Nat, s as Nat);
+        crate::stdlib::bits::count_ones_u64(s);
+        crate::stdlib::bits::popcount_same(m as Nat, 32 * (h as Nat) + (s as Nat));
+        assert(pcw(l, ch, a, b, x) == ch + (s.count_ones() as u64), { unfold(pcw); follows(); });
+        by_arithmetic();
+    } else {
+        let s = r - 32u64;
+        assert(h != 0u64, { by_arithmetic(); });
+        assert((b as Int) == popcount((h as Nat) - 1), { follows(); });
+        assert((m as Int) == 32 * ((h as Int) - 1) + (s as Int) && s < 32u64 && r >= 32u64, { follows(); });
+        pop32((h as Nat) - 1, s as Nat);
+        crate::stdlib::bits::count_ones_u64(s);
+        crate::stdlib::bits::popcount_same(m as Nat, 32 * ((h as Nat) - 1) + (s as Nat));
+        assert(pcw(l, ch, a, b, x) == b + (s.count_ones() as u64), { unfold(pcw); follows(); });
+        by_arithmetic();
+    }
+}
+
+/// A word has at most 64 set bits, and one below 32 at most 5.
+#[lemma]
+fn pop_word(m: u64, l: u64) {
+    requires(l < 32u64);
+    ensures((m.count_ones() as Int) <= 64 && (l.count_ones() as Int) <= 5);
+    crate::stdlib::bits::count_ones_u64(m);
+    crate::stdlib::bits::count_ones_u64(l);
+    assert(pow2(64) == 18446744073709551616 && pow2(5) == 32, { by_arithmetic(); });
+    crate::stdlib::bits::popcount_below(m as Nat, 64);
+    crate::stdlib::bits::popcount_below(l as Nat, 5);
+    by_arithmetic();
+}
+
+/// Halving past an even part: `(2k + u) / 2 = k + u / 2`.
+#[lemma]
+fn half_shift(u: Nat, k: Nat, v: Nat) {
+    requires(v == 2 * k + u);
+    ensures(v / 2 == k + u / 2);
+    crate::stdlib::bits::halves_double(k);
+    crate::stdlib::bits::halves_sum(2 * k, u);
+    rewrite(v == 2 * k + u);
+    follows();
+}
+
+/// One Newton step of `position_to_location` from `m = N + e` (`x = e +
+/// 64`), `p = 2N - popcount(N)`: `(p + popcount(m)) / 2 = N + e'`, `x' =
+/// stepw(x)`.
+#[lemma]
+fn nw_step(n: u64, p: u64, h: u64, l: u64, ch: u64, a: u64, b: u64, x: u64, m: u64) {
+    requires((n as Int) == 32 * (h as Int) + (l as Int) && l < 32u64 && (h as Int) <= pow2(57));
+    requires((ch as Int) == popcount(h as Nat) && (a as Int) == popcount((h as Nat) + 1) && implies(h != 0u64, (b as Int) == popcount((h as Nat) - 1)));
+    requires(ch <= 60u64 && a <= 60u64 && b <= 60u64);
+    requires((p as Int) == 2 * (n as Int) - popcount(n as Nat) && (p as Int) < pow2(63));
+    requires(33u64 <= x && x <= 95u64 && (m as Int) == (n as Int) + (x as Int) - 64);
+    ensures((((p + (m.count_ones() as u64)) >> 1u32) as Int) == (n as Int) + (stepo(l, ch, a, b, x) as Int) - 64);
+    nw_pc(n, h, l, ch, a, b, x, m);
+    pop_word(m, l);
+    pop32(h as Nat, l as Nat);
+    crate::stdlib::bits::popcount_same(n as Nat, 32 * (h as Nat) + (l as Nat));
+    crate::stdlib::bits::count_ones_u64(l);
+    let q = pcw(l, ch, a, b, x);
+    let c = l.count_ones() as u64;
+    assert((q > 200u64) == false && (ch > 60u64) == false && (c > 64u64) == false, { by_arithmetic(); });
+    assert(stepo(l, ch, a, b, x) == (q + 128u64 - (ch + c)) >> 1u32, { unfold(stepo); by_unfolding(stepw); });
+    let y = (q + 128u64 - (ch + c)) as Nat;
+    let v = ((p + (m.count_ones() as u64)) as Nat) + 128;
+    assert(v == 2 * (n as Nat) + y, { by_arithmetic(); });
+    half_shift((p + (m.count_ones() as u64)) as Nat, 64, v);
+    half_shift(y, n as Nat, v);
+    assert((((p + (m.count_ones() as u64)) >> 1u32) as Int) == (((p + (m.count_ones() as u64)) as Nat) / 2) as Int, { follows(); });
+    assert((((q + 128u64 - (ch + c)) >> 1u32) as Int) == (y / 2) as Int, { follows(); });
+    by_arithmetic();
+}
+
+/// The Newton iterates of `position_to_location` from the position of leaf
+/// `n` land within 1 of `n`.
+#[lemma]
+fn newton(p: u64, n: u64) {
+    requires((n as Int) <= pow2(62) && (p as Int) == mmr_size(n as Int) && (p as Int) < pow2(63));
+    ensures({
+        let n0 = p >> 1u32;
+        let n1 = (p + (n0.count_ones() as u64)) >> 1u32;
+        let n2 = (p + (n1.count_ones() as u64)) >> 1u32;
+        let n3 = (p + (n2.count_ones() as u64)) >> 1u32;
+        (n as Int) - 1 <= (n3 as Int) && (n3 as Int) <= (n as Int) + 1
+    });
+    let h = n / 32u64;
+    let l = n % 32u64;
+    assert((h as Int) == (n as Int) / 32 && (l as Int) == (n as Int) % 32 && (n as Int) == 32 * (h as Int) + (l as Int), { follows(); });
+    assert(pow2(62) == 32 * pow2(57) && pow2(57) == 144115188075855872, { by_arithmetic(); });
+    assert((h as Int) <= pow2(57) && l < 32u64, { by_arithmetic(); });
+    crate::stdlib::bits::count_ones_u64(h);
+    crate::stdlib::bits::count_ones_u64(h + 1u64);
+    assert(((h + 1u64) as Nat) == (h as Nat) + 1, { by_arithmetic(); });
+    crate::stdlib::bits::popcount_same((h + 1u64) as Nat, (h as Nat) + 1);
+    let ch = h.count_ones() as u64;
+    let a = (h + 1u64).count_ones() as u64;
+    let b = if h == 0u64 { 0u64 } else { (h - 1u64).count_ones() as u64 };
+    nw_below(h);
+    assert((ch as Int) == popcount(h as Nat) && (a as Int) == popcount((h as Nat) + 1) && implies(h != 0u64, (b as Int) == popcount((h as Nat) - 1)) && implies(h == 0u64, b == 0u64), { follows(); });
+    nw_facts(n, h, l, ch, a, b, h == 0u64);
+    assert(mmr_size(n as Int) == 2 * (n as Int) - popcount(n as Nat), { by_unfolding(mmr_size); });
+    newton_core(p, n, h, l, ch, a, b);
+    follows();
+}
+
+/// `newton` on the numbers: the leaf count `n = 32 h + l`, the set bits
+/// `ch`, `a`, `b` of `h` and its neighbours, and the errors of its class.
+#[lemma]
+fn newton_core(p: u64, n: u64, h: u64, l: u64, ch: u64, a: u64, b: u64) {
+    requires((n as Int) <= pow2(62) && (p as Int) == 2 * (n as Int) - popcount(n as Nat) && (p as Int) < pow2(63));
+    requires((n as Int) == 32 * (h as Int) + (l as Int) && (h as Int) <= pow2(57));
+    requires((ch as Int) == popcount(h as Nat) && (a as Int) == popcount((h as Nat) + 1) && implies(h != 0u64, (b as Int) == popcount((h as Nat) - 1)));
+    requires(l < 32u64 && ch <= 60u64 && a <= 60u64 && b <= 60u64
+        && 33u64 <= x0o(l, ch) && x0o(l, ch) <= 95u64
+        && 33u64 <= stepo(l, ch, a, b, x0o(l, ch)) && stepo(l, ch, a, b, x0o(l, ch)) <= 95u64
+        && 33u64 <= stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch))) && stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch))) <= 95u64
+        && 63u64 <= stepo(l, ch, a, b, stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch))))
+        && stepo(l, ch, a, b, stepo(l, ch, a, b, stepo(l, ch, a, b, x0o(l, ch)))) <= 65u64);
+    ensures({
+        let n0 = p >> 1u32;
+        let n1 = (p + (n0.count_ones() as u64)) >> 1u32;
+        let n2 = (p + (n1.count_ones() as u64)) >> 1u32;
+        let n3 = (p + (n2.count_ones() as u64)) >> 1u32;
+        (n as Int) - 1 <= (n3 as Int) && (n3 as Int) <= (n as Int) + 1
+    });
+    // the first iterate: floor(p / 2) = N + x0 - 64
+    pop32(h as Nat, l as Nat);
+    crate::stdlib::bits::popcount_same(n as Nat, 32 * (h as Nat) + (l as Nat));
+    crate::stdlib::bits::count_ones_u64(l);
+    pop_word(0u64, l);
+    let c = l.count_ones() as u64;
+    let x0 = x0o(l, ch);
+    x0o_def(l, ch);
+    let y0 = (128u64 - (ch + c)) as Nat;
+    let v = (p as Nat) + 128;
+    assert(v == 2 * (n as Nat) + y0, { by_arithmetic(); });
+    half_shift(p as Nat, 64, v);
+    half_shift(y0, n as Nat, v);
+    let n0 = p >> 1u32;
+    assert((n0 as Int) == ((p as Nat) / 2) as Int && (x0 as Int) == (y0 / 2) as Int, { follows(); });
+    assert((n0 as Int) == (n as Int) + (x0 as Int) - 64, { by_arithmetic(); });
+    // three steps
+    let n1 = (p + (n0.count_ones() as u64)) >> 1u32;
+    nw_step(n, p, h, l, ch, a, b, x0, n0);
+    let x1 = stepo(l, ch, a, b, x0);
+    let n2 = (p + (n1.count_ones() as u64)) >> 1u32;
+    nw_step(n, p, h, l, ch, a, b, x1, n1);
+    let x2 = stepo(l, ch, a, b, x1);
+    nw_step(n, p, h, l, ch, a, b, x2, n2);
+    by_arithmetic();
+}
+
+/// One candidate test of `position_to_location`: `2v - popcount(v) = p`
+/// exactly when `v` is the leaf `n` of `p` (`mmr_size` is strictly
+/// increasing).
+#[lemma]
+fn ptl_cand(p: u64, n: u64, v: u64) {
+    requires((n as Int) <= pow2(62) && (p as Int) == mmr_size(n as Int) && (v as Int) <= (n as Int) + 2);
+    ensures((2u64 * v - (v.count_ones() as u64) == p) == (v == n));
+    crate::stdlib::bits::count_ones_u64(v);
+    crate::words::count_ones_le_self(v);
+    assert(mmr_size(v as Int) == 2 * (v as Int) - popcount(v as Nat), { by_unfolding(mmr_size); });
+    assert(((2u64 * v - (v.count_ones() as u64)) as Int) == mmr_size(v as Int), { by_arithmetic(); });
+    if v < n {
+        mmr_size_mono(v as Int, n as Int);
+        follows();
+    } else if n < v {
+        mmr_size_mono(n as Int, v as Int);
+        follows();
+    } else {
+        follows();
+    }
+}
+
+/// `position_to_location`'s candidate tests at the last iterate `m`
+/// (within 1 of the leaf `n` of `p`) pick the leaf.
+#[lemma]
+fn ptl_pick(p: u64, n: u64, m: u64, loc: Location) {
+    requires((n as Int) <= pow2(62) && (p as Int) == mmr_size(n as Int) && (n as Int) - 1 <= (m as Int) && (m as Int) <= (n as Int) + 1 && loc.0 == n);
+    ensures((if 2u64 * m - (m.count_ones() as u64) == p {
+        Some(Location::new(m))
+    } else if m > 0u64 && 2u64 * (m - 1u64) - ((m - 1u64).count_ones() as u64) == p {
+        Some(Location::new(m - 1u64))
+    } else if 2u64 * (m + 1u64) - ((m + 1u64).count_ones() as u64) == p {
+        Some(Location::new(m + 1u64))
+    } else {
+        None
+    }) == Some(loc));
+    ptl_cand(p, n, m);
+    ptl_cand(p, n, m + 1u64);
+    if m == n {
+        location_ext(Location::new(m), loc);
+        follows();
+    } else if m > n {
+        ptl_cand(p, n, m - 1u64);
+        location_ext(Location::new(m - 1u64), loc);
+        follows();
+    } else {
+        location_ext(Location::new(m + 1u64), loc);
+        if m > 0u64 {
+            ptl_cand(p, n, m - 1u64);
+            follows();
+        } else {
+            follows();
+        }
+    }
+}
+
+/// From the Newton iterates landing within 1 of the leaf, and the tests
+/// that find it.
+#[proof]
+fn position_to_location_is_complete(pos: Position, loc: Location) {
+    let n = loc.0;
+    let p = pos.0;
+    let n0 = p >> 1u32;
+    let n1 = (p + (n0.count_ones() as u64)) >> 1u32;
+    let n2 = (p + (n1.count_ones() as u64)) >> 1u32;
+    let m = (p + (n2.count_ones() as u64)) >> 1u32;
+    // `m` is within 1 of the leaf, and the tests pick it
+    newton(p, n);
+    ptl_pick(p, n, m, loc);
+    // the function is its candidate tests at the last iterate `m`
+    unfold(crate::merkle::mmr::Family::position_to_location);
+    exact(ptl_pick(p, n, m, loc));
+}
+
+/// `location_to_position` is pinned by its law.
+#[proof(complete = crate::merkle::mmr::Family::location_to_position)]
+fn location_to_position_determined(loc: Location) {
+    use_hyp(0, loc);
+    use_real(0, loc);
+    apply(position_ext);
+}
+
+/// `Location::try_from` answers `Ok(l)` only on a position below `2^63`
+/// where `position_to_location` answers `Some(l)`.
+#[lemma]
+fn try_from_ok(pos: Position, l: Location) {
+    requires(crate::merkle::location::Location::try_from__Position(pos) == crate::__lift::Result::Ok(l));
+    ensures((pos.0 as Int) < pow2(63) && crate::merkle::mmr::Family::position_to_location(pos) == Some(l));
+    if (pos.0 as Int) <= pow2(63) - 1 {
+        match crate::merkle::mmr::Family::position_to_location(pos) {
+            Some(x) => follows(),
+            None => follows(),
+        }
+    } else {
+        follows();
+    }
+}
+
+/// `Location::try_from` answers an error on a position below `2^63` only
+/// where `position_to_location` answers `None`.
+#[lemma]
+fn try_from_err(pos: Position, e: crate::merkle::Error) {
+    requires((pos.0 as Int) < pow2(63) && crate::merkle::location::Location::try_from__Position(pos) == crate::__lift::Result::Err(e));
+    ensures(crate::merkle::mmr::Family::position_to_location(pos) == None);
+    match crate::merkle::mmr::Family::position_to_location(pos) {
+        Some(x) => follows(),
+        None => follows(),
+    }
+}
+
+/// `position_to_location` is pinned by its two laws: a location it returns
+/// is the leaf's (sound), and every leaf's position returns its location
+/// (complete).
+#[proof(complete = crate::merkle::mmr::Family::position_to_location)]
+fn position_to_location_determined(pos: Position) {
+    // `Location::try_from` (outside the section) reads the real function
+    let t = crate::merkle::location::Location::try_from__Position(pos);
+    match crate::merkle::mmr::Family::position_to_location(pos) {
+        Some(l) => {
+            use_hyp(1, pos, l);
+            use_real(2, pos, l);
+            follows();
+        }
+        None => match t {
+            crate::__lift::Result::Ok(l) => {
+                try_from_ok(pos, l);
+                use_real(1, pos, l);
+                use_hyp(2, pos, l);
+                by_contradiction();
+            }
+            crate::__lift::Result::Err(e) => {
+                try_from_err(pos, e);
+                follows();
+            }
+        },
+    }
+}
+
+/// `to_nearest_size` is pinned by its law: two answers that are both the
+/// largest MMR size up to `size` are equal (each is at most the other).
+#[proof(complete = crate::merkle::mmr::iterator::PeakIterator::to_nearest_size)]
+fn to_nearest_size_determined(size: Position) {
+    // `Family::to_nearest_size` (outside the section) reads the real function
+    let a = PeakIterator::to_nearest_size(size);
+    let b = crate::merkle::mmr::Family::to_nearest_size(size);
+    use_hyp(0, size);
+    use_real(0, size);
+    use_hyp(1, size, b.0 as Nat);
+    use_real(1, size, a.0 as Nat);
+    apply(position_ext);
 }

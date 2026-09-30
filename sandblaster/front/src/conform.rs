@@ -73,6 +73,9 @@ use crate::lift::{ConformCallee, ConformEntry, LiftedInfo, ParamPass};
 use crate::mutate::eval::{self as meval, Hints, Rng, Val};
 use crate::surface::{hex, sha256};
 
+mod in_place;
+pub use in_place::check_in_place;
+
 /// This check's version (part of the cache key).
 pub const VERSION: &str = "sandblaster-lift-conformance/2";
 /// The buffer model in Rust (the harness's crate `bytes`).
@@ -104,9 +107,25 @@ pub struct Config {
     pub edition: String,
     /// The toolchain identity (the build script's hash): part of the key.
     pub toolchain_id: String,
+    /// The host crate's directory (its `Cargo.toml` and `src/`): the
+    /// harness of in-place modules is a copy of the host crate
+    /// ([`check_in_place`]); `None` outside a build.
+    pub manifest_dir: Option<PathBuf>,
+    /// The `cargo` that builds that copy (the build's `CARGO`, else `cargo`).
+    pub cargo: PathBuf,
+    /// The host crate's features the build enabled (`CARGO_FEATURE_*`
+    /// names: upper case, `_` for `-`); `None` or none enabled: the
+    /// default features.
+    pub features: Option<Vec<String>>,
 }
 
 impl Config {
+    /// A configuration outside a build (no host crate: in-place modules
+    /// cannot be checked).
+    pub fn new(rustc: PathBuf, work_dir: PathBuf, edition: &str, toolchain_id: &str) -> Config {
+        Config { rustc, work_dir, edition: edition.into(), toolchain_id: toolchain_id.into(), manifest_dir: None, cargo: PathBuf::from("cargo"), features: None }
+    }
+
     /// The configuration of a module-mode build: `RUSTC` (else `rustc`),
     /// `OUT_DIR/<out>-conformance/`, the edition of the host manifest (a
     /// workspace-inherited edition is read from the workspace manifest;
@@ -117,6 +136,9 @@ impl Config {
             work_dir: out_dir.join(format!("{out}-conformance")),
             edition: edition_of(fs, manifest_dir).unwrap_or_else(|| "2021".into()),
             toolchain_id: context.unwrap_or("").to_string(),
+            manifest_dir: Some(manifest_dir.to_path_buf()),
+            cargo: PathBuf::from(env("CARGO").unwrap_or_else(|| "cargo".into())),
+            features: Some(std::env::vars().filter_map(|(k, _)| k.strip_prefix("CARGO_FEATURE_").map(str::to_string)).collect()),
         }
     }
 }
@@ -343,7 +365,7 @@ pub fn check(out: &elab::Output, krate: &Crate, c: &Checked, info: &LiftedInfo, 
     }
     // what the harness cannot build yet fails the check (never a vacuous pass)
     if info.in_place {
-        rep.errors.push(format!("`{}` is lifted in place: the harness compiles one lifted file on its own, and an in-place file is part of its host crate (it names the crate's other modules and dependencies); lift conformance of in-place modules is not implemented, so no verdict is issued", info.name));
+        rep.errors.push(format!("`{}` is lifted in place: the harness compiles one lifted file on its own, and an in-place file is part of its host crate (it names the crate's other modules and dependencies); an in-place crate is checked as a whole by `check_in_place` (a copy of the host crate), so no verdict is issued here", info.name));
         rep.elapsed = t0.elapsed();
         return rep;
     }
@@ -421,6 +443,8 @@ struct Plan<'a> {
     state_of: Vec<usize>,
     callee: String,
     invariant_arg: bool,
+    /// The checker of the function's precondition (in-place modules).
+    pre: Option<GlobalId>,
 }
 
 /// One compared input.
@@ -442,6 +466,14 @@ struct Gen<'a> {
     harvest_shapes: HashMap<(String, String), usize>,
     pools: HashMap<String, Vec<J>>,
     rng: Rng,
+    /// In-place modules: how the harness (a copy of the host crate)
+    /// spells the source's items ([`in_place`]).
+    ip: Option<in_place::Spell>,
+    /// In-place modules: the checkers of the functions' preconditions
+    /// (lifted function → its checker in `pre_out`'s environment), so that
+    /// a function with a `requires` is compared on the inputs that meet it.
+    pre: HashMap<ItemId, GlobalId>,
+    pre_out: Option<&'a elab::Output>,
 }
 
 fn tkey(t: &Ty) -> String {
@@ -457,7 +489,7 @@ fn num(j: &J) -> Option<u128> {
 
 impl<'a> Gen<'a> {
     fn new(out: &'a elab::Output, krate: &'a Crate, c: &'a Checked, info: &LiftedInfo) -> Gen<'a> {
-        Gen { out, krate, c, module: info.name.clone(), hosts: c.lifted.iter().filter(|l| l.host).map(|l| l.name.clone()).collect(), harvest: HashMap::new(), harvest_shapes: HashMap::new(), pools: HashMap::new(), rng: Rng(SEED) }
+        Gen { out, krate, c, module: info.name.clone(), hosts: c.lifted.iter().filter(|l| l.host).map(|l| l.name.clone()).collect(), harvest: HashMap::new(), harvest_shapes: HashMap::new(), pools: HashMap::new(), rng: Rng(SEED), ip: None, pre: HashMap::new(), pre_out: None }
     }
 
     fn conv(&self) -> Conv<'_> {
@@ -472,7 +504,7 @@ impl<'a> Gen<'a> {
                 er.skipped = Some(why);
                 rep.entries.push(er.clone());
             };
-            let callee = match self.callee(&e.callee) {
+            let callee = match self.ip_callee(e).unwrap_or_else(|| self.callee(&e.callee)) {
                 Ok(c) => c,
                 Err(why) => {
                     er.callee = format!("{:?}", e.callee);
@@ -490,7 +522,8 @@ impl<'a> Gen<'a> {
                 rep.errors.push(format!("`{}` was not elaborated", e.lifted));
                 continue;
             };
-            if f.params.iter().any(|p| p.ghost) || self.out.env.global_param_rels(g).is_none_or(|r| r.contains(&Rel::Irr)) {
+            let pre = self.pre.get(&id).copied();
+            if f.params.iter().any(|p| p.ghost) || (pre.is_none() && self.out.env.global_param_rels(g).is_none_or(|r| r.contains(&Rel::Irr))) {
                 skip(&mut er, "it has a precondition (it is checked through its callers)".into(), rep);
                 continue;
             }
@@ -528,7 +561,7 @@ impl<'a> Gen<'a> {
             }
             let invariant_arg = params.iter().any(|t| self.has_invariant(t));
             rep.entries.push(er);
-            plans.push(Plan { e, index: rep.entries.len() - 1, g, params, ret: f.ret.clone(), comps, state_of, callee, invariant_arg });
+            plans.push(Plan { e, index: rep.entries.len() - 1, g, params, ret: f.ret.clone(), comps, state_of, callee, invariant_arg, pre });
         }
         plans
     }
@@ -639,6 +672,9 @@ impl<'a> Gen<'a> {
     /// The Rust type (in the harness module) of a lifted type, and the
     /// path used in expressions and patterns (turbofish form).
     fn adt_paths(&self, id: ItemId, args: &[Ty]) -> Result<(String, String), String> {
+        if let Some(r) = self.ip_adt_paths(id, args) {
+            return r;
+        }
         let path = self.krate.item(id).path.to_string();
         let targs = args.iter().map(|a| self.rust_ty(a)).collect::<Result<Vec<_>, _>>()?;
         let generics = |ps: &[String]| if ps.is_empty() { (String::new(), String::new()) } else { (format!("<{}>", ps.join(", ")), format!("::<{}>", ps.join(", "))) };
@@ -790,6 +826,28 @@ impl<'a> Gen<'a> {
         for (t, j) in p.params.iter().zip(args) {
             tms.push((Rel::Rel, conv.term(t, j).map_err(|_| None)?));
         }
+        if let Some(chk) = p.pre {
+            // the precondition, decided by its checker: an input that does
+            // not meet it is not compared
+            if !self.meets_pre(chk, p, args).map_err(Some)? {
+                return Err(None);
+            }
+            // (the `requires` binders get erased proofs: the reference strategy)
+            let rels = self.out.env.global_param_rels(p.g).unwrap_or_default();
+            let mut it = tms.into_iter();
+            let all: Vec<(Rel, Tm)> = rels.iter().map(|r| if *r == Rel::Irr { (Rel::Irr, std::rc::Rc::new(sandblaster_kernel::term::Term::Erased)) } else { it.next().unwrap_or((Rel::Rel, std::rc::Rc::new(sandblaster_kernel::term::Term::Erased))) }).collect();
+            *reference += 1;
+            let v = crate::driver::stage::eval_reference(&self.out.env, &mk::apps(mk::global(p.g), all), STEPS).map_err(Some)?;
+            let r = conv.json(&p.ret, &v).map_err(Some)?;
+            return Ok(if p.comps.len() == 1 {
+                vec![r]
+            } else {
+                match r {
+                    J::Arr(xs) if xs.len() == p.comps.len() => xs,
+                    other => return Err(Some(format!("unexpected result shape {}", other.render()))),
+                }
+            });
+        }
         let term = mk::apps(mk::global(p.g), tms);
         let v = if p.invariant_arg {
             *reference += 1;
@@ -820,7 +878,7 @@ impl<'a> Gen<'a> {
         match (t.peel_refs(), j) {
             (Ty::Adt(id, args), _) if self.signed_bits(*id).is_none() => {
                 if let Some((_, fields)) = self.fields_of(*id, args) {
-                    if self.krate.item(*id).path.to_string().starts_with(&format!("crate::{}::", self.module)) {
+                    if self.own_type(&self.krate.item(*id).path.to_string()) {
                         self.keep(t, j);
                     }
                     for (i, (n, ft)) in fields.iter().enumerate() {
@@ -1305,8 +1363,11 @@ const PRELUDE: &str = r#"
 /// Generated readers and writers, by Rust type.
 struct Emit<'g, 'a> {
     g: &'g Gen<'a>,
-    readers: BTreeMap<String, (String, String)>,
-    writers: BTreeMap<String, String>,
+    /// By Rust type: the reader's name as its users call it, its code and
+    /// the module that holds it (in-place harnesses; empty otherwise).
+    readers: BTreeMap<String, (String, String, String)>,
+    /// By Rust type: the writer's code and the module that holds it.
+    writers: BTreeMap<String, (String, String)>,
 }
 
 impl Emit<'_, '_> {
@@ -1314,11 +1375,15 @@ impl Emit<'_, '_> {
     fn reader(&mut self, t: &Ty) -> Result<String, String> {
         let t = t.peel_refs();
         let rt = self.g.rust_ty(t)?;
-        if let Some((name, _)) = self.readers.get(&rt) {
+        if let Some((name, _, _)) = self.readers.get(&rt) {
             return Ok(name.clone());
         }
-        let name = format!("__r{}", self.readers.len());
-        self.readers.insert(rt.clone(), (name.clone(), String::new()));
+        let local = format!("__r{}", self.readers.len());
+        // (an in-place harness spreads its readers over the modules whose
+        // private fields they build: every use names the reader's path)
+        let home = self.g.ip_home(t);
+        let name = if home.is_empty() { local.clone() } else { format!("{home}::{local}") };
+        self.readers.insert(rt.clone(), (name.clone(), String::new(), home.clone()));
         let body = match t {
             Ty::Bool => "t.n() != 0".to_string(),
             Ty::Uint(u) => format!("t.n() as {}", u.name()),
@@ -1359,18 +1424,21 @@ impl Emit<'_, '_> {
             }
             other => return Err(format!("no reader for `{other:?}`")),
         };
-        let code = format!("    fn {name}(t: &mut __T<'_>) -> {rt} {{ {body} }}\n");
-        self.readers.insert(rt, (name.clone(), code));
+        let vis = if home.is_empty() { "" } else { "pub " };
+        let code = format!("    {vis}fn {local}(t: &mut __T<'_>) -> {rt} {{ {body} }}\n");
+        self.readers.insert(rt, (name.clone(), code, home));
         Ok(name)
     }
 
     fn ctor(&mut self, path: &str, shape: Shape, fields: &[FieldDef], args: &[Ty]) -> Result<String, String> {
         let mut parts = Vec::new();
         for f in fields {
-            let r = self.reader(&f.ty.subst(args))?;
+            let ft = f.ty.subst(args);
+            // a `PhantomData` field (its type arguments erased by the lift)
+            let value = if self.g.ip.is_some() && self.g.is_phantom(&ft) { "::core::marker::PhantomData".to_string() } else { format!("{}(t)", self.reader(&ft)?) };
             parts.push(match shape {
-                Shape::Named => format!("{}: {r}(t)", f.name.clone().unwrap_or_default()),
-                _ => format!("{r}(t)"),
+                Shape::Named => format!("{}: {value}", f.name.clone().unwrap_or_default()),
+                _ => value,
             });
         }
         Ok(match shape {
@@ -1393,6 +1461,8 @@ impl Emit<'_, '_> {
             }
             Ty::Array(e, _) | Ty::Seq(e) | Ty::Option(e) => self.writer(e),
             Ty::Adt(id, _) if self.g.signed_bits(*id).is_some() => Ok(()),
+            // (the in-place prelude writes every `PhantomData`)
+            Ty::Adt(..) if self.g.ip.is_some() && self.g.is_phantom(t) => Ok(()),
             Ty::Adt(id, args) => {
                 let path = self.g.krate.item(*id).path.to_string();
                 if path == "crate::__lift::Result" {
@@ -1405,7 +1475,8 @@ impl Emit<'_, '_> {
                 if self.writers.contains_key(&rt) {
                     return Ok(());
                 }
-                self.writers.insert(rt.clone(), String::new());
+                let home = self.g.ip_home(t);
+                self.writers.insert(rt.clone(), (String::new(), home.clone()));
                 let q = |s: &str| format!("{s:?}");
                 let body = match &self.g.krate.item(*id).kind {
                     ItemKind::Struct(s) => {
@@ -1448,12 +1519,18 @@ impl Emit<'_, '_> {
                                 }
                             });
                         }
+                        // a host model has the variants the lifted code
+                        // builds; the host's enum may have more (written as
+                        // a value no model output has: a mismatch if met)
+                        if self.g.ip_host_model(*id) {
+                            arms.push("#[allow(unreachable_patterns)] _ => o.push_str(\"\\\"(a variant the host model does not have)\\\"\"),".into());
+                        }
                         format!("match self {{ {} }}", arms.join(" "))
                     }
                     _ => return Err("not a data type".into()),
                 };
                 let code = format!("    impl __W for {rt} {{ fn w(&self, o: &mut ::std::string::String) {{ {body} }} }}\n");
-                self.writers.insert(rt, code);
+                self.writers.insert(rt, (code, home));
                 Ok(())
             }
             _ => Ok(()),
@@ -1521,68 +1598,74 @@ fn field_tokens(g: &Gen<'_>, fields: &[FieldDef], shape: Shape, args: &[Ty], j: 
     Ok(())
 }
 
+/// The harness function of one plan (`__e{pi}`): reads the inputs, calls
+/// the original and writes the states and the result.
+fn entry_fn(em: &mut Emit<'_, '_>, g: &Gen<'_>, pi: usize, p: &Plan<'_>, vis: &str) -> Result<String, String> {
+    let mut s = format!("    {vis}fn __e{pi}(t: &mut __T<'_>) -> ::std::string::String {{\n");
+    let mut call_args = Vec::new();
+    for (i, (pass, t)) in p.e.params.iter().zip(&p.params).enumerate() {
+        let r = em.reader(t)?;
+        let rt = g.rust_ty(t)?;
+        match pass {
+            ParamPass::Value => {
+                s.push_str(&format!("        let a{i}: {rt} = {r}(t);\n"));
+                call_args.push(format!("a{i}"));
+            }
+            ParamPass::Ref => {
+                s.push_str(&format!("        let a{i}: {rt} = {r}(t);\n"));
+                call_args.push(format!("&a{i}"));
+            }
+            ParamPass::MutRef | ParamPass::BufMut => {
+                s.push_str(&format!("        let mut a{i}: {rt} = {r}(t);\n"));
+                call_args.push(format!("&mut a{i}"));
+            }
+            ParamPass::Buf => {
+                s.push_str(&format!("        let v{i}: {rt} = {r}(t);\n        let mut a{i}: &[u8] = &v{i}[..];\n"));
+                call_args.push(format!("&mut a{i}"));
+            }
+        }
+    }
+    for t in &p.comps {
+        em.writer(t)?;
+    }
+    s.push_str(&format!("        let ret = {}({});\n        let mut o = ::std::string::String::new();\n        o.push('[');\n", p.callee, call_args.join(", ")));
+    let mut first = true;
+    for &i in &p.state_of {
+        if !first {
+            s.push_str("        o.push(',');\n");
+        }
+        first = false;
+        match p.e.params[i] {
+            ParamPass::Buf => s.push_str(&format!("        __W::w(&a{i}.to_vec(), &mut o);\n")),
+            _ => s.push_str(&format!("        __W::w(&a{i}, &mut o);\n")),
+        }
+    }
+    if p.e.has_ret {
+        if !first {
+            s.push_str("        o.push(',');\n");
+        }
+        s.push_str("        __W::w(&ret, &mut o);\n");
+    } else {
+        s.push_str("        let () = ret;\n");
+    }
+    s.push_str("        o.push(']');\n        o\n    }\n");
+    Ok(s)
+}
+
 /// Writes, compiles and runs the harness; returns its output line by case.
 fn harness(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], src: &str, hosts: &[(String, String)], cfg: &Config) -> Result<Vec<String>, String> {
     let mut em = Emit { g, readers: BTreeMap::new(), writers: BTreeMap::new() };
     let mut fns = String::new();
     let mut arms = Vec::new();
     for (pi, p) in plans.iter().enumerate() {
-        let mut s = format!("    fn __e{pi}(t: &mut __T<'_>) -> ::std::string::String {{\n");
-        let mut call_args = Vec::new();
-        for (i, (pass, t)) in p.e.params.iter().zip(&p.params).enumerate() {
-            let r = em.reader(t)?;
-            let rt = g.rust_ty(t)?;
-            match pass {
-                ParamPass::Value => {
-                    s.push_str(&format!("        let a{i}: {rt} = {r}(t);\n"));
-                    call_args.push(format!("a{i}"));
-                }
-                ParamPass::Ref => {
-                    s.push_str(&format!("        let a{i}: {rt} = {r}(t);\n"));
-                    call_args.push(format!("&a{i}"));
-                }
-                ParamPass::MutRef | ParamPass::BufMut => {
-                    s.push_str(&format!("        let mut a{i}: {rt} = {r}(t);\n"));
-                    call_args.push(format!("&mut a{i}"));
-                }
-                ParamPass::Buf => {
-                    s.push_str(&format!("        let v{i}: {rt} = {r}(t);\n        let mut a{i}: &[u8] = &v{i}[..];\n"));
-                    call_args.push(format!("&mut a{i}"));
-                }
-            }
-        }
-        for t in &p.comps {
-            em.writer(t)?;
-        }
-        s.push_str(&format!("        let ret = {}({});\n        let mut o = ::std::string::String::new();\n        o.push('[');\n", p.callee, call_args.join(", ")));
-        let mut first = true;
-        for &i in &p.state_of {
-            if !first {
-                s.push_str("        o.push(',');\n");
-            }
-            first = false;
-            match p.e.params[i] {
-                ParamPass::Buf => s.push_str(&format!("        __W::w(&a{i}.to_vec(), &mut o);\n")),
-                _ => s.push_str(&format!("        __W::w(&a{i}, &mut o);\n")),
-            }
-        }
-        if p.e.has_ret {
-            if !first {
-                s.push_str("        o.push(',');\n");
-            }
-            s.push_str("        __W::w(&ret, &mut o);\n");
-        } else {
-            s.push_str("        let () = ret;\n");
-        }
-        s.push_str("        o.push(']');\n        o\n    }\n");
-        fns.push_str(&s);
+        fns.push_str(&entry_fn(&mut em, g, pi, p, "")?);
         arms.push(format!("{pi} => __e{pi}(&mut t)"));
     }
     let mut module = format!("\n#[doc(hidden)]\npub mod {HARNESS_MOD} {{{PRELUDE}");
-    for (_, code) in em.readers.values() {
+    for (_, code, _) in em.readers.values() {
         module.push_str(code);
     }
-    for code in em.writers.values() {
+    for (code, _) in em.writers.values() {
         module.push_str(code);
     }
     module.push_str(&fns);
@@ -1652,10 +1735,15 @@ fn harness(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], src: &str, hosts: &[
     rustc(&["--crate-type=rlib", "--crate-name=bytes", &ed, "-Coverflow-checks=on", "-Cdebug-assertions=on", "-o", "libbytes.rlib", "bytes.rs"])?;
     let exe = if cfg!(windows) { "harness.exe" } else { "harness" };
     rustc(&["--crate-type=bin", "--crate-name=sandblaster_conformance", &ed, "-Coverflow-checks=on", "-Cdebug-assertions=on", "-Copt-level=1", "--extern", "bytes=libbytes.rlib", "-o", exe, "main.rs"])?;
+    run_harness(&dir.join(exe), dir, cases.len())
+}
+
+/// Runs a built harness on `dir/cases.txt`; returns its output line by case.
+fn run_harness(exe: &Path, dir: &Path, n: usize) -> Result<Vec<String>, String> {
     // run
     let out_path = dir.join("outputs.txt");
     let out_file = std::fs::File::create(&out_path).map_err(|e| format!("cannot create `{}`: {e}", out_path.display()))?;
-    let mut child = Command::new(dir.join(exe)).arg(dir.join("cases.txt")).stdout(Stdio::from(out_file)).stderr(Stdio::null()).spawn().map_err(|e| format!("cannot run the harness: {e}"))?;
+    let mut child = Command::new(exe).arg(dir.join("cases.txt")).stdout(Stdio::from(out_file)).stderr(Stdio::null()).spawn().map_err(|e| format!("cannot run the harness: {e}"))?;
     let t = Instant::now();
     loop {
         match child.try_wait() {
@@ -1670,7 +1758,7 @@ fn harness(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], src: &str, hosts: &[
         }
     }
     let text = std::fs::read_to_string(&out_path).map_err(|e| format!("cannot read `{}`: {e}", out_path.display()))?;
-    let mut outs = vec![String::new(); cases.len()];
+    let mut outs = vec![String::new(); n];
     for line in text.lines() {
         let (i, rest) = line.split_once('\t').ok_or_else(|| format!("bad harness line `{line}`"))?;
         let i: usize = i.parse().map_err(|_| format!("bad harness line `{line}`"))?;
