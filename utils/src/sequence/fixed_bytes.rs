@@ -36,7 +36,8 @@ impl<const N: usize> Ord for FixedBytes<N> {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         let (a, b) = (&self.0, &other.0);
-        // Up to 16 bytes the derived compare is already inlined; past 64 unrolling bloats call sites.
+
+        // Up to 16 bytes the derived compare is faster. Past 64 bytes, unrolling bloats call sites.
         if N <= 16 || N > 64 {
             return a.cmp(b);
         }
@@ -51,6 +52,7 @@ impl<const N: usize> Ord for FixedBytes<N> {
         if N.is_multiple_of(8) {
             return Ordering::Equal;
         }
+
         // Every earlier byte is equal, so the last 8 bytes (overlapping the last whole word) decide.
         let last = |x: &[u8; N]| u64::from_be_bytes(*x.last_chunk::<8>().expect("N > 16"));
         last(a).cmp(&last(b))
@@ -207,6 +209,7 @@ mod tests {
         for _ in 0..8 {
             let a: [u8; N] = rng.random();
             assert_matches(&a, &a);
+
             // Make every position the first difference.
             for k in 0..N {
                 let mut b = a;
@@ -231,6 +234,8 @@ mod tests {
         }
     }
 
+    /// Checks `FixedBytes` ordering against `[u8; N]` at every first-difference position, on both
+    /// sides of each size cutoff and at every remainder length.
     #[test]
     fn test_ord_matches_byte_order() {
         check::<0>();

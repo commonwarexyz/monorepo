@@ -355,10 +355,19 @@ mod tests {
         let a = Digest([0; DIGEST_LENGTH]);
         let mut b = a;
         b.0[DIGEST_LENGTH - 1] = 1;
+
+        // The first byte decides even when the remaining bytes order the other way.
+        let mut c = a;
+        c.0[0] = 0x7f;
+        c.0[1..].fill(0xff);
+        let mut d = a;
+        d.0[0] = 0x80;
         for (a, b, expected) in [
             (a, a, Ordering::Equal),
             (a, b, Ordering::Less),
             (b, a, Ordering::Greater),
+            (c, d, Ordering::Less),
+            (d, c, Ordering::Greater),
         ] {
             assert_eq!(a.cmp(&b), expected);
             assert_eq!(a.partial_cmp(&b), Some(expected));
