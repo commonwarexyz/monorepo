@@ -102,6 +102,8 @@ where
         self.subscribe_by_digest(commitment)
     }
 
+    fn finalized(&self, _commitment: B::Digest, _round: Round) {}
+
     fn retire(&self, _update: Retirement<B::Digest>) {}
 
     fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {

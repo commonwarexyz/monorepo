@@ -150,6 +150,10 @@ where
         Some(self.subscribe(commitment))
     }
 
+    fn finalized(&self, commitment: Commitment<B, C, H>, round: Round) {
+        Self::finalized(self, commitment, round);
+    }
+
     fn retire(&self, update: Retirement<Commitment<B, C, H>>) {
         Self::retire(self, update);
     }

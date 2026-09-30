@@ -798,6 +798,9 @@ where
                     .put_finalization(round, digest, &finalization)
                     .await;
 
+                // Consensus abandons every other commitment at or below a finalized round.
+                buffer.finalized(commitment, round);
+
                 // Search for the finalized block locally, otherwise fetch it remotely.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     // The anchor path stores the floor block and finalization,

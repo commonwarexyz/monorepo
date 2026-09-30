@@ -41,8 +41,8 @@
 //! Notarized data and certificates live in prunable archives managed internally, while finalized
 //! blocks are migrated into immutable archives. Any gaps are filled by asking peers for specific
 //! commitments through the resolver pipeline. The shard engine keeps only ephemeral, in-memory
-//! caches; once a block is finalized it is evicted from the reconstruction map, reducing memory
-//! pressure.
+//! caches. Reconstruction state without a block is evicted once a finalization of another
+//! commitment covers its round, and cached blocks once marshal durably processes them.
 //!
 //! # When to Use
 //!
@@ -185,6 +185,8 @@ mod tests {
             self.commitment_subscriptions.lock().push(sender);
             Some(receiver)
         }
+
+        fn finalized(&self, _commitment: TestCommitment, _round: Round) {}
 
         fn retire(&self, _update: core::Retirement<TestCommitment>) {}
 
@@ -2731,6 +2733,112 @@ mod tests {
                 },
             }
         })
+    }
+
+    /// A reported finalization retires blockless reconstruction state at or below its round
+    /// before the application acknowledges any block, while cached blocks, later state, and
+    /// commitment subscriptions remain.
+    #[test_traced("WARN")]
+    fn test_coding_finalization_retires_reconstruction_state_before_ack() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let mut setup = CodingHarness::setup_validator_with(
+                context.child("validator"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(2),
+                Application::manual_ack(),
+            )
+            .await;
+            let make_block = |height| {
+                CodingHarness::make_test_block(
+                    Sha256::hash(&[b""]),
+                    CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
+                    Height::new(height),
+                    height,
+                    NUM_VALIDATORS as u16,
+                )
+            };
+            let round = |view| Round::new(Epoch::zero(), View::new(view));
+
+            // Another participant leads views 1 through 8 with candidates whose shards never
+            // arrive.
+            let mut candidates = Vec::new();
+            for view in 1..=8 {
+                let commitment = make_block(view).commitment();
+                setup
+                    .extra
+                    .discovered(commitment, participants[1].clone(), round(view));
+                candidates.push((
+                    setup.extra.subscribe_assigned_shard_verified(commitment),
+                    setup
+                        .mailbox
+                        .subscribe_by_commitment(commitment, core::CommitmentFallback::Wait),
+                ));
+            }
+
+            // A block cached below the finalization and a candidate above it.
+            let cached = make_block(20);
+            let cached_commitment = cached.commitment();
+            setup.extra.proposed(round(2), cached);
+            let later = make_block(21).commitment();
+            setup
+                .extra
+                .discovered(later, participants[1].clone(), round(12));
+            let mut later_assigned = setup.extra.subscribe_assigned_shard_verified(later);
+
+            // Consensus finalizes an unavailable block at view 10.
+            CodingHarness::report_finalization(
+                &mut setup.mailbox,
+                CodingHarness::make_finalization(
+                    Proposal {
+                        round: round(10),
+                        parent: View::new(9),
+                        payload: make_block(10).commitment(),
+                    },
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+
+            // Candidates at or below the finalization lose their reconstruction state, but
+            // their commitment subscriptions stay open.
+            for (assigned, _) in &mut candidates {
+                while !matches!(
+                    assigned.try_recv(),
+                    Err(oneshot::error::TryRecvError::Closed)
+                ) {
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+            }
+            for (_, block) in &mut candidates {
+                assert!(matches!(
+                    block.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+            }
+
+            // The cached block and the later candidate remain, and nothing was acknowledged.
+            assert!(setup.extra.get(cached_commitment).await.is_some());
+            assert!(matches!(
+                later_assigned.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert_eq!(setup.application.acknowledged().await, Height::zero());
+        });
     }
 
     #[test_traced("WARN")]

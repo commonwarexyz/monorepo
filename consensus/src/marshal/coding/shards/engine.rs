@@ -326,7 +326,8 @@ enum CommitmentStatus {
 enum RetirementReason {
     /// Durable progress explicitly retired the commitment.
     Exact,
-    /// The commitment's last observation is covered by the durable round floor.
+    /// The commitment's last observation is covered by the durable round floor or, for state
+    /// without a cached block, by a finalization.
     Floor,
 }
 
@@ -643,6 +644,9 @@ where
                     }
                     Message::Notarized { commitment, round } => {
                         self.handle_notarized_commitment(&mut sender, commitment, round);
+                    }
+                    Message::Finalized { commitment, round } => {
+                        self.finalized(commitment, round);
                     }
                     Message::GetByCommitment {
                         commitment,
@@ -1261,7 +1265,7 @@ where
                 // Do not prune other reconstruction state here. A Byzantine
                 // leader can equivocate by proposing multiple commitments in
                 // the same round, so more than one block may be reconstructed
-                // for a given round. Retirement is deferred until durable
+                // for a given round. Cached blocks retire only after durable
                 // application progress supplies both eligibility signals.
                 debug!(
                     %commitment,
@@ -1400,10 +1404,32 @@ where
         }
     }
 
+    /// Retires reconstruction state without a cached block for every commitment other than
+    /// `finalized` last observed at or before `round`.
+    ///
+    /// Cached blocks remain until durable application progress, and block subscriptions remain
+    /// open.
+    fn finalized(&mut self, finalized: Commitment<B, C, H>, round: Round) {
+        // Consensus never verifies or certifies another commitment at or below a finalized
+        // round, and later blocks descend from the finalized commitment. Marshal obtains any
+        // ancestor as a whole block, so partial shards for these commitments are never used.
+        let retired = self
+            .records
+            .iter()
+            .filter_map(|(commitment, record)| {
+                (*commitment != finalized && record.block().is_none() && record.round() <= round)
+                    .then_some(*commitment)
+            })
+            .collect::<Vec<_>>();
+        for commitment in retired {
+            self.retire_commitment(commitment, RetirementReason::Floor);
+        }
+    }
+
     /// Retires cached blocks and reconstruction state after durable application progress.
     ///
-    /// Retirement waits for durable progress because a Byzantine leader may produce multiple
-    /// valid commitments in one round.
+    /// Cached block retirement waits for durable progress because a Byzantine leader may produce
+    /// multiple valid commitments in one round.
     fn retire(&mut self, update: Retirement<Commitment<B, C, H>>) {
         let Retirement {
             round_floor,
@@ -2738,6 +2764,188 @@ mod tests {
                 Err(TryRecvError::Empty)
             ));
         });
+    }
+
+    /// A finalization retires subquorum reconstruction state at or below its round while the
+    /// finalized commitment, later state, cached blocks, and block subscriptions remain.
+    #[test_traced]
+    fn test_finalization_retires_subquorum_reconstruction() {
+        let fixture: Fixture<C> = Fixture {
+            num_primary_peers: 10,
+            ..Default::default()
+        };
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let make_block = |id| {
+                    CodedBlock::<B, C, H>::new(
+                        B::new(Sha256Digest::EMPTY, Height::new(id), id),
+                        coding_config,
+                        &STRATEGY,
+                    )
+                };
+                let round = |view| Round::new(Epoch::zero(), View::new(view));
+                let leader = peers[0].public_key.clone();
+                let receiver_pk = peers[3].public_key.clone();
+                let gossipers = [1, 2, 4];
+                let gossip = |peers: &mut [Peer], block: &CodedBlock<B, C, H>, sender: usize| {
+                    let shard = block
+                        .shard(peers[sender].index.get() as u16)
+                        .expect("missing shard");
+                    peers[sender].sender.send(
+                        Recipients::One(receiver_pk.clone()),
+                        shard.encode(),
+                        true,
+                    );
+                };
+
+                // The leader's candidates at views 1 through 7, the commitment finalized later
+                // (observed at view 2), and a candidate above the finalization each receive
+                // three own-index shards, one short of the four needed to reconstruct.
+                let candidates = (1..=7).map(make_block).collect::<Vec<_>>();
+                let finalized = make_block(8);
+                let later = make_block(9);
+                let observed = candidates
+                    .iter()
+                    .zip(1..)
+                    .chain([(&finalized, 2), (&later, 8)]);
+                let mut subscriptions = Vec::new();
+                for (block, view) in observed {
+                    let commitment = block.commitment();
+                    peers[3]
+                        .mailbox
+                        .discovered(commitment, leader.clone(), round(view));
+                    subscriptions.push((
+                        peers[3]
+                            .mailbox
+                            .subscribe_assigned_shard_verified(commitment),
+                        peers[3].mailbox.subscribe(commitment),
+                    ));
+                    for sender in gossipers {
+                        gossip(&mut peers, block, sender);
+                    }
+                }
+
+                // A block is cached at view 1. Nothing reconstructs and no peer is blocked.
+                let cached = make_block(10);
+                let cached_commitment = cached.commitment();
+                peers[3].mailbox.proposed(round(1), cached);
+                context.sleep(config.link.latency * 2).await;
+                for block in candidates.iter().chain([&finalized, &later]) {
+                    assert!(peers[3].mailbox.get(block.commitment()).await.is_none());
+                }
+                assert!(oracle.blocked().await.unwrap().is_empty());
+
+                // Finalize at view 7, where the leader also proposed a candidate.
+                peers[3].mailbox.finalized(finalized.commitment(), round(7));
+                context.sleep(Duration::from_millis(10)).await;
+
+                // Candidates at or below the finalization lose their reconstruction state, but
+                // their block subscriptions stay open. Everything else is retained.
+                let (retired, retained) = subscriptions.split_at_mut(candidates.len());
+                for (assigned, block) in retired {
+                    assert!(matches!(assigned.try_recv(), Err(TryRecvError::Closed)));
+                    assert!(matches!(block.try_recv(), Err(TryRecvError::Empty)));
+                }
+                for (assigned, block) in retained.iter_mut() {
+                    assert!(matches!(assigned.try_recv(), Err(TryRecvError::Empty)));
+                    assert!(matches!(block.try_recv(), Err(TryRecvError::Empty)));
+                }
+                assert!(peers[3].mailbox.get(cached_commitment).await.is_some());
+
+                // A fourth shard reconstructs the finalized and later commitments. A retired
+                // candidate no longer holds its three shards, so its fourth shard only enters
+                // the sender's buffer.
+                for block in [&finalized, &later, &candidates[0]] {
+                    gossip(&mut peers, block, 5);
+                }
+                context.sleep(config.link.latency * 2).await;
+                for (_, block) in retained {
+                    assert!(block.try_recv().is_ok());
+                }
+                assert!(
+                    peers[3]
+                        .mailbox
+                        .get(candidates[0].commitment())
+                        .await
+                        .is_none()
+                );
+                assert!(oracle.blocked().await.unwrap().is_empty());
+            },
+        );
+    }
+
+    /// Subquorum reconstruction state survives any number of later views, a lower
+    /// finalization, and a lower retirement floor, then reconstructs once its last shard
+    /// arrives.
+    #[test_traced]
+    fn test_subquorum_reconstruction_survives_until_finalization() {
+        let fixture: Fixture<C> = Fixture {
+            num_primary_peers: 10,
+            ..Default::default()
+        };
+        fixture.start(
+            |config, context, _, mut peers, _, coding_config| async move {
+                let make_block = |id| {
+                    CodedBlock::<B, C, H>::new(
+                        B::new(Sha256Digest::EMPTY, Height::new(id), id),
+                        coding_config,
+                        &STRATEGY,
+                    )
+                };
+                let round = |view| Round::new(Epoch::zero(), View::new(view));
+                let leader = peers[0].public_key.clone();
+                let receiver_pk = peers[3].public_key.clone();
+
+                // The candidate at view 10 receives three of the four shards needed.
+                let block = make_block(1);
+                let commitment = block.commitment();
+                peers[3]
+                    .mailbox
+                    .discovered(commitment, leader.clone(), round(10));
+                let mut subscription = peers[3].mailbox.subscribe(commitment);
+                for sender in [1, 2, 4] {
+                    let shard = block
+                        .shard(peers[sender].index.get() as u16)
+                        .expect("missing shard");
+                    peers[sender].sender.send(
+                        Recipients::One(receiver_pk.clone()),
+                        shard.encode(),
+                        true,
+                    );
+                }
+                context.sleep(config.link.latency * 2).await;
+
+                // Thirty later views pass, and consensus finalizes and durably retires only
+                // rounds below the candidate.
+                for view in 11..=40 {
+                    peers[3].mailbox.discovered(
+                        make_block(view).commitment(),
+                        leader.clone(),
+                        round(view),
+                    );
+                }
+                peers[3]
+                    .mailbox
+                    .finalized(make_block(100).commitment(), round(9));
+                peers[3].mailbox.retire(Retirement {
+                    round_floor: round(9),
+                    exact_retirements: Vec::new(),
+                });
+                context.sleep(Duration::from_millis(10)).await;
+                assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+
+                // The last shard reconstructs the candidate.
+                let shard = block
+                    .shard(peers[5].index.get() as u16)
+                    .expect("missing shard");
+                peers[5]
+                    .sender
+                    .send(Recipients::One(receiver_pk), shard.encode(), true);
+                context.sleep(config.link.latency * 2).await;
+                let reconstructed = subscription.try_recv().expect("block reconstructed");
+                assert_eq!(reconstructed.commitment(), commitment);
+            },
+        );
     }
 
     #[test_traced]

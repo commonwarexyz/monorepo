@@ -184,6 +184,12 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
         commitment: V::Commitment,
     ) -> Option<oneshot::Receiver<V::Block>>;
 
+    /// Report that consensus finalized `commitment` at `round`.
+    ///
+    /// Consensus does not verify or certify another commitment at or below `round`. This may
+    /// arrive before [`Self::retire`] covers the finalization.
+    fn finalized(&self, commitment: V::Commitment, round: Round);
+
     /// Retire entries made eligible by durable application progress.
     ///
     /// [`Retirement::round_floor`] is increasing and inclusive.
@@ -242,6 +248,8 @@ where
     fn subscribe_by_commitment(&self, _: V::Commitment) -> Option<oneshot::Receiver<V::Block>> {
         None
     }
+
+    fn finalized(&self, _: V::Commitment, _: Round) {}
 
     fn retire(&self, _: Retirement<V::Commitment>) {}
 

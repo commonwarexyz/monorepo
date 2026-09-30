@@ -48,6 +48,13 @@ where
         /// The round in which the commitment was notarized.
         round: Round,
     },
+    /// A notification from consensus that a [`Commitment`] has been finalized.
+    Finalized {
+        /// The finalized [`Commitment`].
+        commitment: Commitment<B, C, H>,
+        /// The round in which the commitment was finalized.
+        round: Round,
+    },
     /// A request to get a reconstructed block, if available.
     GetByCommitment {
         /// The [`Commitment`] of the block to get.
@@ -120,6 +127,7 @@ where
             Self::Proposed { .. }
             | Self::Discovered { .. }
             | Self::Notarized { .. }
+            | Self::Finalized { .. }
             | Self::Retire { .. } => false,
         }
     }
@@ -266,6 +274,17 @@ where
         let _ = self
             .sender
             .enqueue(Message::Notarized { commitment, round });
+    }
+
+    /// Inform the engine that consensus finalized a [`Commitment`].
+    ///
+    /// Reconstruction state without a cached block is retired for every other commitment last
+    /// observed at or before `round`. Cached blocks remain until [`Self::retire`], and block
+    /// subscriptions remain open.
+    pub fn finalized(&self, commitment: Commitment<B, C, H>, round: Round) {
+        let _ = self
+            .sender
+            .enqueue(Message::Finalized { commitment, round });
     }
 
     /// Request a reconstructed block by its [`Commitment`].
