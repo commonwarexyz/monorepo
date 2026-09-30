@@ -1815,6 +1815,25 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        self.pop_active_with(db, quota, |from, end| db.bitmap.first_one(from, end))
+            .await
+    }
+
+    /// [`Self::pop_active`] with committed candidates drawn from `first_candidate`, which returns
+    /// the first location in `[from, end)` that may hold an active update. Every candidate is
+    /// still checked against this batch and its ancestors, so the source may over-report but must
+    /// not skip an active committed update.
+    pub(crate) async fn pop_active_with<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+        quota: Option<NonZeroUsize>,
+        mut first_candidate: impl FnMut(u64, u64) -> Option<u64>,
+    ) -> PopActiveResult<Self, F, U>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
         let ancestors = self.validate_commitment(db.commitment())?;
         let mut batch = self.with_manual_floor();
         let mut location = batch.manual_floor.expect("manual floor selected");
@@ -1829,7 +1848,7 @@ where
             if location < db_size {
                 let end = *scan_end.min(db_size);
                 // The final commit has a set bit but is not a live update.
-                let candidate = db.bitmap.first_one(*location, end.min(*db_size - 1));
+                let candidate = first_candidate(*location, end.min(*db_size - 1));
                 location = Location::new(candidate.unwrap_or(end));
                 if candidate.is_none() {
                     continue;

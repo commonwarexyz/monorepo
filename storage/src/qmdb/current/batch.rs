@@ -417,7 +417,13 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, entry) = inner.pop_active(&db.any, quota).await?;
+        // The speculative bitmap already clears committed updates that pending ancestors
+        // superseded, so those are skipped without reading them.
+        let (inner, entry) = inner
+            .pop_active_with(&db.any, quota, |from, end| {
+                bitmap_parent.ones_iter_range(from..end).next()
+            })
+            .await?;
         Ok((
             Self {
                 inner,

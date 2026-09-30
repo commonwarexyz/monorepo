@@ -528,9 +528,10 @@ pub mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Metrics as _, Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
+        telemetry::metrics::metric_samples,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, bitmap::Readable};
     use core::future::Future;
@@ -5146,6 +5147,69 @@ pub mod tests {
                 ordered::proof::constant::ExclusionProof::Commit(..)
             ));
             assert!(proof.verify::<Sha256>(&k, &db.root()));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Pops from a child skip committed updates that an unapplied parent superseded, using the
+    /// speculative bitmap instead of reading and decoding them.
+    #[test_traced("INFO")]
+    fn test_current_pop_active_skips_updates_superseded_by_pending_parent() {
+        deterministic::Runner::default().start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedFixedDb = UnorderedFixedDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("current-pop-speculative-skip", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Commit ten keys, laid out in key order after the initial commit.
+            let mut keys: Vec<_> = (40..50).map(key).collect();
+            keys.sort();
+            let seed = keys
+                .iter()
+                .enumerate()
+                .fold(db.new_batch().with_manual_floor(), |batch, (i, key)| {
+                    batch.write(*key, Some(val(i as u64)))
+                })
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // An unapplied parent supersedes every committed key except the last.
+            let parent = keys[..9]
+                .iter()
+                .fold(db.new_batch().with_manual_floor(), |batch, key| {
+                    batch.write(*key, Some(val(100)))
+                })
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // The child's pop reads only the surviving committed update.
+            let log_reads = || -> u64 {
+                let metrics = context.encode();
+                metric_samples(&metrics, "log_journal_read_calls_total")
+                    .map(|(_, value)| value.parse::<u64>().unwrap())
+                    .sum()
+            };
+            let before = log_reads();
+            let (_child, popped) = parent
+                .new_batch::<Sha256>()
+                .pop_active(&db, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                *popped.expect("surviving committed key").update.key(),
+                keys[9]
+            );
+            assert_eq!(log_reads() - before, 1);
+
+            drop(parent);
             db.destroy().await.unwrap();
         });
     }
