@@ -9,7 +9,7 @@ use super::{
 use commonware_p2p::simulated::{Link, Oracle};
 use commonware_runtime::{Handle, Supervisor as _, deterministic};
 use commonware_utils::channel::mpsc;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use tracing::info;
 
 /// Manages running validators and their engines.
@@ -112,7 +112,7 @@ impl<D: EngineDefinition> Team<D> {
         oracle: &Oracle<D::PublicKey, deterministic::Context>,
         link: Link,
         monitor: mpsc::UnboundedSender<FinalizationUpdate<D::PublicKey>>,
-        delayed: &HashSet<D::PublicKey>,
+        delayed: &BTreeSet<D::PublicKey>,
     ) {
         // Link all participants
         let participants = self.participants.clone();

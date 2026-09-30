@@ -562,7 +562,6 @@ impl EngineDefinition for MultiDbEngine {
         let state_sync_resumed = plan.floor().is_some();
 
         let provider = ConstantProvider::new(scheme.clone());
-
         let (probe, probe_mailbox) = Probe::new(ProbeConfig {
             context: context.child("probe"),
             provider: provider.clone(),

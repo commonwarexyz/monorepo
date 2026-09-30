@@ -19,7 +19,7 @@ use commonware_runtime::{Clock, Runner as _, Spawner, Supervisor as _, determini
 use commonware_utils::{NZUsize, TryCollect, channel::mpsc, ordered::Set, probability};
 use rand::seq::IndexedRandom;
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     ops::RangeInclusive,
     sync::{
         Arc,
@@ -402,7 +402,7 @@ impl<D: EngineDefinition> Plan<D> {
     }
 
     /// Determine which participants should be delayed at startup.
-    fn delayed_participants(&self) -> HashSet<D::PublicKey> {
+    fn delayed_participants(&self) -> BTreeSet<D::PublicKey> {
         self.crashes
             .iter()
             .find_map(|crash| match crash {
@@ -664,9 +664,7 @@ impl<D: EngineDefinition> Plan<D> {
                 // Start delayed validators after enough progress
                 if !delayed_started && !delayed.is_empty() && self.delay_reached(&tracker) {
                     info!(target: "simulator", "starting delayed participants");
-                    let mut delayed_order: Vec<_> = delayed.iter().collect();
-                    delayed_order.sort_unstable();
-                    for pk in delayed_order {
+                    for pk in &delayed {
                         team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
                             .await;
                     }
