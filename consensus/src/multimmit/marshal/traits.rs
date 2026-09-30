@@ -15,7 +15,7 @@ use crate::{
 use commonware_cryptography::Hasher;
 use commonware_utils::acknowledgement::Exact;
 use std::num::NonZeroUsize;
-use tracing::{debug, warn};
+use tracing::debug;
 
 impl<B: crate::Block> Delivery for Update<B> {
     type Block = B;
@@ -37,11 +37,10 @@ where
     B: Body<H>,
 {
     type Block = TransactionBlock<H, B>;
+    type Error = Error;
 
-    async fn prune(&self, below: OutputIndex) {
-        if let Err(error) = Self::prune(self, below).await {
-            warn!(?error, %below, "marshal did not prune");
-        }
+    async fn prune(&self, below: OutputIndex) -> Result<(), Error> {
+        Self::prune(self, below).await
     }
 
     fn ack_window(&self) -> NonZeroUsize {
@@ -57,28 +56,28 @@ where
 {
     type Floor = Floor<S, H::Digest>;
 
-    async fn floor_at(&self, at: OutputIndex) -> Option<(OutputIndex, Self::Floor)> {
-        Self::floor_at(self, at).await.ok().flatten()
+    async fn floor_at(&self, at: OutputIndex) -> Result<Option<(OutputIndex, Self::Floor)>, Error> {
+        Self::floor_at(self, at).await
     }
 
     /// The floor's index is the sum of its emitted frontier's heights (decoding bounds the sum),
-    /// which installing the floor authenticates. Only a floor marshal refuses is rejected: any
-    /// other failure leaves the floor unheld as well.
-    async fn install(&self, floor: Self::Floor) -> Option<OutputIndex> {
-        let index = floor
+    /// which installing the floor authenticates. Only a floor marshal refuses is rejected: a
+    /// busy, closed or failed marshal is an error.
+    async fn install(&self, floor: Self::Floor) -> Result<Option<OutputIndex>, Error> {
+        let Some(index) = floor
             .emitted()
             .iter()
-            .try_fold(0u64, |sum, block| sum.checked_add(block.height().get()))?;
+            .try_fold(0u64, |sum, block| sum.checked_add(block.height().get()))
+        else {
+            return Ok(None);
+        };
         match self.install_floor(floor).await {
-            Ok(()) => Some(OutputIndex::new(index)),
+            Ok(()) => Ok(Some(OutputIndex::new(index))),
             Err(Error::Rejected(reason)) => {
                 debug!(reason, "marshal rejected the floor");
-                None
+                Ok(None)
             }
-            Err(error) => {
-                warn!(?error, "marshal did not install the floor");
-                None
-            }
+            Err(error) => Err(error),
         }
     }
 }
