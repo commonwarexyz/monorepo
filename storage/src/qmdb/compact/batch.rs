@@ -138,12 +138,12 @@ mod tests {
             for i in 0..8u64 {
                 a_batch = a_batch.add(&hasher, &i.to_be_bytes());
             }
-            let a = merkle.with_mem(|mem| a_batch.merkleize(mem, &hasher));
+            let a = a_batch.merkleize(merkle.mem(), &hasher);
             let mut b_batch = compact::UnmerkleizedBatch::wrap(a.new_batch());
             for i in 8..10u64 {
                 b_batch = b_batch.add(&hasher, &i.to_be_bytes());
             }
-            let b = merkle.with_mem(|mem| b_batch.merkleize(mem, &hasher));
+            let b = b_batch.merkleize(merkle.mem(), &hasher);
 
             let ancestor = Arc::downgrade(&a);
             let c_batch = compact::UnmerkleizedBatch::wrap(b.new_batch());

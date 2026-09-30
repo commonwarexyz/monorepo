@@ -37,9 +37,9 @@
 //! The wire key names only the view. A retained finalization settles every ask at or below it.
 //! Otherwise serving prefers an exact certified notarization to a covering nullification, matching
 //! proposal construction. If neither is retained, the responder serves its current floor. The
-//! highest finalization remains servable even when a newer certified notarization advances the
-//! construction floor. The requester treats a valid response that does not settle its ask as
-//! ambiguous and retries without faulting the peer.
+//! highest finalization remains servable even when a certified notarization at the same or a
+//! higher view holds the construction floor. The requester treats a valid response that does not
+//! settle its ask as ambiguous and retries without faulting the peer.
 //!
 //! A notarization is served only after local certification succeeds. Possession still settles the
 //! holder's own ask, because certification judges evidence already in hand. A failed verdict also

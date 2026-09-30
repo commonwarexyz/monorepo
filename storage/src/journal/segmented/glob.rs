@@ -75,7 +75,7 @@ struct Inner<E: Context, V: Codec> {
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Glob::init].
-    async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+    async fn init(context: E, cfg: Config<V::Cfg>, ceiling: u64) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: WriteFactory {
@@ -83,7 +83,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 pool: context.storage_buffer_pool().clone(),
             },
         };
-        let manager = Manager::init(context, manager_cfg).await?;
+        let manager = Manager::init_bounded(context, manager_cfg, ceiling).await?;
 
         Ok(Self {
             manager,
@@ -280,7 +280,7 @@ impl<E: Context, V: CodecShared> std::fmt::Debug for Glob<E, V> {
 impl<E: Context, V: CodecShared> Glob<E, V> {
     /// Initialize blob storage, opening existing section blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        Ok(Recovery::init(context, cfg).await?.into())
+        Ok(Recovery::init(context, cfg, u64::MAX).await?.into())
     }
 
     /// Append value to section.
@@ -393,9 +393,10 @@ impl<E: Context, V: CodecShared> From<Recovery<E, V>> for Glob<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Recovery<E, V> {
-    /// Open the uncached sections under paired initialization ownership.
-    pub(crate) async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    /// Open value sections through `ceiling` under paired initialization ownership. Later sections
+    /// stay closed until paired recovery removes them.
+    pub(crate) async fn init(context: E, cfg: Config<V::Cfg>, ceiling: u64) -> Result<Self, Error> {
+        Ok(Self(Box::new(Inner::init(context, cfg, ceiling).await?)))
     }
 
     /// Check whether the entry at `(offset, size)` in `section` has a valid trailing checksum.
@@ -516,7 +517,7 @@ mod tests {
                 codec_config: self.0.codec_config.clone(),
             };
             _ = self.sync_all().await?;
-            let pending = Recovery::init(context, cfg).await?;
+            let pending = Recovery::init(context, cfg, u64::MAX).await?;
             let pending = pending.truncate_section(section, end).await?;
             Ok(pending.into())
         }
