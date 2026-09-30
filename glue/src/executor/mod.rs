@@ -45,7 +45,7 @@
 //!
 //! An executor configured with [`Start::Checkpoint`] and an empty chain executes nothing until it
 //! has a base. It waits for a block a checkpoint certifies, offered through [`Mailbox::sync_to`],
-//! durably records it as its target, and has the application sync its state to it through
+//! durably persists it as its target, and has the application sync its state to it through
 //! [`Execute::sync`]. Newer offers move the target forward while the sync runs. The block the sync
 //! reaches becomes the base: the executor archives it as applied, acknowledges every input at or
 //! below it without executing them, and executes the inputs after it.
@@ -61,7 +61,7 @@
 //! is at or above them. The rest are held unacknowledged until the base is known, which stops
 //! marshal once its acknowledgement window fills. An application that records updates as they
 //! arrive therefore lets marshal follow the newest checkpoint for as long as the sync runs. A
-//! crash during the sync resumes it toward the newest recorded target.
+//! crash during the sync resumes it toward the newest persisted target.
 //!
 //! [`aggregation`]: commonware_consensus::aggregation
 //! [`Finalized`]: commonware_consensus::marshal::Finalized
@@ -101,7 +101,8 @@ pub struct Update<B> {
     /// A block a checkpoint certifies, above every earlier target.
     pub block: Arc<B>,
     /// Signaled once the sync is certain to reach `block` or a later update. The executor then
-    /// acknowledges the inputs up to `block`.
+    /// acknowledges the inputs up to `block`. Updates arrive in increasing height, so a sync may
+    /// also signal one it ignores as below the block it already targets.
     pub recorded: oneshot::Sender<()>,
 }
 
@@ -141,8 +142,8 @@ where
     /// Called when a checkpoint certifies `block`, an executed block, so the application can keep
     /// what a peer needs to sync to it.
     ///
-    /// Calls follow increasing heights. The block a [`sync`](Self::sync) reached counts as
-    /// certified.
+    /// Calls follow increasing heights within one run of the executor, and may repeat heights
+    /// after a restart. The block a [`sync`](Self::sync) reached counts as certified.
     fn certified(&mut self, _block: Arc<Self::Block>) {}
 
     /// Brings the application's state to the state `target` commits to, or to that of a later
@@ -153,7 +154,7 @@ where
     /// updates, and at or above every update whose [`recorded`](Update::recorded) the application
     /// signaled. Until an update is recorded, the inputs above the newest recorded target are held
     /// unacknowledged, which stops marshal once its acknowledgement window fills. The executor may
-    /// ask again after a crash, starting from the newest target it recorded.
+    /// ask again after a crash, starting from the newest target it persisted.
     ///
     /// An application without state of its own can resume from any certified block, which the
     /// default implementation does by returning `target`.

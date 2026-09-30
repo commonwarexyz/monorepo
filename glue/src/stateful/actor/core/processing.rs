@@ -289,7 +289,7 @@ where
                                 .drive(self.processor.finalize(
                                     &self.context,
                                     block.as_ref(),
-                                    durability.barrier.is_none(),
+                                    !durability.has_barrier(),
                                 ))
                                 .await;
                             debug!(
@@ -324,7 +324,7 @@ where
                 Step::Prune((prune, retry_mailbox)) => {
                     // Pruning requires a durable prune target and no active barrier. It stops
                     // every verification because it can remove history any branch may read.
-                    while durability.barrier.is_some() {
+                    while durability.has_barrier() {
                         select! {
                             completion = durability.completion() => {
                                 if !durability.complete(completion) {

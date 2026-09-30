@@ -46,7 +46,7 @@ pub struct StoreConfig<T: Translator, C> {
 pub(super) enum Opened<B> {
     /// The newest block the consumer applied, which execution resumes from.
     Applied(B),
-    /// No base yet: the chain waits for a state sync, toward the recorded target if any.
+    /// No base yet: the chain waits for a state sync, toward the persisted target if any.
     Syncing(Option<B>),
 }
 
@@ -132,12 +132,12 @@ where
             ),
             None => None,
         };
-        match (start, archived) {
-            (Start::Genesis, archived)
-                if archived
-                    .as_ref()
-                    .is_none_or(|block| block.height().is_zero()) =>
-            {
+        // A chain holding only genesis started from genesis before a crash, whatever the start now.
+        let from_genesis = archived
+            .as_ref()
+            .map_or_else(|| start == Start::Genesis, |block| block.height().is_zero());
+        match (from_genesis, archived) {
+            (true, archived) => {
                 let genesis = genesis().await;
                 assert!(
                     genesis.height().is_zero(),
@@ -154,7 +154,7 @@ where
                 store.apply(Height::zero()).await;
                 (store, Opened::Applied(genesis))
             }
-            (_, target) => (store, Opened::Syncing(target)),
+            (false, target) => (store, Opened::Syncing(target)),
         }
     }
 
@@ -205,8 +205,8 @@ where
         self.applied = height;
     }
 
-    /// Durably records `target` as the block a state sync targets.
-    pub(super) async fn record_target(&mut self, target: &B) {
+    /// Durably persists `target` as the block a state sync targets.
+    pub(super) async fn persist_target(&mut self, target: &B) {
         self.put(target).await;
         self.sync_archive().await;
     }
