@@ -408,7 +408,7 @@ pub(crate) type RetainedAncestors<F, D, U, S> = Vec<AncestorBatch<F, D, U, S>>;
 /// Result of merkleizing a batch.
 type MerkleizeResult<F, D, U, S> = Result<Arc<MerkleizedBatch<F, D, U, S>>, crate::qmdb::Error<F>>;
 
-/// Result of evicting an active update: the batch and the optional evicted entry.
+/// Result of [`UnmerkleizedBatch::pop_active`]: the batch and the [`Popped`] outcome.
 pub(crate) type PopActiveResult<B, F, U> = Result<(B, Popped<F, U>), crate::qmdb::Error<F>>;
 
 /// Result of a prepared merkleization: the batch and the ancestors retained while building it.
