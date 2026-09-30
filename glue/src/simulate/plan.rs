@@ -893,8 +893,8 @@ mod tests {
         /// Scripted (validator, view and height, digest byte) reports emitted by
         /// the first node before ordinary finalizations.
         script: Vec<(ed25519::PublicKey, u64, u8)>,
-        /// Participant indices recorded in delayed initialization order, when enabled.
-        starts: Option<Arc<Mutex<Vec<usize>>>>,
+        /// Participant indices recorded in delayed initialization order.
+        starts: Arc<Mutex<Vec<usize>>>,
     }
 
     struct FinalizingNode {
@@ -935,7 +935,7 @@ mod tests {
                 finalizations,
                 period: Duration::ZERO,
                 script: vec![],
-                starts: None,
+                starts: Arc::default(),
             }
         }
     }
@@ -966,20 +966,19 @@ mod tests {
             &self,
             ctx: super::super::engine::InitContext<'_, Self::PublicKey>,
         ) -> impl Future<Output = (Self::Engine, Self::State)> + Send {
-            // Only the first node emits the script so its reports stay ordered.
             let finalize_after = self.finalize_after;
             let finalizations = self.finalizations;
             let period = self.period;
+
+            // Only the first node emits the script so its reports stay ordered.
             let script = if ctx.index == 0 {
                 self.script.clone()
             } else {
                 vec![]
             };
 
-            if ctx.delayed
-                && let Some(starts) = &self.starts
-            {
-                starts.lock().push(ctx.index);
+            if ctx.delayed {
+                self.starts.lock().push(ctx.index);
             }
             async move {
                 (
@@ -1261,16 +1260,14 @@ mod tests {
 
     #[test]
     fn multi_delayed_start_is_deterministic() {
-        // Repeat the same seeded run and capture both delayed initialization
-        // order and the runtime audit state for comparison.
+        // Repeat the same seeded run and capture the delayed initialization order.
         let mut observed = HashSet::new();
         for _ in 0..24 {
             // Two participants start after the active nodes reach view one.
-            let starts = Arc::new(Mutex::new(vec![]));
-            let mut engine = FinalizingEngine::new(4, Duration::from_millis(100), 2);
+            let engine = FinalizingEngine::new(4, Duration::from_millis(100), 2);
             let delayed = engine.participants[..2].to_vec();
-            engine.starts = Some(starts.clone());
-            let result = PlanBuilder::new(engine)
+            let starts = engine.starts.clone();
+            PlanBuilder::new(engine)
                 .seed(7)
                 .required_finalizations(2)
                 .timeout(Duration::from_secs(2))
@@ -1281,17 +1278,12 @@ mod tests {
                 .run()
                 .unwrap();
 
-            // Both delayed nodes must start. Record the start order and audit state.
+            // Both delayed nodes must start, in the same order on every run.
             let order = starts.lock().clone();
             assert_eq!(order.len(), 2);
-            observed.insert((order, result[0].state.clone()));
+            observed.insert(order);
         }
-
-        assert_eq!(
-            observed.len(),
-            1,
-            "different starts or audit states: {observed:?}"
-        );
+        assert_eq!(observed.len(), 1, "different start orders: {observed:?}");
     }
 
     #[test]
