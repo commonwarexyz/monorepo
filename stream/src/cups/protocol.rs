@@ -379,6 +379,7 @@ pub struct Sender<C, O> {
 }
 
 /// Describes one contiguous sink chunk made up of one or more encrypted frames.
+#[derive(Default)]
 struct ChunkPlan {
     messages: Vec<IoBufs>,
     total_len: usize,
@@ -446,52 +447,32 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
         I: IntoIterator<Item = B>,
     {
         let bufs = bufs.into_iter();
-        let (lower, _) = bufs.size_hint();
-        let mut chunks = Vec::with_capacity(lower.max(1));
-        let mut batch = Vec::new();
-        let mut batch_total = 0usize;
         let max_batch_size = self.pool.config().max_size().get();
-
+        let mut chunks = Vec::with_capacity(bufs.size_hint().0);
+        let mut current = ChunkPlan::default();
         for buf in bufs {
+            // Size the record, rejecting an oversized message before any cipher position is
+            // consumed.
             let msg = buf.into();
             let frame_len = self.encrypted_frame_len(msg.len())?;
 
-            // If one framed message is larger than the pooled batch cap, keep
-            // current chunks intact and send that message as its own chunk.
-            if frame_len > max_batch_size {
-                if !batch.is_empty() {
-                    chunks.push(ChunkPlan {
-                        messages: std::mem::take(&mut batch),
-                        total_len: batch_total,
-                    });
-                    batch_total = 0;
-                }
-                chunks.push(ChunkPlan {
-                    messages: vec![msg],
-                    total_len: frame_len,
-                });
-                continue;
+            // Close the current chunk before this record would exceed one network buffer-pool
+            // item. A record larger than that item overflows any non-empty chunk, so it occupies
+            // a chunk alone.
+            if !current.messages.is_empty()
+                && current.total_len.saturating_add(frame_len) > max_batch_size
+            {
+                chunks.push(std::mem::take(&mut current));
             }
 
-            // Close the current chunk before it would exceed one network
-            // buffer-pool item.
-            if batch_total.saturating_add(frame_len) > max_batch_size {
-                chunks.push(ChunkPlan {
-                    messages: std::mem::take(&mut batch),
-                    total_len: batch_total,
-                });
-                batch_total = 0;
-            }
-
-            batch_total += frame_len;
-            batch.push(msg);
+            // Append the record to the current chunk.
+            current.total_len += frame_len;
+            current.messages.push(msg);
         }
 
-        if !batch.is_empty() {
-            chunks.push(ChunkPlan {
-                messages: batch,
-                total_len: batch_total,
-            });
+        // Close the final chunk.
+        if !current.messages.is_empty() {
+            chunks.push(current);
         }
 
         Ok(chunks)

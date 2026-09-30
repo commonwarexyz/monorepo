@@ -805,8 +805,8 @@ mod test {
         Ok(())
     }
 
-    /// Checks that `send_many` places a frame larger than one network pool item in its own chunk
-    /// instead of rejecting or merging it.
+    /// Checks that `send_many` places a frame larger than one network pool item in its own chunk,
+    /// closing the chunks before and after it.
     #[test]
     fn test_send_many_sends_oversized_single_message_alone()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -863,21 +863,26 @@ mod test {
                 sends.store(0, Ordering::Relaxed);
                 chunk_counts.lock().clear();
 
-                // A single framed message larger than the cap still goes out, but it
-                // must occupy its own chunk instead of being rejected or merged.
+                // A framed message larger than the cap goes out in its own chunk, whether it
+                // comes first or follows a pending chunk, and the next message starts a new one.
                 let large = vec![3u8; 200];
                 let small = vec![9u8; 16];
                 dialer_sender
                     .send_many(vec![
                         IoBufs::from(IoBuf::from(large.clone())),
                         IoBufs::from(IoBuf::from(small.clone())),
+                        IoBufs::from(IoBuf::from(large.clone())),
                     ])
                     .await?;
 
                 assert_eq!(sends.load(Ordering::Relaxed), 1);
-                assert_eq!(*chunk_counts.lock(), vec![2]);
-                assert_eq!(listener_receiver.recv().await?.coalesce(), large.as_slice());
-                assert_eq!(listener_receiver.recv().await?.coalesce(), small.as_slice());
+                assert_eq!(*chunk_counts.lock(), vec![3]);
+                for expected in [&large, &small, &large] {
+                    assert_eq!(
+                        listener_receiver.recv().await?.coalesce(),
+                        expected.as_slice()
+                    );
+                }
                 Ok::<_, Box<dyn std::error::Error>>(())
             })?;
         }
