@@ -250,13 +250,14 @@ O’Grady</a></div>
         class="math inline">V_a</span> is empty.</p>
         <p>To send <span class="math inline">x&gt;0</span>, <span
         class="math inline">a</span> updates <span
-        class="math inline">b</span>’s entry and signs the updated
+        class="math inline">b</span>’s entry and signs its updated
         sequence number <span class="math inline">n_a</span> for the
-        epoch, cumulative debit, vector’s Merkle root, and predecessor
-        root: the root of its final vector <span
-        class="math inline">V_a^{e-1}</span> in the previous epoch,
-        empty if it paid no one there. The operator’s receipt <span
-        class="math inline">R</span> countersigns that state:</p>
+        epoch, cumulative debit, vector root, and <strong>predecessor
+        root</strong>. The predecessor root is the Merkle root of its
+        final vector <span class="math inline">V_a^{e-1}</span> in the
+        previous epoch (empty if it made no payments). The operator
+        countersigns this state to issue receipt <span
+        class="math inline">R</span>:</p>
         <p><span class="math display">
         S=\mathsf{Sign}_a\bigl(\mathcal
         A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with
@@ -268,9 +269,10 @@ O’Grady</a></div>
         <span class="math inline">D_a=20</span>, and <span
         class="math inline">V_a=\{b:(20,1)\}</span>.</p>
         <p>The payer durably saves each request before sending it,
-        retries the same bytes if the response is lost, and retains the
-        verified acknowledgment and <strong>openings</strong> (Merkle
-        proofs of the payment entries).</p>
+        retries the same bytes within the epoch if the response is lost,
+        and retains the verified acknowledgment and
+        <strong>openings</strong> (Merkle proofs of the payment
+        entries).</p>
         <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
         Accounts</h2>
         <p>Bajillion defines each payment as an update to the payer’s
@@ -537,16 +539,15 @@ O’Grady</a></div>
         <p>A successful challenge stops a contested close from
         finalizing, but users must still be able to get their funds out.
         Every account can authorize an exact withdrawal or an account
-        close. Normally the operator includes that signed request when
-        registering the next epoch. A censored user can instead queue it
-        directly onchain, even during an active epoch. The operator must
-        include it in a registration unless another request from the
-        same account replaces it.</p>
-        <p>Once a withdrawal request is queued onchain or included in an
-        admitted close, the close that carries it must finalize before
-        the signed deadline <span class="math inline">T_w</span> to
-        avoid a hard fault, unless another request replaces it first.
-        With challenge deadline <span
+        close. Normally the operator includes that signed request in the
+        next registration. A censored user can instead queue it directly
+        onchain, even during an active epoch. The operator must include
+        it in a registration unless another signed request from the same
+        account is registered first.</p>
+        <p>An outstanding withdrawal request, whether queued onchain or
+        included in an admitted close, requires its close to finalize
+        before the signed deadline <span class="math inline">T_w</span>
+        to avoid a hard fault. With challenge deadline <span
         class="math inline">\Delta_e</span>,</p>
         <p><span class="math display">
         \boxed{\Delta_e&lt;t_{\mathrm{finalize}}&lt;T_w.}
@@ -611,47 +612,40 @@ O’Grady</a></div>
         that close’s challenge deadline. Shorter epochs with earlier
         deadlines can reduce that wait, but require more frequent
         preparation and certification.</p>
-        <p>The operator cuts <span class="math inline">e</span> when it
-        stops acknowledging payments in <span
-        class="math inline">e</span>. It can then register <span
-        class="math inline">e+1</span> without waiting for <span
-        class="math inline">e</span>’s close to be built, certified, or
-        admitted, and start payments once that registration is included
-        onchain. Registration fixes deposits and signed withdrawal
-        authorizations before the first payment is acknowledged. The
-        anchor commits nothing about <span
-        class="math inline">e</span>’s close.</p>
+        <p>The operator can register <span
+        class="math inline">e+1</span> while still accepting payments in
+        <span class="math inline">e</span>. Once that registration is
+        included onchain, it can switch payments to <span
+        class="math inline">e+1</span> while <span
+        class="math inline">e</span>’s close is built, certified, and
+        admitted. Registration fixes deposits and signed withdrawal
+        authorizations before the first payment in <span
+        class="math inline">e+1</span> is acknowledged. Its anchor is
+        independent of <span class="math inline">e</span>’s close.</p>
         <p>Once <span class="math inline">e</span>’s close is admitted
         and <span class="math inline">e+1</span> is registered, the
         settlement chain binds <span class="math inline">e+1</span> to
-        that close’s state root. Admission and finality stay first-in,
-        first-out, so <span class="math inline">e+1</span> can only be
-        admitted on top of <span class="math inline">e</span>. The
-        admission and challenge deadlines of <span
-        class="math inline">e+1</span> start when <span
-        class="math inline">e</span> is admitted, or when <span
-        class="math inline">e+1</span> registers if <span
-        class="math inline">e</span> already was. If <span
-        class="math inline">e</span> misses its admission deadline, the
-        deployment permanently faults and drops every later
-        registration.</p>
-        <p>The operator can cut and register later epochs behind <span
-        class="math inline">e</span> with no fixed limit. Deposits and
-        onchain withdrawal requests wait in an ordered inbox. Each
-        registration takes the next range, ending where the operator
-        chooses, so later arrivals cannot change it. A deposit must be
-        taken within a fixed time after it arrives. It then follows its
-        epoch’s close, however many registrations wait ahead, and is
-        refunded if that close never finalizes.</p>
+        that close’s state root and sets <span
+        class="math inline">e+1</span>’s admission and challenge
+        deadlines relative to that time. Closes are admitted and
+        finalized in epoch order. Missing an admission deadline
+        permanently faults the deployment and discards all later
+        registrations.</p>
+        <p>The operator can register further epochs without a fixed
+        queue limit. Deposits and onchain withdrawal requests wait in an
+        ordered inbox. Each registration fixes the next range of
+        entries, so later arrivals cannot change it. A deposit must be
+        registered within a fixed time of arrival, then awaits its
+        epoch’s close. It is refundable during fault recovery if that
+        close never finalizes.</p>
         <p>Accounts without deposits or withdrawals can start paying in
         the new epoch while the operator is still adding incoming
-        credits from the previous one. When <span
-        class="math inline">e</span> is cut, the starting spendable
-        balance <span class="math inline">\widetilde B_a</span> is the
-        previous epoch’s starting balance minus accepted outgoing
-        payments, plus incoming credits already added. Let <span
-        class="math inline">\rho_a</span> be the remaining credit from
-        that epoch:</p>
+        credits from the previous one. At the transition, the starting
+        spendable balance <span class="math inline">\widetilde
+        B_a</span> is the previous epoch’s starting balance minus
+        accepted outgoing payments, plus incoming credits already added.
+        Let <span class="math inline">\rho_a</span> be the remaining
+        credit from that epoch:</p>
         <p><span class="math display">
         \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
         </span></p>
@@ -671,64 +665,64 @@ O’Grady</a></div>
         <p><span class="math display">
         80-20+5-15=50=(85)-20-15.
         </span></p>
-        <div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated balance update for account a after epoch e is cut and epoch e+1 is registered. A payment in epoch e leaves a spendable balance of 80. Two connected rails branch from that balance. The closing balance for epoch e is 85. The spendable balance in epoch e+1 falls to 60 after a payment of 20, rises to 65 when the remaining credit is added, and falls to 50 after a payment of 15. One vertical marker identifies the same incoming credit of 5 in both calculations. The closing balance of 85 never replaces the spendable balance.">
-          <noscript>After epoch e is cut and epoch e+1 is registered, the closing balance is 80 plus 5, or 85. The spendable balance is 80 minus 20 plus the same 5 minus 15, or 50. Adding the remaining credit preserves the new payments instead of replacing the spendable balance with 85.</noscript>
+        <div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated balance update for account a when payments switch from epoch e to the registered epoch e+1. A payment in epoch e leaves a spendable balance of 80. Two connected rails branch from that balance. The closing balance for epoch e is 85. The spendable balance in epoch e+1 falls to 60 after a payment of 20, rises to 65 when the remaining credit is added, and falls to 50 after a payment of 15. One vertical marker identifies the same incoming credit of 5 in both calculations. The closing balance of 85 never replaces the spendable balance.">
+          <noscript>When payments switch to the registered epoch e+1, e's closing balance is 80 plus 5, or 85. The spendable balance is 80 minus 20 plus the same 5 minus 15, or 50. Adding the remaining credit preserves the new payments instead of replacing the spendable balance with 85.</noscript>
         </div>
         <div class="image-caption">
         <p>Figure 6: Both calculations include the same incoming credit.
         Adding it to the spendable balance preserves payments already
         accepted in the new epoch.</p>
         </div>
-        <p>Deposits fixed at registration are available immediately. A
-        new account created by incoming credit must wait for the close
-        that credits it to be admitted before spending. A payer with an
-        outstanding withdrawal authorization waits until its signed
-        deadline before signing another payment.</p>
+        <p>Deposits fixed at registration are available when payments
+        begin in that epoch. A new account created by incoming credit
+        must wait for the close that credits it to be admitted before
+        spending. A payer with an outstanding withdrawal authorization
+        waits until its signed deadline before signing another
+        payment.</p>
         <h3 id="retrying-across-the-boundary">Retrying Across the
         Boundary</h3>
-        <p>A request sent just before the cut can reach the operator too
-        late, or its reply can be lost. The payer then cannot tell
-        whether <span class="math inline">e</span> will include it.
-        Signing the payment again in <span
-        class="math inline">e+1</span> would pay it twice if the
-        operator also included the original.</p>
-        <p>The predecessor root prevents this. It fixes exactly what
-        <span class="math inline">e</span> paid for the payer, including
-        how the debit was split across recipients.</p>
-        <p>The operator countersigns only a predecessor root that
-        matches its record of <span class="math inline">e</span>.
-        Validators check <span class="math inline">e+1</span> only after
-        <span class="math inline">e</span> is admitted and read the root
-        from <span class="math inline">e</span>’s account rows, so the
-        close for <span class="math inline">e+1</span> omits it.
-        Receipts and challenges carry it so their signatures can be
-        verified.</p>
-        <p>When a request from <span class="math inline">e</span>
-        arrives after the cut, the operator refuses it as stale and
-        replies with the payer’s final state in <span
-        class="math inline">e</span>. The payer obtains receipts up to
-        that state and signs the remaining payments again in <span
-        class="math inline">e+1</span> against its root. If the operator
-        still includes a refused request, the payer’s row in <span
-        class="math inline">e</span> ends at a different root and
-        validators reject the re-signed state. A receipt for that state
-        proves a debit mismatch against <span
-        class="math inline">e+1</span>.</p>
-        <p>The signature reaches back only one epoch. If the new request
-        also misses <span class="math inline">e+1</span>, the payer
-        signs the payment again only after <span
-        class="math inline">e</span> is admitted, which decides whether
-        the original was paid.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-retry.svg" alt="Payer a's chain in epoch e reaches state n-1 with vector root P, then forks on how e's close ends a's row. If the close omits the late request r, a's row ends at P, and the retry r' in e+1, which signs predecessor root P, is paid in e+1. If the close includes r as state n with root P', r is paid in e, and validators reject r' because P' is not P. A receipt for r' then proves a debit mismatch. Each outcome pays once.">
+        <p>A request sent near the end of <span
+        class="math inline">e</span> may arrive too late, or its
+        acknowledgment may be lost. The payer then cannot tell whether
+        <span class="math inline">e</span> includes it. An unconditional
+        retry in <span class="math inline">e+1</span> could pay
+        twice.</p>
+        <p>The predecessor root binds the retry to the payer’s reported
+        final vector in <span class="math inline">e</span>, including
+        how its debit is split across recipients. The operator
+        countersigns only if that root matches its record. Validators
+        derive the root from <span class="math inline">e</span>’s
+        admitted account rows when checking <span
+        class="math inline">e+1</span>, so <span
+        class="math inline">e+1</span>’s close need not repeat it.
+        Receipts and challenges include it for signature
+        verification.</p>
+        <p>After <span class="math inline">e</span> ends, the operator
+        returns original receipts for accepted requests from <span
+        class="math inline">e</span> and rejects unaccepted ones as
+        stale, reporting the payer’s final state. The payer verifies
+        receipts through that state, then signs the remaining payments
+        in <span class="math inline">e+1</span> against the reported
+        root. Without a usable report and any required receipts, it
+        waits for <span class="math inline">e</span>’s admission.</p>
+        <p>If the operator includes a rejected request in <span
+        class="math inline">e</span>, the payer’s row has a different
+        root and validators reject the retry. If the operator
+        countersigned that retry, its receipt and a public proof
+        establish a debit mismatch against <span
+        class="math inline">e+1</span>’s admitted close.</p>
+        <p>The predecessor root binds only the previous epoch. If the
+        retry also misses <span class="math inline">e+1</span>, the
+        payer waits for <span class="math inline">e</span>’s admission
+        to determine whether the original was included before signing
+        again.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-retry.svg" alt="Payer a reaches state n-1 with vector root P in epoch e. If e's close omits the late request r, the final vector root remains P, and retry r' can settle in e+1. If the close includes r with root P', validators reject r' because it signs predecessor root P. An operator receipt for r' and a public proof establish a debit mismatch. At most one copy can settle.">
         <div class="image-caption">
         <p>Figure 7: <span class="math inline">r&#39;</span> signs
         predecessor root <span class="math inline">P</span>, so it is
-        valid only if <span class="math inline">e</span> ends at <span
-        class="math inline">P</span>. Either <span
-        class="math inline">e</span> pays <span
-        class="math inline">r</span> or <span
-        class="math inline">e+1</span> pays <span
-        class="math inline">r&#39;</span>, never both.</p>
+        valid only if <span class="math inline">a</span>’s final vector
+        in <span class="math inline">e</span> has that root. The two
+        copies cannot both settle.</p>
         </div>
         <h2 id="atomic-batches-and-collecting-fees">Atomic Batches and
         Collecting Fees</h2>

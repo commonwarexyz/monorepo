@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 432" role="img" aria-labelledby="title description">
-  <title id="title">A retry pays once</title>
-  <desc id="description">Payer a's chain in epoch e reaches state n-1 with vector root P, then forks on how e's close ends a's row. If the close omits the late request r, a's row ends at P, and the retry r' in e+1, which signs predecessor root P, extends it and is paid in e+1. If the close includes r as state n with root P', r is paid in e, and r' is rejected because P' is not P. A receipt for r' then proves a debit mismatch. Each outcome pays once.</desc>
+  <title id="title">At most one copy settles</title>
+  <desc id="description">Payer a reaches state n-1 with vector root P in epoch e. If e's close omits the late request r, the final vector root remains P, and retry r' can settle in e+1. If the close includes r with root P', validators reject r' because it signs predecessor root P. An operator receipt for r' and a public proof establish a debit mismatch. At most one copy can settle.</desc>
   <rect width="1080" height="432" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -35,7 +35,7 @@
     </marker>
   </defs>
 
-  <text class="title" x="36" y="46">A Retry Pays Once</text>
+  <text class="title" x="36" y="46">At Most One Copy Settles</text>
   <text class="note" x="36" y="78">r' signs predecessor root P, so e and e+1 never both pay.</text>
 
   <rect class="panel" x="36" y="104" width="620" height="300" rx="6"/>
@@ -59,7 +59,7 @@
   <text class="label" x="346" y="318">include r</text>
 
   <rect class="paid" x="460" y="302" width="140" height="56" rx="5"/>
-  <text class="note right green" x="600" y="292">paid in e</text>
+  <text class="note right green" x="600" y="292">can settle in e</text>
   <text class="label center" x="530" y="325">n = r</text>
   <text class="label center blue" x="530" y="347">root P'</text>
 
@@ -67,7 +67,7 @@
   <text class="label red center" x="743" y="318">P' ≠ P</text>
 
   <rect class="paid" x="780" y="182" width="140" height="56" rx="5"/>
-  <text class="note right green" x="920" y="172">paid in e+1</text>
+  <text class="note right green" x="920" y="172">can settle in e+1</text>
   <text class="label center" x="850" y="205">r'</text>
   <text class="label center blue" x="850" y="227">pred P</text>
 
@@ -75,5 +75,5 @@
   <text class="note right red" x="920" y="292">rejected</text>
   <text class="label center" x="850" y="325">r'</text>
   <text class="label center blue" x="850" y="347">pred P</text>
-  <text class="note red" x="780" y="382">receipt ⇒ debit mismatch</text>
+  <text class="note red" x="780" y="382">receipt + proof ⇒ fault</text>
 </svg>
