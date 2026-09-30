@@ -7,7 +7,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::{Batches, Strategy};
 use commonware_storage::bmt::{self, Builder};
-use commonware_utils::{Cached, NZUsize};
+use commonware_utils::{Cached, NZUsize, Widen};
 use std::{iter, marker::PhantomData, ops::Range};
 use thiserror::Error;
 
@@ -216,8 +216,8 @@ impl<D: Digest> Read for Chunk<D> {
         // Encoding rejects longer data, and the width grows with the data length, so the widest
         // shard encodes the most data.
         let width = canonical_shard_len(
-            (*maximum_data).min(u32::MAX as usize),
-            usize::from(config.minimum_shards.get()),
+            (*maximum_data).min(Widen::widen(u32::MAX)),
+            config.minimum_shards.widen(),
         );
         let shard = Bytes::read_cfg(reader, &RangeCfg::new(..=width))?;
         let index = u16::read(reader)?;
@@ -403,7 +403,7 @@ fn encode<H: Hasher, S: Strategy>(
     let k = min as usize;
     let m = n - k;
     let data_len = data.remaining();
-    if data_len > u32::MAX as usize {
+    if data_len > Widen::widen(u32::MAX) {
         return Err(Error::InvalidDataLength(data_len));
     }
 
@@ -475,7 +475,7 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
 }
 
 /// Striped Reed-Solomon: split every shard by byte range and run independent
-/// Reed-Solomon operations over those ranges.
+/// Reed-Solomon operations over those ranges. Without batches, one stripe spans the whole shard.
 ///
 /// ```text
 ///   originals:
@@ -495,8 +495,6 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
 /// commitment. With an original missing, [`decode_reveal`](striped::decode_reveal)
 /// feeds exactly `k` shards and recovers the missing original and recovery stripes from the same
 /// Reed-Solomon decode (no re-encode).
-///
-/// Without batches, coding runs one stripe that spans the whole shard.
 ///
 /// Each stripe task codes its range in tiles that target [`MAX_TILE_WORK_BYTES`] of transform
 /// storage. Tiles start on [`SHARD_CHUNK_BYTES`] boundaries, so tiling does not change the coded
