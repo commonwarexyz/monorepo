@@ -12,3 +12,6 @@ documentation = "https://docs.rs/commonware-simd"
 
 [lints]
 workspace = true
+
+[dependencies]
+commonware-macros.workspace = true
