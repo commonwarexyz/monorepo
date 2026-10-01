@@ -2,7 +2,7 @@
 
 use crate::{
     Blob, BlobVersion, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut,
-    Metrics, Name, ReadOptions, Spawner, Supervisor, WriteOptions,
+    Metrics, Name, Network, ReadOptions, SinkOf, Spawner, StreamOf, Supervisor, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -16,6 +16,7 @@ use rand::{TryCryptoRng, TryRng};
 use std::{
     future::{Future, poll_fn},
     mem,
+    net::SocketAddr,
     sync::Arc,
     task::Poll,
 };
@@ -891,6 +892,18 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
 
     fn stopped(&self) -> Signal {
         self.inner.stopped()
+    }
+}
+
+impl<E: Network> Network for DelayedSyncContext<E> {
+    type Listener = E::Listener;
+
+    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
+        self.inner.bind(socket).await
+    }
+
+    async fn dial(&self, socket: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
+        self.inner.dial(socket).await
     }
 }
 

@@ -51,6 +51,17 @@ where
         self.any.get(key).await
     }
 
+    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
+    /// the provided `root`.
+    pub fn verify_key_value_proof(
+        key: K,
+        value: V::Value,
+        proof: &KeyValueProof<F, K, H::Digest, N>,
+        root: &H::Digest,
+    ) -> bool {
+        proof.verify::<H, V>(key, value, root)
+    }
+
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
     /// DB is empty.
     pub async fn get_span(&self, key: &K) -> Result<Option<(Location<F>, Update<K, V>)>, Error<F>> {
@@ -85,6 +96,16 @@ where
         range: impl RangeBounds<K> + Send + 'a,
     ) -> impl Stream<Item = Result<K, Error<F>>> + Send + 'a {
         self.any.keys(range)
+    }
+
+    /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
+    /// provided `root`.
+    pub fn verify_exclusion_proof(
+        key: &K,
+        proof: &ExclusionProof<F, K, V, H::Digest, N>,
+        root: &H::Digest,
+    ) -> bool {
+        proof.verify::<H>(key, root)
     }
 }
 

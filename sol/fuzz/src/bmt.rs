@@ -10,6 +10,7 @@ use alloy_sol_types::{SolValue as _, abi::AbiDecoderConfig, sol_data};
 use clap::{Subcommand, ValueEnum};
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Hasher, Keccak256, Sha256};
+use commonware_parallel::Sequential;
 use commonware_storage::bmt::{Builder, Proof};
 
 type U256 = <sol_data::Uint<256> as alloy_sol_types::SolType>::RustType;
@@ -96,7 +97,7 @@ fn generate<H: Hasher>(
     for index in 0..leaves {
         builder.add(&H::Digest::decode(Copying(leaf(seed, u64::from(index)).as_slice())).unwrap());
     }
-    let tree = builder.build();
+    let tree = builder.build(&Sequential);
     let proof = match mode {
         Mode::Range => tree.range_proof(start, indices.last().copied().unwrap_or(0)),
         Mode::Multi if leaves == 0 && indices.is_empty() => Ok(Proof::default()),

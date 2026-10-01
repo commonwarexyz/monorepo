@@ -1,0 +1,1073 @@
+{
+  "collection_outputs_sha256": {
+    "bytes.csv": "647ee0e3dd0cd600d783ced421905f00c0284afda90b1cef0dbe31af3fc280df",
+    "raw-checks.jsonl.gz": "6fbbf53a08bd90c88a0281534210064d514ac9abb89a48a5d559002a5960470a",
+    "samples.jsonl.gz": "a6e457df750155a465015b0fe74fa70162cacd94611a236472b75fe6869c6789",
+    "timings.csv": "1c63ec3bde29a58abf9785906ae867e4a7d36fc3370584b449fb2695c27e6427"
+  },
+  "collection_root": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling",
+  "payload_values": {
+    "/activity/0/absent_adjacent/bytes": {
+      "sources": [
+        {
+          "locator": "line 3 absence_adjacent metadata lookup_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 50 native_activity absence_adjacent lookup",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/activity/0/absent_adjacent/mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / 1000)",
+          "locator": "line 3 absence_adjacent samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 6 raw_activity_verify mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/activity/0/h": {
+      "sources": [
+        {
+          "locator": "/plan/activity/0/0",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/activity/0/n": {
+      "sources": [
+        {
+          "locator": "/plan/settings/accounts",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/activity/0/present/bytes": {
+      "sources": [
+        {
+          "locator": "line 1 presence metadata lookup_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 46 native_activity presence lookup",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/activity/0/present/mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / 1000)",
+          "locator": "line 1 presence samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 18 raw_activity_verify mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/activity/0/r": {
+      "sources": [
+        {
+          "locator": "/plan/activity/0/1",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/activity/1/absent_adjacent/bytes": {
+      "sources": [
+        {
+          "locator": "line 7 absence_adjacent metadata lookup_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 58 native_activity absence_adjacent lookup",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/activity/1/absent_adjacent/mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / 1000)",
+          "locator": "line 7 absence_adjacent samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 7 raw_activity_verify mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/activity/1/h": {
+      "sources": [
+        {
+          "locator": "/plan/activity/1/0",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/activity/1/n": {
+      "sources": [
+        {
+          "locator": "/plan/settings/accounts",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/activity/1/present/bytes": {
+      "sources": [
+        {
+          "locator": "line 5 presence metadata lookup_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 54 native_activity presence lookup",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/activity/1/present/mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / 1000)",
+          "locator": "line 5 presence samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 19 raw_activity_verify mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/activity/1/r": {
+      "sources": [
+        {
+          "locator": "/plan/activity/1/1",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/activity/2/absent_adjacent/bytes": {
+      "sources": [
+        {
+          "locator": "line 11 absence_adjacent metadata lookup_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 66 native_activity absence_adjacent lookup",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/activity/2/absent_adjacent/mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / 1000)",
+          "locator": "line 11 absence_adjacent samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 8 raw_activity_verify mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/activity/2/h": {
+      "sources": [
+        {
+          "locator": "/plan/activity/2/0",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/activity/2/n": {
+      "sources": [
+        {
+          "locator": "/plan/settings/accounts",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/activity/2/present/bytes": {
+      "sources": [
+        {
+          "locator": "line 9 presence metadata lookup_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 62 native_activity presence lookup",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/activity/2/present/mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / 1000)",
+          "locator": "line 9 presence samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 20 raw_activity_verify mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/activity/2/r": {
+      "sources": [
+        {
+          "locator": "/plan/activity/2/1",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/activity/3/absent_adjacent/bytes": {
+      "sources": [
+        {
+          "locator": "line 15 absence_adjacent metadata lookup_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 74 native_activity absence_adjacent lookup",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/activity/3/absent_adjacent/mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / 1000)",
+          "locator": "line 15 absence_adjacent samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 9 raw_activity_verify mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/activity/3/h": {
+      "sources": [
+        {
+          "locator": "/plan/activity/3/0",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/activity/3/n": {
+      "sources": [
+        {
+          "locator": "/plan/settings/accounts",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/activity/3/present/bytes": {
+      "sources": [
+        {
+          "locator": "line 13 presence metadata lookup_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 70 native_activity presence lookup",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/activity/3/present/mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / 1000)",
+          "locator": "line 13 presence samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 21 raw_activity_verify mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/activity/3/r": {
+      "sources": [
+        {
+          "locator": "/plan/activity/3/1",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/environment/filesystem": {
+      "sources": [
+        {
+          "locator": "/host/storage_filesystem/type",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/environment/instance_type": {
+      "sources": [
+        {
+          "locator": "/plan/settings/instance_type",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/environment/log_operations_per_section": {
+      "sources": [
+        {
+          "locator": "line 24 ACK metadata native_log_operations_per_section A=1000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 23 ACK metadata native_log_operations_per_section A=10000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 22 ACK metadata native_log_operations_per_section A=100000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 21 ACK metadata native_log_operations_per_section A=1000000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 24 ACK metadata native_state_operations_per_blob A=1000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 23 ACK metadata native_state_operations_per_blob A=10000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 22 ACK metadata native_state_operations_per_blob A=100000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 21 ACK metadata native_state_operations_per_blob A=1000000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        }
+      ]
+    },
+    "/environment/merkle_nodes_per_blob": {
+      "sources": [
+        {
+          "locator": "line 24 ACK metadata native_log_merkle_nodes_per_blob A=1000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 23 ACK metadata native_log_merkle_nodes_per_blob A=10000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 22 ACK metadata native_log_merkle_nodes_per_blob A=100000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 21 ACK metadata native_log_merkle_nodes_per_blob A=1000000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 24 ACK metadata native_state_merkle_nodes_per_blob A=1000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 23 ACK metadata native_state_merkle_nodes_per_blob A=10000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 22 ACK metadata native_state_merkle_nodes_per_blob A=100000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 21 ACK metadata native_state_merkle_nodes_per_blob A=1000000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        }
+      ]
+    },
+    "/environment/page_cache_bytes": {
+      "sources": [
+        {
+          "locator": "line 24 ACK metadata native_cache_budget_bytes A=1000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 23 ACK metadata native_cache_budget_bytes A=10000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 22 ACK metadata native_cache_budget_bytes A=100000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 21 ACK metadata native_cache_budget_bytes A=1000000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        }
+      ]
+    },
+    "/environment/payout_private_write_buffer_bytes": {
+      "sources": [
+        {
+          "locator": "line 24 ACK metadata native_payout_write_buffer_bytes A=1000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 23 ACK metadata native_payout_write_buffer_bytes A=10000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 22 ACK metadata native_payout_write_buffer_bytes A=100000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 21 ACK metadata native_payout_write_buffer_bytes A=1000000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 24 ACK metadata native_private_write_replay_buffer_bytes A=1000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 23 ACK metadata native_private_write_replay_buffer_bytes A=10000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 22 ACK metadata native_private_write_replay_buffer_bytes A=100000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 21 ACK metadata native_private_write_replay_buffer_bytes A=1000000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        }
+      ]
+    },
+    "/environment/physical_page_bytes": {
+      "sources": [
+        {
+          "locator": "line 24 ACK metadata native_physical_page_bytes A=1000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 23 ACK metadata native_physical_page_bytes A=10000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 22 ACK metadata native_physical_page_bytes A=100000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 21 ACK metadata native_physical_page_bytes A=1000000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        }
+      ]
+    },
+    "/environment/ram_gib": {
+      "sources": [
+        {
+          "formula": "32991899648 detected bytes rounded up to the containing nominal 8-GiB increment",
+          "locator": "/host/memory Mem total",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/environment/replay_buffer_bytes": {
+      "sources": [
+        {
+          "locator": "line 24 ACK metadata native_replay_buffer_bytes A=1000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 23 ACK metadata native_replay_buffer_bytes A=10000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 22 ACK metadata native_replay_buffer_bytes A=100000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 21 ACK metadata native_replay_buffer_bytes A=1000000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 24 ACK metadata native_private_write_replay_buffer_bytes A=1000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 23 ACK metadata native_private_write_replay_buffer_bytes A=10000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 22 ACK metadata native_private_write_replay_buffer_bytes A=100000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 21 ACK metadata native_private_write_replay_buffer_bytes A=1000000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        }
+      ]
+    },
+    "/environment/runtime_workers": {
+      "sources": [
+        {
+          "locator": "/plan/settings/runtime_workers",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/environment/state_activity_write_buffer_bytes": {
+      "sources": [
+        {
+          "locator": "line 24 ACK metadata native_state_activity_write_buffer_bytes A=1000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 23 ACK metadata native_state_activity_write_buffer_bytes A=10000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 22 ACK metadata native_state_activity_write_buffer_bytes A=100000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 21 ACK metadata native_state_activity_write_buffer_bytes A=1000000",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        }
+      ]
+    },
+    "/environment/storage_gib": {
+      "sources": [
+        {
+          "locator": "/plan/settings/storage_size_gib",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/environment/storage_iops": {
+      "sources": [
+        {
+          "locator": "/plan/settings/storage_iops",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/environment/storage_medium": {
+      "sources": [
+        {
+          "locator": "/plan/settings/storage_medium",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/environment/storage_throughput_mib_s": {
+      "sources": [
+        {
+          "locator": "/plan/settings/storage_throughput_mib_per_second",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/environment/strategy_workers": {
+      "sources": [
+        {
+          "locator": "/plan/settings/workers",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/environment/vcpus": {
+      "sources": [
+        {
+          "locator": "/host/cpu CPU(s)",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/sampling/ack_samples": {
+      "sources": [
+        {
+          "locator": "/plan/settings/ack_samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/sampling/ack_warmup": {
+      "sources": [
+        {
+          "locator": "/plan/settings/ack_warmup",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/sampling/activity_iterations_per_sample": {
+      "sources": [
+        {
+          "locator": "fixed raw activity contract",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/sampling/activity_samples": {
+      "sources": [
+        {
+          "locator": "/plan/settings/raw_samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/sampling/prepare_samples": {
+      "sources": [
+        {
+          "locator": "/plan/settings/raw_samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/sampling/prepare_warmup": {
+      "sources": [
+        {
+          "locator": "fixed raw activity contract",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/schema_version": {
+      "sources": [
+        {
+          "locator": "payload schema version",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/update_clearing_benchmarks.py"
+        }
+      ]
+    },
+    "/workloads/0/a": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/0/1",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/0/b": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/0/2",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/0/challenge/ack_fork_bytes": {
+      "sources": [
+        {
+          "locator": "row 93",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/0/challenge/debit_omitted_bytes": {
+      "sources": [
+        {
+          "locator": "row 95",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/0/challenge/debit_present_bytes": {
+      "sources": [
+        {
+          "locator": "row 91",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/0/challenge/entry_bytes": {
+      "sources": [
+        {
+          "locator": "row 92",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/0/dealing_bytes": {
+      "sources": [
+        {
+          "locator": "line 24 ACK metadata encoded_dealing_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 17 prepare metadata expected_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 81 identical_dealing",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/0/durable_vote_mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(non-warmup ns)",
+          "locator": "line 24 durable_ack records",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 2 durable_ack mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/workloads/0/k": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/0/3",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/0/n": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/0/0",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/0/prepare_mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / iterations)",
+          "locator": "line 17 raw_prepare samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 22 raw_prepare mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/workloads/1/a": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/1/1",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/1/b": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/1/2",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/1/challenge/ack_fork_bytes": {
+      "sources": [
+        {
+          "locator": "row 111",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/1/challenge/debit_omitted_bytes": {
+      "sources": [
+        {
+          "locator": "row 113",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/1/challenge/debit_present_bytes": {
+      "sources": [
+        {
+          "locator": "row 109",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/1/challenge/entry_bytes": {
+      "sources": [
+        {
+          "locator": "row 110",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/1/dealing_bytes": {
+      "sources": [
+        {
+          "locator": "line 23 ACK metadata encoded_dealing_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 18 prepare metadata expected_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 99 identical_dealing",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/1/durable_vote_mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(non-warmup ns)",
+          "locator": "line 23 durable_ack records",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 3 durable_ack mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/workloads/1/k": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/1/3",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/1/n": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/1/0",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/1/prepare_mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / iterations)",
+          "locator": "line 18 raw_prepare samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 23 raw_prepare mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/workloads/2/a": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/2/1",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/2/b": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/2/2",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/2/challenge/ack_fork_bytes": {
+      "sources": [
+        {
+          "locator": "row 129",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/2/challenge/debit_omitted_bytes": {
+      "sources": [
+        {
+          "locator": "row 131",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/2/challenge/debit_present_bytes": {
+      "sources": [
+        {
+          "locator": "row 127",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/2/challenge/entry_bytes": {
+      "sources": [
+        {
+          "locator": "row 128",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/2/dealing_bytes": {
+      "sources": [
+        {
+          "locator": "line 22 ACK metadata encoded_dealing_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 19 prepare metadata expected_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 117 identical_dealing",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/2/durable_vote_mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(non-warmup ns)",
+          "locator": "line 22 durable_ack records",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 4 durable_ack mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/workloads/2/k": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/2/3",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/2/n": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/2/0",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/2/prepare_mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / iterations)",
+          "locator": "line 19 raw_prepare samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 24 raw_prepare mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/workloads/3/a": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/3/1",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/3/b": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/3/2",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/3/challenge/ack_fork_bytes": {
+      "sources": [
+        {
+          "locator": "row 147",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/3/challenge/debit_omitted_bytes": {
+      "sources": [
+        {
+          "locator": "row 149",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/3/challenge/debit_present_bytes": {
+      "sources": [
+        {
+          "locator": "row 145",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/3/challenge/entry_bytes": {
+      "sources": [
+        {
+          "locator": "row 146",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/3/dealing_bytes": {
+      "sources": [
+        {
+          "locator": "line 21 ACK metadata encoded_dealing_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "line 20 prepare metadata expected_bytes",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 135 identical_dealing",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/bytes.csv"
+        }
+      ]
+    },
+    "/workloads/3/durable_vote_mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(non-warmup ns)",
+          "locator": "line 21 durable_ack records",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 5 durable_ack mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    },
+    "/workloads/3/k": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/3/3",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/3/n": {
+      "sources": [
+        {
+          "locator": "/plan/profiles/3/0",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/manifest.json"
+        }
+      ]
+    },
+    "/workloads/3/prepare_mean_ns": {
+      "sources": [
+        {
+          "formula": "mean(total_ns / iterations)",
+          "locator": "line 20 raw_prepare samples",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/samples.jsonl.gz"
+        },
+        {
+          "locator": "row 25 raw_prepare mean_ns",
+          "path": "/Users/patrickogrady/.tact/scratchpad/01a0a33f-b400-7c22-8d4f-98561815c129/ack-scaling-optimization/gib-publication-scaling/timings.csv"
+        }
+      ]
+    }
+  },
+  "schema_version": 1
+}

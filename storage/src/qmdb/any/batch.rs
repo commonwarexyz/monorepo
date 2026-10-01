@@ -13,7 +13,7 @@ use crate::{
             ValueEncoding,
             db::Db,
             operation::{Operation, update},
-            ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut},
+            ordered::{self, find_next_key, find_next_key_ascending, find_prev_key_mut},
         },
         bitmap::Shared,
         chain::{self, Bounds, Commitment},
@@ -30,10 +30,11 @@ use commonware_utils::{bitmap, iter::zip_eq, range::contains_cyclic};
 use core::{
     cmp::Ordering,
     ops::{
-        Bound::{Excluded, Included},
-        Range,
+        Bound::{self, Excluded, Included},
+        Range, RangeBounds,
     },
 };
+use futures::{Stream, StreamExt as _, stream};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, hash_map},
@@ -2284,6 +2285,229 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
+    /// Read the greatest live key at or below `key` and the least live key above it,
+    /// together with their values. Either result is `None` when that side is empty;
+    /// the search does not wrap around the keyspace.
+    ///
+    /// Reads pending mutations, closest-first live ancestor diffs, then committed state.
+    /// Like other batch reads, this view is valid only while the DB advances along this
+    /// batch's ancestry and all unapplied ancestors remain alive.
+    ///
+    /// Searches start at the query in each ordered source. Work depends on the ancestry,
+    /// skipped deleted or shadowed candidates, and translated-key collision buckets.
+    #[allow(clippy::type_complexity)]
+    pub async fn get_neighbors<E, C, I, const N: usize>(
+        &self,
+        key: &K,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<(Option<(K, V::Value)>, Option<(K, V::Value)>), crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+    {
+        let ancestors: Vec<_> =
+            chain::parent_and_ancestors(self.base.parent(), |parent| parent.ancestors()).collect();
+        let before = self.get_neighbor(key, false, &ancestors, db).await?;
+        let after = self.get_neighbor(key, true, &ancestors, db).await?;
+        Ok((before, after))
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn get_neighbor<E, C, I, const N: usize>(
+        &self,
+        key: &K,
+        after: bool,
+        ancestors: &[AncestorBatch<F, H::Digest, update::Ordered<K, V>, S>],
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<(K, V::Value)>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+    {
+        let mut mutations = if after {
+            self.mutations
+                .range((Bound::Excluded(key), Bound::Unbounded))
+        } else {
+            self.mutations
+                .range((Bound::Unbounded, Bound::Included(key)))
+        };
+        let mut best = if after {
+            mutations.find_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone())))
+        } else {
+            mutations
+                .rev()
+                .find_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone())))
+        };
+        let shadowed = |candidate: &K, depth: usize| {
+            self.mutations.contains_key(candidate)
+                || ancestors[..depth]
+                    .iter()
+                    .any(|ancestor| lookup_sorted(&ancestor.diff, candidate).is_some())
+        };
+        let farther = |candidate: &K, current: &K| {
+            if after {
+                candidate >= current
+            } else {
+                candidate <= current
+            }
+        };
+
+        // A nearer source owns both live entries and tombstones. Search each older
+        // source only until it yields an unshadowed candidate or passes the best key.
+        for (depth, ancestor) in ancestors.iter().enumerate() {
+            let split = ancestor.diff.partition_point(|(k, _)| k <= key);
+            let mut entries = if after {
+                &ancestor.diff[split..]
+            } else {
+                &ancestor.diff[..split]
+            };
+            while let Some(((candidate, entry), rest)) = if after {
+                entries.split_first()
+            } else {
+                entries.split_last()
+            } {
+                entries = rest;
+                if best
+                    .as_ref()
+                    .is_some_and(|(current, _)| farther(candidate, current))
+                {
+                    break;
+                }
+                if let Some(value) = entry.value()
+                    && !shadowed(candidate, depth)
+                {
+                    best = Some((candidate.clone(), value.clone()));
+                    break;
+                }
+            }
+        }
+
+        // An ordered index groups collisions without ordering their full keys. Read
+        // the whole bucket before deciding whether another translated key is needed.
+        let mut driver = key.clone();
+        let mut locations: Vec<_> = db.snapshot.get(key).copied().collect();
+        loop {
+            let mut reached = false;
+            for loc in locations {
+                let Operation::Update(update) = db.log.read(*loc).await? else {
+                    unreachable!("snapshot locations reference update operations");
+                };
+                driver = update.key.clone();
+                if (update.key > *key) != after {
+                    continue;
+                }
+                if best
+                    .as_ref()
+                    .is_some_and(|(current, _)| farther(&update.key, current))
+                {
+                    reached = true;
+                    continue;
+                }
+                if !shadowed(&update.key, ancestors.len()) {
+                    best = Some((update.key, update.value));
+                    reached = true;
+                }
+            }
+            if reached {
+                return Ok(best);
+            }
+
+            let bucket = if after {
+                db.snapshot
+                    .next_translated_key(&driver)
+                    .map(|(iter, wrapped)| (iter.copied().collect::<Vec<_>>(), wrapped))
+            } else {
+                db.snapshot
+                    .prev_translated_key(&driver)
+                    .map(|(iter, wrapped)| (iter.copied().collect::<Vec<_>>(), wrapped))
+            };
+            let Some((next, false)) = bucket else {
+                return Ok(best);
+            };
+            locations = next;
+        }
+    }
+
+    /// Streams live (key, value) pairs in ascending key order within `range`.
+    ///
+    /// Reads pending mutations, closest-first live ancestor diffs, then committed state through
+    /// [`Db::stream_range`]. The uncommitted pairs in `range` are collected when the stream is
+    /// created, and committed pairs stream lazily. Like other batch reads, this view is valid only
+    /// while the DB advances along this batch's ancestry and all unapplied ancestors remain alive.
+    pub fn stream_range<'a, E, C, I, const N: usize>(
+        &'a self,
+        range: impl RangeBounds<K> + Send + 'a,
+        db: &'a Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> impl Stream<Item = Result<(K, V::Value), crate::qmdb::Error<F>>> + Send + 'a
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+    {
+        // A nearer source owns both live entries and tombstones, so older sources apply first.
+        let mut overlay = BTreeMap::new();
+        if !ordered::is_empty(&range) {
+            let ancestors: Vec<_> =
+                chain::parent_and_ancestors(self.base.parent(), |parent| parent.ancestors())
+                    .collect();
+            let past = |key: &K| ordered::past_end(range.end_bound(), key);
+            for ancestor in ancestors.iter().rev() {
+                let start = ancestor
+                    .diff
+                    .partition_point(|(key, _)| !range.contains(key) && !past(key));
+                for (key, entry) in ancestor.diff[start..]
+                    .iter()
+                    .take_while(|(key, _)| !past(key))
+                {
+                    overlay.insert(key.clone(), entry.value().cloned());
+                }
+            }
+            for (key, value) in self
+                .mutations
+                .range::<K, _>((range.start_bound(), range.end_bound()))
+            {
+                overlay.insert(key.clone(), value.clone());
+            }
+        }
+
+        // Merge the overlay into the committed stream, which yields its keys in ascending order.
+        let committed = Box::pin(db.stream_range(range).fuse());
+        stream::unfold(
+            (committed, None, overlay.into_iter().peekable()),
+            |(mut committed, mut head, mut overlay)| async move {
+                loop {
+                    if head.is_none() {
+                        match committed.next().await {
+                            Some(Ok(pair)) => head = Some(pair),
+                            // Keep the committed cursor so a later poll retries the read.
+                            Some(Err(err)) => return Some((Err(err), (committed, head, overlay))),
+                            None => {}
+                        }
+                    }
+                    let pair = match (head.take(), overlay.peek()) {
+                        (None, None) => return None,
+                        (Some(pair), Some((key, _))) if pair.0 < *key => pair,
+                        (Some(pair), None) => pair,
+                        (pair, Some(_)) => {
+                            let (key, value) = overlay.next().expect("peeked overlay entry");
+
+                            // The overlay decides its key, so a committed pair at that key is
+                            // dropped.
+                            head = pair.filter(|pair| pair.0 != key);
+                            let Some(value) = value else {
+                                continue;
+                            };
+                            (key, value)
+                        }
+                    };
+                    return Some((Ok(pair), (committed, head, overlay)));
+                }
+            },
+        )
+    }
+
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
@@ -3382,16 +3606,17 @@ mod tests {
         qmdb::any::{
             BITMAP_CHUNK_BYTES,
             ordered::fixed::Db as OrderedFixedDb,
-            test::{colliding_digest, fixed_db_config},
+            test::{colliding_digest, fixed_db_config, variable_db_config},
             unordered::fixed::Db as UnorderedFixedDb,
             value::FixedEncoding,
         },
-        translator::OneCap,
+        translator::{EightCap, OneCap},
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::test_rng;
+    use commonware_runtime::{Metrics as _, Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::{sequence::U64, test_rng};
+    use futures::TryStreamExt as _;
     use rand::RngExt as _;
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
@@ -3411,6 +3636,470 @@ mod tests {
         let mut bm = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::new();
         build(&mut bm);
         Shared::new(bm)
+    }
+
+    type NeighborDb = OrderedFixedDb<
+        crate::mmb::Family,
+        deterministic::Context,
+        sha256::Digest,
+        sha256::Digest,
+        Sha256,
+        OneCap,
+        Sequential,
+    >;
+    type NeighborBatch = UnmerkleizedBatch<
+        crate::mmb::Family,
+        Sha256,
+        update::Ordered<sha256::Digest, FixedEncoding<sha256::Digest>>,
+        Sequential,
+    >;
+
+    async fn check_ordered_neighbors(
+        batch: &NeighborBatch,
+        db: &NeighborDb,
+        expected: &BTreeMap<sha256::Digest, sha256::Digest>,
+    ) {
+        let queries = [0, 1, 2, 3, 255]
+            .into_iter()
+            .flat_map(|prefix| (0..=7).map(move |suffix| colliding_digest(prefix, suffix)))
+            .chain([sha256::Digest::from([255; 32])]);
+        for key in queries {
+            let predecessor = expected.range(..=key).next_back().map(|(&k, &v)| (k, v));
+            let successor = expected
+                .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
+                .next()
+                .map(|(&k, &v)| (k, v));
+            assert_eq!(
+                batch.get_neighbors(&key, db).await.unwrap(),
+                (predecessor, successor),
+                "query {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordered_neighbors_empty_singleton_and_local_writes() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("ordered-neighbors-local", &context);
+            let db = NeighborDb::init(context, config, None).await.unwrap();
+            let mut batch = db.new_batch();
+            let mut expected = BTreeMap::new();
+            check_ordered_neighbors(&batch, &db, &expected).await;
+
+            let keys = [
+                colliding_digest(1, 2),
+                colliding_digest(1, 4),
+                colliding_digest(2, 0),
+                sha256::Digest::from([0; 32]),
+                sha256::Digest::from([255; 32]),
+            ];
+            for key in keys {
+                batch = batch.write(key, Some(key));
+                expected.insert(key, key);
+                check_ordered_neighbors(&batch, &db, &expected).await;
+            }
+            for key in keys {
+                batch = batch.write(key, None);
+                expected.remove(&key);
+                check_ordered_neighbors(&batch, &db, &expected).await;
+            }
+            let key = keys[0];
+            batch = batch.write(key, Some(keys[1])).write(key, Some(keys[2]));
+            expected.insert(key, keys[2]);
+            check_ordered_neighbors(&batch, &db, &expected).await;
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn ordered_neighbors_forks_and_applied_ancestors_match() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("ordered-neighbors-forks", &context);
+            let db = NeighborDb::init(context, config, None).await.unwrap();
+            let keys: Vec<_> = [1, 2, 3]
+                .into_iter()
+                .flat_map(|prefix| [0, 2, 4, 6].map(|suffix| colliding_digest(prefix, suffix)))
+                .collect();
+            let mut expected: BTreeMap<_, _> = keys.iter().map(|&key| (key, key)).collect();
+            let mut initial = db.new_batch();
+            for (&key, &value) in &expected {
+                initial = initial.write(key, Some(value));
+            }
+            let initial = initial.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let created = colliding_digest(1, 3);
+            let grandparent = db
+                .new_batch()
+                .write(keys[1], None)
+                .write(created, Some(keys[0]))
+                .write(keys[5], Some(keys[0]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            expected.remove(&keys[1]);
+            expected.insert(created, keys[0]);
+            expected.insert(keys[5], keys[0]);
+
+            let sibling = grandparent.new_batch::<Sha256>().write(created, None);
+            let mut sibling_expected = expected.clone();
+            sibling_expected.remove(&created);
+            check_ordered_neighbors(&sibling, &db, &sibling_expected).await;
+            drop(sibling);
+
+            let mut parent = grandparent
+                .new_batch::<Sha256>()
+                .write(keys[1], Some(keys[2]))
+                .write(created, None);
+            expected.insert(keys[1], keys[2]);
+            expected.remove(&created);
+            for &key in &keys[4..8] {
+                parent = parent.write(key, None);
+                expected.remove(&key);
+            }
+            let parent = parent.merkleize(&db, None).await.unwrap();
+            let mut child = parent.new_batch::<Sha256>();
+            for &key in &keys[..4] {
+                child = child.write(key, None);
+                expected.remove(&key);
+            }
+            child = child.write(created, Some(keys[7]));
+            expected.insert(created, keys[7]);
+            check_ordered_neighbors(&child, &db, &expected).await;
+
+            let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+            check_ordered_neighbors(&child, &db, &expected).await;
+            drop(grandparent);
+            check_ordered_neighbors(&child, &db, &expected).await;
+            let (db, _) = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+            check_ordered_neighbors(&child, &db, &expected).await;
+            drop(parent);
+            let child = child.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(child).await.unwrap();
+            check_ordered_neighbors(&db.new_batch(), &db, &expected).await;
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn ordered_neighbors_skip_deleted_buckets_and_collisions() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("ordered-neighbors-deletes", &context);
+            let db = NeighborDb::init(context, config, None).await.unwrap();
+            let keys = [
+                colliding_digest(1, 0),
+                colliding_digest(1, 2),
+                colliding_digest(1, 4),
+                colliding_digest(2, 0),
+                colliding_digest(3, 0),
+            ];
+            let mut initial = db.new_batch();
+            for key in keys {
+                initial = initial.write(key, Some(key));
+            }
+            let initial = initial.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            for mask in 0..1 << keys.len() {
+                let mut batch = db.new_batch();
+                let mut expected: BTreeMap<_, _> = keys.iter().map(|&key| (key, key)).collect();
+                for (i, key) in keys.into_iter().enumerate() {
+                    if mask & (1 << i) != 0 {
+                        batch = batch.write(key, None);
+                        expected.remove(&key);
+                    }
+                }
+                check_ordered_neighbors(&batch, &db, &expected).await;
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn ordered_neighbors_reads_are_bounded_with_exact_translation() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                crate::mmb::Family,
+                deterministic::Context,
+                U64,
+                U64,
+                Sha256,
+                EightCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<EightCap>("ordered-neighbors-reads", &context);
+            let mut db = TestDb::init(context.child("neighbors"), config, None)
+                .await
+                .unwrap();
+            let reads = || -> u64 {
+                context
+                    .encode()
+                    .lines()
+                    .find_map(|line| line.strip_prefix("neighbors_log_journal_items_read_total "))
+                    .expect("journal read metric")
+                    .parse()
+                    .unwrap()
+            };
+            let mut previous = 0;
+            for size in [64, 1024] {
+                let mut batch = db.new_batch();
+                for i in previous..size {
+                    batch = batch.write(U64::new(2 * i), Some(U64::new(i)));
+                }
+                let batch = batch.merkleize(&db, None).await.unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                previous = size;
+
+                let query = U64::new(size - 1);
+                let batch = db.new_batch();
+                let before = reads();
+                assert_eq!(
+                    batch.get_neighbors(&query, &db).await.unwrap(),
+                    (
+                        Some((U64::new(size - 2), U64::new(size / 2 - 1))),
+                        Some((U64::new(size), U64::new(size / 2))),
+                    )
+                );
+                assert_eq!(reads() - before, 2);
+
+                let batch = batch.write(query.clone(), Some(U64::new(99)));
+                let before = reads();
+                assert_eq!(
+                    batch.get_neighbors(&query, &db).await.unwrap(),
+                    (
+                        Some((query, U64::new(99))),
+                        Some((U64::new(size), U64::new(size / 2))),
+                    )
+                );
+                assert_eq!(reads() - before, 2);
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn ordered_neighbors_variable_keys_include_empty_and_prefixes() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = crate::qmdb::any::ordered::variable::Db<
+                crate::mmb::Family,
+                deterministic::Context,
+                Vec<u8>,
+                U64,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = variable_db_config::<OneCap>("ordered-neighbors-variable", &context);
+            let config = crate::qmdb::any::VariableConfig {
+                merkle_config: config.merkle_config,
+                journal_config: crate::journal::contiguous::variable::Config {
+                    codec_config: (((0..=4).into(), ()), ()),
+                    partition: config.journal_config.partition,
+                    items_per_section: config.journal_config.items_per_section,
+                    compression: config.journal_config.compression,
+                    page_cache: config.journal_config.page_cache,
+                    write_buffer: config.journal_config.write_buffer,
+                    replay_buffer: config.journal_config.replay_buffer,
+                },
+                translator: config.translator,
+                init_cache: config.init_cache,
+                init_buffer: config.init_buffer,
+                init_concurrency: config.init_concurrency,
+            };
+            let db = TestDb::init(context, config, None).await.unwrap();
+            let keys = [
+                vec![],
+                vec![0],
+                vec![0, 0],
+                vec![0, 1],
+                vec![255],
+                vec![255, 255],
+            ];
+            let mut expected = BTreeMap::new();
+            let mut batch = db.new_batch();
+            for (i, key) in keys.iter().enumerate() {
+                let value = U64::new(i as u64);
+                expected.insert(key.clone(), value.clone());
+                batch = batch.write(key.clone(), Some(value));
+            }
+            let batch = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let mut batch = db.new_batch();
+            for removed in [vec![], vec![0], vec![255]] {
+                expected.remove(&removed);
+                batch = batch.write(removed, None);
+            }
+            expected.insert(vec![0, 0, 0], U64::new(99));
+            batch = batch.write(vec![0, 0, 0], Some(U64::new(99)));
+            for query in keys
+                .into_iter()
+                .chain([vec![0, 0, 0], vec![1], vec![255, 255, 255]])
+            {
+                let before = expected
+                    .range(..=query.clone())
+                    .next_back()
+                    .map(|(k, v)| (k.clone(), v.clone()));
+                let after = expected
+                    .range((Bound::Excluded(query.clone()), Bound::Unbounded))
+                    .next()
+                    .map(|(k, v)| (k.clone(), v.clone()));
+                assert_eq!(
+                    batch.get_neighbors(&query, &db).await.unwrap(),
+                    (before, after)
+                );
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Checks batch range scans against `expected` for every bound kind over colliding keys,
+    /// including inverted and empty ranges.
+    async fn check_ordered_ranges(
+        batch: &NeighborBatch,
+        db: &NeighborDb,
+        expected: &BTreeMap<sha256::Digest, sha256::Digest>,
+    ) {
+        let bounds: Vec<_> = [0, 1, 2, 255]
+            .into_iter()
+            .flat_map(|prefix| [0, 3].map(move |suffix| colliding_digest(prefix, suffix)))
+            .collect();
+        let mut ranges = vec![(Bound::Unbounded, Bound::Unbounded)];
+        for &start in &bounds {
+            ranges.push((Included(start), Bound::Unbounded));
+            ranges.push((Bound::Unbounded, Excluded(start)));
+            for &end in &bounds {
+                ranges.push((Included(start), Excluded(end)));
+                ranges.push((Excluded(start), Included(end)));
+            }
+        }
+        for range in ranges {
+            let scanned: Vec<_> = batch.stream_range(range, db).try_collect().await.unwrap();
+            let wanted: Vec<_> = expected
+                .iter()
+                .filter(|(key, _)| range.contains(*key))
+                .map(|(&key, &value)| (key, value))
+                .collect();
+            assert_eq!(scanned, wanted, "range {range:?}");
+        }
+    }
+
+    /// Batch range scans merge pending writes and live ancestor diffs over committed state, and
+    /// keep the same view while each ancestor applies and drops.
+    #[test]
+    fn ordered_ranges_merge_forks_and_applied_ancestors() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("ordered-ranges-forks", &context);
+            let db = NeighborDb::init(context, config, None).await.unwrap();
+
+            // Committed state holds four colliding keys under each of three prefixes.
+            let keys: Vec<_> = [1, 2, 255]
+                .into_iter()
+                .flat_map(|prefix| [0, 2, 4, 6].map(move |suffix| colliding_digest(prefix, suffix)))
+                .collect();
+            let mut expected: BTreeMap<_, _> = keys.iter().map(|&key| (key, key)).collect();
+            let mut initial = db.new_batch();
+            for (&key, &value) in &expected {
+                initial = initial.write(key, Some(value));
+            }
+            let initial = initial.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+            check_ordered_ranges(&db.new_batch(), &db, &expected).await;
+
+            // An unapplied grandparent deletes, creates, and updates keys.
+            let created = colliding_digest(1, 3);
+            let grandparent = db
+                .new_batch()
+                .write(keys[1], None)
+                .write(created, Some(keys[0]))
+                .write(keys[5], Some(keys[0]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            expected.remove(&keys[1]);
+            expected.insert(created, keys[0]);
+            expected.insert(keys[5], keys[0]);
+
+            // A sibling's pending delete shadows the grandparent's create.
+            let sibling = grandparent.new_batch::<Sha256>().write(created, None);
+            let mut shadowed = expected.clone();
+            shadowed.remove(&created);
+            check_ordered_ranges(&sibling, &db, &shadowed).await;
+            drop(sibling);
+
+            // An unapplied parent recreates the deleted key, deletes the created one, and clears
+            // the second prefix.
+            let mut parent = grandparent
+                .new_batch::<Sha256>()
+                .write(keys[1], Some(keys[2]))
+                .write(created, None);
+            expected.insert(keys[1], keys[2]);
+            expected.remove(&created);
+            for &key in &keys[4..8] {
+                parent = parent.write(key, None);
+                expected.remove(&key);
+            }
+            let parent = parent.merkleize(&db, None).await.unwrap();
+
+            // The child's pending writes clear the first prefix and recreate the created key.
+            let mut child = parent.new_batch::<Sha256>();
+            for &key in &keys[..4] {
+                child = child.write(key, None);
+                expected.remove(&key);
+            }
+            child = child.write(created, Some(keys[7]));
+            expected.insert(created, keys[7]);
+            check_ordered_ranges(&child, &db, &expected).await;
+
+            // Applying and then dropping each ancestor leaves the child's view unchanged.
+            let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+            check_ordered_ranges(&child, &db, &expected).await;
+            drop(grandparent);
+            check_ordered_ranges(&child, &db, &expected).await;
+            let (db, _) = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+            check_ordered_ranges(&child, &db, &expected).await;
+            drop(parent);
+            check_ordered_ranges(&child, &db, &expected).await;
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Batch range scans skip every subset of deleted committed keys across collision buckets.
+    #[test]
+    fn ordered_ranges_skip_deleted_keys_and_collisions() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("ordered-ranges-deletes", &context);
+            let db = NeighborDb::init(context, config, None).await.unwrap();
+
+            // Committed state holds a three-key collision bucket and two singletons.
+            let keys = [
+                colliding_digest(1, 0),
+                colliding_digest(1, 2),
+                colliding_digest(1, 4),
+                colliding_digest(2, 0),
+                colliding_digest(255, 0),
+            ];
+            let mut initial = db.new_batch();
+            for key in keys {
+                initial = initial.write(key, Some(key));
+            }
+            let initial = initial.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+
+            // Each pending batch deletes one subset of the committed keys.
+            for mask in 0..1 << keys.len() {
+                let mut batch = db.new_batch();
+                let mut expected: BTreeMap<_, _> = keys.iter().map(|&key| (key, key)).collect();
+                for (i, key) in keys.into_iter().enumerate() {
+                    if mask & (1 << i) != 0 {
+                        batch = batch.write(key, None);
+                        expected.remove(&key);
+                    }
+                }
+                check_ordered_ranges(&batch, &db, &expected).await;
+            }
+            db.destroy().await.unwrap();
+        });
     }
 
     /// [`DiffCursors`] must resolve exactly like per-key `lookup_sorted` over the same diffs

@@ -1,0 +1,526 @@
+diff --git a/clearing/src/bajillion/benches/publication.py b/clearing/src/bajillion/benches/publication.py
+index 9e63a18e7..40935f172 100755
+--- a/clearing/src/bajillion/benches/publication.py
++++ b/clearing/src/bajillion/benches/publication.py
+@@ -324,8 +324,8 @@ def validate_ack(path: Path, case: tuple[int, ...], samples: int, warmup: int,
+         "native_cache_pages_per_instance": 16,
+         "native_cache_instances": 3,
+         "log_and_private_io_buffer_bytes": 2048,
+-        "native_log_operations_per_section": 128,
+-        "native_log_merkle_nodes_per_blob": 1024,
++        "native_log_operations_per_section": 4096,
++        "native_log_merkle_nodes_per_blob": 4096,
+         "native_state_operations_per_blob": 4096,
+         "native_state_merkle_nodes_per_blob": 4096,
+     }
+diff --git a/examples/terminal/src/chain/da/benches/tests.rs b/examples/terminal/src/chain/da/benches/tests.rs
+index dab2bde1d..e8e645c8c 100644
+--- a/examples/terminal/src/chain/da/benches/tests.rs
++++ b/examples/terminal/src/chain/da/benches/tests.rs
+@@ -1,10 +1,18 @@
+-use super::*;
++use super::{super::durability::controlled, *};
+ use commonware_macros::select;
+ use commonware_runtime::{
+     deterministic,
+-    mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
++    mocks::{
++        DelayedSyncContext, PendingSyncs, drive_pending_syncs, next_pending_sync,
++        release_pending_syncs,
++    },
+ };
+ use commonware_utils::channel::fallible::OneshotExt as _;
++use std::{
++    future::{Future as _, poll_fn},
++    num::NonZeroU64,
++    task::Poll,
++};
+ 
+ fn options(withdrawals: usize) -> Options {
+     Options {
+@@ -23,6 +31,108 @@ fn options(withdrawals: usize) -> Options {
+     }
+ }
+ 
++#[test]
++fn sparse_activity_batch_commits_without_serial_rollover_waits() {
++    let options = Options {
++        accounts: 1024,
++        senders: 1024,
++        recipients: 512,
++        out_degree: 1,
++        history: 0,
++        ..options(0)
++    };
++    let scheme = signer();
++    let (options, scheme) = (&options, &scheme);
++    let ((deployment, expected_head, expected_operations), crash) =
++        deterministic::Runner::default().start_and_recover(|mut context| async move {
++            let strategy = context.strategy(options.workers);
++            let (deployment, input) = setup(context.child("baseline"), options, scheme, &strategy)
++                .await
++                .unwrap();
++            assert_eq!(input.row_count, 1024);
++            assert_eq!(input.activity_append_operations, 2048);
++            let gates = std::array::from_fn(|_| PendingSyncs::default());
++            gates[0].unblock();
++            gates[2].unblock();
++            let activity = &gates[1];
++            let replica =
++                drive_pending_syncs(activity, controlled(&context, PREFIX, &deployment, &gates))
++                    .await;
++            let (_, prepared) = seal::<Sha256, _, _, _, _, BatchVerifier, _>(
++                scheme,
++                &replica,
++                &input.context,
++                &deployment.operator_ack,
++                &input.deposits,
++                &input.withdrawals,
++                input.encoded_dealing.clone(),
++                &mut context,
++                &strategy,
++            )
++            .await
++            .unwrap();
++            let expected_operations = prepared.replica().logs().activity_operations().1.to_vec();
++            let entered = activity.entered();
++            let mut apply = Box::pin(replica.apply(prepared.into_parts().1));
++            let replica = poll_fn(|cx| {
++                let result = apply.as_mut().poll(cx);
++                assert_eq!(
++                    activity.entered(),
++                    entered,
++                    "activity apply waited for an intermediate rollover sync"
++                );
++                result
++            })
++            .await
++            .unwrap();
++
++            // The batch fits one data section. Its durability work can complete in one round,
++            // even though flushing its Merkle nodes starts an optional rollover sync.
++            let mut rounds = 0;
++            let mut commit = Box::pin(replica.commit());
++            let replica = poll_fn(|cx| match commit.as_mut().poll(cx) {
++                Poll::Ready(result) => Poll::Ready(result),
++                Poll::Pending => {
++                    if activity.entered() > activity.completions() {
++                        rounds += 1;
++                        assert_eq!(rounds, 1, "activity commit serialized rollover syncs");
++                        release_pending_syncs(activity);
++                    }
++                    cx.waker().wake_by_ref();
++                    Poll::Pending
++                }
++            })
++            .await
++            .unwrap();
++            assert_eq!(rounds, 1, "activity commit skipped its durability gate");
++            assert_eq!(replica.head(), input.expected_head);
++            (deployment, input.expected_head, expected_operations)
++        });
++    deterministic::Runner::from(crash).start(|context| async move {
++        let replica = NativeReplica::open(
++            context.child("reopened"),
++            config(
++                &context,
++                deployment.digest(),
++                context.strategy(options.workers),
++            ),
++        )
++        .await
++        .unwrap();
++        assert_eq!(replica.head(), expected_head);
++        let (_, operations) = replica
++            .logs()
++            .activity_opening(
++                &expected_head.logs.activity,
++                1,
++                NonZeroU64::new(expected_operations.len() as u64).unwrap(),
++            )
++            .await
++            .unwrap();
++        assert_eq!(operations, expected_operations);
++    });
++}
++
+ #[test]
+ fn measured_ack_advances_and_reopens_every_owner() {
+     for withdrawals in [0, 32] {
+diff --git a/examples/terminal/src/chain/da/config.rs b/examples/terminal/src/chain/da/config.rs
+index 5ac6b70f5..a18245a94 100644
+--- a/examples/terminal/src/chain/da/config.rs
++++ b/examples/terminal/src/chain/da/config.rs
+@@ -12,8 +12,8 @@ use commonware_storage::{journal::contiguous, merkle::full, qmdb::keyless};
+ use commonware_utils::NZU64;
+ use std::num::NonZeroU64;
+ 
+-pub(super) const LOG_OPERATIONS_PER_SECTION: NonZeroU64 = NZU64!(128);
+-pub(super) const LOG_MERKLE_NODES_PER_BLOB: NonZeroU64 = NZU64!(1024);
++pub(super) const LOG_OPERATIONS_PER_SECTION: NonZeroU64 = NZU64!(4096);
++pub(super) const LOG_MERKLE_NODES_PER_BLOB: NonZeroU64 = NZU64!(4096);
+ 
+ /// Remove a recorded generation when no intact native owner is available. Intact owners use
+ /// `destroy` to drain pending work. Repeating removal is safe when some partitions are absent.
+diff --git a/examples/terminal/src/chain/da/durability.rs b/examples/terminal/src/chain/da/durability.rs
+index c90caf85a..a3c419dcc 100644
+--- a/examples/terminal/src/chain/da/durability.rs
++++ b/examples/terminal/src/chain/da/durability.rs
+@@ -22,7 +22,7 @@ async fn drive<T>(gates: &[PendingSyncs; 3], future: impl Future<Output = T>) ->
+     )
+     .await
+ }
+-async fn controlled(
++pub(super) async fn controlled(
+     context: &deterministic::Context,
+     prefix: &str,
+     deployment: &Deployment,
+@@ -1037,11 +1037,14 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+         Arc,
+         atomic::{AtomicUsize, Ordering},
+     };
+-    let ((deployment, expected), crash) =
+-        deterministic::Runner::default().start_and_recover(|context| async move {
++    let ((deployment, expected, finalized), crash) = deterministic::Runner::default()
++        .start_and_recover(|context| async move {
+             let mut fixture = Fixture::new(&context, "maintenance", 70).await;
++            // Advance the four-epoch retention window beyond a complete native section so
++            // maintenance must remove physical history while the other lane stays busy.
++            let finalized = config::LOG_OPERATIONS_PER_SECTION.get().div_ceil(71) as usize + 4;
+             let mut ballots: Vec<Ballot> = Vec::new();
+-            for epoch in 0..12 {
++            for epoch in 0..finalized + 4 {
+                 let floors = if epoch >= 4 {
+                     let roots = ballots[epoch - 4].roots;
+                     Floors {
+@@ -1098,12 +1101,12 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+             });
+             context.sleep(Duration::from_millis(5)).await;
+             let mut batch = db.new_batches().await;
+-            for (epoch, ballot) in ballots.iter().enumerate().skip(8) {
++            for (epoch, ballot) in ballots.iter().enumerate().skip(finalized) {
+                 let admitted = AdmittedRootsResponse::new(
+                     ballot.header.batch_id::<Sha256>(),
+                     ballot.roots,
+                     ballot.context.predecessor_logs().activity.operations,
+-                    epoch == 8,
++                    epoch == finalized,
+                 );
+                 batch = batch.write(
+                     admitted_key(deployment.digest(), epoch as u64),
+@@ -1113,11 +1116,11 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+             batch = batch.write(
+                 status_key(deployment.digest()),
+                 Some(Record::Status(StatusRecord {
+-                    height: 300,
+-                    timestamp: 300,
++                    height: ballots[finalized].context.challenge_deadline() + 1,
++                    timestamp: ballots[finalized].context.challenge_deadline() + 1,
+                     deployment: *deployment.digest(),
+-                    state_root: ballots[8].roots.successor,
+-                    last_finalized: Some(8),
++                    state_root: ballots[finalized].roots.successor,
++                    last_finalized: Some(finalized as u64),
+                     custody: 0,
+                     claimable: 0,
+                     hard_faulted: false,
+@@ -1132,12 +1135,15 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+             );
+             actor.abort();
+             busy.abort();
+-            (deployment, expected)
++            (deployment, expected, finalized)
+         });
+     deterministic::Runner::from(crash).start(|context| async move {
+         let lane = reopen(&context, "maintenance", &deployment).await;
+         assert_eq!(lane.state.as_ref().unwrap().head(), expected);
+-        assert_eq!(lane.manifest().canonical.checkpoint.retained.epoch, 8);
++        assert_eq!(
++            lane.manifest().canonical.checkpoint.retained.epoch,
++            finalized as u64
++        );
+         assert!(
+             lane.state
+                 .as_ref()
+@@ -1145,7 +1151,7 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+                 .logs()
+                 .retained_starts()
+                 .activity
+-                >= 128
++                >= config::LOG_OPERATIONS_PER_SECTION.get()
+         );
+         assert!(
+             lane.state
+@@ -1154,7 +1160,7 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+                 .logs()
+                 .retained_starts()
+                 .payouts
+-                >= 128
++                >= config::LOG_OPERATIONS_PER_SECTION.get()
+         );
+     });
+ }
+diff --git a/examples/terminal/src/chain/da/durability/retirement.rs b/examples/terminal/src/chain/da/durability/retirement.rs
+index 6febde532..671336cdc 100644
+--- a/examples/terminal/src/chain/da/durability/retirement.rs
++++ b/examples/terminal/src/chain/da/durability/retirement.rs
+@@ -63,7 +63,7 @@ async fn replacement(
+     context: &deterministic::Context,
+     prefix: &str,
+     deployment: &Deployment,
+-    prepared: PreparedReplica<Key, Digest, Rayon>,
++    prepared: Vec<PreparedReplica<Key, Digest, Rayon>>,
+ ) -> NativeReplica<DelayedContext> {
+     let pending = PendingSyncs::default();
+     let config = replica_config(
+@@ -71,7 +71,7 @@ async fn replacement(
+         context,
+         context.strategy(NZUsize!(1)),
+     );
+-    let replica = drive_pending_syncs(
++    let mut replica = drive_pending_syncs(
+         &pending,
+         Box::pin(tests::init_config(
+             DelayedSyncContext {
+@@ -83,45 +83,74 @@ async fn replacement(
+         )),
+     )
+     .await
+-    .unwrap()
+-    .apply(prepared)
+-    .await
+     .unwrap();
++    for prepared in prepared {
++        replica = drive_pending_syncs(&pending, replica.apply(prepared))
++            .await
++            .unwrap();
++    }
+     drive_pending_syncs(&pending, replica.sync()).await.unwrap()
+ }
+ 
+ #[test]
+-fn imported_retirement_waits_for_commit_optional_rollover_io() {
++fn imported_retirement_waits_for_commit_optional_merkle_rollover_io() {
+     for fail in [false, true] {
+         let prefix = if fail {
+             "retirement_error"
+         } else {
+             "retirement_success"
+         };
+-        let ((deployment, offset_partition), crash) = deterministic::Runner::default()
++        let ((deployment, merkle_partition), crash) = deterministic::Runner::default()
+             .start_and_recover(move |context| async move {
+-                let fixture = Fixture::new(&context, prefix, 126).await;
++                let mut fixture = Fixture::new(&context, prefix, 511).await;
+                 let deployment = fixture.lane.deployment.clone();
++                let mut replacement_prepared = Vec::new();
++                for outgoing in [510, 510] {
++                    let (history_ballot, _, old_history) = fixture
++                        .prepare(
++                            outgoing,
++                            0,
++                            Floors {
++                                activity: 0,
++                                payouts: 0,
++                            },
++                        )
++                        .await;
++                    let (_, _, replacement_history) = fixture
++                        .prepare(
++                            outgoing,
++                            0,
++                            Floors {
++                                activity: 0,
++                                payouts: 0,
++                            },
++                        )
++                        .await;
++                    replacement_prepared.push(replacement_history.into_parts().1);
++                    fixture.candidate(history_ballot, old_history).await;
++                    fixture.promote().await;
++                }
+                 let (ballot, _, old_prepared) = fixture
+                     .prepare(
++                        1,
+                         0,
+-                        126,
+                         Floors {
+                             activity: 0,
+                             payouts: 0,
+                         },
+                     )
+                     .await;
+-                let (_, _, replacement_prepared) = fixture
++                let (_, _, replacement_candidate) = fixture
+                     .prepare(
++                        1,
+                         0,
+-                        126,
+                         Floors {
+                             activity: 0,
+                             payouts: 0,
+                         },
+                     )
+                     .await;
++                replacement_prepared.push(replacement_candidate.into_parts().1);
+                 drop(fixture);
+ 
+                 let gates = std::array::from_fn(|_| PendingSyncs::default());
+@@ -136,38 +165,39 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                 )
+                 .await;
+                 gates[0].unblock();
+-                gates[1].unblock();
++                gates[2].unblock();
+ 
+                 let replacement = replacement(
+                     &context,
+                     prefix,
+                     &deployment,
+-                    replacement_prepared.into_parts().1,
++                    replacement_prepared,
+                 )
+                 .await;
+                 let mut checkpoint = lane.manifest().canonical.checkpoint.clone();
+                 checkpoint.generation = 1;
+-                checkpoint.next = 1;
++                checkpoint.next = ballot.epoch.checked_add(1).unwrap();
+                 checkpoint.batch = Some(ballot.header.batch_id::<Sha256>().into_digest());
+                 checkpoint.head = replacement.head();
+                 let transfer = sync::Transfer::capture(&replacement, checkpoint)
+                     .await
+                     .unwrap();
+ 
+-                let payout_gate = &gates[2];
+-                let starts = payout_gate.starts();
+-                let entered = payout_gate.entered();
+-                let completions = payout_gate.completions();
+-                // At the exact variable-journal boundary, the offsets fixed journal seals first,
+-                // followed by the authoritative data journal. Commit then syncs the new data tail
+-                // and joins only the latter two completions.
++                let activity_gate = &gates[1];
++                let starts = activity_gate.starts();
++                let entered = activity_gate.entered();
++                let completions = activity_gate.completions();
++                // Two valid 511-row, 510-entry closes leave 2,045 activity leaves. The final
++                // two-row, one-entry close reaches 2,049 leaves and exactly 4,096 MMR nodes.
++                // Commit starts the authoritative data-tail sync first, then flushing those nodes
++                // starts an optional Merkle rollover that publication does not join.
+                 let mut publication = Box::pin(persist_candidate(
+                     &mut lane,
+                     old_prepared.into_parts().1,
+                     ballot.clone(),
+                 ));
+                 loop {
+-                    if payout_gate.starts() >= starts + 3 {
++                    if activity_gate.starts() >= starts + 2 {
+                         break;
+                     }
+                     select! {
+@@ -175,17 +205,17 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                         _ = commonware_runtime::reschedule() => {},
+                     }
+                 }
+-                assert_eq!(payout_gate.starts(), starts + 3);
+-                assert_eq!(payout_gate.entered(), entered + 2);
+-                assert_eq!(payout_gate.completions(), completions);
+-                assert_eq!(payout_gate.lock().len(), 3);
+-                let optional = next_pending_sync(payout_gate);
+-                assert_eq!(payout_gate.lock().len(), 2);
+-                release_next_pending_syncs(payout_gate, 2);
++                assert_eq!(activity_gate.starts(), starts + 2);
++                assert_eq!(activity_gate.entered(), entered + 1);
++                assert_eq!(activity_gate.completions(), completions);
++                assert_eq!(activity_gate.lock().len(), 2);
++                release_next_pending_syncs(activity_gate, 1);
+                 publication.await.unwrap();
+-                assert_eq!(payout_gate.starts(), starts + 3);
+-                assert_eq!(payout_gate.entered(), entered + 2);
+-                assert_eq!(payout_gate.completions(), completions + 2);
++                assert_eq!(activity_gate.starts(), starts + 2);
++                assert_eq!(activity_gate.entered(), entered + 1);
++                assert_eq!(activity_gate.completions(), completions + 1);
++                assert_eq!(activity_gate.lock().len(), 1);
++                let optional = next_pending_sync(activity_gate);
+                 assert_eq!(lane.state.as_ref().unwrap().head(), replacement.head());
+                 assert_eq!(
+                     lane.state
+@@ -193,9 +223,9 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                         .unwrap()
+                         .logs()
+                         .head()
+-                        .payouts
++                        .activity
+                         .operations,
+-                    128
++                    2049
+                 );
+                 assert_eq!(
+                     lane.manifest().candidate.as_ref().unwrap().checkpoint.head,
+@@ -212,9 +242,9 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                     &context,
+                     context.strategy(NZUsize!(1)),
+                 );
+-                let offset_partition =
+-                    format!("{}_offsets-blobs", old_config.logs.payouts.log.partition);
+-                assert!(!context.scan(&offset_partition).await.unwrap().is_empty());
++                let merkle_partition =
++                    format!("{}-blobs", old_config.logs.activity.merkle.journal_partition);
++                assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
+ 
+                 let mut sealer = delayed_sealer(&context, prefix, &deployment).await;
+                 let operator = ed25519::PrivateKey::from_seed(88).public_key();
+@@ -239,7 +269,7 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                 ));
+                 select! {
+                     _ = &mut optional_blocked => {},
+-                    result = &mut retirement => panic!("retirement bypassed pending offset sync: {result:?}"),
++                    result = &mut retirement => panic!("retirement bypassed pending Merkle sync: {result:?}"),
+                 }
+ 
+                 let checkpoint = checkpoint::Store::open(
+@@ -255,7 +285,7 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                     1
+                 );
+                 assert!(checkpoint.stage(2).await.is_err());
+-                assert!(!context.scan(&offset_partition).await.unwrap().is_empty());
++                assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
+ 
+                 release.send_lossy(if fail {
+                     Err(commonware_runtime::Error::Closed)
+@@ -265,21 +295,21 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                 let result = retirement.await;
+                 if fail {
+                     assert!(result.is_err());
+-                    assert_eq!(payout_gate.completions(), completions + 2);
++                    assert_eq!(activity_gate.completions(), completions + 1);
+                     assert_eq!(lanes[0].manifest().garbage, Some(0));
+-                    assert!(!context.scan(&offset_partition).await.unwrap().is_empty());
++                    assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
+                 } else {
+                     result.unwrap();
+-                    assert_eq!(payout_gate.completions(), completions + 3);
++                    assert_eq!(activity_gate.completions(), completions + 2);
+                     assert!(lanes[0].manifest().garbage.is_none());
+                     assert!(matches!(
+-                        context.scan(&offset_partition).await,
++                        context.scan(&merkle_partition).await,
+                         Err(commonware_runtime::Error::PartitionMissing(_))
+                     ));
+                 }
+                 drop(lanes);
+                 drop(sealer);
+-                (deployment, offset_partition)
++                (deployment, merkle_partition)
+             });
+ 
+         deterministic::Runner::from(crash).start(|context| async move {
+@@ -295,7 +325,7 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                 assert_eq!(lane.manifest().canonical.checkpoint.generation, 1);
+             }
+             assert!(matches!(
+-                context.scan(&offset_partition).await,
++                context.scan(&merkle_partition).await,
+                 Err(commonware_runtime::Error::PartitionMissing(_))
+             ));
+         });

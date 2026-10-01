@@ -3,6 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
+use commonware_parallel::Sequential;
 use commonware_storage::{
     bmt::Builder as BmtBuilder,
     merkle::{
@@ -281,7 +282,7 @@ fn fuzz(input: FuzzInput) {
             for digest in &digests {
                 builder.add(digest);
             }
-            let tree = builder.build();
+            let tree = builder.build(&Sequential);
             let root = tree.root();
 
             for (idx, digest) in digests.iter().enumerate() {
@@ -310,7 +311,7 @@ fn fuzz(input: FuzzInput) {
             for digest in &digests {
                 builder.add(digest);
             }
-            let tree = builder.build();
+            let tree = builder.build(&Sequential);
             let root = tree.root();
 
             let positions: Vec<u32> = input

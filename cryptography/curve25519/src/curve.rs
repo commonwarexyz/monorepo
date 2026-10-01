@@ -611,6 +611,13 @@ impl GAffine {
         ]),
     };
 
+    /// Compresses this point to its canonical Ed25519 encoding.
+    pub fn to_bytes(self) -> [u8; 32] {
+        let mut bytes = self.y.to_bytes();
+        bytes[31] |= u8::from(self.x.is_odd()) << 7;
+        bytes
+    }
+
     /// Decompresses a point encoding, accepting non-canonical `y` values and negative zero
     /// (`x = 0` with the sign bit set) per ZIP215.
     pub fn decompress(bytes: &[u8; 32]) -> Option<Self> {

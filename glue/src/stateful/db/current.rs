@@ -41,8 +41,9 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
+use futures::TryStreamExt as _;
 use std::{
-    ops::{Deref, Range},
+    ops::{Deref, Range, RangeBounds},
     sync::Arc,
 };
 
@@ -147,6 +148,42 @@ where
     pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
+    }
+}
+
+impl<F, E, C, I, H, K, V, const N: usize, S>
+    CurrentUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>
+where
+    F: Graftable,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Contiguous<Item = Operation<F, ordered::Update<K, V>>>,
+    I: OrderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, ordered::Update<K, V>>: Codec,
+{
+    /// Read the greatest live key at or below `key` and the least live key above it,
+    /// with their values. Reads pending mutations, live ancestors, and applied state.
+    /// Returns `None` on either side when no such key exists, without wrapping.
+    #[allow(clippy::type_complexity)]
+    pub async fn get_neighbors(
+        &self,
+        key: &K,
+    ) -> Result<(Option<(K, V::Value)>, Option<(K, V::Value)>), Error<F>> {
+        let db = self.db.read().await;
+        self.batch.get_neighbors(key, &db).await
+    }
+
+    /// Read the live keys within `range` in ascending order, with their values.
+    /// Reads pending mutations, live ancestors, and applied state.
+    pub async fn get_range(
+        &self,
+        range: impl RangeBounds<K> + Send,
+    ) -> Result<Vec<(K, V::Value)>, Error<F>> {
+        let db = self.db.read().await;
+        self.batch.stream_range(range, &db).try_collect().await
     }
 }
 
