@@ -494,10 +494,10 @@ pub(super) struct Applied<T> {
 /// Marshal and database prune targets selected from finalized history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Prune<T> {
-    marshal_height: Height,
+    pub(super) marshal_height: Height,
     /// Finalized height whose sync targets are the database prune target.
     pub(super) barrier_height: Height,
-    qmdb_target: T,
+    pub(super) qmdb_target: T,
 }
 
 impl<T> Prune<T> {
@@ -573,7 +573,7 @@ impl<T: Clone> Pruning<T> {
     /// A prune is due when `height` matches the schedule's phase and a full marshal retention
     /// window has been recorded since startup. Marshal is pruned to the oldest retained height,
     /// and the databases to the oldest sync targets in the database retention window.
-    fn observe(&mut self, height: Height, targets: T) -> Option<Prune<T>> {
+    pub(super) fn observe(&mut self, height: Height, targets: T) -> Option<Prune<T>> {
         self.retained.push_back((height, targets));
         if self.retained.len() > self.marshal_window {
             self.retained.pop_front();
