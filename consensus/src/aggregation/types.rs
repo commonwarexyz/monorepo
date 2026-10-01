@@ -46,9 +46,6 @@ pub enum Error {
     /// The acknowledgment's height is outside the accepted bounds
     #[error("Non-useful ack height {0}")]
     AckHeight(Height),
-    /// The acknowledgment's digest is incorrect
-    #[error("Invalid ack digest {0}")]
-    AckDigest(Height),
     /// Duplicate acknowledgment for the same height
     #[error("Duplicate ack from sender {0} for height {1}")]
     AckDuplicate(String, Height),
@@ -381,8 +378,7 @@ where
 }
 
 /// Used as [Reporter::Activity](crate::Reporter::Activity) to report activities that occur during
-/// aggregation. Also used to journal events that are needed to initialize the aggregation engine
-/// when the node restarts.
+/// aggregation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activity<S: Scheme, D: Digest> {
     /// Received an ack from a participant.
@@ -393,9 +389,30 @@ pub enum Activity<S: Scheme, D: Digest> {
 
     /// Moved the tip to a new height.
     Tip(Height),
+
+    /// The automaton's digest in the [Item] is not the one honest validators computed.
+    ///
+    /// Reported at most once per height in a run and never journaled. See
+    /// [Divergence](super#divergence) for when it is detected.
+    Diverged(Item<D>),
 }
 
-impl<S: Scheme, D: Digest> Write for Activity<S, D> {
+/// An event the engine journals to restore its state when the node restarts.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+pub(super) enum Journaled<S: Scheme, D: Digest> {
+    /// This node signed an ack.
+    Ack(Ack<S, D>),
+
+    /// Certified an [Item].
+    Certified(Certificate<S, D>),
+
+    /// Moved the tip to a new height.
+    Tip(Height),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<S: Scheme, D: Digest> Write for Journaled<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Self::Ack(ack) => {
@@ -414,7 +431,8 @@ impl<S: Scheme, D: Digest> Write for Activity<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Read for Activity<S, D> {
+#[cfg(not(target_arch = "wasm32"))]
+impl<S: Scheme, D: Digest> Read for Journaled<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -423,14 +441,15 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
             1 => Ok(Self::Certified(Certificate::read_cfg(reader, cfg)?)),
             2 => Ok(Self::Tip(Height::read(reader)?)),
             _ => Err(CodecError::Invalid(
-                "consensus::aggregation::Activity",
+                "consensus::aggregation::Journaled",
                 "Invalid type",
             )),
         }
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
+#[cfg(not(target_arch = "wasm32"))]
+impl<S: Scheme, D: Digest> EncodeSize for Journaled<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Ack(ack) => ack.encode_size(),
@@ -440,8 +459,8 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
     }
 }
 
-#[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Activity<S, D>
+#[cfg(all(feature = "arbitrary", not(target_arch = "wasm32")))]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Journaled<S, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
     Ack<S, D>: for<'a> arbitrary::Arbitrary<'a>,
@@ -524,19 +543,19 @@ mod tests {
         assert_eq!(restored_tip_ack.ack.item, item);
         assert_eq!(restored_tip_ack.ack.epoch, Epoch::new(1));
 
-        // Test Activity codec - Ack variant
-        let activity_ack = Activity::Ack(ack);
-        let encoded_activity = activity_ack.encode();
-        let restored_activity_ack: Activity<S, Sha256Digest> =
-            Activity::decode_cfg(encoded_activity, &cfg).unwrap();
-        if let Activity::Ack(restored) = restored_activity_ack {
+        // Test Journaled codec - Ack variant
+        let journaled_ack = Journaled::Ack(ack);
+        let encoded_journaled = journaled_ack.encode();
+        let restored_journaled_ack: Journaled<S, Sha256Digest> =
+            Journaled::decode_cfg(encoded_journaled, &cfg).unwrap();
+        if let Journaled::Ack(restored) = restored_journaled_ack {
             assert_eq!(restored.item, item);
             assert_eq!(restored.epoch, Epoch::new(1));
         } else {
-            panic!("Expected Activity::Ack");
+            panic!("Expected Journaled::Ack");
         }
 
-        // Test Activity codec - Certified variant
+        // Test Journaled codec - Certified variant
         // Collect enough acks for a certificate
         let expected = schemes[0].participants().quorum::<N3f1>();
         let expected_count = usize::try_from(expected).expect("quorum exceeds usize::MAX");
@@ -565,26 +584,26 @@ mod tests {
             Certificate::from_acks(&schemes[0], non_empty![@acks.iter()], &Sequential).unwrap();
         assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
 
-        let activity_certified = Activity::Certified(certificate.clone());
-        let encoded_certified = activity_certified.encode();
-        let restored_activity_certified: Activity<S, Sha256Digest> =
-            Activity::decode_cfg(encoded_certified, &cfg).unwrap();
-        if let Activity::Certified(restored) = restored_activity_certified {
+        let journaled_certified = Journaled::Certified(certificate.clone());
+        let encoded_certified = journaled_certified.encode();
+        let restored_journaled_certified: Journaled<S, Sha256Digest> =
+            Journaled::decode_cfg(encoded_certified, &cfg).unwrap();
+        if let Journaled::Certified(restored) = restored_journaled_certified {
             assert_eq!(restored.item, item);
             assert!(restored.verify(&mut rng, &schemes[0], &Sequential));
         } else {
-            panic!("Expected Activity::Certified");
+            panic!("Expected Journaled::Certified");
         }
 
-        // Test Activity codec - Tip variant
-        let activity_tip: Activity<S, Sha256Digest> = Activity::Tip(Height::new(123));
-        let encoded_tip = activity_tip.encode();
-        let restored_activity_tip: Activity<S, Sha256Digest> =
-            Activity::decode_cfg(encoded_tip, &cfg).unwrap();
-        if let Activity::Tip(height) = restored_activity_tip {
+        // Test Journaled codec - Tip variant
+        let journaled_tip: Journaled<S, Sha256Digest> = Journaled::Tip(Height::new(123));
+        let encoded_tip = journaled_tip.encode();
+        let restored_journaled_tip: Journaled<S, Sha256Digest> =
+            Journaled::decode_cfg(encoded_tip, &cfg).unwrap();
+        if let Journaled::Tip(height) = restored_journaled_tip {
             assert_eq!(height, Height::new(123));
         } else {
-            panic!("Expected Activity::Tip");
+            panic!("Expected Journaled::Tip");
         }
     }
 
@@ -598,7 +617,7 @@ mod tests {
         codec(bls12381_threshold::fixture::<MinSig, _>);
     }
 
-    fn activity_invalid_enum<S, F>(fixture: F)
+    fn journaled_invalid_enum<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest>,
         F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -608,24 +627,24 @@ mod tests {
         3u8.write(&mut buf); // Invalid discriminant
 
         let cfg = fixture.schemes[0].certificate_codec_config();
-        let result = Activity::<S, Sha256Digest>::read_cfg(&mut buf, &cfg);
+        let result = Journaled::<S, Sha256Digest>::read_cfg(&mut buf, &cfg);
         assert!(matches!(
             result,
             Err(CodecError::Invalid(
-                "consensus::aggregation::Activity",
+                "consensus::aggregation::Journaled",
                 "Invalid type"
             ))
         ));
     }
 
     #[test]
-    fn test_activity_invalid_enum() {
-        activity_invalid_enum(ed25519::fixture);
-        activity_invalid_enum(secp256r1::fixture);
-        activity_invalid_enum(bls12381_multisig::fixture::<MinPk, _>);
-        activity_invalid_enum(bls12381_multisig::fixture::<MinSig, _>);
-        activity_invalid_enum(bls12381_threshold::fixture::<MinPk, _>);
-        activity_invalid_enum(bls12381_threshold::fixture::<MinSig, _>);
+    fn test_journaled_invalid_enum() {
+        journaled_invalid_enum(ed25519::fixture);
+        journaled_invalid_enum(secp256r1::fixture);
+        journaled_invalid_enum(bls12381_multisig::fixture::<MinPk, _>);
+        journaled_invalid_enum(bls12381_multisig::fixture::<MinSig, _>);
+        journaled_invalid_enum(bls12381_threshold::fixture::<MinPk, _>);
+        journaled_invalid_enum(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     #[cfg(feature = "arbitrary")]
@@ -642,7 +661,7 @@ mod tests {
             CodecConformance<Ack<Scheme, Sha256Digest>>,
             CodecConformance<TipAck<Scheme, Sha256Digest>>,
             CodecConformance<Certificate<Scheme, Sha256Digest>>,
-            CodecConformance<Activity<Scheme, Sha256Digest>>,
+            CodecConformance<Journaled<Scheme, Sha256Digest>>,
         }
     }
 }

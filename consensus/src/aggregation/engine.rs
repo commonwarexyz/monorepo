@@ -3,7 +3,7 @@
 use super::{
     Config, metrics,
     safe_tip::SafeTip,
-    types::{Ack, Activity, Error, Item, TipAck},
+    types::{Ack, Activity, Error, Item, Journaled, TipAck},
 };
 use crate::{
     Automaton, Monitor, Reporter,
@@ -28,21 +28,65 @@ use commonware_runtime::{
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
-    N3f1, PrioritySet,
+    PrioritySet,
     futures::{Pool as FuturesPool, rebind},
     non_empty,
-    ordered::Quorum,
+    ordered::{Quorum, Set},
 };
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use std::{
     cmp::max,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, info, trace, warn};
+
+/// Fault model of `P`'s certificate scheme.
+type SchemeFaults<P> = <<P as Provider>::Scheme as Verifier>::Faults;
+
+/// Signers, by epoch, that acknowledged a digest other than the automaton's at one height, and
+/// whether that height's divergence was reported.
+#[derive(Default)]
+struct Dissent {
+    signers: BTreeMap<Epoch, BTreeSet<Participant>>,
+    reported: bool,
+}
+
+impl Dissent {
+    /// Returns whether `signer`'s dissent in `epoch` is recorded.
+    fn contains(&self, epoch: Epoch, signer: Participant) -> bool {
+        self.signers
+            .get(&epoch)
+            .is_some_and(|signers| signers.contains(&signer))
+    }
+
+    /// Records `signer`'s dissent in `epoch`, and returns whether the height now diverges for
+    /// the first time: `threshold` signers of one epoch dissent, and no divergence was reported.
+    fn record(&mut self, epoch: Epoch, signer: Participant, threshold: usize) -> bool {
+        let signers = self.signers.entry(epoch).or_default();
+        if !signers.insert(signer) || signers.len() < threshold || self.reported {
+            return false;
+        }
+        self.reported = true;
+        true
+    }
+}
+
+/// The outcome of validating an acknowledgement from the network.
+enum Validated {
+    /// The acknowledgement may count toward a certificate.
+    Agrees,
+    /// The acknowledgement is signed by `signer` for a digest other than ours, and `threshold`
+    /// dissenting signers of its epoch diverge the height. A signer's first dissent is verified;
+    /// a repeat changes nothing, so it is not verified again.
+    Dissents {
+        signer: Participant,
+        threshold: usize,
+    },
+}
 
 /// An entry for a height that does not yet have a certificate.
 enum Pending<S: Scheme, D: Digest> {
@@ -50,8 +94,15 @@ enum Pending<S: Scheme, D: Digest> {
     /// The signatures may have arbitrary digests.
     Unverified(BTreeMap<Epoch, BTreeMap<Participant, Ack<S, D>>>),
 
-    /// Verified by the automaton. Now stores the digest.
-    Verified(D, BTreeMap<Epoch, BTreeMap<Participant, Ack<S, D>>>),
+    /// Verified by the automaton.
+    Verified {
+        /// The automaton's digest.
+        digest: D,
+        /// The acks for `digest`.
+        acks: BTreeMap<Epoch, BTreeMap<Participant, Ack<S, D>>>,
+        /// The signers of acks for any other digest.
+        dissent: Dissent,
+    },
 }
 
 /// The type returned by the `pending` pool, used by the application to return which digest is
@@ -134,7 +185,7 @@ pub struct Engine<
 
     // ---------- Journal ----------
     /// Journal for storing acks signed by this node.
-    journal: Option<Journal<E, Activity<P::Scheme, D>>>,
+    journal: Option<Journal<E, Journaled<P::Scheme, D>>>,
     journal_partition: String,
     journal_write_buffer: NonZeroUsize,
     journal_replay_buffer: NonZeroUsize,
@@ -204,6 +255,35 @@ impl<
             .ok_or(Error::UnknownEpoch(epoch))
     }
 
+    /// Returns the number of acks for one digest in an epoch that certify it.
+    fn quorum(participants: &impl Quorum) -> usize {
+        usize::try_from(participants.quorum::<SchemeFaults<P>>())
+            .expect("quorum exceeds usize::MAX")
+    }
+
+    /// Returns the number of signers of one epoch that include an honest one.
+    fn dissent_threshold(participants: &impl Quorum) -> usize {
+        usize::try_from(participants.max_faults::<SchemeFaults<P>>())
+            .expect("max faults exceeds usize::MAX")
+            + 1
+    }
+
+    /// Asserts that the fault model is sound for `participants`: every quorum contains an honest
+    /// signer, and honest validators alone form one.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `max_faults < quorum <= n - max_faults`.
+    fn assert_thresholds(participants: &Set<<P::Scheme as Verifier>::PublicKey>) {
+        let n = participants.len();
+        let max_faults = Self::dissent_threshold(participants) - 1;
+        let quorum = Self::quorum(participants);
+        assert!(
+            max_faults < quorum && quorum + max_faults <= n,
+            "fault model with quorum {quorum} and {max_faults} faults is unsound for {n} validators"
+        );
+    }
+
     /// Runs the engine until the context is stopped.
     ///
     /// The engine will handle:
@@ -266,7 +346,8 @@ impl<
         let scheme = self
             .scheme(self.epoch)
             .expect("current epoch scheme must exist");
-        self.safe_tip.init(scheme.participants());
+        Self::assert_thresholds(scheme.participants());
+        self.safe_tip.init::<SchemeFaults<P>>(scheme.participants());
 
         select_loop! {
             self.context,
@@ -311,26 +392,17 @@ impl<
                 let scheme = self
                     .scheme(self.epoch)
                     .expect("current epoch scheme must exist");
+                Self::assert_thresholds(scheme.participants());
                 self.safe_tip.reconcile(scheme.participants());
 
                 // Update data structures by purging old epochs
-                let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
-                self.pending
-                    .iter_mut()
-                    .for_each(|(_, pending)| match pending {
-                        self::Pending::Unverified(acks) => {
-                            acks.retain(|epoch, _| *epoch >= min_epoch);
-                        }
-                        self::Pending::Verified(_, acks) => {
-                            acks.retain(|epoch, _| *epoch >= min_epoch);
-                        }
-                    });
+                self.prune_epochs();
 
                 // Heights verified without signing authority have no rebroadcast deadline.
                 // Schedule one for each that is still unconfirmed once we can sign.
                 if scheme.me().is_some() {
                     for (height, pending) in &self.pending {
-                        if matches!(pending, Pending::Verified(..))
+                        if matches!(pending, Pending::Verified { .. })
                             && !self.confirmed.contains_key(height)
                             && !self.rebroadcast_deadlines.contains(height)
                         {
@@ -390,19 +462,28 @@ impl<
                 }
 
                 // Validate that we need to process the ack
-                if let Err(err) = self.validate_ack(&ack, &sender) {
-                    if err.blockable() {
-                        commonware_p2p::block!(
-                            self.blocker,
-                            sender,
-                            ?err,
-                            "ack validation failure"
-                        );
-                    } else {
-                        debug!(?sender, ?err, "ack validate failed");
+                match self.validate_ack(&ack, &sender) {
+                    Ok(Validated::Agrees) => {}
+                    Ok(Validated::Dissents { signer, threshold }) => {
+                        debug!(?sender, height = %ack.item.height, "ack for another digest");
+                        guard.set(Status::Dropped);
+                        self.record_dissent(ack.item.height, ack.epoch, signer, threshold);
+                        continue;
                     }
-                    continue;
-                };
+                    Err(err) => {
+                        if err.blockable() {
+                            commonware_p2p::block!(
+                                self.blocker,
+                                sender,
+                                ?err,
+                                "ack validation failure"
+                            );
+                        } else {
+                            debug!(?sender, ?err, "ack validate failed");
+                        }
+                        continue;
+                    }
+                }
 
                 // Handle the ack
                 let accepted;
@@ -453,20 +534,46 @@ impl<
             return self;
         };
 
-        // Move the entry to `Pending::Verified`
         let Some(Pending::Unverified(acks)) = self.pending.remove(&height) else {
             panic!("Pending::Unverified entry not found");
         };
-        self.pending
-            .insert(height, Pending::Verified(digest, BTreeMap::new()));
+
+        // A quorum may have certified another digest before the automaton answered. The height
+        // needs nothing more, and an ack for our digest would only contradict the certificate.
+        if self
+            .confirmed
+            .get(&height)
+            .is_some_and(|certificate| certificate.item.digest != digest)
+        {
+            self.report_divergence(Item { height, digest });
+            return self;
+        }
+
+        // Move the entry to `Pending::Verified`
+        self.pending.insert(
+            height,
+            Pending::Verified {
+                digest,
+                acks: BTreeMap::new(),
+                dissent: Dissent::default(),
+            },
+        );
 
         // Handle each `ack` as if it was received over the network. This inserts the values into
         // the new map, and may form a certificate if enough acks are present. Only process acks
         // that match the verified digest.
-        for epoch_acks in acks.values() {
+        for (epoch, epoch_acks) in &acks {
+            let threshold = self
+                .scheme(*epoch)
+                .ok()
+                .map(|scheme| Self::dissent_threshold(scheme.participants()));
             for epoch_ack in epoch_acks.values() {
-                // Drop acks that don't match the verified digest
+                // Buffered acks were validated, so one for another digest is dissent
                 if epoch_ack.item.digest != digest {
+                    if let Some(threshold) = threshold {
+                        let signer = epoch_ack.attestation.signer;
+                        self.record_dissent(height, *epoch, signer, threshold);
+                    }
                     continue;
                 }
 
@@ -513,8 +620,7 @@ impl<
                 return (self, false);
             }
         };
-        let quorum = usize::try_from(scheme.participants().quorum::<N3f1>())
-            .expect("quorum exceeds usize::MAX");
+        let quorum = Self::quorum(scheme.participants());
 
         // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {
@@ -525,7 +631,7 @@ impl<
                 return (self, false);
             }
             Some(Pending::Unverified(acks)) => acks,
-            Some(Pending::Verified(digest, acks)) => {
+            Some(Pending::Verified { digest, acks, .. }) => {
                 // If we have a verified digest, ensure the ack matches it
                 if ack.item.digest != *digest {
                     debug!(height = %ack.item.height, signer = %ack.attestation.signer, "ack digest mismatch");
@@ -572,9 +678,12 @@ impl<
         self.confirmed.insert(height, certificate.clone());
 
         // Journal and notify the automaton
-        let certified = Activity::Certified(certificate);
-        self = self.record(certified.clone()).await.sync(height).await;
-        self.reporter.report(certified);
+        self = self
+            .record(Journaled::Certified(certificate.clone()))
+            .await
+            .sync(height)
+            .await;
+        self.reporter.report(Activity::Certified(certificate));
 
         // Increase the tip if needed
         if height == self.tip {
@@ -602,7 +711,7 @@ impl<
             TipAck<P::Scheme, D>,
         >,
     ) -> Self {
-        let Some(Pending::Verified(digest, acks)) = self.pending.get(&height) else {
+        let Some(Pending::Verified { digest, acks, .. }) = self.pending.get(&height) else {
             // The height may already be confirmed; continue silently if so
             return self;
         };
@@ -651,12 +760,12 @@ impl<
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
-    /// Returns an error if the ack is invalid.
+    /// Returns an error if the ack is invalid, and otherwise whether it agrees with our digest.
     fn validate_ack(
         &mut self,
         ack: &Ack<P::Scheme, D>,
         sender: &<P::Scheme as Verifier>::PublicKey,
-    ) -> Result<(), Error> {
+    ) -> Result<Validated, Error> {
         // Validate epoch
         {
             let (eb_lo, eb_hi) = self.epoch_bounds;
@@ -697,35 +806,95 @@ impl<
         if self.confirmed.contains_key(&ack.item.height) {
             return Err(Error::AckCertified(ack.item.height));
         }
-        let have_ack = match self.pending.get(&ack.item.height) {
-            None => false,
-            Some(Pending::Unverified(epoch_map)) => epoch_map
-                .get(&ack.epoch)
-                .is_some_and(|acks| acks.contains_key(&ack.attestation.signer)),
-            Some(Pending::Verified(digest, epoch_map)) => {
-                // While we check this in the `handle_ack` function, checking early here avoids an
-                // unnecessary signature check.
-                if ack.item.digest != *digest {
-                    return Err(Error::AckDigest(ack.item.height));
-                }
+        let (have_ack, dissents) = match self.pending.get(&ack.item.height) {
+            None => (false, false),
+            Some(Pending::Unverified(epoch_map)) => (
                 epoch_map
                     .get(&ack.epoch)
-                    .is_some_and(|acks| acks.contains_key(&ack.attestation.signer))
+                    .is_some_and(|acks| acks.contains_key(&signer)),
+                false,
+            ),
+            Some(Pending::Verified {
+                digest,
+                acks,
+                dissent,
+            }) => {
+                if ack.item.digest == *digest {
+                    let have_ack = acks
+                        .get(&ack.epoch)
+                        .is_some_and(|acks| acks.contains_key(&signer));
+                    (have_ack, false)
+                } else {
+                    (dissent.contains(ack.epoch, signer), true)
+                }
             }
         };
-        if have_ack {
+        if have_ack && !dissents {
             return Err(Error::AckDuplicate(sender.to_string(), ack.item.height));
         }
 
-        // Validate signature
-        if !ack.verify(self.context.as_mut(), &*scheme, &self.strategy) {
+        // Validate signature, unless the ack repeats recorded dissent, which changes nothing
+        if !have_ack && !ack.verify(self.context.as_mut(), &*scheme, &self.strategy) {
             return Err(Error::InvalidAckSignature);
         }
 
-        Ok(())
+        if dissents {
+            return Ok(Validated::Dissents {
+                signer,
+                threshold: Self::dissent_threshold(participants),
+            });
+        }
+        Ok(Validated::Agrees)
+    }
+
+    // ---------- Divergence ----------
+
+    /// Records that `signer` acknowledged a digest other than ours at `height` in `epoch`, and
+    /// reports divergence once, when `threshold` signers of one epoch have done so.
+    fn record_dissent(
+        &mut self,
+        height: Height,
+        epoch: Epoch,
+        signer: Participant,
+        threshold: usize,
+    ) {
+        let Some(Pending::Verified {
+            digest, dissent, ..
+        }) = self.pending.get_mut(&height)
+        else {
+            return;
+        };
+        if dissent.record(epoch, signer, threshold) {
+            let item = Item {
+                height,
+                digest: *digest,
+            };
+            self.report_divergence(item);
+        }
+    }
+
+    /// Reports that at least one honest validator disagrees with our digest for an item.
+    fn report_divergence(&mut self, item: Item<D>) {
+        warn!(height = %item.height, digest = ?item.digest, "digest diverges from honest validators");
+        self.metrics.divergences.inc();
+        self.reporter.report(Activity::Diverged(item));
     }
 
     // ---------- Helpers ----------
+
+    /// Drops acks and dissent from epochs below the retained bounds.
+    fn prune_epochs(&mut self) {
+        let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
+        for pending in self.pending.values_mut() {
+            match pending {
+                Pending::Unverified(acks) => acks.retain(|epoch, _| *epoch >= min_epoch),
+                Pending::Verified { acks, dissent, .. } => {
+                    acks.retain(|epoch, _| *epoch >= min_epoch);
+                    dissent.signers.retain(|epoch, _| *epoch >= min_epoch);
+                }
+            }
+        }
+    }
 
     /// Requests the digest from the automaton.
     ///
@@ -766,7 +935,7 @@ impl<
 
         // Journal the ack
         self = self
-            .record(Activity::Ack(ack.clone()))
+            .record(Journaled::Ack(ack.clone()))
             .await
             .sync(height)
             .await;
@@ -822,7 +991,7 @@ impl<
             .retain(|height, _| *height >= activity_threshold);
 
         // Add tip to journal
-        self = self.record(Activity::Tip(tip)).await.sync(tip).await;
+        self = self.record(Journaled::Tip(tip)).await.sync(tip).await;
         self.reporter.report(Activity::Tip(tip));
 
         // Prune journal with buffer
@@ -848,8 +1017,8 @@ impl<
     /// Returns the journal and a list of unverified pending heights that need digest requests.
     async fn replay(
         &mut self,
-        journal: Journal<E, Activity<P::Scheme, D>>,
-    ) -> (Journal<E, Activity<P::Scheme, D>>, Vec<Height>) {
+        journal: Journal<E, Journaled<P::Scheme, D>>,
+    ) -> (Journal<E, Journaled<P::Scheme, D>>, Vec<Height>) {
         let mut tip = Height::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
@@ -863,15 +1032,15 @@ impl<
         while let Some(msg) = replay.next().await {
             let (_, _, _, activity) = msg.expect("replay failed");
             match activity {
-                Activity::Tip(height) => {
+                Journaled::Tip(height) => {
                     tip = max(tip, height);
                     self.reporter.report(Activity::Tip(height));
                 }
-                Activity::Certified(certificate) => {
+                Journaled::Certified(certificate) => {
                     certified.push(certificate.clone());
                     self.reporter.report(Activity::Certified(certificate));
                 }
-                Activity::Ack(ack) => {
+                Journaled::Ack(ack) => {
                     acks.push(ack.clone());
                     self.reporter.report(Activity::Ack(ack));
                 }
@@ -932,8 +1101,14 @@ impl<
             // otherwise as Unverified
             match our_digest {
                 Some(digest) => {
-                    self.pending
-                        .insert(height, Pending::Verified(digest, epoch_map));
+                    self.pending.insert(
+                        height,
+                        Pending::Verified {
+                            digest,
+                            acks: epoch_map,
+                            dissent: Dissent::default(),
+                        },
+                    );
 
                     // If we've already generated an ack and it isn't yet confirmed, mark for immediate rebroadcast
                     self.rebroadcast_deadlines
@@ -967,19 +1142,17 @@ impl<
         (replay.finish().expect("replay failed"), unverified)
     }
 
-    /// Appends an activity to the journal.
-    async fn record(mut self, activity: Activity<P::Scheme, D>) -> Self {
-        let height = match activity {
-            Activity::Ack(ref ack) => ack.item.height,
-            Activity::Certified(ref certificate) => certificate.item.height,
-            Activity::Tip(h) => h,
+    /// Appends an event to the journal.
+    async fn record(mut self, event: Journaled<P::Scheme, D>) -> Self {
+        let height = match event {
+            Journaled::Ack(ref ack) => ack.item.height,
+            Journaled::Certified(ref certificate) => certificate.item.height,
+            Journaled::Tip(h) => h,
         };
         let section = self.get_journal_section(height);
-        rebind(&mut self.journal, |journal| {
-            journal.append(section, &activity)
-        })
-        .await
-        .expect("unable to append to journal");
+        rebind(&mut self.journal, |journal| journal.append(section, &event))
+            .await
+            .expect("unable to append to journal");
         self
     }
 
@@ -1000,65 +1173,437 @@ mod tests {
         aggregation::{mocks, scheme::ed25519},
         simplex::mocks::wrapped::{Behavior, Scheme as WrappedScheme},
     };
-    use commonware_cryptography::{Hasher as _, Sha256, certificate::mocks::Fixture};
-    use commonware_p2p::utils::mocks::NoopBlocker;
+    use commonware_cryptography::{
+        Hasher as _, Sha256, certificate::mocks::Fixture, ed25519::PublicKey,
+        sha256::Digest as Sha256Digest,
+    };
+    use commonware_p2p::{
+        simulated::{self, Network},
+        utils::mocks::NoopBlocker,
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Quota, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZUsize, NonZeroDuration};
+    use std::num::NonZeroU32;
+
+    mod five_f_one {
+        //! An Ed25519 scheme for `aggregation` under the `N5f1` fault model.
+
+        use crate::aggregation::types::{Item, Namespace};
+        use commonware_cryptography::impl_certificate_ed25519;
+        use commonware_utils::N5f1;
+
+        impl_certificate_ed25519!(&'a Item<D>, Namespace, N5f1);
+    }
+
+    type TestEngine<S> = Engine<
+        deterministic::Context,
+        mocks::Provider<S>,
+        Sha256Digest,
+        mocks::Application,
+        mocks::ReporterMailbox<S, Sha256Digest>,
+        mocks::Monitor,
+        NoopBlocker<<S as Verifier>::PublicKey>,
+        Sequential,
+    >;
+
+    type TestSender<S> = WrappedSender<
+        simulated::Sender<<S as Verifier>::PublicKey, deterministic::Context>,
+        TipAck<S, Sha256Digest>,
+    >;
+
+    const EPOCH: Epoch = Epoch::new(111);
+
+    /// Returns an engine signing with `scheme` in [`EPOCH`], with its journal open as `run`
+    /// leaves it before its loop.
+    async fn engine<S: scheme::Scheme<Sha256Digest>>(
+        context: &deterministic::Context,
+        scheme: S,
+        reporter: mocks::ReporterMailbox<S, Sha256Digest>,
+    ) -> TestEngine<S> {
+        let provider = mocks::Provider::new();
+        assert!(provider.register(EPOCH, scheme));
+        let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10));
+        let mut engine = Engine::new(
+            context.child("engine"),
+            Config {
+                monitor: mocks::Monitor::new(EPOCH),
+                provider,
+                automaton: mocks::Application::new(mocks::Strategy::Correct),
+                reporter,
+                blocker: NoopBlocker::default(),
+                priority_acks: false,
+                rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
+                epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
+                window: NonZeroU64::new(10).unwrap(),
+                activity_timeout: HeightDelta::new(10),
+                journal_partition: "aggregation-engine".to_string(),
+                journal_write_buffer: NZUsize!(4096),
+                journal_replay_buffer: NZUsize!(4096),
+                journal_heights_per_section: NonZeroU64::new(6).unwrap(),
+                journal_compression: None,
+                journal_page_cache: page_cache.clone(),
+                strategy: Sequential,
+            },
+        );
+        let journal = Journal::init(
+            context.child("journal"),
+            JConfig {
+                partition: "aggregation-engine".to_string(),
+                compression: None,
+                codec_config: S::certificate_codec_config_unbounded(),
+                page_cache,
+                write_buffer: NZUsize!(4096),
+            },
+        )
+        .await
+        .unwrap();
+        engine.journal = Some(journal);
+        engine.epoch = EPOCH;
+        engine
+    }
+
+    /// Returns a sender for `me` on a simulated network without links.
+    async fn sender<S: scheme::Scheme<Sha256Digest>>(
+        context: &deterministic::Context,
+        participants: &[S::PublicKey],
+        me: &S::PublicKey,
+    ) -> TestSender<S> {
+        let (network, oracle) = Network::new_with_peers(
+            context.child("network"),
+            simulated::Config {
+                max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(participants.len()),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            },
+            participants.to_vec(),
+        )
+        .await;
+        network.start();
+        let (sender, _) = oracle
+            .control(me.clone())
+            .register(0, Quota::per_second(NonZeroU32::MAX))
+            .await
+            .unwrap();
+        WrappedSender::new(context.network_buffer_pool().clone(), sender)
+    }
+
+    /// Returns a pending entry for `digest` with no acks.
+    fn verified<S: Scheme>(digest: Sha256Digest) -> Pending<S, Sha256Digest> {
+        Pending::Verified {
+            digest,
+            acks: BTreeMap::new(),
+            dissent: Dissent::default(),
+        }
+    }
+
+    /// Validates `ack` from `sender` as the engine's loop does, recording its dissent, if any,
+    /// and returns whether it agrees with the engine's digest.
+    fn offer<S: scheme::Scheme<Sha256Digest>>(
+        engine: &mut TestEngine<S>,
+        ack: &Ack<S, Sha256Digest>,
+        sender: &S::PublicKey,
+    ) -> Result<bool, Error> {
+        match engine.validate_ack(ack, sender)? {
+            Validated::Agrees => Ok(true),
+            Validated::Dissents { signer, threshold } => {
+                engine.record_dissent(ack.item.height, ack.epoch, signer, threshold);
+                Ok(false)
+            }
+        }
+    }
+
+    #[test]
+    fn quorum_follows_the_scheme_fault_model() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            // Of eleven validators, `N5f1` tolerates two faults and certifies with nine acks,
+            // where `N3f1` would certify with eight.
+            let Fixture {
+                schemes, verifier, ..
+            } = five_f_one::fixture(&mut context, b"aggregation-faults", 11);
+            let (reporter, mailbox) = mocks::Reporter::new(context.child("reporter"), verifier);
+            reporter.start();
+            let mut engine = engine(&context, schemes[0].clone(), mailbox).await;
+            let height = Height::new(0);
+            let digest = Sha256::hash(&[b"payload"]);
+            engine.pending.insert(height, verified(digest));
+
+            for scheme in &schemes[..8] {
+                let ack = Ack::sign(scheme, EPOCH, Item { height, digest }).unwrap();
+                (engine, _) = engine.handle_ack(&ack).await;
+            }
+            assert!(!engine.confirmed.contains_key(&height));
+            let ack = Ack::sign(&schemes[8], EPOCH, Item { height, digest }).unwrap();
+            (engine, _) = engine.handle_ack(&ack).await;
+            assert!(engine.confirmed.contains_key(&height));
+        });
+    }
+
+    #[test]
+    fn dissent_diverges_once_per_height() {
+        let mut dissent = Dissent::default();
+        let (first, second) = (Epoch::new(1), Epoch::new(2));
+
+        // Signers count per epoch: one in each of two epochs stays below a threshold of two.
+        assert!(!dissent.record(first, Participant::new(0), 2));
+        assert!(!dissent.record(second, Participant::new(1), 2));
+
+        // A repeat counts once, and a second signer of one epoch crosses the threshold.
+        assert!(!dissent.record(first, Participant::new(0), 2));
+        assert!(dissent.record(first, Participant::new(1), 2));
+        assert!(dissent.contains(first, Participant::new(1)));
+
+        // Crossing it again, in any epoch, reports nothing new.
+        assert!(!dissent.record(second, Participant::new(0), 2));
+    }
+
+    /// Offers dissent from `threshold - 1` signers, a repeat, and a forgery, none of which
+    /// diverges, then from one more signer, which does, and from another, which reports nothing
+    /// new.
+    async fn dissent_diverges_at_threshold<S>(
+        context: deterministic::Context,
+        fixture: Fixture<S>,
+        threshold: usize,
+    ) where
+        S: scheme::Scheme<Sha256Digest, PublicKey = PublicKey>,
+    {
+        let Fixture {
+            participants,
+            schemes,
+            verifier,
+            ..
+        } = fixture;
+        let (reporter, mut mailbox) = mocks::Reporter::new(context.child("reporter"), verifier);
+        reporter.start();
+        let mut engine = engine(&context, schemes[0].clone(), mailbox.clone()).await;
+        let height = Height::new(0);
+        let ours = Sha256::hash(&[b"ours"]);
+        let theirs = Item {
+            height,
+            digest: Sha256::hash(&[b"theirs"]),
+        };
+        engine.pending.insert(height, verified(ours));
+
+        // Fewer signers than the threshold may all be faulty, however often they repeat.
+        for signer in 1..threshold {
+            let ack = Ack::sign(&schemes[signer], EPOCH, theirs.clone()).unwrap();
+            for _ in 0..2 {
+                assert!(matches!(
+                    offer(&mut engine, &ack, &participants[signer]),
+                    Ok(false)
+                ));
+            }
+        }
+        assert!(mailbox.get_diverged().await.is_empty());
+
+        // An ack whose signature does not verify is not dissent.
+        let mut forged = Ack::sign(&schemes[threshold], EPOCH, theirs.clone()).unwrap();
+        forged.item.digest = Sha256::hash(&[b"forged"]);
+        assert!(matches!(
+            offer(&mut engine, &forged, &participants[threshold]),
+            Err(Error::InvalidAckSignature)
+        ));
+        assert!(mailbox.get_diverged().await.is_empty());
+
+        // One more signer diverges our digest, and another reports nothing new.
+        for signer in [threshold, threshold + 1] {
+            let ack = Ack::sign(&schemes[signer], EPOCH, theirs.clone()).unwrap();
+            assert!(matches!(
+                offer(&mut engine, &ack, &participants[signer]),
+                Ok(false)
+            ));
+        }
+        assert_eq!(
+            mailbox.get_diverged().await,
+            BTreeMap::from([(height, ours)])
+        );
+        assert_eq!(engine.metrics.divergences.get(), 1);
+    }
+
+    #[test]
+    fn dissent_beyond_n3f1_faults_diverges_once() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            // Of four validators, `N3f1` tolerates one fault, so two dissenting signers include
+            // an honest one.
+            let fixture = ed25519::fixture(&mut context, b"aggregation-divergence", 4);
+            dissent_diverges_at_threshold(context, fixture, 2).await;
+        });
+    }
+
+    #[test]
+    fn dissent_beyond_n5f1_faults_diverges_once() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            // Of eleven validators, `N5f1` tolerates two faults, so it takes three.
+            let fixture = five_f_one::fixture(&mut context, b"aggregation-divergence", 11);
+            dissent_diverges_at_threshold(context, fixture, 3).await;
+        });
+    }
+
+    #[test]
+    fn epoch_pruning_drops_dissent() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, b"aggregation-pruning", 4);
+            let (reporter, mut mailbox) = mocks::Reporter::new(context.child("reporter"), verifier);
+            reporter.start();
+            let mut engine = engine(&context, schemes[0].clone(), mailbox.clone()).await;
+            let height = Height::new(0);
+            let theirs = Item {
+                height,
+                digest: Sha256::hash(&[b"theirs"]),
+            };
+            engine
+                .pending
+                .insert(height, verified(Sha256::hash(&[b"ours"])));
+            let ack = Ack::sign(&schemes[1], EPOCH, theirs.clone()).unwrap();
+            assert!(matches!(
+                offer(&mut engine, &ack, &participants[1]),
+                Ok(false)
+            ));
+
+            // Once its epoch leaves the retained bounds, its dissent is forgotten.
+            engine.epoch = EPOCH.next().next();
+            engine.prune_epochs();
+            let Some(Pending::Verified { dissent, .. }) = engine.pending.get(&height) else {
+                panic!("height must stay pending");
+            };
+            assert!(dissent.signers.is_empty());
+            assert!(mailbox.get_diverged().await.is_empty());
+        });
+    }
+
+    #[test]
+    fn buffered_dissent_diverges_when_the_digest_arrives() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, b"aggregation-buffered", 4);
+            let (reporter, mut mailbox) = mocks::Reporter::new(context.child("reporter"), verifier);
+            reporter.start();
+            let mut engine = engine(&context, schemes[0].clone(), mailbox.clone()).await;
+            let mut sender = sender(&context, &participants, &participants[0]).await;
+            let height = Height::new(0);
+            let ours = Sha256::hash(&[b"ours"]);
+            let theirs = Item {
+                height,
+                digest: Sha256::hash(&[b"theirs"]),
+            };
+
+            // Two acks for another digest arrive before the automaton answers.
+            engine
+                .pending
+                .insert(height, Pending::Unverified(BTreeMap::new()));
+            for signer in 1..3 {
+                let ack = Ack::sign(&schemes[signer], EPOCH, theirs.clone()).unwrap();
+                assert!(matches!(
+                    offer(&mut engine, &ack, &participants[signer]),
+                    Ok(true)
+                ));
+                (engine, _) = engine.handle_ack(&ack).await;
+            }
+            assert!(mailbox.get_diverged().await.is_empty());
+
+            // Once it answers, they count as dissent, and the engine still acks its own digest.
+            engine = engine.handle_digest(height, ours, &mut sender).await;
+            assert_eq!(
+                mailbox.get_diverged().await,
+                BTreeMap::from([(height, ours)])
+            );
+            let Some(Pending::Verified { acks, .. }) = engine.pending.get(&height) else {
+                panic!("height must stay pending");
+            };
+            assert_eq!(acks[&EPOCH].len(), 1);
+            assert!(acks[&EPOCH].contains_key(&Participant::new(0)));
+        });
+    }
+
+    #[test]
+    fn certificate_before_digest_diverges_without_signing() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, b"aggregation-certified", 4);
+            let (reporter, mut mailbox) = mocks::Reporter::new(context.child("reporter"), verifier);
+            reporter.start();
+            let mut engine = engine(&context, schemes[0].clone(), mailbox.clone()).await;
+            let mut sender = sender(&context, &participants, &participants[0]).await;
+            let height = Height::new(0);
+            let ours = Sha256::hash(&[b"ours"]);
+            let theirs = Item {
+                height,
+                digest: Sha256::hash(&[b"theirs"]),
+            };
+
+            // A quorum certifies another digest before the automaton answers.
+            engine
+                .pending
+                .insert(height, Pending::Unverified(BTreeMap::new()));
+            for scheme in &schemes[1..] {
+                let ack = Ack::sign(scheme, EPOCH, theirs.clone()).unwrap();
+                (engine, _) = engine.handle_ack(&ack).await;
+            }
+            assert!(engine.confirmed.contains_key(&height));
+
+            // Our digest diverges, and the engine signs nothing that contradicts the certificate.
+            engine = engine.handle_digest(height, ours, &mut sender).await;
+            assert_eq!(
+                mailbox.get_diverged().await,
+                BTreeMap::from([(height, ours)])
+            );
+            assert!(!engine.pending.contains_key(&height));
+            assert!(engine.rebroadcast_deadlines.peek().is_none());
+
+            // Later acks for the certified digest report nothing new.
+            let ack = Ack::sign(&schemes[1], EPOCH, theirs).unwrap();
+            assert!(matches!(
+                offer(&mut engine, &ack, &participants[1]),
+                Err(Error::AckCertified(_))
+            ));
+            assert_eq!(engine.metrics.divergences.get(), 1);
+        });
+    }
 
     #[test]
     #[should_panic(expected = "verified acknowledgement quorum must assemble")]
     fn assembly_failure_panics() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|mut context| async move {
-            let epoch = Epoch::new(111);
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, b"aggregation-recovery-failure", 4);
-            let provider = mocks::Provider::new();
-            assert!(provider.register(
-                epoch,
-                WrappedScheme::new(schemes[0].clone(), Behavior::RecoveryFailure),
-            ));
             let (_, reporter) = mocks::Reporter::new(
                 context.child("reporter"),
                 WrappedScheme::new(verifier, Behavior::Honest),
             );
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
-            let mut engine = Engine::new(
-                context.child("engine"),
-                Config {
-                    monitor: mocks::Monitor::new(epoch),
-                    provider,
-                    automaton: mocks::Application::new(mocks::Strategy::Correct),
-                    reporter,
-                    blocker: NoopBlocker::default(),
-                    priority_acks: false,
-                    rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
-                    epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
-                    window: NonZeroU64::new(1).unwrap(),
-                    activity_timeout: HeightDelta::new(10),
-                    journal_partition: "aggregation-recovery-failure".to_string(),
-                    journal_write_buffer: NZUsize!(4096),
-                    journal_replay_buffer: NZUsize!(4096),
-                    journal_heights_per_section: NonZeroU64::new(6).unwrap(),
-                    journal_compression: None,
-                    journal_page_cache: page_cache,
-                    strategy: Sequential,
-                },
-            );
+            let scheme = WrappedScheme::new(schemes[0].clone(), Behavior::RecoveryFailure);
+            let mut engine = engine(&context, scheme, reporter).await;
 
             let height = Height::new(0);
             let digest = Sha256::hash(&[b"payload"]);
-            engine
-                .pending
-                .insert(height, Pending::Verified(digest, BTreeMap::new()));
+            engine.pending.insert(height, verified(digest));
 
             for scheme in schemes.iter().take(3) {
                 let scheme = WrappedScheme::new(scheme.clone(), Behavior::Honest);
-                let ack = Ack::sign(&scheme, epoch, Item { height, digest }).unwrap();
+                let ack = Ack::sign(&scheme, EPOCH, Item { height, digest }).unwrap();
                 (engine, _) = engine.handle_ack(&ack).await;
             }
         });
