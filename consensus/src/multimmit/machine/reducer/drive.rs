@@ -247,8 +247,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
         let production_credit = self.can_reserve_build_credit();
         self.chain.set_production_credit(production_credit);
-        self.chain
-            .drive::<H>(self.durable.state.generation, self.finality.finalized())?;
+        self.chain.drive::<H>(self.durable.state.generation)?;
         capabilities.extend(self.chain.take_capabilities());
 
         if order == DaOrder::ChainFirst && self.advance_da_certificate(&mut capabilities)? {
