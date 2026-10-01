@@ -2516,16 +2516,16 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// crash. Also tries to advance the recovery watermark to the previous proven durable
     /// size, bounding startup recovery. Only `sync()` guarantees a current watermark.
     ///
-    /// At most one data sync and one watermark sync are in flight at a time: this call waits
-    /// for the prior call's syncs before starting new ones. It does not wait for a pending
-    /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
-    /// pending when this call returns. Reads always proceed while the returned handle is
-    /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
-    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
-    /// or lose its failure. A failed data flush or sync fails the next append that reaches
-    /// the blob and the next commit, sync, or flushing snapshot, and any prune that changes the
-    /// journal. A failed offsets or recovery-watermark sync is not observed by
-    /// commit and resurfaces on the next sync.
+    /// At most one data sync and one watermark sync are in flight at a time: this call waits for
+    /// the prior call's syncs before starting new ones. It does not wait for a pending rollover
+    /// fsync: the returned handle joins it, so an earlier call's handle may still be pending when
+    /// this call returns. Reads always proceed while the returned handle is pending, and appends
+    /// proceed while they fit in the write buffer (a buffer flush or rollover waits for the
+    /// in-flight fsync). Dropping the handle does not cancel the sync or lose its failure. Flush
+    /// errors are returned directly. A failed data sync fails the next commit, sync, or rollover,
+    /// and any prune that changes the journal. A failed data tail sync also fails the next append
+    /// or snapshot that writes to that blob. A failed offsets or recovery-watermark sync is not
+    /// observed by commit and resurfaces on the next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;

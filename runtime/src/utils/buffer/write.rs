@@ -262,8 +262,7 @@ impl<B: Blob> Write<B> {
     /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
     /// mutate the blob wait before issuing blob operations. A failure of the started sync is
-    /// reported by the handle and by the next such call.
-    /// Flush errors are returned directly.
+    /// reported by the handle and by the next such call. Flush errors are returned directly.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         // Complete buffered writes before requesting their durability barrier.
         if let Some((buf, offset)) = self.buffer.take() {

@@ -1270,8 +1270,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
     /// mutate the blob first wait for any outstanding start_sync handles. A failure of the started
-    /// sync is reported by the handle and by the next such call.
-    /// Flush errors are returned directly.
+    /// sync is reported by the handle and by the next such call. Flush errors are returned
+    /// directly.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         // Finish writes before handing their durability barrier to the runtime.
         self.flush_internal(true, false).await?;
@@ -1634,10 +1634,10 @@ mod tests {
         });
     }
 
-    /// Unsynced partial-page flushes ([Writer::replay]) rewrite the tail
-    /// page without a durability barrier. Every rewrite must keep the page's durable checksum
-    /// slot byte-identical: a crash can cut the unsynced rewrites per byte, and whichever bytes
-    /// land, the footer must still validate the synced prefix.
+    /// Unsynced partial-page flushes ([Writer::replay]) rewrite the tail page without a durability
+    /// barrier. Every rewrite must keep the page's durable checksum slot byte-identical: a crash
+    /// can cut the unsynced rewrites per byte, and whichever bytes land, the footer must still
+    /// validate the synced prefix.
     #[test_traced("DEBUG")]
     fn test_unsynced_flushes_preserve_durable_checksum_slot() {
         let executor = deterministic::Runner::default();
@@ -6090,8 +6090,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Put the old authoritative CRC in slot 1, so the shorter CRC will be staged in slot
-            // 0.
+            // Put the old authoritative CRC in slot 1, so the shorter CRC will be staged in slot 0.
             (append, _) = append.append(&data[..255]).await.unwrap();
             append = append.sync().await.unwrap();
             (append, _) = append.append(&data[255..]).await.unwrap();

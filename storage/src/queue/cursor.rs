@@ -9,8 +9,8 @@ use tracing::debug;
 pub(super) struct Cursor {
     /// Position of the next item to dequeue.
     ///
-    /// Note that `ack_up_to` can advance `ack_floor` past `read_pos`; in this case, `dequeue`
-    /// skips the already-acked items.
+    /// `ack_up_to` can advance `ack_floor` past `read_pos`. `dequeue` then skips the already-acked
+    /// items.
     read_pos: u64,
 
     /// All items at positions < ack_floor are considered acknowledged.

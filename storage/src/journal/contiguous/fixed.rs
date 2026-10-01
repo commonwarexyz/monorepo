@@ -1639,16 +1639,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// crash. Also tries to advance the recovery watermark to the previous proven durable
     /// size, bounding startup recovery. Only `sync()` guarantees a current watermark.
     ///
-    /// At most one data sync and one watermark sync are in flight at a time: this call waits
-    /// for the prior call's syncs before starting new ones. It does not wait for a pending
-    /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
-    /// pending when this call returns. Reads always proceed while the returned handle is
-    /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
-    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
-    /// or lose its failure. A failed data flush or sync fails the next append that reaches
-    /// the blob and the next commit, sync, or flushing snapshot, and any prune that changes the
-    /// journal. A failed recovery-watermark sync is not observed by commit and
-    /// resurfaces on the next sync.
+    /// At most one data sync and one watermark sync are in flight at a time: this call waits for
+    /// the prior call's syncs before starting new ones. It does not wait for a pending rollover
+    /// fsync: the returned handle joins it, so an earlier call's handle may still be pending when
+    /// this call returns. Reads always proceed while the returned handle is pending, and appends
+    /// proceed while they fit in the write buffer (a buffer flush or rollover waits for the
+    /// in-flight fsync). Dropping the handle does not cancel the sync or lose its failure. Flush
+    /// errors are returned directly. A failed data sync fails the next commit, sync, or rollover,
+    /// and any prune that changes the journal. A failed tail sync also fails the next append or
+    /// snapshot that writes to the tail blob. A failed recovery-watermark sync is not observed by
+    /// commit and resurfaces on the next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
@@ -3182,7 +3182,8 @@ mod tests {
         });
     }
 
-    enum TailSyncBoundary {
+    /// The operation that must observe the failed sync.
+    enum Boundary {
         Rollover,
         Clear,
         Destroy,
@@ -3201,12 +3202,7 @@ mod tests {
     #[test_traced]
     fn test_fixed_dropped_failed_start_sync_blocks_blob_changes(
         #[values(FailedSync::Tail, FailedSync::Predecessor)] failed: FailedSync,
-        #[values(
-            TailSyncBoundary::Rollover,
-            TailSyncBoundary::Clear,
-            TailSyncBoundary::Destroy
-        )]
-        boundary: TailSyncBoundary,
+        #[values(Boundary::Rollover, Boundary::Clear, Boundary::Destroy)] boundary: Boundary,
     ) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -3248,12 +3244,12 @@ mod tests {
             // Clearing may persist its checkpoint intent before reaching this boundary.
             let size = journal.size();
             let result = match boundary {
-                TailSyncBoundary::Rollover => journal
+                Boundary::Rollover => journal
                     .append_many(Many::Flat(&[size, size + 1, size + 2]))
                     .await
                     .map(|_| ()),
-                TailSyncBoundary::Clear => journal.clear_to_size(size).await.map(|_| ()),
-                TailSyncBoundary::Destroy => journal.destroy().await,
+                Boundary::Clear => journal.clear_to_size(size).await.map(|_| ()),
+                Boundary::Destroy => journal.destroy().await,
             };
             assert!(matches!(result, Err(Error::Runtime(_))));
             let mut names = scan_partition(&context, &data_partition).await;

@@ -296,7 +296,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
-        BufferPooler, Clock, Runner, Spawner, Supervisor as _,
+        BufferPooler, Runner, Spawner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs},
@@ -483,19 +483,17 @@ mod tests {
     fn test_split_select() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Prepare a split queue for receiving through select with a bounded wait.
+            // Prepare a split queue for receiving through select.
             let cfg = test_config("test_split_select", &context);
             let (writer, mut reader) = init(context.child("storage"), cfg).await.unwrap();
 
             // Enqueue an item
             let (_writer, _) = writer.enqueue(b"test".to_vec()).await.unwrap();
 
-            // Use select to receive with timeout
+            // Receive through select alongside a branch that never completes.
             let result = select! {
                 item = reader.recv() => item,
-                _ = context.sleep(std::time::Duration::from_secs(1)) => {
-                    panic!("timeout")
-                },
+                _ = futures::future::pending::<()>() => unreachable!(),
             };
 
             let (pos, item) = result.unwrap().unwrap();
