@@ -2267,7 +2267,7 @@ mod tests {
 
     impl Strategy for Recording {
         fn manual(&self) -> Manual<Self> {
-            unreachable!("the engine never partitions work manually")
+            unreachable!("the test never starts the engine")
         }
 
         fn spawn<F, T>(&self, len: usize, f: F) -> impl Future<Output = T> + Send + 'static
@@ -4124,7 +4124,7 @@ mod tests {
         );
     }
 
-    /// A rejected leader update does not raise a record's eviction round.
+    /// A leader update naming a non-participant does not raise a record's eviction round.
     #[test_traced]
     fn test_rejected_leader_does_not_refresh_eviction_round() {
         let fixture = Fixture::<C> {
@@ -5071,6 +5071,64 @@ mod tests {
                 );
 
                 // All shards were valid and from participants.
+                assert!(
+                    oracle.blocked().await.unwrap().is_empty(),
+                    "no peers should be blocked for valid buffered shards"
+                );
+            },
+        );
+    }
+
+    /// With an inline strategy, a block reconstructed while handling a consensus signal is cached
+    /// before the engine handles the next queued message.
+    #[test_traced]
+    fn test_inline_reconstruction_completes_before_next_message() {
+        let fixture: Fixture<C> = Fixture {
+            num_primary_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+
+                let receiver_idx = 3usize;
+                let receiver_pk = peers[receiver_idx].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                // Buffer the receiver's shard from the leader and enough gossip shards to reach
+                // quorum before any consensus signal.
+                let leader_shard = coded_block
+                    .shard(peers[receiver_idx].index.get() as u16)
+                    .expect("missing shard")
+                    .encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(receiver_pk.clone()), leader_shard, true);
+                for i in [1usize, 2usize, 4usize] {
+                    let shard = coded_block
+                        .shard(peers[i].index.get() as u16)
+                        .expect("missing shard")
+                        .encode();
+                    peers[i]
+                        .sender
+                        .send(Recipients::One(receiver_pk.clone()), shard, true);
+                }
+                context.sleep(config.link.latency * 2).await;
+
+                // Discovery ingests the buffered shards and reconstructs inline. The request queued
+                // right behind it observes the cached block.
+                peers[receiver_idx].mailbox.discovered(
+                    commitment,
+                    leader,
+                    Round::new(Epoch::zero(), View::new(1)),
+                );
+                assert!(
+                    peers[receiver_idx].mailbox.get(commitment).await.is_some(),
+                    "inline reconstruction must complete before the next message"
+                );
                 assert!(
                     oracle.blocked().await.unwrap().is_empty(),
                     "no peers should be blocked for valid buffered shards"
