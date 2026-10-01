@@ -1,7 +1,7 @@
 use commonware_actor::mailbox::{Policy, Sender};
-use commonware_consensus::{
+use commonware_consensus::simplex::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
-    simplex::types::Finalization,
+    types::Finalization,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_utils::channel::oneshot;

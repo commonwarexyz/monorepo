@@ -7,8 +7,7 @@ use commonware_actor::mailbox::{self as actor_mailbox, Receiver as ActorReceiver
 use commonware_codec::Read;
 use commonware_consensus::{
     Epochable as _,
-    marshal::core::Variant,
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{marshal::core::Variant, scheme::Scheme, types::Finalization},
     types::FixedEpocher,
 };
 use commonware_cryptography::Signer;

@@ -10,13 +10,16 @@ use crate::stateful::{
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Reporter,
-    marshal::{
-        self,
-        core::{Actor as MarshalActor, Processed},
-        resolver::handler,
-        standard::Standard,
+    simplex::{
+        marshal::{
+            self,
+            core::{Actor as MarshalActor, Processed},
+            resolver::handler,
+            standard::Standard,
+        },
+        mocks::scheme as scheme_mocks,
+        types::Activity,
     },
-    simplex::{mocks::scheme as scheme_mocks, types::Activity},
     types::{FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{Digestible as _, certificate::ConstantProvider};
