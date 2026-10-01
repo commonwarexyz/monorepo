@@ -265,7 +265,7 @@ Suppose $b$ has already served the API response, but the operator leaves $a$'s p
 
 ## A Deadline to Exit
 
-A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request in the next registration. A censored user can instead queue it directly onchain, even during an active epoch. The operator must include it in a registration unless another signed request from the same account is registered first.
+A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request in the next registration. A censored user can instead queue it directly onchain, requiring the operator to include it in a registration unless another signed request from the same account is registered first.
 
 An outstanding withdrawal request, whether queued onchain or included in an admitted close, requires its close to finalize before the signed deadline $T_w$ to avoid a hard fault. With challenge deadline $\Delta_e$,
 
