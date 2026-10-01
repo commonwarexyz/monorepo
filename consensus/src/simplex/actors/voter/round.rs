@@ -324,6 +324,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.notarization.as_ref()
     }
 
+    /// Returns true if we broadcast a nullify vote.
+    pub const fn has_nullify_vote(&self) -> bool {
+        self.decision.is_nullify()
+    }
+
     /// Returns the nullification certificate if we already reconstructed one.
     pub const fn nullification(&self) -> Option<&Nullification<S>> {
         self.nullification.as_ref()
@@ -396,7 +401,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns true if certification completed and rejected the proposal.
-    const fn is_failed_certification(&self) -> bool {
+    pub const fn is_failed_certification(&self) -> bool {
         matches!(self.certify, CertifyState::Certified(false))
     }
 

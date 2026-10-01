@@ -141,23 +141,6 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     /// the stall timeout). See [`Self::next_stall_timeout`].
     stall_anchor: View,
 
-    /// Views for which we have voted to nullify.
-    ///
-    /// Used to enforce the term safety rule that suppresses later same-term
-    /// finalize votes until a covering finalization is observed.
-    nullify_views: BTreeSet<View>,
-
-    /// Views for which we have nullification certificates. Used to answer term-level
-    /// nullification queries efficiently (for parent validation and entry certificate fallback)
-    /// without scanning all tracked rounds.
-    nullification_views: BTreeSet<View>,
-
-    /// Views with a local certification rejection not covered by finalization.
-    /// A rejected view cannot support same-term descendant ancestry.
-    /// Every entry remains above the retention floor, so [`Self::prune`] skips
-    /// this set.
-    failed_certifications: BTreeSet<View>,
-
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
 
@@ -241,9 +224,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             genesis: None,
             views: BTreeMap::new(),
             stall_anchor: GENESIS_VIEW,
-            nullify_views: BTreeSet::new(),
-            nullification_views: BTreeSet::new(),
-            failed_certifications: BTreeSet::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
             current_view,
@@ -512,7 +492,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             (round.construct_nullify()?, round.leader())
         };
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
-        self.nullify_views.insert(view);
         if !is_retry && let Some(leader) = leader {
             self.timeouts
                 .get_or_create(&Timeout::new(&leader.key, reason))
@@ -609,7 +588,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let round = self.create_round(view);
         let added = round.add_nullification(nullification);
         let leader = added.then(|| round.leader()).flatten();
-        self.nullification_views.insert(view);
         if let Some(leader) = leader {
             self.nullifications.get_or_create_by(&leader.key).inc();
         }
@@ -625,10 +603,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let view = finalization.view();
         if view > self.last_finalized {
             self.last_finalized = view;
-
-            // Finalization overrides local certification rejections at or
-            // below its view.
-            self.failed_certifications = self.failed_certifications.split_off(&view.next());
 
             // Prune certification candidates at or below finalized view.
             // Finalization is definitive, so these certifications are no longer relevant.
@@ -798,26 +772,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Replays a journaled artifact into the appropriate round during recovery.
     ///
-    /// Restores round-level broadcast flags (via [`Round::replay`]) and
-    /// tracking sets (`nullify_views`, `nullification_views`, and
-    /// `failed_certifications`) so that term-safety and ancestry checks work
-    /// correctly after a restart. Replaying a local notarize vote also restores
-    /// the optimistic successor prepared by live vote construction. Unlike
-    /// [`Self::add_nullification`] (which the actor's replay loop also calls,
-    /// making the `nullification_views` insert idempotent on that path), this
-    /// never advances the view.
+    /// Restores round-level broadcast flags (via [`Round::replay`]) so that
+    /// term-safety and ancestry checks work correctly after a restart.
+    /// Replaying a local notarize vote also restores the optimistic successor
+    /// prepared by live vote construction. Unlike [`Self::add_nullification`],
+    /// this never advances the view.
     pub fn replay(&mut self, artifact: &Artifact<S, D>) {
-        if let Artifact::Nullify(n) = artifact {
-            self.nullify_views.insert(n.view());
-        }
-        if let Artifact::Nullification(n) = artifact {
-            self.nullification_views.insert(n.view());
-        }
-        if matches!(artifact, Artifact::Certification(_, false))
-            && artifact.view() > self.last_finalized
-        {
-            self.failed_certifications.insert(artifact.view());
-        }
         self.create_round(artifact.view()).replay(artifact);
         if matches!(artifact, Artifact::Notarize(_)) {
             self.prepare_optimistic_successor(artifact.view());
@@ -1228,9 +1188,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
         // Remove from outstanding since certification is complete
         self.outstanding_certifications.remove(&view);
-        if !is_success && view > self.last_finalized {
-            self.failed_certifications.insert(view);
-        }
 
         if is_success {
             // Keep the stall deadline armed after certification so the
@@ -1245,20 +1202,17 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         Some(notarization)
     }
 
-    /// Drops tracked rounds below the activity horizon and stale safety-evidence indexes.
+    /// Drops tracked rounds below the activity horizon.
     ///
     /// The activity horizon retains all safety evidence that can still matter:
     /// gate-relevant nullify votes are above `last_finalized` (votes at or
     /// below it are healed by the covering finalization), and same-term vote
     /// safety guarantees no current-term nullification exists at or below
-    /// `last_finalized`, so both sets only hold load-bearing entries above
-    /// `min_active`.
+    /// `last_finalized`, so neither matters below `min_active`.
     pub fn prune(&mut self) -> Vec<View> {
         let min = self.min_active();
         let kept = self.views.split_off(&min);
         let removed = replace(&mut self.views, kept).into_keys().collect();
-        self.nullification_views = self.nullification_views.split_off(&min);
-        self.nullify_views = self.nullify_views.split_off(&min);
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
@@ -1292,19 +1246,21 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns the highest view in `view`'s term, at or below `view`, with a
     /// tracked nullification certificate.
     fn highest_nullification_in_term(&self, view: View) -> Option<View> {
-        self.nullification_views
+        self.views
             .range(view.covering_range(self.term_length()))
-            .next_back()
-            .copied()
+            .rev()
+            .find(|(_, round)| round.nullification().is_some())
+            .map(|(&v, _)| v)
     }
 
     /// Returns the highest view below `view` in `view`'s term that we voted to nullify.
     fn highest_local_nullify_in_term(&self, view: View) -> Option<View> {
         let term_start = view.term_start(self.term_length());
-        self.nullify_views
+        self.views
             .range(term_start..view)
-            .next_back()
-            .copied()
+            .rev()
+            .find(|(_, round)| round.has_nullify_vote())
+            .map(|(&v, _)| v)
     }
 
     /// Resolves `parent`'s payload under the ancestry rule `child` is
@@ -1317,14 +1273,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.explicit_ancestry_payload(parent)
     }
 
-    /// Returns true when `view` or a same-term predecessor has an unresolved
-    /// local certification rejection. Intra-term proposals link every
+    /// Returns true when `view` or a same-term predecessor has a local
+    /// certification rejection not covered by finalization. Intra-term proposals link every
     /// intermediate view; term starts instead require explicit ancestry.
     fn has_failed_optimistic_ancestry(&self, view: View) -> bool {
-        self.failed_certifications
+        self.views
             .range(view.term_start(self.term_length())..=view)
-            .next()
-            .is_some()
+            .any(|(&v, round)| v > self.last_finalized && round.is_failed_certification())
     }
 
     /// Returns the payload of a parent usable as *optimistic* ancestry: a
