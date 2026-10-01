@@ -97,42 +97,43 @@ Threshold Encryption." />
 Vamsi Policharla</a></div>
                         <div class="date">October 1st, 2026</div>
         </div>
-        <p>We started Batched Threshold Encryption about <a
-        href="https://eprint.iacr.org/2024/669">3 years ago</a> with the
-        goal of building <em>practical</em> encrypted mempools that
-        could one day be deployed. Although you could use Threshold
-        Encryption, the communication to decrypt a block of transactions
-        is much larger than the block itself. Specifically, decrypting
-        <span class="math inline">B</span> transactions requires <span
-        class="math inline">O(nB)</span> communication when there are
-        <span class="math inline">n</span> validators. In contrast,
-        Batched Threshold Encryption demands that <span
+        <p>About 3 years ago, my coauthors and I initiated the study of
+        <a href="https://eprint.iacr.org/2024/669">Batched Threshold
+        Encryption</a> with the goal of building <em>practical</em>
+        encrypted mempools. The area has come a long way since then.
+        Last I counted, there are over 20 papers on the topic!</p>
+        <p>In case you’re wondering why you can’t just use threshold
+        encryption: you can, but the communication to decrypt a block of
+        transactions is much larger than the block itself. Specifically,
+        decrypting <span class="math inline">B</span> transactions
+        requires <span class="math inline">O(nB)</span> communication
+        when there are <span class="math inline">n</span> validators. In
+        contrast, Batched Threshold Encryption demands that <span
         class="math inline">B</span> ciphertexts be decrypted with
         <em>sub-linear</em> communication in the batch size, per party.
-        Almost all BTE schemes can do it with <span
+        Almost all BTE schemes do it with <span
         class="math inline">O(1)</span> communication per party.</p>
-        <p>We’ve come a long way since then. Last I counted, there are
-        over 20 papers on the topic! In the early days, constructions
-        had these strange caveats like “your transaction can only be
-        included in this specific view number” or “it must be included
-        at a specific position in the batch” which could potentially
-        result in conflicts. Then we found ways of getting around these
-        issues, but at the cost of a more expensive setup. Just last
-        week, we got a nice construction that <a
-        href="https://eprint.iacr.org/2026/2205">only needs a
-        DKG</a>.</p>
-        <p><strong>Stepping Back.</strong> Recall that the whole point
-        of BTE was to build encrypted mempools for <em>blockchains</em>.
-        And virtually all of them run consensus protocols where the
-        number of validators <span class="math inline">n \geq
-        3f+1</span> in order to tolerate <span
-        class="math inline">f</span> corrupt parties. But so far, all
+        <p>In the early days, constructions had these strange caveats
+        like “your transaction can only be included in this specific
+        view number” or “it must be included at a specific position in
+        the batch” which could potentially result in conflicts. Then we
+        found ways of getting around these issues, but at the cost of a
+        more expensive setup. Last week we finally found a clean
+        construction that <a
+        href="https://eprint.iacr.org/2026/2205">only needs a DKG</a>.
+        So we have good pairing-based BTE schemes now.</p>
+        <p><strong>Stepping Back.</strong> But recall that the whole
+        point of BTE was to build encrypted mempools for
+        <em>blockchains</em>. And virtually all of them run consensus
+        protocols where the number of validators <span
+        class="math inline">n \geq 3f+1</span> in order to tolerate
+        <span class="math inline">f</span> corrupt parties. So far, all
         BTE schemes allow the adversary to corrupt any number of parties
         <span class="math inline">f\leq t-1</span> up to the
         reconstruction threshold <span class="math inline">t</span>.
-        Indeed this is the strongest notion one can achieve, and it’s
-        valuable to study but is unnecessary for encrypted mempools. So
-        what happens when we relax our requirements?</p>
+        While this is the strongest security guarantee one can achieve,
+        and valuable to study, it’s unnecessary for encrypted mempools.
+        So what if we relax our requirements?</p>
         <p>As it turns out, in the <em>ramp setting</em> where there
         exists a gap between the corruption threshold <span
         class="math inline">f</span> and reconstruction threshold <span
