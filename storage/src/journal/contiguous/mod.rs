@@ -25,6 +25,65 @@ pub mod variable;
 #[cfg(test)]
 mod tests;
 
+/// A deferred prune returned by `start_prune`.
+///
+/// The journal's pruning boundary advances when `start_prune` returns. Awaiting or spawning the
+/// handle removes the freed blobs off the hot path and resolves once they are durably removed.
+/// Dropping it defers the removal to the journal's next prune, reset, or destroy. Until the
+/// removal completes, reopening the journal's partition fails with
+/// [commonware_runtime::Error::BlobAlreadyOpen]. A crash before the removal completes leaves the
+/// freed blobs on disk, and recovery retains them as unpruned history.
+#[must_use = "await or spawn the handle to remove the pruned blobs"]
+#[commonware_macros::stability(ALPHA)]
+pub struct PruneHandle {
+    boundary: u64,
+    pruned: bool,
+    inner: Handle<()>,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl PruneHandle {
+    /// A prune that advanced the boundary to `boundary`, with `inner` removing the freed blobs.
+    const fn new(boundary: u64, inner: Handle<()>) -> Self {
+        Self {
+            boundary,
+            pruned: true,
+            inner,
+        }
+    }
+
+    /// A prune that left the boundary at `boundary` and has nothing to remove.
+    fn noop(boundary: u64) -> Self {
+        Self {
+            boundary,
+            pruned: false,
+            inner: Handle::ready(Ok(())),
+        }
+    }
+
+    /// The pruning boundary after the call: every position below it is pruned.
+    pub const fn boundary(&self) -> u64 {
+        self.boundary
+    }
+
+    /// Whether the call advanced the boundary.
+    pub const fn pruned(&self) -> bool {
+        self.pruned
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl Future for PruneHandle {
+    type Output = Result<(), commonware_runtime::Error>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.inner).poll(cx)
+    }
+}
+
 /// Return the number of items that can be written before crossing the current blob boundary.
 ///
 /// `position` is the next logical item position and `remaining` is the number of items left in the

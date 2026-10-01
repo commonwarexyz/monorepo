@@ -19,7 +19,14 @@ use futures::{
     FutureExt as _,
     future::{self, try_join_all},
 };
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    num::NonZeroUsize,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 use tracing::debug;
 
 /// Metrics for a journal's blobs.
@@ -211,6 +218,15 @@ pub(super) struct Writable<E: Context> {
 
     /// Sync of the live tail. Kept on failure so later operations keep failing.
     tail_sync: Option<SyncCompletion>,
+
+    /// Removal of blobs detached by [Self::start_prune], still possibly in flight. Drained before
+    /// any other removal so removals never overlap.
+    pending_prune: Option<SyncCompletion>,
+
+    /// The lowest blob index that may remain on disk. Below [Self::oldest_blob_index] only when a
+    /// deferred removal has not yet run or failed partway. Every removal starts here, so blobs
+    /// always leave the disk oldest-first and recovery never sees a gap.
+    on_disk_oldest: Arc<AtomicU64>,
 }
 
 impl<E: Context> Writable<E> {
@@ -281,12 +297,20 @@ impl<E: Context> Writable<E> {
             sealed_snapshot: None,
             tail_predecessor_sync: None,
             tail_sync: None,
+            pending_prune: None,
+            on_disk_oldest: Arc::new(AtomicU64::new(oldest_blob_index)),
         })
     }
 
     /// Index of the oldest retained blob.
     pub(super) const fn oldest_blob_index(&self) -> u64 {
         self.oldest_blob_index
+    }
+
+    /// The lowest blob index that may remain on disk. Below [Self::oldest_blob_index] only while
+    /// a deferred removal has not yet run or after one failed partway.
+    pub(super) fn on_disk_oldest(&self) -> u64 {
+        self.on_disk_oldest.load(Ordering::Acquire)
     }
 
     /// Index of the newest blob.
@@ -360,21 +384,101 @@ impl<E: Context> Writable<E> {
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
     pub(super) async fn prune(&mut self, min_blob: u64) -> Result<(), Error> {
         assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
+        self.drain_pending_prune().await;
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
 
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
-        let prev_oldest_blob_index = self.oldest_blob_index;
         self.sealed.drain(..drop_count);
         self.sealed_snapshot = None;
         self.oldest_blob_index = min_blob;
 
-        for blob in prev_oldest_blob_index..min_blob {
+        for blob in self.on_disk_oldest.load(Ordering::Acquire)..min_blob {
             self.partition.remove(blob).await?;
+            self.on_disk_oldest.store(blob + 1, Ordering::Release);
             self.metrics.tracked.dec();
             self.metrics.pruned.inc();
         }
         Ok(())
+    }
+
+    /// Detach every blob below `min_blob` and return their removal, oldest-first, as a shared
+    /// completion that runs when polled. The journal no longer reads the detached blobs, and
+    /// snapshot readers keep their own handles.
+    ///
+    /// Each detached blob's handle stays open until its removal completes, so reopening the
+    /// partition while the removal is pending fails with [RError::BlobAlreadyOpen] instead of
+    /// racing it. The completion is also retained here and drained before any later removal or
+    /// reset, so dropping the returned copy defers the work rather than abandoning it. Removal
+    /// stops at the first failure, leaving the remaining blobs on disk for recovery to retain.
+    ///
+    /// `after`, when given, must complete successfully before any blob is removed.
+    ///
+    /// # Invariants
+    ///
+    /// - `oldest_blob_index < min_blob <= tail_blob_index`
+    /// - Every blob below `min_blob` is durable.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn start_prune(
+        &mut self,
+        min_blob: u64,
+        after: Option<SyncCompletion>,
+    ) -> Result<SyncCompletion, Error> {
+        assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
+        self.drain_pending_prune().await;
+
+        // The predecessor sync covers the newest sealed blob, which may be among those
+        // detached. Its data is durable, so the sync has already resolved.
+        self.drain_tail_predecessor_sync().await?;
+
+        let drop_count = (min_blob - self.oldest_blob_index) as usize;
+        let detached: Vec<_> = self.sealed.drain(..drop_count).collect();
+        self.sealed_snapshot = None;
+        self.oldest_blob_index = min_blob;
+
+        let context = self.partition.context.child("prune");
+        let name = self.partition.name.clone();
+        let on_disk_oldest = self.on_disk_oldest.clone();
+        let tracked = self.metrics.tracked.clone();
+        let pruned = self.metrics.pruned.clone();
+        let removal = async move {
+            if let Some(after) = after {
+                after.await?;
+            }
+
+            // Start from any blobs a failed earlier removal left behind, keeping the detached
+            // handles open until every removal has finished.
+            for blob in on_disk_oldest.load(Ordering::Acquire)..min_blob {
+                if let Err(err) = context.remove(&name, Some(&blob.to_be_bytes())).await {
+                    tracing::warn!(?err, blob, partition = %name, "deferred blob removal failed");
+                    return Err(err);
+                }
+                on_disk_oldest.store(blob + 1, Ordering::Release);
+                tracked.dec();
+                pruned.inc();
+            }
+            drop(detached);
+            Ok(())
+        }
+        .boxed()
+        .shared();
+        self.pending_prune = Some(removal.clone());
+        Ok(removal)
+    }
+
+    /// The removal started by the last [Self::start_prune], if not yet drained.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn pending_prune(&self) -> Option<SyncCompletion> {
+        self.pending_prune.clone()
+    }
+
+    /// Wait for any removal started by [Self::start_prune]. A failed removal was logged where it
+    /// failed and leaves its blobs on disk, which recovery retains, so it does not fail this
+    /// journal's later operations.
+    pub(super) async fn drain_pending_prune(&mut self) {
+        if let Some(pending) = self.pending_prune.take() {
+            let _ = pending.await;
+        }
     }
 
     /// Remove every blob and start an empty journal with its tail at `tail_blob`.
@@ -383,12 +487,14 @@ impl<E: Context> Writable<E> {
     /// the runtime's read-after-remove contract keeps valid.
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
+        self.drain_pending_prune().await;
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
 
-        for blob in self.oldest_blob_index..=self.tail_blob_index() {
+        for blob in self.on_disk_oldest.load(Ordering::Acquire)..=self.tail_blob_index() {
             self.partition.remove(blob).await?;
         }
+        self.on_disk_oldest.store(tail_blob, Ordering::Release);
         let _ = self.metrics.tracked.try_set(0);
         self.tail = self.partition.open(tail_blob).await?;
         self.metrics.tracked.inc();
@@ -445,12 +551,13 @@ impl<E: Context> Writable<E> {
 
     /// Remove every blob and the partition itself.
     pub(super) async fn destroy(mut self) -> Result<(), Error> {
+        self.drain_pending_prune().await;
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
 
         let tail_blob = self.tail_blob_index();
         drop(self.tail);
-        for blob in self.oldest_blob_index..=tail_blob {
+        for blob in self.on_disk_oldest.load(Ordering::Acquire)..=tail_blob {
             self.partition.remove(blob).await?;
         }
         Partition::remove_all(&self.partition.context, &self.partition.name).await
