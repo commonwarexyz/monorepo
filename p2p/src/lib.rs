@@ -83,7 +83,7 @@ stability_scope!(BETA {
         type PublicKey: PublicKey;
 
         /// The type of [`CheckedSender`] returned after checking recipients.
-        type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey> + Send
+        type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey>
         where
             Self: 'a;
 

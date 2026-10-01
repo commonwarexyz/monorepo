@@ -993,7 +993,7 @@ stability_scope!(BETA {
 });
 stability_scope!(BETA, cfg(feature = "external") {
     /// Interface that runtimes can implement to constrain the execution latency of a future.
-    pub trait Pacer: Clock + Send + Sync + 'static {
+    pub trait Pacer: Clock {
         /// Defer completion of a future until a specified `latency` has elapsed. If the future is
         /// not yet ready at the desired time of completion, the runtime will block until the future
         /// is ready.

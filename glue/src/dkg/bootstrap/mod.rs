@@ -311,7 +311,7 @@ where
     M: Manager<PublicKey = ed25519::PublicKey, Directory = D> + Clone,
     X: Blocker<PublicKey = ed25519::PublicKey> + Clone,
     SS: SecretStore,
-    T: Strategy + Clone,
+    T: Strategy,
     D: Directory<ed25519::PublicKey>,
     ed25519::Batch: BatchVerifier<PublicKey = ed25519::PublicKey> + Send + 'static,
 {

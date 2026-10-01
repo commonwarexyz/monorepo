@@ -1135,7 +1135,7 @@ macro_rules! impl_state_sync_set {
         impl<E, D, $($T, $R),+> StateSyncSet<E, ($($R,)+), D> for ($(Shared<$T>,)+)
         where
             E: Send + Sync + Spawner + Metrics + 'static,
-            D: Digest + 'static,
+            D: Digest,
             $(
                 $T: StateSyncDb<E, $R> + 'static,
                 $R: Send + 'static,

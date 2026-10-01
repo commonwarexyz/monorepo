@@ -1527,7 +1527,7 @@ async fn is_already_processed<S, V, C>(
 where
     S: Scheme,
     V: MarshalVariant,
-    V::ApplicationBlock: Block + Clone,
+    V::ApplicationBlock: Block,
     C: Cancellation,
 {
     let target_height = block.height();
