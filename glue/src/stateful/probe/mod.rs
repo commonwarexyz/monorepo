@@ -173,7 +173,7 @@ pub use limits::max_payload_size;
 mod mailbox;
 pub use mailbox::Mailbox;
 
-pub(crate) mod sample;
+pub(crate) mod finalization;
 
 mod wire;
 
@@ -894,7 +894,6 @@ mod test {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<wire::Tag>,
             CodecConformance<wire::Message<Scheme, Variant>>,
         }
     }
