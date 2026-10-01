@@ -29,8 +29,24 @@ use util::{explain, unproven};
 
 const ROOT: &str = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n";
 
+/// The MIR fixtures of this file (`mir_fixtures/ai_*`): a lifted module's
+/// source and rustc's MIR of it (`mir_fixtures/extract.py`).
+const FIXTURES: &[(&str, &str)] = &[
+    (include_str!("mir_fixtures/ai_err/w.rs"), include_str!("mir_fixtures/ai_err/w.sbmir")),
+    (include_str!("mir_fixtures/ai_signed/s.rs"), include_str!("mir_fixtures/ai_signed/s.sbmir")),
+    (include_str!("mir_fixtures/ai_panics/s.rs"), include_str!("mir_fixtures/ai_panics/s.sbmir")),
+    (include_str!("mir_fixtures/ai_lit/s.rs"), include_str!("mir_fixtures/ai_lit/s.sbmir")),
+    (include_str!("mir_fixtures/ai_ref_add/s.rs"), include_str!("mir_fixtures/ai_ref_add/s.sbmir")),
+    (include_str!("mir_fixtures/ai_ref_lt/s.rs"), include_str!("mir_fixtures/ai_ref_lt/s.sbmir")),
+    (include_str!("mir_fixtures/ai_ref_widen/s.rs"), include_str!("mir_fixtures/ai_ref_widen/s.sbmir")),
+    (include_str!("mir_fixtures/ai_ref_abs/s.rs"), include_str!("mir_fixtures/ai_ref_abs/s.sbmir")),
+];
+
+/// The files, and rustc's MIR of each lifted module's source next to it
+/// (`r/w.rs` → `r/w.sbmir`).
 fn check(files: &[(&str, &str)]) -> Checked {
-    let fs = MemFs::from_files(files.iter().map(|(p, c)| (*p, *c)));
+    let mirs: Vec<(String, &str)> = files.iter().filter_map(|(p, c)| FIXTURES.iter().find(|(s, _)| s == c).map(|(_, m)| (p.replace(".rs", ".sbmir"), *m))).collect();
+    let fs = MemFs::from_files(files.iter().map(|(p, c)| (*p, *c)).chain(mirs.iter().map(|(p, m)| (p.as_str(), *m))));
     driver::check(Path::new(files[0].0), &fs, &TargetInfo::aarch64_apple_darwin())
 }
 
@@ -187,11 +203,11 @@ fn use_hyp_needs_the_hypothesis_requires() {
 
 const ERR_MODEL: &str = "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Error {\n    EndOfBuffer,\n    InvalidVarint(usize),\n}\n";
 
-const USES_ERR: &str = "use crate::Error;\npub fn fail(n: usize) -> Error { if n == 0 { Error::EndOfBuffer } else { Error::InvalidVarint(n) } }\n";
+const USES_ERR: &str = include_str!("mir_fixtures/ai_err/w.rs");
 
 #[test]
 fn a_host_model_is_checked_variant_by_variant() {
-    let r = root("#[lift]\nmod w;\n#[lift(host)]\nmod error;\npub use error::Error;\npub use w::fail;\n");
+    let r = root("#[lift(mir = \"w.sbmir\")]\nmod w;\n#[lift(host)]\nmod error;\npub use error::Error;\npub use w::fail;\n");
     let c = front_ok(&[("r/mod.rs", &r), ("r/w.rs", USES_ERR), ("r/error.rs", ERR_MODEL)]);
     assert!(c.lifted.iter().any(|l| l.name == "error" && l.host), "{:?}", c.lifted);
     assert!(c.lifted.iter().any(|l| l.name == "w" && !l.host), "{:?}", c.lifted);
@@ -203,7 +219,7 @@ fn a_host_model_is_checked_variant_by_variant() {
 
 #[test]
 fn a_host_model_holds_only_checkable_enums() {
-    let r = root("#[lift]\nmod w;\n#[lift(host)]\nmod error;\npub use error::Error;\npub use w::fail;\n");
+    let r = root("#[lift(mir = \"w.sbmir\")]\nmod w;\n#[lift(host)]\nmod error;\npub use error::Error;\npub use w::fail;\n");
     let with_struct = format!("{ERR_MODEL}pub struct Extra(pub u8);\n");
     let c = check(&[("r/mod.rs", &r), ("r/w.rs", USES_ERR), ("r/error.rs", &with_struct)]);
     rejects(&c, DiagKind::Unsupported, "holds only non-generic enums");
@@ -219,32 +235,9 @@ fn a_host_model_holds_only_checkable_enums() {
 // ---------------------------------------------------------------------
 
 /// Signed operations on the bits a `u32` carries, as the codec writes them.
-const SIGNED: &str = r#"
-pub fn shr_bits(b: u32, k: u32) -> u32 {
-    if k < 32 { ((b as i32) >> k) as u32 } else { 0 }
-}
-pub fn shl_bits(b: u32, k: u32) -> u32 {
-    if k < 32 { ((b as i32) << k) as u32 } else { 0 }
-}
-pub fn neg_bits(b: u32) -> u32 {
-    if b == 0x8000_0000 { 0 } else { (-(b as i32)) as u32 }
-}
-pub fn zz(b: u32) -> u32 {
-    let x = b as i32;
-    ((x << 1) ^ (x >> 31)) as u32
-}
-pub fn unzz(v: u32) -> u32 {
-    (((v >> 1) as i32) ^ (-((v & 1) as i32))) as u32
-}
-pub fn narrow(b: u32) -> u16 {
-    ((b as i32) as i16) as u16
-}
-pub fn lit() -> u32 {
-    (-3i32 >> 1) as u32
-}
-"#;
+const SIGNED: &str = include_str!("mir_fixtures/ai_signed/s.rs");
 
-const SIGNED_ROOT: &str = "#[lift]\nmod s;\npub use s::{shr_bits, shl_bits, neg_bits, zz, unzz, narrow, lit};\n";
+const SIGNED_ROOT: &str = "#[lift(mir = \"s.sbmir\")]\nmod s;\npub use s::{shr_bits, shl_bits, neg_bits, zz, unzz, narrow, lit};\n";
 
 fn native(f: &str, a: u32, k: u32) -> String {
     let v: u32 = match f {
@@ -304,12 +297,14 @@ fn signed_operations_agree_with_rustc() {
 
 #[test]
 fn sign_dependent_operations_the_lift_does_not_translate_are_refused() {
-    let r = root("#[lift]\nmod s;\npub use s::f;\n");
+    let r = root("#[lift(mir = \"s.sbmir\")]\nmod s;\npub use s::f;\n");
     for (body, needle) in [
-        ("pub fn f(a: u32, b: u32) -> u32 { ((a as i32) + (b as i32)) as u32 }", "the signed operation `+` is not lifted"),
-        ("pub fn f(a: u32, b: u32) -> bool { (a as i32) < (b as i32) }", "the signed operation `<` is not lifted"),
-        ("pub fn f(a: u32) -> u64 { (a as i32) as u64 }", "a widening cast from a signed integer"),
-        ("pub fn f(a: u32) -> u32 { (a as i32).abs() as u32 }", "the method `abs` on a signed integer is not lifted"),
+        // (rustc's MIR of each, `mir_fixtures/ai_ref_*`, read by `mir::read`)
+        ("pub fn f(a: u32, b: u32) -> u32 { ((a as i32) + (b as i32)) as u32 }", "signed checked `add`"),
+        ("pub fn f(a: u32, b: u32) -> bool { (a as i32) < (b as i32) }", "the signed operation `lt`"),
+        ("pub fn f(a: u32) -> u64 { (a as i32) as u64 }", "sign extension is not read"),
+        // `abs` is core's MIR, refused at its first sign-dependent operation
+        ("pub fn f(a: u32) -> u32 { (a as i32).abs() as u32 }", "(in `core::num::<impl i32>::abs`): the signed operation `lt`"),
     ] {
         let c = check(&[("r/mod.rs", &r), ("r/s.rs", body)]);
         rejects(&c, DiagKind::Unsupported, needle);
@@ -318,7 +313,7 @@ fn sign_dependent_operations_the_lift_does_not_translate_are_refused() {
 
 #[test]
 fn rusts_signed_panics_are_obligations() {
-    let r = root("#[lift]\nmod s;\npub use s::{neg, shr};\n");
+    let r = root("#[lift(mir = \"s.sbmir\")]\nmod s;\npub use s::{neg, shr};\n");
     // `-x` panics on `i32::MIN`, `x >> k` for `k >= 32`
     let body = "pub fn neg(b: u32) -> u32 { (-(b as i32)) as u32 }\npub fn shr(b: u32, k: u32) -> u32 { ((b as i32) >> k) as u32 }\n";
     let c = front_ok(&[("r/mod.rs", &r), ("r/s.rs", body)]);
@@ -331,7 +326,7 @@ fn rusts_signed_panics_are_obligations() {
 #[test]
 fn a_signed_value_in_ghost_code_is_its_number() {
     let proof = "use sandblaster::prelude::*;\n\n#[lemma]\nfn minus_three() {\n    ensures(((4294967293u32 as i32) as Int) == -3);\n    by_unfolding(crate::__lift_model::int_of_i32);\n}\n";
-    let r = root("#[lift]\nmod s;\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\npub use s::lit;\n");
+    let r = root("#[lift(mir = \"s.sbmir\")]\nmod s;\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\npub use s::lit;\n");
     let c = front_ok(&[("r/mod.rs", &r), ("r/s.rs", "pub fn lit() -> u32 { (-3i32 >> 1) as u32 }\n"), ("r/PROOF.rs", proof)]);
     let v = verify(&c);
     util::assert_verified(&c, &v);

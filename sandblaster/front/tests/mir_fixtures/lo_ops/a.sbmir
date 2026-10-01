@@ -1,0 +1,181 @@
+;; rustc's MIR of `fx_lo_ops::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lo_ops")
+(module "fx_lo_ops::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "26b38885338cb10e1dc5ac5bc9a973f71a02f555e18f42dc8a06f16b8a59ddaf")
+(root "fx_lo_ops::a::Pos::new")
+(root "<fx_lo_ops::a::Pos as std::ops::Add<u64>>::add")
+(root "<fx_lo_ops::a::Pos as std::ops::Deref>::deref")
+(root "fx_lo_ops::a::next")
+(root "fx_lo_ops::a::zero")
+(root "<fx_lo_ops::a::Pos as std::clone::Clone>::clone")
+(root "<fx_lo_ops::a::Pos as std::default::Default>::default")
+(root "<fx_lo_ops::a::Pos as std::cmp::PartialEq>::eq")
+(root "<fx_lo_ops::a::Pos as std::cmp::Eq>::assert_fields_are_eq")
+(note "<fx_lo_ops::a::Pos as std::fmt::Debug>::fmt: not extracted: an impl of `Debug` (SBMIR_SKIP_TRAITS)")
+(note "<fx_lo_ops::a::Pos as std::cmp::PartialOrd>::partial_cmp: not extracted: an impl of `PartialOrd` (SBMIR_SKIP_TRAITS)")
+(note "<fx_lo_ops::a::Pos as std::cmp::Ord>::cmp: not extracted: an impl of `Ord` (SBMIR_SKIP_TRAITS)")
+(adt-def "a::Pos" (path "fx_lo_ops::a::Pos") (kind struct) (args ())
+  (variant 0 "Pos" 0 (field "0" u64) (no-glue)))
+(fn "fx_lo_ops::a::Pos::new"
+  (kind root) (def "fx_lo_ops::a::Pos::new") (args ())
+  (item inherent (adt "a::Pos") "new")
+  (span "src/a.rs" 6 5)
+  (argc 1)
+  (locals
+    (0 (adt "a::Pos") mut)
+    (1 u64 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "a::Pos") 0) (copy (p 1))) (at "src/a.rs" 7 9))
+    (return (at "src/a.rs" 8 6)))
+)
+(fn "<fx_lo_ops::a::Pos as std::ops::Add<u64>>::add"
+  (kind root) (def "<fx_lo_ops::a::Pos as std::ops::Add<u64>>::add") (args ())
+  (item impl (adt "a::Pos") "Add" (u64) "add")
+  (span "src/a.rs" 13 5)
+  (argc 2)
+  (locals
+    (0 (adt "a::Pos") mut)
+    (1 (adt "a::Pos") imm)
+    (2 u64 imm)
+    (3 u64 mut)
+    (4 u64 mut)
+    (5 (tuple u64 bool) mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "r" (p 2) (arg 2))
+  (bb 0
+    (assign (p 4) (use (copy (p 1 (field 0 u64)))) (at "src/a.rs" 14 14))
+    (assign (p 5) (checked add (copy (p 4)) (copy (p 2))) (at "src/a.rs" 14 14))
+    (assert (move (p 5 (field 1 bool))) false overflow 1 (at "src/a.rs" 14 14)))
+  (bb 1
+    (assign (p 3) (use (move (p 5 (field 0 u64)))) (at "src/a.rs" 14 14))
+    (assign (p 0) (agg (adt (adt "a::Pos") 0) (move (p 3))) (at "src/a.rs" 14 9))
+    (return (at "src/a.rs" 15 6)))
+)
+(fn "<fx_lo_ops::a::Pos as std::ops::Deref>::deref"
+  (kind root) (def "<fx_lo_ops::a::Pos as std::ops::Deref>::deref") (args ())
+  (item impl (adt "a::Pos") "Deref" () "deref")
+  (span "src/a.rs" 20 5)
+  (argc 1)
+  (locals
+    (0 (ref shared u64) mut)
+    (1 (ref shared (adt "a::Pos")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (ref shared (p 1 deref (field 0 u64))) (at "src/a.rs" 21 9))
+    (return (at "src/a.rs" 22 6)))
+)
+(fn "fx_lo_ops::a::next"
+  (kind root) (def "fx_lo_ops::a::next") (args ())
+  (item fn "next")
+  (span "src/a.rs" 25 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 (adt "a::Pos") imm)
+    (2 (adt "a::Pos") imm)
+    (3 (ref shared u64) mut)
+    (4 (ref shared (adt "a::Pos")) mut))
+  (debug "p" (p 1) (arg 1))
+  (debug "q" (p 2))
+  (bb 0
+    (call (fn "<fx_lo_ops::a::Pos as std::ops::Add<u64>>::add") (args (copy (p 1)) (int u64 1)) (p 2) 1 (at "src/a.rs" 26 13)))
+  (bb 1
+    (assign (p 4) (ref shared (p 2)) (at "src/a.rs" 27 6))
+    (call (fn "<fx_lo_ops::a::Pos as std::ops::Deref>::deref") (args (move (p 4))) (p 3) 2 (at "src/a.rs" 27 5)))
+  (bb 2
+    (assign (p 0) (use (copy (p 3 deref))) (at "src/a.rs" 27 5))
+    (return (at "src/a.rs" 28 2)))
+)
+(fn "fx_lo_ops::a::zero"
+  (kind root) (def "fx_lo_ops::a::zero") (args ())
+  (item fn "zero")
+  (span "src/a.rs" 30 1)
+  (argc 0)
+  (locals
+    (0 u64 mut)
+    (1 (adt "a::Pos") imm)
+    (2 (ref shared u64) mut)
+    (3 (ref shared (adt "a::Pos")) mut))
+  (debug "z" (p 1))
+  (bb 0
+    (call (fn "<fx_lo_ops::a::Pos as std::default::Default>::default") (args) (p 1) 1 (at "src/a.rs" 31 13)))
+  (bb 1
+    (assign (p 3) (ref shared (p 1)) (at "src/a.rs" 32 6))
+    (call (fn "<fx_lo_ops::a::Pos as std::ops::Deref>::deref") (args (move (p 3))) (p 2) 2 (at "src/a.rs" 32 5)))
+  (bb 2
+    (assign (p 0) (use (copy (p 2 deref))) (at "src/a.rs" 32 5))
+    (return (at "src/a.rs" 33 2)))
+)
+(fn "<fx_lo_ops::a::Pos as std::clone::Clone>::clone"
+  (kind root) (def "<fx_lo_ops::a::Pos as std::clone::Clone>::clone") (args ())
+  (item impl (adt "a::Pos") "Clone" () "clone")
+  (span "src/a.rs" 2 10)
+  (argc 1)
+  (locals
+    (0 (adt "a::Pos") mut)
+    (1 (ref shared (adt "a::Pos")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 deref))) (at "src/a.rs" 2 10))
+    (return (at "src/a.rs" 2 15)))
+)
+(fn "<fx_lo_ops::a::Pos as std::default::Default>::default"
+  (kind root) (def "<fx_lo_ops::a::Pos as std::default::Default>::default") (args ())
+  (item impl (adt "a::Pos") "Default" () "default")
+  (span "src/a.rs" 2 30)
+  (argc 0)
+  (locals
+    (0 (adt "a::Pos") mut)
+    (1 u64 mut))
+  (bb 0
+    (call (fn "<u64 as std::default::Default>::default") (args) (p 1) 1 (at "src/a.rs" 3 16)))
+  (bb 1
+    (assign (p 0) (agg (adt (adt "a::Pos") 0) (move (p 1))) (at "src/a.rs" 2 30))
+    (return (at "src/a.rs" 2 37)))
+)
+(fn "<fx_lo_ops::a::Pos as std::cmp::PartialEq>::eq"
+  (kind root) (def "<fx_lo_ops::a::Pos as std::cmp::PartialEq>::eq") (args ())
+  (item impl (adt "a::Pos") "PartialEq" ((adt "a::Pos")) "eq")
+  (span "src/a.rs" 2 39)
+  (argc 2)
+  (locals
+    (0 bool mut)
+    (1 (ref shared (adt "a::Pos")) imm)
+    (2 (ref shared (adt "a::Pos")) imm)
+    (3 u64 mut)
+    (4 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "other" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (use (copy (p 1 deref (field 0 u64)))) (at "src/a.rs" 3 16))
+    (assign (p 4) (use (copy (p 2 deref (field 0 u64)))) (at "src/a.rs" 3 16))
+    (assign (p 0) (bin eq (move (p 3)) (move (p 4))) (at "src/a.rs" 3 16))
+    (return (at "src/a.rs" 2 48)))
+)
+(fn "<fx_lo_ops::a::Pos as std::cmp::Eq>::assert_fields_are_eq"
+  (kind root) (def "<fx_lo_ops::a::Pos as std::cmp::Eq>::assert_fields_are_eq") (args ())
+  (item impl (adt "a::Pos") "Eq" () "assert_fields_are_eq")
+  (span "src/a.rs" 2 50)
+  (argc 1)
+  (locals
+    (0 unit mut)
+    (1 (ref shared (adt "a::Pos")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (return (at "src/a.rs" 2 52)))
+)
+(fn "<u64 as std::default::Default>::default"
+  (kind callee) (def "<u64 as std::default::Default>::default") (args ())
+  (item impl u64 "Default" () "default")
+  (argc 0)
+  (locals
+    (0 u64 mut))
+  (bb 0
+    (assign (p 0) (use (int u64 0)))
+    (return))
+)

@@ -162,6 +162,16 @@ fn bare_lit(e: &syn::Expr) -> bool {
     }
 }
 
+/// A literal with a type suffix (`31u32`), through parentheses.
+fn suffixed_lit(e: &syn::Expr) -> bool {
+    match e {
+        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) => !i.suffix().is_empty(),
+        syn::Expr::Paren(p) => suffixed_lit(&p.expr),
+        syn::Expr::Group(g) => suffixed_lit(&g.expr),
+        _ => false,
+    }
+}
+
 fn map_binop(op: &syn::BinOp) -> Option<(BinOp, bool)> {
     use syn::BinOp as S;
     Some(match op {
@@ -1708,7 +1718,11 @@ impl<'c, 'a> Cx<'c, 'a> {
                 return Self::error_expr(span);
             }
         }
-        let inner = if bare_lit(&c.expr) {
+        // an unsuffixed literal takes the target type (Rust infers it); a
+        // suffixed one cast to an unsigned type has its own (`31u32 as
+        // usize`, which the MIR reading writes for a signed shift's amount;
+        // a ghost cast to `Int`/`Nat` keeps its reading)
+        let inner = if bare_lit(&c.expr) && !(suffixed_lit(&c.expr) && matches!(target, Ty::Uint(_))) {
             self.check(&c.expr, &target)
         } else {
             self.no_exp_reason.push("cast");

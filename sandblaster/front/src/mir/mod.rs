@@ -3,7 +3,8 @@
 //! `#[lift(mir = "varint.sbmir", ..)] mod varint;` reads the **bodies** of
 //! the module's functions from rustc's own MIR — monomorphized, fully typed,
 //! macros expanded, `?`/closures/operators/iterators desugared by the
-//! compiler — instead of reading the surface syntax of the source. The
+//! compiler; the only reading of exec bodies there is (a lifted exec module
+//! without `mir = ".."` is refused). The
 //! `.sbmir` file is written by `sandblaster-mirx` (a rustc driver on the
 //! pinned nightly of the stable release the crate builds with; see
 //! `sandblaster/mirx`) and checked in next to the laws; it names the source
@@ -18,7 +19,8 @@
 //! is checked against rustc's (parameter count, which parameters are
 //! `&mut` states). The source lift's body rewrites (`?`, combinator
 //! templates, operator impls, loop desugaring, macro expansion, closures,
-//! constant evaluation of `T::SIZE`) are not used for such a module.
+//! constant evaluation of `T::SIZE`) are deleted (`docs/mir-lift.md` §6
+//! step 3).
 //!
 //! Trusted (TCB item 8, "the reading"): `read.rs` (the reading of MIR
 //! constructs), the type and constructor names below, the builtin leaves
@@ -27,7 +29,7 @@
 //! S-expression parser, `cfg.rs` (it only chooses the shape), the matching
 //! of lifted functions to MIR instances (a mismatch is a name or type
 //! error). The lift conformance check compares every read function with
-//! rustc's build of the source, as for the source lift.
+//! rustc's build of the source.
 
 pub mod cfg;
 pub mod ir;
@@ -167,6 +169,13 @@ impl ModuleNames {
         self.open.values().any(|inst| d.path.ends_with(&format!("::{inst}"))) || self.host_instance(m, k).is_some()
     }
 
+    /// Whether a primitive type is the declared instance of an open trait
+    /// through a host model alias (`Word: crate::host::W`, `type W = u64;`).
+    fn is_prim_instance(&self, t: &Ty) -> bool {
+        let Some(p) = prim_name(t) else { return false };
+        self.open.values().any(|inst| self.host.types.values().any(|(dsl, ty)| *dsl == format!("crate::{inst}") && ty.replace(' ', "") == p))
+    }
+
     /// A library type that is the declared instance of an open trait whose
     /// instance is a host model (`CHasher: crate::merkle::host::Sha256`, the
     /// MIR's `commonware_cryptography::Sha256`): the model's DSL path, when
@@ -257,7 +266,10 @@ impl ModuleNames {
                 }
                 let mut s = name.clone();
                 for a in &f.args {
-                    if matches!(a, Ty::Ref(..)) {
+                    // (an open trait's parameter is erased at its instance:
+                    // one function, `run`, not `run__Std`; a byte-string
+                    // iterator's is a state, §19.10)
+                    if matches!(a, Ty::Ref(..)) || self.is_instance(m, a) || self.is_prim_instance(a) || bytes_iter_model(m, a) {
                         continue;
                     }
                     s.push_str("__");

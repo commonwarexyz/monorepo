@@ -80,6 +80,11 @@ into `storage/sandblaster/mmr/mmr.roundtrip__merkle__mmr__iterator.sbmir`,
 and build again. (When the source changes, extract the source first, build,
 then the round trip's copy.)
 
+The toolchain's own test fixtures (`sandblaster/front/tests/mir_fixtures`)
+are crates of another workspace: `--manifest <their Cargo.toml>` extracts a
+package of it, and `mir_fixtures/extract.py` runs every fixture's
+extraction (and that of the round-trip copies the lowering tests write).
+
 Re-run it whenever the module's source changes (the build refuses a stale
 extraction by the sources' SHA-256) or when the workspace moves to another
 stable release (the build refuses MIR of another release; bump the channel

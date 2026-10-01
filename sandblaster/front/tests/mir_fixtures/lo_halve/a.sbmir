@@ -1,0 +1,52 @@
+;; rustc's MIR of `fx_lo_halve::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lo_halve")
+(module "fx_lo_halve::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "65f695c7db4885a374bc63e1ac7d1c301b0ef67bb65931ead314656f055ad0db")
+(root "fx_lo_halve::a::halve")
+(fn "fx_lo_halve::a::halve"
+  (kind root) (def "fx_lo_halve::a::halve") (args ())
+  (item fn "halve")
+  (span "src/a.rs" 2 1)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 u64 mut)
+    (2 u64 mut)
+    (3 bool mut)
+    (4 u64 mut)
+    (5 u64 mut)
+    (6 u64 mut)
+    (7 bool mut)
+    (8 (tuple u64 bool) mut)
+    (9 (tuple u64 bool) mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "k" (p 2) (arg 2))
+  (bb 0
+    (goto 1 (at "src/a.rs" 3 5)))
+  (bb 1
+    (assign (p 4) (use (copy (p 2))) (at "src/a.rs" 3 11))
+    (assign (p 3) (bin ne (move (p 4)) (int u64 0)) (at "src/a.rs" 3 11))
+    (switch (move (p 3)) (0 6) (otherwise 2) (at "src/a.rs" 3 11)))
+  (bb 2
+    (assign (p 6) (use (copy (p 1))) (at "src/a.rs" 4 13))
+    (assign (p 7) (bin eq (int u64 2) (int u64 0)) (at "src/a.rs" 4 13))
+    (assert (move (p 7)) false div-zero 3 (at "src/a.rs" 4 13)))
+  (bb 3
+    (assign (p 5) (bin div (move (p 6)) (int u64 2)) (at "src/a.rs" 4 13))
+    (assign (p 8) (checked add (copy (p 5)) (int u64 1)) (at "src/a.rs" 4 13))
+    (assert (move (p 8 (field 1 bool))) false overflow 4 (at "src/a.rs" 4 13)))
+  (bb 4
+    (assign (p 1) (use (move (p 8 (field 0 u64)))) (at "src/a.rs" 4 9))
+    (assign (p 9) (checked sub (copy (p 2)) (int u64 1)) (at "src/a.rs" 5 9))
+    (assert (move (p 9 (field 1 bool))) false overflow 5 (at "src/a.rs" 5 9)))
+  (bb 5
+    (assign (p 2) (use (move (p 9 (field 0 u64)))) (at "src/a.rs" 5 9))
+    (goto 1 (at "src/a.rs" 3 5)))
+  (bb 6
+    (assign (p 0) (use (copy (p 1))) (at "src/a.rs" 7 5))
+    (return (at "src/a.rs" 8 2)))
+)

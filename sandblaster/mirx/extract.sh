@@ -5,6 +5,7 @@
 #   sandblaster/mirx/extract.sh <package> <module>[,<module>..] <out.sbmir> [--exclude T,..] [--stub out.rs=src.rs,..]
 #       [--stubs crate:out.rs=src.rs;crate2:..] [--instance Trait=path::Type,..] [--skip-traits T,..]
 #       [--inject name=file.rs,..] [--replace src.rs=text.rs,..] [--items 'mod=Item,..;mod2=..'] [--skip-fns T::m,..]
+#       [--manifest path/Cargo.toml]
 #
 #   sandblaster/mirx/extract.sh commonware-codec varint codec/sandblaster/varint/varint.sbmir \
 #       --exclude u128,i128 --stub varint.rs=codec/sandblaster/varint/varint.rs
@@ -29,7 +30,9 @@
 #   that text's;
 # * --items: in the named modules, only the functions of these items (the
 #   lift's `items = ..`); --skip-fns: these functions are not extracted (the
-#   lift's `unverified_fns = ..`).
+#   lift's `unverified_fns = ..`);
+# * --manifest: the package is in another workspace than the monorepo's (the
+#   toolchain's own test fixtures, sandblaster/front/tests/mir_fixtures).
 #
 #   sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr,opt \
 #       storage/sandblaster/mmr/mmr.sbmir \
@@ -40,7 +43,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 pkg="$1"; module="$2"; out="$3"; shift 3
-exclude=""; stub=""; stubs=""; instance=""; skip=""; inject=""; replace=""; items=""; skipfns=""
+exclude=""; stub=""; stubs=""; instance=""; skip=""; inject=""; replace=""; items=""; skipfns=""; manifest="$root/Cargo.toml"
 while [ $# -gt 0 ]; do
   case "$1" in
     --exclude) exclude="$2"; shift 2 ;;
@@ -52,6 +55,7 @@ while [ $# -gt 0 ]; do
     --replace) replace="$2"; shift 2 ;;
     --items) items="$2"; shift 2 ;;
     --skip-fns) skipfns="$2"; shift 2 ;;
+    --manifest) manifest="$2"; case "$manifest" in /*) ;; *) manifest="$root/$manifest" ;; esac; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -90,12 +94,12 @@ abs_replace="$(absify "$replace" both)"
 case "$out" in /*) ;; *) out="$root/$out" ;; esac
 crate="${pkg//-/_}"
 # the crate's library is re-checked each time (its MIR is what is printed)
-touch "$(cargo metadata --no-deps --format-version 1 --manifest-path "$root/Cargo.toml" | python3 -c "import json,sys; d=json.load(sys.stdin); print([t['src_path'] for p in d['packages'] if p['name']=='$pkg' for t in p['targets'] if 'lib' in t['kind']][0])")"
+touch "$(cargo metadata --no-deps --format-version 1 --manifest-path "$manifest" | python3 -c "import json,sys; d=json.load(sys.stdin); print([t['src_path'] for p in d['packages'] if p['name']=='$pkg' for t in p['targets'] if 'lib' in t['kind']][0])")"
 cd "$root"
 if [ -n "$skip" ]; then export SBMIR_SKIP_TRAITS="$skip"; fi
 RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER="$tdir/driver/release/sandblaster-mirx" \
 SBMIR_CRATE="$crate" SBMIR_MODULE="$module" SBMIR_OUT="$out" SBMIR_EXCLUDE="$exclude" SBMIR_STUB="$abs_stub" \
 SBMIR_STUBS="$abs_stubs" SBMIR_INSTANCE="$instance" SBMIR_INJECT="$abs_inject" SBMIR_REPLACE="$abs_replace" \
 SBMIR_ITEMS="$items" SBMIR_SKIP_FNS="$skipfns" \
-CARGO_TARGET_DIR="$tdir/check" cargo +"$toolchain" check -q -p "$pkg"
+CARGO_TARGET_DIR="$tdir/check" cargo +"$toolchain" check -q --manifest-path "$manifest" -p "$pkg"
 echo "wrote $out"

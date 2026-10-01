@@ -1371,7 +1371,7 @@ pub(crate) fn render_report(c: &Checked, v: &Verification, law_audit: &[LawAudit
             .iter()
             .map(|s| Json::string(s))
             // a crate with lifted modules also trusts the lift
-            .chain((!c.lifted.is_empty()).then(|| Json::string("the lift (DESIGN.md §1.1 item 8): the reading of the lifted Rust source (crate::lift, SEMANTICS.md §19), the buffer model (lift/model.rs) and the #[lift(host)] models; mitigated by the lift conformance check against rustc (crate::conform)")))
+            .chain((!c.lifted.is_empty()).then(|| Json::string("the lift (DESIGN.md §1.1 item 8): the item skeleton read from the lifted Rust source (crate::lift, SEMANTICS.md §19), the function bodies read from rustc's MIR (crate::mir and the printer sandblaster-mirx, docs/mir-lift.md §20), the buffer model (lift/model.rs) and the #[lift(host)] models; mitigated by the lift conformance check against rustc (crate::conform)")))
             .collect(),
         ),
     );

@@ -1,0 +1,9 @@
+[package]
+name = "fx-lo-hosty"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+codec = { package = "fx-codec", path = "../fx_codec" }
+cfg_if = { package = "fx-cfg-if", path = "../fx_cfg_if" }

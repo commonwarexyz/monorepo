@@ -1,0 +1,51 @@
+;; rustc's MIR of `fx_mt_derived::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_mt_derived")
+(module "fx_mt_derived::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "07a7e323172cf48b1877cb0c8a44b651602c8d408d5ecb6e7909c8a7cc0fe536")
+(root "fx_mt_derived::a::zero")
+(root "<fx_mt_derived::a::S as std::default::Default>::default")
+(adt-def "a::S" (path "fx_mt_derived::a::S") (kind struct) (args ())
+  (variant 0 "S" 0 (field "x" u64) (no-glue)))
+(fn "fx_mt_derived::a::zero"
+  (kind root) (def "fx_mt_derived::a::zero") (args ())
+  (item fn "zero")
+  (span "src/a.rs" 6 1)
+  (argc 0)
+  (locals
+    (0 u64 mut)
+    (1 (adt "a::S") imm))
+  (debug "s" (p 1))
+  (bb 0
+    (call (fn "<fx_mt_derived::a::S as std::default::Default>::default") (args) (p 1) 1 (at "src/a.rs" 7 13)))
+  (bb 1
+    (assign (p 0) (use (copy (p 1 (field 0 u64)))) (at "src/a.rs" 8 5))
+    (return (at "src/a.rs" 9 2)))
+)
+(fn "<fx_mt_derived::a::S as std::default::Default>::default"
+  (kind root) (def "<fx_mt_derived::a::S as std::default::Default>::default") (args ())
+  (item impl (adt "a::S") "Default" () "default")
+  (span "src/a.rs" 1 10)
+  (argc 0)
+  (locals
+    (0 (adt "a::S") mut)
+    (1 u64 mut))
+  (bb 0
+    (call (fn "<u64 as std::default::Default>::default") (args) (p 1) 1 (at "src/a.rs" 3 5)))
+  (bb 1
+    (assign (p 0) (agg (adt (adt "a::S") 0) (move (p 1))) (at "src/a.rs" 1 10))
+    (return (at "src/a.rs" 1 17)))
+)
+(fn "<u64 as std::default::Default>::default"
+  (kind callee) (def "<u64 as std::default::Default>::default") (args ())
+  (item impl u64 "Default" () "default")
+  (argc 0)
+  (locals
+    (0 u64 mut))
+  (bb 0
+    (assign (p 0) (use (int u64 0)))
+    (return))
+)

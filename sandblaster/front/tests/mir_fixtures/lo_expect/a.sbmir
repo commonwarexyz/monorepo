@@ -1,0 +1,96 @@
+;; rustc's MIR of `fx_lo_expect::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lo_expect")
+(module "fx_lo_expect::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "690e522f4e59d5e69a411b1f6c9b9401454996c6e892e8319b63d0f86af44cf0")
+(root "fx_lo_expect::a::half_of_double")
+(adt-def "std::option::Option<u64>" (path "std::option::Option") (kind enum) (args (u64))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" u64) (no-glue)))
+(fn "fx_lo_expect::a::half_of_double"
+  (kind root) (def "fx_lo_expect::a::half_of_double") (args ())
+  (item fn "half_of_double")
+  (span "src/a.rs" 1 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 u64 mut)
+    (3 (adt "std::option::Option<u64>") mut)
+    (4 (ref shared str) mut)
+    (5 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "core::num::<impl u64>::checked_mul") (args (copy (p 1)) (int u64 2)) (p 3) 1 (at "src/a.rs" 2 5)))
+  (bb 1
+    (assign (p 4) (use (unsupported "constant of type (ref shared str)")) (at "src/a.rs" 2 29))
+    (call (fn "std::option::Option::<u64>::expect") (args (move (p 3)) (move (p 4))) (p 2) 2 (at "src/a.rs" 2 5)))
+  (bb 2
+    (assign (p 5) (bin eq (int u64 2) (int u64 0)) (at "src/a.rs" 2 5))
+    (assert (move (p 5)) false div-zero 3 (at "src/a.rs" 2 5)))
+  (bb 3
+    (assign (p 0) (bin div (move (p 2)) (int u64 2)) (at "src/a.rs" 2 5))
+    (return (at "src/a.rs" 3 2)))
+)
+(fn "core::num::<impl u64>::checked_mul"
+  (kind callee) (def "core::num::<impl u64>::checked_mul") (args ())
+  (item inherent u64 "checked_mul")
+  (argc 2)
+  (locals
+    (0 (adt "std::option::Option<u64>") mut)
+    (1 u64 imm)
+    (2 u64 imm)
+    (3 u64 imm)
+    (4 bool imm)
+    (5 (tuple u64 bool) mut)
+    (6 unit imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (debug "a" (p 3))
+  (debug "b" (p 4))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (debug "b" (p 4) (arg 1))
+  (bb 0
+    (assign (p 5) (checked mul (copy (p 1)) (copy (p 2))))
+    (assign (p 3) (use (copy (p 5 (field 0 u64)))))
+    (assign (p 4) (use (copy (p 5 (field 1 bool)))))
+    (switch (copy (p 4)) (0 4) (otherwise 2)))
+  (bb 1
+    (return))
+  (bb 2
+    (call (intrinsic "cold_path" ()) (args) (p 6) 3))
+  (bb 3
+    (assign (p 0) (use (const-agg (adt "std::option::Option<u64>") 0)))
+    (goto 1))
+  (bb 4
+    (assign (p 0) (agg (adt (adt "std::option::Option<u64>") 1) (copy (p 3))))
+    (goto 1))
+)
+(fn "std::option::Option::<u64>::expect"
+  (kind callee) (def "std::option::Option::<T>::expect") (args (u64))
+  (item inherent (adt "std::option::Option<u64>") "expect")
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (adt "std::option::Option<u64>") imm)
+    (2 (ref shared str) imm)
+    (3 isize mut)
+    (4 never mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "msg" (p 2) (arg 2))
+  (debug "val" (p 0))
+  (bb 0
+    (assign (p 3) (discr (p 1)))
+    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
+  (bb 1
+    (unreachable))
+  (bb 2
+    (call (diverge "std::option::expect_failed") (args (move (p 2))) (p 4) none))
+  (bb 3
+    (assign (p 0) (use (move (p 1 (downcast 1) (field 0 u64)))))
+    (return))
+)

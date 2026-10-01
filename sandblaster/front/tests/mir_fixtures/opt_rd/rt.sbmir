@@ -1,0 +1,288 @@
+;; rustc's MIR of `fx_opt_rd::bits`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_opt_rd")
+(module "fx_opt_rd::bits")
+(overflow-checks on)
+(exclude)
+(source "bits.rs" "5ce30618d4a0a93c2aabd25d309784c6c5aa53dec2601a6bb78f56d0f065d4e2")
+(root "fx_opt_rd::bits::low3")
+(root "fx_opt_rd::bits::get_low3::<&[u8]>")
+(root "fx_opt_rd::bits::get_two::<&[u8]>")
+(root "fx_opt_rd::bits::get_raw::<&[u8]>")
+(root "fx_opt_rd::bits::__sandblaster_check__low3")
+(root "fx_opt_rd::bits::__sandblaster_check__get_two::<&[u8]>")
+(root "fx_opt_rd::bits::__sandblaster_opt_low3")
+(root "fx_opt_rd::bits::__sandblaster_opt_get_two::<&[u8]>")
+(adt-def "bytes::TryGetError" (path "bytes::TryGetError") (kind struct) (args ())
+  (variant 0 "TryGetError" 0 (field "requested" usize) (field "available" usize) (no-glue)))
+(adt-def "std::option::Option<u8>" (path "std::option::Option") (kind enum) (args (u8))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" u8) (no-glue)))
+(adt-def "std::result::Result<u8, bytes::TryGetError>" (path "std::result::Result") (kind enum) (args (u8 (adt "bytes::TryGetError")))
+  (variant 0 "Ok" 0 (field "0" u8) (no-glue))
+  (variant 1 "Err" 1 (field "0" (adt "bytes::TryGetError")) (no-glue)))
+(fn "fx_opt_rd::bits::low3"
+  (kind root) (def "fx_opt_rd::bits::low3") (args ())
+  (item fn "low3")
+  (span "bits.rs" 5 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u8 imm)
+    (2 u8 imm)
+    (3 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "y" (p 2))
+  (bb 0
+    (assign (p 2) (bin and (copy (p 1)) (int u8 7)) (at "bits.rs" 6 13))
+    (assign (p 3) (bin gt (copy (p 2)) (int u8 7)) (at "bits.rs" 7 8))
+    (switch (move (p 3)) (0 2) (otherwise 1) (at "bits.rs" 7 8)))
+  (bb 1
+    (assign (p 0) (use (int u8 7)) (at "bits.rs" 7 16))
+    (goto 3 (at "bits.rs" 7 5)))
+  (bb 2
+    (assign (p 0) (use (copy (p 2))) (at "bits.rs" 7 27))
+    (goto 3 (at "bits.rs" 7 5)))
+  (bb 3
+    (return (at "bits.rs" 8 2)))
+)
+(fn "fx_opt_rd::bits::get_low3::<&[u8]>"
+  (kind root) (def "fx_opt_rd::bits::get_low3") (args ((ref shared (slice u8))))
+  (item fn "get_low3")
+  (span "bits.rs" 12 1)
+  (argc 1)
+  (locals
+    (0 (adt "std::option::Option<u8>") mut)
+    (1 (ref mut (ref shared (slice u8))) imm)
+    (2 (adt "std::result::Result<u8, bytes::TryGetError>") mut)
+    (3 isize mut)
+    (4 u8 imm)
+    (5 u8 imm)
+    (6 u8 mut)
+    (7 bool mut))
+  (debug "buf" (p 1) (arg 1))
+  (debug "b" (p 4))
+  (debug "y" (p 5))
+  (bb 0
+    (call (leaf "bytes::Buf::try_get_u8" ((ref shared (slice u8)))) (args (copy (p 1))) (p 2) 1 (at "bits.rs" 13 11)))
+  (bb 1
+    (assign (p 3) (discr (p 2)) (at "bits.rs" 13 11))
+    (switch (move (p 3)) (0 4) (1 3) (otherwise 2) (at "bits.rs" 13 5)))
+  (bb 2
+    (unreachable (at "bits.rs" 13 11)))
+  (bb 3
+    (assign (p 0) (agg (adt (adt "std::option::Option<u8>") 0)) (at "bits.rs" 18 19))
+    (goto 8 (at "bits.rs" 18 19)))
+  (bb 4
+    (assign (p 4) (use (copy (p 2 (downcast 0) (field 0 u8)))) (at "bits.rs" 14 12))
+    (assign (p 5) (bin and (copy (p 4)) (int u8 7)) (at "bits.rs" 15 21))
+    (assign (p 7) (bin gt (copy (p 5)) (int u8 7)) (at "bits.rs" 16 21))
+    (switch (move (p 7)) (0 6) (otherwise 5) (at "bits.rs" 16 21)))
+  (bb 5
+    (assign (p 6) (use (int u8 7)) (at "bits.rs" 16 29))
+    (goto 7 (at "bits.rs" 16 18)))
+  (bb 6
+    (assign (p 6) (use (copy (p 5))) (at "bits.rs" 16 40))
+    (goto 7 (at "bits.rs" 16 18)))
+  (bb 7
+    (assign (p 0) (agg (adt (adt "std::option::Option<u8>") 1) (move (p 6))) (at "bits.rs" 16 13))
+    (goto 8 (at "bits.rs" 17 9)))
+  (bb 8
+    (return (at "bits.rs" 20 2)))
+)
+(fn "fx_opt_rd::bits::get_two::<&[u8]>"
+  (kind root) (def "fx_opt_rd::bits::get_two") (args ((ref shared (slice u8))))
+  (item fn "get_two")
+  (span "bits.rs" 23 1)
+  (argc 1)
+  (locals
+    (0 (adt "std::option::Option<u8>") mut)
+    (1 (ref mut (ref shared (slice u8))) imm)
+    (2 u8 imm)
+    (3 (adt "std::result::Result<u8, bytes::TryGetError>") mut)
+    (4 isize mut)
+    (5 u8 imm)
+    (6 u8 imm)
+    (7 (adt "std::result::Result<u8, bytes::TryGetError>") mut)
+    (8 isize mut)
+    (9 u8 imm)
+    (10 u8 mut)
+    (11 (tuple u8 bool) mut))
+  (debug "buf" (p 1) (arg 1))
+  (debug "a" (p 2))
+  (debug "a" (p 5))
+  (debug "b" (p 6))
+  (debug "b" (p 9))
+  (bb 0
+    (call (leaf "bytes::Buf::try_get_u8" ((ref shared (slice u8)))) (args (copy (p 1))) (p 3) 1 (at "bits.rs" 24 19)))
+  (bb 1
+    (assign (p 4) (discr (p 3)) (at "bits.rs" 24 19))
+    (switch (move (p 4)) (0 4) (1 3) (otherwise 2) (at "bits.rs" 24 13)))
+  (bb 2
+    (unreachable))
+  (bb 3
+    (assign (p 0) (agg (adt (adt "std::option::Option<u8>") 0)) (at "bits.rs" 26 26))
+    (goto 11))
+  (bb 4
+    (assign (p 5) (use (copy (p 3 (downcast 0) (field 0 u8)))) (at "bits.rs" 25 12))
+    (call (fn "fx_opt_rd::bits::low3") (args (copy (p 5))) (p 2) 5 (at "bits.rs" 25 18)))
+  (bb 5
+    (call (leaf "bytes::Buf::try_get_u8" ((ref shared (slice u8)))) (args (copy (p 1))) (p 7) 6 (at "bits.rs" 28 19)))
+  (bb 6
+    (assign (p 8) (discr (p 7)) (at "bits.rs" 28 19))
+    (switch (move (p 8)) (0 8) (1 7) (otherwise 2) (at "bits.rs" 28 13)))
+  (bb 7
+    (assign (p 0) (agg (adt (adt "std::option::Option<u8>") 0)) (at "bits.rs" 30 26))
+    (goto 11))
+  (bb 8
+    (assign (p 9) (use (copy (p 7 (downcast 0) (field 0 u8)))) (at "bits.rs" 29 12))
+    (call (fn "fx_opt_rd::bits::low3") (args (copy (p 9))) (p 6) 9 (at "bits.rs" 29 18)))
+  (bb 9
+    (assign (p 11) (checked add (copy (p 2)) (copy (p 6))) (at "bits.rs" 32 10))
+    (assert (move (p 11 (field 1 bool))) false overflow 10 (at "bits.rs" 32 10)))
+  (bb 10
+    (assign (p 10) (use (move (p 11 (field 0 u8)))) (at "bits.rs" 32 10))
+    (assign (p 0) (agg (adt (adt "std::option::Option<u8>") 1) (move (p 10))) (at "bits.rs" 32 5))
+    (goto 11 (at "bits.rs" 33 2)))
+  (bb 11
+    (return (at "bits.rs" 33 2)))
+)
+(fn "fx_opt_rd::bits::get_raw::<&[u8]>"
+  (kind root) (def "fx_opt_rd::bits::get_raw") (args ((ref shared (slice u8))))
+  (item fn "get_raw")
+  (span "bits.rs" 36 1)
+  (argc 1)
+  (locals
+    (0 (adt "std::option::Option<u8>") mut)
+    (1 (ref mut (ref shared (slice u8))) imm)
+    (2 (adt "std::result::Result<u8, bytes::TryGetError>") mut)
+    (3 isize mut)
+    (4 u8 imm))
+  (debug "buf" (p 1) (arg 1))
+  (debug "b" (p 4))
+  (bb 0
+    (call (leaf "bytes::Buf::try_get_u8" ((ref shared (slice u8)))) (args (copy (p 1))) (p 2) 1 (at "bits.rs" 37 11)))
+  (bb 1
+    (assign (p 3) (discr (p 2)) (at "bits.rs" 37 11))
+    (switch (move (p 3)) (0 4) (1 3) (otherwise 2) (at "bits.rs" 37 5)))
+  (bb 2
+    (unreachable (at "bits.rs" 37 11)))
+  (bb 3
+    (assign (p 0) (agg (adt (adt "std::option::Option<u8>") 0)) (at "bits.rs" 39 19))
+    (goto 5 (at "bits.rs" 39 19)))
+  (bb 4
+    (assign (p 4) (use (copy (p 2 (downcast 0) (field 0 u8)))) (at "bits.rs" 38 12))
+    (assign (p 0) (agg (adt (adt "std::option::Option<u8>") 1) (copy (p 4))) (at "bits.rs" 38 18))
+    (goto 5 (at "bits.rs" 38 24)))
+  (bb 5
+    (return (at "bits.rs" 41 2)))
+)
+(fn "fx_opt_rd::bits::__sandblaster_check__low3"
+  (kind root) (def "fx_opt_rd::bits::__sandblaster_check__low3") (args ())
+  (item fn "__sandblaster_check__low3")
+  (span "bits.rs" 43 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u8 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "fx_opt_rd::bits::__sandblaster_opt_low3") (args (copy (p 1))) (p 0) 1 (at "bits.rs" 44 5)))
+  (bb 1
+    (return (at "bits.rs" 45 2)))
+)
+(fn "fx_opt_rd::bits::__sandblaster_check__get_two::<&[u8]>"
+  (kind root) (def "fx_opt_rd::bits::__sandblaster_check__get_two") (args ((ref shared (slice u8))))
+  (item fn "__sandblaster_check__get_two")
+  (span "bits.rs" 47 1)
+  (argc 1)
+  (locals
+    (0 (adt "std::option::Option<u8>") mut)
+    (1 (ref mut (ref shared (slice u8))) imm))
+  (debug "buf" (p 1) (arg 1))
+  (bb 0
+    (call (fn "fx_opt_rd::bits::__sandblaster_opt_get_two::<&[u8]>") (args (copy (p 1))) (p 0) 1 (at "bits.rs" 48 5)))
+  (bb 1
+    (return (at "bits.rs" 49 2)))
+)
+(fn "fx_opt_rd::bits::__sandblaster_opt_low3"
+  (kind root) (def "fx_opt_rd::bits::__sandblaster_opt_low3") (args ())
+  (item fn "__sandblaster_opt_low3")
+  (span "bits.rs" 56 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u8 imm))
+  (debug "l0_x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (bin and (copy (p 1)) (int u8 7)) (at "bits.rs" 57 5))
+    (return (at "bits.rs" 58 2)))
+)
+(fn "fx_opt_rd::bits::__sandblaster_opt_get_two::<&[u8]>"
+  (kind root) (def "fx_opt_rd::bits::__sandblaster_opt_get_two") (args ((ref shared (slice u8))))
+  (item fn "__sandblaster_opt_get_two")
+  (span "bits.rs" 62 1)
+  (argc 1)
+  (locals
+    (0 (adt "std::option::Option<u8>") mut)
+    (1 (ref mut (ref shared (slice u8))) imm)
+    (2 (adt "std::result::Result<u8, bytes::TryGetError>") imm)
+    (3 isize mut)
+    (4 u8 imm)
+    (5 (adt "std::result::Result<u8, bytes::TryGetError>") imm)
+    (6 isize mut)
+    (7 u8 imm)
+    (8 u8 imm)
+    (9 u8 imm)
+    (10 u8 mut)
+    (11 (tuple u8 bool) mut)
+    (12 (adt "bytes::TryGetError") imm)
+    (13 (adt "bytes::TryGetError") imm))
+  (debug "l0_buf" (p 1) (arg 1))
+  (debug "l22_s22_r" (p 2))
+  (debug "l15_r15" (p 2))
+  (debug "l21_f0_21" (p 4))
+  (debug "l24_s24_r" (p 5))
+  (debug "l18_r18" (p 5))
+  (debug "l20_f0_20" (p 7))
+  (debug "l25_s25" (p 8))
+  (debug "l26_s26" (p 9))
+  (debug "l20_f0_20" (p 12))
+  (debug "l21_f0_21" (p 13))
+  (bb 0
+    (call (leaf "bytes::Buf::try_get_u8" ((ref shared (slice u8)))) (args (copy (p 1))) (p 2) 1 (at "bits.rs" 63 21)))
+  (bb 1
+    (assign (p 3) (discr (p 2)) (at "bits.rs" 66 19))
+    (switch (move (p 3)) (0 4) (1 3) (otherwise 2) (at "bits.rs" 66 13)))
+  (bb 2
+    (unreachable))
+  (bb 3
+    (assign (p 13) (use (copy (p 2 (downcast 1) (field 0 (adt "bytes::TryGetError"))))) (at "bits.rs" 84 29))
+    (assign (p 0) (agg (adt (adt "std::option::Option<u8>") 0)) (at "bits.rs" 85 21))
+    (goto 11 (at "bits.rs" 86 17)))
+  (bb 4
+    (assign (p 4) (use (copy (p 2 (downcast 0) (field 0 u8)))) (at "bits.rs" 67 28))
+    (call (leaf "bytes::Buf::try_get_u8" ((ref shared (slice u8)))) (args (copy (p 1))) (p 5) 5 (at "bits.rs" 68 37)))
+  (bb 5
+    (assign (p 6) (discr (p 5)) (at "bits.rs" 71 35))
+    (switch (move (p 6)) (0 7) (1 6) (otherwise 2) (at "bits.rs" 71 29)))
+  (bb 6
+    (assign (p 12) (use (copy (p 5 (downcast 1) (field 0 (adt "bytes::TryGetError"))))) (at "bits.rs" 77 45))
+    (assign (p 0) (agg (adt (adt "std::option::Option<u8>") 0)) (at "bits.rs" 78 37))
+    (goto 11 (at "bits.rs" 79 33)))
+  (bb 7
+    (assign (p 7) (use (copy (p 5 (downcast 0) (field 0 u8)))) (at "bits.rs" 72 44))
+    (call (fn "fx_opt_rd::bits::low3") (args (copy (p 4))) (p 8) 8 (at "bits.rs" 73 55)))
+  (bb 8
+    (call (fn "fx_opt_rd::bits::low3") (args (copy (p 7))) (p 9) 9 (at "bits.rs" 74 55)))
+  (bb 9
+    (assign (p 11) (checked add (copy (p 8)) (copy (p 9))) (at "bits.rs" 75 42))
+    (assert (move (p 11 (field 1 bool))) false overflow 10 (at "bits.rs" 75 42)))
+  (bb 10
+    (assign (p 10) (use (move (p 11 (field 0 u8)))) (at "bits.rs" 75 42))
+    (assign (p 0) (agg (adt (adt "std::option::Option<u8>") 1) (move (p 10))) (at "bits.rs" 75 37))
+    (goto 11 (at "bits.rs" 76 33)))
+  (bb 11
+    (return (at "bits.rs" 90 2)))
+)

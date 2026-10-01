@@ -1,0 +1,166 @@
+;; rustc's MIR of `fx_lo_iter::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lo_iter")
+(module "fx_lo_iter::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "e0f3b0b279c900b37ce07019c4f60b507f871b9f6978b7170dc38db2200cb0ba")
+(root "<fx_lo_iter::a::Down as std::iter::Iterator>::next")
+(root "fx_lo_iter::a::Down::new")
+(root "fx_lo_iter::a::down")
+(root "fx_lo_iter::a::heights")
+(root "fx_lo_iter::a::count")
+(adt-def "a::Down" (path "fx_lo_iter::a::Down") (kind struct) (args ())
+  (variant 0 "Down" 0 (field "n" u32) (no-glue)))
+(adt-def "std::ops::RangeInclusive<u32>" (path "std::ops::RangeInclusive") (kind struct) (args (u32))
+  (variant 0 "RangeInclusive" 0 (field "start" u32) (field "end" u32) (field "exhausted" bool) (no-glue)))
+(adt-def "std::option::Option<u32>" (path "std::option::Option") (kind enum) (args (u32))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" u32) (no-glue)))
+(fn "<fx_lo_iter::a::Down as std::iter::Iterator>::next"
+  (kind root) (def "<fx_lo_iter::a::Down as std::iter::Iterator>::next") (args ())
+  (item impl (adt "a::Down") "Iterator" () "next")
+  (span "src/a.rs" 8 5)
+  (argc 1)
+  (locals
+    (0 (adt "std::option::Option<u32>") mut)
+    (1 (ref mut (adt "a::Down")) imm)
+    (2 bool mut)
+    (3 u32 mut)
+    (4 (tuple u32 bool) mut)
+    (5 u32 mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 3) (use (copy (p 1 deref (field 0 u32)))) (at "src/a.rs" 9 12))
+    (assign (p 2) (bin eq (move (p 3)) (int u32 0)) (at "src/a.rs" 9 12))
+    (switch (move (p 2)) (0 2) (otherwise 1) (at "src/a.rs" 9 12)))
+  (bb 1
+    (assign (p 0) (agg (adt (adt "std::option::Option<u32>") 0)) (at "src/a.rs" 10 20))
+    (goto 4 (at "src/a.rs" 14 6)))
+  (bb 2
+    (assign (p 4) (checked sub (copy (p 1 deref (field 0 u32))) (int u32 1)) (at "src/a.rs" 12 9))
+    (assert (move (p 4 (field 1 bool))) false overflow 3 (at "src/a.rs" 12 9)))
+  (bb 3
+    (assign (p 1 deref (field 0 u32)) (use (move (p 4 (field 0 u32)))) (at "src/a.rs" 12 9))
+    (assign (p 5) (use (copy (p 1 deref (field 0 u32)))) (at "src/a.rs" 13 14))
+    (assign (p 0) (agg (adt (adt "std::option::Option<u32>") 1) (move (p 5))) (at "src/a.rs" 13 9))
+    (goto 4 (at "src/a.rs" 14 6)))
+  (bb 4
+    (return (at "src/a.rs" 14 6)))
+)
+(fn "fx_lo_iter::a::Down::new"
+  (kind root) (def "fx_lo_iter::a::Down::new") (args ())
+  (item inherent (adt "a::Down") "new")
+  (span "src/a.rs" 18 5)
+  (argc 1)
+  (locals
+    (0 (adt "a::Down") mut)
+    (1 u32 imm))
+  (debug "n" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "a::Down") 0) (copy (p 1))) (at "src/a.rs" 19 9))
+    (return (at "src/a.rs" 20 6)))
+)
+(fn "fx_lo_iter::a::down"
+  (kind root) (def "fx_lo_iter::a::down") (args ())
+  (item fn "down")
+  (span "src/a.rs" 23 1)
+  (argc 1)
+  (locals
+    (0 (adt "a::Down") mut)
+    (1 u32 imm))
+  (debug "n" (p 1) (arg 1))
+  (bb 0
+    (call (fn "fx_lo_iter::a::Down::new") (args (copy (p 1))) (p 0) 1 (at "src/a.rs" 24 5)))
+  (bb 1
+    (return (at "src/a.rs" 25 2)))
+)
+(fn "fx_lo_iter::a::heights"
+  (kind root) (def "fx_lo_iter::a::heights") (args ())
+  (item fn "heights")
+  (span "src/a.rs" 27 1)
+  (argc 1)
+  (locals
+    (0 (adt "std::ops::RangeInclusive<u32>") mut)
+    (1 u32 imm))
+  (debug "k" (p 1) (arg 1))
+  (bb 0
+    (call (fn "std::ops::RangeInclusive::<u32>::new") (args (int u32 1) (copy (p 1))) (p 0) 1 (at "src/a.rs" 28 5)))
+  (bb 1
+    (return (at "src/a.rs" 29 2)))
+)
+(fn "fx_lo_iter::a::count"
+  (kind root) (def "fx_lo_iter::a::count") (args ())
+  (item fn "count")
+  (span "src/a.rs" 31 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u32 imm)
+    (2 u64 mut)
+    (3 (adt "a::Down") mut)
+    (4 (adt "a::Down") mut)
+    (5 (adt "a::Down") mut)
+    (6 (adt "std::option::Option<u32>") mut)
+    (7 (ref mut (adt "a::Down")) mut)
+    (8 isize mut)
+    (9 u32 imm)
+    (10 (tuple u64 bool) mut))
+  (debug "n" (p 1) (arg 1))
+  (debug "acc" (p 2))
+  (debug "iter" (p 5))
+  (debug "_i" (p 9))
+  (bb 0
+    (assign (p 2) (use (int u64 0)) (at "src/a.rs" 32 19))
+    (call (fn "fx_lo_iter::a::down") (args (copy (p 1))) (p 4) 1 (at "src/a.rs" 33 15)))
+  (bb 1
+    (call (fn "<fx_lo_iter::a::Down as std::iter::IntoIterator>::into_iter") (args (move (p 4))) (p 3) 2 (at "src/a.rs" 33 15)))
+  (bb 2
+    (assign (p 5) (use (move (p 3))) (at "src/a.rs" 33 15))
+    (goto 3 (at "src/a.rs" 33 5)))
+  (bb 3
+    (assign (p 7) (ref mut (p 5)) (at "src/a.rs" 33 15))
+    (call (fn "<fx_lo_iter::a::Down as std::iter::Iterator>::next") (args (copy (p 7))) (p 6) 4 (at "src/a.rs" 33 15)))
+  (bb 4
+    (assign (p 8) (discr (p 6)) (at "src/a.rs" 33 15))
+    (switch (move (p 8)) (0 7) (1 6) (otherwise 5) (at "src/a.rs" 33 15)))
+  (bb 5
+    (unreachable (at "src/a.rs" 33 15)))
+  (bb 6
+    (assign (p 9) (use (copy (p 6 (downcast 1) (field 0 u32)))) (at "src/a.rs" 33 9))
+    (assign (p 10) (checked add (copy (p 2)) (int u64 1)) (at "src/a.rs" 34 9))
+    (assert (move (p 10 (field 1 bool))) false overflow 8 (at "src/a.rs" 34 9)))
+  (bb 7
+    (assign (p 0) (use (copy (p 2))) (at "src/a.rs" 36 5))
+    (return (at "src/a.rs" 37 2)))
+  (bb 8
+    (assign (p 2) (use (move (p 10 (field 0 u64)))) (at "src/a.rs" 34 9))
+    (goto 3 (at "src/a.rs" 33 5)))
+)
+(fn "std::ops::RangeInclusive::<u32>::new"
+  (kind callee) (def "std::ops::RangeInclusive::<Idx>::new") (args (u32))
+  (item inherent (adt "std::ops::RangeInclusive<u32>") "new")
+  (argc 2)
+  (locals
+    (0 (adt "std::ops::RangeInclusive<u32>") mut)
+    (1 u32 imm)
+    (2 u32 imm))
+  (debug "start" (p 1) (arg 1))
+  (debug "end" (p 2) (arg 2))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "std::ops::RangeInclusive<u32>") 0) (copy (p 1)) (copy (p 2)) (int bool 0)))
+    (return))
+)
+(fn "<fx_lo_iter::a::Down as std::iter::IntoIterator>::into_iter"
+  (kind root) (def "<I as std::iter::IntoIterator>::into_iter") (args ((adt "a::Down")))
+  (item impl (adt "a::Down") "IntoIterator" () "into_iter")
+  (argc 1)
+  (locals
+    (0 (adt "a::Down") mut)
+    (1 (adt "a::Down") imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (move (p 1))))
+    (return))
+)

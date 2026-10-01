@@ -1,0 +1,319 @@
+;; rustc's MIR of `fx_lift_w::w`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lift_w")
+(module "fx_lift_w::w")
+(overflow-checks on)
+(exclude)
+(source "w.rs" "32aa5df1547ed3b708ae438041354a2b8a9ac9320062e9d07e0f379ddccebb15")
+(root "<u16 as fx_lift_w::w::sealed::Prim>::low")
+(root "<u32 as fx_lift_w::w::sealed::Prim>::low")
+(root "fx_lift_w::w::Wrap::<u16>::bits")
+(root "fx_lift_w::w::Wrap::<u32>::bits")
+(root "fx_lift_w::w::Wrap::<u16>::low")
+(root "fx_lift_w::w::Wrap::<u32>::low")
+(root "fx_lift_w::w::Counter::new")
+(root "fx_lift_w::w::Counter::bump")
+(root "fx_lift_w::w::Counter::chunks")
+(root "<fx_lift_w::w::Wrap<u16> as std::clone::Clone>::clone")
+(root "<fx_lift_w::w::Wrap<u32> as std::clone::Clone>::clone")
+(root "<fx_lift_w::w::Counter as std::clone::Clone>::clone")
+(note "fx_lift_w::w::sealed::Prim::low: not instantiated: a trait's own method (its impls are extracted)")
+(note "<fx_lift_w::w::Wrap<T> as std::fmt::Debug>::fmt: not extracted: an impl of `Debug` (SBMIR_SKIP_TRAITS)")
+(note "<fx_lift_w::w::Counter as std::fmt::Debug>::fmt: not extracted: an impl of `Debug` (SBMIR_SKIP_TRAITS)")
+(adt-def "w::Counter" (path "fx_lift_w::w::Counter") (kind struct) (args ())
+  (variant 0 "Counter" 0 (field "n" u32) (no-glue)))
+(adt-def "w::Wrap<u16>" (path "fx_lift_w::w::Wrap") (kind struct) (args (u16))
+  (variant 0 "Wrap" 0 (field "0" u16) (no-glue)))
+(adt-def "w::Wrap<u32>" (path "fx_lift_w::w::Wrap") (kind struct) (args (u32))
+  (variant 0 "Wrap" 0 (field "0" u32) (no-glue)))
+(fn "<u16 as fx_lift_w::w::sealed::Prim>::low"
+  (kind root) (def "<u16 as fx_lift_w::w::sealed::Prim>::low") (args ())
+  (item impl u16 "Prim" () "low")
+  (span "w.rs" 6 9)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u16 imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (cast int-to-int (copy (p 1)) u8) (at "w.rs" 6 30))
+    (return (at "w.rs" 6 42)))
+)
+(fn "<u32 as fx_lift_w::w::sealed::Prim>::low"
+  (kind root) (def "<u32 as fx_lift_w::w::sealed::Prim>::low") (args ())
+  (item impl u32 "Prim" () "low")
+  (span "w.rs" 9 9)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u32 imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (cast int-to-int (copy (p 1)) u8) (at "w.rs" 9 30))
+    (return (at "w.rs" 9 42)))
+)
+(fn "fx_lift_w::w::Wrap::<u16>::bits"
+  (kind root) (def "fx_lift_w::w::Wrap::<T>::bits") (args (u16))
+  (item inherent (adt "w::Wrap<u16>") "bits")
+  (span "w.rs" 18 5)
+  (argc 1)
+  (locals
+    (0 usize mut)
+    (1 (ref shared (adt "w::Wrap<u16>")) imm)
+    (2 usize mut)
+    (3 (tuple usize bool) mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (call (fn "std::mem::size_of::<u16>") (args) (p 2) 1 (at "w.rs" 19 9)))
+  (bb 1
+    (assign (p 3) (checked mul (copy (p 2)) (int usize 8)) (at "w.rs" 19 9))
+    (assert (move (p 3 (field 1 bool))) false overflow 2 (at "w.rs" 19 9)))
+  (bb 2
+    (assign (p 0) (use (move (p 3 (field 0 usize)))) (at "w.rs" 19 9))
+    (return (at "w.rs" 20 6)))
+)
+(fn "fx_lift_w::w::Wrap::<u32>::bits"
+  (kind root) (def "fx_lift_w::w::Wrap::<T>::bits") (args (u32))
+  (item inherent (adt "w::Wrap<u32>") "bits")
+  (span "w.rs" 18 5)
+  (argc 1)
+  (locals
+    (0 usize mut)
+    (1 (ref shared (adt "w::Wrap<u32>")) imm)
+    (2 usize mut)
+    (3 (tuple usize bool) mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (call (fn "std::mem::size_of::<u32>") (args) (p 2) 1 (at "w.rs" 19 9)))
+  (bb 1
+    (assign (p 3) (checked mul (copy (p 2)) (int usize 8)) (at "w.rs" 19 9))
+    (assert (move (p 3 (field 1 bool))) false overflow 2 (at "w.rs" 19 9)))
+  (bb 2
+    (assign (p 0) (use (move (p 3 (field 0 usize)))) (at "w.rs" 19 9))
+    (return (at "w.rs" 20 6)))
+)
+(fn "fx_lift_w::w::Wrap::<u16>::low"
+  (kind root) (def "fx_lift_w::w::Wrap::<T>::low") (args (u16))
+  (item inherent (adt "w::Wrap<u16>") "low")
+  (span "w.rs" 21 5)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 (ref shared (adt "w::Wrap<u16>")) imm)
+    (2 u16 mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (use (copy (p 1 deref (field 0 u16)))) (at "w.rs" 22 9))
+    (call (fn "<u16 as fx_lift_w::w::sealed::Prim>::low") (args (move (p 2))) (p 0) 1 (at "w.rs" 22 9)))
+  (bb 1
+    (return (at "w.rs" 23 6)))
+)
+(fn "fx_lift_w::w::Wrap::<u32>::low"
+  (kind root) (def "fx_lift_w::w::Wrap::<T>::low") (args (u32))
+  (item inherent (adt "w::Wrap<u32>") "low")
+  (span "w.rs" 21 5)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 (ref shared (adt "w::Wrap<u32>")) imm)
+    (2 u32 mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (use (copy (p 1 deref (field 0 u32)))) (at "w.rs" 22 9))
+    (call (fn "<u32 as fx_lift_w::w::sealed::Prim>::low") (args (move (p 2))) (p 0) 1 (at "w.rs" 22 9)))
+  (bb 1
+    (return (at "w.rs" 23 6)))
+)
+(fn "fx_lift_w::w::Counter::new"
+  (kind root) (def "fx_lift_w::w::Counter::new") (args ())
+  (item inherent (adt "w::Counter") "new")
+  (span "w.rs" 32 5)
+  (argc 0)
+  (locals
+    (0 (adt "w::Counter") mut))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "w::Counter") 0) (int u32 0)) (at "w.rs" 33 9))
+    (return (at "w.rs" 34 6)))
+)
+(fn "fx_lift_w::w::Counter::bump"
+  (kind root) (def "fx_lift_w::w::Counter::bump") (args ())
+  (item inherent (adt "w::Counter") "bump")
+  (span "w.rs" 35 5)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 (ref mut (adt "w::Counter")) imm)
+    (2 u32 mut)
+    (3 u32 mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 3) (use (copy (p 1 deref (field 0 u32)))) (at "w.rs" 36 18))
+    (call (fn "core::num::<impl u32>::wrapping_add") (args (move (p 3)) (int u32 1)) (p 2) 1 (at "w.rs" 36 18)))
+  (bb 1
+    (assign (p 1 deref (field 0 u32)) (use (move (p 2))) (at "w.rs" 36 9))
+    (assign (p 0) (use (copy (p 1 deref (field 0 u32)))) (at "w.rs" 37 9))
+    (return (at "w.rs" 38 6)))
+)
+(fn "fx_lift_w::w::Counter::chunks"
+  (kind root) (def "fx_lift_w::w::Counter::chunks") (args ())
+  (item inherent (adt "w::Counter") "chunks")
+  (span "w.rs" 39 5)
+  (argc 2)
+  (locals
+    (0 usize mut)
+    (1 (ref shared (adt "w::Counter")) imm)
+    (2 usize imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "bits" (p 2) (arg 2))
+  (bb 0
+    (call (fn "core::num::<impl usize>::div_ceil") (args (copy (p 2)) (int usize 7)) (p 0) 1 (at "w.rs" 40 9)))
+  (bb 1
+    (return (at "w.rs" 41 6)))
+)
+(fn "<fx_lift_w::w::Wrap<u16> as std::clone::Clone>::clone"
+  (kind root) (def "<fx_lift_w::w::Wrap<T> as std::clone::Clone>::clone") (args (u16))
+  (item impl (adt "w::Wrap<u16>") "Clone" () "clone")
+  (span "w.rs" 14 17)
+  (argc 1)
+  (locals
+    (0 (adt "w::Wrap<u16>") mut)
+    (1 (ref shared (adt "w::Wrap<u16>")) imm)
+    (2 u16 mut)
+    (3 (ref shared u16) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 3) (ref shared (p 1 deref (field 0 u16))) (at "w.rs" 15 26))
+    (call (fn "std::clone::impls::<impl std::clone::Clone for u16>::clone") (args (copy (p 3))) (p 2) 1 (at "w.rs" 15 26)))
+  (bb 1
+    (assign (p 0) (agg (adt (adt "w::Wrap<u16>") 0) (move (p 2))) (at "w.rs" 14 17))
+    (return (at "w.rs" 14 22)))
+)
+(fn "<fx_lift_w::w::Wrap<u32> as std::clone::Clone>::clone"
+  (kind root) (def "<fx_lift_w::w::Wrap<T> as std::clone::Clone>::clone") (args (u32))
+  (item impl (adt "w::Wrap<u32>") "Clone" () "clone")
+  (span "w.rs" 14 17)
+  (argc 1)
+  (locals
+    (0 (adt "w::Wrap<u32>") mut)
+    (1 (ref shared (adt "w::Wrap<u32>")) imm)
+    (2 u32 mut)
+    (3 (ref shared u32) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 3) (ref shared (p 1 deref (field 0 u32))) (at "w.rs" 15 26))
+    (call (fn "std::clone::impls::<impl std::clone::Clone for u32>::clone") (args (copy (p 3))) (p 2) 1 (at "w.rs" 15 26)))
+  (bb 1
+    (assign (p 0) (agg (adt (adt "w::Wrap<u32>") 0) (move (p 2))) (at "w.rs" 14 17))
+    (return (at "w.rs" 14 22)))
+)
+(fn "<fx_lift_w::w::Counter as std::clone::Clone>::clone"
+  (kind root) (def "<fx_lift_w::w::Counter as std::clone::Clone>::clone") (args ())
+  (item impl (adt "w::Counter") "Clone" () "clone")
+  (span "w.rs" 26 17)
+  (argc 1)
+  (locals
+    (0 (adt "w::Counter") mut)
+    (1 (ref shared (adt "w::Counter")) imm)
+    (2 u32 mut)
+    (3 (ref shared u32) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 3) (ref shared (p 1 deref (field 0 u32))) (at "w.rs" 28 5))
+    (assign (p 2) (use (copy (p 3 deref))) (at "w.rs" 28 5))
+    (assign (p 0) (agg (adt (adt "w::Counter") 0) (move (p 2))) (at "w.rs" 26 17))
+    (return (at "w.rs" 26 22)))
+)
+(fn "std::mem::size_of::<u16>"
+  (kind callee) (def "std::mem::size_of") (args (u16))
+  (item fn "size_of")
+  (argc 0)
+  (locals
+    (0 usize mut))
+  (bb 0
+    (assign (p 0) (use (const-item none "SIZE" (int usize 2))))
+    (return))
+)
+(fn "std::mem::size_of::<u32>"
+  (kind callee) (def "std::mem::size_of") (args (u32))
+  (item fn "size_of")
+  (argc 0)
+  (locals
+    (0 usize mut))
+  (bb 0
+    (assign (p 0) (use (const-item none "SIZE" (int usize 4))))
+    (return))
+)
+(fn "core::num::<impl u32>::wrapping_add"
+  (kind callee) (def "core::num::<impl u32>::wrapping_add") (args ())
+  (item inherent u32 "wrapping_add")
+  (argc 2)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 u32 imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (bb 0
+    (assign (p 0) (bin add (copy (p 1)) (copy (p 2))))
+    (return))
+)
+(fn "core::num::<impl usize>::div_ceil"
+  (kind callee) (def "core::num::<impl usize>::div_ceil") (args ())
+  (item inherent usize "div_ceil")
+  (argc 2)
+  (locals
+    (0 usize mut)
+    (1 usize imm)
+    (2 usize imm)
+    (3 usize imm)
+    (4 bool mut)
+    (5 usize imm)
+    (6 bool mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (debug "d" (p 3))
+  (debug "r" (p 5))
+  (bb 0
+    (assign (p 4) (bin eq (copy (p 2)) (int usize 0)))
+    (assert (copy (p 4)) false div-zero 1))
+  (bb 1
+    (assign (p 3) (bin div (copy (p 1)) (copy (p 2))))
+    (assert (copy (p 4)) false rem-zero 2))
+  (bb 2
+    (assign (p 5) (bin rem (copy (p 1)) (copy (p 2))))
+    (assign (p 6) (bin gt (copy (p 5)) (int usize 0)))
+    (switch (move (p 6)) (0 4) (otherwise 3)))
+  (bb 3
+    (assign (p 0) (bin add (copy (p 3)) (int usize 1)))
+    (goto 5))
+  (bb 4
+    (assign (p 0) (use (copy (p 3))))
+    (goto 5))
+  (bb 5
+    (return))
+)
+(fn "std::clone::impls::<impl std::clone::Clone for u16>::clone"
+  (kind callee) (def "std::clone::impls::<impl std::clone::Clone for u16>::clone") (args ())
+  (item impl u16 "Clone" () "clone")
+  (argc 1)
+  (locals
+    (0 u16 mut)
+    (1 (ref shared u16) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 deref))))
+    (return))
+)
+(fn "std::clone::impls::<impl std::clone::Clone for u32>::clone"
+  (kind callee) (def "std::clone::impls::<impl std::clone::Clone for u32>::clone") (args ())
+  (item impl u32 "Clone" () "clone")
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 (ref shared u32) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 deref))))
+    (return))
+)

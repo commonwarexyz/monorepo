@@ -1,0 +1,85 @@
+;; rustc's MIR of `fx_lo_open_big9::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lo_open_big9")
+(module "fx_lo_open_big9::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "a8660bb7c27449f71b448730e10c6a47d24f1e7d25808bdbf20784bad700846b")
+(root "<fx_lo_open_big9::a::Big as fx_lo_open_big9::Fam>::cap")
+(root "fx_lo_open_big9::a::P::<fx_lo_open_big9::a::Big>::new")
+(root "fx_lo_open_big9::a::P::<fx_lo_open_big9::a::Big>::get")
+(root "fx_lo_open_big9::a::P::<fx_lo_open_big9::a::Big>::room")
+(note "<fx_lo_open_big9::a::Small as fx_lo_open_big9::Fam>::cap: not extracted: an impl of an open trait for another type than its declared instance")
+(adt-def "a::Big" (path "fx_lo_open_big9::a::Big") (kind struct) (args ())
+  (variant 0 "Big" 0 (no-glue)))
+(adt-def "a::P<a::Big>" (path "fx_lo_open_big9::a::P") (kind struct) (args ((adt "a::Big")))
+  (variant 0 "P" 0 (field "0" u64) (field "1" (adt "std::marker::PhantomData<a::Big>")) (no-glue)))
+(adt-def "std::marker::PhantomData<a::Big>" (path "std::marker::PhantomData") (kind struct) (args ((adt "a::Big")))
+  (variant 0 "PhantomData" 0 (no-glue)))
+(fn "<fx_lo_open_big9::a::Big as fx_lo_open_big9::Fam>::cap"
+  (kind root) (def "<fx_lo_open_big9::a::Big as fx_lo_open_big9::Fam>::cap") (args ())
+  (item impl (adt "a::Big") "Fam" () "cap")
+  (span "src/a.rs" 19 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (int u64 9) (int u64 0)) (at "src/a.rs" 20 9))
+    (assert (move (p 2)) false rem-zero 1 (at "src/a.rs" 20 9)))
+  (bb 1
+    (assign (p 0) (bin rem (copy (p 1)) (int u64 9)) (at "src/a.rs" 20 9))
+    (return (at "src/a.rs" 21 6)))
+)
+(fn "fx_lo_open_big9::a::P::<fx_lo_open_big9::a::Big>::new"
+  (kind root) (def "fx_lo_open_big9::a::P::<F>::new") (args ((adt "a::Big")))
+  (item inherent (adt "a::P<a::Big>") "new")
+  (span "src/a.rs" 27 5)
+  (argc 1)
+  (locals
+    (0 (adt "a::P<a::Big>") mut)
+    (1 u64 imm)
+    (2 u64 mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "<fx_lo_open_big9::a::Big as fx_lo_open_big9::Fam>::cap") (args (copy (p 1))) (p 2) 1 (at "src/a.rs" 28 14)))
+  (bb 1
+    (assign (p 0) (agg (adt (adt "a::P<a::Big>") 0) (move (p 2)) (zst (adt "std::marker::PhantomData<a::Big>"))) (at "src/a.rs" 28 9))
+    (return (at "src/a.rs" 29 6)))
+)
+(fn "fx_lo_open_big9::a::P::<fx_lo_open_big9::a::Big>::get"
+  (kind root) (def "fx_lo_open_big9::a::P::<F>::get") (args ((adt "a::Big")))
+  (item inherent (adt "a::P<a::Big>") "get")
+  (span "src/a.rs" 30 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 (ref shared (adt "a::P<a::Big>")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 deref (field 0 u64)))) (at "src/a.rs" 31 9))
+    (return (at "src/a.rs" 32 6)))
+)
+(fn "fx_lo_open_big9::a::P::<fx_lo_open_big9::a::Big>::room"
+  (kind root) (def "fx_lo_open_big9::a::P::<F>::room") (args ((adt "a::Big")))
+  (item inherent (adt "a::P<a::Big>") "room")
+  (span "src/a.rs" 33 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 u64 mut)
+    (3 (tuple u64 bool) mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "<fx_lo_open_big9::a::Big as fx_lo_open_big9::Fam>::cap") (args (copy (p 1))) (p 2) 1 (at "src/a.rs" 34 18)))
+  (bb 1
+    (assign (p 3) (checked sub (const-item (adt "a::Big") "MAX" (int u64 7)) (copy (p 2))) (at "src/a.rs" 34 9))
+    (assert (move (p 3 (field 1 bool))) false overflow 2 (at "src/a.rs" 34 9)))
+  (bb 2
+    (assign (p 0) (use (move (p 3 (field 0 u64)))) (at "src/a.rs" 34 9))
+    (return (at "src/a.rs" 35 6)))
+)

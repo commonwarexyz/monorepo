@@ -1,0 +1,53 @@
+;; rustc's MIR of `fx_ai_ref_abs::s`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_ai_ref_abs")
+(module "fx_ai_ref_abs::s")
+(overflow-checks on)
+(exclude)
+(source "s.rs" "a905223290a4fa966d1c86d2e1ccf8196754e40a279dd7116c90a114f11f037f")
+(root "fx_ai_ref_abs::s::f")
+(fn "fx_ai_ref_abs::s::f"
+  (kind root) (def "fx_ai_ref_abs::s::f") (args ())
+  (item fn "f")
+  (span "s.rs" 1 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 i32 mut)
+    (3 i32 mut))
+  (debug "a" (p 1) (arg 1))
+  (bb 0
+    (assign (p 3) (cast int-to-int (copy (p 1)) i32) (at "s.rs" 1 27))
+    (call (fn "core::num::<impl i32>::abs") (args (move (p 3))) (p 2) 1 (at "s.rs" 1 27)))
+  (bb 1
+    (assign (p 0) (cast int-to-int (move (p 2)) u32) (at "s.rs" 1 27))
+    (return (at "s.rs" 1 52)))
+)
+(fn "core::num::<impl i32>::abs"
+  (kind callee) (def "core::num::<impl i32>::abs") (args ())
+  (item inherent i32 "abs")
+  (argc 1)
+  (locals
+    (0 i32 mut)
+    (1 i32 imm)
+    (2 bool mut)
+    (3 bool mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin lt (copy (p 1)) (int i32 0)))
+    (switch (move (p 2)) (0 3) (otherwise 1)))
+  (bb 1
+    (assign (p 3) (bin eq (copy (p 1)) (int i32 -2147483648)))
+    (assert (move (p 3)) false overflow-neg 2))
+  (bb 2
+    (assign (p 0) (un neg (copy (p 1))))
+    (goto 4))
+  (bb 3
+    (assign (p 0) (use (copy (p 1))))
+    (goto 4))
+  (bb 4
+    (return))
+)

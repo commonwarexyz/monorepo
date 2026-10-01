@@ -329,6 +329,12 @@ pub fn build_module(root: &str, module_file: &str, context: Option<&str>, env: &
     }
     o.outputs.push((out_dir.join(format!("{out}-report.json")), b.report.clone()));
     o.outputs.push((out_dir.join(format!("{out}-timing.json")), b.timing.clone()));
+    // the lifted round trip's copy of a module read from MIR: the text whose
+    // MIR the round trip reads (`<stem>.roundtrip__<module>.sbmir`, extracted
+    // from this file; docs/mir-lift.md §20.1), as an in-place build writes it
+    if let Some((flat, text)) = b.lowered.as_ref().and_then(|l| l.roundtrip_copy.as_ref()) {
+        o.outputs.push((out_dir.join(format!("{out}-roundtrip__{flat}.rs")), text.clone()));
+    }
     let Some(verdict) = &b.verdict else {
         o.stderr.push_str(&b.render_failure(&checked, &root_display));
         // a failed build leaves no reusable verdict behind

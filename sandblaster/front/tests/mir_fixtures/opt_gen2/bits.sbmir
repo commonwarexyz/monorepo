@@ -1,0 +1,305 @@
+;; rustc's MIR of `fx_opt_gen2::bits`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_opt_gen2")
+(module "fx_opt_gen2::bits")
+(overflow-checks on)
+(exclude)
+(source "bits.rs" "31ff8f6a29e5e6663fc019627226c33cf0c6528bba91850ed35b58fc3f9fbb60")
+(root "<u16 as fx_opt_gen2::bits::sealed::Prim>::low")
+(root "<u32 as fx_opt_gen2::bits::sealed::Prim>::low")
+(root "<u64 as fx_opt_gen2::bits::sealed::Prim>::low")
+(root "fx_opt_gen2::bits::clamp_low::<u16>")
+(root "fx_opt_gen2::bits::clamp_low::<u32>")
+(root "fx_opt_gen2::bits::clamp_low::<u64>")
+(root "fx_opt_gen2::bits::clamp_low_plus::<u16>")
+(root "fx_opt_gen2::bits::clamp_low_plus::<u32>")
+(root "fx_opt_gen2::bits::clamp_low_plus::<u64>")
+(note "fx_opt_gen2::bits::sealed::Prim::low: not instantiated: a trait's own method (its impls are extracted)")
+(fn "<u16 as fx_opt_gen2::bits::sealed::Prim>::low"
+  (kind root) (def "<u16 as fx_opt_gen2::bits::sealed::Prim>::low") (args ())
+  (item impl u16 "Prim" () "low")
+  (span "bits.rs" 8 9)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u16 imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (cast int-to-int (copy (p 1)) u8) (at "bits.rs" 8 30))
+    (return (at "bits.rs" 8 42)))
+)
+(fn "<u32 as fx_opt_gen2::bits::sealed::Prim>::low"
+  (kind root) (def "<u32 as fx_opt_gen2::bits::sealed::Prim>::low") (args ())
+  (item impl u32 "Prim" () "low")
+  (span "bits.rs" 11 9)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u32 imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (cast int-to-int (copy (p 1)) u8) (at "bits.rs" 11 30))
+    (return (at "bits.rs" 11 42)))
+)
+(fn "<u64 as fx_opt_gen2::bits::sealed::Prim>::low"
+  (kind root) (def "<u64 as fx_opt_gen2::bits::sealed::Prim>::low") (args ())
+  (item impl u64 "Prim" () "low")
+  (span "bits.rs" 14 9)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u64 imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (cast int-to-int (copy (p 1)) u8) (at "bits.rs" 14 30))
+    (return (at "bits.rs" 14 42)))
+)
+(fn "fx_opt_gen2::bits::clamp_low::<u16>"
+  (kind root) (def "fx_opt_gen2::bits::clamp_low") (args (u16))
+  (item fn "clamp_low")
+  (span "bits.rs" 20 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u16 imm)
+    (2 u8 imm)
+    (3 u8 mut)
+    (4 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "b" (p 2))
+  (bb 0
+    (call (fn "<u16 as fx_opt_gen2::bits::sealed::Prim>::low") (args (copy (p 1))) (p 3) 1 (at "bits.rs" 21 13)))
+  (bb 1
+    (assign (p 2) (bin and (move (p 3)) (int u8 7)) (at "bits.rs" 21 13))
+    (assign (p 4) (bin gt (copy (p 2)) (int u8 7)) (at "bits.rs" 22 8))
+    (switch (move (p 4)) (0 3) (otherwise 2) (at "bits.rs" 22 8)))
+  (bb 2
+    (assign (p 0) (use (int u8 7)) (at "bits.rs" 22 16))
+    (goto 4 (at "bits.rs" 22 5)))
+  (bb 3
+    (assign (p 0) (use (copy (p 2))) (at "bits.rs" 22 27))
+    (goto 4 (at "bits.rs" 22 5)))
+  (bb 4
+    (return (at "bits.rs" 23 2)))
+)
+(fn "fx_opt_gen2::bits::clamp_low::<u32>"
+  (kind root) (def "fx_opt_gen2::bits::clamp_low") (args (u32))
+  (item fn "clamp_low")
+  (span "bits.rs" 20 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u32 imm)
+    (2 u8 imm)
+    (3 u8 mut)
+    (4 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "b" (p 2))
+  (bb 0
+    (call (fn "<u32 as fx_opt_gen2::bits::sealed::Prim>::low") (args (copy (p 1))) (p 3) 1 (at "bits.rs" 21 13)))
+  (bb 1
+    (assign (p 2) (bin and (move (p 3)) (int u8 7)) (at "bits.rs" 21 13))
+    (assign (p 4) (bin gt (copy (p 2)) (int u8 7)) (at "bits.rs" 22 8))
+    (switch (move (p 4)) (0 3) (otherwise 2) (at "bits.rs" 22 8)))
+  (bb 2
+    (assign (p 0) (use (int u8 7)) (at "bits.rs" 22 16))
+    (goto 4 (at "bits.rs" 22 5)))
+  (bb 3
+    (assign (p 0) (use (copy (p 2))) (at "bits.rs" 22 27))
+    (goto 4 (at "bits.rs" 22 5)))
+  (bb 4
+    (return (at "bits.rs" 23 2)))
+)
+(fn "fx_opt_gen2::bits::clamp_low::<u64>"
+  (kind root) (def "fx_opt_gen2::bits::clamp_low") (args (u64))
+  (item fn "clamp_low")
+  (span "bits.rs" 20 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u64 imm)
+    (2 u8 imm)
+    (3 u8 mut)
+    (4 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "b" (p 2))
+  (bb 0
+    (call (fn "<u64 as fx_opt_gen2::bits::sealed::Prim>::low") (args (copy (p 1))) (p 3) 1 (at "bits.rs" 21 13)))
+  (bb 1
+    (assign (p 2) (bin and (move (p 3)) (int u8 7)) (at "bits.rs" 21 13))
+    (assign (p 4) (bin gt (copy (p 2)) (int u8 7)) (at "bits.rs" 22 8))
+    (switch (move (p 4)) (0 3) (otherwise 2) (at "bits.rs" 22 8)))
+  (bb 2
+    (assign (p 0) (use (int u8 7)) (at "bits.rs" 22 16))
+    (goto 4 (at "bits.rs" 22 5)))
+  (bb 3
+    (assign (p 0) (use (copy (p 2))) (at "bits.rs" 22 27))
+    (goto 4 (at "bits.rs" 22 5)))
+  (bb 4
+    (return (at "bits.rs" 23 2)))
+)
+(fn "fx_opt_gen2::bits::clamp_low_plus::<u16>"
+  (kind root) (def "fx_opt_gen2::bits::clamp_low_plus") (args (u16))
+  (item fn "clamp_low_plus")
+  (span "bits.rs" 26 1)
+  (argc 2)
+  (locals
+    (0 u8 mut)
+    (1 u16 imm)
+    (2 u8 imm)
+    (3 u8 imm)
+    (4 u8 mut)
+    (5 u8 imm)
+    (6 bool mut)
+    (7 u8 imm)
+    (8 bool mut)
+    (9 u8 mut)
+    (10 u8 mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "k" (p 2) (arg 2))
+  (debug "b" (p 3))
+  (debug "b" (p 5))
+  (debug "b" (p 7))
+  (bb 0
+    (call (fn "<u16 as fx_opt_gen2::bits::sealed::Prim>::low") (args (copy (p 1))) (p 4) 1 (at "bits.rs" 27 13)))
+  (bb 1
+    (assign (p 3) (bin and (move (p 4)) (int u8 7)) (at "bits.rs" 27 13))
+    (assign (p 6) (bin gt (copy (p 3)) (int u8 7)) (at "bits.rs" 28 16))
+    (switch (move (p 6)) (0 3) (otherwise 2) (at "bits.rs" 28 16)))
+  (bb 2
+    (assign (p 5) (use (int u8 7)) (at "bits.rs" 28 24))
+    (goto 4 (at "bits.rs" 28 13)))
+  (bb 3
+    (assign (p 5) (use (copy (p 3))) (at "bits.rs" 28 35))
+    (goto 4 (at "bits.rs" 28 13)))
+  (bb 4
+    (assign (p 9) (use (copy (p 5))) (at "bits.rs" 29 16))
+    (assign (p 8) (bin gt (move (p 9)) (int u8 7)) (at "bits.rs" 29 16))
+    (switch (move (p 8)) (0 6) (otherwise 5) (at "bits.rs" 29 16)))
+  (bb 5
+    (assign (p 7) (use (int u8 7)) (at "bits.rs" 29 24))
+    (goto 7 (at "bits.rs" 29 13)))
+  (bb 6
+    (assign (p 7) (use (copy (p 5))) (at "bits.rs" 29 35))
+    (goto 7 (at "bits.rs" 29 13)))
+  (bb 7
+    (assign (p 10) (use (copy (p 7))) (at "bits.rs" 30 5))
+    (call (fn "core::num::<impl u8>::wrapping_add") (args (move (p 10)) (copy (p 2))) (p 0) 8 (at "bits.rs" 30 5)))
+  (bb 8
+    (return (at "bits.rs" 31 2)))
+)
+(fn "fx_opt_gen2::bits::clamp_low_plus::<u32>"
+  (kind root) (def "fx_opt_gen2::bits::clamp_low_plus") (args (u32))
+  (item fn "clamp_low_plus")
+  (span "bits.rs" 26 1)
+  (argc 2)
+  (locals
+    (0 u8 mut)
+    (1 u32 imm)
+    (2 u8 imm)
+    (3 u8 imm)
+    (4 u8 mut)
+    (5 u8 imm)
+    (6 bool mut)
+    (7 u8 imm)
+    (8 bool mut)
+    (9 u8 mut)
+    (10 u8 mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "k" (p 2) (arg 2))
+  (debug "b" (p 3))
+  (debug "b" (p 5))
+  (debug "b" (p 7))
+  (bb 0
+    (call (fn "<u32 as fx_opt_gen2::bits::sealed::Prim>::low") (args (copy (p 1))) (p 4) 1 (at "bits.rs" 27 13)))
+  (bb 1
+    (assign (p 3) (bin and (move (p 4)) (int u8 7)) (at "bits.rs" 27 13))
+    (assign (p 6) (bin gt (copy (p 3)) (int u8 7)) (at "bits.rs" 28 16))
+    (switch (move (p 6)) (0 3) (otherwise 2) (at "bits.rs" 28 16)))
+  (bb 2
+    (assign (p 5) (use (int u8 7)) (at "bits.rs" 28 24))
+    (goto 4 (at "bits.rs" 28 13)))
+  (bb 3
+    (assign (p 5) (use (copy (p 3))) (at "bits.rs" 28 35))
+    (goto 4 (at "bits.rs" 28 13)))
+  (bb 4
+    (assign (p 9) (use (copy (p 5))) (at "bits.rs" 29 16))
+    (assign (p 8) (bin gt (move (p 9)) (int u8 7)) (at "bits.rs" 29 16))
+    (switch (move (p 8)) (0 6) (otherwise 5) (at "bits.rs" 29 16)))
+  (bb 5
+    (assign (p 7) (use (int u8 7)) (at "bits.rs" 29 24))
+    (goto 7 (at "bits.rs" 29 13)))
+  (bb 6
+    (assign (p 7) (use (copy (p 5))) (at "bits.rs" 29 35))
+    (goto 7 (at "bits.rs" 29 13)))
+  (bb 7
+    (assign (p 10) (use (copy (p 7))) (at "bits.rs" 30 5))
+    (call (fn "core::num::<impl u8>::wrapping_add") (args (move (p 10)) (copy (p 2))) (p 0) 8 (at "bits.rs" 30 5)))
+  (bb 8
+    (return (at "bits.rs" 31 2)))
+)
+(fn "fx_opt_gen2::bits::clamp_low_plus::<u64>"
+  (kind root) (def "fx_opt_gen2::bits::clamp_low_plus") (args (u64))
+  (item fn "clamp_low_plus")
+  (span "bits.rs" 26 1)
+  (argc 2)
+  (locals
+    (0 u8 mut)
+    (1 u64 imm)
+    (2 u8 imm)
+    (3 u8 imm)
+    (4 u8 mut)
+    (5 u8 imm)
+    (6 bool mut)
+    (7 u8 imm)
+    (8 bool mut)
+    (9 u8 mut)
+    (10 u8 mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "k" (p 2) (arg 2))
+  (debug "b" (p 3))
+  (debug "b" (p 5))
+  (debug "b" (p 7))
+  (bb 0
+    (call (fn "<u64 as fx_opt_gen2::bits::sealed::Prim>::low") (args (copy (p 1))) (p 4) 1 (at "bits.rs" 27 13)))
+  (bb 1
+    (assign (p 3) (bin and (move (p 4)) (int u8 7)) (at "bits.rs" 27 13))
+    (assign (p 6) (bin gt (copy (p 3)) (int u8 7)) (at "bits.rs" 28 16))
+    (switch (move (p 6)) (0 3) (otherwise 2) (at "bits.rs" 28 16)))
+  (bb 2
+    (assign (p 5) (use (int u8 7)) (at "bits.rs" 28 24))
+    (goto 4 (at "bits.rs" 28 13)))
+  (bb 3
+    (assign (p 5) (use (copy (p 3))) (at "bits.rs" 28 35))
+    (goto 4 (at "bits.rs" 28 13)))
+  (bb 4
+    (assign (p 9) (use (copy (p 5))) (at "bits.rs" 29 16))
+    (assign (p 8) (bin gt (move (p 9)) (int u8 7)) (at "bits.rs" 29 16))
+    (switch (move (p 8)) (0 6) (otherwise 5) (at "bits.rs" 29 16)))
+  (bb 5
+    (assign (p 7) (use (int u8 7)) (at "bits.rs" 29 24))
+    (goto 7 (at "bits.rs" 29 13)))
+  (bb 6
+    (assign (p 7) (use (copy (p 5))) (at "bits.rs" 29 35))
+    (goto 7 (at "bits.rs" 29 13)))
+  (bb 7
+    (assign (p 10) (use (copy (p 7))) (at "bits.rs" 30 5))
+    (call (fn "core::num::<impl u8>::wrapping_add") (args (move (p 10)) (copy (p 2))) (p 0) 8 (at "bits.rs" 30 5)))
+  (bb 8
+    (return (at "bits.rs" 31 2)))
+)
+(fn "core::num::<impl u8>::wrapping_add"
+  (kind callee) (def "core::num::<impl u8>::wrapping_add") (args ())
+  (item inherent u8 "wrapping_add")
+  (argc 2)
+  (locals
+    (0 u8 mut)
+    (1 u8 imm)
+    (2 u8 imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (bb 0
+    (assign (p 0) (bin add (copy (p 1)) (copy (p 2))))
+    (return))
+)

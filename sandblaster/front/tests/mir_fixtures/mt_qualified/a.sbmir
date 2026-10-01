@@ -1,0 +1,43 @@
+;; rustc's MIR of `fx_mt_qualified::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_mt_qualified")
+(module "fx_mt_qualified::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "9e33b049d426b200e8b296adbb428fbcbe8a5326cfc50c0e00ea0972500e3d19")
+(root "fx_mt_qualified::a::S::helper")
+(root "fx_mt_qualified::a::f")
+(adt-def "a::S" (path "fx_mt_qualified::a::S") (kind struct) (args ())
+  (variant 0 "S" 0 (no-glue)))
+(fn "fx_mt_qualified::a::S::helper"
+  (kind root) (def "fx_mt_qualified::a::S::helper") (args ())
+  (item inherent (adt "a::S") "helper")
+  (span "src/a.rs" 6 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (int u64 2) (int u64 0)) (at "src/a.rs" 7 9))
+    (assert (move (p 2)) false div-zero 1 (at "src/a.rs" 7 9)))
+  (bb 1
+    (assign (p 0) (bin div (copy (p 1)) (int u64 2)) (at "src/a.rs" 7 9))
+    (return (at "src/a.rs" 8 6)))
+)
+(fn "fx_mt_qualified::a::f"
+  (kind root) (def "fx_mt_qualified::a::f") (args ())
+  (item fn "f")
+  (span "src/a.rs" 11 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "fx_mt_qualified::a::S::helper") (args (copy (p 1))) (p 0) 1 (at "src/a.rs" 12 5)))
+  (bb 1
+    (return (at "src/a.rs" 13 2)))
+)

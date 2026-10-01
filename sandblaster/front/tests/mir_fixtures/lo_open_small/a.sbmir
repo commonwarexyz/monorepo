@@ -1,0 +1,90 @@
+;; rustc's MIR of `fx_lo_open_small::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lo_open_small")
+(module "fx_lo_open_small::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "48b167dae18610897c1315f176cd5d5f4894467bdbe616be5f883dbaf2e9df64")
+(root "<fx_lo_open_small::a::Small as fx_lo_open_small::Fam>::cap")
+(root "fx_lo_open_small::a::P::<fx_lo_open_small::a::Small>::new")
+(root "fx_lo_open_small::a::P::<fx_lo_open_small::a::Small>::get")
+(root "fx_lo_open_small::a::P::<fx_lo_open_small::a::Small>::room")
+(note "<fx_lo_open_small::a::Big as fx_lo_open_small::Fam>::cap: not extracted: an impl of an open trait for another type than its declared instance")
+(adt-def "a::P<a::Small>" (path "fx_lo_open_small::a::P") (kind struct) (args ((adt "a::Small")))
+  (variant 0 "P" 0 (field "0" u64) (field "1" (adt "std::marker::PhantomData<a::Small>")) (no-glue)))
+(adt-def "a::Small" (path "fx_lo_open_small::a::Small") (kind struct) (args ())
+  (variant 0 "Small" 0 (no-glue)))
+(adt-def "std::marker::PhantomData<a::Small>" (path "std::marker::PhantomData") (kind struct) (args ((adt "a::Small")))
+  (variant 0 "PhantomData" 0 (no-glue)))
+(fn "<fx_lo_open_small::a::Small as fx_lo_open_small::Fam>::cap"
+  (kind root) (def "<fx_lo_open_small::a::Small as fx_lo_open_small::Fam>::cap") (args ())
+  (item impl (adt "a::Small") "Fam" () "cap")
+  (span "src/a.rs" 12 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin gt (copy (p 1)) (const-item (adt "a::Small") "MAX" (int u64 100))) (at "src/a.rs" 13 12))
+    (switch (move (p 2)) (0 2) (otherwise 1) (at "src/a.rs" 13 12)))
+  (bb 1
+    (assign (p 0) (use (const-item (adt "a::Small") "MAX" (int u64 100))) (at "src/a.rs" 13 28))
+    (goto 3 (at "src/a.rs" 13 9)))
+  (bb 2
+    (assign (p 0) (use (copy (p 1))) (at "src/a.rs" 13 47))
+    (goto 3 (at "src/a.rs" 13 9)))
+  (bb 3
+    (return (at "src/a.rs" 14 6)))
+)
+(fn "fx_lo_open_small::a::P::<fx_lo_open_small::a::Small>::new"
+  (kind root) (def "fx_lo_open_small::a::P::<F>::new") (args ((adt "a::Small")))
+  (item inherent (adt "a::P<a::Small>") "new")
+  (span "src/a.rs" 27 5)
+  (argc 1)
+  (locals
+    (0 (adt "a::P<a::Small>") mut)
+    (1 u64 imm)
+    (2 u64 mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "<fx_lo_open_small::a::Small as fx_lo_open_small::Fam>::cap") (args (copy (p 1))) (p 2) 1 (at "src/a.rs" 28 14)))
+  (bb 1
+    (assign (p 0) (agg (adt (adt "a::P<a::Small>") 0) (move (p 2)) (zst (adt "std::marker::PhantomData<a::Small>"))) (at "src/a.rs" 28 9))
+    (return (at "src/a.rs" 29 6)))
+)
+(fn "fx_lo_open_small::a::P::<fx_lo_open_small::a::Small>::get"
+  (kind root) (def "fx_lo_open_small::a::P::<F>::get") (args ((adt "a::Small")))
+  (item inherent (adt "a::P<a::Small>") "get")
+  (span "src/a.rs" 30 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 (ref shared (adt "a::P<a::Small>")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 deref (field 0 u64)))) (at "src/a.rs" 31 9))
+    (return (at "src/a.rs" 32 6)))
+)
+(fn "fx_lo_open_small::a::P::<fx_lo_open_small::a::Small>::room"
+  (kind root) (def "fx_lo_open_small::a::P::<F>::room") (args ((adt "a::Small")))
+  (item inherent (adt "a::P<a::Small>") "room")
+  (span "src/a.rs" 33 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 u64 mut)
+    (3 (tuple u64 bool) mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "<fx_lo_open_small::a::Small as fx_lo_open_small::Fam>::cap") (args (copy (p 1))) (p 2) 1 (at "src/a.rs" 34 18)))
+  (bb 1
+    (assign (p 3) (checked sub (const-item (adt "a::Small") "MAX" (int u64 100)) (copy (p 2))) (at "src/a.rs" 34 9))
+    (assert (move (p 3 (field 1 bool))) false overflow 2 (at "src/a.rs" 34 9)))
+  (bb 2
+    (assign (p 0) (use (move (p 3 (field 0 u64)))) (at "src/a.rs" 34 9))
+    (return (at "src/a.rs" 35 6)))
+)

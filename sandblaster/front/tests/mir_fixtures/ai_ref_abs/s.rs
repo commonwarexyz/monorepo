@@ -1,0 +1,1 @@
+pub fn f(a: u32) -> u32 { (a as i32).abs() as u32 }

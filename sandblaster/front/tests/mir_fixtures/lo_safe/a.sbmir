@@ -1,0 +1,26 @@
+;; rustc's MIR of `fx_lo_safe::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lo_safe")
+(module "fx_lo_safe::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "5ae39d3cb6ebb5562079981d10e284e02cb479d5134f60b37c8b3c4c7934760a")
+(root "fx_lo_safe::a::half")
+(fn "fx_lo_safe::a::half"
+  (kind root) (def "fx_lo_safe::a::half") (args ())
+  (item fn "half")
+  (span "src/a.rs" 1 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (int u64 2) (int u64 0)) (at "src/a.rs" 2 5))
+    (assert (move (p 2)) false div-zero 1 (at "src/a.rs" 2 5)))
+  (bb 1
+    (assign (p 0) (bin div (copy (p 1)) (int u64 2)) (at "src/a.rs" 2 5))
+    (return (at "src/a.rs" 3 2)))
+)

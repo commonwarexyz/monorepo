@@ -1,0 +1,1 @@
+pub fn f(a: u32) -> u64 { (a as i32) as u64 }

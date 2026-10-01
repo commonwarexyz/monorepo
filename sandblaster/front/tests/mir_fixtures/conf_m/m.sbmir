@@ -1,0 +1,829 @@
+;; rustc's MIR of `fx_conf_m::m`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_conf_m")
+(module "fx_conf_m::m")
+(overflow-checks on)
+(exclude)
+(source "m.rs" "e6c6caaa9eb26f967fd9c9f59d962869413cfbe39a4f426c764c99572d05e401")
+(root "fx_conf_m::m::Pos::new")
+(root "<fx_conf_m::m::Pos as std::ops::Add<u64>>::add")
+(root "<fx_conf_m::m::Pos as std::ops::Deref>::deref")
+(root "<fx_conf_m::m::Pos as std::cmp::PartialEq<u64>>::eq")
+(root "fx_conf_m::m::<impl std::cmp::PartialEq<fx_conf_m::m::Pos> for u64>::eq")
+(root "fx_conf_m::m::next")
+(root "fx_conf_m::m::is_at")
+(root "fx_conf_m::m::at_is")
+(root "fx_conf_m::m::zero")
+(root "fx_conf_m::m::dec2")
+(root "fx_conf_m::m::half_or_zero")
+(root "fx_conf_m::m::shl_or_zero")
+(root "fx_conf_m::m::ones")
+(root "fx_conf_m::m::tripled")
+(root "fx_conf_m::m::halved")
+(root "<fx_conf_m::m::Down as std::iter::Iterator>::next")
+(root "fx_conf_m::m::Down::new")
+(root "fx_conf_m::m::down")
+(root "fx_conf_m::m::count")
+(root "<fx_conf_m::m::Pos as std::clone::Clone>::clone")
+(root "<fx_conf_m::m::Pos as std::default::Default>::default")
+(root "<fx_conf_m::m::Pos as std::cmp::PartialEq>::eq")
+(root "<fx_conf_m::m::Pos as std::cmp::Eq>::assert_fields_are_eq")
+(note "<fx_conf_m::m::Pos as std::fmt::Debug>::fmt: not extracted: an impl of `Debug` (SBMIR_SKIP_TRAITS)")
+(adt-def "m::Down" (path "fx_conf_m::m::Down") (kind struct) (args ())
+  (variant 0 "Down" 0 (field "n" u32) (no-glue)))
+(adt-def "m::Pos" (path "fx_conf_m::m::Pos") (kind struct) (args ())
+  (variant 0 "Pos" 0 (field "0" u64) (no-glue)))
+(adt-def "std::fmt::Arguments<'_>" (path "std::fmt::Arguments") (kind struct) (args ())
+  (variant 0 "Arguments" 0 (field "template" (adt "std::ptr::NonNull<u8>")) (field "args" (adt "std::ptr::NonNull<core::fmt::rt::Argument<'_>>")) (no-glue)))
+(adt-def "std::option::Option<u32>" (path "std::option::Option") (kind enum) (args (u32))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" u32) (no-glue)))
+(adt-def "std::option::Option<u64>" (path "std::option::Option") (kind enum) (args (u64))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" u64) (no-glue)))
+(adt-def "std::ptr::NonNull<core::fmt::rt::Argument<'_>>" (path "std::ptr::NonNull") (kind struct) (args ((adt "core::fmt::rt::Argument<'_>")))
+  (variant 0 "NonNull" 0 (field "pointer" (unsupported "type Pat(Ty { id: 81, kind: RigidTy(RawPtr(Ty { id: 75, kind: RigidTy(Adt(AdtDef(DefId { id: 67, name: \"core::fmt::rt::Argument\" }), GenericArgs([Lifetime(Region { kind: ReErased })]))) }, Not)) }, NotNull)")) (no-glue)))
+(adt-def "std::ptr::NonNull<u8>" (path "std::ptr::NonNull") (kind struct) (args (u8))
+  (variant 0 "NonNull" 0 (field "pointer" (unsupported "type Pat(Ty { id: 68, kind: RigidTy(RawPtr(Ty { id: 74, kind: RigidTy(Uint(U8)) }, Not)) }, NotNull)")) (no-glue)))
+(adt-def "core::fmt::rt::Argument<'_>" (path "core::fmt::rt::Argument") (kind struct) (args ())
+  (variant 0 "Argument" 0 (field "ty" (adt "core::fmt::rt::ArgumentType<'_>")) (no-glue)))
+(adt-def "core::fmt::rt::ArgumentType<'_>" (path "core::fmt::rt::ArgumentType") (kind enum) (args ())
+  (variant 0 "Placeholder" 0 (field "value" (adt "std::ptr::NonNull<()>")) (field "formatter" (unsupported "type FnPtr(Binder { value: FnSig { inputs_and_output: [Ty { id: 84, kind: RigidTy(Adt(AdtDef(DefId { id: 58, name: \"std::ptr::NonNull\" }), GenericArgs([Type(Ty { id: 27, kind: RigidTy(Tuple([])) })]))) }, Ty { id: 86, kind: RigidTy(Ref(Region { kind: ReBound(0, BoundRegion { var: 0, kind: BrAnon }) }, Ty { id: 88, kind: RigidTy(Adt(AdtDef(DefId { id: 74, name: \"std::fmt::Formatter\" }), GenericArgs([Lifetime(Region { kind: ReBound(0, BoundRegion { var: 1, kind: BrAnon }) })]))) }, Mut)) }, Ty { id: 87, kind: RigidTy(Adt(AdtDef(DefId { id: 75, name: \"std::result::Result\" }), GenericArgs([Type(Ty { id: 27, kind: RigidTy(Tuple([])) }), Type(Ty { id: 89, kind: RigidTy(Adt(AdtDef(DefId { id: 76, name: \"std::fmt::Error\" }), GenericArgs([]))) })]))) }], c_variadic: false, safety: Unsafe, abi: Rust }, bound_vars: [Region(BrAnon), Region(BrAnon)] })")) (field "_lifetime" (adt "std::marker::PhantomData<&()>")) (no-glue))
+  (variant 1 "Count" 1 (field "0" u16) (no-glue)))
+(adt-def "std::marker::PhantomData<&()>" (path "std::marker::PhantomData") (kind struct) (args ((ref shared unit)))
+  (variant 0 "PhantomData" 0 (no-glue)))
+(adt-def "std::ptr::NonNull<()>" (path "std::ptr::NonNull") (kind struct) (args (unit))
+  (variant 0 "NonNull" 0 (field "pointer" (unsupported "type Pat(Ty { id: 93, kind: RigidTy(RawPtr(Ty { id: 27, kind: RigidTy(Tuple([])) }, Not)) }, NotNull)")) (no-glue)))
+(fn "fx_conf_m::m::Pos::new"
+  (kind root) (def "fx_conf_m::m::Pos::new") (args ())
+  (item inherent (adt "m::Pos") "new")
+  (span "m.rs" 7 5)
+  (argc 1)
+  (locals
+    (0 (adt "m::Pos") mut)
+    (1 u64 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "m::Pos") 0) (copy (p 1))) (at "m.rs" 8 9))
+    (return (at "m.rs" 9 6)))
+)
+(fn "<fx_conf_m::m::Pos as std::ops::Add<u64>>::add"
+  (kind root) (def "<fx_conf_m::m::Pos as std::ops::Add<u64>>::add") (args ())
+  (item impl (adt "m::Pos") "Add" (u64) "add")
+  (span "m.rs" 14 5)
+  (argc 2)
+  (locals
+    (0 (adt "m::Pos") mut)
+    (1 (adt "m::Pos") imm)
+    (2 u64 imm)
+    (3 u64 mut)
+    (4 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "r" (p 2) (arg 2))
+  (bb 0
+    (assign (p 4) (use (copy (p 1 (field 0 u64)))) (at "m.rs" 15 14))
+    (call (fn "core::num::<impl u64>::wrapping_add") (args (move (p 4)) (copy (p 2))) (p 3) 1 (at "m.rs" 15 14)))
+  (bb 1
+    (assign (p 0) (agg (adt (adt "m::Pos") 0) (move (p 3))) (at "m.rs" 15 9))
+    (return (at "m.rs" 16 6)))
+)
+(fn "<fx_conf_m::m::Pos as std::ops::Deref>::deref"
+  (kind root) (def "<fx_conf_m::m::Pos as std::ops::Deref>::deref") (args ())
+  (item impl (adt "m::Pos") "Deref" () "deref")
+  (span "m.rs" 21 5)
+  (argc 1)
+  (locals
+    (0 (ref shared u64) mut)
+    (1 (ref shared (adt "m::Pos")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (ref shared (p 1 deref (field 0 u64))) (at "m.rs" 22 9))
+    (return (at "m.rs" 23 6)))
+)
+(fn "<fx_conf_m::m::Pos as std::cmp::PartialEq<u64>>::eq"
+  (kind root) (def "<fx_conf_m::m::Pos as std::cmp::PartialEq<u64>>::eq") (args ())
+  (item impl (adt "m::Pos") "PartialEq" (u64) "eq")
+  (span "m.rs" 27 5)
+  (argc 2)
+  (locals
+    (0 bool mut)
+    (1 (ref shared (adt "m::Pos")) imm)
+    (2 (ref shared u64) imm)
+    (3 u64 mut)
+    (4 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "o" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (use (copy (p 1 deref (field 0 u64)))) (at "m.rs" 28 9))
+    (assign (p 4) (use (copy (p 2 deref))) (at "m.rs" 28 19))
+    (assign (p 0) (bin eq (move (p 3)) (move (p 4))) (at "m.rs" 28 9))
+    (return (at "m.rs" 29 6)))
+)
+(fn "fx_conf_m::m::<impl std::cmp::PartialEq<fx_conf_m::m::Pos> for u64>::eq"
+  (kind root) (def "fx_conf_m::m::<impl std::cmp::PartialEq<fx_conf_m::m::Pos> for u64>::eq") (args ())
+  (item impl u64 "PartialEq" ((adt "m::Pos")) "eq")
+  (span "m.rs" 33 5)
+  (argc 2)
+  (locals
+    (0 bool mut)
+    (1 (ref shared u64) imm)
+    (2 (ref shared (adt "m::Pos")) imm)
+    (3 u64 mut)
+    (4 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "o" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (use (copy (p 1 deref))) (at "m.rs" 34 9))
+    (assign (p 4) (use (copy (p 2 deref (field 0 u64)))) (at "m.rs" 34 18))
+    (assign (p 0) (bin eq (move (p 3)) (move (p 4))) (at "m.rs" 34 9))
+    (return (at "m.rs" 35 6)))
+)
+(fn "fx_conf_m::m::next"
+  (kind root) (def "fx_conf_m::m::next") (args ())
+  (item fn "next")
+  (span "m.rs" 38 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 (adt "m::Pos") imm)
+    (2 (adt "m::Pos") imm)
+    (3 (ref shared u64) mut)
+    (4 (ref shared (adt "m::Pos")) mut))
+  (debug "p" (p 1) (arg 1))
+  (debug "q" (p 2))
+  (bb 0
+    (call (fn "<fx_conf_m::m::Pos as std::ops::Add<u64>>::add") (args (copy (p 1)) (int u64 1)) (p 2) 1 (at "m.rs" 39 13)))
+  (bb 1
+    (assign (p 4) (ref shared (p 2)) (at "m.rs" 40 6))
+    (call (fn "<fx_conf_m::m::Pos as std::ops::Deref>::deref") (args (move (p 4))) (p 3) 2 (at "m.rs" 40 5)))
+  (bb 2
+    (assign (p 0) (use (copy (p 3 deref))) (at "m.rs" 40 5))
+    (return (at "m.rs" 41 2)))
+)
+(fn "fx_conf_m::m::is_at"
+  (kind root) (def "fx_conf_m::m::is_at") (args ())
+  (item fn "is_at")
+  (span "m.rs" 43 1)
+  (argc 2)
+  (locals
+    (0 bool mut)
+    (1 (adt "m::Pos") imm)
+    (2 u64 imm)
+    (3 (ref shared (adt "m::Pos")) mut)
+    (4 (ref shared u64) mut))
+  (debug "p" (p 1) (arg 1))
+  (debug "x" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (ref shared (p 1)) (at "m.rs" 44 5))
+    (assign (p 4) (ref shared (p 2)) (at "m.rs" 44 10))
+    (call (fn "<fx_conf_m::m::Pos as std::cmp::PartialEq<u64>>::eq") (args (move (p 3)) (move (p 4))) (p 0) 1 (at "m.rs" 44 5)))
+  (bb 1
+    (return (at "m.rs" 45 2)))
+)
+(fn "fx_conf_m::m::at_is"
+  (kind root) (def "fx_conf_m::m::at_is") (args ())
+  (item fn "at_is")
+  (span "m.rs" 47 1)
+  (argc 2)
+  (locals
+    (0 bool mut)
+    (1 u64 imm)
+    (2 (adt "m::Pos") imm)
+    (3 (ref shared u64) mut)
+    (4 (ref shared (adt "m::Pos")) mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "p" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (ref shared (p 1)) (at "m.rs" 48 5))
+    (assign (p 4) (ref shared (p 2)) (at "m.rs" 48 10))
+    (call (fn "fx_conf_m::m::<impl std::cmp::PartialEq<fx_conf_m::m::Pos> for u64>::eq") (args (move (p 3)) (move (p 4))) (p 0) 1 (at "m.rs" 48 5)))
+  (bb 1
+    (return (at "m.rs" 49 2)))
+)
+(fn "fx_conf_m::m::zero"
+  (kind root) (def "fx_conf_m::m::zero") (args ())
+  (item fn "zero")
+  (span "m.rs" 51 1)
+  (argc 0)
+  (locals
+    (0 u64 mut)
+    (1 (adt "m::Pos") imm)
+    (2 (ref shared u64) mut)
+    (3 (ref shared (adt "m::Pos")) mut))
+  (debug "z" (p 1))
+  (bb 0
+    (call (fn "<fx_conf_m::m::Pos as std::default::Default>::default") (args) (p 1) 1 (at "m.rs" 52 13)))
+  (bb 1
+    (assign (p 3) (ref shared (p 1)) (at "m.rs" 53 6))
+    (call (fn "<fx_conf_m::m::Pos as std::ops::Deref>::deref") (args (move (p 3))) (p 2) 2 (at "m.rs" 53 5)))
+  (bb 2
+    (assign (p 0) (use (copy (p 2 deref))) (at "m.rs" 53 5))
+    (return (at "m.rs" 54 2)))
+)
+(fn "fx_conf_m::m::dec2"
+  (kind root) (def "fx_conf_m::m::dec2") (args ())
+  (item fn "dec2")
+  (span "m.rs" 56 1)
+  (argc 1)
+  (locals
+    (0 (adt "std::option::Option<u64>") mut)
+    (1 (adt "std::option::Option<u64>") imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "std::option::Option::<u64>::and_then::<u64, {closure@m.rs:57:16: 57:19}>") (args (copy (p 1)) (zst (closure "fx_conf_m::m::dec2::{closure#0}" unit))) (p 0) 1 (at "m.rs" 57 5)))
+  (bb 1
+    (return (at "m.rs" 58 2)))
+)
+(fn "fx_conf_m::m::half_or_zero"
+  (kind root) (def "fx_conf_m::m::half_or_zero") (args ())
+  (item fn "half_or_zero")
+  (span "m.rs" 60 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 (adt "std::option::Option<u64>") imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "std::option::Option::<u64>::map_or::<u64, {closure@m.rs:61:20: 61:23}>") (args (copy (p 1)) (int u64 0) (zst (closure "fx_conf_m::m::half_or_zero::{closure#0}" unit))) (p 0) 1 (at "m.rs" 61 5)))
+  (bb 1
+    (return (at "m.rs" 62 2)))
+)
+(fn "fx_conf_m::m::shl_or_zero"
+  (kind root) (def "fx_conf_m::m::shl_or_zero") (args ())
+  (item fn "shl_or_zero")
+  (span "m.rs" 64 1)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 u32 imm)
+    (3 (adt "std::option::Option<u64>") mut)
+    (4 isize mut)
+    (5 u64 imm))
+  (debug "x" (p 1) (arg 1))
+  (debug "s" (p 2) (arg 2))
+  (debug "v" (p 5))
+  (bb 0
+    (call (fn "core::num::<impl u64>::checked_shl") (args (copy (p 1)) (copy (p 2))) (p 3) 1 (at "m.rs" 65 11)))
+  (bb 1
+    (assign (p 4) (discr (p 3)) (at "m.rs" 65 11))
+    (switch (move (p 4)) (0 3) (1 4) (otherwise 2) (at "m.rs" 65 5)))
+  (bb 2
+    (unreachable (at "m.rs" 65 11)))
+  (bb 3
+    (assign (p 0) (use (int u64 0)) (at "m.rs" 67 17))
+    (goto 5 (at "m.rs" 67 17)))
+  (bb 4
+    (assign (p 5) (use (copy (p 3 (downcast 1) (field 0 u64)))) (at "m.rs" 66 14))
+    (assign (p 0) (use (copy (p 5))) (at "m.rs" 66 20))
+    (goto 5 (at "m.rs" 66 20)))
+  (bb 5
+    (return (at "m.rs" 69 2)))
+)
+(fn "fx_conf_m::m::ones"
+  (kind root) (def "fx_conf_m::m::ones") (args ())
+  (item fn "ones")
+  (span "m.rs" 71 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u64 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "core::num::<impl u64>::trailing_ones") (args (copy (p 1))) (p 0) 1 (at "m.rs" 72 5)))
+  (bb 1
+    (return (at "m.rs" 73 2)))
+)
+(fn "fx_conf_m::m::tripled"
+  (kind root) (def "fx_conf_m::m::tripled") (args ())
+  (item fn "tripled")
+  (span "m.rs" 75 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u32 imm)
+    (2 (closure "fx_conf_m::m::tripled::{closure#0}" unit) imm)
+    (3 (ref shared (closure "fx_conf_m::m::tripled::{closure#0}" unit)) mut)
+    (4 (tuple u64) mut)
+    (5 u64 mut))
+  (debug "n" (p 1) (arg 1))
+  (debug-other "f")
+  (bb 0
+    (assign (p 3) (ref shared (p 2)) (at "m.rs" 77 5))
+    (assign (p 5) (cast int-to-int (copy (p 1)) u64) (at "m.rs" 77 7))
+    (assign (p 4) (agg (tuple) (move (p 5))) (at "m.rs" 77 5))
+    (call (fn "fx_conf_m::m::tripled::{closure#0}") (args (move (p 3)) (move (p 4))) (p 0) 1 (at "m.rs" 77 5)))
+  (bb 1
+    (return (at "m.rs" 78 2)))
+)
+(fn "fx_conf_m::m::halved"
+  (kind root) (def "fx_conf_m::m::halved") (args ())
+  (item fn "halved")
+  (span "m.rs" 80 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut)
+    (3 u64 mut)
+    (4 bool mut)
+    (5 never imm)
+    (6 (adt "std::fmt::Arguments<'_>") mut)
+    (7 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 4) (bin eq (int u64 2) (int u64 0)) (at "m.rs" 81 13))
+    (assert (move (p 4)) false div-zero 1 (at "m.rs" 81 13)))
+  (bb 1
+    (assign (p 3) (bin div (copy (p 1)) (int u64 2)) (at "m.rs" 81 13))
+    (assign (p 2) (bin le (move (p 3)) (copy (p 1))) (at "m.rs" 81 13))
+    (switch (move (p 2)) (0 3) (otherwise 2) (at "m.rs" 81 13)))
+  (bb 2
+    (assign (p 7) (bin eq (int u64 2) (int u64 0)) (at "m.rs" 82 5))
+    (assert (move (p 7)) false div-zero 5 (at "m.rs" 82 5)))
+  (bb 3
+    (call (fn "std::fmt::Arguments::<'_>::from_str") (args (unsupported "constant of type (ref shared str)")) (p 6) 4))
+  (bb 4
+    (call (diverge "core::panicking::panic_fmt") (args (move (p 6))) (p 5) none))
+  (bb 5
+    (assign (p 0) (bin div (copy (p 1)) (int u64 2)) (at "m.rs" 82 5))
+    (return (at "m.rs" 83 2)))
+)
+(fn "<fx_conf_m::m::Down as std::iter::Iterator>::next"
+  (kind root) (def "<fx_conf_m::m::Down as std::iter::Iterator>::next") (args ())
+  (item impl (adt "m::Down") "Iterator" () "next")
+  (span "m.rs" 91 5)
+  (argc 1)
+  (locals
+    (0 (adt "std::option::Option<u32>") mut)
+    (1 (ref mut (adt "m::Down")) imm)
+    (2 bool mut)
+    (3 u32 mut)
+    (4 (tuple u32 bool) mut)
+    (5 u32 mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 3) (use (copy (p 1 deref (field 0 u32)))) (at "m.rs" 92 12))
+    (assign (p 2) (bin eq (move (p 3)) (int u32 0)) (at "m.rs" 92 12))
+    (switch (move (p 2)) (0 2) (otherwise 1) (at "m.rs" 92 12)))
+  (bb 1
+    (assign (p 0) (agg (adt (adt "std::option::Option<u32>") 0)) (at "m.rs" 93 20))
+    (goto 4 (at "m.rs" 97 6)))
+  (bb 2
+    (assign (p 4) (checked sub (copy (p 1 deref (field 0 u32))) (int u32 1)) (at "m.rs" 95 9))
+    (assert (move (p 4 (field 1 bool))) false overflow 3 (at "m.rs" 95 9)))
+  (bb 3
+    (assign (p 1 deref (field 0 u32)) (use (move (p 4 (field 0 u32)))) (at "m.rs" 95 9))
+    (assign (p 5) (use (copy (p 1 deref (field 0 u32)))) (at "m.rs" 96 14))
+    (assign (p 0) (agg (adt (adt "std::option::Option<u32>") 1) (move (p 5))) (at "m.rs" 96 9))
+    (goto 4 (at "m.rs" 97 6)))
+  (bb 4
+    (return (at "m.rs" 97 6)))
+)
+(fn "fx_conf_m::m::Down::new"
+  (kind root) (def "fx_conf_m::m::Down::new") (args ())
+  (item inherent (adt "m::Down") "new")
+  (span "m.rs" 101 5)
+  (argc 1)
+  (locals
+    (0 (adt "m::Down") mut)
+    (1 u32 imm))
+  (debug "n" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "m::Down") 0) (copy (p 1))) (at "m.rs" 102 9))
+    (return (at "m.rs" 103 6)))
+)
+(fn "fx_conf_m::m::down"
+  (kind root) (def "fx_conf_m::m::down") (args ())
+  (item fn "down")
+  (span "m.rs" 106 1)
+  (argc 1)
+  (locals
+    (0 (adt "m::Down") mut)
+    (1 u16 imm)
+    (2 u32 mut))
+  (debug "n" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (cast int-to-int (copy (p 1)) u32) (at "m.rs" 107 15))
+    (call (fn "fx_conf_m::m::Down::new") (args (move (p 2))) (p 0) 1 (at "m.rs" 107 5)))
+  (bb 1
+    (return (at "m.rs" 108 2)))
+)
+(fn "fx_conf_m::m::count"
+  (kind root) (def "fx_conf_m::m::count") (args ())
+  (item fn "count")
+  (span "m.rs" 110 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u16 imm)
+    (2 u64 mut)
+    (3 (adt "m::Down") mut)
+    (4 (adt "m::Down") mut)
+    (5 (adt "m::Down") mut)
+    (6 (adt "std::option::Option<u32>") mut)
+    (7 (ref mut (adt "m::Down")) mut)
+    (8 isize mut)
+    (9 u32 imm)
+    (10 (tuple u64 bool) mut))
+  (debug "n" (p 1) (arg 1))
+  (debug "acc" (p 2))
+  (debug "iter" (p 5))
+  (debug "_i" (p 9))
+  (bb 0
+    (assign (p 2) (use (int u64 0)) (at "m.rs" 111 19))
+    (call (fn "fx_conf_m::m::down") (args (copy (p 1))) (p 4) 1 (at "m.rs" 112 15)))
+  (bb 1
+    (call (fn "<fx_conf_m::m::Down as std::iter::IntoIterator>::into_iter") (args (move (p 4))) (p 3) 2 (at "m.rs" 112 15)))
+  (bb 2
+    (assign (p 5) (use (move (p 3))) (at "m.rs" 112 15))
+    (goto 3 (at "m.rs" 112 5)))
+  (bb 3
+    (assign (p 7) (ref mut (p 5)) (at "m.rs" 112 15))
+    (call (fn "<fx_conf_m::m::Down as std::iter::Iterator>::next") (args (copy (p 7))) (p 6) 4 (at "m.rs" 112 15)))
+  (bb 4
+    (assign (p 8) (discr (p 6)) (at "m.rs" 112 15))
+    (switch (move (p 8)) (0 7) (1 6) (otherwise 5) (at "m.rs" 112 15)))
+  (bb 5
+    (unreachable (at "m.rs" 112 15)))
+  (bb 6
+    (assign (p 9) (use (copy (p 6 (downcast 1) (field 0 u32)))) (at "m.rs" 112 9))
+    (assign (p 10) (checked add (copy (p 2)) (int u64 1)) (at "m.rs" 113 9))
+    (assert (move (p 10 (field 1 bool))) false overflow 8 (at "m.rs" 113 9)))
+  (bb 7
+    (assign (p 0) (use (copy (p 2))) (at "m.rs" 115 5))
+    (return (at "m.rs" 116 2)))
+  (bb 8
+    (assign (p 2) (use (move (p 10 (field 0 u64)))) (at "m.rs" 113 9))
+    (goto 3 (at "m.rs" 112 5)))
+)
+(fn "<fx_conf_m::m::Pos as std::clone::Clone>::clone"
+  (kind root) (def "<fx_conf_m::m::Pos as std::clone::Clone>::clone") (args ())
+  (item impl (adt "m::Pos") "Clone" () "clone")
+  (span "m.rs" 3 10)
+  (argc 1)
+  (locals
+    (0 (adt "m::Pos") mut)
+    (1 (ref shared (adt "m::Pos")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 deref))) (at "m.rs" 3 10))
+    (return (at "m.rs" 3 15)))
+)
+(fn "<fx_conf_m::m::Pos as std::default::Default>::default"
+  (kind root) (def "<fx_conf_m::m::Pos as std::default::Default>::default") (args ())
+  (item impl (adt "m::Pos") "Default" () "default")
+  (span "m.rs" 3 30)
+  (argc 0)
+  (locals
+    (0 (adt "m::Pos") mut)
+    (1 u64 mut))
+  (bb 0
+    (call (fn "<u64 as std::default::Default>::default") (args) (p 1) 1 (at "m.rs" 4 16)))
+  (bb 1
+    (assign (p 0) (agg (adt (adt "m::Pos") 0) (move (p 1))) (at "m.rs" 3 30))
+    (return (at "m.rs" 3 37)))
+)
+(fn "<fx_conf_m::m::Pos as std::cmp::PartialEq>::eq"
+  (kind root) (def "<fx_conf_m::m::Pos as std::cmp::PartialEq>::eq") (args ())
+  (item impl (adt "m::Pos") "PartialEq" ((adt "m::Pos")) "eq")
+  (span "m.rs" 3 39)
+  (argc 2)
+  (locals
+    (0 bool mut)
+    (1 (ref shared (adt "m::Pos")) imm)
+    (2 (ref shared (adt "m::Pos")) imm)
+    (3 u64 mut)
+    (4 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "other" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (use (copy (p 1 deref (field 0 u64)))) (at "m.rs" 4 16))
+    (assign (p 4) (use (copy (p 2 deref (field 0 u64)))) (at "m.rs" 4 16))
+    (assign (p 0) (bin eq (move (p 3)) (move (p 4))) (at "m.rs" 4 16))
+    (return (at "m.rs" 3 48)))
+)
+(fn "<fx_conf_m::m::Pos as std::cmp::Eq>::assert_fields_are_eq"
+  (kind root) (def "<fx_conf_m::m::Pos as std::cmp::Eq>::assert_fields_are_eq") (args ())
+  (item impl (adt "m::Pos") "Eq" () "assert_fields_are_eq")
+  (span "m.rs" 3 50)
+  (argc 1)
+  (locals
+    (0 unit mut)
+    (1 (ref shared (adt "m::Pos")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (return (at "m.rs" 3 52)))
+)
+(fn "core::num::<impl u64>::wrapping_add"
+  (kind callee) (def "core::num::<impl u64>::wrapping_add") (args ())
+  (item inherent u64 "wrapping_add")
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 u64 imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (bb 0
+    (assign (p 0) (bin add (copy (p 1)) (copy (p 2))))
+    (return))
+)
+(fn "std::option::Option::<u64>::and_then::<u64, {closure@m.rs:57:16: 57:19}>"
+  (kind closure) (def "std::option::Option::<T>::and_then") (args ())
+  (item inherent (adt "std::option::Option<u64>") "and_then")
+  (argc 2)
+  (locals
+    (0 (adt "std::option::Option<u64>") mut)
+    (1 (adt "std::option::Option<u64>") imm)
+    (2 (closure "fx_conf_m::m::dec2::{closure#0}" unit) imm)
+    (3 isize mut)
+    (4 u64 imm)
+    (5 (closure "fx_conf_m::m::dec2::{closure#0}" unit) mut)
+    (6 (tuple u64) mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "f" (p 2) (arg 2))
+  (debug "x" (p 4))
+  (bb 0
+    (assign (p 3) (discr (p 1)))
+    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
+  (bb 1
+    (unreachable))
+  (bb 2
+    (assign (p 0) (agg (adt (adt "std::option::Option<u64>") 0)))
+    (drop (p 2) no-glue 5))
+  (bb 3
+    (assign (p 4) (use (move (p 1 (downcast 1) (field 0 u64)))))
+    (assign (p 5) (use (move (p 2))))
+    (assign (p 6) (agg (tuple) (copy (p 4))))
+    (call (fn "fx_conf_m::m::dec2::{closure#0}") (args (move (p 5)) (move (p 6))) (p 0) 4))
+  (bb 4
+    (goto 5))
+  (bb 5
+    (return))
+)
+(fn "std::option::Option::<u64>::map_or::<u64, {closure@m.rs:61:20: 61:23}>"
+  (kind closure) (def "std::option::Option::<T>::map_or") (args ())
+  (item inherent (adt "std::option::Option<u64>") "map_or")
+  (argc 3)
+  (locals
+    (0 u64 mut)
+    (1 (adt "std::option::Option<u64>") imm)
+    (2 u64 imm)
+    (3 (closure "fx_conf_m::m::half_or_zero::{closure#0}" unit) imm)
+    (4 isize mut)
+    (5 u64 imm)
+    (6 (closure "fx_conf_m::m::half_or_zero::{closure#0}" unit) mut)
+    (7 (tuple u64) mut)
+    (8 bool mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "default" (p 2) (arg 2))
+  (debug "f" (p 3) (arg 3))
+  (debug "t" (p 5))
+  (bb 0
+    (assign (p 8) (use (int bool 1)))
+    (assign (p 4) (discr (p 1)))
+    (switch (move (p 4)) (0 2) (1 3) (otherwise 1)))
+  (bb 1
+    (unreachable))
+  (bb 2
+    (assign (p 8) (use (int bool 0)))
+    (assign (p 0) (use (move (p 2))))
+    (drop (p 3) no-glue 5))
+  (bb 3
+    (assign (p 5) (use (move (p 1 (downcast 1) (field 0 u64)))))
+    (assign (p 6) (use (move (p 3))))
+    (assign (p 7) (agg (tuple) (copy (p 5))))
+    (call (fn "fx_conf_m::m::half_or_zero::{closure#0}") (args (move (p 6)) (move (p 7))) (p 0) 4))
+  (bb 4
+    (drop (p 2) no-glue 5))
+  (bb 5
+    (return))
+  (bb 6
+    (resume))
+  (bb 7
+    (drop (p 2) no-glue 6))
+  (bb 8
+    (switch (copy (p 8)) (0 6) (otherwise 7)))
+)
+(fn "core::num::<impl u64>::checked_shl"
+  (kind callee) (def "core::num::<impl u64>::checked_shl") (args ())
+  (item inherent u64 "checked_shl")
+  (argc 2)
+  (locals
+    (0 (adt "std::option::Option<u64>") mut)
+    (1 u64 imm)
+    (2 u32 imm)
+    (3 bool mut)
+    (4 u64 mut)
+    (5 unit imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (bin lt (copy (p 2)) (int u32 64)))
+    (switch (move (p 3)) (0 2) (otherwise 1)))
+  (bb 1
+    (switch (runtime-checks ub) (0 5) (otherwise 4)))
+  (bb 2
+    (assign (p 0) (use (const-agg (adt "std::option::Option<u64>") 0)))
+    (goto 3))
+  (bb 3
+    (return))
+  (bb 4
+    (call (fn "core::num::<impl u64>::unchecked_shl::precondition_check") (args (copy (p 2))) (p 5) 5))
+  (bb 5
+    (assign (p 4) (bin shl-unchecked (copy (p 1)) (copy (p 2))))
+    (assign (p 0) (agg (adt (adt "std::option::Option<u64>") 1) (move (p 4))))
+    (goto 3))
+)
+(fn "core::num::<impl u64>::trailing_ones"
+  (kind callee) (def "core::num::<impl u64>::trailing_ones") (args ())
+  (item inherent u64 "trailing_ones")
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u64 imm)
+    (2 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "self" (p 2) (arg 1))
+  (bb 0
+    (assign (p 2) (un not (copy (p 1))))
+    (call (intrinsic "cttz" (u64)) (args (move (p 2))) (p 0) 1))
+  (bb 1
+    (return))
+)
+(fn "fx_conf_m::m::tripled::{closure#0}"
+  (kind root) (def "fx_conf_m::m::tripled::{closure#0}") (args ())
+  (item closure)
+  (span "m.rs" 76 13)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (ref shared (closure "fx_conf_m::m::tripled::{closure#0}" unit)) mut)
+    (2 u64 imm)
+    (3 (tuple u64 bool) mut))
+  (debug "k" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (checked mul (copy (p 2)) (int u64 3)) (at "m.rs" 76 22))
+    (assert (move (p 3 (field 1 bool))) false overflow 1 (at "m.rs" 76 22)))
+  (bb 1
+    (assign (p 0) (use (move (p 3 (field 0 u64)))) (at "m.rs" 76 22))
+    (return (at "m.rs" 76 27)))
+)
+(fn "std::fmt::Arguments::<'_>::from_str"
+  (kind callee) (def "std::fmt::Arguments::<'a>::from_str") (args ())
+  (item inherent (adt "std::fmt::Arguments<'_>") "from_str")
+  (argc 1)
+  (locals
+    (0 (adt "std::fmt::Arguments<'_>") mut)
+    (1 (ref shared str) imm)
+    (2 (adt "std::ptr::NonNull<u8>") mut)
+    (3 (unsupported "type RawPtr(Ty { id: 74, kind: RigidTy(Uint(U8)) }, Not)") mut)
+    (4 (adt "std::ptr::NonNull<core::fmt::rt::Argument<'_>>") mut)
+    (5 usize mut)
+    (6 usize mut)
+    (7 usize mut)
+    (8 (unsupported "type RawPtr(Ty { id: 46, kind: RigidTy(Str) }, Not)") mut)
+    (9 (ref shared (slice u8)) imm))
+  (debug "s" (p 1) (arg 1))
+  (debug "self" (p 1) (arg 1))
+  (debug "self" (p 1) (arg 1))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 8) (unsupported "rvalue AddressOf(Const, (*_1))"))
+    (assign (p 3) (cast (unsupported "PtrToPtr") (copy (p 8)) (unsupported "type RawPtr(Ty { id: 74, kind: RigidTy(Uint(U8)) }, Not)")))
+    (assign (p 2) (cast transmute (copy (p 3)) (adt "std::ptr::NonNull<u8>")))
+    (assign (p 9) (cast transmute (copy (p 1)) (ref shared (slice u8))))
+    (assign (p 7) (un ptr-metadata (copy (p 9))))
+    (assign (p 6) (bin shl (move (p 7)) (int i32 1)))
+    (assign (p 5) (bin or (move (p 6)) (int usize 1)))
+    (assign (p 4) (cast transmute (move (p 5)) (adt "std::ptr::NonNull<core::fmt::rt::Argument<'_>>")))
+    (assign (p 0) (agg (adt (adt "std::fmt::Arguments<'_>") 0) (move (p 2)) (move (p 4))))
+    (return))
+)
+(fn "<fx_conf_m::m::Down as std::iter::IntoIterator>::into_iter"
+  (kind root) (def "<I as std::iter::IntoIterator>::into_iter") (args ((adt "m::Down")))
+  (item impl (adt "m::Down") "IntoIterator" () "into_iter")
+  (argc 1)
+  (locals
+    (0 (adt "m::Down") mut)
+    (1 (adt "m::Down") imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (move (p 1))))
+    (return))
+)
+(fn "<u64 as std::default::Default>::default"
+  (kind callee) (def "<u64 as std::default::Default>::default") (args ())
+  (item impl u64 "Default" () "default")
+  (argc 0)
+  (locals
+    (0 u64 mut))
+  (bb 0
+    (assign (p 0) (use (int u64 0)))
+    (return))
+)
+(fn "fx_conf_m::m::dec2::{closure#0}"
+  (kind root) (def "fx_conf_m::m::dec2::{closure#0}") (args ())
+  (item closure)
+  (span "m.rs" 57 16)
+  (argc 2)
+  (locals
+    (0 (adt "std::option::Option<u64>") mut)
+    (1 (closure "fx_conf_m::m::dec2::{closure#0}" unit) mut)
+    (2 u64 imm))
+  (debug "v" (p 2) (arg 2))
+  (bb 0
+    (call (fn "core::num::<impl u64>::checked_sub") (args (copy (p 2)) (int u64 2)) (p 0) 1 (at "m.rs" 57 20)))
+  (bb 1
+    (return (at "m.rs" 57 36)))
+)
+(fn "fx_conf_m::m::half_or_zero::{closure#0}"
+  (kind root) (def "fx_conf_m::m::half_or_zero::{closure#0}") (args ())
+  (item closure)
+  (span "m.rs" 61 20)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (closure "fx_conf_m::m::half_or_zero::{closure#0}" unit) mut)
+    (2 u64 imm)
+    (3 bool mut))
+  (debug "v" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (bin eq (int u64 2) (int u64 0)) (at "m.rs" 61 24))
+    (assert (move (p 3)) false div-zero 1 (at "m.rs" 61 24)))
+  (bb 1
+    (assign (p 0) (bin div (copy (p 2)) (int u64 2)) (at "m.rs" 61 24))
+    (return (at "m.rs" 61 29)))
+)
+(fn "core::num::<impl u64>::unchecked_shl::precondition_check"
+  (kind callee) (def "core::num::<impl u64>::unchecked_shl::precondition_check") (args ())
+  (item fn "precondition_check")
+  (argc 1)
+  (locals
+    (0 unit mut)
+    (1 u32 imm)
+    (2 bool mut)
+    (3 (ref shared str) imm)
+    (4 never imm)
+    (5 (adt "std::fmt::Arguments<'_>") mut)
+    (6 (adt "std::ptr::NonNull<u8>") mut)
+    (7 (unsupported "type RawPtr(Ty { id: 74, kind: RigidTy(Uint(U8)) }, Not)") mut)
+    (8 (adt "std::ptr::NonNull<core::fmt::rt::Argument<'_>>") mut)
+    (9 usize mut)
+    (10 usize mut)
+    (11 usize mut)
+    (12 (unsupported "type RawPtr(Ty { id: 46, kind: RigidTy(Str) }, Not)") mut)
+    (13 (ref shared (slice u8)) imm))
+  (debug "rhs" (p 1) (arg 1))
+  (debug "msg" (p 3))
+  (debug "s" (p 3) (arg 1))
+  (debug "self" (p 3) (arg 1))
+  (debug "self" (p 3) (arg 1))
+  (debug "self" (p 3) (arg 1))
+  (bb 0
+    (assign (p 2) (bin lt (copy (p 1)) (int u32 64)))
+    (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1
+    (return))
+  (bb 2
+    (assign (p 3) (use (unsupported "constant of type (ref shared str)")))
+    (assign (p 12) (unsupported "rvalue AddressOf(Const, (*_3))"))
+    (assign (p 7) (cast (unsupported "PtrToPtr") (copy (p 12)) (unsupported "type RawPtr(Ty { id: 74, kind: RigidTy(Uint(U8)) }, Not)")))
+    (assign (p 6) (cast transmute (copy (p 7)) (adt "std::ptr::NonNull<u8>")))
+    (assign (p 13) (cast transmute (unsupported "constant of type (ref shared str)") (ref shared (slice u8))))
+    (assign (p 11) (un ptr-metadata (copy (p 13))))
+    (assign (p 10) (bin shl (move (p 11)) (int i32 1)))
+    (assign (p 9) (bin or (move (p 10)) (int usize 1)))
+    (assign (p 8) (cast transmute (move (p 9)) (adt "std::ptr::NonNull<core::fmt::rt::Argument<'_>>")))
+    (assign (p 5) (agg (adt (adt "std::fmt::Arguments<'_>") 0) (move (p 6)) (move (p 8))))
+    (call (diverge "core::panicking::panic_nounwind_fmt") (args (move (p 5)) (int bool 0)) (p 4) none))
+)
+(fn "core::num::<impl u64>::checked_sub"
+  (kind callee) (def "core::num::<impl u64>::checked_sub") (args ())
+  (item inherent u64 "checked_sub")
+  (argc 2)
+  (locals
+    (0 (adt "std::option::Option<u64>") mut)
+    (1 u64 imm)
+    (2 u64 imm)
+    (3 bool mut)
+    (4 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (bin lt (copy (p 1)) (copy (p 2))))
+    (switch (move (p 3)) (0 2) (otherwise 1)))
+  (bb 1
+    (assign (p 0) (use (const-agg (adt "std::option::Option<u64>") 0)))
+    (goto 3))
+  (bb 2
+    (assign (p 4) (bin sub-unchecked (copy (p 1)) (copy (p 2))))
+    (assign (p 0) (agg (adt (adt "std::option::Option<u64>") 1) (move (p 4))))
+    (goto 3))
+  (bb 3
+    (return))
+)

@@ -76,10 +76,10 @@ pub fn i64_neg(x: I64) -> I64 {
 }
 
 // ---------------------------------------------------------------------------
-// Core items lifted code names (SEMANTICS.md §19.5–§19.9): markers, the
-// ordering of comparisons, and the iterators behind ranges and
-// `core::iter::once`. Each transcribes core's definition; the iterators'
-// `next` is state passing (`it.next()` is `let (it, r) = T::next(it)`).
+// Core items lifted code names (SEMANTICS.md §19.5–§19.9, `docs/mir-lift.md`
+// §20.2): markers, the ordering of comparisons, and the iterators the MIR
+// reading builds for `RangeInclusive::new` and `core::iter::once` (stepped by
+// core's own `next`, whose MIR is read). Each transcribes core's definition.
 // ---------------------------------------------------------------------------
 
 /// `core::marker::PhantomData<T>`: a zero-sized marker (the lift erases
@@ -129,18 +129,6 @@ pub fn ord_ge(o: Option<Ordering>) -> bool {
     }
 }
 
-/// `core::ops::Range<u32>` as an iterator.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct RangeU32 {
-    pub start: u32,
-    pub end: u32,
-}
-
-/// `Iterator::next` of `Range<u32>`: `start` and one step while `start < end`.
-pub fn range_u32_next(it: RangeU32) -> (RangeU32, Option<u32>) {
-    if it.start < it.end { (RangeU32 { start: it.start + 1u32, end: it.end }, Some(it.start)) } else { (it, None) }
-}
-
 /// `core::ops::RangeInclusive<u32>` as an iterator, with core's
 /// `exhausted` flag (set by the step that yields `end`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -153,31 +141,6 @@ pub struct RangeInclusiveU32 {
 /// `RangeInclusive::new(start, end)`.
 pub fn range_inclusive_u32(start: u32, end: u32) -> RangeInclusiveU32 {
     RangeInclusiveU32 { start, end, exhausted: false }
-}
-
-/// `Iterator::next` of `RangeInclusive<u32>` (core: `None` when empty —
-/// exhausted or `start > end` —, else `start`, stepping while `start <
-/// end` and setting `exhausted` at `end`).
-pub fn range_inclusive_u32_next(it: RangeInclusiveU32) -> (RangeInclusiveU32, Option<u32>) {
-    if it.exhausted || it.start > it.end {
-        (it, None)
-    } else if it.start < it.end {
-        (RangeInclusiveU32 { start: it.start + 1u32, end: it.end, exhausted: false }, Some(it.start))
-    } else {
-        (RangeInclusiveU32 { start: it.start, end: it.end, exhausted: true }, Some(it.start))
-    }
-}
-
-/// `core::ops::Range<u64>` as an iterator.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct RangeU64 {
-    pub start: u64,
-    pub end: u64,
-}
-
-/// `Iterator::next` of `Range<u64>`.
-pub fn range_u64_next(it: RangeU64) -> (RangeU64, Option<u64>) {
-    if it.start < it.end { (RangeU64 { start: it.start + 1u64, end: it.end }, Some(it.start)) } else { (it, None) }
 }
 
 /// `core::ops::RangeInclusive<u64>` as an iterator.
@@ -193,17 +156,6 @@ pub fn range_inclusive_u64(start: u64, end: u64) -> RangeInclusiveU64 {
     RangeInclusiveU64 { start, end, exhausted: false }
 }
 
-/// `Iterator::next` of `RangeInclusive<u64>`.
-pub fn range_inclusive_u64_next(it: RangeInclusiveU64) -> (RangeInclusiveU64, Option<u64>) {
-    if it.exhausted || it.start > it.end {
-        (it, None)
-    } else if it.start < it.end {
-        (RangeInclusiveU64 { start: it.start + 1u64, end: it.end, exhausted: false }, Some(it.start))
-    } else {
-        (RangeInclusiveU64 { start: it.start, end: it.end, exhausted: true }, Some(it.start))
-    }
-}
-
 /// `core::iter::Once<T>`: the value not yet yielded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Once<T: Copy> {
@@ -215,13 +167,8 @@ pub fn once<T: Copy>(v: T) -> Once<T> {
     Once { v: Some(v) }
 }
 
-/// `Iterator::next` of `Once<T>`: the value, then `None`.
-pub fn once_next<T: Copy>(it: Once<T>) -> (Once<T>, Option<T>) {
-    (Once { v: None }, it.v)
-}
-
-/// `core::ops::Range<T>` (`start..end`) as a value: lifted code reads its
-/// fields (a range the code iterates is `RangeU32`/`RangeU64`).
+/// `core::ops::Range<T>` (`start..end`): lifted code reads its fields (and
+/// steps it by core's `next`, read from MIR).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Range<T: Copy> {
     pub start: T,

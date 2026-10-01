@@ -1,8 +1,10 @@
-//! The lift pass (`#[lift] mod m;`, `crate::lift`): plain Rust files checked
-//! as written. Sealed-trait generics become one instance per impl type,
-//! `&mut self` becomes state passing (`mut self` returning the new state),
-//! attachments (`#[lift_attach]`) add contracts from a proof file, and
-//! `#[lift(unverified = "..")]` leaves named instances out, visibly. Each
+//! The lift pass (`#[lift(mir = "m.sbmir")] mod m;`, `crate::lift`): plain
+//! Rust files checked as written, their bodies read from rustc's MIR (the
+//! fixture `mir_fixtures/lift_w`). Sealed-trait generics become one
+//! instance per impl type, `&mut self` becomes state passing (`mut self`
+//! returning the new state), attachments (`#[lift_attach]`) add contracts
+//! from a proof file, `#[lift(unverified = "..")]` leaves named instances
+//! out, visibly, and a lifted module without its MIR is refused. Each
 //! feature has a positive test and a negative twin.
 
 #[path = "elab_util.rs"]
@@ -21,54 +23,15 @@ use util::{explain, opts, unproven};
 const ROOT: &str = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n";
 
 /// A small module in the shape of codec's varint: a sealed trait over two
-/// widths, a generic wrapper, a `&mut self` method, `size_of`, `div_ceil`.
-const W: &str = r#"
-mod sealed {
-    pub trait Prim: Copy + PartialOrd {
-        fn low(self) -> u8;
-    }
-    impl Prim for u16 {
-        fn low(self) -> u8 { self as u8 }
-    }
-    impl Prim for u32 {
-        fn low(self) -> u8 { self as u8 }
-    }
-}
-pub use sealed::Prim;
+/// widths, a generic wrapper, a `&mut self` method, `size_of`, `div_ceil`
+/// (the MIR fixture `mir_fixtures/lift_w`: its bodies are rustc's MIR).
+const W: &str = include_str!("mir_fixtures/lift_w/w.rs");
+/// rustc's MIR of `W` (`mir_fixtures/extract.py`).
+const W_MIR: &str = include_str!("mir_fixtures/lift_w/w.sbmir");
 
-#[derive(Debug, Clone)]
-pub struct Wrap<T: Prim>(pub T);
-
-impl<T: Prim> Wrap<T> {
-    pub fn bits(&self) -> usize {
-        size_of::<T>() * 8
-    }
-    pub fn low(&self) -> u8 {
-        self.0.low()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Counter {
-    n: u32,
-}
-
-impl Counter {
-    pub fn new() -> Self {
-        Self { n: 0 }
-    }
-    pub fn bump(&mut self) -> u32 {
-        self.n = self.n.wrapping_add(1);
-        self.n
-    }
-    pub fn chunks(&self, bits: usize) -> usize {
-        bits.div_ceil(7)
-    }
-}
-"#;
-
+/// The files and `r/w.sbmir` (the MIR of `W`, which every lifted `w` reads).
 fn check(files: &[(&str, &str)]) -> Checked {
-    let fs = MemFs::from_files(files.iter().map(|(p, c)| (*p, *c)));
+    let fs = MemFs::from_files(files.iter().map(|(p, c)| (*p, *c)).chain([("r/w.sbmir", W_MIR)]));
     driver::check(Path::new(files[0].0), &fs, &TargetInfo::aarch64_apple_darwin())
 }
 
@@ -110,7 +73,7 @@ fn def_names(v: &Verification) -> Vec<String> {
 
 #[test]
 fn sealed_generics_become_instances_and_mut_self_becomes_state_passing() {
-    let r = root("#[lift]\nmod w;\npub use w::{Counter, Wrap};\n");
+    let r = root("#[lift(mir = \"w.sbmir\")]\nmod w;\npub use w::{Counter, Wrap};\n");
     let c = front_ok(&[("r/mod.rs", &r), ("r/w.rs", W)]);
     let v = verify(&c);
     util::assert_verified(&c, &v);
@@ -121,9 +84,63 @@ fn sealed_generics_become_instances_and_mut_self_becomes_state_passing() {
 }
 
 #[test]
+fn a_lifted_module_without_its_mir_is_refused() {
+    // the bodies are read only from rustc's MIR: the error names the extractor
+    let r = root("#[lift]\nmod w;\npub use w::{Counter, Wrap};\n");
+    let c = check(&[("r/mod.rs", &r), ("r/w.rs", W)]);
+    rejects(&c, DiagKind::Unsupported, "has no `mir = \"..\"`");
+    assert!(c.render().contains("sandblaster/mirx/extract.sh"), "{}", c.render());
+    // twin: a ghost module (laws, proofs) and a host model need no MIR
+    let ok = root("#[lift(mir = \"w.sbmir\")]\nmod w;\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\npub use w::{Counter, Wrap};\n");
+    front_ok(&[("r/mod.rs", &ok), ("r/w.rs", W), ("r/PROOF.rs", "use sandblaster::prelude::*;\n")]);
+}
+
+/// Ghost code the expression reading shares with the deleted body reading
+/// (`docs/mir-lift.md` §20): each reads as it did before the source's body
+/// reading was deleted.
+const GHOST_SHARED: &str = r#"use sandblaster::prelude::*;
+use crate::w::{Prim, Wrap};
+
+#[spec]
+fn eight<T: Prim>() -> usize { 8 }
+#[spec]
+fn halved(x: u32) -> u32 { x >> 1 }
+#[spec]
+fn first(s: &[u8]) -> u8 { let i = 0; s[i] }
+#[spec]
+fn same(x: u32) -> u32 { let y = x.checked_add(0).unwrap(); y }
+#[spec]
+fn got(o: Option<u32>) -> u32 { let x = o.unwrap(); x }
+#[lemma]
+fn generic_call<T: Prim>(w: Wrap<T>) { ensures(eight() == 8usize); }
+#[lemma]
+fn unwrap_max(x: u32) { ensures(Some(x).unwrap() == x && u32::max(x, 3) >= 3u32); }
+#[lemma]
+fn slices(s: &[u8], i: usize) { requires(i < s.len()); ensures((&s[..=i]).len() == i + 1 && s.as_ref().len() == s.len()); }
+#[lemma]
+fn ctor(x: u32) { ensures(Wrap(x).low() == (x as u8)); }
+#[lemma]
+fn signed_shift_not(x: u32) { ensures(((x as i32) >> 1) == ((x as i32) >> 1u32) && (!(x as i32)) == (!(x as i32))); }
+#[lemma]
+fn signed_xor(x: u32, y: u32) { ensures(((x as i32) ^ (y as i32)) == ((y as i32) ^ (x as i32))); }
+#[lemma]
+fn signed_narrow(x: u32) { ensures((((x as i32) as i16) as Int) == (((x as i32) as i16) as Int)); }
+"#;
+
+#[test]
+fn the_ghost_language_keeps_the_readings_it_shared_with_the_body_reading() {
+    let r = root("#[lift(mir = \"w.sbmir\")]\nmod w;\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\npub use w::{Counter, Wrap};\n");
+    front_ok(&[("r/mod.rs", &r), ("r/w.rs", W), ("r/PROOF.rs", GHOST_SHARED)]);
+    // twin: a signed operation the reading does not translate is refused
+    let bad = GHOST_SHARED.replace("((x as i32) ^ (y as i32)) == ((y as i32) ^ (x as i32))", "((x as i32) + (y as i32)) == ((y as i32) + (x as i32))");
+    let c = check(&[("r/mod.rs", &r), ("r/w.rs", W), ("r/PROOF.rs", &bad)]);
+    rejects(&c, DiagKind::Unsupported, "the signed operation `+` is not lifted");
+}
+
+#[test]
 fn a_generic_without_a_sealed_bound_is_not_lifted() {
     let w = format!("{W}\npub fn same<T: Copy>(x: T) -> T {{ x }}\n");
-    let r = root("#[lift]\nmod w;\npub use w::{Counter, Wrap};\n");
+    let r = root("#[lift(mir = \"w.sbmir\")]\nmod w;\npub use w::{Counter, Wrap};\n");
     let c = check(&[("r/mod.rs", &r), ("r/w.rs", &w)]);
     rejects(&c, DiagKind::Unsupported, "cannot monomorphize `same`");
 }
@@ -131,7 +148,7 @@ fn a_generic_without_a_sealed_bound_is_not_lifted() {
 #[test]
 fn an_associated_const_in_a_sealed_trait_is_reported_not_dropped() {
     let w = W.replace("fn low(self) -> u8;", "const SIZE: usize;\n        fn low(self) -> u8;");
-    let r = root("#[lift]\nmod w;\npub use w::{Counter, Wrap};\n");
+    let r = root("#[lift(mir = \"w.sbmir\")]\nmod w;\npub use w::{Counter, Wrap};\n");
     let c = check(&[("r/mod.rs", &r), ("r/w.rs", &w)]);
     rejects(&c, DiagKind::Unsupported, "only methods and associated types are lifted in traits");
 }
@@ -159,7 +176,7 @@ fn ghost_types_in_exec_signatures_only_in_lifted_modules() {
 
 #[test]
 fn unverified_instances_are_left_out_and_reported() {
-    let r = root("#[lift(unverified = \"u32\")]\nmod w;\npub use w::{Counter, Wrap};\n");
+    let r = root("#[lift(mir = \"w.sbmir\", unverified = \"u32\")]\nmod w;\npub use w::{Counter, Wrap};\n");
     let c = front_ok(&[("r/mod.rs", &r), ("r/w.rs", W)]);
     assert!(warnings(&c).iter().any(|m| m.contains("the `u32` instances of `w` are declared unverified")), "{}", c.render());
     let v = verify(&c);
@@ -171,14 +188,14 @@ fn unverified_instances_are_left_out_and_reported() {
 
 #[test]
 fn a_malformed_lift_attribute_is_an_error() {
-    let r = root("#[lift(skip = \"u32\")]\nmod w;\npub use w::{Counter, Wrap};\n");
+    let r = root("#[lift(mir = \"w.sbmir\", skip = \"u32\")]\nmod w;\npub use w::{Counter, Wrap};\n");
     let c = check(&[("r/mod.rs", &r), ("r/w.rs", W)]);
     rejects(&c, DiagKind::Load, "expected `#[lift]`, `#[lift(host)]`, `#[lift(opt)]` or `#[lift(unverified");
 }
 
 #[test]
 fn without_the_declaration_every_instance_is_lifted() {
-    let r = root("#[lift]\nmod w;\npub use w::{Counter, Wrap};\n");
+    let r = root("#[lift(mir = \"w.sbmir\")]\nmod w;\npub use w::{Counter, Wrap};\n");
     let c = front_ok(&[("r/mod.rs", &r), ("r/w.rs", W)]);
     assert!(!warnings(&c).iter().any(|m| m.contains("declared unverified")), "{}", c.render());
 }
@@ -187,7 +204,7 @@ fn without_the_declaration_every_instance_is_lifted() {
 // attachments
 // ---------------------------------------------------------------------
 
-const ATTACH_ROOT: &str = "#[lift]\nmod w;\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\npub use w::{Counter, Wrap};\n";
+const ATTACH_ROOT: &str = "#[lift(mir = \"w.sbmir\")]\nmod w;\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\npub use w::{Counter, Wrap};\n";
 
 #[test]
 fn an_attached_summary_is_proven_on_every_instance() {

@@ -1,0 +1,76 @@
+;; rustc's MIR of `fx_lo_walk::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lo_walk")
+(module "fx_lo_walk::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "d0d9240d0f4718b23b68fb96a95c341468971cf81f42cd9ade582784e2e7feb2")
+(root "fx_lo_walk::a::Walk::go")
+(adt-def "a::Walk" (path "fx_lo_walk::a::Walk") (kind struct) (args ())
+  (variant 0 "Walk" 0 (field "pos" u64) (field "step" u64) (no-glue)))
+(fn "fx_lo_walk::a::Walk::go"
+  (kind root) (def "fx_lo_walk::a::Walk::go") (args ())
+  (item inherent (adt "a::Walk") "go")
+  (span "src/a.rs" 8 5)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (ref mut (adt "a::Walk")) imm)
+    (2 u64 imm)
+    (3 bool mut)
+    (4 u64 mut)
+    (5 bool mut)
+    (6 u64 mut)
+    (7 u64 mut)
+    (8 u64 mut)
+    (9 (tuple u64 bool) mut)
+    (10 (tuple u64 bool) mut)
+    (11 bool mut)
+    (12 u64 mut)
+    (13 never mut)
+    (14 u32 mut)
+    (15 bool mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "limit" (p 2) (arg 2))
+  (bb 0
+    (goto 1 (at "src/a.rs" 9 9)))
+  (bb 1
+    (assign (p 4) (use (copy (p 1 deref (field 1 u64)))) (at "src/a.rs" 9 15))
+    (assign (p 3) (bin gt (move (p 4)) (int u64 1)) (at "src/a.rs" 9 15))
+    (switch (move (p 3)) (0 10) (otherwise 2) (at "src/a.rs" 9 15)))
+  (bb 2
+    (assign (p 6) (use (copy (p 1 deref (field 0 u64)))) (at "src/a.rs" 10 16))
+    (assign (p 5) (bin lt (move (p 6)) (copy (p 2))) (at "src/a.rs" 10 16))
+    (switch (move (p 5)) (0 8) (otherwise 3) (at "src/a.rs" 10 16)))
+  (bb 3
+    (assign (p 8) (use (copy (p 1 deref (field 1 u64)))) (at "src/a.rs" 11 29))
+    (assign (p 9) (checked sub (copy (p 8)) (int u64 1)) (at "src/a.rs" 11 29))
+    (assert (move (p 9 (field 1 bool))) false overflow 4 (at "src/a.rs" 11 29)))
+  (bb 4
+    (assign (p 7) (use (move (p 9 (field 0 u64)))) (at "src/a.rs" 11 29))
+    (assign (p 10) (checked add (copy (p 1 deref (field 0 u64))) (copy (p 7))) (at "src/a.rs" 11 17))
+    (assert (move (p 10 (field 1 bool))) false overflow 5 (at "src/a.rs" 11 17)))
+  (bb 5
+    (assign (p 1 deref (field 0 u64)) (use (move (p 10 (field 0 u64)))) (at "src/a.rs" 11 17))
+    (assign (p 12) (use (copy (p 1 deref (field 0 u64)))) (at "src/a.rs" 12 25))
+    (assign (p 11) (bin ge (move (p 12)) (copy (p 2))) (at "src/a.rs" 12 25))
+    (switch (move (p 11)) (0 7) (otherwise 6) (at "src/a.rs" 12 25)))
+  (bb 6
+    (assign (p 0) (use (copy (p 1 deref (field 0 u64)))) (at "src/a.rs" 13 24))
+    (goto 11 (at "src/a.rs" 18 6)))
+  (bb 7
+    (call (diverge "core::panicking::panic") (args (unsupported "constant of type (ref shared str)")) (p 13) none (at "src/a.rs" 12 17)))
+  (bb 8
+    (assign (p 14) (cast int-to-int (int i32 1) u32) (at "src/a.rs" 15 13))
+    (assign (p 15) (bin lt (move (p 14)) (int u32 64)) (at "src/a.rs" 15 13))
+    (assert (move (p 15)) true overflow 9 (at "src/a.rs" 15 13)))
+  (bb 9
+    (assign (p 1 deref (field 1 u64)) (bin shr (copy (p 1 deref (field 1 u64))) (int i32 1)) (at "src/a.rs" 15 13))
+    (goto 1 (at "src/a.rs" 9 9)))
+  (bb 10
+    (assign (p 0) (use (int u64 0)) (at "src/a.rs" 17 9))
+    (goto 11 (at "src/a.rs" 18 6)))
+  (bb 11
+    (return (at "src/a.rs" 18 6)))
+)

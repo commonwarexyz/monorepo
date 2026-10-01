@@ -7,7 +7,8 @@
 //! parameters, a depth bound for non-tail recursion by attachment, the
 //! in-place type invariant as a host obligation, `core::ops::Range`,
 //! thiserror's `#[error]` text, and the SHA-256 model against a native
-//! FIPS 180-4 implementation. Each feature has a positive test and a
+//! FIPS 180-4 implementation. The lifted bodies are rustc's MIR (the
+//! fixtures `mir_fixtures/lv_*`). Each feature has a positive test and a
 //! negative twin.
 
 #[path = "elab_util.rs"]
@@ -25,8 +26,30 @@ use util::opts;
 
 const ROOT: &str = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n";
 
+/// The MIR fixtures of this file (`mir_fixtures/lv_*`): a lifted `src/a.rs`
+/// and rustc's MIR of it (`mir_fixtures/extract.py`).
+const FIXTURES: &[(&str, &str)] = &[
+    (include_str!("mir_fixtures/lv_items/src/a.rs"), include_str!("mir_fixtures/lv_items/a.sbmir")),
+    (include_str!("mir_fixtures/lv_tr/src/a.rs"), include_str!("mir_fixtures/lv_tr/a.sbmir")),
+    (include_str!("mir_fixtures/lv_er/src/a.rs"), include_str!("mir_fixtures/lv_er/a.sbmir")),
+    (include_str!("mir_fixtures/lv_st/src/a.rs"), include_str!("mir_fixtures/lv_st/a.sbmir")),
+    (include_str!("mir_fixtures/lv_wb/src/a.rs"), include_str!("mir_fixtures/lv_wb/a.sbmir")),
+    (include_str!("mir_fixtures/lv_bump/src/a.rs"), include_str!("mir_fixtures/lv_bump/a.sbmir")),
+    (include_str!("mir_fixtures/lv_rec/src/a.rs"), include_str!("mir_fixtures/lv_rec/a.sbmir")),
+    (include_str!("mir_fixtures/lv_inv/src/a.rs"), include_str!("mir_fixtures/lv_inv/a.sbmir")),
+];
+
+/// rustc's MIR of a fixture's source; for a source no fixture has (a
+/// negative twin the item skeleton refuses), a MIR that does not match it
+/// (the load reports the stale MIR besides the refusal the test names).
+fn mir_of(src: &str) -> &'static str {
+    FIXTURES.iter().find(|(s, _)| *s == src).map(|(_, m)| *m).unwrap_or(FIXTURES[4].1)
+}
+
+/// The files, and the MIR of `src/a.rs` beside the DSL root (`a.sbmir`).
 fn check(files: &[(&str, &str)]) -> Checked {
-    let fs = MemFs::from_files(files.iter().map(|(p, c)| (*p, *c)));
+    let mir = files.iter().find(|(p, _)| *p == A).map(|(_, c)| mir_of(c)).unwrap_or(FIXTURES[4].1);
+    let fs = MemFs::from_files(files.iter().map(|(p, c)| (*p, *c)).chain([("c/sandblaster/m/a.sbmir", mir)]));
     driver::check(Path::new(files[0].0), &fs, &TargetInfo::aarch64_apple_darwin())
 }
 
@@ -76,7 +99,7 @@ fn failed(files: &[(&str, &str)]) -> Vec<String> {
 /// A DSL root lifting the host file `src/a.rs` in place with `opts`, the
 /// proof file when `proof` is given, and `extra` items (host models).
 fn root(opts: &str, proof: bool, extra: &str) -> String {
-    let mut r = format!("{ROOT}#[lift(in_place{opts})]\n#[path = \"../../src/a.rs\"]\npub mod a;\n{extra}");
+    let mut r = format!("{ROOT}#[lift(in_place, mir = \"a.sbmir\"{opts})]\n#[path = \"../../src/a.rs\"]\npub mod a;\n{extra}");
     if proof {
         r.push_str("#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n");
     }
@@ -95,31 +118,7 @@ const HOST_DECL: &str = "#[lift(host)]\nmod host;\n";
 // `items = ".."`: the verified items of an in-place file
 // ---------------------------------------------------------------------
 
-const ITEMS: &str = r#"
-pub struct Keep(pub u64);
-
-impl Keep {
-    pub fn get(self) -> u64 {
-        self.0
-    }
-}
-
-pub struct Skip(pub u64);
-
-impl Skip {
-    pub fn dec(self) -> u64 {
-        self.0 - 1
-    }
-}
-
-pub fn helper(x: u64) -> u64 {
-    x - 1
-}
-
-pub fn uses_helper() -> u64 {
-    helper(5)
-}
-"#;
+const ITEMS: &str = include_str!("mir_fixtures/lv_items/src/a.rs");
 
 #[test]
 fn only_the_selected_items_of_an_in_place_file_are_lifted() {
@@ -149,43 +148,7 @@ fn an_item_selection_needs_in_place() {
 // instance; names shared with inherent methods
 // ---------------------------------------------------------------------
 
-const TR: &str = r#"
-pub trait Mix: Clone + Send + Sync {
-    fn base(&self, x: u64) -> u64;
-    fn flip(&self, x: u64) -> u64 {
-        self.base(x) ^ 1
-    }
-    fn low(&self, x: u64) -> u64 {
-        self.base(x) & 15
-    }
-}
-
-pub struct Std {
-    k: u64,
-}
-
-impl Std {
-    pub fn new(k: u64) -> Self {
-        Self { k }
-    }
-    pub fn base(&self, x: u64) -> u64 {
-        x ^ self.k
-    }
-    pub fn low(&self, x: u64) -> u64 {
-        self.base(x) & 15
-    }
-}
-
-impl Mix for Std {
-    fn base(&self, x: u64) -> u64 {
-        Self::base(self, x)
-    }
-}
-
-pub fn run<M: Mix>(m: &M, x: u64) -> u64 {
-    m.flip(x) | m.low(x)
-}
-"#;
+const TR: &str = include_str!("mir_fixtures/lv_tr/src/a.rs");
 
 const TR_LAW: &str = "use sandblaster::prelude::*;\n\n#[law]\nfn run_flips() {\n    ensures(crate::a::run(&crate::a::Std::new(2u64), 5u64) == 6u64 | 7u64);\n    by_computation();\n}\n";
 
@@ -230,29 +193,7 @@ fn a_provided_method_left_unverified_has_no_lifted_caller() {
 // functions (in place)
 // ---------------------------------------------------------------------
 
-const ER: &str = r#"
-use core::marker::PhantomData;
-
-pub struct Tag<F: Fam>(pub u64, PhantomData<F>);
-
-impl<F: Fam> Tag<F> {
-    pub const fn new(x: u64) -> Self {
-        Self(x, PhantomData)
-    }
-}
-
-pub fn keep<D: Word, F: Fam>(d: D, t: Tag<F>) -> Result<D, u8> {
-    if t.0 == 0 {
-        Err(1u8)
-    } else {
-        Ok(d)
-    }
-}
-
-pub fn digest<H: HashFn>(x: u64) -> H::Out {
-    H::f(x)
-}
-"#;
+const ER: &str = include_str!("mir_fixtures/lv_er/src/a.rs");
 
 const ER_HOST: &str = r#"
 /// A marker family.
@@ -303,31 +244,7 @@ fn host_models_of_types_and_functions_need_an_in_place_crate() {
 // `Option<&mut Vec<T>>`; `core::ops::Range`; `copied`, `ok_or(..)?`
 // ---------------------------------------------------------------------
 
-const ST: &str = r#"
-pub fn take(slots: &[u64], cursor: &mut usize) -> Option<u64> {
-    let Some(v) = slots.get(*cursor).copied() else {
-        return None;
-    };
-    *cursor += 1;
-    Some(v)
-}
-
-pub fn first_len<E>(items: &mut E) -> Result<usize, u8>
-where
-    E: Iterator<Item: AsRef<[u8]>>,
-{
-    let x = items.next().ok_or(1u8)?;
-    Ok(x.as_ref().len())
-}
-
-pub fn log(r: &core::ops::Range<u64>, x: u64, mut out: Option<&mut Vec<u64>>) -> bool {
-    let inside = r.start <= x && x < r.end;
-    if let Some(ref mut v) = out {
-        v.push(x);
-    }
-    inside
-}
-"#;
+const ST: &str = include_str!("mir_fixtures/lv_st/src/a.rs");
 
 const ST_LAW: &str = r#"use sandblaster::prelude::*;
 
@@ -364,7 +281,7 @@ fn a_wrong_state_result_is_refuted() {
     assert!(f.iter().any(|n| n.contains("states_are_passed")), "{f:?}");
 }
 
-const WB: &str = "pub fn push1(v: &mut Vec<u8>) {\n    v.push(1);\n}\n";
+const WB: &str = include_str!("mir_fixtures/lv_wb/src/a.rs");
 
 const WB_LAW: &str = "use sandblaster::prelude::*;\n\n#[law]\nfn written_back() {\n    ensures({\n        let mut b = seq![7u8];\n        crate::a::push1(&mut b);\n        b == seq![7u8, 1u8]\n    });\n    by_computation();\n}\n";
 
@@ -384,7 +301,7 @@ fn a_write_back_that_did_not_happen_is_refuted() {
 
 #[test]
 fn a_value_state_keeps_its_overflow_obligation() {
-    let src = "pub fn bump(c: &mut u8) {\n    *c += 1;\n}\n";
+    let src = include_str!("mir_fixtures/lv_bump/src/a.rs");
     let f = failed(&[(R, &root("", false, "")), (A, src)]);
     assert!(f.iter().any(|n| n.contains("bump")), "{f:?}");
 }
@@ -393,14 +310,14 @@ fn a_value_state_keeps_its_overflow_obligation() {
 fn an_iterator_of_other_items_is_not_a_state() {
     let src = "pub fn first<E: Iterator<Item = u64>>(items: &mut E) -> Option<u64> {\n    items.next()\n}\n";
     let c = check(&[(R, &root("", false, "")), (A, src)]);
-    assert!(!c.ok(), "only an iterator of byte strings is read as a state:\n{}", c.render());
+    rejects(&c, "cannot monomorphize `first`");
 }
 
 // ---------------------------------------------------------------------
 // a depth bound for non-tail recursion, by attachment
 // ---------------------------------------------------------------------
 
-const REC: &str = "fn depth(h: u32) -> u32 {\n    if h == 0 {\n        0\n    } else {\n        depth(h - 1) | 1\n    }\n}\n\npub fn depth8() -> u32 {\n    depth(8)\n}\n";
+const REC: &str = include_str!("mir_fixtures/lv_rec/src/a.rs");
 
 const REC_PROOF: &str = "use sandblaster::prelude::*;\n\n#[lift_attach(crate::a::depth)]\nfn depth_bound() {\n    requires(h <= 64u32);\n    decreases(h, max = 64);\n}\n";
 
@@ -419,37 +336,7 @@ fn non_tail_recursion_without_a_bound_is_refused() {
 // an in-place type invariant is a host obligation; thiserror's `#[error]`
 // ---------------------------------------------------------------------
 
-const INV: &str = r#"
-#[derive(thiserror::Error, Debug)]
-pub enum Oops {
-    #[error("too big")]
-    TooBig,
-    #[error("too small")]
-    TooSmall,
-}
-
-#[derive(Copy, Clone)]
-pub struct Span {
-    lo: u64,
-    hi: u64,
-}
-
-impl Span {
-    pub fn new(lo: u64, hi: u64) -> Option<Self> {
-        if lo <= hi {
-            Some(Self { lo, hi })
-        } else {
-            None
-        }
-    }
-    pub fn width(&self) -> Result<u64, Oops> {
-        if self.hi - self.lo > 100 {
-            return Err(Oops::TooBig);
-        }
-        Ok(self.hi - self.lo)
-    }
-}
-"#;
+const INV: &str = include_str!("mir_fixtures/lv_inv/src/a.rs");
 
 const INV_PROOF: &str = "use sandblaster::prelude::*;\n\n#[lift_attach(crate::a::Span)]\nfn span_ordered() {\n    invariant(self.lo <= self.hi);\n}\n";
 

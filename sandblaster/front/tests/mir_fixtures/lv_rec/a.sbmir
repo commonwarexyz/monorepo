@@ -1,0 +1,53 @@
+;; rustc's MIR of `fx_lv_rec::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lv_rec")
+(module "fx_lv_rec::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "0f8dbf80a6eea06de337db4cf99737de3dcabdaee17fb6107fda2badaa964e57")
+(root "fx_lv_rec::a::depth")
+(root "fx_lv_rec::a::depth8")
+(fn "fx_lv_rec::a::depth"
+  (kind root) (def "fx_lv_rec::a::depth") (args ())
+  (item fn "depth")
+  (span "src/a.rs" 1 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 bool mut)
+    (3 u32 mut)
+    (4 u32 mut)
+    (5 (tuple u32 bool) mut))
+  (debug "h" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (copy (p 1)) (int u32 0)) (at "src/a.rs" 2 8))
+    (switch (move (p 2)) (0 2) (otherwise 1) (at "src/a.rs" 2 8)))
+  (bb 1
+    (assign (p 0) (use (int u32 0)) (at "src/a.rs" 3 9))
+    (goto 5 (at "src/a.rs" 2 5)))
+  (bb 2
+    (assign (p 5) (checked sub (copy (p 1)) (int u32 1)) (at "src/a.rs" 5 15))
+    (assert (move (p 5 (field 1 bool))) false overflow 3 (at "src/a.rs" 5 15)))
+  (bb 3
+    (assign (p 4) (use (move (p 5 (field 0 u32)))) (at "src/a.rs" 5 15))
+    (call (fn "fx_lv_rec::a::depth") (args (move (p 4))) (p 3) 4 (at "src/a.rs" 5 9)))
+  (bb 4
+    (assign (p 0) (bin or (move (p 3)) (int u32 1)) (at "src/a.rs" 5 9))
+    (goto 5 (at "src/a.rs" 2 5)))
+  (bb 5
+    (return (at "src/a.rs" 7 2)))
+)
+(fn "fx_lv_rec::a::depth8"
+  (kind root) (def "fx_lv_rec::a::depth8") (args ())
+  (item fn "depth8")
+  (span "src/a.rs" 9 1)
+  (argc 0)
+  (locals
+    (0 u32 mut))
+  (bb 0
+    (call (fn "fx_lv_rec::a::depth") (args (int u32 8)) (p 0) 1 (at "src/a.rs" 10 5)))
+  (bb 1
+    (return (at "src/a.rs" 11 2)))
+)

@@ -13,7 +13,8 @@
 //!   hypothesis `l{i}` about the real function.
 //!
 //! (The in-place conformance harness and the restoration of unit fields in
-//! rewrite motives have unit tests beside their code.)
+//! rewrite motives have unit tests beside their code.) The lifted bodies are
+//! rustc's MIR (the fixtures `mir_fixtures/mt_*`).
 
 #[path = "elab_util.rs"]
 #[macro_use]
@@ -31,8 +32,21 @@ use util::explain;
 
 const ROOT: &str = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n";
 
+/// The MIR fixtures of this file (`mir_fixtures/mt_*`): a lifted `src/a.rs`
+/// and rustc's MIR of it (`mir_fixtures/extract.py`).
+const FIXTURES: &[(&str, &str)] = &[
+    (include_str!("mir_fixtures/mt_derived/src/a.rs"), include_str!("mir_fixtures/mt_derived/a.sbmir")),
+    (include_str!("mir_fixtures/mt_qualified/src/a.rs"), include_str!("mir_fixtures/mt_qualified/a.sbmir")),
+    (include_str!("mir_fixtures/mt_half/src/a.rs"), include_str!("mir_fixtures/mt_half/a.sbmir")),
+    (include_str!("mir_fixtures/mt_pair/src/a.rs"), include_str!("mir_fixtures/mt_pair/a.sbmir")),
+    (include_str!("mir_fixtures/mt_cmp/src/a.rs"), include_str!("mir_fixtures/mt_cmp/a.sbmir")),
+];
+
+/// The files, and rustc's MIR of the lifted `src/a.rs` beside the DSL root
+/// (`a.sbmir`).
 fn check(files: &[(&str, &str)]) -> Checked {
-    let fs = MemFs::from_files(files.iter().map(|(p, c)| (*p, *c)));
+    let mir = files.iter().find(|(p, _)| *p == A).and_then(|(_, c)| FIXTURES.iter().find(|(s, _)| s == c)).map(|(_, m)| *m).unwrap_or("");
+    let fs = MemFs::from_files(files.iter().map(|(p, c)| (*p, *c)).chain([("c/sandblaster/m/a.sbmir", mir)]));
     driver::check(Path::new(files[0].0), &fs, &TargetInfo::aarch64_apple_darwin())
 }
 
@@ -70,7 +84,7 @@ fn failed(files: &[(&str, &str)]) -> Vec<String> {
 
 /// A DSL root lifting `src/a.rs` in place, with `LAWS.rs` and `PROOF.rs`.
 fn lifted_root() -> String {
-    format!("{ROOT}#[lift(in_place)]\n#[path = \"../../src/a.rs\"]\npub mod a;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"LAWS.rs\"]\nmod laws;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n")
+    format!("{ROOT}#[lift(in_place, mir = \"a.sbmir\")]\n#[path = \"../../src/a.rs\"]\npub mod a;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"LAWS.rs\"]\nmod laws;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n")
 }
 
 const R: &str = "c/sandblaster/m/mod.rs";
@@ -87,7 +101,7 @@ fn attach(target: &str, body: &str) -> String {
 // an attachment to a derived `default`
 // ---------------------------------------------------------------------
 
-const DERIVED: &str = "#[derive(Default)]\npub struct S {\n    x: u64,\n}\n\npub fn zero() -> u64 {\n    let s = S::default();\n    s.x\n}\n";
+const DERIVED: &str = include_str!("mir_fixtures/mt_derived/src/a.rs");
 
 #[test]
 fn a_derived_default_takes_an_attached_contract() {
@@ -113,7 +127,7 @@ fn a_derived_default_contract_is_checked_and_holds_nothing_else() {
 
 /// `helper` is imported from a host module the lift does not read, and
 /// used by the lifted code only as the qualified `crate::a::S::helper`.
-const QUALIFIED: &str = "use super::helper;\n\npub struct S;\n\nimpl S {\n    pub fn helper(x: u64) -> u64 {\n        x / 2\n    }\n}\n\npub fn f(x: u64) -> u64 {\n    S::helper(x)\n}\n";
+const QUALIFIED: &str = include_str!("mir_fixtures/mt_qualified/src/a.rs");
 
 #[test]
 fn a_qualified_path_in_a_contract_does_not_keep_an_import() {
@@ -134,7 +148,7 @@ fn a_contract_naming_the_import_keeps_it() {
 // attached `ensures(..)` are conjoined
 // ---------------------------------------------------------------------
 
-const HALF: &str = "pub fn half(x: u64) -> u64 {\n    x / 2\n}\n\npub fn use_half(x: u64) -> u64 {\n    let r = half(x);\n    assert!(r <= x && r <= x / 2);\n    r\n}\n";
+const HALF: &str = include_str!("mir_fixtures/mt_half/src/a.rs");
 
 #[test]
 fn two_attached_ensures_are_conjoined() {
@@ -161,7 +175,7 @@ fn attached_ensures_must_bind_the_result_alike() {
 // a getter's contract
 // ---------------------------------------------------------------------
 
-const PAIR: &str = "pub struct Pair(u64, u64);\n\nimpl Pair {\n    pub fn first(&self) -> u64 {\n        self.0\n    }\n}\n";
+const PAIR: &str = include_str!("mir_fixtures/mt_pair/src/a.rs");
 
 #[test]
 fn a_getter_contract_is_proven_from_the_projection() {
@@ -180,7 +194,7 @@ fn a_getter_contract_naming_the_wrong_field_fails() {
 // lift prelude functions in a section's dependencies
 // ---------------------------------------------------------------------
 
-const CMP: &str = "use core::cmp::Ordering;\n\npub fn order(a: u64, b: u64) -> Option<Ordering> {\n    a.partial_cmp(&b)\n}\n\npub fn lt(a: u64, b: u64) -> bool {\n    a < b\n}\n";
+const CMP: &str = include_str!("mir_fixtures/mt_cmp/src/a.rs");
 
 /// The sections of a lifted crate with its dependency records, by display path.
 fn section_deps(files: &[(&str, &str)]) -> Vec<(Vec<String>, Vec<(String, DepHow)>)> {

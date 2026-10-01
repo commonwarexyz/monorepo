@@ -1,0 +1,11 @@
+[package]
+name = "fx-opt-rd"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+bytes = "1"

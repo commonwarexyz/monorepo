@@ -1,0 +1,347 @@
+;; rustc's MIR of `fx_opt_driven_more::bits`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_opt_driven_more")
+(module "fx_opt_driven_more::bits")
+(overflow-checks on)
+(exclude)
+(source "bits.rs" "98671f5c4b97c3b0d530d30c057d3f69b87d7839980611aa9710d83f4e9c199e")
+(root "fx_opt_driven_more::bits::bump_low")
+(root "fx_opt_driven_more::bits::clamp7")
+(root "fx_opt_driven_more::bits::low_byte")
+(root "<u16 as fx_opt_driven_more::bits::sealed::Prim>::low")
+(root "<u32 as fx_opt_driven_more::bits::sealed::Prim>::low")
+(root "fx_opt_driven_more::bits::clamp_generic::<u16>")
+(root "fx_opt_driven_more::bits::clamp_generic::<u32>")
+(root "fx_opt_driven_more::bits::put_counted::<&mut [u8]>")
+(root "fx_opt_driven_more::bits::__sandblaster_check__clamp7")
+(root "fx_opt_driven_more::bits::__sandblaster_check__clamp_generic::<u16>")
+(root "fx_opt_driven_more::bits::__sandblaster_check__clamp_generic::<u32>")
+(root "fx_opt_driven_more::bits::__sandblaster_opt_clamp7")
+(root "fx_opt_driven_more::bits::__sandblaster_opt_clamp_generic_for_u16")
+(root "fx_opt_driven_more::bits::__sandblaster_opt_clamp_generic_for_u32")
+(root "fx_opt_driven_more::bits::<impl fx_opt_driven_more::bits::sealed::__sandblaster_dispatch_Prim for u16>::__sandblaster_opt_clamp_generic")
+(root "fx_opt_driven_more::bits::<impl fx_opt_driven_more::bits::sealed::__sandblaster_dispatch_Prim for u32>::__sandblaster_opt_clamp_generic")
+(note "fx_opt_driven_more::bits::sealed::__sandblaster_dispatch_Prim::__sandblaster_opt_clamp_generic: not instantiated: a trait's own method (its impls are extracted)")
+(note "fx_opt_driven_more::bits::sealed::Prim::low: not instantiated: a trait's own method (its impls are extracted)")
+(fn "fx_opt_driven_more::bits::bump_low"
+  (kind root) (def "fx_opt_driven_more::bits::bump_low") (args ())
+  (item fn "bump_low")
+  (span "bits.rs" 5 1)
+  (argc 2)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 u32 imm)
+    (3 u32 imm)
+    (4 u32 imm)
+    (5 bool mut)
+    (6 u32 imm)
+    (7 bool mut)
+    (8 u32 mut)
+    (9 bool mut)
+    (10 u32 mut))
+  (debug "n" (p 1) (arg 1))
+  (debug "k" (p 2) (arg 2))
+  (debug "m" (p 3))
+  (debug "m" (p 4))
+  (debug "m" (p 6))
+  (bb 0
+    (assign (p 3) (bin and (copy (p 2)) (int u32 7)) (at "bits.rs" 6 13))
+    (assign (p 5) (bin gt (copy (p 3)) (int u32 7)) (at "bits.rs" 7 16))
+    (switch (move (p 5)) (0 2) (otherwise 1) (at "bits.rs" 7 16)))
+  (bb 1
+    (assign (p 4) (use (int u32 7)) (at "bits.rs" 7 24))
+    (goto 3 (at "bits.rs" 7 13)))
+  (bb 2
+    (assign (p 4) (use (copy (p 3))) (at "bits.rs" 7 35))
+    (goto 3 (at "bits.rs" 7 13)))
+  (bb 3
+    (assign (p 8) (use (copy (p 4))) (at "bits.rs" 8 16))
+    (assign (p 7) (bin gt (move (p 8)) (int u32 7)) (at "bits.rs" 8 16))
+    (switch (move (p 7)) (0 5) (otherwise 4) (at "bits.rs" 8 16)))
+  (bb 4
+    (assign (p 6) (use (int u32 7)) (at "bits.rs" 8 24))
+    (goto 6 (at "bits.rs" 8 13)))
+  (bb 5
+    (assign (p 6) (use (copy (p 4))) (at "bits.rs" 8 35))
+    (goto 6 (at "bits.rs" 8 13)))
+  (bb 6
+    (assign (p 10) (use (copy (p 6))) (at "bits.rs" 9 8))
+    (assign (p 9) (bin lt (move (p 10)) (int u32 1)) (at "bits.rs" 9 8))
+    (switch (move (p 9)) (0 8) (otherwise 7) (at "bits.rs" 9 8)))
+  (bb 7
+    (call (fn "core::num::<impl u32>::wrapping_add") (args (copy (p 1)) (int u32 1)) (p 0) 9 (at "bits.rs" 9 16)))
+  (bb 8
+    (assign (p 0) (use (copy (p 1))) (at "bits.rs" 9 43))
+    (goto 9 (at "bits.rs" 9 5)))
+  (bb 9
+    (return (at "bits.rs" 10 2)))
+)
+(fn "fx_opt_driven_more::bits::clamp7"
+  (kind root) (def "fx_opt_driven_more::bits::clamp7") (args ())
+  (item fn "clamp7")
+  (span "bits.rs" 13 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 u32 imm)
+    (3 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "y" (p 2))
+  (bb 0
+    (assign (p 2) (bin and (copy (p 1)) (int u32 7)) (at "bits.rs" 14 13))
+    (assign (p 3) (bin gt (copy (p 2)) (int u32 7)) (at "bits.rs" 15 8))
+    (switch (move (p 3)) (0 2) (otherwise 1) (at "bits.rs" 15 8)))
+  (bb 1
+    (assign (p 0) (use (int u32 7)) (at "bits.rs" 15 16))
+    (goto 3 (at "bits.rs" 15 5)))
+  (bb 2
+    (assign (p 0) (use (copy (p 2))) (at "bits.rs" 15 27))
+    (goto 3 (at "bits.rs" 15 5)))
+  (bb 3
+    (return (at "bits.rs" 16 2)))
+)
+(fn "fx_opt_driven_more::bits::low_byte"
+  (kind root) (def "fx_opt_driven_more::bits::low_byte") (args ())
+  (item fn "low_byte")
+  (span "bits.rs" 19 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u64 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (cast int-to-int (copy (p 1)) u8) (at "bits.rs" 20 5))
+    (return (at "bits.rs" 21 2)))
+)
+(fn "<u16 as fx_opt_driven_more::bits::sealed::Prim>::low"
+  (kind root) (def "<u16 as fx_opt_driven_more::bits::sealed::Prim>::low") (args ())
+  (item impl u16 "Prim" () "low")
+  (span "bits.rs" 35 9)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u16 imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (cast int-to-int (copy (p 1)) u8) (at "bits.rs" 35 30))
+    (return (at "bits.rs" 35 42)))
+)
+(fn "<u32 as fx_opt_driven_more::bits::sealed::Prim>::low"
+  (kind root) (def "<u32 as fx_opt_driven_more::bits::sealed::Prim>::low") (args ())
+  (item impl u32 "Prim" () "low")
+  (span "bits.rs" 38 9)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u32 imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (cast int-to-int (copy (p 1)) u8) (at "bits.rs" 38 30))
+    (return (at "bits.rs" 38 42)))
+)
+(fn "fx_opt_driven_more::bits::clamp_generic::<u16>"
+  (kind root) (def "fx_opt_driven_more::bits::clamp_generic") (args (u16))
+  (item fn "clamp_generic")
+  (span "bits.rs" 44 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u16 imm)
+    (2 u8 imm)
+    (3 u8 mut)
+    (4 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "b" (p 2))
+  (bb 0
+    (call (fn "<u16 as fx_opt_driven_more::bits::sealed::Prim>::low") (args (copy (p 1))) (p 3) 1 (at "bits.rs" 45 13)))
+  (bb 1
+    (assign (p 2) (bin and (move (p 3)) (int u8 7)) (at "bits.rs" 45 13))
+    (assign (p 4) (bin gt (copy (p 2)) (int u8 7)) (at "bits.rs" 46 8))
+    (switch (move (p 4)) (0 3) (otherwise 2) (at "bits.rs" 46 8)))
+  (bb 2
+    (assign (p 0) (use (int u8 7)) (at "bits.rs" 46 16))
+    (goto 4 (at "bits.rs" 46 5)))
+  (bb 3
+    (assign (p 0) (use (copy (p 2))) (at "bits.rs" 46 27))
+    (goto 4 (at "bits.rs" 46 5)))
+  (bb 4
+    (return (at "bits.rs" 47 2)))
+)
+(fn "fx_opt_driven_more::bits::clamp_generic::<u32>"
+  (kind root) (def "fx_opt_driven_more::bits::clamp_generic") (args (u32))
+  (item fn "clamp_generic")
+  (span "bits.rs" 44 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u32 imm)
+    (2 u8 imm)
+    (3 u8 mut)
+    (4 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "b" (p 2))
+  (bb 0
+    (call (fn "<u32 as fx_opt_driven_more::bits::sealed::Prim>::low") (args (copy (p 1))) (p 3) 1 (at "bits.rs" 45 13)))
+  (bb 1
+    (assign (p 2) (bin and (move (p 3)) (int u8 7)) (at "bits.rs" 45 13))
+    (assign (p 4) (bin gt (copy (p 2)) (int u8 7)) (at "bits.rs" 46 8))
+    (switch (move (p 4)) (0 3) (otherwise 2) (at "bits.rs" 46 8)))
+  (bb 2
+    (assign (p 0) (use (int u8 7)) (at "bits.rs" 46 16))
+    (goto 4 (at "bits.rs" 46 5)))
+  (bb 3
+    (assign (p 0) (use (copy (p 2))) (at "bits.rs" 46 27))
+    (goto 4 (at "bits.rs" 46 5)))
+  (bb 4
+    (return (at "bits.rs" 47 2)))
+)
+(fn "fx_opt_driven_more::bits::put_counted::<&mut [u8]>"
+  (kind root) (def "fx_opt_driven_more::bits::put_counted") (args ((ref mut (slice u8))))
+  (item fn "put_counted")
+  (span "bits.rs" 52 1)
+  (argc 2)
+  (locals
+    (0 u32 mut)
+    (1 u8 imm)
+    (2 (ref mut (ref mut (slice u8))) imm)
+    (3 unit imm)
+    (4 u8 mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "buf" (p 2) (arg 2))
+  (bb 0
+    (assign (p 4) (bin and (copy (p 1)) (int u8 7)) (at "bits.rs" 53 16))
+    (call (leaf "bytes::BufMut::put_u8" ((ref mut (slice u8)))) (args (copy (p 2)) (move (p 4))) (p 3) 1 (at "bits.rs" 53 5)))
+  (bb 1
+    (assign (p 0) (use (int u32 1)) (at "bits.rs" 54 5))
+    (return (at "bits.rs" 55 2)))
+)
+(fn "fx_opt_driven_more::bits::__sandblaster_check__clamp7"
+  (kind root) (def "fx_opt_driven_more::bits::__sandblaster_check__clamp7") (args ())
+  (item fn "__sandblaster_check__clamp7")
+  (span "bits.rs" 57 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "fx_opt_driven_more::bits::__sandblaster_opt_clamp7") (args (copy (p 1))) (p 0) 1 (at "bits.rs" 58 5)))
+  (bb 1
+    (return (at "bits.rs" 59 2)))
+)
+(fn "fx_opt_driven_more::bits::__sandblaster_check__clamp_generic::<u16>"
+  (kind root) (def "fx_opt_driven_more::bits::__sandblaster_check__clamp_generic") (args (u16))
+  (item fn "__sandblaster_check__clamp_generic")
+  (span "bits.rs" 61 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u16 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "fx_opt_driven_more::bits::<impl fx_opt_driven_more::bits::sealed::__sandblaster_dispatch_Prim for u16>::__sandblaster_opt_clamp_generic") (args (copy (p 1))) (p 0) 1 (at "bits.rs" 62 5)))
+  (bb 1
+    (return (at "bits.rs" 63 2)))
+)
+(fn "fx_opt_driven_more::bits::__sandblaster_check__clamp_generic::<u32>"
+  (kind root) (def "fx_opt_driven_more::bits::__sandblaster_check__clamp_generic") (args (u32))
+  (item fn "__sandblaster_check__clamp_generic")
+  (span "bits.rs" 61 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u32 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "fx_opt_driven_more::bits::<impl fx_opt_driven_more::bits::sealed::__sandblaster_dispatch_Prim for u32>::__sandblaster_opt_clamp_generic") (args (copy (p 1))) (p 0) 1 (at "bits.rs" 62 5)))
+  (bb 1
+    (return (at "bits.rs" 63 2)))
+)
+(fn "fx_opt_driven_more::bits::__sandblaster_opt_clamp7"
+  (kind root) (def "fx_opt_driven_more::bits::__sandblaster_opt_clamp7") (args ())
+  (item fn "__sandblaster_opt_clamp7")
+  (span "bits.rs" 70 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm))
+  (debug "l0_x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (bin and (copy (p 1)) (int u32 7)) (at "bits.rs" 71 5))
+    (return (at "bits.rs" 72 2)))
+)
+(fn "fx_opt_driven_more::bits::__sandblaster_opt_clamp_generic_for_u16"
+  (kind root) (def "fx_opt_driven_more::bits::__sandblaster_opt_clamp_generic_for_u16") (args ())
+  (item fn "__sandblaster_opt_clamp_generic_for_u16")
+  (span "bits.rs" 76 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u16 imm)
+    (2 u8 mut))
+  (debug "l0_x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (cast int-to-int (copy (p 1)) u8) (at "bits.rs" 77 5))
+    (assign (p 0) (bin and (move (p 2)) (int u8 7)) (at "bits.rs" 77 5))
+    (return (at "bits.rs" 78 2)))
+)
+(fn "fx_opt_driven_more::bits::__sandblaster_opt_clamp_generic_for_u32"
+  (kind root) (def "fx_opt_driven_more::bits::__sandblaster_opt_clamp_generic_for_u32") (args ())
+  (item fn "__sandblaster_opt_clamp_generic_for_u32")
+  (span "bits.rs" 82 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u32 imm)
+    (2 u8 mut))
+  (debug "l0_x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (cast int-to-int (copy (p 1)) u8) (at "bits.rs" 83 5))
+    (assign (p 0) (bin and (move (p 2)) (int u8 7)) (at "bits.rs" 83 5))
+    (return (at "bits.rs" 84 2)))
+)
+(fn "fx_opt_driven_more::bits::<impl fx_opt_driven_more::bits::sealed::__sandblaster_dispatch_Prim for u16>::__sandblaster_opt_clamp_generic"
+  (kind root) (def "fx_opt_driven_more::bits::<impl fx_opt_driven_more::bits::sealed::__sandblaster_dispatch_Prim for u16>::__sandblaster_opt_clamp_generic") (args ())
+  (item impl u16 "__sandblaster_dispatch_Prim" () "__sandblaster_opt_clamp_generic")
+  (span "bits.rs" 88 5)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u16 imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (call (fn "fx_opt_driven_more::bits::__sandblaster_opt_clamp_generic_for_u16") (args (copy (p 1))) (p 0) 1 (at "bits.rs" 89 9)))
+  (bb 1
+    (return (at "bits.rs" 90 6)))
+)
+(fn "fx_opt_driven_more::bits::<impl fx_opt_driven_more::bits::sealed::__sandblaster_dispatch_Prim for u32>::__sandblaster_opt_clamp_generic"
+  (kind root) (def "fx_opt_driven_more::bits::<impl fx_opt_driven_more::bits::sealed::__sandblaster_dispatch_Prim for u32>::__sandblaster_opt_clamp_generic") (args ())
+  (item impl u32 "__sandblaster_dispatch_Prim" () "__sandblaster_opt_clamp_generic")
+  (span "bits.rs" 95 5)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u32 imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (call (fn "fx_opt_driven_more::bits::__sandblaster_opt_clamp_generic_for_u32") (args (copy (p 1))) (p 0) 1 (at "bits.rs" 96 9)))
+  (bb 1
+    (return (at "bits.rs" 97 6)))
+)
+(fn "core::num::<impl u32>::wrapping_add"
+  (kind callee) (def "core::num::<impl u32>::wrapping_add") (args ())
+  (item inherent u32 "wrapping_add")
+  (argc 2)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 u32 imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (bb 0
+    (assign (p 0) (bin add (copy (p 1)) (copy (p 2))))
+    (return))
+)

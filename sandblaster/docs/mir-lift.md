@@ -6,11 +6,13 @@ commonware-storage's MMR position and peak arithmetic (in place, with its
 `#[rewrite]` alternatives) with its laws unchanged and one proof lemma
 restated in the MIR's shape, and the first set of storage's Merkle proof
 verifier (`hasher.rs` at `Standard<Sha256>`, `proof.rs`'s subtree
-reconstruction, in place) with its laws and proofs unchanged. The appendix (§20) is the normative reading;
-it joins SEMANTICS.md at the next acceptance of the specification locks
-(SEMANTICS.md is part of every `SPEC.lock`'s `semantics` hash). This note
-records the decision, the design, the measurements and the plan to retire
-the source lift's reading of bodies.
+reconstruction, in place) with its laws and proofs unchanged. The source
+lift's reading of bodies is deleted (§6 step 3): bodies are read only from
+MIR, and a lifted exec module without `mir = ".."` is refused. The appendix
+(§20) is the normative reading; it joins SEMANTICS.md at the next acceptance
+of the specification locks (SEMANTICS.md is part of every `SPEC.lock`'s
+`semantics` hash). This note records the decision, the design, the
+measurements and the plan to replace the source lift.
 
 ## 1. Why
 
@@ -116,13 +118,17 @@ and lifted names, exactly as before.
   host models by name), lifted names of module instances, and the checks
   of `load` (format version, module, overflow checks, source hashes,
   compiler release).
-* `lift.rs`: `#[lift(mir = ..)]` loads the file; for every lifted exec
-  function of the module it skips the source reading of the body, checks
-  the signature against the MIR (parameter count, state parameters =
-  `&mut` parameters), takes an `impl Trait` result's concrete type from
-  the MIR, reads the loop attachments with the MIR's locals typed (a name
-  shadowed at the loop is the variable in scope there), and takes the body
-  and helpers from `mir::read`.
+* `lift.rs`: `#[lift(mir = ..)]` loads the file (a lifted exec module
+  without it is refused, the error naming `sandblaster/mirx/extract.sh`);
+  for every lifted exec function of the module it reads the skeleton only
+  (the source has no body reader any more), checks the signature against
+  the MIR (parameter count, state parameters = `&mut` parameters), takes an
+  `impl Trait` result's concrete type from the MIR, reads the loop
+  attachments with the MIR's locals typed (a name shadowed at the loop is
+  the variable in scope there), and takes the body and helpers from
+  `mir::read`. What the source still reads besides the skeleton: the ghost
+  language, constant initializers (their lifted form is in every
+  `SPEC.lock`) and the functions of host models (§20).
 * **In place and the lifted round trip** (DESIGN.md §2.1). An in-place crate
   is extracted as a whole (`merkle::position,merkle::location,merkle::mmr`,
   its lowered copies stubbed by the sources, the dependencies' verifying
@@ -208,12 +214,18 @@ and lifted names, exactly as before.
   unknown forms, a non-`&mut` state, another module or format version,
   MIR without overflow checks, a stale source, a missing source), and the
   codec extraction read end to end by the front end.
+* The front end's own tests of the lift (`tests/lift*.rs`,
+  `lowered_use.rs`, `mmr_toolchain.rs`, `build_loop.rs`,
+  `aug_int_toolchain.rs`) lift small fixture crates whose MIR is checked in
+  (`front/tests/mir_fixtures`: 57 crates and 3 dependency crates, 72 MIR files, extracted by
+  `mir_fixtures/extract.py` through `extract.sh --manifest`), including the
+  MIR of the lifted round trip's copies the lowering tests read back.
 
 ## 5. Numbers
 
 | | source lift | MIR path |
 | --- | --- | --- |
-| trusted reading (code lines, no comments/tests) | `lift.rs` 4,172 + `lift_open.rs` 2,622 + templates/prelude/model 335 = **7,129** (covers varint, MMR, verifier) | `mir/read.rs` 2,397 + `mir/mod.rs` 430 = **2,827**, printer `mirx` 1,131 → **3,958** (covers varint, the MMR and the verifier's set 1; 3,656 before the verifier moved: +302; 3,109 before the MMR moved) |
+| trusted reading (code lines, no comments/tests) | before §6 step 3: `lift.rs` 4,443 + `lift_open.rs` 2,665 + templates 131 + prelude 145 + model 59 = **7,443** (bodies, skeleton and ghost language; covers varint, MMR, verifier); after it (no bodies): `lift.rs` 3,579 (its MIR glue of 202 not counted) + `lift_open.rs` 1,138 + prelude 108 + model 59 = **4,884** | `mir/read.rs` 2,417 + `mir/mod.rs` 434 = **2,851**, printer `mirx` 1,131 → **3,982**, glue in `lift.rs` 202 (covers varint, the MMR and the verifier's set 1; 3,958 before §6 step 3, whose fixtures added the slice length, the test hooks and two reader fixes: +24; 3,656 before the verifier moved; 3,109 before the MMR moved) |
 | grows with | every surface feature (each port added ~2k) | new MIR constructs only (the MMR survey added intrinsics, `Cmp`, unsizing, reference constants, iterator models: ≈ 0.2k; moving the MMR ≈ 0.5k; moving the verifier ≈ 0.3k: host models, open-trait instances and items in the printer, `Option<&mut T>` states, field write-back) |
 | untrusted support | — | `cfg.rs` 235, `ir.rs` 467, `sexp.rs` 131 |
 | MMR laws / proof lines adapted | 10 laws, PROOF.rs 4,074 lines | LAWS.rs unchanged; PROOF.rs: one lemma's `ensures` (`ptl_pick`, the candidate tests of `position_to_location`) restated in the MIR's shape, 9 lines replaced by 16 (+2 comment lines); `opt.rs`: the host file's imports (`use crate::merkle::Family as _`, 3 lines → 6 with a comment), so that rustc compiles it |
@@ -285,56 +297,58 @@ does not declare (the lift reads them).
 2. **MMR** (done, in place, with its `#[rewrite]` alternatives and the
    round trip's MIR) **and verifier** (set 1 done, in place; §4): multi-module extraction (done in the
    driver: `SBMIR_MODULE="a,b"`, open-trait instances `SBMIR_INSTANCE`),
-   leaves for core's range iterators (the lift prelude's `RangeU64` model:
-   `Range::next`'s MIR goes through `mem::replace` and `Step`), `for`
+   leaves for core's range iterators (then the lift prelude's `RangeU64`
+   model, deleted in step 3: `Range::next`'s MIR goes through
+   `mem::replace` and `Step`), `for`
    loops as helpers with the iterator named `iter` (rustc's own debug name
    for the desugared loop), operator-trait calls as calls of the lifted
    impls by name (`Position::add__u64`), `impl Iterator` returns (the
    concrete type is in the MIR), open-trait associated constants (already
    evaluated by rustc). Then the conformance check of in-place modules
    runs on MIR-read bodies like on module mode.
-3. **Delete the source lift's body reading**: every exec module now reads
-   MIR (varint, the MMR, the verifier's set 1). Measured: the front end of
-   the three roots (`tests/mir.rs`, `*_bodies_are_read_from_rustc_mir`,
-   under `cargo llvm-cov`) never runs 1,064 of `lift.rs`'s 3,913
-   instrumented lines and 1,395 of `lift_open.rs`'s 2,442 (≈ 2.46k
-   lines). No module uses any more, wholly or almost wholly (uncovered /
-   instrumented lines): the loop and iterator desugaring (`while_helper`
-   134/134, `for_helper` 114/114, `loop_helper` 85/85, `next_fn`,
-   `range_iter`, `for_needs_helper`, `loop_attach_stmts`, `has_control`,
-   `ReplaceControl`, `has_break`, the loop helpers' receiver unpacking
-   `UnpackSelf`/`rebuild_self`/`self_fields`), `impl Iterator` returns
-   (`impl_trait_concrete` 60/60), the combinator templates and closures
-   (`instantiate_template` 72/72, `template_ret` 54/54, `closure_call`,
-   `inline_closure`, `closure_inlinable`, `bound_names`, `free_idents`,
-   `Rename`; all of `lift/combinators.rs`), operator and conversion
-   rewriting of exec bodies (`operator_rewrite` 66/77, `binop_trait`,
-   `cmp_op`, `conversion_call` 16/28, `op_param_is_ref`, `prim_fn_path`),
-   exec state passing (`state_rewrite` 58/66, `wrap_state_ret`,
-   `state_arg_place`, `is_place_state`, `is_state`, `pre_stmt`'s
-   visitors), the typing of unsuffixed literals (`demand`, `demand_block`,
-   `infer_from_uses` 118 lines, `untyped_int`, `suffix_untyped`,
-   `suffix_literal`, `pending_literal`, `shift_amount_ty`), assertion and
-   panic macros (`macro_rewrite`), `const` assertion blocks
-   (`const_block_holds`), `ty_of_range`, `signed_lit`, `variant_owner`.
-   Partly unused (the exec arms of functions the ghost language also runs):
-   `rewrite_method` 94/182, `expr` 87/160, `signed_rewrite` 81/136,
-   `rewrite_call` 44/169, `stmt` 42/83, `rewrite` 42/56, `ty_of_src`
-   40/215, `fn_body` 31/60, `match_in` 26/69, `call_family` 18/77. These
-   counts are of the front end (`driver::check`); the build's lifted round
-   trip re-reads the MMR's rewritten copy through MIR as well, which the
-   deletion must confirm with a storage build. Delete in this order (each
-   deletion is dead code at that point):
-   `lift_open.rs`'s loop and iterator desugaring (`while_helper`,
-   `for_helper`, range and `once` iterators, `impl Iterator` returns),
-   closures and combinator templates (`combinators.rs`,
-   `instantiate_template`, `closure_call`), operator/conversion/`Deref`
-   rewriting of exec bodies, assertion macros, `?`/`map_err`/`unwrap`/
-   `checked_*().unwrap()` rewrites and `&a[..=j]`, exec state passing
-   (`state_rewrite`, `wrap_state_ret`, buffer calls), signed-integer
-   rewriting of exec code (ghost code keeps `int_of_iN`), `T::SIZE` and
-   `const` evaluation, the prelude iterators and `Ordering` helpers.
-   About 2.3k of the 6.8k code lines.
+3. **Delete the source lift's body reading** (done). Every exec module read
+   MIR (varint, the MMR, the verifier's set 1), and the front end of the
+   three roots never ran 1,064 of `lift.rs`'s 3,913 instrumented lines and
+   1,395 of `lift_open.rs`'s 2,442 (`cargo llvm-cov` over `tests/mir.rs`
+   and `*_bodies_are_read_from_rustc_mir`). Deleted, in the planned order:
+   the loop and iterator desugaring (`while`/`for`/`loop` helpers, range
+   and `once` iterators, `impl Iterator` results' concrete types, the
+   helpers' receiver unpacking), closures and the combinator templates
+   (`lift/combinators.rs` and `tests/lift_open.rs`'s native comparison of
+   them with core), operator, conversion and `Deref` rewriting of exec
+   bodies, assertion macros, the `?`/`map_err`/`unwrap`/`checked_*().unwrap()`
+   rewrites and `&a[..=j]`, exec state passing in bodies, the typing of
+   unsuffixed literals, signed-integer rewriting of exec code (ghost code
+   keeps `int_of_iN`, `iN_of_int`, literals, negation and casts), `T::SIZE`
+   and `const` evaluation in bodies, `const { .. }` assertion blocks, and the
+   prelude iterators only those rewrites used (`RangeU32`, `RangeU64`, their
+   `next`, `range_inclusive_*_next`, `once_next`; the `Ordering` helpers
+   `ord_*` stay: the MIR reading and the ghost language use them). The
+   arms of the expression reading that the ghost language shares with the
+   deleted body reading stay (§20: a ghost expression reads as it did,
+   whether or not the three roots use it; the validation probed each of
+   `x >> 1`, signed `!x`/`^`/`>>`/narrowing casts, `o.unwrap()`, `let x =
+   a.checked_add(b).unwrap()`, `&s[..=i]`, `s.as_ref()`, `Wrap(x).low()`,
+   `Family::MAX_NODES`, `u64::max(a, 3)`, an index literal and a generic
+   call without turbofish in a law or spec, before and after: identical
+   readings). A lifted exec module
+   without `mir = ".."` is refused, naming `extract.sh`. Constant
+   initializers keep the expression reading: their lifted form is part of
+   every `SPEC.lock` (codec's lock holds `MAX_U16_VARINT_SIZE`'s expression
+   and kernel body), so reading their values from MIR would change the
+   locks; host models' functions (calls of spec functions) keep it too.
+   Measured (code lines, no comments/tests): `lift.rs` 4,443 → 3,781,
+   `lift_open.rs` 2,665 → 1,138, templates 131 → 0, prelude 145 → 108 —
+   **2,357 code lines** deleted (2,717 lines in all, net: `lift.rs` 712,
+   `lift_open.rs` 1,747, `combinators.rs` 205, `prelude.rs` 53). The
+   lifted output of the three roots is byte-identical before and after (every lifted module and the lift's facts, compared);
+   the obligation counts change only by the deleted prelude functions'
+   own obligations (the `+ 1` of the four `next` functions: 4 obligations
+   and 11 definitions per root): the verifier 1,643 (1,647), the MMR
+   5,598 (5,602), varint 21,237 (21,241), every law proven. The front end's
+   tests that lifted hand-written sources moved to MIR fixtures (§4); the
+   lowering tests whose fixtures do not lower from MIR are open (DESIGN.md
+   §2.1, "The optimizer on lifted modules").
 4. **Skeleton from MIR**: generate the lifted items (struct and enum
    declarations from the `adt-def`s, signatures from the instances' MIR
    signatures with state passing from `&mut`, the sealed families from the
@@ -359,16 +373,35 @@ for `#[lift(opt)]`); until then it is normative from here.
 
 #### 20. Bodies read from rustc's MIR (`#[lift(mir = "m.sbmir", ..)]`)
 
-A lifted module declared with `mir = "file.sbmir"` keeps §19's item
-skeleton (which items exist, their lifted names and signatures, state
+A lifted exec module is declared with `mir = "file.sbmir"`; one without it
+is refused (the error names `sandblaster/mirx/extract.sh`). It keeps §19's
+item skeleton (which items exist, their lifted names and signatures, state
 passing, the sealed-trait families, the struct and enum declarations, the
-attachments) and reads **every function body** from rustc's MIR instead of
+attachments) and reads **every function body** from rustc's MIR, never from
 the surface syntax (`crate::mir`; DESIGN.md §1.1 item 8, §2.1). The source
-lift's body rewrites (§19.1's `?`/`map_err`/`unwrap`/`checked_*().unwrap()`,
-§19.7's templates and closures, §19.8's operator impls, §19.9's loop and
-iterator desugaring and assertion macros, macro expansion inside bodies,
-`T::SIZE`, `const` asserts) are not used for such a module: rustc has done
-all of that before MIR exists.
+lift's body rewrites of exec code are **retired**: §19.1's
+`?`/`map_err`/`unwrap`/`checked_*().unwrap()` and `&a[..=j]`, §19.3's
+translation of signed operations in exec code, §19.7's templates and closures, §19.8's operator,
+conversion and `Deref` rewriting of bodies, §19.9's loop and iterator
+desugaring and assertion macros, macro expansion inside bodies, exec state
+passing in bodies, `T::SIZE` and `const` asserts in bodies. rustc has done
+all of that before MIR exists, and the toolchain no longer implements it;
+SEMANTICS.md §19 keeps their text until the next acceptance of the locks
+(it is hashed into every `SPEC.lock`), where this appendix replaces them.
+What the source still reads besides the skeleton is the ghost language
+(laws, proofs, specs, `WORDS`, attachments), which keeps every expression
+reading of §19 it shared with the retired body reading, so a ghost
+expression reads as it did: §19.1's `o.unwrap()`, `let x =
+a.checked_sub(b).unwrap();` and `&a[..=j]`, §19.3's signed literals,
+negation, shifts, bit operations and casts (with `as Int`/`as iN`), an
+unsuffixed shift amount typed `u32` (or by a sealed `Shl<X>` bound), an
+unsuffixed `let` that indexes typed `usize`, `S::C` for an open-trait
+associated constant, `prim::m(a, ..)` as `a.m(..)`, `b.as_ref()` of a byte
+slice, and a generic call's instance taken from the enclosing instance's
+parameter with the same sealed bound. Besides it: the initializers of `const` items and associated constants
+(literals, `size_of::<T>()`, other constants, calls of lifted functions:
+their lifted form is part of every `SPEC.lock`), and the functions of
+`#[lift(host)]` models.
 
 #### 20.1 The extraction
 
@@ -486,8 +519,16 @@ shape of the output.
 | an `Option<&mut T>` parameter the lift passes as a state (§19.10) | a variable of type `Option<T>`, returned like any state; `Option::as_deref_mut(&mut o)` is the same optional place (passed as the state `o` and assigned back) |
 | `&mut (x as V).i` of a variable whose variant is known on the path (a matched arm: `if let Some(v) = &mut o`) | `let mut m = <the field>;`, writes through the borrow assign `m`, reads of `x` see `V(.., m, ..)`, and `x = V(.., m, ..)` where the path leaves the arm (its end, a return); a `&mut` copied out of that borrow (`copy (*r)` of the field's `&mut &mut T`) is the same place |
 | `uN::to_be_bytes(x)`, `<[T]>::get(s, i)` by a `usize` | the builtins `x.to_be_bytes()`, `s.get(i)` |
+| `PtrMetadata(s)` of a slice reference (`s.len()`) | the builtin `s.len()` |
 | signed operations | §19.3's two's complement reading |
 | everything else (raw pointers, function pointers, `Len`, `Transmute`, runtime checks other than overflow checks, a call rustc did not let the extractor follow, loops in library code) | refused |
+
+A named variable bound to a constructor keeps the constructor known; where
+paths join it is already in its own name (it is not assigned again). Under
+the toolchain's own tests only (never in a build), `lift::test_hook` makes
+the reading deliberately wrong — a signed `Shr` read as the logical shift of
+the bits, an index by `RangeToInclusive` read as `RangeTo` — so that the
+lift conformance check's negative twins show it catches a misreading.
 
 The lift's signature is checked against rustc's: the parameter count, and
 that exactly the lift's state parameters are `&mut` in the MIR; an `impl
@@ -518,4 +559,6 @@ crate, and the lift conformance check (§1.1 item 8) compares every read
 function with that compiler's build of the source on generated inputs. The
 S-expression parser, the control-flow analyses (`cfg.rs`) and the matching
 of lifted names to MIR instances are not trusted (a wrong one is a refusal,
-a name error or a type error).
+a name error or a type error; a free function generic over an open trait,
+or over a byte-string iterator, is matched without its instance's name,
+as the lift erases that parameter).

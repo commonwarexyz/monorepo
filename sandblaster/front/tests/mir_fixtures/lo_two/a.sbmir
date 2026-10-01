@@ -1,0 +1,26 @@
+;; rustc's MIR of `fx_lo_two::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lo_two")
+(module "fx_lo_two::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "f8b39648bdff0f649e06bd8da8495201444a2c2ca82501573c364d1a6df04d36")
+(root "fx_lo_two::a::inc")
+(fn "fx_lo_two::a::inc"
+  (kind root) (def "fx_lo_two::a::inc") (args ())
+  (item fn "inc")
+  (span "src/a.rs" 1 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 (tuple u64 bool) mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (checked add (copy (p 1)) (int u64 1)) (at "src/a.rs" 2 5))
+    (assert (move (p 2 (field 1 bool))) false overflow 1 (at "src/a.rs" 2 5)))
+  (bb 1
+    (assign (p 0) (use (move (p 2 (field 0 u64)))) (at "src/a.rs" 2 5))
+    (return (at "src/a.rs" 3 2)))
+)

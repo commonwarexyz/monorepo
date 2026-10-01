@@ -3,8 +3,9 @@
 //! compiled by rustc, on generated inputs. A small module in the shape of
 //! commonware-codec's varint (sealed-trait generics over signed widths,
 //! `&mut self` with an attached invariant, `BufMut`/`Buf` state passing,
-//! `?`/`map_err`, `&a[..=n]`, a host model) passes; each deliberately wrong
-//! lift rule (the lift's test hook) is caught with the input that shows it;
+//! `?`/`map_err`, `&a[..=n]`, a host model; its bodies read from rustc's MIR,
+//! the fixture `mir_fixtures/conf_w`) passes; each deliberately wrong reading
+//! of the MIR (the lift's test hook) is caught with the input that shows it;
 //! a pass is cached by its key and a failure is not; a check that cannot
 //! run fails.
 //!
@@ -27,7 +28,7 @@ use sandblaster_front::target::TargetInfo;
 const ROOT: &str = r#"#![forbid(unsafe_code)]
 use sandblaster::prelude::*;
 
-#[lift]
+#[lift(mir = "w.sbmir")]
 mod w;
 
 #[lift(host)]
@@ -45,70 +46,10 @@ pub use w::{Acc, put_pair, take2, zigzag};
 
 const ERROR: &str = "//! Host model: `crate::Error`.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Error {\n    EndOfBuffer,\n    InvalidVarint(usize),\n}\n";
 
-/// The lifted source (existing Rust, as written).
-const W: &str = r#"//! A small codec in the shape of commonware-codec's varint.
-
-use crate::{Buf, Error};
-use bytes::BufMut;
-use sealed::SPrim;
-
-mod sealed {
-    pub trait SPrim: Copy {
-        fn zz(self) -> u32;
-    }
-    impl SPrim for i32 {
-        fn zz(self) -> u32 {
-            ((self << 1) ^ (self >> 31)) as u32
-        }
-    }
-    impl SPrim for i16 {
-        fn zz(self) -> u32 {
-            (((self << 1) ^ (self >> 15)) as u16) as u32
-        }
-    }
-}
-
-/// An accumulator of at most 100 bytes.
-#[derive(Debug, Clone)]
-pub struct Acc {
-    total: u32,
-    count: u8,
-}
-
-impl Acc {
-    pub fn new() -> Self {
-        Self { total: 0, count: 0 }
-    }
-
-    pub fn add(&mut self, b: u8) -> bool {
-        if self.count >= 100 {
-            return false;
-        }
-        self.total = self.total.wrapping_add(b as u32);
-        self.count += 1;
-        true
-    }
-}
-
-/// Writes `a`, `b` and, when `a` has its top bit set, `a ^ b`.
-pub fn put_pair(a: u8, b: u8, buf: &mut impl BufMut) {
-    let bytes = [a, b, a ^ b];
-    let n: usize = if a < 128 { 1 } else { 2 };
-    buf.put_slice(&bytes[..=n]);
-}
-
-/// Reads a big-endian `u16`.
-pub fn take2(buf: &mut impl Buf) -> Result<u16, Error> {
-    let hi = buf.try_get_u8().map_err(|_| Error::EndOfBuffer)?;
-    let lo = buf.try_get_u8().map_err(|_| Error::EndOfBuffer)?;
-    Ok(((hi as u16) << 8) | lo as u16)
-}
-
-/// ZigZag of a signed value.
-pub fn zigzag<S: SPrim>(x: S) -> u32 {
-    x.zz()
-}
-"#;
+/// The lifted source (existing Rust, as written: `mir_fixtures/conf_w`).
+const W: &str = include_str!("mir_fixtures/conf_w/w.rs");
+/// rustc's MIR of `W` (`mir_fixtures/extract.py`).
+const W_MIR: &str = include_str!("mir_fixtures/conf_w/w.sbmir");
 
 const PROOF: &str = r#"use sandblaster::prelude::*;
 
@@ -119,7 +60,7 @@ fn acc_state() {
 "#;
 
 fn files() -> Vec<(&'static str, String)> {
-    vec![("/r/mod.rs", ROOT.to_string()), ("/r/w.rs", W.to_string()), ("/r/error.rs", ERROR.to_string()), ("/r/PROOF.rs", PROOF.to_string())]
+    vec![("/r/mod.rs", ROOT.to_string()), ("/r/w.rs", W.to_string()), ("/r/w.sbmir", W_MIR.to_string()), ("/r/error.rs", ERROR.to_string()), ("/r/PROOF.rs", PROOF.to_string())]
 }
 
 fn check(files: &[(&str, String)], hook: Option<test_hook::WrongRule>) -> Checked {
@@ -247,9 +188,12 @@ fn a_pass_is_cached_by_its_key() {
         assert!(r.passed() && !r.cached, "{bad}");
         assert_eq!(r.json().render(), r1.json().render());
     }
-    // a changed source changes the key: checked again
+    // a changed source changes the key: checked again (the fixture
+    // `conf_w64`: `W` with `a < 64` for `a < 128`, and its MIR)
     let mut fs2 = files();
-    fs2[1].1 = W.replace("if a < 128 { 1 } else { 2 }", "if a < 64 { 1 } else { 2 }");
+    fs2[1].1 = include_str!("mir_fixtures/conf_w64/w.rs").to_string();
+    fs2[2].1 = include_str!("mir_fixtures/conf_w64/w.sbmir").to_string();
+    assert_eq!(fs2[1].1, W.replace("if a < 128 { 1 } else { 2 }", "if a < 64 { 1 } else { 2 }"));
     let c2 = check(&fs2, None);
     let r3 = conformance(&c2, &cfg);
     assert!(r3.passed() && !r3.cached && r3.key != r1.key, "{}", r3.summary());
@@ -294,7 +238,7 @@ fn the_edition_follows_the_manifest() {
 const MROOT: &str = r#"#![forbid(unsafe_code)]
 use sandblaster::prelude::*;
 
-#[lift]
+#[lift(mir = "m.sbmir")]
 mod m;
 
 #[cfg(sandblaster)]
@@ -306,128 +250,14 @@ mod proof;
 /// Operator, comparison, `Deref` and `Iterator` impls (on a struct and on a
 /// primitive), a derived `Default`, core combinators with closures, an
 /// assertion macro, an `impl Iterator` return and a `for` loop helper.
-const M: &str = r#"//! The MMR track's lift features in one module.
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Pos(u64);
-
-impl Pos {
-    pub const fn new(x: u64) -> Self {
-        Self(x)
-    }
-}
-
-impl core::ops::Add<u64> for Pos {
-    type Output = Self;
-    fn add(self, r: u64) -> Self {
-        Self(self.0.wrapping_add(r))
-    }
-}
-
-impl core::ops::Deref for Pos {
-    type Target = u64;
-    fn deref(&self) -> &u64 {
-        &self.0
-    }
-}
-
-impl PartialEq<u64> for Pos {
-    fn eq(&self, o: &u64) -> bool {
-        self.0 == *o
-    }
-}
-
-impl PartialEq<Pos> for u64 {
-    fn eq(&self, o: &Pos) -> bool {
-        *self == o.0
-    }
-}
-
-pub fn next(p: Pos) -> u64 {
-    let q = p + 1;
-    *q
-}
-
-pub fn is_at(p: Pos, x: u64) -> bool {
-    p == x
-}
-
-pub fn at_is(x: u64, p: Pos) -> bool {
-    x == p
-}
-
-pub fn zero() -> u64 {
-    let z = Pos::default();
-    *z
-}
-
-pub fn dec2(x: Option<u64>) -> Option<u64> {
-    x.and_then(|v| v.checked_sub(2))
-}
-
-pub fn half_or_zero(x: Option<u64>) -> u64 {
-    x.map_or(0u64, |v| v / 2)
-}
-
-pub fn shl_or_zero(x: u64, s: u32) -> u64 {
-    match x.checked_shl(s) {
-        Some(v) => v,
-        None => 0,
-    }
-}
-
-pub fn ones(x: u64) -> u32 {
-    x.trailing_ones()
-}
-
-pub fn tripled(n: u32) -> u64 {
-    let f = |k: u64| k * 3;
-    f(n as u64)
-}
-
-pub fn halved(x: u64) -> u64 {
-    assert!(x / 2 <= x, "halving never grows");
-    x / 2
-}
-
-pub struct Down {
-    n: u32,
-}
-
-impl Iterator for Down {
-    type Item = u32;
-    fn next(&mut self) -> Option<u32> {
-        if self.n == 0 {
-            return None;
-        }
-        self.n -= 1;
-        Some(self.n)
-    }
-}
-
-impl Down {
-    pub fn new(n: u32) -> Self {
-        Self { n }
-    }
-}
-
-pub fn down(n: u16) -> impl Iterator<Item = u32> {
-    Down::new(n as u32)
-}
-
-pub fn count(n: u16) -> u64 {
-    let mut acc = 0u64;
-    for _i in down(n) {
-        acc += 1;
-    }
-    acc
-}
-"#;
+/// (`mir_fixtures/conf_m`; its bodies are rustc's MIR.)
+const M: &str = include_str!("mir_fixtures/conf_m/m.rs");
+const M_MIR: &str = include_str!("mir_fixtures/conf_m/m.sbmir");
 
 const MPROOF: &str = "use sandblaster::prelude::*;\n\n#[lift_attach(crate::m::count, loop_nr = 0)]\nfn count_loop() {\n    invariant((acc as Int) + (iter.n as Int) == (n as Int));\n    decreases(iter.n);\n}\n";
 
 fn mfiles() -> Vec<(&'static str, String)> {
-    vec![("/q/mod.rs", MROOT.to_string()), ("/q/m.rs", M.to_string()), ("/q/PROOF.rs", MPROOF.to_string())]
+    vec![("/q/mod.rs", MROOT.to_string()), ("/q/m.rs", M.to_string()), ("/q/m.sbmir", M_MIR.to_string()), ("/q/PROOF.rs", MPROOF.to_string())]
 }
 
 #[test]
@@ -516,36 +346,11 @@ fn pilot() {
 /// A host crate (no dependencies) whose `src/a.rs` is lifted in place: a
 /// private-field state, a function with an attached precondition, a
 /// signed shift.
-const IN_PLACE_A: &str = r#"pub struct Acc {
-    total: u32,
-    count: u8,
-}
+/// (`mir_fixtures/conf_inplace`; its bodies are rustc's MIR.)
+const IN_PLACE_A: &str = include_str!("mir_fixtures/conf_inplace/src/a.rs");
+const IN_PLACE_MIR: &str = include_str!("mir_fixtures/conf_inplace/a.sbmir");
 
-impl Acc {
-    pub fn new() -> Self {
-        Self { total: 0, count: 0 }
-    }
-
-    pub fn add(&mut self, b: u8) -> bool {
-        if self.count >= 100 {
-            return false;
-        }
-        self.total = self.total.wrapping_add(b as u32);
-        self.count += 1;
-        true
-    }
-}
-
-pub fn inc(x: u32) -> u32 {
-    x + 1
-}
-
-pub fn half(x: i32) -> i32 {
-    x >> 1
-}
-"#;
-
-const IN_PLACE_ROOT: &str = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n\n#[lift(in_place)]\n#[path = \"../../src/a.rs\"]\npub mod a;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n";
+const IN_PLACE_ROOT: &str = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n\n#[lift(in_place, mir = \"a.sbmir\")]\n#[path = \"../../src/a.rs\"]\npub mod a;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n";
 
 const IN_PLACE_PROOF: &str = "use sandblaster::prelude::*;\n\n#[lift_attach(crate::a::Acc)]\nfn acc_state() {\n    invariant(self.count <= 100u8);\n}\n\n#[lift_attach(crate::a::inc)]\nfn inc_pre() {\n    requires((x as Int) < 1000);\n}\n";
 
@@ -558,6 +363,7 @@ fn in_place_crate(name: &str) -> PathBuf {
         ("src/lib.rs", "mod a;\npub use a::{half, inc, Acc};\n"),
         ("src/a.rs", IN_PLACE_A),
         ("sandblaster/m/mod.rs", IN_PLACE_ROOT),
+        ("sandblaster/m/a.sbmir", IN_PLACE_MIR),
         ("sandblaster/m/PROOF.rs", IN_PLACE_PROOF),
     ] {
         let f = d.join(p);

@@ -1,8 +1,9 @@
 //! The lift of a host crate's own files (`#[lift(in_place, ..)]`,
-//! SEMANTICS.md §19.5–19.9): open traits at a declared instance, operator
-//! impls, core's `Option`/`Result`/integer methods as templates, closures,
-//! `impl Trait` returns, `for`/`while` loops (helpers and attachments),
-//! assertion macros, dropped host items, attachment merging and bridge
+//! SEMANTICS.md §19.5–19.9), their bodies read from rustc's MIR (the fixtures
+//! `mir_fixtures/lo_*`): open traits at a declared instance, operator impls,
+//! `impl Trait` returns, loops of `for`, `while` and `&mut self` methods with
+//! their attachments, assertion macros as obligations, dropped host items,
+//! attachment merging, an unreachable tail, in-place builds and bridge
 //! rules. Each feature has a positive test and a negative twin.
 
 #[path = "elab_util.rs"]
@@ -20,8 +21,35 @@ use util::opts;
 
 const ROOT: &str = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n";
 
+/// The MIR fixtures of this file (`mir_fixtures/lo_*`): a lifted `src/a.rs`
+/// and rustc's MIR of it (`mir_fixtures/extract.py`).
+const FIXTURES: &[(&str, &str)] = &[
+    (include_str!("mir_fixtures/lo_open_small/src/a.rs"), include_str!("mir_fixtures/lo_open_small/a.sbmir")),
+    (include_str!("mir_fixtures/lo_open_big9/src/a.rs"), include_str!("mir_fixtures/lo_open_big9/a.sbmir")),
+    (include_str!("mir_fixtures/lo_ops/src/a.rs"), include_str!("mir_fixtures/lo_ops/a.sbmir")),
+    (include_str!("mir_fixtures/lo_iter/src/a.rs"), include_str!("mir_fixtures/lo_iter/a.sbmir")),
+    (include_str!("mir_fixtures/lo_walk/src/a.rs"), include_str!("mir_fixtures/lo_walk/a.sbmir")),
+    (include_str!("mir_fixtures/lo_halve/src/a.rs"), include_str!("mir_fixtures/lo_halve/a.sbmir")),
+    (include_str!("mir_fixtures/lo_asserts/src/a.rs"), include_str!("mir_fixtures/lo_asserts/a.sbmir")),
+    (include_str!("mir_fixtures/lo_hosty/src/a.rs"), include_str!("mir_fixtures/lo_hosty/a.sbmir")),
+    (include_str!("mir_fixtures/lo_partly/src/a.rs"), include_str!("mir_fixtures/lo_partly/a.sbmir")),
+    (include_str!("mir_fixtures/lo_partly_call/src/a.rs"), include_str!("mir_fixtures/lo_partly_call/a.sbmir")),
+    (include_str!("mir_fixtures/lo_two/src/a.rs"), include_str!("mir_fixtures/lo_two/a.sbmir")),
+    (include_str!("mir_fixtures/lo_expect/src/a.rs"), include_str!("mir_fixtures/lo_expect/a.sbmir")),
+    (include_str!("mir_fixtures/lo_safe/src/a.rs"), include_str!("mir_fixtures/lo_safe/a.sbmir")),
+];
+
+/// rustc's MIR of a fixture's source; for a source no fixture has (a
+/// negative twin the item skeleton refuses), a MIR that does not match it
+/// (the load reports the stale MIR besides the refusal the test names).
+fn mir_of(src: &str) -> &'static str {
+    FIXTURES.iter().find(|(s, _)| *s == src).map(|(_, m)| *m).unwrap_or(FIXTURES[10].1)
+}
+
+/// The files, and the MIR of `src/a.rs` beside the DSL root (`a.sbmir`).
 fn check(files: &[(&str, &str)]) -> Checked {
-    let fs = MemFs::from_files(files.iter().map(|(p, c)| (*p, *c)));
+    let mir = files.iter().find(|(p, _)| *p == A).map(|(_, c)| mir_of(c)).unwrap_or(FIXTURES[10].1);
+    let fs = MemFs::from_files(files.iter().map(|(p, c)| (*p, *c)).chain([(M, mir)]));
     driver::check(Path::new(files[0].0), &fs, &TargetInfo::aarch64_apple_darwin())
 }
 
@@ -72,7 +100,7 @@ fn failed(files: &[(&str, &str)]) -> Vec<String> {
 /// A DSL root lifting the host file `src/a.rs` in place with `opts`, and
 /// the proof file when `proof` is given.
 fn root(opts: &str, proof: bool) -> String {
-    let mut r = format!("{ROOT}#[lift(in_place{opts})]\n#[path = \"../../src/a.rs\"]\npub mod a;\n");
+    let mut r = format!("{ROOT}#[lift(in_place, mir = \"a.sbmir\"{opts})]\n#[path = \"../../src/a.rs\"]\npub mod a;\n");
     if proof {
         r.push_str("#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n");
     }
@@ -82,48 +110,13 @@ fn root(opts: &str, proof: bool) -> String {
 const R: &str = "c/sandblaster/m/mod.rs";
 const A: &str = "c/src/a.rs";
 const P: &str = "c/sandblaster/m/PROOF.rs";
+const M: &str = "c/sandblaster/m/a.sbmir";
 
 // ---------------------------------------------------------------------
 // open traits at a declared instance
 // ---------------------------------------------------------------------
 
-const OPEN: &str = r#"
-// the open trait lives in a host module the lift does not read (as
-// `crate::merkle::Family` does for the storage crate)
-use super::Fam;
-use core::marker::PhantomData;
-
-pub struct Small;
-pub struct Big;
-
-impl Fam for Small {
-    const MAX: u64 = 100;
-    fn cap(x: u64) -> u64 {
-        if x > Self::MAX { Self::MAX } else { x }
-    }
-}
-
-impl Fam for Big {
-    const MAX: u64 = 7;
-    fn cap(x: u64) -> u64 {
-        x % 8
-    }
-}
-
-pub struct P<F: Fam>(u64, PhantomData<F>);
-
-impl<F: Fam> P<F> {
-    pub fn new(x: u64) -> Self {
-        Self(F::cap(x), PhantomData)
-    }
-    pub fn get(&self) -> u64 {
-        self.0
-    }
-    pub fn room(x: u64) -> u64 {
-        F::MAX - F::cap(x)
-    }
-}
-"#;
+const OPEN: &str = include_str!("mir_fixtures/lo_open_small/src/a.rs");
 
 #[test]
 fn an_open_trait_is_lifted_at_its_declared_instance() {
@@ -149,6 +142,7 @@ fn the_declared_instance_is_the_one_checked() {
     // a `Big` whose `cap` can exceed its `MAX` fails when it is the
     // declared instance
     let bad = OPEN.replace("x % 8", "x % 9");
+    assert_eq!(bad, include_str!("mir_fixtures/lo_open_big9/src/a.rs"));
     let r = root(", instance = \"Fam: crate::a::Big\", unverified_instances = \"Fam: crate::a::Small\"", false);
     let f = failed(&[(R, &r), (A, &bad)]);
     assert!(f.iter().any(|n| n.contains("room")), "{f:?}");
@@ -158,40 +152,7 @@ fn the_declared_instance_is_the_one_checked() {
 // operator impls, `Deref`, derived `Default`
 // ---------------------------------------------------------------------
 
-const OPS: &str = r#"
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Pos(u64);
-
-impl Pos {
-    pub const fn new(x: u64) -> Self {
-        Self(x)
-    }
-}
-
-impl core::ops::Add<u64> for Pos {
-    type Output = Self;
-    fn add(self, r: u64) -> Self {
-        Self(self.0 + r)
-    }
-}
-
-impl core::ops::Deref for Pos {
-    type Target = u64;
-    fn deref(&self) -> &u64 {
-        &self.0
-    }
-}
-
-pub fn next(p: Pos) -> u64 {
-    let q = p + 1;
-    *q
-}
-
-pub fn zero() -> u64 {
-    let z = Pos::default();
-    *z
-}
-"#;
+const OPS: &str = include_str!("mir_fixtures/lo_ops/src/a.rs");
 
 const OPS_PRE: &str = "use sandblaster::prelude::*;\n\n#[lift_attach(crate::a::next)]\nfn next_pre() {\n    requires((p.0 as Int) + 1 < pow2(64));\n}\n\n#[lift_attach(crate::a::Pos::add__u64)]\nfn add_pre() {\n    requires((self.0 as Int) + (r as Int) < pow2(64));\n}\n";
 
@@ -207,113 +168,10 @@ fn an_operator_impl_keeps_its_overflow_obligation() {
 }
 
 // ---------------------------------------------------------------------
-// templates: Option/Result/integer methods, closures
-// ---------------------------------------------------------------------
-
-const TPL: &str = r#"
-pub fn dbl(x: u64) -> u64 {
-    x.checked_mul(2).expect("small")
-}
-
-pub fn dec2(x: Option<u64>) -> Option<u64> {
-    x.and_then(|v| v.checked_sub(2))
-}
-
-pub fn half_or_zero(x: Option<u64>) -> u64 {
-    x.map_or(0u64, |v| v / 2)
-}
-
-pub fn need(x: Option<u64>) -> Result<u64, u8> {
-    x.ok_or(3u8)
-}
-
-pub fn shl_or_zero(x: u64, s: u32) -> u64 {
-    match x.checked_shl(s) {
-        Some(v) => v,
-        None => 0,
-    }
-}
-
-pub fn ones(x: u64) -> u32 {
-    x.trailing_ones()
-}
-
-pub fn size(n: u64) -> u64 {
-    let f = |k: u64| 2 * k - k.count_ones() as u64;
-    f(n)
-}
-"#;
-
-const TPL_PRE: &str = "use sandblaster::prelude::*;\n\n#[lift_attach(crate::a::dbl)]\nfn dbl_pre() {\n    requires((x as Int) * 2 < pow2(64));\n}\n\n#[lift_attach(crate::a::size)]\nfn size_pre() {\n    requires((n as Int) < pow2(62) && n >= 64u64);\n}\n";
-
-#[test]
-fn core_methods_and_closures_are_lifted_as_checked_templates() {
-    verified(&[(R, &root("", true)), (A, TPL), (P, TPL_PRE)]);
-}
-
-#[test]
-fn an_expect_that_can_fail_is_an_unproven_panic() {
-    let pre = TPL_PRE.replace("requires((x as Int) * 2 < pow2(64));", "requires(true);");
-    let f = failed(&[(R, &root("", true)), (A, TPL), (P, &pre)]);
-    assert!(f.iter().any(|n| n.contains("dbl")), "{f:?}");
-}
-
-#[test]
-fn a_closure_whose_capture_changes_is_refused() {
-    let src = "pub fn g(x: u64) -> u64 {\n    let mut a = 1u64;\n    let f = |k: u64| k / 2 + a;\n    a = 2;\n    f(x) + a\n}\n";
-    let c = check(&[(R, &root("", false)), (A, src)]);
-    rejects(&c, "re-bound or assigned while the closure lives");
-}
-
-#[test]
-fn a_template_message_must_be_a_literal() {
-    let src = "pub fn g(x: Option<u64>, m: &str) -> u64 {\n    x.expect(m)\n}\n";
-    let c = check(&[(R, &root("", false)), (A, src)]);
-    rejects(&c, "string literal");
-}
-
-// ---------------------------------------------------------------------
 // `impl Trait` returns, custom iterators, `for` loops
 // ---------------------------------------------------------------------
 
-const ITER: &str = r#"
-pub struct Down {
-    n: u32,
-}
-
-impl Iterator for Down {
-    type Item = u32;
-    fn next(&mut self) -> Option<u32> {
-        if self.n == 0 {
-            return None;
-        }
-        self.n -= 1;
-        Some(self.n)
-    }
-}
-
-impl Down {
-    pub fn new(n: u32) -> Self {
-        Self { n }
-    }
-}
-
-pub fn down(n: u32) -> impl Iterator<Item = u32> {
-    Down::new(n)
-}
-
-pub fn heights(k: u32) -> impl Iterator<Item = u32> {
-    1..=k
-}
-
-pub fn count(n: u32) -> u64 {
-    let mut acc = 0u64;
-    for _i in down(n) {
-        acc += 1;
-    }
-    acc
-}
-"#;
+const ITER: &str = include_str!("mir_fixtures/lo_iter/src/a.rs");
 
 const ITER_PROOF: &str = "use sandblaster::prelude::*;\n\n#[lift_attach(crate::a::count, loop_nr = 0)]\nfn count_loop() {\n    invariant((acc as Int) + (iter.n as Int) == (n as Int));\n    decreases(iter.n);\n}\n";
 
@@ -328,37 +186,11 @@ fn a_for_loop_without_its_invariant_leaves_the_overflow_unproven() {
     assert!(f.iter().any(|n| n.contains("count")), "{f:?}");
 }
 
-#[test]
-fn a_for_loop_over_an_unknown_iterator_is_refused() {
-    let src = "pub fn f(v: [u64; 3]) -> u64 {\n    let mut a = 0u64;\n    for x in v.iter() {\n        a = *x;\n    }\n    a\n}\n";
-    let c = check(&[(R, &root("", false)), (A, src)]);
-    assert!(!c.ok(), "{}", c.render());
-}
-
 // ---------------------------------------------------------------------
 // `while` helpers of `&mut self` methods, assertion macros, `at_start!`
 // ---------------------------------------------------------------------
 
-const WALK: &str = r#"
-pub struct Walk {
-    pos: u64,
-    step: u64,
-}
-
-impl Walk {
-    pub fn go(&mut self, limit: u64) -> u64 {
-        while self.step > 1 {
-            if self.pos < limit {
-                self.pos += self.step - 1;
-                assert!(self.pos >= limit);
-                return self.pos;
-            }
-            self.step >>= 1;
-        }
-        0
-    }
-}
-"#;
+const WALK: &str = include_str!("mir_fixtures/lo_walk/src/a.rs");
 
 const WALK_PROOF: &str = "use sandblaster::prelude::*;\n\n#[lift_attach(crate::a::Walk::go, loop_nr = 0)]\nfn go_loop() {\n    invariant((self.pos as Int) + (self.step as Int) < pow2(64) && ((self.pos as Int) >= (limit as Int) || (self.pos as Int) + (self.step as Int) >= (limit as Int) + 1));\n    decreases(self.step);\n}\n\n#[lift_attach(crate::a::Walk::go)]\nfn go_pre() {\n    requires((self.pos as Int) + (self.step as Int) < pow2(64) && ((self.pos as Int) >= (limit as Int) || (self.pos as Int) + (self.step as Int) >= (limit as Int) + 1));\n}\n";
 
@@ -374,15 +206,7 @@ fn a_false_assertion_in_a_while_helper_is_unproven() {
     assert!(f.iter().any(|n| n.contains("go")), "{f:?}");
 }
 
-const HALVE: &str = r#"
-pub fn halve(mut x: u64, mut k: u64) -> u64 {
-    while k != 0 {
-        x = x / 2 + 1;
-        k -= 1;
-    }
-    x
-}
-"#;
+const HALVE: &str = include_str!("mir_fixtures/lo_halve/src/a.rs");
 
 #[test]
 fn a_plain_loop_runs_its_at_start_steps_each_iteration() {
@@ -398,14 +222,7 @@ fn an_at_start_step_is_checked_where_it_runs() {
     assert!(f.iter().any(|n| n.contains("halve")), "{f:?}");
 }
 
-const ASSERTS: &str = r#"
-pub fn check(x: u64) -> u64 {
-    assert_eq!(x % 2, 0, "even");
-    assert_ne!(x, 1);
-    debug_assert!(x != 3);
-    x / 2
-}
-"#;
+const ASSERTS: &str = include_str!("mir_fixtures/lo_asserts/src/a.rs");
 
 #[test]
 fn assertion_macros_are_obligations() {
@@ -423,27 +240,7 @@ fn an_assertion_that_can_fail_is_unproven() {
 // host items left out: item macros, declared unverified impls
 // ---------------------------------------------------------------------
 
-const HOSTY: &str = r#"
-pub struct Q(u64);
-
-impl Q {
-    pub fn get(&self) -> u64 {
-        self.0
-    }
-}
-
-impl codec::Write for Q {
-    fn write(&self, buf: &mut Vec<u8>) {
-        buf.push(self.0 as u8);
-    }
-}
-
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        pub mod full;
-    }
-}
-"#;
+const HOSTY: &str = include_str!("mir_fixtures/lo_hosty/src/a.rs");
 
 #[test]
 fn declared_unverified_impls_and_item_macros_are_left_out_and_listed() {
@@ -460,24 +257,14 @@ fn an_undeclared_host_impl_is_an_error() {
     // state since the verifier's extensions: an unknown trait is the case)
     let src = HOSTY.replace("impl codec::Write for Q", "impl codec::Frob for Q");
     let c = check(&[(R, &root("", false)), (A, &src)]);
-    assert!(!c.ok(), "an impl of an unknown trait must be declared unverified:\n{}", c.render());
+    rejects(&c, "impl of the trait `Frob`, which the lift does not know");
 }
 
 // ---------------------------------------------------------------------
 // a declared unverified method stays host code
 // ---------------------------------------------------------------------
 
-const PARTLY: &str = "pub struct T(u64);
-
-impl T {
-    pub fn get(&self) -> u64 {
-        self.0
-    }
-    pub fn bump(&self) -> u64 {
-        self.0 + 1
-    }
-}
-";
+const PARTLY: &str = include_str!("mir_fixtures/lo_partly/src/a.rs");
 
 #[test]
 fn a_declared_unverified_method_is_left_out_and_listed() {
@@ -496,6 +283,7 @@ fn a_call_to_a_declared_unverified_method_is_refused() {
     // does not load
     let src = PARTLY.replace("    pub fn get(&self) -> u64 {\n        self.0\n    }", "    pub fn get(&self) -> u64 {\n        self.bump()\n    }");
     assert!(src.contains("self.bump()"));
+    assert_eq!(src, include_str!("mir_fixtures/lo_partly_call/src/a.rs"));
     let c = check(&[(R, &root(", unverified_fns = \"T::bump\"", false)), (A, &src)]);
     assert!(!c.ok(), "{}", c.render());
 }
@@ -510,7 +298,7 @@ fn an_undeclared_method_is_checked() {
 // attachments: several on one item are merged
 // ---------------------------------------------------------------------
 
-const TWO: &str = "pub fn inc(x: u64) -> u64 {\n    x + 1\n}\n";
+const TWO: &str = include_str!("mir_fixtures/lo_two/src/a.rs");
 
 #[test]
 fn two_attachments_to_one_function_are_merged() {
@@ -556,76 +344,10 @@ fn without_the_bridge_module_the_rules_are_not_known() {
 }
 
 // ---------------------------------------------------------------------
-// the templates are core's definitions (native differential test)
-// ---------------------------------------------------------------------
-
-#[allow(dead_code, clippy::all)]
-#[path = "../lift/combinators.rs"]
-mod templates;
-
-const WORDS64: [u64; 12] = [0, 1, 2, 3, 7, 8, 255, 256, 0x8000_0000_0000_0000, 0x7fff_ffff_ffff_ffff, u64::MAX - 1, u64::MAX];
-
-#[test]
-fn the_integer_templates_agree_with_core() {
-    for &x in &WORDS64 {
-        for s in 0..70u32 {
-            assert_eq!(templates::u64_checked_shl(x, s), x.checked_shl(s), "checked_shl({x}, {s})");
-            assert_eq!(templates::u64_checked_shr(x, s), x.checked_shr(s), "checked_shr({x}, {s})");
-            let (y, z) = (x as u32, (x >> 3) as u16);
-            assert_eq!(templates::u32_checked_shl(y, s), y.checked_shl(s));
-            assert_eq!(templates::u16_checked_shr(z, s), z.checked_shr(s));
-        }
-        assert_eq!(templates::u64_trailing_ones(x), x.trailing_ones());
-        assert_eq!(templates::u64_leading_ones(x), x.leading_ones());
-        assert_eq!(templates::u8_trailing_ones(x as u8), (x as u8).trailing_ones());
-        for &w in &WORDS64 {
-            assert_eq!(templates::u64_cmp(&x, &w), x.cmp(&w));
-            assert_eq!(templates::u64_partial_cmp(&x, &w), x.partial_cmp(&w));
-            assert_eq!(templates::usize_cmp(&(x as usize), &(w as usize)), (x as usize).cmp(&(w as usize)));
-        }
-    }
-}
-
-#[test]
-fn the_option_and_result_templates_agree_with_core() {
-    let opts: [Option<u64>; 4] = [None, Some(0), Some(5), Some(u64::MAX)];
-    for &o in &opts {
-        assert_eq!(templates::option_and_then(o, |v| v.checked_sub(2)), o.and_then(|v| v.checked_sub(2)));
-        assert_eq!(templates::option_map(o, |v| v / 3), o.map(|v| v / 3));
-        assert_eq!(templates::option_map_or(o, 7, |v| v % 5), o.map_or(7, |v| v % 5));
-        assert_eq!(templates::option_ok_or(o, 3u8), o.ok_or(3u8));
-        assert_eq!(templates::option_copied(o.as_ref()), o.as_ref().copied());
-        assert_eq!(templates::option_filter(o, |v| *v > 1), o.filter(|v| *v > 1));
-        assert_eq!(templates::option_or(o, Some(9)), o.or(Some(9)));
-        assert_eq!(templates::option_is_some_and(o, |v| v % 2 == 1), o.is_some_and(|v| v % 2 == 1));
-        assert_eq!(templates::option_unwrap_or_else(o, || 4), o.unwrap_or_else(|| 4));
-        if let Some(v) = o {
-            assert_eq!(templates::option_expect(o, "m"), v);
-        } else {
-            assert!(std::panic::catch_unwind(|| templates::option_expect(o, "m")).is_err());
-        }
-        let r: Result<u64, u8> = o.ok_or(1);
-        assert_eq!(templates::result_ok(r), r.ok());
-        assert_eq!(templates::result_is_ok(r), r.is_ok());
-        assert_eq!(templates::result_and_then(r, |v| if v > 3 { Ok(v) } else { Err(2) }), r.and_then(|v| if v > 3 { Ok(v) } else { Err(2) }));
-        match r {
-            Ok(v) => {
-                assert_eq!(templates::result_expect(r, "m"), v);
-                assert_eq!(templates::result_unwrap(r), v);
-            }
-            Err(_) => {
-                assert!(std::panic::catch_unwind(|| templates::result_expect(r, "m")).is_err());
-                assert!(std::panic::catch_unwind(|| templates::result_unwrap(r)).is_err());
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------
 // `ensures` of a function with an unreachable tail (`expect`'s `else`)
 // ---------------------------------------------------------------------
 
-const EXPECT: &str = "pub fn half_of_double(x: u64) -> u64 {\n    x.checked_mul(2).expect(\"small\") / 2\n}\n";
+const EXPECT: &str = include_str!("mir_fixtures/lo_expect/src/a.rs");
 
 #[test]
 fn an_unreachable_tail_is_closed_by_the_bodys_own_proof() {
@@ -646,7 +368,7 @@ fn an_unreachable_tail_does_not_prove_a_false_ensures() {
 // ---------------------------------------------------------------------
 
 fn build_in_place(src: &str, gates: driver::GateUse) -> driver::BuildOutcome {
-    let fs = MemFs::from_files([("c/src/lib.rs", "mod a;\n"), ("c/src/a.rs", src), ("c/sandblaster/m/mod.rs", root("", false).as_str())]);
+    let fs = MemFs::from_files([("c/src/lib.rs", "mod a;\n"), ("c/src/a.rs", src), ("c/sandblaster/m/mod.rs", root("", false).as_str()), (M, mir_of(src))]);
     let env = |k: &str| -> Option<String> {
         match k {
             "CARGO_MANIFEST_DIR" => Some("c".into()),
@@ -661,7 +383,7 @@ fn build_in_place(src: &str, gates: driver::GateUse) -> driver::BuildOutcome {
     driver::build_lifted_with("sandblaster/m/mod.rs", "m", None, &env, &fs, gates)
 }
 
-const SAFE: &str = "pub fn half(x: u64) -> u64 {\n    x / 2\n}\n";
+const SAFE: &str = include_str!("mir_fixtures/lo_safe/src/a.rs");
 
 #[test]
 fn a_pending_gates_build_passes_on_checked_proofs_and_says_so() {
@@ -718,10 +440,10 @@ fn an_in_place_build_runs_the_conformance_check_after_the_gates() {
     // and the reason is named (the check on a crate on disk:
     // tests/lift_conformance.rs)
     let target = TargetInfo::from_cargo_env(&cargo_env).expect("target");
-    let dsl_root = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n#[lift(in_place)]\n#[path = \"../../src/a.rs\"]\nmod a;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"LAWS.rs\"]\nmod laws;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n\npub use a::half;\n";
+    let dsl_root = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n#[lift(in_place, mir = \"a.sbmir\")]\n#[path = \"../../src/a.rs\"]\nmod a;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"LAWS.rs\"]\nmod laws;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n\npub use a::half;\n";
     let laws = "use sandblaster::prelude::*;\nuse crate::a::half;\n\n/// `half` rounds down.\n#[law]\nfn half_rounds_down(x: u64) {\n    ensures(half(x) as Nat == (x as Nat) / 2);\n}\n";
     let proof = "use sandblaster::prelude::*;\n#[allow(unused_imports)]\nuse crate::a::half;\n\n/// By the definition.\n#[proof]\nfn half_rounds_down(x: u64) {\n    follows();\n}\n";
-    let files: Vec<(String, String)> = vec![("c/src/lib.rs".into(), "mod a;\n".into()), (A.into(), SAFE.into()), (R.into(), dsl_root.into()), ("c/sandblaster/m/LAWS.rs".into(), laws.into()), ("c/sandblaster/m/PROOF.rs".into(), proof.into())];
+    let files: Vec<(String, String)> = vec![("c/src/lib.rs".into(), "mod a;\n".into()), (A.into(), SAFE.into()), (R.into(), dsl_root.into()), ("c/sandblaster/m/LAWS.rs".into(), laws.into()), ("c/sandblaster/m/PROOF.rs".into(), proof.into()), (M.into(), mir_of(SAFE).into())];
     let files = gated::with_accepted_lock(&files, R, &target).expect("every gate but the lock passes");
     let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
     let o = driver::build_lifted_with("sandblaster/m/mod.rs", "m", None, &cargo_env, &fs, driver::GateUse::Enforce);

@@ -1,0 +1,26 @@
+;; rustc's MIR of `fx_lv_bump::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lv_bump")
+(module "fx_lv_bump::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "37b8c0600c1ed187b5381ccd87d1334f5d75b2201a771fd07cee19d671925135")
+(root "fx_lv_bump::a::bump")
+(fn "fx_lv_bump::a::bump"
+  (kind root) (def "fx_lv_bump::a::bump") (args ())
+  (item fn "bump")
+  (span "src/a.rs" 1 1)
+  (argc 1)
+  (locals
+    (0 unit mut)
+    (1 (ref mut u8) imm)
+    (2 (tuple u8 bool) mut))
+  (debug "c" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (checked add (copy (p 1 deref)) (int u8 1)) (at "src/a.rs" 2 5))
+    (assert (move (p 2 (field 1 bool))) false overflow 1 (at "src/a.rs" 2 5)))
+  (bb 1
+    (assign (p 1 deref) (use (move (p 2 (field 0 u8)))) (at "src/a.rs" 2 5))
+    (return (at "src/a.rs" 3 2)))
+)

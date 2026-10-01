@@ -1,0 +1,1 @@
+pub fn f(a: u32, b: u32) -> u32 { ((a as i32) + (b as i32)) as u32 }

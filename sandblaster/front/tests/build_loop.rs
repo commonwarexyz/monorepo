@@ -19,6 +19,11 @@
 //! * **the optimizer's summary** states why each kept function kept its
 //!   source text.
 //!
+//! The lifted bodies are rustc's MIR (the fixtures `mir_fixtures/opt_mbits`,
+//! shared with tests/lift_opt.rs, and `bl_mbits_edited`), and so are those
+//! the lifted round trip reads back (`rt.sbmir`, extracted from the copy a
+//! build writes, `OUT_DIR/bits-roundtrip__bits.rs`).
+//!
 //! `cargo test --release -p sandblaster-front --test build_loop -- --test-threads=1`
 
 #[path = "gated_util.rs"]
@@ -39,7 +44,7 @@ const M_MODULE: &str = "src/bits.rs";
 const M_DSL_ROOT: &str = r#"//! A lifted module: `bits.rs` as written.
 #![forbid(unsafe_code)]
 
-#[lift]
+#[lift(mir = "bits.sbmir")]
 mod bits;
 
 #[cfg(sandblaster)]
@@ -55,19 +60,7 @@ mod proof;
 pub use bits::{clamp7, low_byte};
 "#;
 
-const M_BITS: &str = r#"//! Bits of a byte, the obvious way.
-
-/// The low three bits of `x`, clamped to 7.
-pub fn clamp7(x: u8) -> u8 {
-    let y = x & 7;
-    if y > 7 { 7 } else { y }
-}
-
-/// The low byte of `x`.
-pub fn low_byte(x: u32) -> u8 {
-    x as u8
-}
-"#;
+const M_BITS: &str = include_str!("mir_fixtures/opt_mbits/bits.rs");
 
 const M_LAWS: &str = r#"//! What `bits.rs` guarantees.
 use sandblaster::prelude::*;
@@ -138,13 +131,26 @@ fn env(out: &Path, cache: Option<&Path>) -> HashMap<String, String> {
     m
 }
 
+/// A fixture file (`tests/mir_fixtures/<path>`), when it exists.
+fn fixture(path: &str) -> Option<String> {
+    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/mir_fixtures").join(path)).ok()
+}
+
 fn m_files(bits: &str) -> Vec<(String, String)> {
-    let dsl = vec![
+    // rustc's MIR of `bits.rs` and of the round trip's copy (the fixture
+    // whose source it is)
+    let dir = if bits == M_BITS { "opt_mbits" } else { "bl_mbits_edited" };
+    assert_eq!(fixture(&format!("{dir}/bits.rs")).as_deref(), Some(bits), "a fixture of this `bits.rs`");
+    let mut dsl = vec![
         (format!("/host/{M_ROOT}"), M_DSL_ROOT.to_string()),
         ("/host/sandblaster/bits/bits.rs".to_string(), bits.to_string()),
         ("/host/sandblaster/bits/LAWS.rs".to_string(), M_LAWS.to_string()),
         ("/host/sandblaster/bits/PROOF.rs".to_string(), M_PROOF.to_string()),
+        ("/host/sandblaster/bits/bits.sbmir".to_string(), fixture(&format!("{dir}/bits.sbmir")).expect("the fixture's MIR")),
     ];
+    if let Some(rt) = fixture(&format!("{dir}/rt.sbmir")) {
+        dsl.push(("/host/sandblaster/bits/bits.roundtrip__bits.sbmir".to_string(), rt));
+    }
     let mut files = gated::with_accepted_lock(&dsl, &format!("/host/{M_ROOT}"), &TargetInfo::aarch64_apple_darwin()).unwrap_or_else(|e| panic!("the gates reject the test crate:\n{e}"));
     let (docs, _) = driver::lifted::split_docs(bits);
     files.push(("/host/src/lib.rs".into(), "//! A host crate.\nmod bits;\npub fn both(x: u32) -> u8 { bits::clamp7(bits::low_byte(x)) }\n".into()));
@@ -301,6 +307,11 @@ fn verification_output_is_deterministic() {
     // twin: an edited source
     let edited = m_files(&M_BITS.replace("/// The low byte of `x`.", "/// The low byte of `x` (edited)."));
     let c = m_build(&edited, Some(&ctx), &env(&d3.join("out"), None));
+    if std::env::var_os("SANDBLASTER_DUMP_ROUNDTRIP_COPIES").is_some()
+        && let Some((_, t)) = c.outputs.iter().find(|(p, _)| p.ends_with("bits-roundtrip__bits.rs"))
+    {
+        std::fs::write(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/mir_fixtures/bl_mbits_edited/rt.rs"), t).unwrap();
+    }
     assert!(c.ok, "{}", c.stderr);
     assert_ne!(output(&c, "bits.rs"), output(&a, "bits.rs"));
     assert_ne!(conformance_key(output(&c, "bits-report.json")), key);

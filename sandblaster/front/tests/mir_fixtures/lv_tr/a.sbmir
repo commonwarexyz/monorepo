@@ -1,0 +1,157 @@
+;; rustc's MIR of `fx_lv_tr::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lv_tr")
+(module "fx_lv_tr::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "760d6adaa6e740e3ddb1090792aba5456f39955d05f7069fd3bd9579268a28dc")
+(root "<fx_lv_tr::a::Std as fx_lv_tr::a::Mix>::flip")
+(root "<fx_lv_tr::a::Std as fx_lv_tr::a::Mix>::low")
+(root "fx_lv_tr::a::Std::new")
+(root "fx_lv_tr::a::Std::base")
+(root "fx_lv_tr::a::Std::low")
+(root "<fx_lv_tr::a::Std as fx_lv_tr::a::Mix>::base")
+(root "fx_lv_tr::a::run::<fx_lv_tr::a::Std>")
+(root "<fx_lv_tr::a::Std as std::clone::Clone>::clone")
+(note "fx_lv_tr::a::Mix::base: not instantiated: a trait's own method (its impls are extracted)")
+(adt-def "a::Std" (path "fx_lv_tr::a::Std") (kind struct) (args ())
+  (variant 0 "Std" 0 (field "k" u64) (no-glue)))
+(fn "<fx_lv_tr::a::Std as fx_lv_tr::a::Mix>::flip"
+  (kind root) (def "fx_lv_tr::a::Mix::flip") (args ((adt "a::Std")))
+  (item provided (adt "a::Std") "Mix" () "flip")
+  (span "src/a.rs" 4 5)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (ref shared (adt "a::Std")) imm)
+    (2 u64 imm)
+    (3 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "x" (p 2) (arg 2))
+  (bb 0
+    (call (fn "<fx_lv_tr::a::Std as fx_lv_tr::a::Mix>::base") (args (copy (p 1)) (copy (p 2))) (p 3) 1 (at "src/a.rs" 5 9)))
+  (bb 1
+    (assign (p 0) (bin xor (move (p 3)) (int u64 1)) (at "src/a.rs" 5 9))
+    (return (at "src/a.rs" 6 6)))
+)
+(fn "<fx_lv_tr::a::Std as fx_lv_tr::a::Mix>::low"
+  (kind root) (def "fx_lv_tr::a::Mix::low") (args ((adt "a::Std")))
+  (item provided (adt "a::Std") "Mix" () "low")
+  (span "src/a.rs" 7 5)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (ref shared (adt "a::Std")) imm)
+    (2 u64 imm)
+    (3 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "x" (p 2) (arg 2))
+  (bb 0
+    (call (fn "<fx_lv_tr::a::Std as fx_lv_tr::a::Mix>::base") (args (copy (p 1)) (copy (p 2))) (p 3) 1 (at "src/a.rs" 8 9)))
+  (bb 1
+    (assign (p 0) (bin and (move (p 3)) (int u64 15)) (at "src/a.rs" 8 9))
+    (return (at "src/a.rs" 9 6)))
+)
+(fn "fx_lv_tr::a::Std::new"
+  (kind root) (def "fx_lv_tr::a::Std::new") (args ())
+  (item inherent (adt "a::Std") "new")
+  (span "src/a.rs" 18 5)
+  (argc 1)
+  (locals
+    (0 (adt "a::Std") mut)
+    (1 u64 imm))
+  (debug "k" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "a::Std") 0) (copy (p 1))) (at "src/a.rs" 19 9))
+    (return (at "src/a.rs" 20 6)))
+)
+(fn "fx_lv_tr::a::Std::base"
+  (kind root) (def "fx_lv_tr::a::Std::base") (args ())
+  (item inherent (adt "a::Std") "base")
+  (span "src/a.rs" 21 5)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (ref shared (adt "a::Std")) imm)
+    (2 u64 imm)
+    (3 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "x" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (use (copy (p 1 deref (field 0 u64)))) (at "src/a.rs" 22 13))
+    (assign (p 0) (bin xor (copy (p 2)) (move (p 3))) (at "src/a.rs" 22 9))
+    (return (at "src/a.rs" 23 6)))
+)
+(fn "fx_lv_tr::a::Std::low"
+  (kind root) (def "fx_lv_tr::a::Std::low") (args ())
+  (item inherent (adt "a::Std") "low")
+  (span "src/a.rs" 24 5)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (ref shared (adt "a::Std")) imm)
+    (2 u64 imm)
+    (3 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "x" (p 2) (arg 2))
+  (bb 0
+    (call (fn "fx_lv_tr::a::Std::base") (args (copy (p 1)) (copy (p 2))) (p 3) 1 (at "src/a.rs" 25 9)))
+  (bb 1
+    (assign (p 0) (bin and (move (p 3)) (int u64 15)) (at "src/a.rs" 25 9))
+    (return (at "src/a.rs" 26 6)))
+)
+(fn "<fx_lv_tr::a::Std as fx_lv_tr::a::Mix>::base"
+  (kind root) (def "<fx_lv_tr::a::Std as fx_lv_tr::a::Mix>::base") (args ())
+  (item impl (adt "a::Std") "Mix" () "base")
+  (span "src/a.rs" 30 5)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (ref shared (adt "a::Std")) imm)
+    (2 u64 imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "x" (p 2) (arg 2))
+  (bb 0
+    (call (fn "fx_lv_tr::a::Std::base") (args (copy (p 1)) (copy (p 2))) (p 0) 1 (at "src/a.rs" 31 9)))
+  (bb 1
+    (return (at "src/a.rs" 32 6)))
+)
+(fn "fx_lv_tr::a::run::<fx_lv_tr::a::Std>"
+  (kind root) (def "fx_lv_tr::a::run") (args ((adt "a::Std")))
+  (item fn "run")
+  (span "src/a.rs" 35 1)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (ref shared (adt "a::Std")) imm)
+    (2 u64 imm)
+    (3 u64 mut)
+    (4 u64 mut))
+  (debug "m" (p 1) (arg 1))
+  (debug "x" (p 2) (arg 2))
+  (bb 0
+    (call (fn "<fx_lv_tr::a::Std as fx_lv_tr::a::Mix>::flip") (args (copy (p 1)) (copy (p 2))) (p 3) 1 (at "src/a.rs" 36 5)))
+  (bb 1
+    (call (fn "<fx_lv_tr::a::Std as fx_lv_tr::a::Mix>::low") (args (copy (p 1)) (copy (p 2))) (p 4) 2 (at "src/a.rs" 36 17)))
+  (bb 2
+    (assign (p 0) (bin or (move (p 3)) (move (p 4))) (at "src/a.rs" 36 5))
+    (return (at "src/a.rs" 37 2)))
+)
+(fn "<fx_lv_tr::a::Std as std::clone::Clone>::clone"
+  (kind root) (def "<fx_lv_tr::a::Std as std::clone::Clone>::clone") (args ())
+  (item impl (adt "a::Std") "Clone" () "clone")
+  (span "src/a.rs" 12 10)
+  (argc 1)
+  (locals
+    (0 (adt "a::Std") mut)
+    (1 (ref shared (adt "a::Std")) imm)
+    (2 u64 mut)
+    (3 (ref shared u64) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 3) (ref shared (p 1 deref (field 0 u64))) (at "src/a.rs" 14 5))
+    (assign (p 2) (use (copy (p 3 deref))) (at "src/a.rs" 14 5))
+    (assign (p 0) (agg (adt (adt "a::Std") 0) (move (p 2))) (at "src/a.rs" 12 10))
+    (return (at "src/a.rs" 12 15)))
+)

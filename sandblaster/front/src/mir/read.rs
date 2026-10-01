@@ -32,7 +32,7 @@
 //!   and whose only exit is that test becomes `while c { .. }`; any other
 //!   loop becomes a tail-recursive helper over the variables live at its
 //!   header; a loop attachment places its measure, invariant, summary and
-//!   proof steps exactly as the source lift does (SEMANTICS.md §19.2, §19.9).
+//!   proof steps as SEMANTICS.md §19.2 and §19.9 place them.
 //!
 //! The structure (where an `if` rejoins) comes from post-dominators
 //! (`cfg.rs`), which only decide the shape; the reading of every edge is
@@ -275,6 +275,10 @@ struct Env {
     /// Some(ref mut v) = o`): the variable is assigned the rebuilt value
     /// where the path leaves the arm.
     writeback: BTreeSet<Key>,
+    /// Named variables that hold their current value in their own name
+    /// although it is carried as a known constructor (bound by `let x = C;`
+    /// and not assigned since): the value is in its name already.
+    holds: BTreeSet<Key>,
 }
 
 enum Flow {
@@ -953,6 +957,8 @@ impl<'m> Reader<'m> {
                     "eq" => (syn::parse_quote!(#ea == #eb), true),
                     "ne" => (syn::parse_quote!(#ea != #eb), true),
                     "shl" | "shl-unchecked" => (syn::parse_quote!(#sp(#ea.0 << #amount)), false),
+                    // (`lift::test_hook`: a deliberately wrong logical shift)
+                    "shr" | "shr-unchecked" if crate::lift::test_hook::get() == Some(crate::lift::test_hook::WrongRule::SignedShrLogical) => (syn::parse_quote!(#sp(#ea.0 >> #amount)), false),
                     "shr" | "shr-unchecked" => (syn::parse_quote!(crate::__lift::#shr(#ea, (#amount) as usize)), false),
                     _ => return self.err(fr, format!("the signed operation `{op}` (SEMANTICS.md §19.3 reads bit operations, shifts, negation and truncating casts only)")),
                 };
@@ -1077,7 +1083,9 @@ impl<'m> Reader<'m> {
             let name = self.frames[fr].names[p.local].clone();
             if let Some(v) = env.vals.get(&key).cloned() {
                 let is_self_var = matches!(&v, Val::E(syn::Expr::Path(pp)) if pp.path.is_ident(&name));
-                if !is_self_var {
+                if !is_self_var && env.holds.remove(&key) {
+                    env.vals.insert(key, Val::E(var(&name)));
+                } else if !is_self_var {
                     let ex = self.materialize(fr, &v)?;
                     let id = ident(&name);
                     if env.declared.contains(&name) || self.is_param(fr, p.local) {
@@ -1132,6 +1140,7 @@ impl<'m> Reader<'m> {
             let name = self.frames[fr].names[p.local].clone();
             self.invalidate(fr, &name, Some(key), env, out)?;
             env.discr.remove(&key);
+            env.holds.remove(&key);
             let named = self.named(fr, p.local) || self.is_param(fr, p.local) || env.declared.contains(&name);
             if !named {
                 // a temporary: carried
@@ -1164,6 +1173,9 @@ impl<'m> Reader<'m> {
             }
             // a constructor stays known (the variable holds the same value)
             let known = matches!(&v, Val::C(..)) && !self.is_param(fr, p.local);
+            if known {
+                env.holds.insert(key);
+            }
             env.vals.insert(key, if known { v } else { Val::E(var(&name)) });
             return Ok(());
         }
@@ -1370,6 +1382,7 @@ impl<'m> Reader<'m> {
             fs2[*i] = Val::E(var(&n));
             env.vals.insert(key, Val::C(t, cv, fs2));
             env.writeback.insert(key);
+            env.holds.remove(&key);
             return Ok(LRef { lv: var(&n), buf: None, fields: None, inner: true });
         }
         let (lv, _) = self.lvalue(fr, q, env, out)?;
@@ -1432,6 +1445,8 @@ impl<'m> Reader<'m> {
                         let f = format_ident!("i{}_neg", b);
                         Ok(self.bind(syn::parse_quote!(crate::__lift::#f(#ea)), false, t, out))
                     }
+                    // a slice reference's metadata is its length (`s.len()`)
+                    ("ptr-metadata", Ty::Ref(_, inner)) if matches!(**inner, Ty::Slice(_)) => Ok(self.bind(syn::parse_quote!(#ea.len()), pu, t, out)),
                     _ => self.err(fr, format!("the unary `{op}` on {ta:?}")),
                 }
             }
@@ -1527,6 +1542,11 @@ impl<'m> Reader<'m> {
                 continue;
             }
             if matches!(v, Val::Z(_)) {
+                continue;
+            }
+            // the variable already holds the value (bound, not assigned since)
+            if env.holds.contains(&(fr, l)) && env.declared.contains(&name) {
+                env.vals.insert((fr, l), Val::E(var(&name)));
                 continue;
             }
             let e = self.materialize(fr, &v)?;
@@ -2122,7 +2142,13 @@ impl<'m> Reader<'m> {
                 // the length, as `&a[..j + 1]` does
                 "RangeToInclusive" => {
                     let j = &fe[0];
-                    syn::parse_quote!(&#a[..#j + 1usize])
+                    // (a deliberately wrong reading for the conformance check's
+                    // own tests, `lift::test_hook`; never set by a build)
+                    if crate::lift::test_hook::get() == Some(crate::lift::test_hook::WrongRule::InclusiveRangeAsExclusive) {
+                        syn::parse_quote!(&#a[..#j])
+                    } else {
+                        syn::parse_quote!(&#a[..#j + 1usize])
+                    }
                 }
                 "RangeTo" => {
                     let j = &fe[0];
@@ -2329,6 +2355,7 @@ impl<'m> Reader<'m> {
             for (k, r) in &e.refs {
                 m2.refs.entry(*k).or_insert_with(|| r.clone());
             }
+            m2.holds = e.holds.clone();
             // a discriminant read before the switch is still that value only
             // where no arm changed its place
             m2.discr.retain(|k, _| e.discr.contains_key(k));
@@ -2337,6 +2364,7 @@ impl<'m> Reader<'m> {
                 Some(mut acc) => {
                     // keep only what every arm agrees on
                     acc.vals.retain(|k, v| m2.vals.get(k).is_some_and(|w| format!("{w:?}") == format!("{v:?}")));
+                    acc.holds.retain(|k| m2.holds.contains(k));
                     acc.discr.retain(|k, _| m2.discr.contains_key(k));
                     acc
                 }

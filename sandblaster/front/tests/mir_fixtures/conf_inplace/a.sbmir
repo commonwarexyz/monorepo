@@ -1,0 +1,114 @@
+;; rustc's MIR of `fx_conf_inplace::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_conf_inplace")
+(module "fx_conf_inplace::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "d6cecf67ea7fc51617154457a1fd90664a7fd3ba55b37644686889ebe82acee3")
+(root "fx_conf_inplace::a::Acc::new")
+(root "fx_conf_inplace::a::Acc::add")
+(root "fx_conf_inplace::a::inc")
+(root "fx_conf_inplace::a::half")
+(adt-def "a::Acc" (path "fx_conf_inplace::a::Acc") (kind struct) (args ())
+  (variant 0 "Acc" 0 (field "total" u32) (field "count" u8) (no-glue)))
+(fn "fx_conf_inplace::a::Acc::new"
+  (kind root) (def "fx_conf_inplace::a::Acc::new") (args ())
+  (item inherent (adt "a::Acc") "new")
+  (span "src/a.rs" 7 5)
+  (argc 0)
+  (locals
+    (0 (adt "a::Acc") mut))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "a::Acc") 0) (int u32 0) (int u8 0)) (at "src/a.rs" 8 9))
+    (return (at "src/a.rs" 9 6)))
+)
+(fn "fx_conf_inplace::a::Acc::add"
+  (kind root) (def "fx_conf_inplace::a::Acc::add") (args ())
+  (item inherent (adt "a::Acc") "add")
+  (span "src/a.rs" 11 5)
+  (argc 2)
+  (locals
+    (0 bool mut)
+    (1 (ref mut (adt "a::Acc")) imm)
+    (2 u8 imm)
+    (3 bool mut)
+    (4 u8 mut)
+    (5 u32 mut)
+    (6 u32 mut)
+    (7 u32 mut)
+    (8 (tuple u8 bool) mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "b" (p 2) (arg 2))
+  (bb 0
+    (assign (p 4) (use (copy (p 1 deref (field 1 u8)))) (at "src/a.rs" 12 12))
+    (assign (p 3) (bin ge (move (p 4)) (int u8 100)) (at "src/a.rs" 12 12))
+    (switch (move (p 3)) (0 2) (otherwise 1) (at "src/a.rs" 12 12)))
+  (bb 1
+    (assign (p 0) (use (int bool 0)) (at "src/a.rs" 13 20))
+    (goto 5 (at "src/a.rs" 18 6)))
+  (bb 2
+    (assign (p 6) (use (copy (p 1 deref (field 0 u32)))) (at "src/a.rs" 15 22))
+    (assign (p 7) (cast int-to-int (copy (p 2)) u32) (at "src/a.rs" 15 46))
+    (call (fn "core::num::<impl u32>::wrapping_add") (args (move (p 6)) (move (p 7))) (p 5) 3 (at "src/a.rs" 15 22)))
+  (bb 3
+    (assign (p 1 deref (field 0 u32)) (use (move (p 5))) (at "src/a.rs" 15 9))
+    (assign (p 8) (checked add (copy (p 1 deref (field 1 u8))) (int u8 1)) (at "src/a.rs" 16 9))
+    (assert (move (p 8 (field 1 bool))) false overflow 4 (at "src/a.rs" 16 9)))
+  (bb 4
+    (assign (p 1 deref (field 1 u8)) (use (move (p 8 (field 0 u8)))) (at "src/a.rs" 16 9))
+    (assign (p 0) (use (int bool 1)) (at "src/a.rs" 17 9))
+    (goto 5 (at "src/a.rs" 18 6)))
+  (bb 5
+    (return (at "src/a.rs" 18 6)))
+)
+(fn "fx_conf_inplace::a::inc"
+  (kind root) (def "fx_conf_inplace::a::inc") (args ())
+  (item fn "inc")
+  (span "src/a.rs" 21 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 (tuple u32 bool) mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (checked add (copy (p 1)) (int u32 1)) (at "src/a.rs" 22 5))
+    (assert (move (p 2 (field 1 bool))) false overflow 1 (at "src/a.rs" 22 5)))
+  (bb 1
+    (assign (p 0) (use (move (p 2 (field 0 u32)))) (at "src/a.rs" 22 5))
+    (return (at "src/a.rs" 23 2)))
+)
+(fn "fx_conf_inplace::a::half"
+  (kind root) (def "fx_conf_inplace::a::half") (args ())
+  (item fn "half")
+  (span "src/a.rs" 25 1)
+  (argc 1)
+  (locals
+    (0 i32 mut)
+    (1 i32 imm)
+    (2 u32 mut)
+    (3 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (cast int-to-int (int i32 1) u32) (at "src/a.rs" 26 5))
+    (assign (p 3) (bin lt (move (p 2)) (int u32 32)) (at "src/a.rs" 26 5))
+    (assert (move (p 3)) true overflow 1 (at "src/a.rs" 26 5)))
+  (bb 1
+    (assign (p 0) (bin shr (copy (p 1)) (int i32 1)) (at "src/a.rs" 26 5))
+    (return (at "src/a.rs" 27 2)))
+)
+(fn "core::num::<impl u32>::wrapping_add"
+  (kind callee) (def "core::num::<impl u32>::wrapping_add") (args ())
+  (item inherent u32 "wrapping_add")
+  (argc 2)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 u32 imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (bb 0
+    (assign (p 0) (bin add (copy (p 1)) (copy (p 2))))
+    (return))
+)

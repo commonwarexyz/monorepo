@@ -1,11 +1,21 @@
 //! Lifting existing Rust into the verified subset ("as-is" modules).
 //!
-//! A module declared `#[lift] mod m;` is ordinary Rust copied verbatim from
-//! an existing crate. The lift translates it, at load time, into the exec
-//! subset the rest of the pipeline checks. The source file is never edited:
-//! the translation is the toolchain's reading of the code (part of the
-//! elaboration semantics, TCB; SEMANTICS.md §19), and every construct it
-//! does not know is an error, never a guess the type checker cannot catch.
+//! A module declared `#[lift(mir = "m.sbmir")] mod m;` is ordinary Rust
+//! copied verbatim from an existing crate (or the host's own file, in
+//! place). The lift translates it, at load time, into the exec subset the
+//! rest of the pipeline checks. The source file is never edited: the
+//! translation is the toolchain's reading of the code (part of the
+//! elaboration semantics, TCB; SEMANTICS.md §19, `docs/mir-lift.md` §20),
+//! and every construct it does not know is an error, never a guess the
+//! type checker cannot catch.
+//!
+//! **Function bodies are read from rustc's MIR only** ([`crate::mir`]):
+//! macros, `?`, closures, operators, iterators, loops and constants in
+//! bodies are what rustc lowered them to. A `#[lift]` module of exec code
+//! without `mir = ".."` is refused (extract it with
+//! `sandblaster/mirx/extract.sh`). This file reads the **item skeleton**
+//! from the source and the **ghost language** of the lifted ghost modules
+//! (laws, proofs, attachments):
 //!
 //! | Rust | lifted |
 //! | --- | --- |
@@ -14,24 +24,13 @@
 //! | `#[cfg(test)]`, `#[cfg(feature = ..)]` items | dropped, listed (host-only code; not part of the lifted meaning) |
 //! | a **sealed** trait (declared in a private inline module) with impls for concrete types | the trait disappears; each impl method becomes a free function `Trait__Ty__m(self_: Ty, ..)` |
 //! | generic items whose parameters are bounded by sealed traits | one monomorphic instance per impl type (`write` → `write__u16`, `Decoder<U>` → `Decoder__u16`) |
-//! | `T::from(x)` with the sealed trait's `From<X>` supertrait | `Ty::from(x)` with `x` typed `X` |
-//! | `T::SIZE` (host `FixedSize`), `size_of::<Ty>()` | the constant |
-//! | `x.m(..)` / `T::m(..)` for a sealed-trait method | `Trait__Ty__m(x, ..)` (receiver type from the lift's local typing; a method whose name is also an inherent integer method must be a pure delegation `self.m(..)` in every impl, so both resolutions agree) |
-//! | `&mut self`, `&mut impl Buf`, `&mut impl BufMut` parameters | state passing: the function takes the state by value and returns it (`(state.., value)`) |
-//! | `buf.put_u8(b)`, `buf.put_slice(s)`, `buf.try_get_u8()` | the buffer model `crate::__lift_model::{bufmut_put_u8, bufmut_put_slice, buf_try_get_u8}` over `Seq<u8>` |
-//! | `e?` on `Result`, `e.map_err(\|p\| b)`, `e.map(F)`, `o.unwrap()` | `match` (with `unreachable!()` for `unwrap`'s panic: an obligation) |
-//! | `loop { .. }` in tail position without `break` | a tail-recursive helper `f__loopK` (measure from an attachment) |
-//! | `&a[..=j]` | `&a[..j + 1]` (both panic exactly when `j + 1 > len`) |
-//! | `let x = a.checked_sub(b).unwrap();` (also `_add`, `_mul`) | `let x = a - b;` (both panic exactly on overflow; the operation's obligation proves it does not) |
-//! | `let Some(x) = e else { .. }` shapes from `unwrap` | `let .. else { unreachable!() }` (an obligation) |
+//! | `&mut self`, `&mut impl Buf`, `&mut impl BufMut` parameters (and §19.10's states) | state passing: the function takes the state by value and returns it (`(state.., value)`) |
 //! | `#[lift(unverified = "u128, ..")]` on the declaration | those impl types' instances are not lifted (reported) |
-//! | `usize::max(a, b)` (a primitive's method as a path) | `a.max(b)` |
-//! | `const { .. }` blocks of `assert!(size_of::<A>() == size_of::<B>())` shape | evaluated by the lift (must hold) and removed |
 //! | derives `PartialOrd`, `Ord`, `Hash` | dropped (rustc-derived, not used by the lifted code) and listed; `Copy` added (the model is by value; rustc already checked moves) |
 //! | impls of host traits (`Default`, `Write`, `Read`, `EncodeSize`, `From`) | inherent methods / free functions of the instance |
-//! | `i16`/`i32`/`i64` values and their operations | two's complement bits `crate::__lift::I16(u16)`..; `>>` arithmetic (`iN_shr`), unary `-` with its panic as an obligation (`iN_neg`), bit operations and truncating casts on the bits, ghost `as Int` / `as iN` through `int_of_iN` / `iN_of_int`; other sign-dependent operations refused (SEMANTICS.md §19.3) |
+//! | `i16`/`i32`/`i64` in types | two's complement bits `crate::__lift::I16(u16)`..; ghost `as Int` / `as iN` through `int_of_iN` / `iN_of_int` (SEMANTICS.md §19.3) |
 //! | `#[lift(host)]` on a declaration | a host model (enums): proven against, never emitted; the emitted module checks each variant against the host |
-//! | an unsuffixed shift amount (`v >> 1`) | `1u32` (Rust infers it; a shift means the same for any amount type) |
+//! | `const` items, associated constants of open-trait impls | their initializer, read by the expression reading below (constants only: literals, `size_of`, constants, calls of lifted functions) |
 //!
 //! **Attachments.** Proof annotations never go into the lifted file. A
 //! ghost `#[lift]` module (PROOF.rs) attaches them from outside:
@@ -48,11 +47,11 @@
 //! its `ensures` alone, like the exec functions with loops or buffers.
 //!
 //! The statements are moved (monomorphized like everything else) into the
-//! lifted item: a struct `#[invariant]`, a `proof! { invariant(..);
-//! decreases(..); }` at the head of the `k`-th `while` body, or the
-//! `#[decreases]`/`#[requires]` of the `k`-th `loop` helper.
+//! lifted item: a struct `#[invariant]`, a function's contract, or the
+//! `k`-th loop of rustc's MIR (`loop_nr = k`; the MIR reading places it on
+//! the `while` or the loop helper it reads, `mir::read::LoopAttach`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use proc_macro2::{Delimiter, Group, Ident, Span as PSpan, TokenStream, TokenTree};
 use quote::{format_ident, quote, ToTokens};
@@ -63,7 +62,7 @@ use syn::visit_mut::VisitMut;
 use crate::diag::{DiagKind, Diagnostic, Diagnostics};
 use crate::span::{FileId, Span};
 
-/// In-place lifting, open traits, operator impls, closures, templates.
+/// In-place lifting, open traits, operator impls, state parameters.
 #[path = "lift_open.rs"]
 pub mod open;
 
@@ -266,17 +265,18 @@ pub struct ConformSkip {
     pub why: String,
 }
 
-/// A deliberately wrong lift rule, for the toolchain's own tests of the
-/// conformance check (never set by a build: the check must catch it).
+/// A deliberately wrong reading of rustc's MIR (`mir::read`), for the
+/// toolchain's own tests of the conformance check (never set by a build: the
+/// check must catch it).
 #[doc(hidden)]
 pub mod test_hook {
     use std::cell::Cell;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum WrongRule {
-        /// Signed `x >> k` read as the logical shift of the bits.
+        /// A signed `Shr` read as the logical shift of the bits.
         SignedShrLogical,
-        /// `&a[..=j]` read as `&a[..j]`.
+        /// An index by `RangeToInclusive` (`&a[..=j]`) read as `&a[..j]`.
         InclusiveRangeAsExclusive,
     }
 
@@ -406,7 +406,15 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
         }
         cx.open.module_paths.insert(src.name.clone(), src.module_path.clone());
     }
-    cx.load_templates();
+    // exec code is read from rustc's MIR only (`docs/mir-lift.md` §20): a
+    // lifted exec module without its extraction is refused, never read
+    // from its surface syntax
+    for src in sources.iter().filter(|s| !s.ghost && !s.host && s.mir.is_none()) {
+        diags.push(
+            Diagnostic::error(DiagKind::Unsupported, src.decl_span, format!("lift: the lifted module `{}` has no `mir = \"..\"`: function bodies are read only from rustc's MIR", src.name))
+                .note("extract it with `sandblaster/mirx/extract.sh` (see `sandblaster/mirx/README.md`) and declare `#[lift(mir = \"<file>.sbmir\", ..)]`"),
+        );
+    }
     // the generic items whose open-trait parameters erasure drops
     {
         let instances = cx.open.instances.clone();
@@ -424,7 +432,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
         }
     }
     // 1. preprocess: drop host-only items, expand macros, flatten modules
-    let mut pre: Vec<(usize, FileId, bool, String, Vec<syn::Item>)> = Vec::new();
+    let mut pre: Vec<(usize, FileId, bool, bool, String, Vec<syn::Item>)> = Vec::new();
     let mut in_place: HashSet<usize> = HashSet::new();
     // `#[lift(mir = ..)]` modules (name, DSL path without `crate::`, text,
     // declaration) and the lifted source files the MIR must match
@@ -468,16 +476,16 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
         if s.opts.in_place {
             in_place.insert(s.module_index);
         }
-        pre.push((s.module_index, s.file, s.ghost, s.name, items));
+        pre.push((s.module_index, s.file, s.ghost, s.host, s.name, items));
     }
     // 2. declarations
-    for (_, file, _, modname, items) in &pre {
+    for (_, file, _, _, modname, items) in &pre {
         cx.file = *file;
         cx.collect(modname, items);
     }
     cx.check_sealed();
     // 3. attachments (ghost modules)
-    for (_, file, ghost, _, items) in &mut pre {
+    for (_, file, ghost, _, _, items) in &mut pre {
         if *ghost {
             cx.file = *file;
             cx.take_attachments(items);
@@ -487,7 +495,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     {
         let sealed: std::collections::BTreeSet<String> = cx.traits.iter().filter(|(_, t)| t.sealed).map(|(n, _)| n.clone()).collect();
         let mut host_enums: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for (_, _, _, _, items) in &pre {
+        for (_, _, _, _, _, items) in &pre {
             for it in items {
                 if let syn::Item::Enum(e) = it {
                     host_enums.entry(e.ident.to_string()).or_insert_with(|| e.variants.iter().map(|v| v.ident.to_string()).collect());
@@ -517,13 +525,15 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     }
     // 4. emit
     let mut out = Vec::new();
-    for (idx, file, ghost, modname, items) in pre {
+    for (idx, file, ghost, host, modname, items) in pre {
         cx.file = file;
         cx.open.cur_in_place = in_place.contains(&idx);
         cx.cur_mir = if ghost { None } else { cx.mir_modules.get(&modname).cloned() };
+        cx.cur_host = host;
         let mir_module = cx.cur_mir.is_some();
         let mut lifted = cx.emit_module(&modname, ghost, items);
         cx.cur_mir = None;
+        cx.cur_host = false;
         cx.open.cur_in_place = false;
         // (a MIR module's bodies need none of its imports: `use Trait as _`
         // only steered rustc's method resolution)
@@ -627,10 +637,10 @@ pub fn expand_use_families(t: &mut syn::UseTree, fams: &Families) {
 struct TraitInfo {
     /// `From<X>` supertrait: `X`.
     from: Option<syn::Type>,
-    /// Supertraits `Shl<usize>`, `ShrAssign<usize>`: the amount type.
+    /// Supertraits `Shl<usize>`, `ShrAssign<usize>`: the amount type (a
+    /// ghost shift's literal amount, [`FnRw::shift_amount_ty`]).
     shift_amount: Option<syn::Type>,
     methods: BTreeMap<String, syn::Signature>,
-    assoc_types: Vec<String>,
     /// Declared inside a private inline module (the impl set is closed).
     sealed: bool,
     span: Span,
@@ -662,12 +672,8 @@ struct StructInfo {
 
 #[derive(Clone)]
 struct FnInfo {
-    module: String,
     params: Vec<GenericParam>,
     sig: syn::Signature,
-    /// The body of a `-> impl Trait` function (its callers' `for` loops
-    /// need the concrete type, `Ctx::impl_trait_concrete`).
-    impl_body: Option<syn::Block>,
 }
 
 #[derive(Clone, Default)]
@@ -677,8 +683,6 @@ struct MethodInfo {
     /// Indices (in the signature, receiver excluded) of state parameters.
     state_params: Vec<usize>,
     sig: Option<syn::Signature>,
-    /// The generic struct's params (for substitution of the signature).
-    owner_params: Vec<GenericParam>,
 }
 
 #[derive(Clone)]
@@ -746,6 +750,10 @@ struct Ctx {
     mir_modules: HashMap<String, std::rc::Rc<crate::mir::Loaded>>,
     /// The MIR of the module being emitted.
     cur_mir: Option<std::rc::Rc<crate::mir::Loaded>>,
+    /// The module being emitted is a host model (`#[lift(host)]`): its
+    /// functions' bodies (calls of spec functions) are read by the
+    /// expression reading, like constants.
+    cur_host: bool,
     /// [`LiftFacts::mir_read`].
     mir_read: Vec<(String, String, Vec<(usize, String)>)>,
 }
@@ -893,7 +901,6 @@ impl Ctx {
                         }
                     }
                     let mut methods = BTreeMap::new();
-                    let mut assoc_types = Vec::new();
                     for ti in &t.items {
                         match ti {
                             syn::TraitItem::Fn(f) => {
@@ -907,26 +914,24 @@ impl Ctx {
                                 }
                                 methods.insert(f.sig.ident.to_string(), f.sig.clone());
                             }
-                            syn::TraitItem::Type(ty) => assoc_types.push(ty.ident.to_string()),
+                            syn::TraitItem::Type(_) => {}
                             other => self.err(other.span(), "only methods and associated types are lifted in traits"),
                         }
                     }
                     let span = self.sp(t.span());
-                    self.traits.insert(name, TraitInfo { from, shift_amount, methods, assoc_types, sealed, span });
+                    self.traits.insert(name, TraitInfo { from, shift_amount, methods, sealed, span });
                 }
                 syn::Item::Impl(im) => {
-                    self.record_methods(im);
-                    if self.collect_open_impl(modname, im) {
+                    if self.collect_open_impl(im) {
                         continue;
                     }
                     let Some((_, tpath, _)) = &im.trait_ else {
                         // inherent impl of a (generic) struct
                         if let Some(sname) = type_name(&im.self_ty) {
-                            let owner_params = self.structs.get(&sname).map(|s| s.params.clone()).unwrap_or_default();
                             for ii in &im.items {
                                 if let syn::ImplItem::Fn(f) = ii {
                                     self.open.inherent_fns.insert((sname.clone(), f.sig.ident.to_string()), f.clone());
-                                    let mi = method_info(&f.sig, owner_params.clone());
+                                    let mi = method_info(&f.sig);
                                     self.methods.insert((sname.clone(), f.sig.ident.to_string()), mi);
                                 }
                             }
@@ -967,10 +972,9 @@ impl Ctx {
                             continue;
                         }
                         // host-trait impl of a lifted struct: its methods become inherent
-                        let owner_params = self.structs.get(&sname).map(|s| s.params.clone()).unwrap_or_default();
                         for ii in &im.items {
                             if let syn::ImplItem::Fn(f) = ii {
-                                let mi = method_info(&f.sig, owner_params.clone());
+                                let mi = method_info(&f.sig);
                                 self.methods.insert((sname.clone(), f.sig.ident.to_string()), mi);
                             }
                         }
@@ -983,14 +987,13 @@ impl Ctx {
                         let sn = s.ident.to_string();
                         self.open.derive_default.insert(sn.clone());
                         let sig: syn::Signature = syn::parse_quote!(fn default() -> Self);
-                        self.methods.insert((sn, "default".into()), method_info(&sig, vec![]));
+                        self.methods.insert((sn, "default".into()), method_info(&sig));
                     }
                 }
                 syn::Item::Fn(f) => {
                     let iters = open::byte_iter_params(&f.sig.generics);
                     let params: Vec<GenericParam> = self.generic_params(&f.sig.generics).into_iter().filter(|p| !iters.contains(&p.name)).collect();
-                    let impl_body = matches!(&f.sig.output, syn::ReturnType::Type(_, t) if matches!(&**t, syn::Type::ImplTrait(_))).then(|| (*f.block).clone());
-                    self.fns.insert(f.sig.ident.to_string(), FnInfo { module: modname.to_string(), params, sig: f.sig.clone(), impl_body });
+                    self.fns.insert(f.sig.ident.to_string(), FnInfo { params, sig: f.sig.clone() });
                 }
                 syn::Item::Const(c) => {
                     self.consts.insert(c.ident.to_string(), (*c.ty).clone());
@@ -1225,16 +1228,17 @@ impl Ctx {
                     if matches!(c.vis, syn::Visibility::Inherited) {
                         c.vis = syn::parse_quote!(pub(crate));
                     }
+                    // the initializer: the expression reading (literals,
+                    // `size_of`, other constants, calls of lifted functions)
                     let mut rw = FnRw::new(self, HashMap::new(), ghost);
                     rw.expr(&mut c.expr, Some(&c.ty.clone()));
-                    let helpers = std::mem::take(&mut rw.helpers);
                     drop(rw);
-                    out.extend(helpers);
                     out.push(syn::Item::Const(c));
                 }
                 syn::Item::Trait(_) => {}
                 syn::Item::Fn(f) if f.sig.constness.is_some() && f.block.stmts.iter().all(|s| matches!(s, syn::Stmt::Expr(syn::Expr::Macro(m), _) if m.mac.path.is_ident("assert")) || matches!(s, syn::Stmt::Macro(m) if m.mac.path.is_ident("assert"))) => {
-                    // `const fn` compile-time assertions (used only in `const { .. }` blocks, which the lift evaluates)
+                    // `const fn` compile-time assertions, used only in `const { .. }`
+                    // blocks (rustc evaluates them; MIR has no trace of them)
                 }
                 syn::Item::Fn(f) => {
                     // byte-string iterator parameters are states, not instances (`open::state_param`)
@@ -1665,16 +1669,14 @@ impl Ctx {
         f.sig.generics = syn::Generics::default();
         // `const fn`: the same function (constness only allows compile-time calls)
         f.sig.constness = None;
-        // `-> impl Trait`: the concrete type of the body's result (a MIR
-        // module: rustc's, the type of the instance's return place)
+        // `-> impl Trait`: rustc's concrete type, the type of the
+        // instance's return place
         if let syn::ReturnType::Type(_, t) = &f.sig.output
             && matches!(&**t, syn::Type::ImplTrait(_))
+            && !ghost
+            && let Some(ct) = self.mir_ret_ty(&f.sig.ident.to_string(), self_ty.as_ref())
         {
-            let t = (**t).clone();
-            let ct = if !ghost && self.cur_mir.is_some() { self.mir_ret_ty(&f.sig.ident.to_string(), self_ty.as_ref()) } else { self.impl_trait_concrete(&t, &mut f.block, self_ty.as_ref()) };
-            if let Some(ct) = ct {
-                f.sig.output = syn::parse_quote!(-> #ct);
-            }
+            f.sig.output = syn::parse_quote!(-> #ct);
         }
         // exec items keep docs and lint allowances (their other attributes are
         // host-only: `#[inline]`); ghost items keep their annotations
@@ -1686,8 +1688,6 @@ impl Ctx {
         rw.bounds = bounds;
         rw.impl_assoc = impl_assoc;
         rw.self_ty = self_ty.clone();
-        rw.fn_name = orig_name.clone();
-        rw.lifted_name = f.sig.ident.to_string();
         // parameters: types, states
         let mut new_inputs: syn::punctuated::Punctuated<syn::FnArg, syn::Token![,]> = syn::punctuated::Punctuated::new();
         rw.push_scope();
@@ -1702,7 +1702,6 @@ impl Ctx {
                     } else if self_ty.as_ref().is_some_and(|t| type_name(t).is_some_and(|n| is_prim(&n))) {
                         // a sealed-trait method on a primitive: `self_` parameter
                         new_inputs.push(syn::parse_quote!(self_: #st));
-                        rw.rename_self = true;
                         rw.bind("self_", st.clone());
                     } else {
                         new_inputs.push(syn::parse_quote!(self));
@@ -1759,8 +1758,9 @@ impl Ctx {
         } else if let Some(r) = &ret_ty {
             f.sig.output = syn::parse_quote!(-> #r);
         }
-        // body (a `#[lift(mir = ..)]` module reads it from rustc's MIR below)
-        let use_mir = !ghost && rw.cx.cur_mir.is_some();
+        // body: exec code from rustc's MIR (below); a ghost function's and a
+        // host model's by the expression reading
+        let use_mir = !ghost && !rw.cx.cur_host;
         let state_names: Vec<String> = rw.states.iter().map(|(n, _)| n.clone()).collect();
         let state_tys: Vec<(String, syn::Type)> = rw.states.clone();
         let mut block = (*f.block).clone();
@@ -1790,16 +1790,12 @@ impl Ctx {
         }
         rw.pop_scope();
         f.block = Box::new(block);
-        let mut helpers = std::mem::take(&mut rw.helpers);
-        let rename_self = rw.rename_self;
         drop(rw);
+        let mut helpers = Vec::new();
         if use_mir {
             let (b, h) = self.mir_body(&mut f, &orig_name, self_ty.as_ref(), &state_names, &state_tys);
             f.block = Box::new(b);
             helpers = h;
-        } else if rename_self {
-            let mut rs = RenameSelf;
-            rs.visit_block_mut(&mut f.block);
         }
         if let Some(at) = self.attach_fn.get(&orig_name).cloned() {
             self.attach_used.insert(format!("fn {orig_name}"));
@@ -2165,44 +2161,40 @@ impl Ctx {
 // function rewriting
 // ---------------------------------------------------------------------------
 
+/// The expression reading: the ghost language (laws, proofs, specs,
+/// attachments; `ghost`), and the bodies that are not exec code read from
+/// MIR — constant initializers and host models' functions. Generic
+/// parameters are substituted by the instance (`sigma`), sealed-trait and
+/// generic-family calls named by their lifted instances, state arguments
+/// of calls (`v.write(&mut b)` in a law) passed and assigned back. It keeps
+/// every reading the ghost language shared with the deleted body reading
+/// (`docs/mir-lift.md` §20): `unwrap`, `checked_*().unwrap()`, `&a[..=j]`,
+/// signed operations and casts, shift amounts and index literals typed,
+/// `S::C`, `prim::m(a, ..)`, `as_ref` of a byte slice, a generic call's
+/// instance from the enclosing one.
 struct FnRw<'c> {
     cx: &'c mut Ctx,
     sigma: HashMap<String, syn::Type>,
     self_ty: Option<syn::Type>,
     ghost: bool,
-    /// State variables (`self` for `&mut self`, `&mut impl Buf(Mut)` params) and their lifted types.
+    /// State parameters of the function's signature (`self` for `&mut
+    /// self`, `&mut impl Buf(Mut)` params) and their lifted types.
     states: Vec<(String, syn::Type)>,
     ret: Option<syn::Type>,
     scopes: Vec<HashMap<String, syn::Type>>,
     fresh: usize,
-    helpers: Vec<syn::Item>,
-    fn_name: String,
-    lifted_name: String,
-    while_index: usize,
-    loop_index: usize,
-    rename_self: bool,
     /// Sealed-trait bounds of the current item's generic parameters (source names).
     bounds: HashMap<String, Vec<String>>,
-    /// `after_loop!` steps of the `while` just rewritten, placed after it by [`FnRw::block`].
-    after_loop: Vec<Vec<syn::Stmt>>,
     /// The associated types of the enclosing impl (`Self::Item` ..).
     impl_assoc: HashMap<String, syn::Type>,
-    /// Local closures (`let f = |x| e;`), inlined at their calls, with the
-    /// variables they capture.
-    closures: HashMap<String, (syn::ExprClosure, BTreeSet<String>)>,
-    /// Temporary bindings for typing (a closure body's parameters).
-    extra_scopes: std::cell::RefCell<Vec<HashMap<String, syn::Type>>>,
     /// The function's receiver is `&self`/`&mut self` (`*self` is then the
     /// builtin dereference of the reference: the lifted `self` itself).
     recv_ref: bool,
-    /// Inside a method helper whose `self` is unpacked into field locals
-    /// (`(field, local)`): `self` is rebuilt where it leaves the helper.
-    unpacked_self: Option<Vec<(String, String)>>,
 }
 
 impl<'c> FnRw<'c> {
     fn new(cx: &'c mut Ctx, sigma: HashMap<String, syn::Type>, ghost: bool) -> FnRw<'c> {
-        FnRw { cx, sigma, self_ty: None, ghost, states: vec![], ret: None, scopes: vec![HashMap::new()], fresh: 0, helpers: vec![], fn_name: String::new(), lifted_name: String::new(), while_index: 0, loop_index: 0, rename_self: false, bounds: HashMap::new(), after_loop: vec![], impl_assoc: HashMap::new(), closures: HashMap::new(), extra_scopes: std::cell::RefCell::new(vec![]), recv_ref: false, unpacked_self: None }
+        FnRw { cx, sigma, self_ty: None, ghost, states: vec![], ret: None, scopes: vec![HashMap::new()], fresh: 0, bounds: HashMap::new(), impl_assoc: HashMap::new(), recv_ref: false }
     }
 
     fn push_scope(&mut self) {
@@ -2215,17 +2207,11 @@ impl<'c> FnRw<'c> {
         self.scopes.last_mut().unwrap().insert(n.to_string(), t);
     }
     fn local_ty(&self, n: &str) -> Option<syn::Type> {
-        if let Some(t) = self.extra_scopes.borrow().iter().rev().find_map(|s| s.get(n).cloned()) {
-            return Some(t);
-        }
         self.scopes.iter().rev().find_map(|s| s.get(n).cloned())
     }
     fn fresh(&mut self, base: &str) -> Ident {
         self.fresh += 1;
         format_ident!("__{}{}", base, self.fresh)
-    }
-    fn is_state(&self, n: &str) -> bool {
-        self.states.iter().any(|(s, _)| s == n)
     }
 
     // ----- types --------------------------------------------------------
@@ -2251,101 +2237,22 @@ impl<'c> FnRw<'c> {
 
     // ----- statements and blocks -----------------------------------------
 
+    /// A ghost function's or a host model's body (never exec code: that is
+    /// read from MIR).
     fn fn_body(&mut self, b: &mut syn::Block) {
         self.push_scope();
-        // a `loop` in tail position becomes a helper
-        let mut todo: std::collections::VecDeque<syn::Stmt> = std::mem::take(&mut b.stmts).into();
-        let mut new = Vec::new();
-        while let Some(mut st) = todo.pop_front() {
-            let last = todo.is_empty();
-            if let syn::Stmt::Expr(syn::Expr::Loop(lp), _) = &st
-                && last
+        let n = b.stmts.len();
+        for (i, st) in b.stmts.iter_mut().enumerate() {
+            if i + 1 == n
+                && let syn::Stmt::Expr(e, None) = st
             {
-                let call = self.loop_helper(lp.clone());
-                new.push(syn::Stmt::Expr(call, None));
-                continue;
-            }
-            // a `while` with `return`/`continue`/`break`: a helper with the rest (`open`)
-            if let syn::Stmt::Expr(syn::Expr::While(w), _) = &st
-                && !self.ghost
-                && ({ let (r, c, k) = open::has_control(&w.body); r || c || k } || self.next_loop_has_ensures())
-            {
-                let w = w.clone();
-                let rest: Vec<syn::Stmt> = todo.drain(..).collect();
-                let call = self.while_helper(w, rest);
-                new.push(syn::Stmt::Expr(call, None));
-                continue;
-            }
-            // a `for` over an iterator (or with `return`/`continue`/`break`): a helper (`open`)
-            if let syn::Stmt::Expr(syn::Expr::ForLoop(f), _) = &st
-                && !self.ghost
-                && self.for_needs_helper(f)
-            {
-                let f = f.clone();
-                let rest: Vec<syn::Stmt> = todo.drain(..).collect();
-                let mut pre = Vec::new();
-                let call = self.for_helper(f, rest, &mut pre);
-                new.extend(pre);
-                new.push(syn::Stmt::Expr(call, None));
-                continue;
-            }
-            let rest: Vec<syn::Stmt> = todo.iter().cloned().collect();
-            if self.pre_stmt(&mut st, &rest) {
-                continue;
-            }
-            if last && let syn::Stmt::Expr(e, None) = &mut st {
                 let ret = self.ret.clone();
                 self.expr(e, ret.as_ref());
-                new.push(st);
                 continue;
             }
-            self.stmt(&mut st);
-            new.push(st);
-            for steps in std::mem::take(&mut self.after_loop) {
-                new.push(syn::parse_quote!(proof! { #(#steps)* }));
-            }
-        }
-        b.stmts = new;
-        // the tail value
-        if !self.states.is_empty() {
-            let tail = match b.stmts.last() {
-                Some(syn::Stmt::Expr(_, None)) => {
-                    let syn::Stmt::Expr(e, _) = b.stmts.pop().unwrap() else { unreachable!() };
-                    Some(e)
-                }
-                _ => None,
-            };
-            let ret = match tail {
-                Some(e) if is_helper_call(&e) => e,
-                Some(e) => self.wrap_state_ret(e),
-                None => self.wrap_state_ret(syn::parse_quote!(())),
-            };
-            b.stmts.push(syn::Stmt::Expr(ret, None));
+            self.stmt(st);
         }
         self.pop_scope();
-    }
-
-    /// `(s1, .., v)` for a value `v` evaluated before the states are read.
-    fn wrap_state_ret(&mut self, v: syn::Expr) -> syn::Expr {
-        // an unpacked `self` (`open::while_helper`) is rebuilt from its field locals
-        let states: Vec<syn::Expr> = self.states.iter().map(|(s, _)| match (&self.unpacked_self, s.as_str()) {
-            (Some(fields), "self") => open::rebuild_self(fields),
-            _ => {
-                let id = format_ident!("{}", s);
-                syn::parse_quote!(#id)
-            }
-        }).collect();
-        if self.ret.is_none() {
-            let unit_v = matches!(&v, syn::Expr::Tuple(t) if t.elems.is_empty());
-            let st: syn::Expr = if states.len() == 1 { states[0].clone() } else { syn::parse_quote!((#(#states),*)) };
-            if unit_v {
-                return st;
-            }
-            return syn::parse_quote!({ #v; #st });
-        }
-        let r = self.fresh("r");
-        let rt = self.ret.clone().unwrap();
-        syn::parse_quote!({ let #r: #rt = #v; (#(#states,)* #r) })
     }
 
     fn stmt(&mut self, st: &mut syn::Stmt) {
@@ -2424,18 +2331,8 @@ impl<'c> FnRw<'c> {
                 if pat_ident(&l.pat).is_none() {
                     self.bind_pat(&l.pat, ty.as_ref());
                 }
-                if let Some(n) = pat_ident(&l.pat) {
-                    match ty {
-                        Some(t) => self.bind(&n, t),
-                        None => {
-                            // an unsuffixed literal: typed by its uses (`a[x]` forces `usize`)
-                            if let Some(init) = &mut l.init
-                                && is_unsuffixed_int(&init.expr)
-                            {
-                                self.pending_literal(&n, l);
-                            }
-                        }
-                    }
+                if let (Some(n), Some(t)) = (pat_ident(&l.pat), ty) {
+                    self.bind(&n, t);
                 }
             }
             syn::Stmt::Expr(e, _) => self.expr(e, None),
@@ -2453,30 +2350,11 @@ impl<'c> FnRw<'c> {
         }
     }
 
-    /// `let mut x = 0;`: rustc types the literal from later uses. The lift
-    /// types it only when a use forces the type: an array index `a[x]`
-    /// forces `usize`. (Typeck re-checks the annotation.)
-    fn pending_literal(&mut self, n: &str, l: &mut syn::Local) {
-        // decided later in `finish_literals`; here: mark with usize if the
-        // function indexes with this name anywhere (checked by `index_uses`)
-        let _ = (n, l);
-    }
-
     fn block(&mut self, b: &mut syn::Block) {
         self.push_scope();
-        let mut out = Vec::new();
-        let stmts = std::mem::take(&mut b.stmts);
-        for (i, mut st) in stmts.iter().cloned().enumerate() {
-            if self.pre_stmt(&mut st, &stmts[i + 1..]) {
-                continue;
-            }
-            self.stmt(&mut st);
-            out.push(st);
-            for steps in std::mem::take(&mut self.after_loop) {
-                out.push(syn::parse_quote!(proof! { #(#steps)* }));
-            }
+        for st in b.stmts.iter_mut() {
+            self.stmt(st);
         }
-        b.stmts = out;
         self.pop_scope();
     }
 
@@ -2495,20 +2373,6 @@ impl<'c> FnRw<'c> {
             && matches!(&*u.expr, syn::Expr::Path(p) if p.path.is_ident("self"))
         {
             *e = syn::parse_quote!(self);
-            return;
-        }
-        // the value, iterator and `Vec` states (`open::state_rewrite`)
-        if !self.ghost
-            && let Some(new) = self.state_rewrite(e)
-        {
-            *e = new;
-            return;
-        }
-        // operators on lifted structs (`open`)
-        if !self.ghost
-            && let Some(new) = self.operator_rewrite(e)
-        {
-            *e = new;
             return;
         }
         // shapes rewritten as a whole first
@@ -2546,89 +2410,6 @@ impl<'c> FnRw<'c> {
                     }
                     self.expr(&mut arm.body, expected);
                     self.pop_scope();
-                }
-            }
-            syn::Expr::While(w) => {
-                self.expr(&mut w.cond, None);
-                let k = self.while_index;
-                self.while_index += 1;
-                self.block(&mut w.body);
-                if let Some(at) = self.cx.attach_loop.get(&(self.fn_name.clone(), k)).cloned() {
-                    self.cx.attach_used.insert(format!("loop {}#{k}", self.fn_name));
-                    let mut steps: Vec<syn::Stmt> = Vec::new();
-                    self.check_attach_params(&at);
-                    for st in &at.stmts {
-                        let mut st = st.clone();
-                        let saved_ghost = self.ghost;
-                        self.ghost = true;
-                        self.ghost_stmt(&mut st);
-                        self.ghost = saved_ghost;
-                        steps.push(st);
-                    }
-                    // `at_start! { .. }`: proof steps before the body (each
-                    // iteration, the invariant assumed); `at_end! { .. }`:
-                    // after it (the state the invariant is preserved into);
-                    // `after_loop! { .. }`: after the loop
-                    let mut head: Vec<syn::Stmt> = Vec::new();
-                    let mut start: Vec<syn::Stmt> = Vec::new();
-                    let mut tail: Vec<syn::Stmt> = Vec::new();
-                    let mut after: Vec<syn::Stmt> = Vec::new();
-                    for st in steps {
-                        match &st {
-                            syn::Stmt::Macro(m) if m.mac.path.is_ident("at_start") || m.mac.path.is_ident("at_end") || m.mac.path.is_ident("after_loop") => {
-                                let which = if m.mac.path.is_ident("at_start") {
-                                    &mut start
-                                } else if m.mac.path.is_ident("at_end") {
-                                    &mut tail
-                                } else {
-                                    &mut after
-                                };
-                                match m.mac.parse_body_with(syn::Block::parse_within) {
-                                    Ok(v) => which.extend(v),
-                                    Err(e) => self.cx.err(m.span(), format!("malformed `{}!`: {e}", m.mac.path.to_token_stream())),
-                                }
-                            }
-                            _ => head.push(st),
-                        }
-                    }
-                    if !after.is_empty() {
-                        self.after_loop.push(after);
-                    }
-                    let pf: syn::Stmt = syn::parse_quote!(proof! { #(#head)* });
-                    w.body.stmts.insert(0, pf);
-                    if !start.is_empty() {
-                        let pf1: syn::Stmt = syn::parse_quote!(proof! { #(#start)* });
-                        w.body.stmts.insert(1, pf1);
-                    }
-                    if !tail.is_empty() {
-                        let pf2: syn::Stmt = syn::parse_quote!(proof! { #(#tail)* });
-                        w.body.stmts.push(pf2);
-                    }
-                }
-            }
-            syn::Expr::ForLoop(f) => {
-                self.expr(&mut f.expr, None);
-                self.push_scope();
-                if let Some(n) = pat_ident(&f.pat) {
-                    let t = self.ty_of_range(&f.expr);
-                    if let Some(t) = t {
-                        self.bind(&n, t);
-                    }
-                }
-                self.block(&mut f.body);
-                self.pop_scope();
-            }
-            syn::Expr::Loop(l) => self.cx.err(l.span(), "a `loop` is lifted only in tail position of a function body, without `break`"),
-            syn::Expr::Closure(c) if !self.ghost => self.cx.err(c.span(), "closures are lifted only as the argument of `map_err`/`map`"),
-            syn::Expr::Return(r) => {
-                if let Some(v) = &mut r.expr {
-                    let ret = self.ret.clone();
-                    self.expr(v, ret.as_ref());
-                }
-                if !self.states.is_empty() && !r.expr.as_ref().is_some_and(|v| is_helper_call(v)) {
-                    let v = r.expr.take().map(|b| *b).unwrap_or_else(|| syn::parse_quote!(()));
-                    let w = self.wrap_state_ret(v);
-                    r.expr = Some(Box::new(w));
                 }
             }
             syn::Expr::Assign(a) => {
@@ -2683,11 +2464,13 @@ impl<'c> FnRw<'c> {
         }
     }
 
-    /// Signed integers (SEMANTICS.md §19.3). An `iN` value is its two's
-    /// complement bits, the prelude type `crate::__lift::IN(uN)` (the final
-    /// [`SignedTypes`] pass renames the types), so each operation whose
-    /// meaning depends on the sign is translated here, and one that is not
-    /// fails to type check (never a silent unsigned reading):
+    /// Signed integers in the expression reading (SEMANTICS.md §19.3): an
+    /// `iN` value is its two's complement bits, the prelude type
+    /// `crate::__lift::IN(uN)` (the final [`SignedTypes`] pass renames the
+    /// types). Exec code's signed operations are rustc's MIR, read by
+    /// `mir::read`; here the ghost language's (and constants') are
+    /// translated, and an operation on `IN` values that is not fails to
+    /// type check (never a silent unsigned reading):
     ///
     /// | Rust (`x`, `y`: `iN`) | lifted |
     /// | --- | --- |
@@ -2697,13 +2480,13 @@ impl<'c> FnRw<'c> {
     /// | `x ^ y`, `x & y`, `x \| y`, `!x` | the same on the bits |
     /// | `-x` | `iN_neg(x)` (`requires(x != MIN)`: Rust's panic) |
     /// | `x as uM` / `x as iM` (`M <= N`) | `x.0` / `(x.0 as uM)` / `IM(x.0 as uM)` |
-    /// | `u as iN` (`u` unsigned) | `IN(u as uN)` |
+    /// | `u as iN` (`u` unsigned, or an unsuffixed literal) | `IN(u as uN)` |
     /// | `x as Int` (ghost) | `int_of_iN(x)` |
+    /// | `e as iN` (ghost, `e` an integer that is not unsigned) | `iN_of_int(e as Int)` |
     /// | `x == y`, `x != y` | structural (unchanged) |
     ///
     /// Refused: signed `+ - * / %`, comparisons, compound assignment,
-    /// widening casts from a signed type (sign extension), methods on a
-    /// signed receiver other than sealed-trait methods, and `as iN` of an
+    /// widening casts from a signed type (sign extension), and `as iN` of an
     /// operand the lift cannot type.
     fn signed_rewrite(&mut self, e: &mut syn::Expr) -> Option<syn::Expr> {
         let span = e.span();
@@ -2714,30 +2497,27 @@ impl<'c> FnRw<'c> {
                 let v: u128 = i.base10_parse().ok()?;
                 Some(signed_lit(n, v, false, span, self))
             }
-            syn::Expr::Unary(u) => {
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => {
                 let t = self.ty_of(&u.expr)?;
                 let n = signed_bits(&t)?;
-                match u.op {
-                    syn::UnOp::Neg(_) => {
-                        if let syn::Expr::Lit(l) = &*u.expr
-                            && let syn::Lit::Int(i) = &l.lit
-                            && let Ok(v) = i.base10_parse::<u128>()
-                        {
-                            return Some(signed_lit(n, v, true, span, self));
-                        }
-                        let mut x = (*u.expr).clone();
-                        self.expr(&mut x, None);
-                        let f = format_ident!("i{}_neg", n);
-                        Some(syn::parse_quote_spanned!(span=> crate::__lift::#f(#x)))
-                    }
-                    syn::UnOp::Not(_) => {
-                        let mut x = (*u.expr).clone();
-                        self.expr(&mut x, None);
-                        let c = signed_ctor(n);
-                        Some(syn::parse_quote_spanned!(span=> #c(!((#x).0))))
-                    }
-                    _ => None,
+                if let syn::Expr::Lit(l) = &*u.expr
+                    && let syn::Lit::Int(i) = &l.lit
+                    && let Ok(v) = i.base10_parse::<u128>()
+                {
+                    return Some(signed_lit(n, v, true, span, self));
                 }
+                let mut x = (*u.expr).clone();
+                self.expr(&mut x, None);
+                let f = format_ident!("i{}_neg", n);
+                Some(syn::parse_quote_spanned!(span=> crate::__lift::#f(#x)))
+            }
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Not(_)) => {
+                let t = self.ty_of(&u.expr)?;
+                let n = signed_bits(&t)?;
+                let mut x = (*u.expr).clone();
+                self.expr(&mut x, None);
+                let c = signed_ctor(n);
+                Some(syn::parse_quote_spanned!(span=> #c(!((#x).0))))
             }
             syn::Expr::Binary(b) => {
                 let lt = self.ty_of(&b.left).and_then(|t| signed_bits(&t));
@@ -2765,7 +2545,6 @@ impl<'c> FnRw<'c> {
                         let c = signed_ctor(n);
                         Some(match b.op {
                             B::Shl(_) => syn::parse_quote_spanned!(span=> #c((#l).0 << (#amt))),
-                            _ if test_hook::get() == Some(test_hook::WrongRule::SignedShrLogical) => syn::parse_quote_spanned!(span=> #c((#l).0 >> (#amt))),
                             _ => {
                                 let f = format_ident!("i{}_shr", n);
                                 // a literal amount is written as a `usize` literal
@@ -2827,78 +2606,34 @@ impl<'c> FnRw<'c> {
                     let f = format_ident!("i{}_of_int", m);
                     return Some(syn::parse_quote_spanned!(span=> crate::__lift_model::#f((#x) as Int)));
                 }
-                // an unsuffixed literal cast to a signed type: its value
-                if dn.is_some() && src.is_none() && !is_unsuffixed_int(&x) {
-                    self.cx.err(span, format!("`as {}` of an operand the lift cannot type is not lifted", dst.to_token_stream()));
-                    return None;
-                }
                 self.expr(&mut x, None);
                 let dname = type_name(&dst);
-                match (sn, dn) {
-                    (Some(n), None) => match dname.as_deref() {
-                        Some("Int") if self.ghost => {
-                            let f = format_ident!("int_of_i{}", n);
-                            Some(syn::parse_quote_spanned!(span=> crate::__lift_model::#f(#x)))
-                        }
-                        Some(d) => match uint_name_bits(d) {
-                            Some(m) if m == n => Some(syn::parse_quote_spanned!(span=> (#x).0)),
-                            Some(m) if m < n => Some(syn::parse_quote_spanned!(span=> ((#x).0 as #dst))),
-                            Some(_) => {
-                                self.cx.err(span, format!("a widening cast from a signed integer (sign extension) to `{d}` is not lifted"));
-                                None
-                            }
-                            None => {
-                                self.cx.err(span, format!("the cast of a signed integer to `{d}` is not lifted"));
-                                None
-                            }
-                        },
-                        None => None,
-                    },
-                    (Some(n), Some(m)) => {
-                        let um = format_ident!("u{}", m);
-                        let cm = signed_ctor(m);
-                        if m == n {
-                            Some(x)
-                        } else if m < n {
-                            Some(syn::parse_quote_spanned!(span=> #cm((#x).0 as #um)))
-                        } else {
-                            self.cx.err(span, "a widening cast between signed integers (sign extension) is not lifted");
-                            None
-                        }
+                match (sn, dname.as_deref()) {
+                    (Some(n), Some("Int")) if self.ghost => {
+                        let f = format_ident!("int_of_i{}", n);
+                        Some(syn::parse_quote_spanned!(span=> crate::__lift_model::#f(#x)))
                     }
-                    (None, Some(m)) => {
-                        let um = format_ident!("u{}", m);
-                        let cm = signed_ctor(m);
-                        let ok = src.as_ref().and_then(type_name).is_some_and(|t| uint_name_bits(&t).is_some()) || is_unsuffixed_int(&x);
-                        if !ok {
-                            self.cx.err(span, format!("`as i{m}` of a `{}` is not lifted", src.map(|t| t.to_token_stream().to_string()).unwrap_or_default()));
-                            return None;
-                        }
+                    (Some(n), Some(d)) if uint_name_bits(d) == Some(n) => Some(syn::parse_quote_spanned!(span=> (#x).0)),
+                    (Some(n), Some(d)) if uint_name_bits(d).is_some_and(|m| m < n) => Some(syn::parse_quote_spanned!(span=> ((#x).0 as #dst))),
+                    // `x as iM` of a signed value, `M <= N`: its (low) bits
+                    (Some(n), _) if dn.is_some_and(|m| m <= n) => {
+                        let m = dn.unwrap_or(n);
+                        let (um, cm) = (format_ident!("u{}", m), signed_ctor(m));
+                        Some(if m == n { x } else { syn::parse_quote_spanned!(span=> #cm((#x).0 as #um)) })
+                    }
+                    // `u as iN` of an unsigned value: its bits (`IN(u as uN)`)
+                    (None, _) if src.as_ref().and_then(type_name).is_some_and(|t| uint_name_bits(&t).is_some()) || is_unsuffixed_int(&x) => {
+                        let m = dn.unwrap_or(0);
+                        let (um, cm) = (format_ident!("u{}", m), signed_ctor(m));
                         Some(syn::parse_quote_spanned!(span=> #cm((#x) as #um)))
                     }
-                    (None, None) => None,
+                    _ => {
+                        self.cx.err(span, format!("the cast `as {}` of a signed integer is not lifted here (exec code's casts are rustc's MIR; SEMANTICS.md §19.3)", dst.to_token_stream()));
+                        None
+                    }
                 }
-            }
-            syn::Expr::MethodCall(mc) => {
-                let t = self.ty_of(&mc.receiver)?;
-                signed_bits(&t)?;
-                let m = mc.method.to_string();
-                let sealed = self.cx.traits.iter().any(|(tn, ti)| ti.methods.contains_key(&m) && self.cx.impl_of(tn, &strip_refs(&t)).is_some());
-                if !sealed {
-                    self.cx.err(span, format!("the method `{m}` on a signed integer is not lifted (SEMANTICS.md §19.3)"));
-                }
-                None
             }
             _ => None,
-        }
-    }
-
-    /// An attachment names the target's generic parameters by the target's own names.
-    fn check_attach_params(&mut self, at: &Attach) {
-        for p in &at.params {
-            if !self.sigma.contains_key(p) {
-                self.cx.errors.push((at.span, format!("attachment parameter `{p}` is not a generic parameter of the target (use the target's names)"), vec![]));
-            }
         }
     }
 
@@ -3001,41 +2736,11 @@ impl<'c> FnRw<'c> {
     /// Whole-expression rewrites. Returns the replacement (already rewritten).
     fn rewrite(&mut self, e: &mut syn::Expr, expected: Option<&syn::Type>) -> Option<syn::Expr> {
         match e {
-            // `e?` on Result in a lifted function
-            syn::Expr::Try(t) if !self.ghost => {
-                let inner_ty = self.ty_of(&t.expr);
-                let is_option = inner_ty.as_ref().is_some_and(|t| type_name(t).as_deref() == Some("Option")) || self.ret.as_ref().is_some_and(|r| type_name(r).as_deref() == Some("Option"));
-                let mut inner = (*t.expr).clone();
-                let exp_inner: Option<syn::Type> = expected.map(|x| {
-                    if is_option { syn::parse_quote!(Option<#x>) } else { syn::parse_quote!(Result<#x, crate::Error>) }
-                });
-                self.expr(&mut inner, exp_inner.as_ref());
-                if is_option {
-                    return Some(syn::parse_quote!(#inner?));
-                }
-                let v = self.fresh("v");
-                let x = self.fresh("e");
-                let ret_err: syn::Expr = syn::parse_quote!(Err(#x));
-                let ret_e = if self.states.is_empty() { ret_err } else { self.wrap_state_ret(ret_err) };
-                // `o.ok_or(e)?` with no expected type: the template's `Ok(v)` arm
-                // leaves the error type open to the type checker, so the
-                // scrutinee is annotated with the type the lift read off it
-                if expected.is_none()
-                    && matches!(&*t.expr, syn::Expr::MethodCall(mc) if mc.method == "ok_or")
-                    && let Some(it) = &inner_ty
-                    && generic_arg(it, "Result", 0).is_some()
-                    && generic_arg(it, "Result", 1).is_some()
-                {
-                    let s = self.fresh("s");
-                    return Some(syn::parse_quote!(match { let #s: #it = #inner; #s } { Ok(#v) => #v, Err(#x) => return #ret_e }));
-                }
-                Some(syn::parse_quote!(match #inner { Ok(#v) => #v, Err(#x) => return #ret_e }))
-            }
             syn::Expr::MethodCall(mc) => self.rewrite_method(mc, expected),
             syn::Expr::Call(c) => self.rewrite_call(c, expected),
             syn::Expr::Path(p) => self.rewrite_path(p),
             syn::Expr::Reference(r) => {
-                // `&a[..=j]` → `&a[..j + 1]`
+                // `&a[..=j]` → `&a[..j + 1]` (both panic exactly when `j + 1 > len`)
                 if let syn::Expr::Index(ix) = &*r.expr
                     && let syn::Expr::Range(rg) = &*ix.index
                     && matches!(rg.limits, syn::RangeLimits::Closed(_))
@@ -3048,49 +2753,15 @@ impl<'c> FnRw<'c> {
                     }
                     let mut end = rg.end.clone()?;
                     self.expr(&mut end, None);
-                    let one: syn::Expr = if test_hook::get() == Some(test_hook::WrongRule::InclusiveRangeAsExclusive) { syn::parse_quote!(0) } else { syn::parse_quote!(1) };
                     return Some(match from {
-                        Some(f) => syn::parse_quote!(&#base[#f..#end + #one]),
-                        None => syn::parse_quote!(&#base[..#end + #one]),
+                        Some(f) => syn::parse_quote!(&#base[#f..#end + 1]),
+                        None => syn::parse_quote!(&#base[..#end + 1]),
                     });
                 }
-                // `&mut x` argument outside calls handled at calls
                 None
-            }
-            // `assert!` and friends, `panic!` (`open`)
-            syn::Expr::Macro(m) if !self.ghost => {
-                let mut new = self.macro_rewrite(m)?;
-                self.expr(&mut new, expected);
-                Some(new)
-            }
-            syn::Expr::Const(c) => {
-                // `const { assert_equal_size::<A, B>(); }`: evaluated here
-                if self.const_block_holds(&c.block) {
-                    Some(syn::parse_quote!(()))
-                } else {
-                    self.cx.err(c.span(), "`const { .. }` block the lift cannot evaluate to a true assertion");
-                    Some(syn::parse_quote!(()))
-                }
             }
             _ => None,
         }
-    }
-
-    fn const_block_holds(&self, b: &syn::Block) -> bool {
-        b.stmts.iter().all(|st| {
-            let syn::Stmt::Expr(syn::Expr::Call(c), _) = st else { return false };
-            let syn::Expr::Path(p) = &*c.func else { return false };
-            let seg = p.path.segments.last().unwrap();
-            if seg.ident != "assert_equal_size" {
-                return false;
-            }
-            let syn::PathArguments::AngleBracketed(a) = &seg.arguments else { return false };
-            let tys: Vec<syn::Type> = a.args.iter().filter_map(|x| match x {
-                syn::GenericArgument::Type(t) => Some(self.cx.subst_ty(t, &self.sigma)),
-                _ => None,
-            }).collect();
-            tys.len() == 2 && prim_size(&tys[0]).is_some() && prim_size(&tys[0]) == prim_size(&tys[1])
-        })
     }
 
     fn rewrite_path(&mut self, p: &syn::ExprPath) -> Option<syn::Expr> {
@@ -3128,33 +2799,6 @@ impl<'c> FnRw<'c> {
     }
 
     fn rewrite_call(&mut self, c: &mut syn::ExprCall, expected: Option<&syn::Type>) -> Option<syn::Expr> {
-        // `Self(..)`: the struct's constructor by name (`open`)
-        if !self.ghost
-            && matches!(&*c.func, syn::Expr::Path(p) if p.path.is_ident("Self"))
-            && let Some(st) = self.self_ty.clone()
-            && let Some(sn) = type_name(&st)
-            && self.cx.structs.contains_key(&sn)
-        {
-            let id = format_ident!("{}", sn);
-            let mut args: Vec<syn::Expr> = c.args.iter().cloned().collect();
-            for a in args.iter_mut() {
-                self.expr(a, None);
-            }
-            return Some(syn::parse_quote!(#id(#(#args),*)));
-        }
-        // a local closure (`open`): inlined
-        if !self.ghost
-            && let Some(mut new) = self.closure_call(c)
-        {
-            self.expr(&mut new, expected);
-            return Some(new);
-        }
-        // `S::from(x)` / `S::try_from(x)` of a lifted struct: the impl for `x`'s type (`open`)
-        if !self.ghost
-            && let Some(new) = self.conversion_call(c)
-        {
-            return Some(new);
-        }
         let syn::Expr::Path(fp) = &*c.func else { return None };
         let segs: Vec<(String, syn::PathArguments)> = fp.path.segments.iter().map(|s| (s.ident.to_string(), s.arguments.clone())).collect();
         let span = c.span();
@@ -3470,13 +3114,6 @@ impl<'c> FnRw<'c> {
         }
     }
 
-    /// The place of a state argument (`open::state_place`); a value that is
-    /// not a place (`None`, `&mut 0`) is a fresh temporary, as Rust passes
-    /// `&mut <temporary>`: its final value is dropped.
-    fn state_arg_place(&mut self, a: &syn::Expr, pre: &mut Vec<syn::Stmt>) -> syn::Expr {
-        self.state_arg_place_ty(a, pre, None)
-    }
-
     /// The model type of the `i`-th state parameter of `sig` (`open::state_param`).
     fn state_param_ty(&mut self, sig: &syn::Signature, i: usize) -> Option<syn::Type> {
         let iters = open::byte_iter_params(&sig.generics);
@@ -3511,13 +3148,6 @@ impl<'c> FnRw<'c> {
         syn::parse_quote!(#t)
     }
 
-    fn is_place_state(&self, p: &syn::Expr) -> bool {
-        match p {
-            syn::Expr::Path(ep) => ep.path.get_ident().is_some(),
-            _ => false,
-        }
-    }
-
     fn rewrite_method(&mut self, mc: &mut syn::ExprMethodCall, expected: Option<&syn::Type>) -> Option<syn::Expr> {
         let m = mc.method.to_string();
         let span = mc.span();
@@ -3526,49 +3156,6 @@ impl<'c> FnRw<'c> {
             _ => None,
         };
         let recv_ty = self.ty_of(&mc.receiver);
-        // auto-deref (`open`): an integer method on a struct that derefs to an integer
-        if !self.ghost
-            && let Some(t) = &recv_ty
-            && let Some(sn) = self.struct_of(t)
-            && !self.cx.methods.contains_key(&(sn.clone(), m.clone()))
-            && !self.cx.open.all_methods.contains(&(sn.clone(), m.clone()))
-            && let Some(target) = self.cx.open.deref.get(&sn).cloned()
-            && type_name(&target).is_some_and(|n| is_prim(&n))
-        {
-            let p = self.struct_path(&sn);
-            let r = &mc.receiver;
-            let mut new = mc.clone();
-            new.receiver = Box::new(syn::parse_quote!((*#p::deref(#r))));
-            let mut e = syn::Expr::MethodCall(new);
-            self.expr(&mut e, expected);
-            return Some(e);
-        }
-        // buffer model
-        if let Some(rn) = &recv_name
-            && !self.ghost
-            && self.is_state(rn)
-            && recv_ty.as_ref().is_some_and(|t| matches!(type_name(t).as_deref(), Some("__Buf" | "__BufMut")))
-        {
-            let b = format_ident!("{}", rn);
-            let mut args: Vec<syn::Expr> = mc.args.iter().cloned().collect();
-            for a in args.iter_mut() {
-                self.expr(a, None);
-            }
-            return Some(match m.as_str() {
-                "put_u8" => syn::parse_quote!({ #b = crate::__lift_model::bufmut_put_u8(#b, #(#args),*); }),
-                "put_slice" => syn::parse_quote!({ #b = crate::__lift_model::bufmut_put_slice(#b, #(#args),*); }),
-                "try_get_u8" => {
-                    let t = self.fresh("b");
-                    let r = self.fresh("r");
-                    syn::parse_quote!({ let (#t, #r) = crate::__lift_model::buf_try_get_u8(#b); #b = #t; #r })
-                }
-                "remaining" => syn::parse_quote!(crate::__lift_model::buf_remaining(#b)),
-                other => {
-                    self.cx.err(span, format!("buffer method `{other}` has no model"));
-                    return None;
-                }
-            });
-        }
         // `b.as_ref()` of a byte slice (`<[u8] as AsRef<[u8]>>::as_ref`,
         // through the reference): the slice itself
         if m == "as_ref"
@@ -3585,60 +3172,6 @@ impl<'c> FnRw<'c> {
             self.expr(&mut r, None);
             let v = self.fresh("v");
             return Some(syn::parse_quote!(match #r { Some(#v) => #v, None => unreachable!() }));
-        }
-        // `x.map_err(|p| b)` / `x.map(F)` on `Result`
-        if (m == "map_err" || m == "map") && mc.args.len() == 1 && !self.ghost {
-            let mut r = (*mc.receiver).clone();
-            let rty = self.ty_of(&r);
-            let is_result = rty.as_ref().is_some_and(|t| type_name(t).as_deref() == Some("Result")) || m == "map_err";
-            if is_result {
-                self.expr(&mut r, None);
-                let v = self.fresh("v");
-                let x = self.fresh("e");
-                let arg = mc.args[0].clone();
-                let ok_ty = rty.as_ref().and_then(|t| generic_arg(t, "Result", 0));
-                return Some(match (m.as_str(), arg) {
-                    ("map_err", syn::Expr::Closure(cl)) if cl.inputs.len() == 1 => {
-                        let p = &cl.inputs[0];
-                        let mut body = (*cl.body).clone();
-                        let err_ty = self.ty_of(&body).or_else(|| variant_owner(&body));
-                        self.push_scope();
-                        self.expr(&mut body, None);
-                        self.pop_scope();
-                        match (ok_ty, err_ty) {
-                            (Some(o), Some(e)) => {
-                                let m2 = self.fresh("m");
-                                syn::parse_quote!({ let #m2: Result<#o, #e> = match #r { Ok(#v) => Ok(#v), Err(#p) => Err(#body) }; #m2 })
-                            }
-                            _ => syn::parse_quote!(match #r { Ok(#v) => Ok(#v), Err(#p) => Err(#body) }),
-                        }
-                    }
-                    ("map", syn::Expr::Path(mut f)) => {
-                        // a tuple-struct constructor of a generic struct: its instance by the expectation
-                        if let Some(id) = f.path.get_ident().map(|i| i.to_string())
-                            && let Some(si) = self.cx.structs.get(&id).cloned()
-                            && !si.params.is_empty()
-                        {
-                            let inst = expected.and_then(|t| generic_arg(t, "Result", 0)).and_then(|t| type_name(&t)).map(|n| if n == "Self" { self.self_ty.as_ref().and_then(type_name).unwrap_or(n) } else { n });
-                            match inst {
-                                Some(n) => f.path = syn::parse_str(&n).unwrap(),
-                                None => self.cx.err(span, format!("cannot tell which instance of `{id}` this `map` builds")),
-                            }
-                        }
-                        match expected {
-                            Some(et) => {
-                                let m2 = self.fresh("m");
-                                syn::parse_quote!({ let #m2: #et = match #r { Ok(#v) => Ok(#f(#v)), Err(#x) => Err(#x) }; #m2 })
-                            }
-                            None => syn::parse_quote!(match #r { Ok(#v) => Ok(#f(#v)), Err(#x) => Err(#x) }),
-                        }
-                    }
-                    _ => {
-                        self.cx.err(span, format!("`{m}` is lifted with a closure `|p| e` (`map_err`) or a function path (`map`) only"));
-                        return None;
-                    }
-                });
-            }
         }
         // a `&mut self` method of a lifted struct
         if let Some(t) = &recv_ty
@@ -3721,17 +3254,6 @@ impl<'c> FnRw<'c> {
                 return Some(syn::parse_quote!({ #(#pre)* let #t0 = (#r).#mid(#(#args),*); #p0 = #t0; }));
             }
         }
-        // a core method with a template (`open`): its definition inlined
-        if !self.ghost
-            && let Some(t) = &recv_ty
-            && let Some(kind) = open::receiver_kind(t)
-            && let Some(tpl) = self.cx.template(&kind, &m)
-        {
-            let args: Vec<syn::Expr> = mc.args.iter().cloned().collect();
-            let mut new = self.instantiate_template(&tpl, (*mc.receiver).clone(), args, span)?;
-            self.expr(&mut new, expected);
-            return Some(new);
-        }
         let _ = expected;
         None
     }
@@ -3743,109 +3265,6 @@ impl<'c> FnRw<'c> {
         }
         let base = inst.split("__").next()?;
         self.cx.structs.contains_key(base).then(|| base.to_string())
-    }
-
-    /// A `loop { B }` in tail position: a tail-recursive helper taking every
-    /// local the body mentions (read or assigned).
-    fn loop_helper(&mut self, lp: syn::ExprLoop) -> syn::Expr {
-        let k = self.loop_index;
-        self.loop_index += 1;
-        let hname = format_ident!("{}__loop{}", self.lifted_name, k, span = lp.span());
-        if has_break(&lp.body) {
-            self.cx.err(lp.span(), "a `loop` with `break` is not lifted (only loops that exit by `return`)");
-        }
-        // locals mentioned by the body, in first-mention order, that are in scope here
-        let mut names: Vec<String> = Vec::new();
-        collect_idents(&lp.body, &mut names);
-        let mut params: Vec<(String, syn::Type)> = Vec::new();
-        for n in &names {
-            if self.is_state(n) {
-                continue;
-            }
-            if let Some(t) = self.local_ty(n) {
-                params.push((n.clone(), t));
-            }
-        }
-        let states = self.states.clone();
-        // helper signature: the non-state locals, then the states
-        let mut inputs: Vec<syn::FnArg> = Vec::new();
-        let mut call_args: Vec<Ident> = Vec::new();
-        for (n, t) in &params {
-            let id = format_ident!("{}", n);
-            inputs.push(syn::parse_quote!(mut #id: #t));
-            call_args.push(id);
-        }
-        for (n, t) in &states {
-            let id = format_ident!("{}", n);
-            if n == "self" {
-                self.cx.err(lp.span(), "a `loop` inside a `&mut self` method is not lifted");
-                continue;
-            }
-            inputs.push(syn::parse_quote!(mut #id: #t));
-            call_args.push(id);
-        }
-        let out_ty: syn::Type = {
-            let mut parts: Vec<syn::Type> = states.iter().map(|(_, t)| t.clone()).collect();
-            if let Some(r) = &self.ret {
-                parts.push(r.clone());
-            }
-            if parts.is_empty() { syn::parse_quote!(()) } else if parts.len() == 1 { parts.remove(0) } else { syn::parse_quote!((#(#parts),*)) }
-        };
-        // body: B with the recursive call at the end
-        let mut body = lp.body.clone();
-        self.push_scope();
-        for (n, t) in &params {
-            self.bind(n, t.clone());
-        }
-        self.block(&mut body);
-        self.pop_scope();
-        body.stmts.push(syn::parse_quote!(return #hname(#(#call_args),*);));
-        // attachment: decreases / requires / ensures / start steps
-        let mut attrs: Vec<syn::Attribute> = Vec::new();
-        let mut helper_start: Vec<syn::Stmt> = Vec::new();
-        if let Some(at) = self.cx.attach_loop.get(&(self.fn_name.clone(), k)).cloned() {
-            self.cx.attach_used.insert(format!("loop {}#{k}", self.fn_name));
-            self.check_attach_params(&at);
-            for st in &at.stmts {
-                let saved_ghost = self.ghost;
-                self.ghost = true;
-                if let Some(mut e) = attach_call(st, "decreases") {
-                    self.expr(&mut e, None);
-                    attrs.push(syn::parse_quote!(#[decreases(#e)]));
-                } else if let Some(mut e) = attach_call(st, "invariant") {
-                    self.expr(&mut e, None);
-                    attrs.push(syn::parse_quote!(#[requires(#e)]));
-                } else if let Some(mut e) = attach_call(st, "ensures") {
-                    self.expr(&mut e, None);
-                    attrs.push(syn::parse_quote!(#[ensures(#e)]));
-                } else if let syn::Stmt::Macro(m) = st
-                    && m.mac.path.is_ident("at_start")
-                {
-                    // proof steps at the helper's start (facts about its parameters)
-                    match m.mac.parse_body_with(syn::Block::parse_within) {
-                        Ok(mut steps) => {
-                            for s2 in steps.iter_mut() {
-                                self.ghost_stmt(s2);
-                            }
-                            helper_start.push(syn::parse_quote!(proof! { #(#steps)* }));
-                        }
-                        Err(e) => self.cx.err(m.span(), format!("malformed `at_start!`: {e}")),
-                    }
-                } else {
-                    self.cx.err(st.span(), "a loop attachment holds `invariant(..);`, `decreases(..);`, `ensures(..);` and `at_start! { .. }`");
-                }
-                self.ghost = saved_ghost;
-            }
-        }
-        for (i, st) in helper_start.into_iter().enumerate() {
-            body.stmts.insert(i, st);
-        }
-        let helper: syn::ItemFn = syn::parse_quote!(
-            #(#attrs)*
-            fn #hname(#(#inputs),*) -> #out_ty #body
-        );
-        self.helpers.push(syn::Item::Fn(helper));
-        syn::parse_quote!(#hname(#(#call_args),*))
     }
 
     // ----- local typing -----------------------------------------------------
@@ -3884,7 +3303,7 @@ impl<'c> FnRw<'c> {
                         _ => {}
                     }
                 }
-                // an associated constant of an open-trait impl (`open`)
+                // an associated constant of an open-trait impl (`S::C`, `S__C`; `open`)
                 if segs.len() >= 2 {
                     let n = segs.len();
                     let owner = if segs[n - 2] == "Self" { self.self_ty.as_ref().and_then(type_name).unwrap_or_default() } else { segs[n - 2].clone() };
@@ -3972,18 +3391,14 @@ impl<'c> FnRw<'c> {
                 let m = mc.method.to_string();
                 let rt = self.ty_of(&mc.receiver);
                 match m.as_str() {
-                    "try_get_u8" => return Some(syn::parse_quote!(Result<u8, TryGetError>)),
                     "leading_zeros" | "trailing_zeros" | "count_ones" => return Some(syn::parse_quote!(u32)),
                     "checked_sub" | "checked_add" | "checked_mul" => {
                         let t = rt?;
                         return Some(syn::parse_quote!(Option<#t>));
                     }
                     "unwrap" => return rt.and_then(|t| generic_arg(&t, "Option", 0)),
-                    "map_err" => {
-                        let t = rt?;
-                        let ok = generic_arg(&t, "Result", 0)?;
-                        return Some(syn::parse_quote!(Result<#ok, crate::Error>));
-                    }
+                    // `b.as_ref()` of a byte slice: the slice
+                    "as_ref" if mc.args.is_empty() && rt.as_ref().is_some_and(|t| is_byte_slice(t)) => return Some(syn::parse_quote!(&[u8])),
                     "div_ceil" | "max" | "min" | "wrapping_add" | "wrapping_sub" => return rt,
                     // `s.get(i)` of a slice: `Option<&T>`
                     "get" if mc.args.len() == 1 && rt.as_ref().is_some_and(|t| matches!(strip_refs(t), syn::Type::Slice(_))) => {
@@ -3991,30 +3406,9 @@ impl<'c> FnRw<'c> {
                         let el = &*sl.elem;
                         return Some(syn::parse_quote!(Option<&#el>));
                     }
-                    // `it.next()` of the byte-string iterator state (`open::state_param`)
-                    "next" if rt.as_ref().and_then(type_name).as_deref() == Some("__BytesIter") => return Some(syn::parse_quote!(Option<&[u8]>)),
-                    // `b.as_ref()` of a byte slice: the slice
-                    "as_ref" if mc.args.is_empty() && rt.as_ref().is_some_and(|t| is_byte_slice(t)) => return Some(syn::parse_quote!(&[u8])),
                     _ => {}
                 }
                 let t = rt?;
-                // a core method with a template (`open`): its result type
-                if let Some(kind) = open::receiver_kind(&t)
-                    && let Some(tpl) = self.cx.template(&kind, &m)
-                {
-                    let args: Vec<syn::Expr> = mc.args.iter().cloned().collect();
-                    return self.template_ret(&tpl, &t, &args);
-                }
-                // auto-deref to an integer (`open`)
-                if let Some(sn) = type_name(&t)
-                    && !self.cx.methods.contains_key(&(sn.clone(), m.clone()))
-                    && let Some(target) = self.cx.open.deref.get(&sn)
-                    && let Some(kind) = open::receiver_kind(target)
-                    && let Some(tpl) = self.cx.template(&kind, &m)
-                {
-                    let args: Vec<syn::Expr> = mc.args.iter().cloned().collect();
-                    return self.template_ret(&tpl, target, &args);
-                }
                 // sealed-trait method
                 for (tn, ti) in &self.cx.traits {
                     if let Some(sig) = ti.methods.get(&m)
@@ -4042,15 +3436,6 @@ impl<'c> FnRw<'c> {
             syn::Expr::Call(c) => {
                 let syn::Expr::Path(fp) = &*c.func else { return None };
                 let segs: Vec<(String, syn::PathArguments)> = fp.path.segments.iter().map(|s| (s.ident.to_string(), s.arguments.clone())).collect();
-                // `S::from(x)` / `S::try_from(x)` (`open`)
-                if let Some(t) = self.conversion_ty(c) {
-                    return Some(t);
-                }
-                // `core::iter::once(x)` (`open`)
-                if segs.iter().map(|s| s.0.as_str()).collect::<Vec<_>>() == ["crate", "__lift", "once"] && c.args.len() == 1 {
-                    let t = self.ty_of_src(&c.args[0])?;
-                    return Some(syn::parse_quote!(crate::__lift::Once<#t>));
-                }
                 // `UInt(x)`: a generic tuple struct's constructor, its argument's type
                 if segs.len() == 1
                     && let Some(si) = self.cx.structs.get(&segs[0].0)
@@ -4134,17 +3519,6 @@ impl<'c> FnRw<'c> {
         }
     }
 
-    fn ty_of_range(&self, e: &syn::Expr) -> Option<syn::Type> {
-        if let syn::Expr::Range(r) = e {
-            if let Some(s) = &r.start {
-                return self.ty_of(s);
-            }
-            if let Some(s) = &r.end {
-                return self.ty_of(s);
-            }
-        }
-        None
-    }
 }
 
 /// Generic traversal that routes every child expression back through
@@ -4210,19 +3584,6 @@ fn rename_generic_path(rw: &mut FnRw<'_>, p: &mut syn::Path) {
                 p.segments[i].ident = Ident::new(&mangle(&name, &cands), p.segments[i].ident.span());
             }
         }
-    }
-}
-
-struct RenameSelf;
-impl VisitMut for RenameSelf {
-    fn visit_expr_path_mut(&mut self, p: &mut syn::ExprPath) {
-        if p.path.is_ident("self") {
-            p.path = syn::parse_quote!(self_);
-        }
-        syn::visit_mut::visit_expr_path_mut(self, p);
-    }
-    fn visit_expr_method_call_mut(&mut self, m: &mut syn::ExprMethodCall) {
-        syn::visit_mut::visit_expr_method_call_mut(self, m);
     }
 }
 
@@ -4617,9 +3978,9 @@ fn fn_states(sig: &syn::Signature) -> Vec<usize> {
     out
 }
 
-fn method_info(sig: &syn::Signature, owner_params: Vec<GenericParam>) -> MethodInfo {
+fn method_info(sig: &syn::Signature) -> MethodInfo {
     let mut_self = sig.inputs.iter().any(|i| matches!(i, syn::FnArg::Receiver(r) if r.reference.is_some() && r.mutability.is_some()));
-    MethodInfo { mut_self, state_params: fn_states(sig), sig: Some(sig.clone()), owner_params }
+    MethodInfo { mut_self, state_params: fn_states(sig), sig: Some(sig.clone()) }
 }
 
 fn pat_ident(p: &syn::Pat) -> Option<String> {
@@ -4666,43 +4027,6 @@ fn keep_fn_attrs(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
 fn is_delegation(f: &syn::ImplItemFn, m: &str) -> bool {
     let [syn::Stmt::Expr(syn::Expr::MethodCall(mc), None)] = f.block.stmts.as_slice() else { return false };
     mc.method == m && matches!(&*mc.receiver, syn::Expr::Path(p) if p.path.is_ident("self")) && mc.args.is_empty() && f.sig.inputs.len() == 1
-}
-
-fn is_helper_call(e: &syn::Expr) -> bool {
-    matches!(e, syn::Expr::Call(c) if matches!(&*c.func, syn::Expr::Path(p) if p.path.segments.last().is_some_and(|i| { let s = i.ident.to_string(); s.contains("__loop") || s.contains("__while") })))
-}
-
-fn has_break(b: &syn::Block) -> bool {
-    struct V(bool);
-    impl<'ast> syn::visit::Visit<'ast> for V {
-        fn visit_expr_break(&mut self, _: &'ast syn::ExprBreak) {
-            self.0 = true;
-        }
-        fn visit_expr_continue(&mut self, _: &'ast syn::ExprContinue) {
-            self.0 = true;
-        }
-        fn visit_expr_loop(&mut self, _: &'ast syn::ExprLoop) {}
-        fn visit_expr_while(&mut self, _: &'ast syn::ExprWhile) {}
-        fn visit_expr_for_loop(&mut self, _: &'ast syn::ExprForLoop) {}
-    }
-    let mut v = V(false);
-    syn::visit::Visit::visit_block(&mut v, b);
-    v.0
-}
-
-fn collect_idents(b: &syn::Block, out: &mut Vec<String>) {
-    struct V<'a>(&'a mut Vec<String>);
-    impl<'ast> syn::visit::Visit<'ast> for V<'_> {
-        fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
-            if let Some(i) = p.path.get_ident() {
-                let s = i.to_string();
-                if !self.0.contains(&s) {
-                    self.0.push(s);
-                }
-            }
-        }
-    }
-    syn::visit::Visit::visit_block(&mut V(out), b);
 }
 
 /// The conjunction of several attached `ensures(..)` of one function: the
@@ -4758,13 +4082,6 @@ fn attach_call(st: &syn::Stmt, name: &str) -> Option<syn::Expr> {
         return None;
     }
     Some(c.args[0].clone())
-}
-
-fn expr_path_last(e: &syn::Expr) -> Option<String> {
-    match e {
-        syn::Expr::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
-        _ => None,
-    }
 }
 
 fn expr_usize(e: &syn::Expr) -> Option<usize> {
@@ -5123,11 +4440,6 @@ fn stream_vars(ts: TokenStream, out: &mut Vec<String>) {
     }
 }
 
-#[allow(dead_code)]
-fn quote_unit() -> TokenStream {
-    quote!(())
-}
-
 /// `let mut x = 0;` where `x` indexes an array (`a[x]`, `a[..x]`, `a[..=x]`):
 /// rustc types the literal `usize`; the lift writes the annotation (typeck
 /// re-checks it).
@@ -5179,25 +4491,6 @@ pub const PRELUDE_EXEC: &str = include_str!("../lift/prelude.rs");
 /// The model part of the lift prelude (`crate::__lift_model`).
 pub const PRELUDE_MODEL: &str = include_str!("../lift/model.rs");
 
-
-/// The type of an enum variant path expression `E::V` / `E::V(..)`: `E`.
-fn variant_owner(e: &syn::Expr) -> Option<syn::Type> {
-    let p = match e {
-        syn::Expr::Path(p) => &p.path,
-        syn::Expr::Call(c) => match &*c.func {
-            syn::Expr::Path(p) => &p.path,
-            _ => return None,
-        },
-        _ => return None,
-    };
-    if p.segments.len() < 2 {
-        return None;
-    }
-    let mut owner = p.clone();
-    owner.segments.pop();
-    let owner_path: syn::Path = syn::Path { leading_colon: owner.leading_colon, segments: owner.segments.into_pairs().map(|pr| pr.into_value()).collect() };
-    Some(syn::Type::Path(syn::TypePath { qself: None, path: owner_path }))
-}
 
 /// An integer literal and its suffix.
 fn lit_usize(e: &syn::Expr) -> Option<(u64, String)> {

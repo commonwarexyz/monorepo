@@ -1,0 +1,28 @@
+;; rustc's MIR of `fx_ai_lit::s`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_ai_lit")
+(module "fx_ai_lit::s")
+(overflow-checks on)
+(exclude)
+(source "s.rs" "851480df50ae5d7a7c10f0169f22bfe0aa790ac2dd91f4083a6985c20b88b4dc")
+(root "fx_ai_lit::s::lit")
+(fn "fx_ai_lit::s::lit"
+  (kind root) (def "fx_ai_lit::s::lit") (args ())
+  (item fn "lit")
+  (span "s.rs" 1 1)
+  (argc 0)
+  (locals
+    (0 u32 mut)
+    (1 i32 mut)
+    (2 u32 mut)
+    (3 bool mut))
+  (bb 0
+    (assign (p 2) (cast int-to-int (int i32 1) u32) (at "s.rs" 1 23))
+    (assign (p 3) (bin lt (move (p 2)) (int u32 32)) (at "s.rs" 1 23))
+    (assert (move (p 3)) true overflow 1 (at "s.rs" 1 23)))
+  (bb 1
+    (assign (p 1) (bin shr (int i32 -3) (int i32 1)) (at "s.rs" 1 23))
+    (assign (p 0) (cast int-to-int (move (p 1)) u32) (at "s.rs" 1 23))
+    (return (at "s.rs" 1 44)))
+)

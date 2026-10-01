@@ -228,28 +228,48 @@ green, speed of the result and the human review load.
    behaviour (host `unsafe`, `transmute` and C externs can forge any value,
    including values of invariant and evidence types). The report, the spec
    sheet and `SPEC.lock` carry this list.
-8. **The lift** (lifted modules, `#[lift] mod m;`, §2.1, SEMANTICS.md §19):
-   the claim that the exec items the lift produces from an existing Rust
-   file mean what `rustc` compiles from that file. The proofs are about
-   the lift's reading; the emitted code is the file as-is, so a misreading
-   would make a proven law false of the shipped code. Three parts:
-   * **the reading** — `sandblaster/front/src/lift.rs`: `macro_rules!`
-     expansion, flattening of inline modules, sealed-trait
-     monomorphization, state passing for `&mut self` and buffers, the
-     rewrite table (`?`, `map_err`, `unwrap`, `checked_*().unwrap()`,
-     `&a[..=j]`, loops as helpers, `T::SIZE`, `const` asserts), signed
-     integers as their two's complement bits, the dropped items — and its
-     prelude (`lift/prelude.rs`: `Result`, `TryGetError`, `iN_shr`,
-     `iN_neg`, the prelude iterators; `elab/lift.core`: `div_ceil`);
-     **and its extension for in-place crates** — `src/lift_open.rs`
-     (SEMANTICS.md §19.5–§19.9: in-place sources and children, open traits
-     erased at their declared instance, operator/comparison/conversion,
-     `Deref`, `Default` and `Iterator` impls as methods, auto-deref,
-     `impl Iterator` returns, `for`/`while` loops with control flow as
-     helpers, assertion macros as obligations, inlined closures) and the
-     core-method templates `lift/combinators.rs` (core's `Option`, `Result`
-     and integer methods transcribed; each is compared with core natively by
-     `tests/lift_open.rs`);
+8. **The lift** (lifted modules, `#[lift(mir = "m.sbmir")] mod m;`, §2.1,
+   SEMANTICS.md §19, `docs/mir-lift.md` §20): the claim that the exec items
+   the lift produces from an existing Rust file mean what `rustc` compiles
+   from that file. The proofs are about the lift's reading; the emitted code
+   is the file as-is, so a misreading would make a proven law false of the
+   shipped code. Function bodies are read only from rustc's MIR; the source
+   gives the item skeleton and the ghost language. A lifted exec module
+   without `mir = ".."` is refused (the error names
+   `sandblaster/mirx/extract.sh`). Its parts:
+   * **the bodies: the MIR reading** (`sandblaster/front/src/mir`,
+     `docs/mir-lift.md` §20) — rustc's own monomorphized MIR (macros
+     expanded, `?`, closures, operators, iterators, loops and constants in
+     bodies already lowered by the compiler) read by a translation over a
+     fixed set of MIR constructs that does not grow with surface features:
+     `mir/read.rs` (2,417 code lines) and the names in `mir/mod.rs` (434),
+     plus the printer `sandblaster/mirx` (1,131: a rustc driver on the
+     pinned nightly of the stable release, whose output is checked in with
+     the sources' SHA-256) — 3,982 code lines; and its glue in `lift.rs`
+     (≈ 0.2k: loading the extraction, the signature checks, the loop
+     attachments read with the MIR's locals typed, `mir_body`);
+   * **the item skeleton** — `sandblaster/front/src/lift.rs`:
+     `macro_rules!` expansion of item macros (≈ 0.3k), flattening of inline
+     modules, sealed-trait monomorphization, state passing in signatures
+     for `&mut self`, buffers and §19.10's states, the struct and enum
+     declarations, derived `Default`, the dropped items, the attachments;
+     and its extension for in-place crates, `src/lift_open.rs`
+     (SEMANTICS.md §19.5–§19.10: in-place sources and children, open
+     traits erased at their declared instance, operator, comparison,
+     conversion, `Deref`, `Default` and `Iterator` impls as methods, item
+     selection, host models of types and functions, the lowered
+     declaration);
+   * **the expression reading** — the part of `lift.rs` (`FnRw`, ≈ 1.2k)
+     that reads the ghost language of lifted ghost modules (laws, proofs,
+     attachments: item 6) and the bodies that are not exec code: constant
+     initializers (const items and associated constants: their lifted form
+     is in every `SPEC.lock`, so they keep the expression reading — literals,
+     `size_of`, other constants, calls of lifted functions) and the
+     functions of host models;
+   * **the prelude** (`lift/prelude.rs`: `Result`, `TryGetError`, the
+     signed integers' bits with `iN_shr`, `iN_neg`, `PhantomData`,
+     `Ordering` and `ord_*`, the iterators the MIR reading builds, `Range`,
+     `bytes_iter_next`; `elab/lift.core`: `div_ceil`);
    * **the buffer model** — `lift/model.rs`: a `BufMut` is the bytes put so
      far, a `Buf` the bytes not yet read; the host assumption is that the
      caller's buffer behaves so (true of `Vec<u8>`, `BytesMut`, `Bytes`,
@@ -273,33 +293,21 @@ green, speed of the result and the human review load.
    (`driver::in_place::lowered_copies`), and the build's declaration check
    makes the include name that copy (textual, like module mode's scan).
 
-   About 6.5k code lines today (`lift.rs` 4.0k, of which the macro
-   expander ≈ 0.3k; `lift_open.rs` 2.1k; templates 125, prelude 134,
-   model 54, `lift.core` 24; the lowered declaration ≈ 75): **over the 4k
-   budget** since the in-place extension (the MMR track) — named here as
-   new trust; shrinking it (or moving readings into checked templates) is
-   open work.
-   **The MIR path** (`#[lift(mir = "m.sbmir")]`, `docs/mir-lift.md` §20,
-   `sandblaster/front/src/mir`) replaces the reading of *bodies*: rustc's
-   own monomorphized MIR (macros expanded, `?`, closures, operators,
-   iterators and constants already lowered by the compiler) is read by a
-   translation over a fixed set of MIR constructs that does not grow with
-   surface features — `mir/read.rs` and the names in `mir/mod.rs` (≈ 2.8k
-   code lines) plus the printer `sandblaster/mirx` (≈ 1.1k: a rustc driver
-   on the pinned nightly of the stable release, whose output is checked in
-   with the sources' SHA-256). For such a module the source lift keeps only
-   the item skeleton (names, signatures and state passing, sealed
-   families, attachments) and the ghost language; its body rewrites are not
-   used. commonware-codec's varint is verified this way with its laws and
-   proofs unchanged, and commonware-storage's MMR in place (with its
-   `#[rewrite]` alternatives and the lifted round trip of its lowered copy,
-   whose bodies are rustc's MIR of the copy) with its laws unchanged, and
-   the first set of its Merkle proof verifier (`hasher.rs` at
-   `Standard<Sha256>`, `Subtree::reconstruct_digest`) with its laws and
-   proofs unchanged. Every exec module of the repository now reads its
-   bodies from MIR; the plan to retire the source lift's body reading, with
-   the list of its readings no module uses any more, is in
-   `docs/mir-lift.md` §6.
+   Size: the source's reading (skeleton, expression reading, prelude,
+   model) is 4,884 code lines (`lift.rs` 3,781 less the MIR glue's 202,
+   `lift_open.rs` 1,138, prelude 108, model 59), down from 7,443 before
+   the source's reading of bodies was deleted (`docs/mir-lift.md` §6 step
+   3: `lift.rs` 4,443, `lift_open.rs` 2,665, the combinator templates 131,
+   prelude 145, model 59); the MIR reading is 3,982 and its glue 202. The
+   skeleton's next step is to come from the MIR too (§6 step 4); the
+   reading's trust is to shrink to a literal reading checked against the
+   structured one (§6 step 5). commonware-codec's varint is verified this
+   way with its laws and proofs unchanged, commonware-storage's MMR in
+   place (with its `#[rewrite]` alternatives and the lifted round trip of
+   its lowered copy, whose bodies are rustc's MIR of the copy) with its
+   laws unchanged, and the first set of its Merkle proof verifier
+   (`hasher.rs` at `Standard<Sha256>`, `Subtree::reconstruct_digest`) with
+   its laws and proofs unchanged.
    **Mitigation: the lift conformance check** (`sandblaster/front/src/conform.rs`;
    its module docs are the full description), which every module-mode build of a lifted module
    (and every `compile_lifted` build of an in-place one, §2.1)
@@ -319,14 +327,19 @@ green, speed of the result and the human review load.
    (`lift::ConformSkip`: loop helpers and `impl Trait` returns, compared
    through their callers; functions with preconditions, compared through
    their callers; associated constants lifted as constant functions).
-   Combinator templates (`lift/combinators.rs`) and inlined closures are
-   not functions of their own: they are compared inside every function
-   that uses them. Its negative twins (`tests/lift_conformance.rs`: a wrong
-   rewrite rule behind the lift's test hook is caught) show it catches the
-   kind of misreading the rewrite table risks. Further mitigations:
-   SEMANTICS.md §19, the refusal of every construct the lift does not know,
-   `tests/aug_int_toolchain.rs` and `tests/lift.rs` (kernel against rustc
-   for signed operations and `div_ceil`). Audit notes: AUDIT.md §21.
+   Library code inlined from rustc's MIR (core's methods, closures) is not
+   a function of its own: it is compared inside every function that uses
+   it. Its negative twins (`tests/lift_conformance.rs`: a wrong reading of
+   the MIR behind the lift's test hook — a signed `Shr` read as a logical
+   shift, an index by `RangeToInclusive` read as an exclusive one — is
+   caught, in module mode and in place) show it catches the kind of
+   misreading the MIR reading risks. Further mitigations: `docs/mir-lift.md`
+   §20, the refusal of every construct the lift does not know,
+   `tests/mir.rs` (each MIR construct on hand-written MIR, with negative
+   twins), `tests/aug_int_toolchain.rs` and `tests/lift.rs` (kernel against
+   rustc for signed operations and `div_ceil`), and the MIR fixtures of the
+   front end's tests (`front/tests/mir_fixtures`, extracted by `mirx`).
+   Audit notes: AUDIT.md §21.
 
 Not trusted: parsing, name resolution, surface typing, the elaborator's
 obligation generation for exec code (a missing obligation is caught because
@@ -533,19 +546,21 @@ host/
   are `#[lift(host)]` models); a source with an inner attribute after its
   docs is refused; crate mode (`compile`) refuses a lifted crate (the source
   names host items through `crate::`). `driver::lifted` has the details.
-* **Bodies from rustc's MIR** (`#[lift(mir = "m.sbmir", ..)]`, SEMANTICS.md
-  §20). The module's function bodies are read from rustc's MIR, extracted
+* **Bodies from rustc's MIR** (`#[lift(mir = "m.sbmir", ..)]`,
+  `docs/mir-lift.md` §20; required: a lifted exec module without it is
+  refused). The module's function bodies are read from rustc's MIR, extracted
   by `sandblaster/mirx/extract.sh` (a rustc driver on the nightly of the
   stable release the workspace builds with) into a checked-in `.sbmir`
   file that names its sources by SHA-256; the build refuses a stale file,
   a file extracted without overflow checks, and MIR of another rustc
   release. The emitted file (still the source byte for byte) says so in
   its header. The lift conformance check compares the read functions with
-  the build's rustc exactly as for the source lift. An in-place crate is
+  the build's rustc. An in-place crate is
   extracted as a whole (its `#[lift(opt)]` alternatives compiled in the
   crate's context); the lifted round trip of a rewritten file reads rustc's
   MIR of the copy it checks (`<stem>.roundtrip__<module>.sbmir`, extracted
-  from the copy the build writes to `OUT_DIR/<name>-roundtrip__<module>.rs`;
+  from the copy the build writes to `OUT_DIR/<name>-roundtrip__<module>.rs`,
+  in module mode as in place;
   a stale one fails the round trip, so a host compiling that lowered copy
   fails its build until it is extracted again; `docs/mir-lift.md` §20.1).
   Open traits are extracted at the instances the declarations name, given as
@@ -647,7 +662,14 @@ host/
   loops or recursion (an alternative may have loops: its text is copied,
   not printed — but loop helpers are not yet matched by the round trip, so
   write alternatives loop-free), and the lift conformance check of the
-  alternatives' texts.
+  alternatives' texts. Open since bodies come from rustc's MIR only
+  (`docs/mir-lift.md` §6): a `for` over a range is a loop helper over
+  `core::ops::Range`, whose residual the printer does not print (a generic
+  struct), so no closed form of a loop is lowered; rustc's optimized MIR
+  already removes much of what the optimizer removed from the source's
+  reading (the buffer writers of the old tests are no longer 3% cheaper);
+  and the round trip compares the copy's MIR reading with the residual
+  structurally, which a lowered reader (`try_get_u8` calls) fails.
 * **In place.** When the verified code is the crate's own files (not a
   copy), a DSL root inside the crate lifts them by path (`#[lift(in_place,
   ..)] #[path = "../../src/x.rs"] mod x;`, SEMANTICS.md §19.5) and the
