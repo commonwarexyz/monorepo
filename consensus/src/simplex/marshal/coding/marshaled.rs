@@ -222,7 +222,6 @@ where
     A: Application<
             E,
             Block = B,
-            SigningScheme = Z::Scheme,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
@@ -641,7 +640,6 @@ where
     A: Application<
             E,
             Block = B,
-            SigningScheme = Z::Scheme,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
@@ -1103,7 +1101,6 @@ where
     A: Application<
             E,
             Block = B,
-            SigningScheme = Z::Scheme,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,

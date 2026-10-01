@@ -5,9 +5,9 @@ use crate::stateful::{
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
+    ancestry::Ancestry,
     simplex::{
-        marshal::{ancestry::Ancestry, standard::Standard},
-        mocks::scheme as scheme_mocks,
+        marshal::standard::Standard, mocks::scheme as scheme_mocks,
         types::Context as SimplexContext,
     },
     types::{Epoch, Height, View},
@@ -304,7 +304,6 @@ impl<
         + Sync,
 > Application<E> for TestApp
 {
-    type SigningScheme = TestScheme;
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
     type Databases = TestDatabases;

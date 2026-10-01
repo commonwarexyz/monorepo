@@ -8,7 +8,6 @@ use super::{
 use crate::{
     multimmit::{
         marshal::{
-            OutputIndex,
             actors::{
                 catalog,
                 delivery::{self, HotOutput},
@@ -26,7 +25,7 @@ use crate::{
         testing::{SpanRecorder, TestBody},
         types::{BlockRef, ChainId, PathLimits, TransactionBlock, TransactionBlockHeader},
     },
-    types::{Epoch, Height},
+    types::{Epoch, Height, OutputIndex},
 };
 use commonware_actor::mailbox::Policy as _;
 use commonware_codec::EncodeSize as _;

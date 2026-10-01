@@ -1,7 +1,7 @@
 //! Body, header, and output reads, the caches that serve them, and materialization.
 
 use super::*;
-use crate::multimmit::{marshal::OutputIndex, testing::expect_within};
+use crate::{multimmit::testing::expect_within, types::OutputIndex};
 
 #[test]
 fn pending_metadata_bypasses_finalized_archive_reads() {

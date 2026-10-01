@@ -12,7 +12,7 @@ use crate::{
     multimmit::{
         actors::util::gated,
         marshal::{
-            MarshalProgress, OutputIndex,
+            MarshalProgress,
             actors::catalog,
             bodies::{self, Bodies},
             storage::{Error as StorageError, catalog::StoredRef},
@@ -20,6 +20,7 @@ use crate::{
         },
         types::{Body, TransactionBlock},
     },
+    types::OutputIndex,
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};

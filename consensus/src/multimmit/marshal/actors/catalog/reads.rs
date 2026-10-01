@@ -14,7 +14,6 @@ use super::{
 use crate::{
     multimmit::{
         marshal::{
-            OutputIndex,
             storage::{
                 Error as StorageError,
                 catalog::CatalogStore,
@@ -25,7 +24,7 @@ use crate::{
         },
         types::{BlockRef, Body, ChainId, TransactionBlock},
     },
-    types::Height,
+    types::{Height, OutputIndex},
 };
 use commonware_codec::EncodeSize;
 use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
