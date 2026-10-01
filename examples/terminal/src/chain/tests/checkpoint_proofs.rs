@@ -186,7 +186,7 @@ fn public_lookup_encodings_exclude_private_checkpoint_suffixes() {
         Lookup::Admitted { epoch: u64::MAX },
         Lookup::PayoutHead,
         Lookup::Deposit { id: digest },
-        Lookup::Registration,
+        Lookup::Registration { epoch: u64::MAX },
         Lookup::Withdrawal {
             account: account.clone(),
         },

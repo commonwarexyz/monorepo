@@ -93,8 +93,8 @@ pub(crate) struct Genesis {
     /// query recency and display. Block heights remain the only deadline
     /// clock.
     pub(crate) timestamp: u64,
-    /// Maximum blocks from a registration's inclusion height to its admission
-    /// deadline.
+    /// Exact blocks from the height an epoch becomes the admission frontier
+    /// to its admission deadline.
     ///
     /// Genesis-fixed with `challenge_duration`, one chain-wide policy applied
     /// to every deployment: a per-epoch or per-operator choice would let an
@@ -306,8 +306,9 @@ struct EncodedGenesis {
     /// Chain creation time in milliseconds since the Unix epoch
     /// (display/recency-grade only).
     timestamp: u64,
-    /// Genesis-fixed maximum blocks from registration inclusion to the
-    /// admission deadline, applied to every deployment.
+    /// Genesis-fixed exact blocks from the height an epoch becomes the
+    /// admission frontier to its admission deadline, applied to every
+    /// deployment.
     admission_offset: u64,
     /// Genesis-fixed exact challenge window duration in blocks, applied to
     /// every deployment.
@@ -707,6 +708,10 @@ pub fn prepare_operator(args: OperatorSetup) -> anyhow::Result<()> {
         args.max_dealing_bytes <= genesis.native.max_dealing_bytes,
         "dealing reservation exceeds the chain resource policy"
     );
+    let epoch_cost = genesis
+        .native
+        .epoch_cost(args.max_dealing_bytes)
+        .context("epoch fee overflow")?;
     anyhow::ensure!(
         !args.node_dir.exists() || args.node_dir.read_dir()?.next().is_none(),
         "operator directory must be empty"
@@ -744,8 +749,7 @@ pub fn prepare_operator(args: OperatorSetup) -> anyhow::Result<()> {
     println!("Fund native account: {}", hex(&request.operator.encode()));
     println!(
         "Registration fee: {}; reserved epoch fee: {}",
-        request.fee,
-        genesis.native.epoch_fee * u64::from(request.max_dealing_bytes).div_ceil(1024)
+        request.fee, epoch_cost
     );
     println!(
         "Register with: terminal-chain register --node-dir {}",

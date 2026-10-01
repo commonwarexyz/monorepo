@@ -76,6 +76,10 @@ fn validators_derive_the_commitment_from_their_registered_predecessor() {
                 &state,
                 &fixture.deposits,
                 &fixture.withdrawals,
+                0..0,
+                fixture.context.predecessor_liability(),
+                fixture.context.admission_deadline(),
+                fixture.context.challenge_deadline(),
                 Floors {
                     activity: 0,
                     payouts: 0,
@@ -128,9 +132,6 @@ fn preparing_dealing_enforces_the_sender_entry_limit() {
                 fixture.operator.public_key(),
                 &fixture.deposits,
                 &fixture.withdrawals,
-                fixture.context.predecessor_liability(),
-                98,
-                99,
                 CloseLimits::new(4, 4, 0, limit, 4, 100, 0, 0),
                 *fixture.context.committee(),
             )
@@ -143,13 +144,19 @@ fn preparing_dealing_enforces_the_sender_entry_limit() {
                 2,
                 terminal.vector.root::<Sha256, ShaDigest>().unwrap(),
             );
-            let ack =
-                VectorAck::sign_by_authorities(body, &fixture.accounts[0].1, &fixture.operator);
+            let ack = VectorAck::sign_by_authorities(
+                body,
+                empty_root(),
+                &fixture.accounts[0].1,
+                &fixture.operator,
+            );
             terminal.authorization = SendAuthorization::from_raw_unchecked(
                 ack.body().clone(),
+                ack.predecessor(),
                 ack.payer_signature().clone(),
             );
-            terminal.operator_signature = bls_ack(&fixture.operator_bls_private, ack.body());
+            terminal.operator_signature =
+                bls_ack(&fixture.operator_bls_private, &terminal.authorization);
             let result = prepare_dealing::<Sha256, _, _>(
                 &context,
                 &fixture.deposits,
@@ -313,9 +320,6 @@ fn keyed_dealing_binds_resource_limits_before_allocating_rows_or_edges() {
                 fixture.operator.public_key(),
                 &fixture.deposits,
                 &fixture.withdrawals,
-                fixture.context.predecessor_liability(),
-                98,
-                99,
                 limits,
                 *fixture.context.committee(),
             )
@@ -324,6 +328,10 @@ fn keyed_dealing_binds_resource_limits_before_allocating_rows_or_edges() {
                 &fixture.state,
                 &fixture.deposits,
                 &fixture.withdrawals,
+                0..0,
+                fixture.context.predecessor_liability(),
+                98,
+                99,
                 Floors {
                     activity: 0,
                     payouts: 0,
@@ -422,9 +430,6 @@ fn headers_bind_every_root_amount_and_registered_context() {
             fixture.operator.public_key(),
             &fixture.deposits,
             &fixture.withdrawals,
-            fixture.context.predecessor_liability(),
-            98,
-            99,
             CloseLimits::protocol_maximum(),
             *fixture.context.committee(),
         )
@@ -433,6 +438,10 @@ fn headers_bind_every_root_amount_and_registered_context() {
             &fixture.state,
             &fixture.deposits,
             &fixture.withdrawals,
+            0..0,
+            fixture.context.predecessor_liability(),
+            98,
+            99,
             Floors {
                 activity: 0,
                 payouts: 0,
@@ -477,7 +486,7 @@ fn malformed_terminal_material_is_rejected_before_state_preparation() {
                         old.send_root(),
                     );
                     terminals[0].authorization =
-                        SendAuthorization::sign(body, &fixture.accounts[0].1);
+                        SendAuthorization::sign(body, empty_root(), &fixture.accounts[0].1);
                 }
                 _ => unreachable!(),
             }

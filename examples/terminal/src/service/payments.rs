@@ -7,7 +7,7 @@ use crate::{
         MAX_VERIFICATION_BATCHES, Operator, SendsOutcome, VerifiedSends, rpc as operator_rpc,
         verify_sends,
     },
-    protocol::Key,
+    protocol::{Key, Timing},
     rpc,
 };
 use anyhow::{Result, ensure};
@@ -164,12 +164,13 @@ pub(super) fn start<E, C>(
     chain: C,
     operator: Arc<Mutex<Operator>>,
     strategy: commonware_parallel::Rayon,
+    timing: Timing,
 ) -> (PaymentSender, Handle<()>)
 where
     E: Env + CryptoRng,
     C: Chain,
 {
-    start_inner(context, chain, operator, strategy, None)
+    start_inner(context, chain, operator, strategy, timing, None)
 }
 
 #[cfg(test)]
@@ -178,13 +179,14 @@ pub(super) fn start_with_hooks<E, C>(
     chain: C,
     operator: Arc<Mutex<Operator>>,
     strategy: commonware_parallel::Rayon,
+    timing: Timing,
     hooks: TestHooks,
 ) -> (PaymentSender, Handle<()>)
 where
     E: Env + CryptoRng,
     C: Chain,
 {
-    start_inner(context, chain, operator, strategy, Some(hooks))
+    start_inner(context, chain, operator, strategy, timing, Some(hooks))
 }
 
 fn start_inner<E, C>(
@@ -192,6 +194,7 @@ fn start_inner<E, C>(
     chain: C,
     operator: Arc<Mutex<Operator>>,
     strategy: commonware_parallel::Rayon,
+    timing: Timing,
     #[cfg(test)] hooks: Option<TestHooks>,
     #[cfg(not(test))] _hooks: Option<()>,
 ) -> (PaymentSender, Handle<()>)
@@ -206,6 +209,7 @@ where
             chain,
             operator,
             strategy,
+            timing,
             receiver,
             #[cfg(test)]
             hooks,
@@ -261,6 +265,7 @@ async fn run<E, C>(
     mut chain: C,
     operator: Arc<Mutex<Operator>>,
     strategy: commonware_parallel::Rayon,
+    timing: Timing,
     mut receiver: mpsc::Receiver<Payment>,
     #[cfg(test)] hooks: Option<TestHooks>,
 ) where
@@ -301,7 +306,7 @@ async fn run<E, C>(
             reject_group(group, error.clone());
             panic!("payment storage failed: {error}");
         }
-        if let Err(error) = register_epoch(&context, &mut chain, &operator, |operator| {
+        if let Err(error) = register_epoch(&context, &mut chain, &operator, timing, |operator| {
             let mut required = false;
             let mut first_error = None;
             for verified in group
@@ -569,17 +574,9 @@ fn encode_outcome(kind: ResponseKind, outcome: SendsOutcome) -> Result<rpc::Resp
                     );
                     operator_rpc::AcceptSendResponse::Accepted(accepted.remove(0).into())
                 }
-                SendsOutcome::Stale {
-                    context,
-                    cumulative_debit,
-                    seq,
-                    entries,
-                } => operator_rpc::AcceptSendResponse::Stale {
-                    context,
-                    cumulative_debit,
-                    seq,
-                    entries,
-                },
+                SendsOutcome::Stale { context, report } => operator_rpc::AcceptSendResponse::Stale(
+                    operator_rpc::StaleResponse::new(context, report),
+                ),
             };
             response.encode()
         }

@@ -1,9 +1,10 @@
 use super::{
     certification, challenge as challenge_model,
     settlement::{
-        Account, AccountState, Batch, BatchStatus, ChallengeKind, Deployment, DepositId,
-        Destination, Fault, RegistrationId, Root, SettlementAction, SettlementEdge,
-        SettlementModel, SettlementState, Terminal, WithdrawalAction, WithdrawalId,
+        ACCOUNT_COUNT, Account, AccountState, Batch, BatchStatus, ChallengeKind, Deployment,
+        DepositId, Destination, Entry, Fault, Frontier, Queued, RegistrationId, Root,
+        SettlementAction, SettlementEdge, SettlementModel, SettlementState, Terminal, Variant,
+        WithdrawalAction, WithdrawalId,
     },
 };
 use std::collections::BTreeMap;
@@ -22,12 +23,19 @@ fn rejected(model: SettlementModel, state: &SettlementState, action: SettlementA
 }
 
 fn register_and_admit(model: SettlementModel, state: &mut SettlementState, batch: Batch) {
-    step(
-        model,
-        state,
-        SettlementAction::Register(batch.registration()),
-    );
+    register(model, state, batch.registration());
     step(model, state, admission(batch));
+}
+
+// Registers a fixture with a pull of the whole inbox.
+fn register(model: SettlementModel, state: &mut SettlementState, id: RegistrationId) {
+    let action = whole(state, id);
+    step(model, state, action);
+}
+
+// The registration of a fixture that pulls the whole inbox.
+fn whole(state: &SettlementState, id: RegistrationId) -> SettlementAction {
+    SettlementAction::Register(id, u8::try_from(state.inbox.len()).unwrap())
 }
 
 fn admission(batch: Batch) -> SettlementAction {
@@ -71,18 +79,14 @@ fn rejected_candidate_preserves_the_exact_live_registration() {
         &mut state,
         SettlementAction::RecordDeposit(DepositId::BobTwo),
     );
-    step(
-        model,
-        &mut state,
-        SettlementAction::Register(RegistrationId::B0),
-    );
+    register(model, &mut state, RegistrationId::B0);
 
     let registered = state.clone();
     rejected(model, &state, admission(Batch::Offset));
     assert_eq!(state, registered);
 
     step(model, &mut state, admission(Batch::B0));
-    assert_eq!(state.registered, None);
+    assert_eq!(state.frontier, None);
     assert_eq!(state.pipeline, vec![Batch::B0]);
 }
 
@@ -108,15 +112,6 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
         model,
         &state,
         SettlementAction::QueueWithdrawal(wrong_deployment),
-    );
-
-    let mut wrong_context = valid;
-    wrong_context.request.context_root = Root::R1;
-    wrong_context.replay_key = wrong_context.request.replay_key();
-    rejected(
-        model,
-        &state,
-        SettlementAction::QueueWithdrawal(wrong_context),
     );
 
     let mut oversized_destination = valid;
@@ -259,22 +254,14 @@ fn drain_terminal(model: SettlementModel, state: &mut SettlementState) {
 fn skipped_registration_and_out_of_order_settlement_are_rejected() {
     let model = SettlementModel::default();
     let mut state = SettlementState::default();
-    rejected(
-        model,
-        &state,
-        SettlementAction::Register(RegistrationId::B1),
-    );
+    rejected(model, &state, whole(&state, RegistrationId::B1));
     step(
         model,
         &mut state,
         SettlementAction::RecordDeposit(DepositId::BobTwo),
     );
     register_and_admit(model, &mut state, Batch::B0);
-    rejected(
-        model,
-        &state,
-        SettlementAction::Register(RegistrationId::B2),
-    );
+    rejected(model, &state, whole(&state, RegistrationId::B2));
     register_and_admit(model, &mut state, Batch::B1);
 
     step(model, &mut state, SettlementAction::Observe(6));
@@ -296,14 +283,18 @@ fn admission_and_challenge_boundaries_are_inclusive() {
         &mut registered,
         SettlementAction::RecordDeposit(DepositId::BobTwo),
     );
-    step(model, &mut registered, SettlementAction::Observe(2));
-    step(
-        model,
-        &mut registered,
-        SettlementAction::Register(RegistrationId::B0),
+    register(model, &mut registered, RegistrationId::B0);
+    assert_eq!(
+        registered.frontier,
+        Some(Frontier {
+            registration: RegistrationId::B0,
+            admission_deadline: 2,
+            challenge_deadline: 4,
+        })
     );
 
     let mut admitted = registered.clone();
+    step(model, &mut admitted, SettlementAction::Observe(2));
     step(model, &mut admitted, admission(Batch::B0));
     assert_eq!(admitted.last, SettlementEdge::Admit(Batch::B0));
     step(model, &mut admitted, SettlementAction::Observe(4));
@@ -323,7 +314,7 @@ fn admission_and_challenge_boundaries_are_inclusive() {
             ..
         }
     ));
-    assert_eq!(late.registered, None);
+    assert_eq!(late.frontier, None);
 
     let mut clean = SettlementState::default();
     step(
@@ -332,9 +323,9 @@ fn admission_and_challenge_boundaries_are_inclusive() {
         SettlementAction::RecordDeposit(DepositId::BobTwo),
     );
     register_and_admit(model, &mut clean, Batch::B0);
-    step(model, &mut clean, SettlementAction::Observe(4));
+    step(model, &mut clean, SettlementAction::Observe(3));
     rejected(model, &clean, SettlementAction::Finalize);
-    step(model, &mut clean, SettlementAction::Observe(5));
+    step(model, &mut clean, SettlementAction::Observe(4));
     step(model, &mut clean, SettlementAction::Finalize);
 }
 
@@ -364,27 +355,25 @@ fn withdrawal_queued_during_registration_waits_for_the_next_boundary() {
         &mut state,
         SettlementAction::RecordDeposit(DepositId::BobTwo),
     );
-    step(
-        model,
-        &mut state,
-        SettlementAction::Register(RegistrationId::B0),
-    );
+    register(model, &mut state, RegistrationId::B0);
 
     let queued = SettlementModel::withdrawal_attempt(&state, WithdrawalId::CloseAfterFault);
     let request = queued.request;
     step(model, &mut state, SettlementAction::QueueWithdrawal(queued));
-    assert_eq!(state.registered, Some(RegistrationId::B0));
     assert_eq!(
-        state.pending_withdrawals[Account::Alice.index()],
-        Some(request)
+        state.frontier.map(|frontier| frontier.registration),
+        Some(RegistrationId::B0)
     );
+    let queued = Some(Queued {
+        index: 1,
+        request,
+        carried: false,
+    });
+    assert_eq!(state.pending_withdrawals[Account::Alice.index()], queued);
 
     step(model, &mut state, admission(Batch::B0));
     assert_eq!(state.pipeline, vec![Batch::B0]);
-    assert_eq!(
-        state.pending_withdrawals[Account::Alice.index()],
-        Some(request)
-    );
+    assert_eq!(state.pending_withdrawals[Account::Alice.index()], queued);
     assert_eq!(
         state.outstanding_withdrawals[Account::Alice.index()],
         Some(request)
@@ -392,11 +381,7 @@ fn withdrawal_queued_during_registration_waits_for_the_next_boundary() {
 
     // The admitted boundary did not carry the later request. A successor
     // registration must include it verbatim instead of silently consuming it.
-    rejected(
-        model,
-        &state,
-        SettlementAction::Register(RegistrationId::B1),
-    );
+    rejected(model, &state, whole(&state, RegistrationId::B1));
 }
 
 #[test]
@@ -415,11 +400,7 @@ fn registered_withdrawal_blocks_another_request_for_the_same_account() {
         &mut state,
         SettlementAction::RecordDeposit(DepositId::BobOne),
     );
-    step(
-        model,
-        &mut state,
-        SettlementAction::Register(RegistrationId::B1C),
-    );
+    register(model, &mut state, RegistrationId::B1C);
 
     let mut duplicate = SettlementModel::withdrawal_attempt(&state, WithdrawalId::Carried);
     duplicate.request.action = WithdrawalAction::Amount(1);
@@ -434,15 +415,11 @@ fn open_registration_slot_has_no_heartbeat() {
     let mut state = SettlementState::default();
     step(model, &mut state, SettlementAction::Observe(12));
     assert_eq!(state.fault, Fault::Healthy);
-    assert_eq!(state.registered, None);
+    assert_eq!(state.frontier, None);
 
-    rejected(
-        model,
-        &state,
-        SettlementAction::Register(RegistrationId::B1),
-    );
+    rejected(model, &state, whole(&state, RegistrationId::B1));
     assert_eq!(state.fault, Fault::Healthy);
-    assert_eq!(state.registered, None);
+    assert_eq!(state.frontier, None);
 }
 
 #[test]
@@ -455,11 +432,7 @@ fn expired_registration_is_permanent_and_recovers_every_sender_bucket() {
         SettlementAction::RecordDeposit(DepositId::BobTwo),
     );
     queue_withdrawal(model, &mut state, WithdrawalId::Offset);
-    step(
-        model,
-        &mut state,
-        SettlementAction::Register(RegistrationId::Offset),
-    );
+    register(model, &mut state, RegistrationId::Offset);
     step(model, &mut state, SettlementAction::Observe(2));
     assert!(matches!(
         state.fault,
@@ -470,11 +443,7 @@ fn expired_registration_is_permanent_and_recovers_every_sender_bucket() {
         }
     ));
     assert_eq!(state.admission_fence_epoch, Some(0));
-    rejected(
-        model,
-        &state,
-        SettlementAction::Register(RegistrationId::Offset),
-    );
+    rejected(model, &state, whole(&state, RegistrationId::Offset));
     rejected(model, &state, admission(Batch::Offset));
 
     step(
@@ -515,11 +484,7 @@ fn simultaneous_faults_use_registration_then_withdrawal_then_deposit_priority() 
         SettlementAction::RecordDeposit(DepositId::BobTwo),
     );
     queue_withdrawal(model, &mut all_three, WithdrawalId::Offset);
-    step(
-        model,
-        &mut all_three,
-        SettlementAction::Register(RegistrationId::Offset),
-    );
+    register(model, &mut all_three, RegistrationId::Offset);
     step(model, &mut all_three, SettlementAction::Observe(12));
     assert!(matches!(
         all_three.fault,
@@ -542,11 +507,7 @@ fn simultaneous_faults_use_registration_then_withdrawal_then_deposit_priority() 
         &mut registration_deposit,
         SettlementAction::RecordDeposit(DepositId::BobTwo),
     );
-    step(
-        model,
-        &mut registration_deposit,
-        SettlementAction::Register(RegistrationId::B0),
-    );
+    register(model, &mut registration_deposit, RegistrationId::B0);
     step(
         model,
         &mut registration_deposit,
@@ -605,6 +566,7 @@ fn every_contradiction_kind_releases_the_frozen_sender() {
             SettlementAction::RecordDeposit(DepositId::BobTwo),
         );
         register_and_admit(model, &mut state, Batch::B0);
+        step(model, &mut state, SettlementAction::Observe(2));
         register_and_admit(model, &mut state, Batch::B1);
         finalize_b0(model, &mut state);
         step(model, &mut state, proven_challenge(Batch::B1, kind));
@@ -651,12 +613,12 @@ fn amountless_close_sweeps_the_frozen_epoch_tail_after_operator_failure() {
     let model = SettlementModel::default();
     let mut state = SettlementState::default();
     queue_withdrawal(model, &mut state, WithdrawalId::CloseAfterFault);
-    step(model, &mut state, SettlementAction::Observe(11));
+    step(model, &mut state, SettlementAction::Observe(12));
     assert_eq!(
         state.fault,
         Fault::ExpiredWithdrawal {
             account: Account::Alice,
-            expired_at: 11,
+            expired_at: 12,
         }
     );
     drain_terminal(model, &mut state);
@@ -698,7 +660,7 @@ fn wrong_batch_and_expired_challenge_do_not_change_status() {
 fn middle_fault_preserves_only_the_clean_fifo_prefix() {
     let model = SettlementModel::default();
     let mut state = admit_first_three(model);
-    step(model, &mut state, SettlementAction::Observe(4));
+    step(model, &mut state, SettlementAction::Observe(3));
     step(
         model,
         &mut state,
@@ -767,11 +729,7 @@ fn registration_expiry_drains_its_earlier_two_batch_prefix() {
     register_and_admit(model, &mut state, Batch::B0);
     register_and_admit(model, &mut state, Batch::B1);
     queue_withdrawal(model, &mut state, WithdrawalId::Amount);
-    step(
-        model,
-        &mut state,
-        SettlementAction::Register(RegistrationId::B2),
-    );
+    register(model, &mut state, RegistrationId::B2);
 
     // Expiry fences the registered successor without invalidating its earlier pending prefix.
     step(model, &mut state, SettlementAction::Observe(5));
@@ -779,7 +737,7 @@ fn registration_expiry_drains_its_earlier_two_batch_prefix() {
         state.fault,
         Fault::ExpiredRegistration {
             registration: RegistrationId::B2,
-            expired_at: 4,
+            expired_at: 1,
             ..
         }
     ));
@@ -1012,7 +970,7 @@ fn withdrawal_replay_ids_prune_at_the_exact_deadline_and_recheck_context_on_reus
 }
 
 #[test]
-fn same_account_deposits_keep_the_earliest_deadline_and_refund_exactly() {
+fn same_account_deposits_keep_their_own_deadlines_and_refund_exactly() {
     let model = SettlementModel::default();
     let mut state = SettlementState::default();
     step(
@@ -1026,7 +984,13 @@ fn same_account_deposits_keep_the_earliest_deadline_and_refund_exactly() {
         &mut state,
         SettlementAction::RecordDeposit(DepositId::BobOne),
     );
-    assert_eq!(state.deposit_deadlines[Account::Bob as usize], Some(2));
+    assert_eq!(
+        state.inbox,
+        vec![
+            Entry::Deposit(DepositId::BobTwo, 2),
+            Entry::Deposit(DepositId::BobOne, 3),
+        ]
+    );
     step(model, &mut state, SettlementAction::Observe(2));
     assert_eq!(
         state.fault,
@@ -1067,11 +1031,7 @@ fn carried_withdrawal_clears_and_consumes_its_replay_id_at_admission() {
     // The carried request is never queued: registration accepts it as an
     // operator-collected extra and admission consumes its replay id.
     assert_eq!(state.pending_withdrawals, [None, None, None]);
-    step(
-        model,
-        &mut state,
-        SettlementAction::Register(RegistrationId::B1C),
-    );
+    register(model, &mut state, RegistrationId::B1C);
     assert_eq!(
         state.withdrawal_replay_expiries[WithdrawalId::Carried.index()],
         None
@@ -1111,11 +1071,7 @@ fn degraded_amount_finalizes_and_claims_a_zero_release() {
     register_and_admit(model, &mut state, Batch::B0);
     register_and_admit(model, &mut state, Batch::B1);
     queue_withdrawal(model, &mut state, WithdrawalId::Amount);
-    step(
-        model,
-        &mut state,
-        SettlementAction::Register(RegistrationId::B2),
-    );
+    register(model, &mut state, RegistrationId::B2);
 
     // Certification certified the degraded close: Bob spent below his queued
     // amount, so the uncovered withdrawal releases nothing.
@@ -1160,11 +1116,7 @@ fn uncovered_carried_amount_degrades_at_the_frozen_root() {
         &mut state,
         SettlementAction::RecordDeposit(DepositId::BobOne),
     );
-    step(
-        model,
-        &mut state,
-        SettlementAction::Register(RegistrationId::B1C),
-    );
+    register(model, &mut state, RegistrationId::B1C);
     step(model, &mut state, admission(Batch::B1C));
 
     // A proven challenge freezes R1, where Bob's balance cannot cover the
@@ -1192,15 +1144,11 @@ fn carried_offset_includes_the_deposit_and_preserves_the_account_balance() {
         &mut state,
         SettlementAction::RecordDeposit(DepositId::BobTwo),
     );
-    step(
-        model,
-        &mut state,
-        SettlementAction::Register(RegistrationId::OffsetC),
-    );
+    register(model, &mut state, RegistrationId::OffsetC);
     step(model, &mut state, admission(Batch::OffsetC));
 
-    assert_eq!(state.pending_deposits, [0, 0, 0]);
-    assert_eq!(state.deposit_deadlines[Account::Bob as usize], None);
+    assert_eq!(state.pending, [0; ACCOUNT_COUNT]);
+    assert_eq!(state.pulled, 1);
     step(model, &mut state, SettlementAction::Observe(2));
     assert!(state.fault.healthy());
     step(model, &mut state, SettlementAction::Observe(4));
@@ -1250,4 +1198,281 @@ fn queued_withdrawal_behind_a_pending_prefix_expires_and_recovers() {
     assert_eq!(state.recovered_state[Account::Carol as usize], 1);
     step(model, &mut state, withdrawal_claim(Batch::B2));
     assert_eq!(state.released, state.total_in);
+}
+
+/// A successor registers while its predecessor still awaits admission. It waits without deadlines
+/// and becomes the frontier at the predecessor's admission, taking deadlines from that instant.
+#[test]
+fn successor_registers_before_predecessor_admission_and_is_promoted_at_admission() {
+    let model = SettlementModel::default();
+    let mut state = SettlementState::default();
+
+    // B0 becomes the frontier at 0 and B1 queues behind it.
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    register(model, &mut state, RegistrationId::B0);
+    register(model, &mut state, RegistrationId::B1);
+    let frontier = Frontier {
+        registration: RegistrationId::B0,
+        admission_deadline: 1,
+        challenge_deadline: 3,
+    };
+    assert_eq!(state.frontier, Some(frontier));
+    assert_eq!(state.queued, Some(RegistrationId::B1));
+
+    // The finite model holds two registrations at once, and B1's close cannot be admitted
+    // before its predecessor.
+    queue_withdrawal(model, &mut state, WithdrawalId::Amount);
+    rejected(model, &state, whole(&state, RegistrationId::B2));
+    rejected(model, &state, admission(Batch::B1));
+
+    // B0's admission at 1 promotes B1 with deadlines from 1.
+    step(model, &mut state, SettlementAction::Observe(1));
+    step(model, &mut state, admission(Batch::B0));
+    assert_eq!(
+        state.frontier,
+        Some(Frontier {
+            registration: RegistrationId::B1,
+            admission_deadline: 2,
+            challenge_deadline: 4,
+        })
+    );
+    assert_eq!(state.queued, None);
+    assert_eq!(state.challenge_deadlines[Batch::B0.index()], 3);
+
+    // The successor admits, and FIFO finalization follows the chained deadlines.
+    step(model, &mut state, admission(Batch::B1));
+    register_and_admit(model, &mut state, Batch::B2);
+    step(model, &mut state, SettlementAction::Observe(4));
+    step(model, &mut state, SettlementAction::Finalize);
+    rejected(model, &state, SettlementAction::Finalize);
+    step(model, &mut state, SettlementAction::Observe(5));
+    step(model, &mut state, SettlementAction::Finalize);
+    step(model, &mut state, SettlementAction::Finalize);
+    assert_eq!(state.expected_epoch, 3);
+}
+
+/// A deposit made while an epoch is registered waits in the inbox. It leaves the registered
+/// boundary unchanged, survives that boundary's admission, and is refunded after a fault.
+#[test]
+fn deposit_during_registration_waits_in_the_inbox() {
+    let model = SettlementModel::default();
+    let mut state = SettlementState::default();
+
+    // B0 pulls Bob's deposit. Alice's later deposit waits unpulled.
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    register(model, &mut state, RegistrationId::B0);
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::AliceOne),
+    );
+    assert_eq!(state.pulled, 1);
+    assert_eq!(state.inbox.len(), 2);
+    assert_eq!(state.pending, [1, 2, 0]);
+
+    // Admission removes exactly the pulled deposit.
+    step(model, &mut state, admission(Batch::B0));
+    assert_eq!(state.pending, [1, 0, 0]);
+    assert_eq!(state.unfinalized_deposits, [1, 2, 0]);
+
+    // No fixture pulls Alice's deposit, so it expires and is refunded directly.
+    rejected(model, &state, whole(&state, RegistrationId::B1));
+    step(model, &mut state, SettlementAction::Observe(2));
+    assert_eq!(
+        state.fault,
+        Fault::ExpiredDeposit {
+            account: Account::Alice,
+            expired_at: 2,
+        }
+    );
+    step(
+        model,
+        &mut state,
+        SettlementAction::ClaimDeposit(Account::Alice),
+    );
+    assert_eq!(state.refunded_deposits[Account::Alice as usize], 1);
+    step(model, &mut state, SettlementAction::Observe(4));
+    step(model, &mut state, SettlementAction::Finalize);
+    drain_terminal(model, &mut state);
+    assert_eq!(state.released, state.total_in);
+}
+
+/// A frontier expiry drops the frontier and the queue. Every unadmitted deposit and
+/// chain-queued withdrawal stays with its owner, and a refund returns an account's pulled and
+/// unpulled deposits once.
+#[test]
+fn fault_drops_the_frontier_and_queue_and_refunds_every_deposit() {
+    let model = SettlementModel::default();
+    let mut state = SettlementState::default();
+
+    // B0 is the frontier, B1 is queued, and later intake waits unpulled.
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    register(model, &mut state, RegistrationId::B0);
+    register(model, &mut state, RegistrationId::B1);
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobOne),
+    );
+    queue_withdrawal(model, &mut state, WithdrawalId::CloseAfterFault);
+    assert_eq!((state.pulled, state.inbox.len()), (1, 3));
+    assert_eq!(state.pending, [0, 3, 0]);
+    assert_eq!(
+        state.pending_withdrawals[Account::Alice.index()].map(|queued| queued.index),
+        Some(2)
+    );
+
+    // B0 misses its admission deadline.
+    step(model, &mut state, SettlementAction::Observe(2));
+    assert!(matches!(
+        state.fault,
+        Fault::ExpiredRegistration {
+            registration: RegistrationId::B0,
+            expired_at: 1,
+            ..
+        }
+    ));
+    assert_eq!(state.last, SettlementEdge::Fault(2));
+    assert_eq!(state.frontier, None);
+    assert_eq!(state.queued, None);
+    rejected(model, &state, admission(Batch::B0));
+
+    // Bob's pulled and unpulled deposits refund together.
+    step(
+        model,
+        &mut state,
+        SettlementAction::ClaimDeposit(Account::Bob),
+    );
+    assert_eq!(state.refunded_deposits[Account::Bob as usize], 3);
+    rejected(model, &state, SettlementAction::ClaimDeposit(Account::Bob));
+    drain_terminal(model, &mut state);
+    assert_eq!(state.terminal_withdrawals[Account::Alice as usize], 10);
+    assert_eq!(state.released, state.total_in);
+}
+
+// Registers B0 over Bob's deposit after Alice's deposit and a chain-queued withdrawal land behind
+// it, and returns whether the pull of that prefix is accepted.
+fn prefix_registers_after_later_intake(model: SettlementModel) -> bool {
+    let mut state = SettlementState::default();
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::AliceOne),
+    );
+    queue_withdrawal(model, &mut state, WithdrawalId::CloseAfterFault);
+    model
+        .apply(&state, SettlementAction::Register(RegistrationId::B0, 1))
+        .is_some()
+}
+
+/// A deposit and a chain-queued withdrawal recorded after the operator fixes its pull leave the
+/// pulled prefix registrable. A variant that requires the whole inbox rejects it.
+#[test]
+fn later_intake_leaves_the_prefix_registrable() {
+    // The specified rule registers the prefix.
+    assert!(prefix_registers_after_later_intake(
+        SettlementModel::default()
+    ));
+
+    // Requiring the whole inbox rejects the same registration.
+    assert!(!prefix_registers_after_later_intake(SettlementModel::new(
+        Variant::WholePending
+    )));
+}
+
+// Queues Bob's Amount request while B0 and B1 are registered, admits B0, and registers B2 without
+// pulling the request's index. Returns the state after the registration, if it is accepted.
+fn early_carriage(model: SettlementModel) -> Option<SettlementState> {
+    let mut state = SettlementState::default();
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    register(model, &mut state, RegistrationId::B0);
+    register(model, &mut state, RegistrationId::B1);
+    queue_withdrawal(model, &mut state, WithdrawalId::Amount);
+    step(model, &mut state, SettlementAction::Observe(1));
+    step(model, &mut state, admission(Batch::B0));
+    model.apply(&state, SettlementAction::Register(RegistrationId::B2, 1))
+}
+
+/// A registration may carry a chain-queued request its pull does not reach, which carries it
+/// early. The request stays carried until admission removes it, so no later pull owes it. A
+/// variant without early carriage rejects the registration.
+#[test]
+fn queued_request_beyond_the_prefix_is_carried_once() {
+    // The specified rule carries the request early.
+    let model = SettlementModel::default();
+    let mut state = early_carriage(model).expect("the specified rule carries the request early");
+    let bob = Account::Bob.index();
+    assert_eq!(state.pulled, 1);
+    assert!(
+        state.pending_withdrawals[bob].is_some_and(|queued| queued.carried && queued.index == 1)
+    );
+
+    // Admitting B1 and then the carrying B2 removes the request.
+    step(model, &mut state, admission(Batch::B1));
+    assert!(state.pending_withdrawals[bob].is_some_and(|queued| queued.carried));
+    step(model, &mut state, admission(Batch::B2));
+    assert_eq!(state.pending_withdrawals[bob], None);
+    assert_eq!(
+        state.outstanding_withdrawals[bob],
+        Some(WithdrawalId::Amount.request())
+    );
+
+    // Without early carriage, the same registration is rejected.
+    assert!(early_carriage(SettlementModel::new(Variant::NoEarlyCarriage)).is_none());
+}
+
+// Pulls and admits Bob's deposit with B0 and observes the instant its inclusion deadline would
+// pass.
+fn pulled_deposit_at_its_deadline(model: SettlementModel) -> Fault {
+    let mut state = SettlementState::default();
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    register(model, &mut state, RegistrationId::B0);
+    step(model, &mut state, admission(Batch::B0));
+    step(model, &mut state, SettlementAction::Observe(2));
+    state.fault
+}
+
+/// A pull disarms the pulled deposits' inclusion deadlines, so a pulled deposit never expires. A
+/// variant that leaves them armed faults on the pulled deposit.
+#[test]
+fn pulled_deposit_never_expires() {
+    // The specified rule stays healthy past the pulled deposit's deadline.
+    assert_eq!(
+        pulled_deposit_at_its_deadline(SettlementModel::default()),
+        Fault::Healthy
+    );
+
+    // Leaving the deadline armed expires the pulled deposit.
+    assert_eq!(
+        pulled_deposit_at_its_deadline(SettlementModel::new(Variant::ArmedAfterPull)),
+        Fault::ExpiredDeposit {
+            account: Account::Bob,
+            expired_at: 2,
+        }
+    );
 }

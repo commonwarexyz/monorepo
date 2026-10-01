@@ -16,6 +16,7 @@ fn acknowledge(
             debit,
             vector.root::<Sha256, ShaDigest>().unwrap(),
         ),
+        empty_root(),
         payer,
         &fixture.operator,
     )
@@ -203,8 +204,10 @@ fn ack_debit_arms_decline_earlier_retries() {
         let mut terminals = fixture.terminals.clone();
         let terminal = &mut terminals[3];
         let ack = acknowledge(&fixture, private, &terminal.vector, 1, 2);
-        terminal.authorization = SendAuthorization::sign(ack.body().clone(), private);
-        terminal.operator_signature = bls_ack(&fixture.operator_bls_private, ack.body());
+        terminal.authorization =
+            SendAuthorization::sign(ack.body().clone(), ack.predecessor(), private);
+        terminal.operator_signature =
+            bls_ack(&fixture.operator_bls_private, &terminal.authorization);
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &fixture.state,
             &fixture.context,
@@ -370,8 +373,10 @@ fn entry_amount_and_count_contradictions_are_independent() {
         let recipient = entries[0].recipient.clone();
         terminals[2].vector = OutVector::new(EPOCH, payer.clone(), entries).unwrap();
         let ack = acknowledge(&fixture, private, &terminals[2].vector, 0, 2);
-        terminals[2].authorization = SendAuthorization::sign(ack.body().clone(), private);
-        terminals[2].operator_signature = bls_ack(&fixture.operator_bls_private, ack.body());
+        terminals[2].authorization =
+            SendAuthorization::sign(ack.body().clone(), ack.predecessor(), private);
+        terminals[2].operator_signature =
+            bls_ack(&fixture.operator_bls_private, &terminals[2].authorization);
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &fixture.state,
             &fixture.context,
@@ -693,8 +698,9 @@ fn foreign_context_acks_are_rejected() {
                 committed.send_root(),
             );
             let mut terminals = fixture.terminals.clone();
-            terminals[2].operator_signature = bls_ack(&fixture.operator_bls_private, &foreign);
-            terminals[2].authorization = SendAuthorization::sign(foreign, private);
+            terminals[2].authorization = SendAuthorization::sign(foreign, empty_root(), private);
+            terminals[2].operator_signature =
+                bls_ack(&fixture.operator_bls_private, &terminals[2].authorization);
             assert!(matches!(
                 prepare_close_with_strategy::<Sha256, _, _, _, _>(
                     &fixture.state,
@@ -742,6 +748,7 @@ fn cross_epoch_and_anchor_challenge_replays_are_rejected() {
                     2,
                     vector.root::<Sha256, ShaDigest>().unwrap(),
                 ),
+                empty_root(),
                 private,
                 &fixture.operator,
             );
@@ -802,7 +809,7 @@ fn signatures_for_other_roles_cannot_authorize_challenges() {
         let mut wrong_payer_role = AckWitness::from_ack(&ack);
         wrong_payer_role.payer_signature = private.sign(
             crate::bajillion::payment::VECTOR_ACK_SIGNATURE_NAMESPACE,
-            &ack.body().encode(),
+            &ack.body().message(&ack.predecessor()),
         );
         assert!(matches!(
             check(
@@ -818,7 +825,7 @@ fn signatures_for_other_roles_cannot_authorize_challenges() {
         let mut wrong_operator_role = AckWitness::from_ack(&ack);
         wrong_operator_role.operator_signature = fixture.operator.sign(
             crate::bajillion::payment::VECTOR_SEND_SIGNATURE_NAMESPACE,
-            &ack.body().encode(),
+            &ack.body().message(&ack.predecessor()),
         );
         assert!(matches!(
             check(

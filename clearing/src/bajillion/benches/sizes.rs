@@ -334,7 +334,6 @@ pub(crate) fn withdrawal_claim_fixture(
     assert!(amount > 0);
     let request = SignedWithdrawal::sign(
         *fixture.context.deployment(),
-        fixture.context.predecessor_root().digest,
         Bytes::from_static(WITHDRAWAL_DESTINATION),
         action,
         100,

@@ -1,9 +1,10 @@
 //! Payer-signed vector endpoints and operator acknowledgment countersignatures.
 //!
 //! A payer authorizes one batch by signing its epoch-local sequence number, epoch cumulative
-//! debit endpoint, and the root of its strictly recipient-sorted, epoch-cumulative per-recipient
-//! vector. The operator accepts by countersigning the identical body. Per-edge evidence is the
-//! dual-signed body plus one membership opening of the vector root at the credited recipient.
+//! debit endpoint, vector root, and predecessor: the root of its terminal vector in the preceding
+//! epoch. The vector is strictly recipient-sorted, epoch-cumulative, and per-recipient. The
+//! operator countersigns the identical message. Per-edge evidence is the dual-signed message plus
+//! one membership opening of the vector root at the credited recipient.
 
 use crate::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
@@ -11,7 +12,7 @@ use crate::bajillion::{
 };
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
-use bytes::BufMut;
+use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{
     Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
@@ -49,10 +50,13 @@ pub struct PaymentContext<P: PublicKey, D: Digest> {
 impl<P: PublicKey, D: Digest> PaymentContext<P, D> {
     /// Creates a payment context from its chain-recognized anchor and operator key.
     ///
-    /// The anchor must uniquely identify one immutable, one-shot epoch registration. Linear
-    /// settlement ancestry may bind the exact predecessor root later, but the anchor must never be
-    /// reused after that ancestry is invalidated. The embedding must not release an
-    /// operator-signed acknowledgment until settlement has registered this exact anchor.
+    /// The anchor must uniquely identify one immutable, one-shot epoch registration. It commits
+    /// nothing about the predecessor close, so registration and acknowledgments can begin while
+    /// that close is still built, certified, and admitted. Settlement binds the exact predecessor
+    /// root, log heads, and liability when the epoch becomes the admission frontier, and the
+    /// anchor must never be reused after that ancestry is invalidated. The embedding must not
+    /// release an operator-signed acknowledgment until settlement has registered this exact
+    /// anchor.
     pub const fn new(anchor: D, epoch: Epoch, operator: P) -> Self {
         Self {
             anchor,
@@ -187,6 +191,15 @@ impl<P: PublicKey, D: Digest> VectorSendBody<P, D> {
         }
         Ok(())
     }
+
+    /// Encodes the message every signature over this send covers: the body followed by the
+    /// predecessor.
+    pub(crate) fn message(&self, predecessor: &VectorRoot<D>) -> Bytes {
+        let mut message = BytesMut::with_capacity(Self::SIZE + VectorRoot::<D>::SIZE);
+        self.write(&mut message);
+        predecessor.write(&mut message);
+        message.freeze()
+    }
 }
 
 impl<P: PublicKey, D: Digest> Write for VectorSendBody<P, D> {
@@ -221,36 +234,46 @@ impl<P: PublicKey, D: Digest> Read for VectorSendBody<P, D> {
 
 /// Payer-signed vector endpoint carried by a close row.
 ///
+/// The predecessor is the root of the payer's terminal vector in the preceding epoch, or the
+/// empty vector root when it had none there. A close carries the body only when the preceding
+/// admitted close ended at that root. The dealing omits the predecessor because validators read
+/// it from the preceding close.
+///
 /// One aggregate countersignature authenticates the operator's acceptance of every terminal
-/// body in the close, so rows carry only the payer signature. Receipts keep the dual-signed [VectorAck]: the
-/// operator signs each accepted body twice, once for the receipt and once, under
-/// [VECTOR_ACK_AGGREGATE_NAMESPACE], for the close aggregate.
+/// message in the close, so rows carry only the payer signature. Receipts keep the dual-signed
+/// [VectorAck]: the operator signs each accepted message twice, once for the receipt and once,
+/// under [VECTOR_ACK_AGGREGATE_NAMESPACE], for the close aggregate.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SendAuthorization<P: PublicKey, D: Digest> {
     body: VectorSendBody<P, D>,
+    predecessor: VectorRoot<D>,
     payer_signature: P::Signature,
 }
 
 impl<P: PublicKey, D: Digest> SendAuthorization<P, D> {
-    /// Signs an endpoint body with an explicit payer authority.
+    /// Signs an endpoint body and its predecessor with an explicit payer authority.
     pub fn sign<S: Signer<PublicKey = P, Signature = P::Signature>>(
         body: VectorSendBody<P, D>,
+        predecessor: VectorRoot<D>,
         payer: &S,
     ) -> Self {
-        let encoded = body.encode();
+        let message = body.message(&predecessor);
         Self {
-            payer_signature: payer.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &encoded),
+            payer_signature: payer.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &message),
             body,
+            predecessor,
         }
     }
 
     /// Constructs a raw envelope without checking the signature.
     pub const fn from_raw_unchecked(
         body: VectorSendBody<P, D>,
+        predecessor: VectorRoot<D>,
         payer_signature: P::Signature,
     ) -> Self {
         Self {
             body,
+            predecessor,
             payer_signature,
         }
     }
@@ -260,18 +283,27 @@ impl<P: PublicKey, D: Digest> SendAuthorization<P, D> {
         &self.body
     }
 
+    /// Returns the signed root of the payer's terminal vector in the preceding epoch.
+    pub const fn predecessor(&self) -> VectorRoot<D> {
+        self.predecessor
+    }
+
     /// Returns the payer signature.
     pub const fn payer_signature(&self) -> &P::Signature {
         &self.payer_signature
     }
 
+    /// Returns the message every signature over this send covers.
+    pub fn message(&self) -> Bytes {
+        self.body.message(&self.predecessor)
+    }
+
     /// Verifies intrinsic fields, epoch context, and the payer signature.
     pub fn verify(&self, context: &PaymentContext<P, D>) -> Result<(), AckError> {
         self.body.validate_context(context)?;
-        let encoded = self.body.encode();
         if !self.body.payer.verify(
             VECTOR_SEND_SIGNATURE_NAMESPACE,
-            &encoded,
+            &self.message(),
             &self.payer_signature,
         ) {
             return Err(AckError::InvalidPayerSignature);
@@ -283,12 +315,13 @@ impl<P: PublicKey, D: Digest> SendAuthorization<P, D> {
 impl<P: PublicKey, D: Digest> Write for SendAuthorization<P, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.body.write(buf);
+        self.predecessor.write(buf);
         self.payer_signature.write(buf);
     }
 }
 
 impl<P: PublicKey, D: Digest> FixedSize for SendAuthorization<P, D> {
-    const SIZE: usize = VectorSendBody::<P, D>::SIZE + P::Signature::SIZE;
+    const SIZE: usize = VectorSendBody::<P, D>::SIZE + VectorRoot::<D>::SIZE + P::Signature::SIZE;
 }
 
 impl<P: PublicKey, D: Digest> Read for SendAuthorization<P, D> {
@@ -297,46 +330,56 @@ impl<P: PublicKey, D: Digest> Read for SendAuthorization<P, D> {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             body: VectorSendBody::read(buf)?,
+            predecessor: VectorRoot::read(buf)?,
             payer_signature: P::Signature::read(buf)?,
         })
     }
 }
 
 /// Dual-signed acceptance of one payer vector endpoint.
+///
+/// Recipients verify both signatures with the carried predecessor. A receipt whose predecessor
+/// the preceding close contradicts cannot be carried, so it proves a mismatch against the close
+/// that omits it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct VectorAck<P: PublicKey, D: Digest> {
     body: VectorSendBody<P, D>,
+    predecessor: VectorRoot<D>,
     payer_signature: P::Signature,
     operator_signature: P::Signature,
 }
 
 impl<P: PublicKey, D: Digest> VectorAck<P, D> {
-    /// Signs and countersigns an endpoint body with explicit key authorities.
+    /// Signs and countersigns an endpoint body and its predecessor with explicit key authorities.
     ///
     /// This intentionally permits malformed bodies and keys different from the named parties,
     /// modeling everything faulty authorities can sign for challenge tests. Callers must verify
     /// the result before treating it as acceptance evidence.
     pub fn sign_by_authorities<S: Signer<PublicKey = P, Signature = P::Signature>>(
         body: VectorSendBody<P, D>,
+        predecessor: VectorRoot<D>,
         payer: &S,
         operator: &S,
     ) -> Self {
-        let encoded = body.encode();
+        let message = body.message(&predecessor);
         Self {
-            payer_signature: payer.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &encoded),
-            operator_signature: operator.sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &encoded),
+            payer_signature: payer.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &message),
+            operator_signature: operator.sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &message),
             body,
+            predecessor,
         }
     }
 
     /// Constructs a raw envelope without checking signatures.
     pub const fn from_raw_unchecked(
         body: VectorSendBody<P, D>,
+        predecessor: VectorRoot<D>,
         payer_signature: P::Signature,
         operator_signature: P::Signature,
     ) -> Self {
         Self {
             body,
+            predecessor,
             payer_signature,
             operator_signature,
         }
@@ -345,6 +388,11 @@ impl<P: PublicKey, D: Digest> VectorAck<P, D> {
     /// Returns the dual-signed body.
     pub const fn body(&self) -> &VectorSendBody<P, D> {
         &self.body
+    }
+
+    /// Returns the signed root of the payer's terminal vector in the preceding epoch.
+    pub const fn predecessor(&self) -> VectorRoot<D> {
+        self.predecessor
     }
 
     /// Returns the payer signature.
@@ -360,17 +408,17 @@ impl<P: PublicKey, D: Digest> VectorAck<P, D> {
     /// Verifies intrinsic fields, epoch context, and both signatures.
     pub fn verify(&self, context: &PaymentContext<P, D>) -> Result<(), AckError> {
         self.body.validate_context(context)?;
-        let encoded = self.body.encode();
+        let message = self.body.message(&self.predecessor);
         if !self.body.payer.verify(
             VECTOR_SEND_SIGNATURE_NAMESPACE,
-            &encoded,
+            &message,
             &self.payer_signature,
         ) {
             return Err(AckError::InvalidPayerSignature);
         }
         if !context.operator().verify(
             VECTOR_ACK_SIGNATURE_NAMESPACE,
-            &encoded,
+            &message,
             &self.operator_signature,
         ) {
             return Err(AckError::InvalidOperatorSignature);
@@ -382,13 +430,15 @@ impl<P: PublicKey, D: Digest> VectorAck<P, D> {
 impl<P: PublicKey, D: Digest> Write for VectorAck<P, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.body.write(buf);
+        self.predecessor.write(buf);
         self.payer_signature.write(buf);
         self.operator_signature.write(buf);
     }
 }
 
 impl<P: PublicKey, D: Digest> FixedSize for VectorAck<P, D> {
-    const SIZE: usize = VectorSendBody::<P, D>::SIZE + P::Signature::SIZE * 2;
+    const SIZE: usize =
+        VectorSendBody::<P, D>::SIZE + VectorRoot::<D>::SIZE + P::Signature::SIZE * 2;
 }
 
 impl<P: PublicKey, D: Digest> Read for VectorAck<P, D> {
@@ -397,6 +447,7 @@ impl<P: PublicKey, D: Digest> Read for VectorAck<P, D> {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             body: VectorSendBody::read(buf)?,
+            predecessor: VectorRoot::read(buf)?,
             payer_signature: P::Signature::read(buf)?,
             operator_signature: P::Signature::read(buf)?,
         })
@@ -479,8 +530,9 @@ impl<P: PublicKey, D: Digest> Read for EntryReceipt<P, D> {
 
 /// Verifies the payer signatures of a close's unique terminal authorizations in one batch.
 ///
-/// Callers must validate ack structure separately and treat a `false` return as one or more
-/// invalid signatures without attribution.
+/// Each authorization carries the predecessor read from the preceding admitted close, so a body
+/// signed against any other predecessor fails. Callers must validate ack structure separately
+/// and treat a `false` return as one or more invalid signatures without attribution.
 #[cfg(feature = "std")]
 pub(crate) fn verify_ack_signatures<'a, P, D, B, R, I>(
     authorizations: I,
@@ -501,7 +553,7 @@ where
 
     let mut batch = B::new(authorizations.len());
     let messages = strategy.map_collect_vec(authorizations.iter().copied(), |authorization| {
-        authorization.body.encode()
+        authorization.message()
     });
     let mut queued = true;
     for (authorization, message) in authorizations.into_iter().zip(messages) {
@@ -580,6 +632,7 @@ mod arbitrary_impls {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
             Ok(Self {
                 body: u.arbitrary()?,
+                predecessor: u.arbitrary()?,
                 payer_signature: u.arbitrary()?,
             })
         }
@@ -594,6 +647,7 @@ mod arbitrary_impls {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
             Ok(Self {
                 body: u.arbitrary()?,
+                predecessor: u.arbitrary()?,
                 payer_signature: u.arbitrary()?,
                 operator_signature: u.arbitrary()?,
             })
@@ -632,30 +686,98 @@ mod tests {
         let context = PaymentContext::new(ShaDigest::EMPTY, 7, operator.public_key());
         let root = commitment::empty_root::<Sha256>(VectorKind::OutEntry);
         let body = VectorSendBody::new(&context, payer.public_key(), 1, 5, root);
-        let encoded = body.encode();
-        let wrong_purpose = payer.sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &encoded);
-        let authorization = SendAuthorization::from_raw_unchecked(body.clone(), wrong_purpose);
+        let message = body.message(&root);
+        let wrong_purpose = payer.sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &message);
+        let authorization =
+            SendAuthorization::from_raw_unchecked(body.clone(), root, wrong_purpose);
         assert_eq!(
             authorization.verify(&context),
             Err(AckError::InvalidPayerSignature)
         );
-        let wrong_purpose = operator.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &encoded);
+        let wrong_purpose = operator.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &message);
         let acknowledgment = VectorAck::from_raw_unchecked(
             body.clone(),
-            payer.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &encoded),
+            root,
+            payer.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &message),
             wrong_purpose,
         );
         assert_eq!(
             acknowledgment.verify(&context),
             Err(AckError::InvalidOperatorSignature)
         );
-        let current = VectorAck::sign_by_authorities(body, &payer, &operator);
+        let current = VectorAck::sign_by_authorities(body, root, &payer, &operator);
         current.verify(&context).unwrap();
         let next = PaymentContext::new(ShaDigest::EMPTY, 8, operator.public_key());
         assert_eq!(current.verify(&next), Err(AckError::WrongContext));
         let reset = VectorSendBody::new(&next, payer.public_key(), 1, 1, root);
-        VectorAck::sign_by_authorities(reset, &payer, &operator)
+        VectorAck::sign_by_authorities(reset, root, &payer, &operator)
             .verify(&next)
             .unwrap();
+    }
+
+    /// Every signature over a send covers the predecessor, so replacing it fails verification
+    /// even though the body is unchanged.
+    #[test]
+    fn changed_predecessor_fails_verification() {
+        let payer = SigningKey::from_seed(1);
+        let operator = SigningKey::from_seed(2);
+        let context = PaymentContext::new(ShaDigest::EMPTY, 7, operator.public_key());
+        let empty = commitment::empty_root::<Sha256>(VectorKind::OutEntry);
+        let other = VectorRoot {
+            digest: Sha256::hash(&[b"predecessor"]),
+        };
+        let body = VectorSendBody::new(&context, payer.public_key(), 1, 5, empty);
+
+        // Both envelopes verify with the predecessor they were signed over.
+        let authorization = SendAuthorization::sign(body.clone(), empty, &payer);
+        authorization.verify(&context).unwrap();
+        assert_eq!(authorization.predecessor(), empty);
+        let acknowledgment = VectorAck::sign_by_authorities(body.clone(), empty, &payer, &operator);
+        acknowledgment.verify(&context).unwrap();
+        assert_eq!(acknowledgment.predecessor(), empty);
+
+        // The same signatures fail once the carried predecessor changes.
+        let changed = SendAuthorization::from_raw_unchecked(
+            body.clone(),
+            other,
+            authorization.payer_signature().clone(),
+        );
+        assert_eq!(
+            changed.verify(&context),
+            Err(AckError::InvalidPayerSignature)
+        );
+        let changed = VectorAck::from_raw_unchecked(
+            body.clone(),
+            other,
+            acknowledgment.payer_signature().clone(),
+            acknowledgment.operator_signature().clone(),
+        );
+        assert_eq!(
+            changed.verify(&context),
+            Err(AckError::InvalidPayerSignature)
+        );
+
+        // A countersignature over another predecessor fails beside a valid payer signature.
+        let changed = VectorAck::from_raw_unchecked(
+            body.clone(),
+            other,
+            payer.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &body.message(&other)),
+            acknowledgment.operator_signature().clone(),
+        );
+        assert_eq!(
+            changed.verify(&context),
+            Err(AckError::InvalidOperatorSignature)
+        );
+
+        // A signature over the body alone authenticates no predecessor.
+        let body_only = SendAuthorization::from_raw_unchecked(
+            body.clone(),
+            empty,
+            payer.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &body.encode()),
+        );
+        assert_eq!(
+            body_only.verify(&context),
+            Err(AckError::InvalidPayerSignature)
+        );
     }
 }

@@ -285,7 +285,6 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
             .map(|index| {
                 let body = WithdrawalBody::new(
                     deployment,
-                    state.state().root().digest,
                     Bytes::from(vec![index as u8]),
                     WithdrawalAction::Amount(NonZeroU64::new(index as u64).unwrap()),
                     50,
@@ -303,9 +302,6 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
             keys[0].0.clone(),
             &deposits,
             &withdrawals,
-            keys.len() as u64 * 100,
-            60,
-            70,
             CloseLimits::protocol_maximum(),
             Sha256::hash(&[b"committee"]),
         )
@@ -314,6 +310,10 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
             &state,
             &deposits,
             &withdrawals,
+            0..0,
+            keys.len() as u64 * 100,
+            60,
+            70,
             Floors {
                 activity: 0,
                 payouts: 0,
@@ -514,9 +514,6 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
             keys[0].0.clone(),
             &deposits,
             &withdrawals,
-            keys.len() as u64 * 100,
-            60,
-            70,
             CloseLimits::protocol_maximum(),
             committee.commitment::<Sha256>(),
         )
@@ -525,6 +522,10 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
             &state,
             &deposits,
             &withdrawals,
+            0..0,
+            keys.len() as u64 * 100,
+            60,
+            70,
             Floors {
                 activity: 0,
                 payouts: 0,
@@ -555,18 +556,20 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
                 6,
                 vector.root::<Sha256, ShaDigest>().unwrap(),
             );
+            let message = body.message(&empty_root());
             terminals.push(Terminal {
                 authorization: SendAuthorization::from_raw_unchecked(
-                    body.clone(),
+                    body,
+                    empty_root(),
                     keys[payer]
                         .1
-                        .sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &body.encode()),
+                        .sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &message),
                 ),
                 vector,
                 operator_signature: sign_message::<crate::bajillion::transition::OperatorVariant>(
                     &operator_private,
                     VECTOR_ACK_AGGREGATE_NAMESPACE,
-                    &body.encode(),
+                    &message,
                 ),
             });
         }
@@ -664,10 +667,11 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
             seq: body.seq(),
             cumulative_debit: body.cumulative_debit(),
             send_root: body.send_root(),
+            predecessor: send.predecessor(),
             payer_signature: send.payer_signature().clone(),
             operator_signature: keys[0]
                 .1
-                .sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &body.encode()),
+                .sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &send.message()),
         };
         let genuine = Challenge::HigherAckDebit {
             ack: Box::new(ack.clone()),

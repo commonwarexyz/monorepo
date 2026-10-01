@@ -13,7 +13,7 @@ use crate::{
             ValueEncoding,
             db::Db,
             operation::{Operation, update},
-            ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut},
+            ordered::{self, find_next_key, find_next_key_ascending, find_prev_key_mut},
         },
         bitmap::Shared,
         chain::{self, Bounds, Commitment},
@@ -31,9 +31,10 @@ use core::{
     cmp::Ordering,
     ops::{
         Bound::{self, Excluded, Included},
-        Range,
+        Range, RangeBounds,
     },
 };
+use futures::{Stream, StreamExt as _, stream};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, hash_map},
@@ -2429,6 +2430,84 @@ where
         }
     }
 
+    /// Streams live (key, value) pairs in ascending key order within `range`.
+    ///
+    /// Reads pending mutations, closest-first live ancestor diffs, then committed state through
+    /// [`Db::stream_range`]. The uncommitted pairs in `range` are collected when the stream is
+    /// created, and committed pairs stream lazily. Like other batch reads, this view is valid only
+    /// while the DB advances along this batch's ancestry and all unapplied ancestors remain alive.
+    pub fn stream_range<'a, E, C, I, const N: usize>(
+        &'a self,
+        range: impl RangeBounds<K> + Send + 'a,
+        db: &'a Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> impl Stream<Item = Result<(K, V::Value), crate::qmdb::Error<F>>> + Send + 'a
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+    {
+        // A nearer source owns both live entries and tombstones, so older sources apply first.
+        let mut overlay = BTreeMap::new();
+        if !ordered::is_empty(&range) {
+            let ancestors: Vec<_> =
+                chain::parent_and_ancestors(self.base.parent(), |parent| parent.ancestors())
+                    .collect();
+            let past = |key: &K| ordered::past_end(range.end_bound(), key);
+            for ancestor in ancestors.iter().rev() {
+                let start = ancestor
+                    .diff
+                    .partition_point(|(key, _)| !range.contains(key) && !past(key));
+                for (key, entry) in ancestor.diff[start..]
+                    .iter()
+                    .take_while(|(key, _)| !past(key))
+                {
+                    overlay.insert(key.clone(), entry.value().cloned());
+                }
+            }
+            for (key, value) in self
+                .mutations
+                .range::<K, _>((range.start_bound(), range.end_bound()))
+            {
+                overlay.insert(key.clone(), value.clone());
+            }
+        }
+
+        // Merge the overlay into the committed stream, which yields its keys in ascending order.
+        let committed = Box::pin(db.stream_range(range).fuse());
+        stream::unfold(
+            (committed, None, overlay.into_iter().peekable()),
+            |(mut committed, mut head, mut overlay)| async move {
+                loop {
+                    if head.is_none() {
+                        match committed.next().await {
+                            Some(Ok(pair)) => head = Some(pair),
+                            // Keep the committed cursor so a later poll retries the read.
+                            Some(Err(err)) => return Some((Err(err), (committed, head, overlay))),
+                            None => {}
+                        }
+                    }
+                    let pair = match (head.take(), overlay.peek()) {
+                        (None, None) => return None,
+                        (Some(pair), Some((key, _))) if pair.0 < *key => pair,
+                        (Some(pair), None) => pair,
+                        (pair, Some(_)) => {
+                            let (key, value) = overlay.next().expect("peeked overlay entry");
+
+                            // The overlay decides its key, so a committed pair at that key is
+                            // dropped.
+                            head = pair.filter(|pair| pair.0 != key);
+                            let Some(value) = value else {
+                                continue;
+                            };
+                            (key, value)
+                        }
+                    };
+                    return Some((Ok(pair), (committed, head, overlay)));
+                }
+            },
+        )
+    }
+
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
@@ -3537,6 +3616,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Metrics as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{sequence::U64, test_rng};
+    use futures::TryStreamExt as _;
     use rand::RngExt as _;
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
@@ -3867,6 +3947,156 @@ mod tests {
                     batch.get_neighbors(&query, &db).await.unwrap(),
                     (before, after)
                 );
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Checks batch range scans against `expected` for every bound kind over colliding keys,
+    /// including inverted and empty ranges.
+    async fn check_ordered_ranges(
+        batch: &NeighborBatch,
+        db: &NeighborDb,
+        expected: &BTreeMap<sha256::Digest, sha256::Digest>,
+    ) {
+        let bounds: Vec<_> = [0, 1, 2, 255]
+            .into_iter()
+            .flat_map(|prefix| [0, 3].map(move |suffix| colliding_digest(prefix, suffix)))
+            .collect();
+        let mut ranges = vec![(Bound::Unbounded, Bound::Unbounded)];
+        for &start in &bounds {
+            ranges.push((Included(start), Bound::Unbounded));
+            ranges.push((Bound::Unbounded, Excluded(start)));
+            for &end in &bounds {
+                ranges.push((Included(start), Excluded(end)));
+                ranges.push((Excluded(start), Included(end)));
+            }
+        }
+        for range in ranges {
+            let scanned: Vec<_> = batch.stream_range(range, db).try_collect().await.unwrap();
+            let wanted: Vec<_> = expected
+                .iter()
+                .filter(|(key, _)| range.contains(*key))
+                .map(|(&key, &value)| (key, value))
+                .collect();
+            assert_eq!(scanned, wanted, "range {range:?}");
+        }
+    }
+
+    /// Batch range scans merge pending writes and live ancestor diffs over committed state, and
+    /// keep the same view while each ancestor applies and drops.
+    #[test]
+    fn ordered_ranges_merge_forks_and_applied_ancestors() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("ordered-ranges-forks", &context);
+            let db = NeighborDb::init(context, config, None).await.unwrap();
+
+            // Committed state holds four colliding keys under each of three prefixes.
+            let keys: Vec<_> = [1, 2, 255]
+                .into_iter()
+                .flat_map(|prefix| [0, 2, 4, 6].map(move |suffix| colliding_digest(prefix, suffix)))
+                .collect();
+            let mut expected: BTreeMap<_, _> = keys.iter().map(|&key| (key, key)).collect();
+            let mut initial = db.new_batch();
+            for (&key, &value) in &expected {
+                initial = initial.write(key, Some(value));
+            }
+            let initial = initial.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+            check_ordered_ranges(&db.new_batch(), &db, &expected).await;
+
+            // An unapplied grandparent deletes, creates, and updates keys.
+            let created = colliding_digest(1, 3);
+            let grandparent = db
+                .new_batch()
+                .write(keys[1], None)
+                .write(created, Some(keys[0]))
+                .write(keys[5], Some(keys[0]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            expected.remove(&keys[1]);
+            expected.insert(created, keys[0]);
+            expected.insert(keys[5], keys[0]);
+
+            // A sibling's pending delete shadows the grandparent's create.
+            let sibling = grandparent.new_batch::<Sha256>().write(created, None);
+            let mut shadowed = expected.clone();
+            shadowed.remove(&created);
+            check_ordered_ranges(&sibling, &db, &shadowed).await;
+            drop(sibling);
+
+            // An unapplied parent recreates the deleted key, deletes the created one, and clears
+            // the second prefix.
+            let mut parent = grandparent
+                .new_batch::<Sha256>()
+                .write(keys[1], Some(keys[2]))
+                .write(created, None);
+            expected.insert(keys[1], keys[2]);
+            expected.remove(&created);
+            for &key in &keys[4..8] {
+                parent = parent.write(key, None);
+                expected.remove(&key);
+            }
+            let parent = parent.merkleize(&db, None).await.unwrap();
+
+            // The child's pending writes clear the first prefix and recreate the created key.
+            let mut child = parent.new_batch::<Sha256>();
+            for &key in &keys[..4] {
+                child = child.write(key, None);
+                expected.remove(&key);
+            }
+            child = child.write(created, Some(keys[7]));
+            expected.insert(created, keys[7]);
+            check_ordered_ranges(&child, &db, &expected).await;
+
+            // Applying and then dropping each ancestor leaves the child's view unchanged.
+            let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+            check_ordered_ranges(&child, &db, &expected).await;
+            drop(grandparent);
+            check_ordered_ranges(&child, &db, &expected).await;
+            let (db, _) = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+            check_ordered_ranges(&child, &db, &expected).await;
+            drop(parent);
+            check_ordered_ranges(&child, &db, &expected).await;
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Batch range scans skip every subset of deleted committed keys across collision buckets.
+    #[test]
+    fn ordered_ranges_skip_deleted_keys_and_collisions() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("ordered-ranges-deletes", &context);
+            let db = NeighborDb::init(context, config, None).await.unwrap();
+
+            // Committed state holds a three-key collision bucket and two singletons.
+            let keys = [
+                colliding_digest(1, 0),
+                colliding_digest(1, 2),
+                colliding_digest(1, 4),
+                colliding_digest(2, 0),
+                colliding_digest(255, 0),
+            ];
+            let mut initial = db.new_batch();
+            for key in keys {
+                initial = initial.write(key, Some(key));
+            }
+            let initial = initial.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+
+            // Each pending batch deletes one subset of the committed keys.
+            for mask in 0..1 << keys.len() {
+                let mut batch = db.new_batch();
+                let mut expected: BTreeMap<_, _> = keys.iter().map(|&key| (key, key)).collect();
+                for (i, key) in keys.into_iter().enumerate() {
+                    if mask & (1 << i) != 0 {
+                        batch = batch.write(key, None);
+                        expected.remove(&key);
+                    }
+                }
+                check_ordered_ranges(&batch, &db, &expected).await;
             }
             db.destroy().await.unwrap();
         });

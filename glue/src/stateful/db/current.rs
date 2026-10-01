@@ -41,8 +41,9 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
+use futures::TryStreamExt as _;
 use std::{
-    ops::{Deref, Range},
+    ops::{Deref, Range, RangeBounds},
     sync::Arc,
 };
 
@@ -173,6 +174,16 @@ where
     ) -> Result<(Option<(K, V::Value)>, Option<(K, V::Value)>), Error<F>> {
         let db = self.db.read().await;
         self.batch.get_neighbors(key, &db).await
+    }
+
+    /// Read the live keys within `range` in ascending order, with their values.
+    /// Reads pending mutations, live ancestors, and applied state.
+    pub async fn get_range(
+        &self,
+        range: impl RangeBounds<K> + Send,
+    ) -> Result<Vec<(K, V::Value)>, Error<F>> {
+        let db = self.db.read().await;
+        self.batch.stream_range(range, &db).try_collect().await
     }
 }
 

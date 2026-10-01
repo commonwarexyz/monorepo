@@ -149,7 +149,6 @@ async fn input(runtime: deterministic::Context, workload: Workload) -> Input {
             .map(|(_, signer)| {
                 SignedWithdrawal::sign(
                     deployment,
-                    state.state().root().digest,
                     Bytes::from_static(b"exit-destination"),
                     WithdrawalAction::Close,
                     99,

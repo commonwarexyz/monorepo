@@ -31,23 +31,29 @@
 //!
 //! Each payer maintains one strictly recipient-sorted [`vector::OutVector`] for an immutable
 //! registered epoch. An entry records the cumulative amount and payment count for that recipient.
-//! A [`payment::SendAuthorization`] signs the payer's epoch-local sequence, cumulative debit, and
-//! vector root. Debit starts at zero for each epoch and equals the terminal vector's total.
-//! Each accepted batch advances debit by a positive amount and preserves every earlier entry's
-//! amount and count. Different payers can advance independently, including payments to the same
-//! recipient.
+//! A [`payment::SendAuthorization`] signs the payer's epoch-local sequence, cumulative debit,
+//! vector root, and predecessor. Debit starts at zero for each epoch and equals the terminal
+//! vector's total. Each accepted batch advances debit by a positive amount and preserves every
+//! earlier entry's amount and count. Different payers can advance independently, including
+//! payments to the same recipient.
 //!
-//! The operator countersigns the exact body in two distinct roles: the private receipt uses
-//! [`payment::VectorAck`], and a separate aggregable acceptance signature authenticates the
-//! terminal bodies in the close. The committee certificate signs the close commitment. These
-//! signatures bind different messages and use separate domains.
+//! The operator countersigns the exact payer-signed message in two distinct roles: the private
+//! receipt uses [`payment::VectorAck`], and a separate aggregable acceptance signature
+//! authenticates the terminal messages in the close. The committee certificate signs the close
+//! commitment. These signatures use separate domains.
 //!
 //! A wallet keeps at most one unacknowledged batch for an account. It stages the exact signed
 //! request, retries those bytes after response loss, verifies the acknowledgment and entry
 //! openings, and durably saves them before signing its next endpoint. A zero spendable balance
-//! does not reset the epoch's accepted sequence, debit, vector, or retry state. Moving to another
-//! epoch does not resolve an ambiguous payment: the wallet must authenticate the old outcome
-//! before authorizing a replacement.
+//! does not reset the epoch's accepted sequence, debit, vector, or retry state.
+//!
+//! Every body also signs the root of the payer's terminal vector in the preceding epoch.
+//! Validators check an epoch only after its predecessor is admitted, so a close carries a body
+//! only when the preceding close ended where the payer said. A wallet may re-sign an ambiguous
+//! payment in the next epoch against a root that excludes it, and at most one copy can settle.
+//! The binding reaches back one epoch. A wallet signs a payment again only after every earlier
+//! epoch in which it signed that payment, other than the immediately preceding one, is decided:
+//! admitted, or dead because its own preceding epoch was admitted at another root.
 //!
 //! A [`payment::EntryReceipt`] combines the dual-signed acknowledgment with one opening under
 //! the payer's vector root. The recipient obtains it before relying on the payment. Any holder
@@ -91,8 +97,9 @@
 //! a certificate with at least the minimum quorum and derives successor liability from its
 //! registered deposits and certified outflow. The operator identifies its proposal without
 //! constructing the native trees.
-//! Registration captures log floors from one finalized snapshot; later finalizations cannot
-//! change the inputs used by signers processing that same proposal.
+//! Registration captures log floors from one finalized snapshot, and they stay fixed while the
+//! epoch waits in the queue. Later finalizations cannot change the inputs used by signers
+//! processing that same proposal.
 //!
 //! `transition::prepare_dealing` encodes accepted activity without reading account state.
 //! `admission::seal` decodes and validates the complete dealing against the exact predecessor and
@@ -114,11 +121,38 @@
 //!
 //! # Registration and settlement
 //!
-//! One registration fixes the deployment, operator, epoch, deposits, signed withdrawals, opening
-//! liability, deadlines, limits, and committee. The payment anchor and the separately bound exact
-//! predecessor root must match the registered close context before an acknowledgment is released.
-//! An empty registration slot has no heartbeat. Once registered, its inclusive admission deadline
-//! is a one-shot obligation; the context cannot be rebased after it expires.
+//! One registration fixes the deployment, operator, epoch, deposits, signed withdrawals, limits,
+//! and committee. The payment anchor commits nothing about the predecessor close or timing, so an
+//! epoch can register, and its payments can be acknowledged, while its predecessor's close is
+//! still built, certified, and admitted. The embedding must not release an acknowledgment before
+//! settlement has registered the exact anchor.
+//!
+//! Registered epochs wait in FIFO order. Registration requires only that the previous epoch is
+//! registered, and neither registration nor admission can skip ancestry. The earliest registered
+//! epoch is the admission frontier. An epoch becomes the frontier at its registration when no
+//! earlier epoch awaits admission, and otherwise at its predecessor's admission. Settlement then
+//! binds it to the exact state root, log heads, account rows, and liability of its own admitted
+//! head and derives both deadlines from the deployment policy. The operator states none of these values. Only the
+//! frontier has deadlines, so only the frontier can expire. Its inclusive admission deadline is a
+//! one-shot obligation, and its context cannot be rebased after it expires. An empty queue has no
+//! heartbeat.
+//!
+//! Deposits and chain-queued withdrawals enter one ordered inbox, and each receives the next inbox
+//! index when settlement records it. No epoch is assigned then. A registration names the exclusive
+//! end of the prefix it pulls, starting at the first unpulled index, and commits exactly the
+//! deposits recorded there. Intake recorded later, including earlier in the same block, cannot
+//! change it. A registered boundary therefore never changes, and admitting an epoch removes
+//! exactly its own deposits. A deposit's inclusion deadline applies until a registration pulls it.
+//! Deposits share one timeout, so the oldest unpulled deposit expires first. Afterward the deposit
+//! follows its epoch: that epoch's admission carries it into the admitted close, and a hard fault
+//! before that admission makes it refundable. A registration must carry every uncarried
+//! chain-queued withdrawal in its prefix verbatim. It may carry a request recorded past its prefix
+//! early, or supersede that request with a fresh extra signed for the same account. No later
+//! registration can carry a carried or superseded request.
+//!
+//! The embedding stores each deposit under `(deployment, index)` and supplies the per-account
+//! aggregate of the pulled prefix at registration. Settlement authenticates that aggregate only
+//! against the registered deposit root, so the embedding must read it from its own records.
 //!
 //! The acknowledged set freezes before dealing. A retry under that registration redistributes the
 //! same corpus and resubmits the same certified header. A genuine certificate may be admitted by
@@ -148,10 +182,9 @@
 //!       advance finalized state and reserve withdrawals
 //! ```
 //!
-//! A successor epoch can register against the admitted queue tail while earlier closes remain
-//! challengeable. Registration and admission cannot skip ancestry. Finalization consumes only the
-//! FIFO front and requires time strictly later than its challenge deadline. Certification alone
-//! never changes custody or finalizes payments.
+//! Admitted closes remain challengeable while later epochs register and admit. Finalization
+//! consumes only the FIFO front and requires time strictly later than its challenge deadline.
+//! Certification alone never changes custody or finalizes payments.
 //!
 //! A receipt challenge proves an understated terminal debit, an understated recipient amount or
 //! count, or conflicting operator acknowledgments. An activity-absent payer has public epoch debit
@@ -162,6 +195,8 @@
 //! A proven challenge marks its target challenged and invalidates its pending descendants. A
 //! missed admission, deposit, or withdrawal deadline also permanently faults the deployment.
 //! New work stops, but an earlier clean pending prefix can still be challenged or finalized.
+//! A fault drops the frontier and every queued registration. Their deposits and chain-queued
+//! withdrawals stay with their owners.
 //! The first fault reason and admission fence remain immutable; a later successful challenge can
 //! shorten the surviving prefix. Registration wins a tied fault instant over intake, and a tied
 //! withdrawal wins over a deposit. All monetary obligations remain recoverable.
@@ -179,10 +214,15 @@
 //! equation and signed authorizations; `Withdrawal(0)` remains distinct from no withdrawal action.
 //!
 //! A censored withdrawal can be queued onchain against one finalized balance opening, including
-//! during an active epoch. It leaves that epoch's registered boundary unchanged and must appear
-//! in the next registration. Fresh operator-carried requests instead prove their balance against
-//! the registered predecessor and boundary deposits. Intervening payments can change either
-//! request's final release; recovery always uses the surviving finalized balance.
+//! while epochs are registered. It leaves every registered boundary unchanged and must appear in
+//! the registration that pulls its inbox index. Fresh operator-carried requests carry no balance
+//! proof. Every authorization enters settlement only while its deadline lies within the notice
+//! window of the accepting block, and its replay id stays consumed until the deadline. The
+//! carrying epoch's tail resolves the release: the requested amount when the tail covers it, and
+//! zero otherwise. Intervening payments can change either request's final release. A fresh request
+//! supersedes a different request its account queued after the registration's pull ended, since
+//! the signer authorized both, so intake that races a published boundary cannot fail its
+//! registration. Recovery always uses the surviving finalized balance.
 //!
 //! Clean FIFO finalization updates one approved cumulative payout root/count and marks its trailing
 //! native Commit location as consumed. The external ledger stores disjoint claimed
@@ -213,8 +253,10 @@
 //! root and liability. Each live account proves its positive balance at that root and is consumed
 //! once by account identity. Recovery routes a covered Amount or full Close to its signed
 //! destination and returns any residual to the account. Unadmitted deposits are refunded separately
-//! by account without requiring an operator or state proof. A never-admitted or invalidated close
-//! never debits this frozen state or creates a withdrawal reserve.
+//! by account without requiring an operator or state proof, and one refund returns every
+//! unadmitted deposit of the account, pulled or not. A never-admitted or invalidated close never
+//! debits this
+//! frozen state or creates a withdrawal reserve.
 //!
 //! Active custody, finalized claim reserves, and pending-deposit refunds are disjoint accounting
 //! buckets. Every returned asset transfer must be persisted atomically and idempotently with its

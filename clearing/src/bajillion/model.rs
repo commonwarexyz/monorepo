@@ -4,6 +4,8 @@ pub(crate) mod certification;
 pub(crate) mod challenge;
 #[path = "../../stateright/claims.rs"]
 pub(crate) mod claims;
+#[path = "../../stateright/lineage.rs"]
+mod lineage;
 #[path = "../../stateright/scenarios.rs"]
 mod scenarios;
 #[path = "../../stateright/settlement.rs"]

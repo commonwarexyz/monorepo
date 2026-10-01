@@ -36,9 +36,6 @@ fn empty_activity_range_excludes_previous_epoch_and_commit_positions() {
             fixture.operator.public_key(),
             &fixture.deposits,
             &fixture.withdrawals,
-            successor_liability,
-            100,
-            101,
             CloseLimits::protocol_maximum(),
             *fixture.context.committee(),
         )
@@ -47,6 +44,10 @@ fn empty_activity_range_excludes_previous_epoch_and_commit_positions() {
             &replica,
             &fixture.deposits,
             &fixture.withdrawals,
+            first_range.start..first_range.end,
+            successor_liability,
+            100,
+            101,
             Floors {
                 activity: 0,
                 payouts: 0,
@@ -110,8 +111,9 @@ fn proposal_identity_distinguishes_equal_balance_results_before_tree_derivation(
             body.send_root(),
         );
         terminals[0].authorization =
-            SendAuthorization::sign(changed.clone(), &fixture.accounts[0].1);
-        terminals[0].operator_signature = bls_ack(&fixture.operator_bls_private, &changed);
+            SendAuthorization::sign(changed, empty_root(), &fixture.accounts[0].1);
+        terminals[0].operator_signature =
+            bls_ack(&fixture.operator_bls_private, &terminals[0].authorization);
         let alternative = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &fixture.state,
             &fixture.context,
@@ -153,6 +155,7 @@ fn accepted_replay_rejects_changed_original_records() {
     deterministic::Runner::default().start(|runtime| async move {
         let fixture = fixture(runtime.child("source"), 1, 1, 1, 1).await;
         let mut first = Accepted::prepared(&fixture.prepared);
+        let first_rows = rows(&fixture.context, fixture.prepared.close());
         let successor_liability =
             fixture.context.predecessor_liability() - fixture.prepared.close().withdrawal_total;
         let (state, _) = Box::pin(fixture.prepared.apply::<_, Sha256>(fixture.state))
@@ -164,9 +167,6 @@ fn accepted_replay_rejects_changed_original_records() {
             fixture.operator.public_key(),
             &fixture.deposits,
             &fixture.withdrawals,
-            successor_liability,
-            100,
-            101,
             CloseLimits::protocol_maximum(),
             *fixture.context.committee(),
         )
@@ -175,6 +175,10 @@ fn accepted_replay_rejects_changed_original_records() {
             &state,
             &fixture.deposits,
             &fixture.withdrawals,
+            first_rows,
+            successor_liability,
+            100,
+            101,
             Floors {
                 activity: 0,
                 payouts: 0,

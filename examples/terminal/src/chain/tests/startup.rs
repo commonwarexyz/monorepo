@@ -1,6 +1,5 @@
 use super::{fixture::ReadFixture, *};
-use crate::service::{registered_operator, start_observation};
-use commonware_actor::mailbox::{self, Receiver as MailboxReceiver};
+use crate::service::{registered_operator, synchronize};
 use commonware_p2p::utils::mocks::{InertSender, inert_channel};
 use std::net::SocketAddr;
 
@@ -36,8 +35,7 @@ async fn follower(
     context: &deterministic::Context,
     source: &ReadFixture,
     deployment: Digest,
-) -> (ReadFixture, Backend, MailboxReceiver<node::Observed>) {
-    let (sender, receiver) = mailbox::new(context.child("observations"), NZUsize!(10));
+) -> (ReadFixture, Backend) {
     let follower_context = context.child("follower");
     let fixture = ReadFixture::configured(
         &follower_context,
@@ -45,7 +43,6 @@ async fn follower(
         SocketAddr::from(([127, 0, 0, 1], 19_875)),
         source.identity.clone(),
         source.scheme.clone(),
-        Some(node::Observer::new(deployment, sender)),
     )
     .await;
     let (sender, _) = inert_channel([source.parent.context.leader.clone()]);
@@ -56,7 +53,7 @@ async fn follower(
         sender,
         source.identity.holders().unwrap(),
     );
-    (fixture, backend, receiver)
+    (fixture, backend)
 }
 
 async fn ready_operator(
@@ -64,8 +61,6 @@ async fn ready_operator(
     source: &ReadFixture,
     backend: &mut Backend,
     entry: RegistryEntry,
-    held: Option<node::Observed>,
-    observations: MailboxReceiver<node::Observed>,
 ) -> Arc<Mutex<Operator>> {
     assert_eq!(
         entry,
@@ -101,18 +96,9 @@ async fn ready_operator(
         )
         .unwrap(),
     ));
-    if let Some(held) = held {
-        observe(context, backend, &operator, held).await.unwrap();
-    }
-    start_observation(
-        context,
-        backend,
-        operator.clone(),
-        observations,
-        source.identity.timing(),
-    )
-    .await
-    .expect("startup reaches the production observation and fresh-state gate");
+    synchronize(context, backend, &operator, source.identity.timing())
+        .await
+        .expect("startup reaches the production observation and fresh-state gate");
     operator
 }
 
@@ -160,15 +146,10 @@ fn dynamic_startup_skips_rejected_preregistration_deposit() {
             Some(request.entry(&native).unwrap())
         );
 
-        let (mut fixture, mut backend, mut observations) =
-            follower(&context, &source, deployment).await;
+        let (mut fixture, mut backend) = follower(&context, &source, deployment).await;
         fixture.publish(first.clone()).await;
         fixture.publish(registered.clone()).await;
         fixture.wait_applied(&context, &first).await;
-        assert_eq!(
-            fixture.marshal.get_processed().await.map(Processed::height),
-            Some(Height::zero())
-        );
         assert_eq!(
             fixture.marshal.get_block(registered.height).await,
             Some(Arc::new(registered.clone()))
@@ -180,21 +161,9 @@ fn dynamic_startup_skips_rejected_preregistration_deposit() {
                 .await
                 .is_some()
         );
-        assert_eq!(
-            registry_entry(&fixture.db, &native, &deployment)
-                .await
-                .unwrap(),
-            None
-        );
 
-        let result = registered_operator(
-            &context,
-            &mut backend,
-            native.chain_id(),
-            deployment,
-            &mut observations,
-        )
-        .await;
+        let result =
+            registered_operator(&context, &mut backend, native.chain_id(), deployment).await;
         if let Err(error) = &result {
             eprintln!(
                 "startup error={error:#}; applied={:?}; processed={:?}; registration_available={}",
@@ -203,12 +172,12 @@ fn dynamic_startup_skips_rejected_preregistration_deposit() {
                 fixture.marshal.get_block(registered.height).await.is_some()
             );
         }
-        let (entry, held) =
+        let entry =
             result.expect("rejected historical intake must not block its later registration");
         fixture.wait_applied(&context, &registered).await;
-        let operator =
-            ready_operator(&context, &source, &mut backend, entry, held, observations).await;
+        let operator = ready_operator(&context, &source, &mut backend, entry).await;
         assert!(operator.lock().snapshot().unwrap().accounts.is_empty());
+        assert_eq!(operator.lock().observed().unwrap(), 0);
         assert_eq!(
             read(&fixture.db, &deposit_key(&deployment, &rejected.event.id)).await,
             None
@@ -240,22 +209,14 @@ fn dynamic_startup_without_registration_releases_rejected_history_and_stops() {
         let first = source
             .direct(&context, vec![SettlementTx::Deposit(rejected.clone())])
             .await;
-        let (mut fixture, mut backend, mut observations) =
-            follower(&context, &source, deployment).await;
+        let (mut fixture, mut backend) = follower(&context, &source, deployment).await;
         fixture.publish(first.clone()).await;
         fixture.wait_applied(&context, &first).await;
-        let result = registered_operator(
-            &context,
-            &mut backend,
-            native.chain_id(),
-            deployment,
-            &mut observations,
-        )
-        .await;
+        let result =
+            registered_operator(&context, &mut backend, native.chain_id(), deployment).await;
         assert!(
             result
-                .err()
-                .expect("unknown deployment must remain bounded")
+                .expect_err("unknown deployment must remain bounded")
                 .to_string()
                 .contains("operator registration did not appear")
         );
@@ -276,8 +237,10 @@ fn dynamic_startup_without_registration_releases_rejected_history_and_stops() {
     });
 }
 
+/// A starting operator observes the certified inbox and credits an applied
+/// deposit before it serves intake. Nothing waits on block delivery.
 #[test]
-fn dynamic_startup_stages_applied_deposit_before_acknowledging() {
+fn dynamic_startup_takes_applied_deposit_before_serving() {
     deterministic::Runner::timed(Duration::from_secs(20)).start(|context| async move {
         let source_context = context.child("source");
         let mut source = ReadFixture::new(&source_context).await;
@@ -291,39 +254,15 @@ fn dynamic_startup_stages_applied_deposit_before_acknowledging() {
         let deposited = source
             .direct(&context, vec![SettlementTx::Deposit(applied.clone())])
             .await;
-        let (mut fixture, mut backend, mut observations) =
-            follower(&context, &source, deployment).await;
+        let (mut fixture, mut backend) = follower(&context, &source, deployment).await;
         fixture.publish(registered.clone()).await;
         fixture.publish(deposited.clone()).await;
         fixture.wait_applied(&context, &deposited).await;
-        assert_eq!(
-            fixture.marshal.get_processed().await.map(Processed::height),
-            Some(registered.height)
-        );
-        let (entry, held) = registered_operator(
-            &context,
-            &mut backend,
-            native.chain_id(),
-            deployment,
-            &mut observations,
-        )
-        .await
-        .unwrap();
-        assert!(
-            held.is_some(),
-            "startup retains the applied deposit for durable staging"
-        );
-        assert_eq!(
-            fixture.marshal.get_processed().await.map(Processed::height),
-            Some(registered.height)
-        );
-        let operator =
-            ready_operator(&context, &source, &mut backend, entry, held, observations).await;
-        assert_eq!(operator.lock().snapshot().unwrap().accounts[0].balance, 7);
-        while fixture.marshal.get_processed().await.map(Processed::height) != Some(deposited.height)
-        {
-            context.sleep(Duration::from_millis(1)).await;
-        }
+        let entry = registered_operator(&context, &mut backend, native.chain_id(), deployment)
+            .await
+            .unwrap();
+        let operator = ready_operator(&context, &source, &mut backend, entry).await;
+        assert_eq!(operator.lock().observed().unwrap(), 1);
         assert_eq!(operator.lock().snapshot().unwrap().accounts[0].balance, 7);
         assert_eq!(backend.status(&context).await.unwrap().custody, 7);
     });

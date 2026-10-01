@@ -136,35 +136,197 @@ then claim it. The chain pays each certified output once. An account close
 sweeps the balance at the end of its epoch. Later payments can create a balance
 again.
 
+A signed withdrawal can enter settlement only while its deadline lies within the
+notice window. When that window closes before a registration carries it or the
+chain queues it, the wallet discards it. Payments resume, and a later withdrawal
+signs a new request.
+
 ### Closes advance while blocks pass
 
 A close records the net effects of an epoch's payments. Validators certify it,
-then the chain **admits** it for settlement. Payments continue in the next epoch
-while earlier closes await finality:
+then the chain **admits** it for settlement. The operator registers the next epoch
+while continuing to accept payments in the current one. Once registration is
+confirmed onchain, it switches payments and builds the previous epoch's close:
 
 ```text
-  epoch e:    register -- payments -- cut -- certify -- admit ... finalize
-                                                        |
-  epoch e+1:                                            register -- ...
+  epoch e:    register -- payments ------------ end -- build -- certify -- admit ... finalize
+                                                |
+  epoch e+1:              register onchain -----+-- payments -- end -- ...
 
   blocks:     [H] ---> [H+1] ---> [H+2] ---> ... (including empty blocks)
 ```
 
-With the generated defaults, the operator schedules a cut four blocks after
-registration, or sooner when the epoch fills. The wallet can request an earlier cut.
-Validator panes show finalized block heights, hashes, and transaction counts.
-Empty blocks advance deadlines too.
+With the generated defaults, the operator starts registering the next epoch four
+blocks after the current epoch's registration, or sooner when the epoch fills.
+The wallet can request an earlier transition. Transitions do not wait for
+earlier closes, so closes can queue. Empty registered epochs follow the same
+schedule. Every epoch registration pays the epoch fee, which scales with the
+deployment's dealing reservation. The operator closes an epoch only after its
+successor registers, so an operator that cannot pay its successor's epoch fee
+never closes the registered live epoch, and the deployment hard-faults once that
+epoch's admission deadline passes. Deposits wait in the settlement chain's
+inbox, and a registration must pull each one within 400 blocks. A registration
+pulls only intake recorded before its block. From then on a deposit follows its
+epoch to admission, or to a refund if the deployment faults first, however long
+the closes queued ahead of it take. Validator panes show finalized block
+heights, hashes, and transaction counts. Empty blocks advance deadlines too.
 
-The generated defaults allow 300 blocks for admission and one further block for
-challenges. These deadlines are fixed at registration: a close registered at
-height `H` cannot finalize before `H + 302`, even if admitted early. Earlier
-closes must finalize first.
+Each payment in epoch `e+1` also signs the root where the payer's vector ended
+in `e`, and validators reject a close that carries a payment bound to another
+root. An unaccepted payment from `e` that arrives after the epoch ends is
+rejected as stale with the payer's final state in `e` and the root `e+1`
+requires. The operator keeps that state until `e+1` finalizes. The wallet then
+signs the remaining payments again in `e+1` against that root and keeps the
+originals as superseded copies until an admitted close decides them. A request
+that gets no response is resent unchanged, never treated as excluded. If the
+operator acknowledged a payment that no close can carry, the wallet keeps that
+receipt and challenges the admitted close that omits it until that close
+finalizes.
+
+The generated defaults allow 300 blocks for admission and 300 further blocks for
+challenges. An epoch receives these deadlines once every earlier epoch is
+admitted, either at its registration or at its predecessor's admission. A close
+whose deadlines start at height `H` cannot finalize before `H + 601`, even if
+admitted early. Earlier closes must finalize first.
+
+## Getting your money out
+
+The settlement chain holds every obligation and its deadline, so funds leave
+without the operator. [The chain module](src/chain/mod.rs) describes the
+lifecycle, and [the transaction table](src/chain/tx.rs) lists each
+transaction's checks.
+
+A registration **pulls** deposits and queued withdrawals from the chain's inbox
+in recording order and **carries** the requests it includes for its epoch's
+close. That close must credit or carry everything pulled. A missed deadline or a
+proven challenge **hard-faults** the deployment, and the settlement panel shows
+**HARD FAULT**. Each account then recovers its balance at the **frozen root**,
+which is the state after the last close that finalizes. The first accepted `h`
+from any account starts **terminal settlement**.
+
+`w` signs an **Amount** request for the draft amount, and `f` signs a **Close**
+request for your whole balance. A lower-case **close** is an epoch's certified
+result. An **opening** proves a balance at a state root. **Onchain** is your
+native account.
+
+Keys: `R` retry saved payment, `p` send this payment, `w` withdraw, `f` Close
+account, `x` escalate, `c` claim withdrawal, `h` recover state, `r` refund
+deposit, `d` deposit, and `t` fund operator. `x`, `h`, `r`, and `c` pay no fee,
+so they work without native units. They can take up to a minute to report, and
+the wallet does not redraw meanwhile.
+
+The settlement panel's **Height** counts blocks, which have no fixed pace, and
+**finalized** shows the latest finalized epoch. In the operator panel,
+**FENCED** means the operator reports a fault and **UNAVAILABLE** means it does
+not answer. If either persists, follow these steps.
+
+### If your operator stops serving you
+
+1. Whenever the settlement panel shows **HARD FAULT**, follow
+   [After a hard fault](#after-a-hard-fault).
+2. If the payment draft shows **Saved payment awaiting confirmation**, press
+   `R`. If it logs "Payment still unresolved", go on to step 3.
+3. Press `f`, then `x`, even if the operator accepted the request. Whenever
+   `x` is rejected, press `f` again, then `x`.
+4. Each time **finalized** advances, press `c` until it logs "withdrawal
+   claimed".
+
+### Every failure and its exit
+
+| The operator | On the chain | You press | You get |
+| --- | --- | --- | --- |
+| Refuses or ignores your payment, or sends a report the wallet cannot use | Nothing lands. Nothing faults while closes continue. | `R`. On "Payment still unresolved", `f`, then `x`. | Your balance at the end of the carrying epoch, less any pending payment a close carried by then. |
+| Carries your payment in epoch `e` and withholds the receipt | The close of `e` settles it. | `R` each time **finalized** advances. If still pending, as above. | The payment settles once. The rest exits as above. |
+| Ignores your withdrawal, or accepts it and never carries it | `x` queues it. The registration that pulls it, or an earlier one, must carry it. The deployment faults at the signed deadline unless its close has finalized. | `x` right after `w` or `f`. Then `c`. | See Amount and Close below. |
+| Never pulls your deposit | Fault 400 blocks after the deposit. | [Hard-fault steps](#after-a-hard-fault). | `r` returns deposits no admitted close carried. `h` pays your operator balance. |
+| Stops closing, crashes, or disappears | Fault at most 301 blocks after its last registration or admission. With no epoch awaiting admission, nothing faults until a deposit or queued withdrawal expires. Admitted closes still finalize. | [Hard-fault steps](#after-a-hard-fault). If the settlement panel still shows ONLINE 301 blocks after the operator stopped, nothing faults on its own. `d` forces a fault 400 blocks later, or `f`, then `x`, 1,301 blocks after signing. | `h`, `r`, and `c` pay out. Payments in epochs that never finalize stay with the payers. |
+| Cannot pay the epoch fee | The registration fails at no charge, and the epoch stalls as above. | `t` sends the draft amount from Onchain to the operator's native account for good. It helps only while the operator runs and lacks one epoch fee, which the wallet does not show. Otherwise as above. | As above. |
+| Admits a close that omits or understates your payment | Your wallet challenges with its receipts by the challenge deadline. A proven challenge invalidates that close and every later admitted close, and faults. | Keep the wallet running through the challenge deadline. It challenges on its own and logs the conviction. A recipient's wallet can stop after "epoch N reconciled" for the receipt's epoch. | `h` pays your balance at the last close before the challenged one. The payer keeps the payment. A missed challenge finalizes the close, a recipient's wallet logs an ALARM, and the credit is lost. |
+| Carries your withdrawal in a close that fails | A dropped registration returns a request you queued with `x` to the inbox and discards one carried without it. An invalidated close keeps its withdrawals for terminal settlement. | `h`, and `c` if the close finalized. | Your frozen balance through `h`, or the payout through `c` and the rest through `h`. |
+| Carries your deposit in a registration a fault drops, or in a close a challenge invalidates | The deposit stays refundable. | `r` after the fault if dropped, or once terminal settlement starts if invalidated. | The deposit, to Onchain. |
+| Withholds or forges proofs, openings, or receipts | Nothing. | Nothing. The wallet asks the validators for any opening or proof the operator withholds or forges. | Every exit completes without operator proofs. A recipient missing incoming receipts cannot challenge an omission and keeps the credit that finalized closes carry. |
+| Is gone after your payout finalized | The payout never expires. | `c` promptly, because proofs can lapse. | The payout, to Onchain. |
+
+**Payments.** `w` refuses while a payment is pending, and `f` still signs. A
+payment that stays undecided blocks `p` on this wallet for good. `R` can
+conclude a payment from the chain. An admitted close that leaves the payment
+out resolves it at admission. A close that carries it without your receipt
+resolves it only after that close finalizes and before two more epochs
+finalize. That window can last only a few blocks, and the wallet never checks
+on its own.
+
+**Escalation.** `x` needs a finalized balance that covers an Amount or is
+positive for a Close. It changes nothing and logs "withdrawal escalation
+rejected" after about a minute if a registration already carries the request
+or the 100-block escalation window has closed. Then repeat the same request
+(`f`, or `w` with the same amount), then `x`. The wallet offers the same request while it stands. If
+the window closes before `x` or a registration enters it, the wallet discards
+it without a log line, and the next `f` or `w` signs a new one.
+
+**Amount and Close.** A Close pays your balance at the end of the carrying
+epoch. An Amount pays in full if that balance covers it and nothing otherwise,
+and your operator balance keeps the rest. An Amount that pays nothing still
+blocks `f` until its deadline.
+
+### After a hard fault
+
+Start once the settlement panel shows **HARD FAULT**. Anyone may land these
+transactions, each is safe to repeat, and none expires. Only `h`, `r`, and `c`
+move funds out of the deployment, and `w` and `f` refuse with "settlement is
+permanently hard-faulted".
+
+1. `h` pays your balance at the frozen root. While an admitted close that no
+   challenge invalidated awaits finalization, `h` logs "hard-fault recovery
+   rejected: terminal settlement never certifiably began". Press it again
+   until it succeeds, within about 600 blocks of the fault plus one block per
+   pending close. It pays a withdrawal that is queued or in an invalidated
+   close first when the frozen balance covers it, all to Onchain, and logs
+   "hard-fault recovery released X (residual Y)" with Y the rest. A pending
+   payment does not block `h`.
+2. `r` refunds deposits that no admitted close carried. After terminal
+   settlement starts it also refunds those of invalidated closes, so press it
+   again after `h` succeeds. With nothing left, it logs "deposit refund
+   rejected: the refund claim earned no certified release" after about a
+   minute. A repeated `r` in the same phase reports the earlier refund again
+   and pays nothing more.
+3. `c` claims one finalized payout, including one finalized after the fault.
+   After `h` succeeds, press `c` until it logs "claim rejected: no unspent
+   wallet-owned payout is available". The wallet logs the same message while
+   a payout's proof is unavailable, so retry later before treating every
+   payout as claimed.
+
+### Deadlines
+
+Empty blocks count. Settlement accepts a withdrawal only while its deadline
+lies 1,201 to 1,301 blocks ahead, which leaves the 100-block escalation
+window.
+
+| Window | Blocks | At its end |
+| --- | --- | --- |
+| Admission | 300 after deadlines start | The next block faults unless the close was admitted |
+| Challenge | 300 more | The close may finalize 601 blocks after deadlines start |
+| Deposit pull | 400 after the deposit | Fault unless a registration pulled it |
+| Escalation | 100 after signing | Settlement refuses the request |
+| Withdrawal | 1,301 after signing | Fault if the request is queued or admitted and unfinalized. Until then the wallet signs no payment or other withdrawal, unless it discarded the request. |
+
+### What you still depend on
+
+- A live settlement chain that includes your transactions. The operator is a
+  non-signing node and cannot keep your transaction out of a block.
+- One source for each proof: the wallet database, its operator, or any
+  genesis validator.
+- Your wallet running from a close's admission through its challenge deadline,
+  to challenge an omission.
+- Prompt claims. Validators without `--retain-native-history` prune old payout
+  history, so after the operator leaves an old payout needs a genesis
+  validator that kept it. A proof that `c` holds stays valid once the admitted
+  closes finalize after a fault.
 
 ## What each process keeps
 
 | Process | Owned state |
 | --- | --- |
-| Wallet | SQLite payment intents, receipts, one exact active withdrawal authorization, its retirement deadline, and an optional verified payout claim. |
+| Wallet | SQLite payment intents, receipts, superseded copies of re-signed payments, receipts of abandoned payments until their close finalizes, one exact active withdrawal authorization, its retirement deadline, and an optional verified payout claim. |
 | Operator | SQLite live payments and certified close jobs, with an optional balance QMDB and two native log replicas for proofs. |
 | Validator | Certified chain state; per deployment, a Current Ordered MMB balance QMDB, cumulative activity and payout MMRs, and a local compact keyless QMDB for checkpoints and saved votes. |
 
@@ -197,17 +359,25 @@ new vote, alongside deposit refunds and recovery from the frozen balance root.
 Validators prune native history behind the current challenge and recovery boundaries.
 Run a validator with `--retain-native-history` to keep older native operations for
 proof serving through its ordinary query endpoint. Longer retention is a local
-choice; an offline replica does not delay other validators' pruning. Keep wallet
-databases and a replica with the required history available for old claims.
+choice. An offline replica does not delay other validators' pruning. Wallets
+request payout proofs only from their operator and the genesis validators, so
+claim payouts promptly (see [Getting your money out](#getting-your-money-out)).
 Adjacent claimed positions coalesce, so fully settled history and intervening commit markers
 collapse into one range; fragmented claims still require proportional range state. Each finalization
-retires the previous finalized admission and anchor. The chain keeps the latest
-finalized descriptor and the live pending suffix; the fixed admission and challenge
-windows bound that suffix. Proof servers walk retained native rows and payment
-entries for activity proofs, and native payout outputs for claims under the current
-finalized payout head. Public Commit operations carry no metadata. Unavailable
-operations make reads retryable rather than proving absence. Native transaction
-and deposit idempotency records are retained for replay protection.
+retires the admission and anchor two epochs back. The chain keeps the two latest
+finalized descriptors and the live pending suffix, and validators keep the
+activity rows of both finalized closes. A wallet that returns after an epoch's
+successor finalizes can therefore still decide the payments it signed in both
+epochs. The bound is fixed. A wallet away until
+the epoch after that finalizes decides a payment only through its saved
+receipts. Without them the payment stays undecided and blocks the wallet's
+later payments and `w` for good. `f` still signs a Close of the whole balance.
+The fixed admission and challenge windows bound the pending suffix.
+Proof servers walk retained native rows and payment entries for activity proofs,
+and native payout outputs for claims under the current finalized payout head.
+Public Commit operations carry no metadata. Unavailable operations make reads
+retryable rather than proving absence. Native transaction and deposit idempotency
+records are retained for replay protection.
 
 Run `terminal-operator --node-dir <operator-directory> --no-proof-replica` to
 accept payments, propose closes, and accept certificates without constructing any

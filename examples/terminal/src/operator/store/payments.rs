@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) enum SendsVerdict {
     Accepted(Vec<AcceptedBatch>),
-    Stale(Endpoint),
+    Stale(Report),
 }
 
 pub(crate) struct CommittedSends {
@@ -30,7 +30,8 @@ pub(crate) struct CommittedSends {
 struct SequenceInput {
     request: AcceptSendsRequest,
     accepted: Vec<AcceptedBatch>,
-    endpoint: Endpoint,
+    /// The corrective report, absent when every send replays an accepted batch.
+    report: Option<Report>,
 }
 
 struct PreparedSequence {
@@ -43,7 +44,7 @@ struct PreparedSequence {
 }
 
 enum Preparation {
-    Stale(Endpoint),
+    Stale(Report),
     Ready(PreparedSequence),
 }
 
@@ -79,7 +80,7 @@ impl Store {
                 SendsVerdict::Accepted(mut accepted) => {
                     SendVerdict::Accepted(Box::new(accepted.pop().expect("one send")))
                 }
-                SendsVerdict::Stale(endpoint) => SendVerdict::Stale(endpoint),
+                SendsVerdict::Stale(report) => SendVerdict::Stale(report),
             },
         )
     }
@@ -179,8 +180,8 @@ impl Store {
                         committed.verdicts.push(Err(error));
                         continue;
                     }
-                    Ok(Preparation::Stale(endpoint)) => {
-                        committed.verdicts.push(Ok(SendsVerdict::Stale(endpoint)));
+                    Ok(Preparation::Stale(report)) => {
+                        committed.verdicts.push(Ok(SendsVerdict::Stale(report)));
                         continue;
                     }
                     Ok(Preparation::Ready(plan)) => plan,
@@ -337,6 +338,14 @@ fn propagate_storage_error<T>(result: &Result<T>) -> Result<()> {
     Ok(())
 }
 
+/// Reads the replayed prefix and, when some send is fresh, the corrective report for one
+/// payer submission.
+///
+/// The report names the payer's endpoint in the submission's own epoch, which is frozen once
+/// that epoch is cut, and the frozen root every live-epoch body must bind. Any epoch whose
+/// vectors remain is reported, but only a report for the epoch before the live one is usable.
+/// That epoch's vectors stay until the next epoch finalizes. A submission from an epoch whose
+/// vectors are gone has no report and fails, since that epoch's admission decides it.
 fn read_sequence(
     connection: &Connection,
     context: &EpochPaymentContext,
@@ -351,26 +360,29 @@ fn read_sequence(
         };
         accepted.push(batch);
     }
-    let epoch = metadata_epoch(connection)?;
-    if accepted.len() != request.sends.len() {
-        ensure!(epoch == context.epoch(), "payment context is stale");
-        ensure!(
-            metadata_payment_context(connection)?.as_ref() == Some(context),
-            "payment anchor is stale"
-        );
+    if accepted.len() == request.sends.len() {
+        return Ok(SequenceInput {
+            request,
+            accepted,
+            report: None,
+        });
     }
-    let epoch = sql_u64(epoch, "epoch")?;
-    let payer = request.sends[0].authorization.body().payer();
-    let (seq, cumulative_debit) = payer_endpoint(connection, epoch, payer)?;
-    let entries = out_entries_for(connection, epoch, payer)?;
+    let live = metadata_epoch(connection)?;
+    ensure!(live == context.epoch(), "payment context is stale");
+    ensure!(
+        metadata_payment_context(connection)?.as_ref() == Some(context),
+        "payment anchor is stale"
+    );
+    let body = request.sends[0].authorization.body();
+    let report = Report {
+        epoch: body.epoch(),
+        endpoint: endpoint(connection, body.epoch(), body.payer())?,
+        predecessor: frozen_root(connection, live, body.payer())?,
+    };
     Ok(SequenceInput {
         request,
         accepted,
-        endpoint: Endpoint {
-            seq,
-            cumulative_debit,
-            entries,
-        },
+        report: Some(report),
     })
 }
 
@@ -382,16 +394,28 @@ fn prepare_sequence(
     let SequenceInput {
         request,
         mut accepted,
-        endpoint,
+        report,
     } = input;
     let replayed = accepted.len();
+    let Some(report) = report else {
+        return ready(PreparedSequence {
+            request,
+            accepted,
+            replayed,
+            vector: Vec::new(),
+            credits: BTreeMap::new(),
+            total: 0,
+        });
+    };
     let payer = request.sends[0].authorization.body().payer().clone();
-    let mut merged = endpoint.entries.clone();
-    let mut seq = endpoint.seq;
-    let mut debit = endpoint.cumulative_debit;
+    let mut merged = report.endpoint.entries.clone();
+    let mut seq = report.endpoint.seq;
+    let mut debit = report.endpoint.cumulative_debit;
     let mut total = 0_u64;
     let mut credits = BTreeMap::<Key, u64>::new();
     for send in &request.sends[replayed..] {
+        // A body of a cut epoch, or one bound to another predecessor than the payer's frozen
+        // root in the preceding epoch, can never be carried by the live epoch's close.
         let body = send.authorization.body();
         if VectorSendBody::new(
             context,
@@ -400,8 +424,9 @@ fn prepare_sequence(
             body.cumulative_debit(),
             body.send_root(),
         ) != *body
+            || send.authorization.predecessor() != report.predecessor
         {
-            return Ok(Preparation::Stale(endpoint));
+            return Ok(Preparation::Stale(report));
         }
         ensure!(
             send.entries
@@ -425,7 +450,7 @@ fn prepare_sequence(
         seq = seq.checked_add(1).context("batch sequence overflow")?;
         debit = checked_sql_add(debit, amount, "payer cumulative debit")?;
         if body.seq() != seq || body.cumulative_debit() != debit {
-            return Ok(Preparation::Stale(endpoint));
+            return Ok(Preparation::Stale(report));
         }
         for entry in &send.entries {
             match merged.binary_search_by(|edge| edge.recipient.cmp(&entry.recipient)) {
@@ -457,13 +482,15 @@ fn prepare_sequence(
             .commitment::<Sha256, Digest>()
             .context("commit merged out vector")?;
         if tree.root() != body.send_root() {
-            return Ok(Preparation::Stale(endpoint));
+            return Ok(Preparation::Stale(report));
         }
-        let operator_signature = protocol
-            .operator()
-            .sign(VECTOR_ACK_SIGNATURE_NAMESPACE, body.encode().as_ref());
+        let operator_signature = protocol.operator().sign(
+            VECTOR_ACK_SIGNATURE_NAMESPACE,
+            send.authorization.message().as_ref(),
+        );
         let ack = Ack::from_raw_unchecked(
             body.clone(),
+            send.authorization.predecessor(),
             send.authorization.payer_signature().clone(),
             operator_signature,
         );
@@ -495,8 +522,20 @@ fn prepare_sequence(
             acceptance: Acceptance { ack, entries },
         });
     }
+    ready(PreparedSequence {
+        request,
+        accepted,
+        replayed,
+        vector: merged,
+        credits,
+        total,
+    })
+}
+
+/// Admits a prepared sequence whose acceptance response fits the RPC body bound.
+fn ready(plan: PreparedSequence) -> Result<Preparation> {
     let response = AcceptSendsResponse::Accepted(
-        accepted
+        plan.accepted
             .iter()
             .cloned()
             .map(AcceptedBatchResponse::from)
@@ -506,19 +545,12 @@ fn prepare_sequence(
         response.encode_size() <= MAX_BODY_SIZE,
         "accepted sends response exceeds the RPC body bound"
     );
-    Ok(Preparation::Ready(PreparedSequence {
-        request,
-        accepted,
-        replayed,
-        vector: merged,
-        credits,
-        total,
-    }))
+    Ok(Preparation::Ready(plan))
 }
 
 fn prepared_verdict(prepared: Result<Preparation>) -> Result<SendsVerdict> {
     Ok(match prepared? {
-        Preparation::Stale(endpoint) => SendsVerdict::Stale(endpoint),
+        Preparation::Stale(report) => SendsVerdict::Stale(report),
         Preparation::Ready(plan) => SendsVerdict::Accepted(plan.accepted),
     })
 }

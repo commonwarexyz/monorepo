@@ -36,7 +36,7 @@ pub(super) async fn serve<L: Listener>(
         context.child("schedule_verifier"),
     )
     .unwrap();
-    let alice = Agent::new(0).unwrap();
+    let mut alice = Agent::new(0).unwrap();
     loop {
         let Ok((_, mut sink, mut stream)) = listener.accept().await else {
             context.sleep(rpc::ACCEPT_RETRY_DELAY).await;
@@ -82,37 +82,47 @@ pub(super) async fn serve<L: Listener>(
                 };
                 if first {
                     assert_eq!(request.request.account(), &alice.account());
-                    let status = verifier.status(&context).await.unwrap();
-                    let opening = operator
-                        .lock()
-                        .payment_head(&alice.account())
-                        .unwrap()
-                        .opening;
+                    let (status, opening) =
+                        alice.validator_head(&context, &mut verifier).await.unwrap();
+                    let opening = opening.unwrap();
                     assert_eq!(opening.account, alice.account());
                     opening.verify::<Sha256>(&status.state_root).unwrap();
                     let finished = matches!(
                         operator.lock().poll_close(0),
                         Ok(Some(CloseEvent::Finished(_)))
                     );
-                    schedule.lock().withdrawal_after_finality = status.last_finalized == Some(0)
+                    schedule.lock().withdrawal_after_finality = status.last_finalized.is_some()
                         && !status.hard_faulted
                         && opening.balance.get() == 120
                         && finished;
                 }
             }
             operator_rpc::OperatorRequest::StartClose(request) => {
-                let expected = schedule
-                    .lock()
-                    .payments
-                    .last()
-                    .map_or(0, |payment| payment.epoch);
-                assert_eq!(
-                    request.expected_epoch, expected,
-                    "close must name accepted work"
-                );
+                let expected = {
+                    let schedule = schedule.lock();
+                    schedule
+                        .payments
+                        .iter()
+                        .map(|payment| payment.epoch)
+                        .chain(schedule.withdrawal.iter().map(|(epoch, _)| *epoch))
+                        .max()
+                };
+                if let Some(expected) = expected {
+                    assert_eq!(
+                        request.expected_epoch, expected,
+                        "close must name accepted work"
+                    );
+                } else {
+                    let status = verifier.status(&context).await.unwrap();
+                    assert!(
+                        status
+                            .last_finalized
+                            .is_some_and(|epoch| epoch >= request.expected_epoch)
+                    );
+                }
                 assert!(
-                    operator.lock().status().unwrap().epoch > expected,
-                    "automatic driver must cut before the client close"
+                    operator.lock().status().unwrap().epoch >= request.expected_epoch,
+                    "the client must not request a future close"
                 );
                 schedule.lock().closes.push(request.expected_epoch);
             }
@@ -143,7 +153,23 @@ pub(super) async fn serve<L: Listener>(
         {
             let ack = operator_rpc::WithdrawalAck::decode(body.clone()).unwrap();
             assert_eq!(ack.digest, operator_rpc::withdrawal_digest(&withdrawal));
-            schedule.lock().withdrawal.push((ack.epoch, withdrawal));
+            assert!(
+                ack.epoch <= operator.lock().status().unwrap().epoch,
+                "withdrawal ACK must not name a future operational epoch"
+            );
+            let mut schedule = schedule.lock();
+            if let Some((epoch, _)) = schedule
+                .withdrawal
+                .iter()
+                .find(|(_, prior)| prior == &withdrawal)
+            {
+                assert_eq!(
+                    *epoch, ack.epoch,
+                    "exact withdrawal retry changed its epoch"
+                );
+            } else {
+                schedule.withdrawal.push((ack.epoch, withdrawal));
+            }
         }
         if payment
             && let rpc::Response::Success { body } = &response
@@ -226,10 +252,6 @@ pub(super) async fn run(
             "next payment must race the preceding close's finality"
         );
         anyhow::ensure!(
-            schedule.withdrawals == 2,
-            "expected exactly two withdrawal intents"
-        );
-        anyhow::ensure!(
             schedule.withdrawal_after_finality,
             "withdrawal preceded finalized balance 120 and local Finished"
         );
@@ -256,38 +278,45 @@ pub(super) async fn run(
         "payments must occupy distinct automatically cut epochs"
     );
     anyhow::ensure!(
-        closes == vec![0, epochs[2], epochs[3]],
+        closes.len() == 3
+            && closes[1] == epochs[2].max(withdrawals[0].0)
+            && closes[2] == epochs[3].max(withdrawals[1].0),
         "close requests must identify each completed work arc: {closes:?}"
     );
     let status = chain.status(&context).await?;
     anyhow::ensure!(
-        status.last_finalized == Some(epochs[3])
+        status
+            .last_finalized
+            .is_some_and(|epoch| epoch >= closes[2])
             && status.custody == 415
             && status.claimable == 0
             && !status.hard_faulted,
         "unexpected final status: {status:?}"
     );
+    let successor = chain
+        .registration(&context)
+        .await?
+        .context("the automatic operator lost its successor registration")?;
     anyhow::ensure!(
-        chain.registration(&context).await?.is_none() && chain.fault(&context).await?.is_none(),
-        "script left registration or fault"
+        successor.epoch > closes[2]
+            && successor.admitted.is_none()
+            && chain.fault(&context).await?.is_none(),
+        "script left an invalid successor or fault"
     );
     for (identity, balance) in [106, 106, 102, 101].into_iter().enumerate() {
-        let wallet = Agent::new(identity)?;
-        let head = operator_rpc::payment_head(
-            &context,
-            operator,
-            operator_rpc::PaymentHeadRequest {
-                account: wallet.account(),
-            },
-        )
-        .await?;
+        let mut wallet = Agent::new(identity)?;
+        let (status, opening) = wallet.validator_head(&context, &mut chain).await?;
+        let opening = opening.context("the finalized wallet account is absent")?;
         anyhow::ensure!(
-            head.opening.account == wallet.account(),
+            opening.account == wallet.account(),
             "opening names another account"
         );
-        head.opening.verify::<Sha256>(&status.state_root)?;
+        opening.verify::<Sha256>(&status.state_root)?;
         anyhow::ensure!(
-            head.opening.balance.get() == balance,
+            status
+                .last_finalized
+                .is_some_and(|epoch| epoch >= closes[2])
+                && opening.balance.get() == balance,
             "incorrect certified balance for identity {identity}"
         );
     }

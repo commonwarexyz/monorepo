@@ -3,6 +3,7 @@ use crate::{protocol, rpc};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
+    commitment::{self, VectorKind},
     logs::PayoutOperation,
     payment::{SendAuthorization, VectorSendBody},
     qmdb::account_key,
@@ -64,7 +65,6 @@ async fn old_payout_frame_from_maximum_native_epoch(context: deterministic::Cont
             .map(|signer| {
                 SignedWithdrawal::sign(
                     protocol.deployment(),
-                    replica.state().root().digest,
                     Bytes::from(vec![0xa5; protocol::MAX_DESTINATION_BYTES]),
                     WithdrawalAction::Amount(NZU64!(1)),
                     100,
@@ -98,9 +98,14 @@ async fn old_payout_frame_from_maximum_native_epoch(context: deterministic::Cont
                 1,
                 vector.root::<Sha256, Digest>().unwrap(),
             );
+            let authorization = SendAuthorization::sign(
+                body,
+                commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+                payer,
+            );
             Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&body),
-                authorization: SendAuthorization::sign(body, payer),
+                operator_signature: protocol.sign_ack_aggregate(&authorization),
+                authorization,
                 vector,
             }
         })
@@ -121,7 +126,7 @@ async fn old_payout_frame_from_maximum_native_epoch(context: deterministic::Cont
         .checked_add(deposit_total)
         .and_then(|total| total.checked_sub(result.withdrawal_total))
         .unwrap();
-    let registration = protocol
+    let mut registration = protocol
         .registration_at(
             1,
             DepositBatch::new(Vec::new()).unwrap(),
@@ -131,6 +136,7 @@ async fn old_payout_frame_from_maximum_native_epoch(context: deterministic::Cont
             14,
         )
         .unwrap();
+    registration.rows = result.rows().unwrap();
     let prepared = protocol.prepare(registration, Vec::new()).unwrap();
     let (_, candidate) = Box::pin(protocol.complete(prepared, &replica, &mut TestRng::new(90_002)))
         .await

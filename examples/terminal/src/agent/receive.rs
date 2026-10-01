@@ -3,7 +3,7 @@
 use super::{
     Agent,
     store::IncomingRecord,
-    wallet::{ReceiptEpoch, invalidated_epoch, receipt_epoch},
+    wallet::{ReceiptEpoch, invalidated_epoch, receipt_epoch, retired},
 };
 use crate::{
     chain::{
@@ -40,7 +40,7 @@ pub(crate) struct ReconcileSummary {
     pub(crate) unenforceable: Vec<u64>,
     /// Epochs that finalized while the operator still withholds the committed-side evidence
     /// needed to verify or convict, reported once per stretch of withholding. The epoch retries
-    /// while its descriptor remains retained; retired historical receipts remain unresolved.
+    /// while its descriptor remains retained, and retired historical receipts remain unresolved.
     pub(crate) withheld: Vec<u64>,
 }
 
@@ -202,8 +202,8 @@ impl Agent {
     /// The operator is a fallback for the live admitted path when every native holder declines.
     /// Missing, unanchored, or unprovable evidence leaves that epoch unresolved without blocking
     /// other epochs. After finalization the challenge window is closed, so withheld evidence
-    /// raises an alarm. Evidence remains retryable while its finalized descriptor is retained;
-    /// once a successor finalizes, the historical receipt remains unresolved.
+    /// raises an alarm. Evidence remains retryable while its finalized descriptor is retained.
+    /// Once the epoch after its successor finalizes, the historical receipt remains unresolved.
     ///
     /// The challenge window sits between admission and finalization. On the first held receipt
     /// that exceeds the anchored committed entry while that window is open, the wallet convicts
@@ -284,10 +284,10 @@ impl Agent {
             return Ok(());
         }
 
-        // Finalizing a successor permanently retires this epoch's admitted descriptor and
-        // anchor. The held receipts remain unresolved, but repeating unavailable evidence reads
-        // cannot change that outcome.
-        if status.last_finalized.is_some_and(|last| last > epoch) {
+        // Finalizing the epoch after its successor permanently retires this epoch's admitted
+        // descriptor and anchor. The held receipts remain unresolved, but repeating unavailable
+        // evidence reads cannot change that outcome.
+        if retired(status, epoch) {
             if self.withheld.insert(epoch) {
                 summary.withheld.push(epoch);
             }

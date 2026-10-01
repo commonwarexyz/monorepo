@@ -1,4 +1,5 @@
 use commonware_clearing::bajillion::{
+    commitment::{self, VectorKind},
     payment::{EntryReceipt, PaymentContext, SendAuthorization, VectorAck, VectorSendBody},
     vector::{OutEntry, OutTipLookup, OutVector},
 };
@@ -45,9 +46,17 @@ fn ack_fixture() -> AckFixture {
         .root::<Sha256, Digest>()
         .expect("vector root is valid");
     let body = VectorSendBody::new(&context, payer.public_key(), 0, ENTRIES as u64, send_root);
-    let ack = VectorAck::sign_by_authorities(body, &payer, &operator);
-    let authorization =
-        SendAuthorization::from_raw_unchecked(ack.body().clone(), ack.payer_signature().clone());
+    let ack = VectorAck::sign_by_authorities(
+        body,
+        commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+        &payer,
+        &operator,
+    );
+    let authorization = SendAuthorization::from_raw_unchecked(
+        ack.body().clone(),
+        ack.predecessor(),
+        ack.payer_signature().clone(),
+    );
     let OutTipLookup::Present {
         cumulative,
         count,

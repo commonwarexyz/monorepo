@@ -1,4 +1,7 @@
 //! Native lifecycle trace execution over the service, SQLite operator, and certified chain.
+//!
+//! Apply observes authenticated private withdrawal staging. External withdrawal RPC
+//! acknowledgments wait until the staged epoch becomes operational.
 
 use super::*;
 use crate::{
@@ -8,7 +11,7 @@ use crate::{
         light::Verified,
         query::{Evidence, EvidenceLookup, EvidenceRequest, EvidenceResponse, ReadRequest},
         state::StatusRecord,
-        tx::QueueWithdrawalRequest,
+        tx::{QueueWithdrawalRequest, RegisterEpochRequest},
     },
     protocol::{Key, SettlementResult, deployment, wallets},
     withdrawal_model::{
@@ -33,11 +36,16 @@ use std::{
 const ADDRESS: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9_702);
 static DATABASE_ID: AtomicU64 = AtomicU64::new(0);
+
+// The challenge window covers interleaved certified reads before explicit finalization.
 const TIMING: Timing = Timing {
     admission_offset: 64,
-    challenge_duration: 1,
+    challenge_duration: 16,
 };
-const REGISTRATION_SPACING: u64 = 16;
+
+// Blocks between the notice windows one phase closes, and between the last of them and the
+// frontier's admission deadline. They cover the submissions a trace interleaves.
+const WINDOW_SPACING: u64 = 10;
 
 struct Database(PathBuf);
 
@@ -135,8 +143,63 @@ impl Chain for GatedChain {
         self.deliver(&request.lookup, verified).await
     }
 
+    async fn inbox<E: Env>(
+        &mut self,
+        ctx: &E,
+        indices: std::ops::Range<u64>,
+    ) -> Result<Vec<crate::chain::state::Intake>> {
+        crate::chain::client::inbox(ctx, self, indices).await
+    }
+
     async fn submit<E: Env>(&mut self, ctx: &E, tx: &SettlementTx) -> Result<Submission> {
         self.client.submit(ctx, tx).await
+    }
+}
+
+/// A client that records whether any chain call failed, so a staging error from a broken read
+/// never replays as a native refusal.
+struct Checked {
+    client: Client,
+    failed: bool,
+}
+
+impl Checked {
+    fn note<T>(&mut self, result: Result<T>) -> Result<T> {
+        self.failed |= result.is_err();
+        result
+    }
+}
+
+impl Chain for Checked {
+    fn deployment(&self) -> Digest {
+        self.client.deployment()
+    }
+    fn holders(&self) -> Result<Vec<SocketAddr>> {
+        self.client.holders()
+    }
+
+    async fn read<E: Env>(&mut self, ctx: &E, request: &ReadRequest) -> Result<Verified> {
+        let result = self.client.read(ctx, request).await;
+        self.note(result)
+    }
+
+    async fn recent<E: Env>(&mut self, ctx: &E, request: &ReadRequest) -> Result<Verified> {
+        let result = self.client.recent(ctx, request).await;
+        self.note(result)
+    }
+
+    async fn inbox<E: Env>(
+        &mut self,
+        ctx: &E,
+        indices: std::ops::Range<u64>,
+    ) -> Result<Vec<crate::chain::state::Intake>> {
+        let result = crate::chain::client::inbox(ctx, self, indices).await;
+        self.note(result)
+    }
+
+    async fn submit<E: Env>(&mut self, ctx: &E, tx: &SettlementTx) -> Result<Submission> {
+        let result = self.client.submit(ctx, tx).await;
+        self.note(result)
     }
 }
 
@@ -151,17 +214,12 @@ struct Native {
     reconciliation: Option<Reconciliation>,
     event: Option<ReadEvent>,
     database: Database,
-    requests: [Option<SavedRequest>; 3],
+    requests: [Option<SignedWithdrawal<Key, Digest>>; 3],
     packets: BTreeMap<PacketId, RegisterEpochRequest>,
     published: [Option<PublishedPacket>; model::EPOCHS],
     closes: Vec<SettlementResult>,
     payments: [Option<operator_rpc::AcceptSendRequest>; 2],
     claim_cache: BTreeMap<OutputId, CachedClaim>,
-}
-
-struct SavedRequest {
-    request: SignedWithdrawal<Key, Digest>,
-    opening: StateOpening<Key, Digest>,
 }
 
 struct PublishedPacket {
@@ -218,18 +276,47 @@ impl Native {
         self.client(context).recent_status(context).await.unwrap()
     }
 
+    /// Signs `id` so that its notice window closes at its slot in the current phase, a fixed
+    /// distance before the admission frontier's deadline.
     async fn sign(
         &mut self,
         context: &deterministic::Context,
-        slot: usize,
-        account: usize,
+        id: RequestId,
         action: WithdrawalAction,
     ) -> Result<()> {
         ensure!(
-            self.requests[slot].is_none(),
+            self.requests[id.index()].is_none(),
             "request slot is already signed"
         );
-        let wallet = wallets().remove(account);
+        let wallet = wallets().remove(id.account());
+        let status = self.status(context).await;
+        let frontier = self
+            .client(context)
+            .registration_at(context, status.next_admission)
+            .await?
+            .context("the signing phase has no admission frontier")?;
+        let (admission, _) = frontier
+            .deadlines
+            .context("the signing frontier has no deadlines")?;
+        let closes = admission - 1 - WINDOW_SPACING * (2 - u64::from(id.slot()));
+        let deadline = closes + minimum_notice()?;
+        self.requests[id.index()] = Some(SignedWithdrawal::sign(
+            deployment(),
+            wallet.public_key().encode(),
+            action,
+            deadline,
+            wallet.signer(),
+        ));
+        Ok(())
+    }
+
+    /// Queues the request with an opening at the current finalized root. An account absent from
+    /// that root has no opening, and its queue is not submitted.
+    async fn queue(&mut self, context: &deterministic::Context, id: RequestId) -> Result<()> {
+        let request = self.requests[id.index()]
+            .clone()
+            .context("request is unsigned")?;
+        let account = request.account().clone();
         let status = self.status(context).await;
         let mut chain = self.client(context);
         let operations = match status.last_finalized {
@@ -257,97 +344,114 @@ impl Native {
         let lookup = EvidenceLookup::State {
             root: status.state_root,
             operations,
-            account: wallet.public_key(),
+            account: account.clone(),
         };
         let evidence = self
             .control
             .evidence(EvidenceRequest::new(deployment(), lookup))
             .await;
         let EvidenceResponse::Served(Evidence::State(lookup)) = evidence else {
-            bail!("signing account has no finalized state proof");
+            bail!("the queued account has no finalized state proof");
         };
-        lookup.resolve::<Sha256>(&status.state_root, &account_key(&wallet.public_key())?)?;
+        lookup.resolve::<Sha256>(&status.state_root, &account_key(&account)?)?;
         let StateLookup::Present(value) = lookup else {
-            bail!("signing account has no finalized membership");
+            return Ok(());
         };
         let opening = StateOpening {
-            account: wallet.public_key(),
+            account,
             balance: value.balance,
             proof: value.proof,
         };
         opening.verify::<Sha256>(&status.state_root)?;
-        let deadline = status.height
-            + crate::protocol::settlement_config(&TIMING)?
-                .maximum_withdrawal_notice
-                .get();
-        let request = SignedWithdrawal::sign(
-            deployment(),
-            status.state_root.digest,
-            wallet.public_key().encode(),
-            action,
-            deadline,
-            wallet.signer(),
-        );
-        self.requests[slot] = Some(SavedRequest { request, opening });
-        Ok(())
-    }
-
-    async fn queue(&mut self, slot: usize) -> Result<()> {
-        let saved = self.requests[slot]
-            .as_ref()
-            .context("request is unsigned")?;
         self.control
             .submit(SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
-                request: saved.request.clone(),
-                opening: saved.opening.clone(),
+                request,
+                opening,
             }))
             .await;
         Ok(())
+    }
+
+    /// Advances to the height at which `id`'s notice window closes, unless an admitted close
+    /// awaits finality or the deployment faulted.
+    async fn expire(&mut self, context: &deterministic::Context, id: RequestId) -> Result<Outcome> {
+        let Some(request) = &self.requests[id.index()] else {
+            return Ok(Outcome::Rejected);
+        };
+        let closes = request.body().deadline() - minimum_notice()?;
+        let status = self.status(context).await;
+        let next = status.last_finalized.map_or(0, |epoch| epoch + 1);
+        if status.hard_faulted
+            || self
+                .client(context)
+                .admitted(context, next)
+                .await?
+                .is_some()
+        {
+            return Ok(Outcome::Rejected);
+        }
+        if status.height >= closes {
+            return Ok(Outcome::Unchanged);
+        }
+        self.control.advance(closes - status.height).await;
+        Ok(Outcome::Accepted)
     }
 
     async fn apply(
         &mut self,
         context: &deterministic::Context,
         slot: usize,
-    ) -> Result<rpc::Response> {
-        let saved = self.requests[slot]
-            .as_ref()
-            .context("request is unsigned")?;
-        let request =
-            operator_rpc::OperatorRequest::ApplyWithdrawal(operator_rpc::ApplyWithdrawalRequest {
-                request: saved.request.clone(),
-            });
-        let response = prepare_request(
-            context,
-            &mut self.client(context),
-            self.operator(),
-            &request,
-            TIMING,
-        )
-        .await?;
-        Ok(response
-            .unwrap_or_else(|| operator_rpc::handle_decoded(&mut self.operator().lock(), request)))
+    ) -> Result<Option<crate::operator::StagedWithdrawal>> {
+        let request = operator_rpc::ApplyWithdrawalRequest {
+            request: self.requests[slot].clone().context("request is unsigned")?,
+        };
+        let mut chain = Checked {
+            client: self.client(context),
+            failed: false,
+        };
+        match stage_withdrawal(context, &mut chain, self.operator(), &request, TIMING).await {
+            Ok(staged) => Ok(staged),
+            Err(error) if chain.failed => Err(error.context("a chain call failed during staging")),
+            Err(error) => {
+                self.operator()
+                    .lock()
+                    .ensure_store_usable()
+                    .context(error)?;
+                Ok(None)
+            }
+        }
     }
 
     async fn freeze(&mut self, context: &deterministic::Context) -> Result<PacketId> {
-        let epoch = self.operator().lock().registration_boundary()?.0.epoch();
-        let request =
-            registration_request(context, &mut self.client(context), self.operator(), epoch)
-                .await?;
+        let live = self.operator().lock().snapshot()?.epoch;
+        let adopted = self.operator().lock().adopted();
+        let request = if adopted {
+            self.operator().lock().signed_successor(live)?
+        } else {
+            self.operator().lock().signed_registration()?
+        };
+        let epoch = request.epoch;
+        ensure!(
+            epoch == live + u64::from(adopted),
+            "registration targets an unexpected epoch"
+        );
         let requests = self.request_mask(&request.withdrawals)?;
-        let queued = request
-            .withdrawals
-            .requests()
-            .iter()
-            .filter(|withdrawal| {
-                !request
-                    .openings
-                    .iter()
-                    .any(|opening| opening.account == *withdrawal.account())
-            })
-            .try_fold(0, |mask, request| {
-                Ok::<_, anyhow::Error>(mask | self.request_id(request)?.bit())
-            })?;
+
+        // Requests the chain already queued ride as exact records. The rest are
+        // operator-carried extras.
+        let mut chain = self.client(context);
+        let mut queued = 0;
+        for withdrawal in request.withdrawals.requests() {
+            let lookup = chain.request(Lookup::Withdrawal {
+                account: withdrawal.account().clone(),
+            });
+            if matches!(
+                chain.recent(context, &lookup).await?.record,
+                Some(Record::Withdrawal(accepted)) if accepted.request == *withdrawal
+            ) {
+                queued |= self.request_id(withdrawal)?.bit();
+            }
+        }
         let id = PacketId {
             epoch: epoch.try_into()?,
             requests,
@@ -357,22 +461,7 @@ impl Native {
         Ok(id)
     }
 
-    async fn publish(&mut self, context: &deterministic::Context, packet: PacketId) -> Result<()> {
-        if let Some(previous) = self.client(context).registration(context).await?
-            && previous.epoch + 1 == u64::from(packet.epoch)
-        {
-            // Separate live leases so finalizing the predecessor leaves room to admit
-            // its successor. Every intervening empty block still executes native state.
-            let earliest = previous
-                .challenge_deadline
-                .checked_add(REGISTRATION_SPACING)
-                .context("registration schedule exceeds the clock")?
-                .saturating_sub(TIMING.admission_offset);
-            let current = self.status(context).await.height;
-            if current < earliest {
-                self.control.advance(earliest - current).await;
-            }
-        }
+    async fn publish(&mut self, packet: PacketId) -> Result<()> {
         let request = self
             .packets
             .get(&packet)
@@ -384,24 +473,44 @@ impl Native {
     }
 
     async fn adopt(&mut self, context: &deterministic::Context) -> Result<()> {
+        let epoch = self.operator().lock().snapshot()?.epoch;
         let registered = self
             .client(context)
-            .registration(context)
+            .registration_at(context, epoch)
             .await?
             .context("registration is absent")?;
         self.operator().lock().adopt_registration(&registered)
     }
 
-    fn cut(&mut self) -> Result<()> {
+    async fn cut(&mut self, context: &deterministic::Context) -> Result<()> {
+        self.adopt(context).await?;
+        let epoch = self.operator().lock().snapshot()?.epoch;
+        let successor = self
+            .client(context)
+            .registration_at(context, epoch + 1)
+            .await?
+            .context("the successor has no certified registration")?;
         let close = self
             .operator()
             .lock()
-            .complete_close(self.closes.len() as u64 + 1)?;
+            .complete_close_with_successor(self.closes.len() as u64 + 1, &successor)?;
         self.closes.push(close);
         Ok(())
     }
 
-    async fn admit(&mut self, epoch: usize) -> Result<()> {
+    async fn admit(&mut self, context: &deterministic::Context, epoch: usize) -> Result<()> {
+        // Promotion starts the successor's lease. Admit near the predecessor's
+        // deadline so its challenge window expires while that lease remains live.
+        let deadline = self
+            .closes
+            .get(epoch)
+            .context("close is unavailable")?
+            .context
+            .admission_deadline();
+        let height = self.status(context).await.height;
+        if height + 1 < deadline {
+            self.control.advance(deadline - height - 1).await;
+        }
         let close = self.closes.get(epoch).context("close is unavailable")?;
         self.control
             .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
@@ -420,7 +529,7 @@ impl Native {
         };
         let operator = self.operator().clone();
         let task = context.child("reconcile").spawn(move |context| async move {
-            let result = reconcile_withdrawals(&context, &mut chain, &operator)
+            let result = reconcile_withdrawals(&context, &mut chain, &operator, TIMING)
                 .await
                 .map_err(|error| format!("{error:#}"));
             let _ = events.send(ReadEvent::Finished(result)).await;
@@ -441,7 +550,8 @@ impl Native {
             .expect("reconciliation event")
     }
 
-    async fn restart(&mut self) {
+    /// Reopens the operator from SQLite and releases recovery as the service does.
+    async fn restart(&mut self, context: &deterministic::Context) -> Result<()> {
         // Await cancellation before releasing the authoritative SQL owner.
         if let Some(reconciliation) = self.reconciliation.take() {
             reconciliation.task.abort();
@@ -452,6 +562,9 @@ impl Native {
         assert_eq!(Arc::strong_count(&previous), 1);
         drop(previous);
         self.operator = Some(Arc::new(Mutex::new(self.database.open())));
+
+        // The reopened operator authenticates its live registration before intake resumes.
+        observe_closes(context, &mut self.client(context), self.operator()).await
     }
 
     fn request_id(&self, request: &SignedWithdrawal<Key, Digest>) -> Result<RequestId> {
@@ -460,7 +573,7 @@ impl Native {
             .find(|id| {
                 self.requests[id.index()]
                     .as_ref()
-                    .is_some_and(|saved| saved.request == *request)
+                    .is_some_and(|saved| saved == request)
             })
             .context("runtime withdrawal is outside the signed trace catalog")
     }
@@ -614,7 +727,7 @@ impl Native {
                     }
                     Withdrawal::Close => WithdrawalAction::Close,
                 };
-                self.sign(context, id.index(), id.account(), action).await?;
+                self.sign(context, id, action).await?;
                 Outcome::Accepted
             }
             Action::Queue(id) => {
@@ -623,13 +736,9 @@ impl Native {
                     .client(context)
                     .withdrawal(context, key.clone())
                     .await?;
-                self.queue(id.index()).await?;
+                self.queue(context, id).await?;
                 let after = self.client(context).withdrawal(context, key).await?;
-                if after.as_ref()
-                    == self.requests[id.index()]
-                        .as_ref()
-                        .map(|saved| &saved.request)
-                {
+                if after.as_ref() == self.requests[id.index()].as_ref() {
                     if before == after {
                         Outcome::Unchanged
                     } else {
@@ -639,17 +748,11 @@ impl Native {
                     Outcome::Rejected
                 }
             }
+            Action::Expire(id) => self.expire(context, id).await?,
             Action::Apply(id) => {
-                let response = self.apply(context, id.index()).await?;
-                if matches!(response, rpc::Response::Success { .. }) {
-                    let saved = self.requests[id.index()].as_ref().unwrap();
-                    let acknowledgment = self
-                        .operator()
-                        .lock()
-                        .staged_withdrawal(&saved.request)?
-                        .context("successful application has no durable acknowledgment")?;
+                if let Some(staged) = self.apply(context, id.index()).await? {
                     Outcome::Acknowledged(Acknowledgement {
-                        epoch: acknowledgment.epoch.try_into()?,
+                        epoch: staged.epoch.try_into()?,
                         request: id,
                     })
                 } else {
@@ -657,7 +760,10 @@ impl Native {
                 }
             }
             Action::Freeze => {
-                let epoch = self.operator().lock().registration_boundary()?.0.epoch();
+                if self.operator().lock().fault().is_some() {
+                    return Ok(Outcome::Rejected);
+                }
+                let epoch = self.operator().lock().snapshot()?.epoch;
                 if epoch > 0
                     && self
                         .client(context)
@@ -680,7 +786,7 @@ impl Native {
                     epoch: u64::from(packet.epoch),
                 });
                 let before = self.client(context).recent(context, &lookup).await?.record;
-                self.publish(context, packet).await?;
+                self.publish(packet).await?;
                 let after = self.client(context).recent(context, &lookup).await?.record;
                 let accepted = self.project(context).await?.anchors[usize::from(packet.epoch)]
                     == Some(PacketId {
@@ -710,9 +816,9 @@ impl Native {
                 }
             }
             Action::ObserveRegistration => {
-                let before = self.operator().lock().registration_boundary()?.0;
+                let before = self.operator().lock().adopted();
                 self.adopt(context).await?;
-                if self.operator().lock().registration_boundary()?.0 == before {
+                if self.operator().lock().adopted() == before {
                     Outcome::Unchanged
                 } else {
                     Outcome::Accepted
@@ -762,7 +868,7 @@ impl Native {
                 }
             }
             Action::Cut => {
-                self.cut()?;
+                self.cut(context).await?;
                 Outcome::Accepted
             }
             Action::Admit(epoch) => {
@@ -770,7 +876,7 @@ impl Native {
                     .client(context)
                     .admitted(context, u64::from(epoch))
                     .await?;
-                self.admit(usize::from(epoch)).await?;
+                self.admit(context, usize::from(epoch)).await?;
                 let after = self
                     .client(context)
                     .admitted(context, u64::from(epoch))
@@ -839,25 +945,28 @@ impl Native {
                 self.receive_event().await
             }
             Action::Restart => {
-                self.restart().await;
+                self.restart(context).await?;
                 Outcome::Accepted
             }
             Action::Fault => {
-                if self.status(context).await.hard_faulted {
+                let status = self.status(context).await;
+                if status.hard_faulted {
                     Outcome::Unchanged
                 } else {
                     let registration = self
                         .client(context)
-                        .registration(context)
+                        .registration_at(context, status.next_admission)
                         .await?
                         .context("fault action requires an active registration")?;
-                    let height = self.status(context).await.height;
-                    if height <= registration.admission_deadline {
-                        self.control
-                            .advance(registration.admission_deadline - height + 1)
-                            .await;
+                    let (admission_deadline, _) = registration
+                        .deadlines
+                        .context("fault action requires the admission frontier")?;
+                    let height = status.height;
+                    if height <= admission_deadline {
+                        self.control.advance(admission_deadline - height + 1).await;
                     }
                     if self.status(context).await.hard_faulted {
+                        observe_closes(context, &mut self.client(context), self.operator()).await?;
                         Outcome::Accepted
                     } else {
                         Outcome::Rejected
@@ -914,7 +1023,8 @@ impl Native {
 
     async fn project(&mut self, context: &deterministic::Context) -> Result<Projection> {
         let snapshot = self.operator().lock().snapshot()?;
-        let (payment, withdrawals) = self.operator().lock().registration_boundary()?;
+        let (_, withdrawals) = self.operator().lock().live_registration_boundary()?;
+        let adopted = self.operator().lock().adopted();
         let wallets = wallets();
         let mut balances = [0; model::ACCOUNTS];
         let mut present = [false; model::ACCOUNTS];
@@ -935,8 +1045,7 @@ impl Native {
         let mut acknowledgements = [None; model::REQUESTS];
         for id in RequestId::ALL {
             if let Some(saved) = &self.requests[id.index()]
-                && let Ok(Some(acknowledgment)) =
-                    self.operator().lock().staged_withdrawal(&saved.request)
+                && let Ok(Some(acknowledgment)) = self.operator().lock().staged_withdrawal(saved)
             {
                 acknowledgements[id.index()] = Some(Acknowledgement {
                     epoch: acknowledgment.epoch.try_into()?,
@@ -947,7 +1056,6 @@ impl Native {
         let mut chain = self.client(context);
         let status = chain.recent_status(context).await?;
         let payout_tip = chain.payout_checkpoint(context).await?;
-        let registered = chain.registration(context).await?;
         let mut receipts = [None; model::ACCOUNTS];
         for account in 0..model::ACCOUNTS {
             receipts[account] = chain
@@ -959,7 +1067,6 @@ impl Native {
         }
         let mut anchors = [None; model::EPOCHS];
         let mut admitted = [false; model::EPOCHS];
-        let mut adopted = false;
         for epoch in 0..model::EPOCHS {
             if status
                 .last_finalized
@@ -969,10 +1076,6 @@ impl Native {
                     .closes
                     .get(epoch)
                     .context("finalized trace epoch has no retained local close")?;
-                let anchor = *close.context.payment().anchor();
-                if payment.epoch() == epoch as u64 {
-                    adopted = payment.anchor() == &anchor;
-                }
                 anchors[epoch] = Some(PacketId {
                     epoch: epoch.try_into()?,
                     requests: self.request_mask(self.close_requests(close)?)?,
@@ -982,9 +1085,6 @@ impl Native {
                 continue;
             }
             if let Some(anchor) = chain.anchor(context, epoch as u64).await? {
-                if payment.epoch() == epoch as u64 {
-                    adopted = payment.anchor() == &anchor;
-                }
                 let requests = if let Some(close) = self.closes.get(epoch) {
                     ensure!(
                         close.context.payment().anchor() == &anchor,
@@ -998,9 +1098,10 @@ impl Native {
                     );
                     published.packet.requests
                 } else {
-                    let registered = registered
-                        .as_ref()
-                        .filter(|record| record.epoch == epoch as u64 && record.anchor == anchor)
+                    let registered = chain
+                        .registration_at(context, epoch as u64)
+                        .await?
+                        .filter(|record| record.anchor == anchor)
                         .context("uncut native anchor has no current registration")?;
                     let request = self
                         .packets
@@ -1165,7 +1266,7 @@ impl Native {
             balances,
             present,
             boundary,
-            frozen: self.operator().lock().withdrawals_frozen()?,
+            frozen: self.operator().lock().live_withdrawals_frozen()?,
             adopted,
             faulted: status.hard_faulted,
             acknowledgements,
@@ -1189,6 +1290,12 @@ impl Native {
     }
 }
 
+fn minimum_notice() -> Result<u64> {
+    Ok(crate::protocol::settlement_config(&TIMING)?
+        .minimum_withdrawal_notice
+        .get())
+}
+
 async fn replay(context: &deterministic::Context, trace: Trace) {
     let model = model::WithdrawalModel::new(trace.instance);
     let mut expected = model.initial_state();
@@ -1206,9 +1313,11 @@ async fn replay(context: &deterministic::Context, trace: Trace) {
             .await
             .unwrap_or_else(|error| panic!("{} step {index}: {action:?}: {error:#}", trace.name));
         assert_eq!(
-            observed, transition.outcome,
-            "{} step {index}: {action:?}",
-            trace.name
+            observed,
+            transition.outcome,
+            "{} step {index}: {action:?}; path: {:?}",
+            trace.name,
+            &trace.actions[..=index]
         );
         assert_eq!(
             native.project(context).await.unwrap_or_else(|error| {
@@ -1224,7 +1333,7 @@ async fn replay(context: &deterministic::Context, trace: Trace) {
         );
         expected = transition.state;
     }
-    native.restart().await;
+    native.restart(context).await.unwrap();
 }
 
 #[test]
@@ -1250,17 +1359,16 @@ fn restart_cancels_a_captured_certified_read_before_reopening_sql() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let mut native = Native::new(&context).await;
         let wallet = wallets().remove(0);
-        let opening = native
-            .operator()
-            .lock()
-            .withdrawal_opening(&wallet.public_key())
-            .unwrap();
+        let deadline = native.status(&context).await.height
+            + crate::protocol::settlement_config(&TIMING)
+                .unwrap()
+                .maximum_withdrawal_notice
+                .get();
         let request = SignedWithdrawal::sign(
             deployment(),
-            opening.root.digest,
             wallet.public_key().encode(),
             WithdrawalAction::Close,
-            100,
+            deadline,
             wallet.signer(),
         );
         let acknowledgment = native
@@ -1284,7 +1392,7 @@ fn restart_cancels_a_captured_certified_read_before_reopening_sql() {
         };
         assert_eq!(lookup, Lookup::Status);
         assert!(matches!(verified.record, Some(Record::Status(_))));
-        native.restart().await;
+        native.restart(&context).await.unwrap();
         assert!(deliver.send(()).is_err());
         let replay = native
             .operator()
@@ -1306,7 +1414,7 @@ fn restart_cancels_a_captured_certified_read_before_reopening_sql() {
                 }
             }
         }
-        native.restart().await;
+        native.restart(&context).await.unwrap();
         assert!(
             native
                 .operator()

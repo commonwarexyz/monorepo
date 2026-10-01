@@ -3,7 +3,6 @@
 use super::rpc::AcceptSendsRequest;
 use anyhow::{Context, Result, anyhow, bail};
 use commonware_clearing::bajillion::payment::VECTOR_SEND_SIGNATURE_NAMESPACE;
-use commonware_codec::Encode as _;
 use commonware_cryptography_curve25519::signing::BatchVerifier;
 use commonware_parallel::{Rayon, Strategy as _};
 use rand_core::CryptoRng;
@@ -28,13 +27,14 @@ impl VerifiedSends {
     }
 }
 
+// Each signature covers the body and the request's predecessor, so a body signed against
+// another predecessor fails here.
 fn add_request(verifier: &mut BatchVerifier, request: &AcceptSendsRequest) {
     for send in &request.sends {
-        let body = send.authorization.body();
         verifier.add(
             VECTOR_SEND_SIGNATURE_NAMESPACE,
-            &body.encode(),
-            body.payer().as_zip215(),
+            &send.authorization.message(),
+            send.authorization.body().payer().as_zip215(),
             send.authorization.payer_signature(),
         );
     }
@@ -42,10 +42,9 @@ fn add_request(verifier: &mut BatchVerifier, request: &AcceptSendsRequest) {
 
 fn verify_request(request: AcceptSendsRequest) -> Result<VerifiedSends> {
     for (position, send) in request.sends.iter().enumerate() {
-        let body = send.authorization.body();
-        if !body.payer().verify(
+        if !send.authorization.body().payer().verify(
             VECTOR_SEND_SIGNATURE_NAMESPACE,
-            &body.encode(),
+            &send.authorization.message(),
             send.authorization.payer_signature(),
         ) {
             bail!("payment send at position {position} has an invalid payer signature");
@@ -124,10 +123,10 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_clearing::bajillion::{
-        commitment::VectorRoot,
+        commitment::{self, VectorKind, VectorRoot},
         payment::{PaymentContext, SendAuthorization, VectorSendBody},
     };
-    use commonware_codec::DecodeExt as _;
+    use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_utils::test_rng;
     use std::num::NonZeroUsize;
@@ -152,7 +151,7 @@ mod tests {
                     },
                 );
                 AcceptSendRequest {
-                    authorization: SendAuthorization::sign(body, payer.signer()),
+                    authorization: SendAuthorization::sign(body, empty(), payer.signer()),
                     entries: vec![Entry {
                         recipient: recipient.clone(),
                         amount: 1,
@@ -161,6 +160,10 @@ mod tests {
             })
             .collect();
         AcceptSendsRequest { sends }
+    }
+
+    fn empty() -> VectorRoot<Digest> {
+        commitment::empty_root::<Sha256>(VectorKind::OutEntry)
     }
 
     fn corrupt_signature(request: &mut AcceptSendsRequest, position: usize) {
@@ -227,18 +230,31 @@ mod tests {
     }
 
     #[test]
-    fn signatures_bind_the_namespace_and_exact_context_body() {
+    fn signatures_bind_the_namespace_exact_context_body_and_predecessor() {
         let payer = Wallet::from_seed("payer", 31);
         let recipient = Wallet::from_seed("recipient", 32).public_key();
         let operator = Wallet::from_seed("operator", 33).public_key();
         let context = PaymentContext::new(Sha256::hash(&[b"bound-anchor"]), 13, operator.clone());
         let mut wrong_namespace = request(&payer, &recipient, &context, 1, 1);
-        let body = wrong_namespace.sends[0].authorization.body().clone();
+        let authorization = wrong_namespace.sends[0].authorization.clone();
         let signature = payer
             .signer()
-            .sign(b"_COMMONWARE_TERMINAL_WRONG", &body.encode());
-        wrong_namespace.sends[0].authorization =
-            SendAuthorization::from_raw_unchecked(body, signature);
+            .sign(b"_COMMONWARE_TERMINAL_WRONG", &authorization.message());
+        wrong_namespace.sends[0].authorization = SendAuthorization::from_raw_unchecked(
+            authorization.body().clone(),
+            authorization.predecessor(),
+            signature,
+        );
+
+        let mut wrong_predecessor = request(&payer, &recipient, &context, 1, 1);
+        let authorization = wrong_predecessor.sends[0].authorization.clone();
+        wrong_predecessor.sends[0].authorization = SendAuthorization::from_raw_unchecked(
+            authorization.body().clone(),
+            VectorRoot {
+                digest: Sha256::hash(&[b"another-predecessor"]),
+            },
+            authorization.payer_signature().clone(),
+        );
 
         let mut wrong_body = request(&payer, &recipient, &context, 1, 1);
         let original = &wrong_body.sends[0].authorization;
@@ -253,11 +269,11 @@ mod tests {
             original_body.send_root(),
         );
         wrong_body.sends[0].authorization =
-            SendAuthorization::from_raw_unchecked(altered_body, signature);
+            SendAuthorization::from_raw_unchecked(altered_body, empty(), signature);
         let strategy = Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap();
 
         let verified = verify_sends(
-            vec![wrong_namespace, wrong_body],
+            vec![wrong_namespace, wrong_predecessor, wrong_body],
             &mut test_rng(),
             &strategy,
         );

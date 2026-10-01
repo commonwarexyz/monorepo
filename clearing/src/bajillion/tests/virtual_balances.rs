@@ -4,6 +4,7 @@ use crate::bajillion::state::SettlementOutput;
 fn epoch(
     state: &TestState,
     epoch: u64,
+    predecessor_rows: Range<u64>,
     predecessor_liability: u64,
     deposits: &DepositBatch<VerifyingKey>,
     withdrawals: &WithdrawalBatch<VerifyingKey, ShaDigest>,
@@ -14,9 +15,6 @@ fn epoch(
         SigningKey::from_seed(OPERATOR_SEED).public_key(),
         deposits,
         withdrawals,
-        predecessor_liability,
-        98,
-        99,
         CloseLimits::protocol_maximum(),
         Sha256::hash(&[b"committee"]),
     )
@@ -25,6 +23,10 @@ fn epoch(
         state,
         deposits,
         withdrawals,
+        predecessor_rows,
+        predecessor_liability,
+        98,
+        99,
         Floors {
             activity: 0,
             payouts: 0,
@@ -35,6 +37,7 @@ fn epoch(
 
 fn terminal(
     context: &CloseContext<VerifyingKey, ShaDigest>,
+    predecessor: VectorRoot<ShaDigest>,
     payer: &SigningKey,
     payments: &[(&SigningKey, u64)],
 ) -> Terminal<VerifyingKey, ShaDigest> {
@@ -55,9 +58,13 @@ fn terminal(
         payments.iter().map(|(_, amount)| amount).sum(),
         vector.root::<Sha256, ShaDigest>().unwrap(),
     );
+    let authorization = SendAuthorization::sign(body, predecessor, payer);
     Terminal {
-        operator_signature: bls_ack(&BlsPrivate::new(Scalar::from(OPERATOR_SEED)), &body),
-        authorization: SendAuthorization::sign(body, payer),
+        operator_signature: bls_ack(
+            &BlsPrivate::new(Scalar::from(OPERATOR_SEED)),
+            &authorization,
+        ),
+        authorization,
         vector,
     }
 }
@@ -117,15 +124,15 @@ fn absent_credit_and_multilateral_payments_create_virtual_balances() {
         .await;
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = epoch(&state, EPOCH, 140, &deposits, &withdrawals);
+        let context = epoch(&state, EPOCH, 0..0, 140, &deposits, &withdrawals);
         let prepared = verify(
             &state,
             &context,
             &deposits,
             &withdrawals,
             vec![
-                terminal(&context, &a, &[(&b, 20), (&c, 10)]),
-                terminal(&context, &b, &[(&c, 5), (&d, 8)]),
+                terminal(&context, empty_root(), &a, &[(&b, 20), (&c, 10)]),
+                terminal(&context, empty_root(), &b, &[(&c, 5), (&d, 8)]),
             ],
         )
         .await;
@@ -172,15 +179,15 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
         let state = new_state(runtime, "eligibility", vec![(a.public_key(), 100)]).await;
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = epoch(&state, EPOCH, 100, &deposits, &withdrawals);
+        let context = epoch(&state, EPOCH, 0..0, 100, &deposits, &withdrawals);
         let rejected = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
             &deposits,
             &withdrawals,
             vec![
-                terminal(&context, &a, &[(&b, 20)]),
-                terminal(&context, &b, &[(&a, 5)]),
+                terminal(&context, empty_root(), &a, &[(&b, 20)]),
+                terminal(&context, empty_root(), &b, &[(&a, 5)]),
             ],
             &Sequential,
         )
@@ -191,10 +198,10 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
             &context,
             &deposits,
             &withdrawals,
-            vec![terminal(&context, &a, &[(&b, 20)])],
+            vec![terminal(&context, empty_root(), &a, &[(&b, 20)])],
         )
         .await;
-        let (state, _) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, first) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
         assert_eq!(
             state
                 .state()
@@ -204,13 +211,25 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
                 .map(NonZeroU64::get),
             Some(20)
         );
-        let next = epoch(&state, EPOCH + 1, 100, &deposits, &withdrawals);
+        let next = epoch(
+            &state,
+            EPOCH + 1,
+            rows(&context, &first),
+            100,
+            &deposits,
+            &withdrawals,
+        );
         let second = verify(
             &state,
             &next,
             &deposits,
             &withdrawals,
-            vec![terminal(&next, &b, &[(&a, 5)])],
+            vec![terminal(
+                &next,
+                predecessor(&first, &b.public_key()),
+                &b,
+                &[(&a, 5)],
+            )],
         )
         .await;
         let (state, _) = Box::pin(second.apply::<_, Sha256>(state)).await.unwrap();
@@ -238,15 +257,15 @@ fn eligible_recipient_reuses_incoming_credit() {
         .await;
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = epoch(&state, EPOCH, 101, &deposits, &withdrawals);
+        let context = epoch(&state, EPOCH, 0..0, 101, &deposits, &withdrawals);
         let close = verify(
             &state,
             &context,
             &deposits,
             &withdrawals,
             vec![
-                terminal(&context, &a, &[(&b, 20)]),
-                terminal(&context, &b, &[(&c, 21)]),
+                terminal(&context, empty_root(), &a, &[(&b, 20)]),
+                terminal(&context, empty_root(), &b, &[(&c, 21)]),
             ],
         )
         .await;
@@ -284,25 +303,24 @@ fn close_deletes_balance_and_recredit_recreates_same_owner() {
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
             Sha256::hash(&[b"virtual-balances"]),
-            state.state().root().digest,
             Bytes::from_static(b"destination"),
             WithdrawalAction::Close,
             99,
             &b,
         )])
         .unwrap();
-        let context = epoch(&state, EPOCH, 140, &deposits, &withdrawals);
+        let context = epoch(&state, EPOCH, 0..0, 140, &deposits, &withdrawals);
         let first = verify(
             &state,
             &context,
             &deposits,
             &withdrawals,
-            vec![terminal(&context, &a, &[(&b, 10)])],
+            vec![terminal(&context, empty_root(), &a, &[(&b, 10)])],
         )
         .await;
         let payout_head = first.close().roots.withdrawal_outputs;
         let payout_position = context.predecessor_logs().payouts.operations;
-        let (state, _) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, first) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
         let output = state.logs().payout_at(payout_position).await.unwrap();
         let (opening, _) = state
             .logs()
@@ -320,13 +338,25 @@ fn close_deletes_balance_and_recredit_recreates_same_owner() {
                 .is_none()
         );
         let withdrawals = WithdrawalBatch::empty();
-        let next = epoch(&state, EPOCH + 1, 90, &deposits, &withdrawals);
+        let next = epoch(
+            &state,
+            EPOCH + 1,
+            rows(&context, &first),
+            90,
+            &deposits,
+            &withdrawals,
+        );
         let second = verify(
             &state,
             &next,
             &deposits,
             &withdrawals,
-            vec![terminal(&next, &a, &[(&b, 7)])],
+            vec![terminal(
+                &next,
+                predecessor(&first, &a.public_key()),
+                &a,
+                &[(&b, 7)],
+            )],
         )
         .await;
         assert!(
@@ -363,25 +393,37 @@ fn new_balance_recovery_replays_only_missing_suffix_and_retains_historical_proof
             );
             let deposits = DepositBatch::empty();
             let withdrawals = WithdrawalBatch::empty();
-            let context = epoch(&state, EPOCH, 100, &deposits, &withdrawals);
+            let context = epoch(&state, EPOCH, 0..0, 100, &deposits, &withdrawals);
             let first = verify(
                 &state,
                 &context,
                 &deposits,
                 &withdrawals,
-                vec![terminal(&context, &a, &[(&b, 20)])],
+                vec![terminal(&context, empty_root(), &a, &[(&b, 20)])],
             )
             .await;
             let first_record = Accepted::prepared(&first);
-            let (state, _) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
+            let (state, first) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
             let state = Box::pin(state.sync()).await.unwrap();
-            let next = epoch(&state, EPOCH + 1, 100, &deposits, &withdrawals);
+            let next = epoch(
+                &state,
+                EPOCH + 1,
+                rows(&context, &first),
+                100,
+                &deposits,
+                &withdrawals,
+            );
             let second = verify(
                 &state,
                 &next,
                 &deposits,
                 &withdrawals,
-                vec![terminal(&next, &b, &[(&a, 5)])],
+                vec![terminal(
+                    &next,
+                    predecessor(&first, &b.public_key()),
+                    &b,
+                    &[(&a, 5)],
+                )],
             )
             .await;
             let second_record = Accepted::prepared(&second);
@@ -444,9 +486,6 @@ fn receiving_balance_creation_respects_live_account_limit() {
             SigningKey::from_seed(OPERATOR_SEED).public_key(),
             &deposits,
             &withdrawals,
-            100,
-            98,
-            99,
             CloseLimits::new(1, 2, 0, 1, 1, 100, 0, 0),
             Sha256::hash(&[b"committee"]),
         )
@@ -455,6 +494,10 @@ fn receiving_balance_creation_respects_live_account_limit() {
             &state,
             &deposits,
             &withdrawals,
+            0..0,
+            100,
+            98,
+            99,
             Floors {
                 activity: 0,
                 payouts: 0,
@@ -467,7 +510,7 @@ fn receiving_balance_creation_respects_live_account_limit() {
             &context,
             &deposits,
             &withdrawals,
-            vec![terminal(&context, &a, &[(&b, 20)])],
+            vec![terminal(&context, empty_root(), &a, &[(&b, 20)])],
             &Sequential,
         )
         .await;
@@ -478,7 +521,7 @@ fn receiving_balance_creation_respects_live_account_limit() {
             &context,
             &deposits,
             &withdrawals,
-            vec![terminal(&context, &a, &[(&b, 100)])],
+            vec![terminal(&context, empty_root(), &a, &[(&b, 100)])],
         )
         .await;
         let (state, _) = Box::pin(prepared.apply::<_, Sha256>(state)).await.unwrap();

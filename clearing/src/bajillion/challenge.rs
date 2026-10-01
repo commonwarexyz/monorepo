@@ -27,8 +27,9 @@ use thiserror::Error;
 
 /// Context-relative dual-signed acknowledgment evidence.
 ///
-/// The anchor, epoch, and operator key are reconstructed from the trusted close context, so the
-/// witness carries only the payer-variable fields and both signatures.
+/// The anchor, epoch, and operator key are reconstructed from the trusted close context. The
+/// witness carries the payer-variable fields, the signed predecessor, and both signatures.
+/// Adjudication authenticates the predecessor only through the signatures.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AckWitness<P: PublicKey, D: Digest> {
     /// Payer named by the acknowledged endpoint.
@@ -39,9 +40,11 @@ pub struct AckWitness<P: PublicKey, D: Digest> {
     pub cumulative_debit: u64,
     /// Acknowledged per-recipient vector root.
     pub send_root: VectorRoot<D>,
-    /// Payer signature over the reconstructed body.
+    /// Signed root of the payer's terminal vector in the preceding epoch.
+    pub predecessor: VectorRoot<D>,
+    /// Payer signature over the reconstructed message.
     pub payer_signature: P::Signature,
-    /// Operator countersignature over the reconstructed body.
+    /// Operator countersignature over the reconstructed message.
     pub operator_signature: P::Signature,
 }
 
@@ -54,12 +57,13 @@ impl<P: PublicKey, D: Digest> AckWitness<P, D> {
             seq: ack.body().seq(),
             cumulative_debit: ack.body().cumulative_debit(),
             send_root: ack.body().send_root(),
+            predecessor: ack.predecessor(),
             payer_signature: ack.payer_signature().clone(),
             operator_signature: ack.operator_signature().clone(),
         }
     }
 
-    /// Reconstructs the canonical body and verifies both signatures.
+    /// Reconstructs the canonical body and verifies both signatures over it and the predecessor.
     pub fn reconstruct(
         &self,
         context: &CloseContext<P, D>,
@@ -71,17 +75,17 @@ impl<P: PublicKey, D: Digest> AckWitness<P, D> {
             self.cumulative_debit,
             self.send_root,
         );
-        let encoded = body.encode();
+        let message = body.message(&self.predecessor);
         if !self.payer.verify(
             VECTOR_SEND_SIGNATURE_NAMESPACE,
-            &encoded,
+            &message,
             &self.payer_signature,
         ) {
             return Err(ChallengeError::Ack(AckError::InvalidPayerSignature));
         }
         if !context.payment().operator().verify(
             VECTOR_ACK_SIGNATURE_NAMESPACE,
-            &encoded,
+            &message,
             &self.operator_signature,
         ) {
             return Err(ChallengeError::Ack(AckError::InvalidOperatorSignature));
@@ -89,7 +93,7 @@ impl<P: PublicKey, D: Digest> AckWitness<P, D> {
         Ok(body)
     }
 
-    /// Reconstructs and verifies only the operator countersignature.
+    /// Reconstructs the canonical body and verifies only the operator countersignature.
     ///
     /// An acknowledgment fork is the operator's fault regardless of whose key produced the
     /// payer half, so fork adjudication does not require valid payer signatures.
@@ -104,10 +108,9 @@ impl<P: PublicKey, D: Digest> AckWitness<P, D> {
             self.cumulative_debit,
             self.send_root,
         );
-        let encoded = body.encode();
         if !context.payment().operator().verify(
             VECTOR_ACK_SIGNATURE_NAMESPACE,
-            &encoded,
+            &body.message(&self.predecessor),
             &self.operator_signature,
         ) {
             return Err(ChallengeError::Ack(AckError::InvalidOperatorSignature));
@@ -122,13 +125,15 @@ impl<P: PublicKey, D: Digest> Write for AckWitness<P, D> {
         self.seq.write(buf);
         self.cumulative_debit.write(buf);
         self.send_root.write(buf);
+        self.predecessor.write(buf);
         self.payer_signature.write(buf);
         self.operator_signature.write(buf);
     }
 }
 
 impl<P: PublicKey, D: Digest> FixedSize for AckWitness<P, D> {
-    const SIZE: usize = P::SIZE + u64::SIZE * 2 + VectorRoot::<D>::SIZE + P::Signature::SIZE * 2;
+    const SIZE: usize =
+        P::SIZE + u64::SIZE * 2 + VectorRoot::<D>::SIZE * 2 + P::Signature::SIZE * 2;
 }
 
 impl<P: PublicKey, D: Digest> Read for AckWitness<P, D> {
@@ -140,6 +145,7 @@ impl<P: PublicKey, D: Digest> Read for AckWitness<P, D> {
             seq: u64::read(buf)?,
             cumulative_debit: u64::read(buf)?,
             send_root: VectorRoot::read(buf)?,
+            predecessor: VectorRoot::read(buf)?,
             payer_signature: P::Signature::read(buf)?,
             operator_signature: P::Signature::read(buf)?,
         })
@@ -491,7 +497,7 @@ pub enum Challenge<P: PublicKey, D: Digest> {
         /// Public terminal-entry resolution under the sender row's committed root.
         sender: Box<HigherEntryLookup<P, D>>,
     },
-    /// Two distinct operator-countersigned endpoints at one payer sequence number.
+    /// Two distinct operator-countersigned messages at one payer sequence number.
     AckFork {
         /// First countersigned endpoint.
         left: Box<AckWitness<P, D>>,
@@ -566,7 +572,7 @@ pub enum ChallengeKind {
     HigherAckDebit,
     /// A retained edge entry contradicts the public terminal entry.
     HigherAckEntry,
-    /// The operator countersigned two endpoints at one payer sequence number.
+    /// The operator countersigned two distinct messages at one payer sequence number.
     AckFork,
 }
 
@@ -580,6 +586,9 @@ pub enum Verdict {
 }
 
 /// Adjudicates one challenge against an already-certified header and root bundle.
+///
+/// `context` must be the one settlement bound for the target when it became the admission
+/// frontier. Settlement enforces its challenge deadline.
 pub fn adjudicate<H, P, D>(
     context: &CloseContext<P, D>,
     header: &Header<D>,
@@ -660,7 +669,10 @@ where
         Challenge::AckFork { left, right } => {
             let left_body = left.reconstruct_operator(context)?;
             let right_body = right.reconstruct_operator(context)?;
-            if left.payer == right.payer && left.seq == right.seq && left_body != right_body {
+            if left.payer == right.payer
+                && left.seq == right.seq
+                && (left_body, left.predecessor) != (right_body, right.predecessor)
+            {
                 return Ok(Verdict::Proven(ChallengeKind::AckFork));
             }
             Ok(Verdict::NoContradiction)
@@ -716,6 +728,7 @@ mod arbitrary_impls {
                 seq: u.arbitrary()?,
                 cumulative_debit: u.arbitrary()?,
                 send_root: u.arbitrary()?,
+                predecessor: u.arbitrary()?,
                 payer_signature: u.arbitrary()?,
                 operator_signature: u.arbitrary()?,
             })

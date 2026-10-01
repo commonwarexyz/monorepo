@@ -55,8 +55,12 @@ pub(crate) struct NativeGenesis {
     pub(crate) empty_operations: u64,
     pub(crate) balances: Vec<Account>,
     pub(crate) deployments: Vec<RegistryEntry>,
+    /// Native account credited with every fee.
     pub(crate) fee_recipient: Key,
+    /// Native fee one deployment registration pays.
     pub(crate) registration_fee: u64,
+    /// Native fee one epoch registration pays per started KiB of its deployment's dealing
+    /// reservation (see [`Self::epoch_cost`]).
     pub(crate) epoch_fee: u64,
     pub(crate) max_deployments: u32,
     pub(crate) max_dealing_bytes: u32,
@@ -73,10 +77,7 @@ impl NativeGenesis {
             || self.max_deployments as usize > MAX_DEPLOYMENTS
             || self.deployments.len() > self.max_deployments as usize
             || self.max_dealing_bytes == 0
-            || self
-                .epoch_fee
-                .checked_mul(u64::from(self.max_dealing_bytes).div_ceil(1024))
-                .is_none()
+            || self.epoch_cost(self.max_dealing_bytes).is_none()
         {
             return false;
         }
@@ -117,6 +118,13 @@ impl NativeGenesis {
             supply = total;
         }
         true
+    }
+
+    /// The fee one epoch registration pays for a deployment reserving `max_dealing_bytes`, or
+    /// `None` on overflow.
+    pub(crate) fn epoch_cost(&self, max_dealing_bytes: u32) -> Option<u64> {
+        self.epoch_fee
+            .checked_mul(u64::from(max_dealing_bytes).div_ceil(1024))
     }
 
     /// The immutable chain domain; runtime registry growth never changes it.

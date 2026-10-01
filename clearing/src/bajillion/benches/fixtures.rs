@@ -2,6 +2,7 @@ use commonware_clearing::bajillion::{
     benchmark_workload as workload,
     boundary::{DepositBatch, WithdrawalBatch},
     challenge::{AckWitness, Challenge, ChallengeKind, EntryWitness, Verdict, adjudicate},
+    commitment::{self, VectorKind, VectorRoot},
     custody::Epoch,
     logs::{self, Floors, Logs},
     payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
@@ -14,7 +15,6 @@ use commonware_clearing::bajillion::{
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
-use commonware_codec::Encode as _;
 use commonware_cryptography::{
     Hasher, Sha256, Signer as _,
     bls12381::primitives::{
@@ -61,6 +61,11 @@ pub(crate) fn runner() -> deterministic::Runner {
 pub(crate) fn strategy() -> &'static Rayon {
     static STRATEGY: OnceLock<Rayon> = OnceLock::new();
     STRATEGY.get_or_init(|| Rayon::new(NonZeroUsize::new(WORKERS).unwrap()).expect("worker pool"))
+}
+
+// Fixture contexts bind no predecessor rows, so every payer signs the empty vector root.
+pub(crate) fn empty_root() -> VectorRoot<Digest> {
+    commitment::empty_root::<Sha256>(VectorKind::OutEntry)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -381,12 +386,6 @@ pub(crate) fn epoch_context(
         operator.public_key(),
         deposits,
         withdrawals,
-        u64::try_from(accounts)
-            .expect("benchmark account count fits u64")
-            .checked_mul(OPENING_BALANCE)
-            .expect("benchmark liability fits u64"),
-        98,
-        99,
         CloseLimits::protocol_maximum(),
         committee,
     )
@@ -395,6 +394,13 @@ pub(crate) fn epoch_context(
         state,
         deposits,
         withdrawals,
+        0..0,
+        u64::try_from(accounts)
+            .expect("benchmark account count fits u64")
+            .checked_mul(OPENING_BALANCE)
+            .expect("benchmark liability fits u64"),
+        98,
+        99,
         Floors {
             activity: 0,
             payouts: 0,
@@ -448,18 +454,20 @@ pub(crate) fn terminal_for_entries(
         debit,
         vector.root::<Sha256, Digest>().expect("vector root"),
     );
-    let ack = VectorAck::sign_by_authorities(body, &account.1, operator);
+    let ack = VectorAck::sign_by_authorities(body, empty_root(), &account.1, operator);
+    let authorization = SendAuthorization::from_raw_unchecked(
+        ack.body().clone(),
+        ack.predecessor(),
+        ack.payer_signature().clone(),
+    );
     let terminal = Terminal {
-        authorization: SendAuthorization::from_raw_unchecked(
-            ack.body().clone(),
-            ack.payer_signature().clone(),
-        ),
-        vector,
         operator_signature: sign_message::<OperatorVariant>(
             &BlsPrivate::new(Scalar::from(OPERATOR_SEED)),
             VECTOR_ACK_AGGREGATE_NAMESPACE,
-            ack.body().encode().as_ref(),
+            authorization.message().as_ref(),
         ),
+        authorization,
+        vector,
     };
     (terminal, ack)
 }
@@ -673,7 +681,8 @@ pub(crate) async fn proven_challenges(
             + 1,
         retained_root,
     );
-    let retained_ack = VectorAck::sign_by_authorities(retained_body, &payer_private, &operator);
+    let retained_ack =
+        VectorAck::sign_by_authorities(retained_body, empty_root(), &payer_private, &operator);
     let OutTipLookup::Present {
         cumulative,
         count,
@@ -726,7 +735,7 @@ pub(crate) async fn proven_challenges(
                     + 5,
                 retained_root,
             );
-            VectorAck::sign_by_authorities(body, &payer_private, &operator)
+            VectorAck::sign_by_authorities(body, empty_root(), &payer_private, &operator)
         })),
     };
 

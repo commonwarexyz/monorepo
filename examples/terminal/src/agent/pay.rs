@@ -1,28 +1,33 @@
 //! Durable, context-scoped payment authorization and authenticated outcome resolution.
 //!
 //! Ordinary payments sign from local accepted epoch state and a verified balance floor.
-//! A submitted intent keeps its exact bytes until receipts or settlement resolve it.
-//! Operator corrections never authorize the same ambiguous intent in another context.
+//! Every body binds the root of the wallet's terminal vector in the preceding epoch.
+//! A submitted intent keeps its exact bytes until receipts, a usable corrective report, or
+//! settlement resolve it. A usable report re-signs a cut epoch's intent in the successor
+//! epoch against the reported endpoint, so at most one copy can settle.
 
 use super::{
     Agent,
     evidence::{check_opening, unusable_head},
     store::{ContextCache, PaymentConclusion, PendingPayment, VerifiedAcceptance},
-    wallet::{ReceiptEpoch, receipt_epoch, settlement_status},
+    wallet::{ReceiptEpoch, receipt_epoch, retired, settlement_status},
 };
 use crate::{
     chain::{
-        client::{Chain, Client, Env, POLL, SUBMIT_ATTEMPTS},
-        state::StatusRecord,
+        client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL, SUBMIT_ATTEMPTS},
+        state::{AdmittedRootsResponse, FaultRecord, HardFaultReasonResponse, StatusRecord},
+        tx::{ChallengeRequest, SettlementTx},
     },
     operator::rpc as operator_rpc,
-    protocol::{Entry, Key, MAX_BATCH_SEND_ENTRIES, MAX_SENDS_PER_BATCH},
+    protocol::{Acceptance, Entry, Key, MAX_BATCH_SEND_ENTRIES, MAX_SENDS_PER_BATCH},
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
-    commitment::VectorKind,
+    challenge::{AckWitness, Challenge, ChallengeKind},
+    commitment::{self, VectorKind, VectorRoot},
     payment::{PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE, VectorSendBody},
     qmdb::{StateOpening, StateRoot},
+    state::AccountChange,
     vector::{OutEntry, OutVector},
 };
 use commonware_codec::Encode as _;
@@ -67,6 +72,23 @@ enum PendingOutcome {
         /// A permanently excluded suffix remains durable and must be re-signed.
         restage_suffix: bool,
     },
+    /// A usable corrective report concluded the prefix at or below its endpoint, and the rest
+    /// is staged again in the successor epoch.
+    Resigned {
+        outcomes: Vec<PaymentOutcome>,
+        staged: Box<StagedBatch>,
+    },
+}
+
+/// What an admitted preceding epoch decides about the pending batch.
+enum Predecessor {
+    /// The preceding epoch is unadmitted or retired, or it ended at the batch's predecessor.
+    Open,
+    /// Carried superseded copies still need receipts or finality to conclude.
+    Wait,
+    /// No close can carry the batch. The carried copies concluded, and every other pending
+    /// intent is replaceable.
+    Settled(Vec<PaymentOutcome>),
 }
 
 impl Agent {
@@ -96,7 +118,7 @@ impl Agent {
         operator: SocketAddr,
         sends: &[Vec<(usize, u64)>],
     ) -> Result<Vec<PaymentOutcome>> {
-        self.observe_withdrawal_expiry(ctx, chain).await?;
+        self.observe_withdrawal(ctx, chain).await?;
         ensure!(
             !sends.is_empty() && sends.len() <= MAX_SENDS_PER_BATCH,
             "payment batch exceeds its send bound"
@@ -150,6 +172,23 @@ impl Agent {
         let mut staged = if self.pending_payments.is_empty() {
             self.stage(ctx, chain, operator, &requested).await?
         } else if self.pending_payments[0].replaceable {
+            // Superseded copies of the excluded intents must be decided before they are
+            // signed again.
+            if !self.superseded.is_empty() {
+                if let Predecessor::Settled(outcomes) =
+                    self.decide_predecessor(ctx, chain, operator).await?
+                {
+                    requested.drain(..outcomes.len());
+                    completed.extend(outcomes);
+                    if self.pending_payments.is_empty() {
+                        return Ok(completed);
+                    }
+                }
+                ensure!(
+                    self.superseded.is_empty(),
+                    "the excluded payment waits for its earlier epoch to be decided"
+                );
+            }
             self.restage_excluded(ctx, chain, operator, &requested)
                 .await?
         } else {
@@ -170,8 +209,10 @@ impl Agent {
             let response = match submit_staged(ctx, operator, &staged).await {
                 Ok(response) => response,
                 Err(error) => {
+                    // Silence is never exclusion: the exact bytes stay staged until a receipt,
+                    // a usable report, or settlement resolves them.
                     return match self
-                        .resolve_pending(ctx, chain, operator, staged, None)
+                        .resolve_pending(ctx, chain, operator, staged, None, None)
                         .await
                     {
                         Ok(PendingOutcome::Resolved {
@@ -193,6 +234,17 @@ impl Agent {
                         }) => {
                             completed.extend(outcomes);
                             return Ok(completed);
+                        }
+                        Ok(PendingOutcome::Resigned {
+                            outcomes,
+                            staged: resigned,
+                        }) => {
+                            let resolved = outcomes.len();
+                            completed.extend(outcomes);
+                            requested.drain(..resolved);
+                            staged = *resigned;
+                            attempts = 1;
+                            continue;
                         }
                         Ok(PendingOutcome::Live(_)) => Err(error).context("submit payment"),
                         Err(unresolved) => Err(unresolved).context(format!(
@@ -218,21 +270,26 @@ impl Agent {
                     for (position, acceptance) in acceptances.into_iter().enumerate() {
                         self.pending_payments[position].acceptance = Some(acceptance);
                     }
-                    self.resolve_pending(ctx, chain, operator, staged, Some(accepted))
+                    self.resolve_pending(ctx, chain, operator, staged, Some(accepted), None)
                         .await?
                 }
-                operator_rpc::AcceptSendsResponse::Stale { context, .. } => {
+                operator_rpc::AcceptSendsResponse::Stale(stale) => {
                     ensure!(
-                        context.operator() == &self.operator,
+                        stale.context.operator() == &self.operator,
                         "corrective context has an unexpected operator"
                     );
-                    self.resolve_pending(ctx, chain, operator, staged, None)
+
+                    // The unsigned report releases the staged bytes only as far as receipts
+                    // confirm it. Otherwise settlement of their epoch decides.
+                    self.resolve_pending(ctx, chain, operator, staged, None, Some(stale))
                         .await?
                 }
             };
             ensure!(
-                matches!(&resolution, PendingOutcome::Resolved { .. })
-                    || attempts < SUBMIT_ATTEMPTS,
+                matches!(
+                    &resolution,
+                    PendingOutcome::Resolved { .. } | PendingOutcome::Resigned { .. }
+                ) || attempts < SUBMIT_ATTEMPTS,
                 "the operator repeatedly rejected the unresolved payment"
             );
             attempts += 1;
@@ -255,6 +312,16 @@ impl Agent {
                     self.restage_excluded(ctx, chain, operator, &requested)
                         .await?
                 }
+                PendingOutcome::Resigned {
+                    outcomes,
+                    staged: resigned,
+                } => {
+                    let resolved = outcomes.len();
+                    completed.extend(outcomes);
+                    requested.drain(..resolved);
+                    attempts = 1;
+                    *resigned
+                }
             };
         }
     }
@@ -266,6 +333,10 @@ impl Agent {
         operator: SocketAddr,
         requested: &[(Vec<Entry>, u64)],
     ) -> Result<StagedBatch> {
+        ensure!(
+            self.superseded.is_empty(),
+            "the excluded payment waits for its earlier epoch to be decided"
+        );
         match self.stage(ctx, chain, operator, requested).await {
             Ok(staged) => Ok(staged),
             Err(error)
@@ -290,6 +361,7 @@ impl Agent {
                     .archive_replaceable_payments(&self.pending_payments, self.receipt_count)
                     .context("archive permanently excluded payment batch")?;
                 self.pending_payments.clear();
+                self.superseded.clear();
                 self.cache = None;
                 Err(error).context("payment batch was permanently excluded")
             }
@@ -358,11 +430,12 @@ impl Agent {
     }
 
     /// Signs the requested deltas against the wallet's durable prior vector state under
-    /// `context`: the merged cumulative vector's root at the next batch sequence and the
-    /// wallet's own successor debit endpoint.
+    /// `context`: the merged cumulative vector's root at the next batch sequence, the
+    /// wallet's own successor debit endpoint, and `predecessor`.
     fn sign_payments(
         &self,
         context: &PaymentContext<Key, Digest>,
+        predecessor: VectorRoot<Digest>,
         requested: &[(Vec<Entry>, u64)],
     ) -> Result<Vec<SendAuthorization<Key, Digest>>> {
         let prior = self.store.vector_state(context)?;
@@ -389,7 +462,11 @@ impl Agent {
                     .context("commit signed out vector")?,
             );
             prior_entries = vector.entries().to_vec();
-            authorizations.push(SendAuthorization::sign(body, self.wallet.signer()));
+            authorizations.push(SendAuthorization::sign(
+                body,
+                predecessor,
+                self.wallet.signer(),
+            ));
         }
         Ok(authorizations)
     }
@@ -431,10 +508,60 @@ impl Agent {
         Ok((requested, total))
     }
 
-    /// Resolves the staged authorization batch against its registration and admitted activity.
-    /// Admission fixes the close, so exclusion is permanent. Inclusion without a receipt
-    /// requires finality before the wallet records a completed payment. Any supplied acceptance
-    /// has already passed exact-body and receipt verification.
+    /// Resolves the staged authorization batch against receipts, a corrective report, its
+    /// registration, and admitted activity. Admission fixes the close, so exclusion is permanent.
+    /// Inclusion without a receipt requires finality before the wallet records a completed
+    /// payment. Any supplied acceptance has already passed exact-message and receipt
+    /// verification.
+    ///
+    /// # Stale replies
+    ///
+    /// An operator that has cut epoch `e` answers a send signed under `e` with `Stale`. The
+    /// staged authorization is a valid payer signature over a cumulative endpoint in `e`, and the
+    /// operator holds it. `Stale` is unsigned, so it does not bind the operator to leaving that
+    /// endpoint out of `e`: a malicious operator can include it in `e`'s close and still answer
+    /// `Stale`. A fresh authorization of the same payment under `e + 1` would be an independent
+    /// debit, so re-signing on the reply alone would let such an operator settle both and make
+    /// the payer pay twice.
+    ///
+    /// Every body therefore also signs its predecessor: the root of the payer's terminal vector
+    /// in the preceding epoch, or the empty vector root when it had none there. `Stale` reports
+    /// the payer's endpoint in `e`, frozen at the cut, and the root that bodies of the live epoch
+    /// must bind. A report is usable when its vector is empty and the wallet holds no receipt in
+    /// `e`, or when the wallet holds or fetches a verified receipt for its own body at the
+    /// reported endpoint and that endpoint is at or above every receipt it holds. The wallet then
+    /// includes the bodies at or below the endpoint with their receipts and re-signs the rest
+    /// under `e + 1` right away, bound to the reported root. It keeps only the first usable report
+    /// per epoch, and without one it waits for `e` to be admitted.
+    ///
+    /// Validators check `e + 1` only after `e` is admitted, and they read each payer's
+    /// predecessor from the account rows of `e`'s admitted close. A body whose signed predecessor
+    /// differs fails payer signature verification, and every certificate includes an honest
+    /// signer, so no certified close for `e + 1` can carry it. A re-signed payment settles only if
+    /// `e` ended exactly at the reported root, and that root excludes the original.
+    ///
+    /// An operator that reports one endpoint and carries another in `e` gains nothing. The
+    /// re-signed bodies can no longer be carried. If the operator acknowledged any of them, a
+    /// certified close for `e + 1` must omit them, and the acknowledgment convicts it with
+    /// `HigherAckDebit` or `HigherAckEntry`. If it certifies no close for `e + 1` at all, that
+    /// registration expires and faults the deployment. Once `e`'s admission shows the re-signed
+    /// bodies dead, the wallet concludes the carried originals, keeps every receipt it holds for
+    /// a dead body as evidence, and signs the remaining intents again. Its challenge watcher
+    /// proves `HigherAckDebit` from those receipts while `e + 1`'s admitted close can be
+    /// challenged, and prunes them once it cannot.
+    ///
+    /// The binding reaches back one epoch only. A body in `e + 2` pins the payer's terminal in
+    /// `e + 1`, which says nothing about `e`. If a re-signed payment also misses `e + 1`, signing
+    /// it again under `e + 2` could settle beside an original that `e` carries, whatever `e + 1`
+    /// reports. So the wallet signs a payment again only after every earlier epoch in which it
+    /// signed that payment, other than the immediately preceding one, is decided: admitted, or
+    /// dead because its own preceding epoch was admitted at another root.
+    ///
+    /// No response is not exclusion. The operator may have accepted the send and lost the reply,
+    /// so the wallet resubmits the exact bytes and keeps waiting for a receipt, a usable report,
+    /// or `e`'s admission. Admission fixes `e`'s activity: an excluded endpoint concludes with no
+    /// included prefix and restages under the successor, an included endpoint completes through
+    /// its receipts or finality, and invalidation restages as well.
     async fn resolve_pending<E: Env>(
         &mut self,
         ctx: &E,
@@ -442,7 +569,22 @@ impl Agent {
         operator: SocketAddr,
         staged: StagedBatch,
         accepted: Option<Vec<operator_rpc::AcceptedBatchResponse>>,
+        report: Option<operator_rpc::StaleResponse>,
     ) -> Result<PendingOutcome> {
+        // A receipted batch without superseded copies resolves through its receipts and its own
+        // epoch, so it skips this read.
+        if accepted.is_none() || !self.superseded.is_empty() {
+            match self.decide_predecessor(ctx, chain, operator).await? {
+                Predecessor::Open => {}
+                Predecessor::Wait => return Ok(PendingOutcome::Live(Box::new(staged))),
+                Predecessor::Settled(outcomes) => {
+                    return Ok(PendingOutcome::Resolved {
+                        restage_suffix: !self.pending_payments.is_empty(),
+                        outcomes,
+                    });
+                }
+            }
+        }
         let context = &staged.context;
         let (range, descriptor_finalized) =
             match receipt_epoch(ctx, chain, self.deployment, context).await? {
@@ -451,18 +593,25 @@ impl Agent {
                 }
                 ReceiptEpoch::Unresolved => return Ok(PendingOutcome::Live(Box::new(staged))),
                 ReceiptEpoch::Live(None) => {
-                    return match accepted {
-                        Some(accepted) => Ok(PendingOutcome::Resolved {
+                    return match (accepted, report) {
+                        (Some(accepted), _) => Ok(PendingOutcome::Resolved {
                             outcomes: self.record_payments(accepted)?,
                             restage_suffix: false,
                         }),
-                        None => Ok(PendingOutcome::Live(Box::new(staged))),
+                        (None, Some(report)) => {
+                            self.resign(ctx, chain, operator, staged, report).await
+                        }
+                        (None, None) => Ok(PendingOutcome::Live(Box::new(staged))),
                     };
                 }
                 ReceiptEpoch::Live(Some(admitted)) | ReceiptEpoch::Faulted(admitted) => {
                     (admitted.activity_range(), false)
                 }
                 ReceiptEpoch::Finalized(admitted) => (admitted.activity_range(), true),
+                // The finalized close decides the batch from its retained rows until the epoch
+                // after its successor finalizes. A wallet away for longer concludes only with
+                // receipts, and without them the batch stays pending for good. That retention
+                // is a deliberate bound, not a liveness guarantee.
                 ReceiptEpoch::Retired => {
                     self.fetch_missing_acceptances(ctx, operator, &staged.sends)
                         .await?;
@@ -575,6 +724,326 @@ impl Agent {
         Ok(outcome)
     }
 
+    /// Decides the pending batch against its admitted preceding epoch.
+    ///
+    /// Every pending body binds one predecessor. A preceding close that ended at that root
+    /// proves no superseded copy was carried, so the copies are archived. A close that ended at
+    /// another root leaves no close able to carry any pending body: the superseded copies at or
+    /// below its terminal settle their intents, and every other intent becomes replaceable. A
+    /// receipt held for a pending body stays durable with it as evidence against the successor
+    /// close.
+    async fn decide_predecessor<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+        operator: SocketAddr,
+    ) -> Result<Predecessor> {
+        let Some(first) = self.pending_payments.first() else {
+            return Ok(Predecessor::Open);
+        };
+        let predecessor = first.authorization.predecessor();
+        let Some(previous) = first.authorization.body().epoch().checked_sub(1) else {
+            return Ok(Predecessor::Open);
+        };
+
+        // An unadmitted predecessor decides nothing. The chain keeps an admission until the
+        // epoch after the batch's own epoch finalizes, so only a wallet away for longer finds it
+        // retired, and then it decides nothing either. Superseded copies stay undecided, which
+        // blocks every re-sign of their intents. That retention is a deliberate bound, not a
+        // liveness guarantee. Any other failed read is returned.
+        let admitted = match chain.admitted(ctx, previous).await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                let status = chain.recent_status(ctx).await?;
+                ensure!(
+                    status.deployment == self.deployment,
+                    "settlement status has an unexpected deployment"
+                );
+                if !retired(&status, previous) {
+                    return Err(error.context("read the admitted predecessor"));
+                }
+                None
+            }
+        };
+        let Some(admitted) = admitted else {
+            return Ok(Predecessor::Open);
+        };
+        let range = admitted.activity_range();
+        let account = self.account();
+        let lookup = self
+            .holders
+            .committed_account_at(ctx, chain, previous, &range, &account)
+            .await?;
+        let (_, activity) = lookup
+            .resolve::<Sha256>(&range, &account)
+            .context("verify admitted predecessor activity")?;
+        let root = activity.as_ref().map_or_else(
+            || commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+            AccountChange::send_root,
+        );
+        if root == predecessor {
+            if !self.superseded.is_empty() {
+                self.store
+                    .drop_superseded(&self.pending_payments, &self.superseded)
+                    .context("archive uncarried superseded copies")?;
+                self.superseded.clear();
+            }
+            return Ok(Predecessor::Open);
+        }
+
+        // No close can carry a pending body. A receipt held for one proves a mismatch against
+        // the successor close and stays durable with its body, so it never blocks the decision.
+        let carried = match activity.filter(AccountChange::has_outgoing) {
+            None => 0,
+            Some(activity) => {
+                match self.superseded.iter().position(|copy| {
+                    activity
+                        .matches_outgoing(&authorization_context(copy, &self.operator), copy.body())
+                }) {
+                    Some(position) => position + 1,
+                    None => {
+                        ensure!(
+                            self.superseded
+                                .iter()
+                                .all(|copy| copy.body().seq() > activity.terminal_seq()),
+                            "the admitted predecessor terminal names an unknown authorization"
+                        );
+                        0
+                    }
+                }
+            }
+        };
+
+        // Carried copies conclude through their receipts, or through finality without them.
+        let mut conclusions = Vec::with_capacity(carried);
+        let mut outcomes = Vec::with_capacity(carried);
+        for position in 0..carried {
+            let copy = self.superseded[position].clone();
+            let entries = self.pending_payments[position].entries.clone();
+            let send = StagedSend {
+                authorization: copy.clone(),
+                entries,
+            };
+            let response = operator_rpc::accepted_batch(
+                ctx,
+                operator,
+                operator_rpc::AcceptSendRequest {
+                    authorization: send.authorization.clone(),
+                    entries: send.entries.clone(),
+                },
+            )
+            .await
+            .ok()
+            .flatten();
+            let one = StagedBatch {
+                context: authorization_context(&copy, &self.operator),
+                sends: vec![send],
+            };
+            let verified = response.and_then(|response| {
+                let mut verified =
+                    Self::verify_accepted(std::slice::from_ref(&response), &one).ok()?;
+                Some((verified.remove(0), response))
+            });
+            match verified {
+                Some((verified, response)) => {
+                    conclusions.push(PaymentConclusion::Accepted(Box::new(verified)));
+                    outcomes.push(PaymentOutcome::Accepted(Box::new(response)));
+                }
+                None if admitted.finalized => {
+                    conclusions.push(PaymentConclusion::Retired);
+                    outcomes.push(PaymentOutcome::CommittedUnheld {
+                        epoch: previous,
+                        total: entry_total(&one.sends[0].entries)?,
+                    });
+                }
+                None => return Ok(Predecessor::Wait),
+            }
+        }
+        self.receipt_count = self
+            .store
+            .settle_superseded(
+                &self.pending_payments,
+                &self.superseded,
+                &conclusions,
+                self.receipt_count,
+            )
+            .context("settle carried superseded copies")?;
+        self.pending_payments.drain(..carried);
+        for payment in &mut self.pending_payments {
+            payment.replaceable = true;
+        }
+        self.superseded.clear();
+        self.cache = None;
+        Ok(Predecessor::Settled(outcomes))
+    }
+
+    /// Re-signs the batch into the successor epoch against a usable corrective report.
+    ///
+    /// The bodies at or below the reported endpoint conclude with their receipts. The rest are
+    /// signed again under the successor's verified context, bound to the reported root, and
+    /// their originals stay durable as undecided superseded copies. An unusable report, or a
+    /// head that names another epoch than the successor, leaves the exact bytes staged. An active
+    /// withdrawal authorization refuses a re-sign and leaves them staged as well.
+    async fn resign<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+        operator: SocketAddr,
+        staged: StagedBatch,
+        report: operator_rpc::StaleResponse,
+    ) -> Result<PendingOutcome> {
+        let Some(included) = self.usable(ctx, operator, &staged, &report).await? else {
+            return Ok(PendingOutcome::Live(Box::new(staged)));
+        };
+        if included == self.pending_payments.len() {
+            return self.conclude_staged_prefix(included, false);
+        }
+        ensure!(
+            self.pending_withdrawal.is_none(),
+            "a withdrawal authorization is still active"
+        );
+        let requested = self.pending_payments[included..]
+            .iter()
+            .map(|payment| Ok((payment.entries.clone(), entry_total(&payment.entries)?)))
+            .collect::<Result<Vec<_>>>()?;
+        let total = requested.iter().try_fold(0_u64, |sum, (_, total)| {
+            sum.checked_add(*total)
+                .context("payment batch total overflow")
+        })?;
+        let successor = staged
+            .context
+            .epoch()
+            .checked_add(1)
+            .context("epoch overflow")?;
+        let Ok((context, root)) = self.head_at(ctx, chain, operator, successor, total).await else {
+            return Ok(PendingOutcome::Live(Box::new(staged)));
+        };
+        let authorizations = self.sign_payments(&context, report.predecessor, &requested)?;
+        let replacement = authorizations
+            .into_iter()
+            .zip(requested)
+            .map(|(authorization, (entries, _))| PendingPayment {
+                authorization,
+                entries,
+                recovery_root: root,
+                acceptance: None,
+                replaceable: false,
+            })
+            .collect::<Vec<_>>();
+        let receipts = self.pending_payments[..included]
+            .iter()
+            .map(|payment| {
+                payment
+                    .acceptance
+                    .clone()
+                    .context("reported prefix has no verified receipt")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.receipt_count = self
+            .store
+            .resign(
+                &self.pending_payments,
+                &receipts,
+                &replacement,
+                self.receipt_count,
+            )
+            .context("re-sign reported payment suffix")?;
+        let outcomes = self.pending_payments[..included]
+            .iter()
+            .zip(&receipts)
+            .map(|(payment, acceptance)| {
+                Ok(PaymentOutcome::Accepted(Box::new(accepted_response(
+                    payment, acceptance,
+                )?)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.superseded = self.pending_payments[included..]
+            .iter()
+            .map(|payment| payment.authorization.clone())
+            .collect();
+        self.pending_payments = replacement;
+        Ok(PendingOutcome::Resigned {
+            outcomes,
+            staged: Box::new(self.staged_batch()?),
+        })
+    }
+
+    /// Returns how many staged bodies lie at or below a usable report's endpoint.
+    ///
+    /// The report must describe the staged epoch while its successor is live, and every
+    /// earlier copy of the staged intents must be decided. An empty endpoint is usable only
+    /// while the wallet holds no receipt in the epoch. A nonempty one must be at or above every
+    /// receipt the wallet holds and must name one of the wallet's own bodies, whose receipt the
+    /// wallet holds or fetches together with every receipt below it.
+    async fn usable<E: Env>(
+        &mut self,
+        ctx: &E,
+        operator: SocketAddr,
+        staged: &StagedBatch,
+        report: &operator_rpc::StaleResponse,
+    ) -> Result<Option<usize>> {
+        let epoch = staged.context.epoch();
+        if report.epoch != epoch
+            || epoch.checked_add(1) != Some(report.context.epoch())
+            || !self.superseded.is_empty()
+        {
+            return Ok(None);
+        }
+
+        // The endpoint must be a feasible cumulative vector whose root the successor requires.
+        let Ok(vector) = OutVector::new(epoch, self.account(), report.entries.clone()) else {
+            return Ok(None);
+        };
+        let root = vector
+            .root::<Sha256, Digest>()
+            .context("commit reported out vector")?;
+        if root != report.predecessor
+            || vector.totals().ok().map(|(debit, _)| debit) != Some(report.cumulative_debit)
+            || (report.seq == 0) != report.entries.is_empty()
+        {
+            return Ok(None);
+        }
+
+        // Receipts the wallet holds in this epoch: its concluded endpoint and any staged
+        // receipts.
+        let base = self.store.vector_state(&staged.context)?;
+        let concluded = base.as_ref().map_or(0, |state| state.seq);
+        let held = self
+            .pending_payments
+            .iter()
+            .filter(|payment| payment.acceptance.is_some())
+            .map(|payment| payment.authorization.body().seq())
+            .max()
+            .unwrap_or(0)
+            .max(concluded);
+        if report.seq < held {
+            return Ok(None);
+        }
+        if report.seq == 0 || report.seq == concluded {
+            let expected = base.map(|state| state.entries).unwrap_or_default();
+            return Ok((report.entries == expected).then_some(0));
+        }
+        let Some(position) = report
+            .seq
+            .checked_sub(concluded)
+            .and_then(|offset| offset.checked_sub(1))
+            .and_then(|position| usize::try_from(position).ok())
+            .filter(|position| *position < staged.sends.len())
+        else {
+            return Ok(None);
+        };
+        let body = staged.sends[position].authorization.body();
+        if body.send_root() != root || body.cumulative_debit() != report.cumulative_debit {
+            return Ok(None);
+        }
+        self.fetch_missing_acceptances(ctx, operator, &staged.sends[..=position])
+            .await?;
+        Ok(self.pending_payments[..=position]
+            .iter()
+            .all(|payment| payment.acceptance.is_some())
+            .then_some(position + 1))
+    }
+
     async fn fetch_missing_acceptances<E: Env>(
         &mut self,
         ctx: &E,
@@ -654,6 +1123,9 @@ impl Agent {
             })
             .collect::<Result<Vec<_>>>()?;
         self.pending_payments.drain(..included);
+        if !self.superseded.is_empty() {
+            self.superseded.drain(..included);
+        }
         for payment in &mut self.pending_payments {
             payment.replaceable = true;
         }
@@ -665,7 +1137,13 @@ impl Agent {
         })
     }
 
-    /// Verifies a payment context and its finalized or admitted predecessor balance floor.
+    /// Verifies a payment context and its authenticated balance floor.
+    ///
+    /// The floor epoch lies between the first unfinalized epoch and the
+    /// context's epoch. At the first unfinalized epoch the floor root is the
+    /// chain's finalized state root. Above it, the floor root is the successor
+    /// root of the admitted close just below the floor epoch, so a successor
+    /// context never needs its own predecessor admitted.
     pub(super) async fn verify_head<E: Env>(
         &mut self,
         ctx: &E,
@@ -680,31 +1158,33 @@ impl Agent {
             "payment context is not bound to this deployment and operator"
         );
         self.check_withdrawal_floor(status)?;
-        let finalized_epoch = floor_epoch(status)?;
-        let epoch = head.context.payment().epoch();
-        let epoch = if epoch > finalized_epoch {
-            ensure!(
-                !status.hard_faulted,
-                "settlement is permanently hard-faulted"
-            );
-            let predecessor = chain
-                .admitted(ctx, epoch - 1)
-                .await?
-                .context("payer predecessor close has not been admitted")?;
-            ensure!(
-                predecessor.roots.successor == head.root,
-                "payer opening differs from its admitted predecessor"
-            );
-            epoch
-        } else {
+        let first = floor_epoch(status)?;
+        let floor = head.floor_epoch;
+        ensure!(
+            first <= floor && floor <= head.context.payment().epoch(),
+            "payer floor epoch lies outside the unfinalized epochs up to its context"
+        );
+        if floor == first {
             ensure!(
                 status.state_root == head.root,
                 "payer opening is not the exact settlement head"
             );
-            finalized_epoch
-        };
+        } else {
+            ensure!(
+                !status.hard_faulted,
+                "settlement is permanently hard-faulted"
+            );
+            let admitted = chain
+                .admitted(ctx, floor - 1)
+                .await?
+                .context("payer floor close has not been admitted")?;
+            ensure!(
+                admitted.roots.successor == head.root,
+                "payer opening differs from its admitted floor close"
+            );
+        }
         self.retain_head(&head.root, &head.opening)?;
-        self.cache_signing(head.context.payment(), &head.root, epoch)
+        self.cache_signing(head.context.payment(), &head.root, floor)
     }
 
     /// Retains a Current membership proof for custody recovery at its exact root.
@@ -767,39 +1247,67 @@ impl Agent {
         requested: &[(Vec<Entry>, u64)],
         total: u64,
     ) -> Result<StagedBatch> {
+        let (context, root) = self.head(ctx, chain, operator, total).await?;
+        self.stage_under(context, root, requested)
+    }
+
+    /// Reads a verified head that covers `total` and re-anchors the signing floor on it,
+    /// returning its context and floor root.
+    pub(crate) async fn head<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+        operator: SocketAddr,
+        total: u64,
+    ) -> Result<(PaymentContext<Key, Digest>, StateRoot<Digest>)> {
         let operator_error =
             match operator_head(ctx, operator, self.account(), &self.operator).await {
                 Ok(head) => {
                     let status = staging_status(ctx, chain, self.deployment).await?;
                     match self.stage_head(ctx, chain, &head, &status, total).await {
-                        Ok(()) => {
-                            return self.stage_under(
-                                head.context.payment().clone(),
-                                head.root,
-                                requested,
-                            );
-                        }
+                        Ok(()) => return Ok((head.context.payment().clone(), head.root)),
                         Err(error) => error,
                     }
                 }
                 Err(error) => error,
             };
-        let (context, root) = self
-            .stage_chain_head(ctx, chain, total)
+        self.stage_chain_head(ctx, chain, total)
             .await
-            .map_err(|error| unusable_head(operator_error, error))?;
-        self.stage_under(context, root, requested)
+            .map_err(|error| unusable_head(operator_error, error))
+    }
+
+    /// Reads a verified head whose context names `epoch`.
+    async fn head_at<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+        operator: SocketAddr,
+        epoch: u64,
+        total: u64,
+    ) -> Result<(PaymentContext<Key, Digest>, StateRoot<Digest>)> {
+        let (context, root) = self.head(ctx, chain, operator, total).await?;
+        ensure!(
+            context.epoch() == epoch,
+            "the verified head names epoch {} instead of {epoch}",
+            context.epoch()
+        );
+        Ok((context, root))
     }
 
     /// Signs and durably stages a fresh send under `context`, with the opening
     /// retained at `root` as its recovery evidence.
+    ///
+    /// Every staged body binds the root of the wallet's terminal in the preceding epoch. The
+    /// pending batch is empty or excluded here, so the wallet's concluded vector there is that
+    /// terminal.
     fn stage_under(
         &mut self,
         context: PaymentContext<Key, Digest>,
         root: StateRoot<Digest>,
         requested: &[(Vec<Entry>, u64)],
     ) -> Result<StagedBatch> {
-        let authorizations = self.sign_payments(&context, requested)?;
+        let predecessor = self.store.predecessor(context.epoch())?;
+        let authorizations = self.sign_payments(&context, predecessor, requested)?;
         let pending = authorizations
             .into_iter()
             .zip(requested)
@@ -891,9 +1399,10 @@ impl Agent {
     }
 
     /// Stages without the operator's head: the signing context is the chain's
-    /// certified registration and the balance floor comes from its admitted predecessor
-    /// for a successor epoch, otherwise the finalized head. A completed boundary replaces older
-    /// balances before held credits can contribute to the successor's spending floor.
+    /// latest certified registration. The balance floor is the successor root of
+    /// the context's admitted predecessor when it is admitted, otherwise the
+    /// finalized head. A completed boundary replaces older balances before held
+    /// credits can contribute to the successor's spending floor.
     async fn stage_chain_head<E: Env>(
         &mut self,
         ctx: &E,
@@ -904,16 +1413,14 @@ impl Agent {
         self.check_withdrawal_floor(&status)?;
         let context = registered_context(ctx, chain, &self.operator).await?;
         let account = self.account();
-        let finalized_epoch = floor_epoch(&status)?;
-        let predecessor = if context.epoch() > finalized_epoch {
-            Some(
-                chain
-                    .admitted(ctx, context.epoch() - 1)
-                    .await?
-                    .context("payer predecessor close has not been admitted")?,
-            )
-        } else {
-            None
+        let first = floor_epoch(&status)?;
+        ensure!(
+            context.epoch() >= first,
+            "the registered payment context is already finalized"
+        );
+        let predecessor = match context.epoch().checked_sub(1) {
+            Some(previous) if previous >= first => chain.admitted(ctx, previous).await?,
+            _ => None,
         };
         let (opening, root, epoch) = match predecessor {
             Some(admitted) => (
@@ -928,7 +1435,7 @@ impl Agent {
                     .validator_opening(ctx, chain, &account, &status)
                     .await?,
                 status.state_root,
-                finalized_epoch,
+                first,
             ),
         };
         ensure!(
@@ -941,8 +1448,8 @@ impl Agent {
     }
 
     /// Confirms an operator acceptance is the exact staged send with valid receipts:
-    /// the acknowledged body must be the staged body byte for byte, and the opened
-    /// entries must credit the staged recipients positionally.
+    /// the acknowledged body and predecessor must be the staged message byte for byte,
+    /// and the opened entries must credit the staged recipients positionally.
     fn verify_accepted(
         accepted: &[operator_rpc::AcceptedBatchResponse],
         staged: &StagedBatch,
@@ -958,7 +1465,8 @@ impl Agent {
                 accepted.epoch == staged.context.epoch()
                     && accepted.sequence == send.authorization.body().seq()
                     && accepted.total == total
-                    && accepted.acceptance.ack.body() == send.authorization.body(),
+                    && accepted.acceptance.ack.body() == send.authorization.body()
+                    && accepted.acceptance.ack.predecessor() == send.authorization.predecessor(),
                 "operator returned another payment"
             );
             ensure!(
@@ -978,7 +1486,7 @@ impl Agent {
             let body = accepted.acceptance.ack.body();
             verifier.add(
                 VECTOR_ACK_SIGNATURE_NAMESPACE,
-                &body.encode(),
+                &send.authorization.message(),
                 staged.context.operator().as_zip215(),
                 accepted.acceptance.ack.operator_signature(),
             );
@@ -1041,6 +1549,7 @@ impl Agent {
                     && response.sequence == send.authorization.body().seq()
                     && entry_total(&send.entries).ok() == Some(response.total)
                     && response.acceptance.ack.body() == send.authorization.body()
+                    && response.acceptance.ack.predecessor() == send.authorization.predecessor()
                     && response.acceptance.ack.payer_signature()
                         == send.authorization.payer_signature()
                     && response.acceptance.entries.len() == send.entries.len()
@@ -1109,10 +1618,141 @@ impl Agent {
             )
             .context("commit accepted receipt batch")?;
         self.pending_payments.clear();
+        self.superseded.clear();
         Ok(accepted
             .into_iter()
             .map(|response| PaymentOutcome::Accepted(Box::new(response)))
             .collect())
+    }
+
+    /// Convicts admitted closes that omit this payer's acknowledged sends.
+    ///
+    /// A receipt for a body no close can carry stays evidence while its close can be
+    /// challenged: a re-signed body whose predecessor the preceding admitted close contradicts,
+    /// or a send its own admitted close excludes. That close's terminal debit for the payer is
+    /// lower than the receipt's. For each payment context whose close is admitted and still
+    /// challengeable, the highest receipt proves `HigherAckDebit` when it exceeds the committed
+    /// terminal debit, so the wallet submits that challenge and reads the certified fault back.
+    /// An unrelated fault does not stop this while the close survives it. Receipts of abandoned
+    /// sends prove nothing once their close finalizes or can never be challenged, and are then
+    /// pruned. Returns the epochs whose closes this pass convicted.
+    pub(crate) async fn enforce<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+    ) -> Result<Vec<u64>> {
+        let status = settlement_status(ctx, chain, self.deployment).await?;
+        let mut convicted = Vec::new();
+        for evidence in self.store.evidence(status.last_finalized)? {
+            let body = evidence.acceptance.ack.body();
+            let epoch = body.epoch();
+            let context = PaymentContext::new(*body.anchor(), epoch, self.operator.clone());
+
+            // A failed read retries on the next pass without shadowing other contexts.
+            let prune = status.last_finalized.is_some_and(|last| epoch <= last)
+                || match receipt_epoch(ctx, chain, self.deployment, &context).await {
+                    // An unrelated fault leaves a surviving admitted close challengeable
+                    // until its deadline.
+                    Ok(ReceiptEpoch::Live(Some(admitted)) | ReceiptEpoch::Faulted(admitted)) => {
+                        if self
+                            .convict(ctx, chain, &admitted, &evidence.acceptance)
+                            .await
+                            .unwrap_or(false)
+                        {
+                            convicted.push(epoch);
+                        }
+                        false
+                    }
+                    Ok(
+                        ReceiptEpoch::Finalized(_)
+                        | ReceiptEpoch::Retired
+                        | ReceiptEpoch::Invalidated,
+                    ) => true,
+                    Ok(ReceiptEpoch::Live(None) | ReceiptEpoch::Unresolved) | Err(_) => false,
+                };
+            if prune && evidence.abandoned {
+                self.receipt_count = self
+                    .store
+                    .prune_evidence(&context, self.receipt_count)
+                    .context("prune receipts that can no longer convict")?;
+            }
+        }
+        Ok(convicted)
+    }
+
+    /// Submits `HigherAckDebit` against `admitted` when `acceptance` contradicts the payer's
+    /// committed terminal, and reports whether the certified fault attributes that conviction
+    /// to it.
+    ///
+    /// A fault keeps its first reason, so a conviction that follows an unrelated fault is
+    /// visible only once terminal settlement records the challenged close as the start of the
+    /// invalid suffix. Until then this reports false, and a later pass resubmits the challenge,
+    /// which the chain rejects without effect once the close is challenged.
+    ///
+    /// The contradiction is the one adjudication proves: a higher acknowledged debit, another
+    /// body at the terminal's sequence number, or an equal debit at a later sequence number.
+    async fn convict<E: Env>(
+        &self,
+        ctx: &E,
+        chain: &mut Client,
+        admitted: &AdmittedRootsResponse,
+        acceptance: &Acceptance,
+    ) -> Result<bool> {
+        let account = self.account();
+        let body = acceptance.ack.body();
+        let range = admitted.activity_range();
+        let lookup = self
+            .holders
+            .committed_account_at(ctx, chain, body.epoch(), &range, &account)
+            .await?;
+        let (debit, terminal) = lookup
+            .resolve::<Sha256>(&range, &account)
+            .context("verify committed payer activity")?;
+        let context = PaymentContext::new(*body.anchor(), body.epoch(), self.operator.clone());
+        let contradicts = body.cumulative_debit() > debit
+            || terminal.is_some_and(|terminal| {
+                terminal.has_outgoing()
+                    && !terminal.matches_outgoing(&context, body)
+                    && (body.seq() == terminal.terminal_seq()
+                        || (body.cumulative_debit() == debit
+                            && body.seq() > terminal.terminal_seq()))
+            });
+        if !contradicts {
+            return Ok(false);
+        }
+        let challenge = Challenge::HigherAckDebit {
+            ack: Box::new(AckWitness::from_ack(&acceptance.ack)),
+            payer: Box::new(lookup),
+        };
+        chain
+            .deliver(
+                ctx,
+                &SettlementTx::Challenge(ChallengeRequest {
+                    deployment: self.deployment,
+                    batch_id: admitted.batch_id,
+                    evidence: challenge.encode(),
+                }),
+            )
+            .await?;
+        for _ in 0..EFFECT_ATTEMPTS {
+            match chain.fault(ctx).await? {
+                Some(FaultRecord::Faulted(reason)) => {
+                    return Ok(matches!(
+                        reason,
+                        HardFaultReasonResponse::ProvenChallenge {
+                            batch_id,
+                            kind: ChallengeKind::HigherAckDebit,
+                        } if batch_id == admitted.batch_id
+                    ));
+                }
+                Some(FaultRecord::Settling(settlement)) => {
+                    return Ok(settlement.invalid_from == Some(admitted.batch_id));
+                }
+                None => {}
+            }
+            ctx.sleep(POLL).await;
+        }
+        Ok(false)
     }
 }
 
@@ -1135,17 +1775,9 @@ async fn submit_staged<E: Env>(
                 operator_rpc::AcceptSendResponse::Accepted(accepted) => {
                     operator_rpc::AcceptSendsResponse::Accepted(vec![accepted])
                 }
-                operator_rpc::AcceptSendResponse::Stale {
-                    context,
-                    cumulative_debit,
-                    seq,
-                    entries,
-                } => operator_rpc::AcceptSendsResponse::Stale {
-                    context,
-                    cumulative_debit,
-                    seq,
-                    entries,
-                },
+                operator_rpc::AcceptSendResponse::Stale(stale) => {
+                    operator_rpc::AcceptSendsResponse::Stale(stale)
+                }
             },
         );
     }
@@ -1188,15 +1820,15 @@ pub(super) async fn operator_head<E: Env>(
     Ok(head)
 }
 
-/// The live payment context from the chain alone: the registered epoch and the
-/// anchor settlement certified for it, under `bound`, the operator the wallet
-/// is bound to. A send signed under it needs no operator head, and the context
-/// cannot be false because the anchor is the chain's own registration record.
+/// The latest registered payment context from the chain alone: the epoch
+/// and the anchor settlement certified for it, under `bound`, the operator the
+/// wallet is bound to. A send signed under it needs no operator head, and the
+/// context cannot be false because the anchor is the chain's own registration
+/// record.
 ///
-/// The registration singleton keeps naming an epoch after its close is
-/// admitted, until the successor registers or finalization retires it. An
-/// admitted close is fixed, so that epoch is dead for a new send: only an
-/// unadmitted registration is a live context.
+/// A successor can register while its predecessor still accepts payments. A send under the
+/// successor waits for the operator's handoff, retaining its exact authorization while pending.
+/// An admitted close is fixed, so its epoch cannot accept a new send.
 async fn registered_context<E: Env>(
     ctx: &E,
     chain: &mut Client,
@@ -1205,8 +1837,8 @@ async fn registered_context<E: Env>(
     let registration = chain
         .registration(ctx)
         .await
-        .context("read the registered close")?
-        .context("no close is registered, so there is no payment context to sign under")?;
+        .context("read the latest registration")?
+        .context("no epoch is registered, so there is no payment context to sign under")?;
     ensure!(
         registration.admitted.is_none(),
         "the registered close is admitted, so there is no live payment context to sign under"

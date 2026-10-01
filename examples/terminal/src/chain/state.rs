@@ -20,10 +20,12 @@
 //!
 //! Block height is the only deadline clock. Execution observes each machine's liveness
 //! deadlines before processing transactions, retaining those observations even if a subsequent
-//! request is rejected. Registration assigns deadlines from genesis policy and enables a
-//! successor registration after admission. Finalization consumes the FIFO front strictly after
-//! its challenge window. A hard fault permanently fences its deployment while preserving the
-//! valid pending prefix, finalized reserves, and independent terminal claims.
+//! request is rejected. Epochs register in sequence without waiting for earlier closes. Each
+//! registration owns one record, and the admission frontier receives its deadlines from genesis
+//! policy when it is promoted. Each block finalizes at most one close per deployment, consuming
+//! the FIFO front strictly after its challenge window. A hard fault permanently fences its
+//! deployment and retires every unadmitted registration while preserving the valid pending
+//! prefix, finalized reserves, and independent terminal claims.
 //!
 //! # Persistence and replay
 //!
@@ -51,12 +53,12 @@ use crate::{
     },
     protocol::{
         Deployment, DepositEvent, Key, MAX_DESTINATION_BYTES, SQLITE_U64_MAX, Timing, committee,
-        epoch_context_at, settlement_config, verify_chain_registration_signature,
+        deposit_batch, epoch_context_at, settlement_config, verify_chain_registration_signature,
     },
 };
 use bytes::{BufMut, Bytes};
 use commonware_clearing::bajillion::{
-    boundary::SignedWithdrawal,
+    boundary::{SignedWithdrawal, WithdrawalId},
     challenge::{ChallengeKind, Verdict},
     commitment::VectorRoot,
     qmdb::StateRoot,
@@ -76,7 +78,8 @@ use commonware_glue::stateful::db::Unmerkleized as _;
 use commonware_macros::boxed;
 use commonware_runtime::Spawner;
 use commonware_storage::{Context as StorageContext, mmr, qmdb::Error as QmdbError};
-use std::collections::BTreeMap;
+use futures::TryStreamExt as _;
+use std::{collections::BTreeMap, ops::Range};
 use tracing::debug;
 
 /// Native withdrawals require a canonical public key with a stable credit destination.
@@ -96,6 +99,7 @@ enum Domain {
     Withdrawal = 5,
     Registration = 6,
     Claimed = 7,
+    Intake = 8,
     HardFault = 9,
     Refund = 10,
     Fault = 11,
@@ -103,6 +107,7 @@ enum Domain {
     NativeBalance = 14,
     NativeTransfer = 15,
     RegistryEntry = 16,
+    Carried = 17,
     Machine = 254,
 }
 
@@ -150,17 +155,36 @@ pub(crate) fn withdrawal_key(deployment: &Digest, account: &Key) -> StateKey {
     derive(deployment, Domain::Withdrawal, &account.encode())
 }
 
-/// Key of one deployment's registration singleton.
-pub(crate) fn registration_key(deployment: &Digest) -> StateKey {
-    derive(deployment, Domain::Registration, &[])
+/// Key of the latest request a registration carried for `account`.
+pub(crate) fn carried_key(deployment: &Digest, account: &Key) -> StateKey {
+    derive(deployment, Domain::Carried, &account.encode())
+}
+
+/// Key of one deployment's registration record for `epoch`.
+pub(crate) fn registration_key(deployment: &Digest, epoch: u64) -> StateKey {
+    derive(deployment, Domain::Registration, &epoch.to_be_bytes())
+}
+
+/// Derives one ordered state key: the deployment's derived `domain` key with `index` in its
+/// big-endian index bytes. One deployment's records in `domain` share the entropy bytes and
+/// the domain tag, so they sort by index. Index zero is the domain's payload-free derived key,
+/// so an ordered domain derives no other key.
+fn ordered(deployment: &Digest, domain: Domain, index: u64) -> StateKey {
+    let mut bytes = [0; KEY_BYTES];
+    bytes.copy_from_slice(derive(deployment, domain, &[]).as_ref());
+    bytes[32..40].copy_from_slice(&index.to_be_bytes());
+    StateKey::new(bytes)
+}
+
+/// Ordered key of one deployment's inbox entry at `index`. An entry exists from its recording
+/// until a registration pulls it.
+pub(crate) fn intake_key(deployment: &Digest, index: u64) -> StateKey {
+    ordered(deployment, Domain::Intake, index)
 }
 
 /// Ordered key of a claimed range's inclusive start.
 pub(crate) fn claimed_key(deployment: &Digest, start: u64) -> StateKey {
-    let mut bytes = [0; KEY_BYTES];
-    bytes.copy_from_slice(derive(deployment, Domain::Claimed, &[]).as_ref());
-    bytes[32..40].copy_from_slice(&start.to_be_bytes());
-    StateKey::new(bytes)
+    ordered(deployment, Domain::Claimed, start)
 }
 
 /// Decodes a range start only inside this deployment's ordered key namespace.
@@ -327,6 +351,19 @@ pub(crate) struct StatusRecord {
     /// Highest finalized epoch. Epochs finalize in order, so the state root
     /// covers every epoch at or below it.
     pub(crate) last_finalized: Option<u64>,
+    /// Next epoch to admit: the admission frontier whenever any epoch is
+    /// registered.
+    pub(crate) next_admission: u64,
+    /// Next epoch to register. Registered epochs are exactly those from
+    /// [`Self::next_admission`] up to this one, exclusive.
+    pub(crate) next_registration: u64,
+    /// Inbox length: the index the next deposit or chain-queued withdrawal
+    /// receives.
+    pub(crate) intake: u64,
+    /// First inbox index no registration has pulled. Inbox entries exist
+    /// exactly from here up to [`Self::intake`], exclusive. A hard fault
+    /// freezes both, so the unpulled entries remain.
+    pub(crate) pulled: u64,
     pub(crate) custody: u64,
     pub(crate) claimable: u64,
     pub(crate) hard_faulted: bool,
@@ -339,6 +376,10 @@ impl Write for StatusRecord {
         self.deployment.write(buf);
         self.state_root.write(buf);
         self.last_finalized.write(buf);
+        self.next_admission.write(buf);
+        self.next_registration.write(buf);
+        self.intake.write(buf);
+        self.pulled.write(buf);
         self.custody.write(buf);
         self.claimable.write(buf);
         self.hard_faulted.write(buf);
@@ -352,6 +393,10 @@ impl EncodeSize for StatusRecord {
             + self.deployment.encode_size()
             + self.state_root.encode_size()
             + self.last_finalized.encode_size()
+            + self.next_admission.encode_size()
+            + self.next_registration.encode_size()
+            + self.intake.encode_size()
+            + self.pulled.encode_size()
             + self.custody.encode_size()
             + self.claimable.encode_size()
             + self.hard_faulted.encode_size()
@@ -368,6 +413,10 @@ impl Read for StatusRecord {
             deployment: Digest::read(buf)?,
             state_root: StateRoot::read(buf)?,
             last_finalized: Option::<u64>::read(buf)?,
+            next_admission: u64::read(buf)?,
+            next_registration: u64::read(buf)?,
+            intake: u64::read(buf)?,
+            pulled: u64::read(buf)?,
             custody: u64::read(buf)?,
             claimable: u64::read(buf)?,
             hard_faulted: bool::read(buf)?,
@@ -375,24 +424,30 @@ impl Read for StatusRecord {
     }
 }
 
-/// The registration singleton: the live payment context's commitments,
-/// including the chain-assigned deadlines and anchor the operator reads back
-/// before issuing any receipt.
+/// One registered epoch's commitments: the anchor the operator reads back
+/// before issuing any receipt, the sealed boundary roots, the inbox indices it
+/// pulled, and the deadlines once the epoch becomes the admission frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RegistrationRecord {
     pub(crate) epoch: u64,
-    pub(crate) predecessor_liability: u64,
     pub(crate) anchor: Digest,
-    /// Chain-assigned last height at which the epoch's close may be admitted.
-    pub(crate) admission_deadline: u64,
-    /// Chain-assigned last height at which the admitted close may be
-    /// challenged.
-    pub(crate) challenge_deadline: u64,
+    /// Block height that included the registration.
+    pub(crate) height: u64,
+    /// Settlement-assigned last heights at which the epoch's close may be
+    /// admitted and challenged. Assigned when the epoch becomes the admission
+    /// frontier, so an epoch queued behind an unadmitted predecessor has none.
+    pub(crate) deadlines: Option<(u64, u64)>,
     /// Root of the derived deposit boundary.
     pub(crate) deposits_root: VectorRoot<Digest>,
-
     /// Root of the registered withdrawal batch.
     pub(crate) withdrawals_root: VectorRoot<Digest>,
+    /// Inbox indices the registration pulled.
+    pub(crate) pulled: Range<u64>,
+    /// Inbox length when the registration executed. A chain-queued request recorded from
+    /// `pulled.end` up to here, for an account the registration carries another request for, was
+    /// superseded by that request.
+    pub(crate) intake: u64,
+    /// Log floors captured at registration.
     pub(crate) floors: commonware_clearing::bajillion::logs::Floors,
     /// The admitted close, once one is admitted for this registration.
     pub(crate) admitted: Option<BatchId<Digest>>,
@@ -401,13 +456,14 @@ pub(crate) struct RegistrationRecord {
 impl Write for RegistrationRecord {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
-        self.predecessor_liability.write(buf);
         self.anchor.write(buf);
-        self.admission_deadline.write(buf);
-        self.challenge_deadline.write(buf);
+        self.height.write(buf);
+        self.deadlines.write(buf);
         self.deposits_root.write(buf);
-
         self.withdrawals_root.write(buf);
+        self.pulled.start.write(buf);
+        self.pulled.end.write(buf);
+        self.intake.write(buf);
         self.floors.write(buf);
         self.admitted.write(buf);
     }
@@ -416,12 +472,14 @@ impl Write for RegistrationRecord {
 impl EncodeSize for RegistrationRecord {
     fn encode_size(&self) -> usize {
         self.epoch.encode_size()
-            + self.predecessor_liability.encode_size()
             + self.anchor.encode_size()
-            + self.admission_deadline.encode_size()
-            + self.challenge_deadline.encode_size()
+            + self.height.encode_size()
+            + self.deadlines.encode_size()
             + self.deposits_root.encode_size()
             + self.withdrawals_root.encode_size()
+            + self.pulled.start.encode_size()
+            + self.pulled.end.encode_size()
+            + self.intake.encode_size()
             + self.floors.encode_size()
             + self.admitted.encode_size()
     }
@@ -433,23 +491,178 @@ impl Read for RegistrationRecord {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             epoch: u64::read(buf)?,
-            predecessor_liability: u64::read(buf)?,
             anchor: Digest::read(buf)?,
-            admission_deadline: u64::read(buf)?,
-            challenge_deadline: u64::read(buf)?,
+            height: u64::read(buf)?,
+            deadlines: Option::<(u64, u64)>::read_cfg(buf, &((), ()))?,
             deposits_root: VectorRoot::read(buf)?,
-
             withdrawals_root: VectorRoot::read(buf)?,
+            pulled: u64::read(buf)?..u64::read(buf)?,
+            intake: u64::read(buf)?,
             floors: commonware_clearing::bajillion::logs::Floors::read(buf)?,
             admitted: Option::<BatchId<Digest>>::read(buf)?,
         })
     }
 }
 
+/// One applied deposit and its inbox index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DepositEffect {
+    pub(crate) event: DepositEvent,
+    pub(crate) index: u64,
+}
+
+impl Write for DepositEffect {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.event.write(buf);
+        self.index.write(buf);
+    }
+}
+
+impl EncodeSize for DepositEffect {
+    fn encode_size(&self) -> usize {
+        self.event.encode_size() + self.index.encode_size()
+    }
+}
+
+impl Read for DepositEffect {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            event: DepositEvent::read(buf)?,
+            index: u64::read(buf)?,
+        })
+    }
+}
+
+/// One accepted chain-queued withdrawal and its inbox index. It stays after a
+/// registration carries the request, so a lost intake response remains
+/// provable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WithdrawalEffect {
+    pub(crate) request: SignedWithdrawal<Key, Digest>,
+    pub(crate) index: u64,
+}
+
+impl Write for WithdrawalEffect {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.request.write(buf);
+        self.index.write(buf);
+    }
+}
+
+impl EncodeSize for WithdrawalEffect {
+    fn encode_size(&self) -> usize {
+        self.request.encode_size() + self.index.encode_size()
+    }
+}
+
+impl Read for WithdrawalEffect {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            request: SignedWithdrawal::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
+            index: u64::read(buf)?,
+        })
+    }
+}
+
+/// The latest request a registration carried for one account and the epoch
+/// that carried it. Only a later registration carrying another request for the
+/// account overwrites it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CarriedRecord {
+    pub(crate) epoch: u64,
+    pub(crate) id: WithdrawalId<Digest>,
+}
+
+impl Write for CarriedRecord {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.epoch.write(buf);
+        self.id.write(buf);
+    }
+}
+
+impl EncodeSize for CarriedRecord {
+    fn encode_size(&self) -> usize {
+        self.epoch.encode_size() + self.id.encode_size()
+    }
+}
+
+impl Read for CarriedRecord {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            epoch: u64::read(buf)?,
+            id: WithdrawalId::read(buf)?,
+        })
+    }
+}
+
+/// One inbox entry: a deposit or a chain-queued withdrawal awaiting the
+/// registration that pulls it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Intake {
+    Deposit(DepositEvent),
+    Withdrawal(SignedWithdrawal<Key, Digest>),
+}
+
+impl Intake {
+    /// The depositing or withdrawing account.
+    pub(crate) const fn account(&self) -> &Key {
+        match self {
+            Self::Deposit(event) => &event.account,
+            Self::Withdrawal(request) => request.account(),
+        }
+    }
+}
+
+impl Write for Intake {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Deposit(event) => {
+                0_u8.write(buf);
+                event.write(buf);
+            }
+            Self::Withdrawal(request) => {
+                1_u8.write(buf);
+                request.write(buf);
+            }
+        }
+    }
+}
+
+impl EncodeSize for Intake {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Deposit(event) => event.encode_size(),
+            Self::Withdrawal(request) => request.encode_size(),
+        }
+    }
+}
+
+impl Read for Intake {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            0 => Ok(Self::Deposit(DepositEvent::read(buf)?)),
+            1 => Ok(Self::Withdrawal(SignedWithdrawal::read_cfg(
+                buf,
+                &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
+            )?)),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
+
 /// The identity and roots of the close admitted for one epoch.
 ///
-/// The current finalized close and pending FIFO suffix retain these roots for
-/// challenges, native checkpoint recovery, and current-balance openings.
+/// The two latest finalized closes and the pending FIFO suffix retain these
+/// roots for challenges, native checkpoint recovery, current-balance openings,
+/// and wallet decisions about the epoch after each close.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AdmittedRootsResponse {
     pub(crate) batch_id: BatchId<Digest>,
@@ -989,10 +1202,12 @@ pub(crate) enum Record {
     Anchor(Digest),
     Admitted(AdmittedRootsResponse),
     PayoutHead(crate::protocol::PayoutTip),
-    Deposit(DepositEvent),
-    Withdrawal(SignedWithdrawal<Key, Digest>),
+    Deposit(DepositEffect),
+    Withdrawal(WithdrawalEffect),
+    Carried(CarriedRecord),
     Registration(RegistrationRecord),
     Claimed(u64),
+    Intake(Intake),
     HardFault(HardFaultReleaseRecord),
     Refund(ClaimPendingDepositResponse),
     Fault(FaultRecord),
@@ -1046,12 +1261,20 @@ impl Write for Record {
                 5_u8.write(buf);
                 record.write(buf);
             }
+            Self::Carried(record) => {
+                18_u8.write(buf);
+                record.write(buf);
+            }
             Self::Registration(record) => {
                 6_u8.write(buf);
                 record.write(buf);
             }
             Self::Claimed(record) => {
                 7_u8.write(buf);
+                record.write(buf);
+            }
+            Self::Intake(record) => {
+                8_u8.write(buf);
                 record.write(buf);
             }
             Self::HardFault(record) => {
@@ -1088,8 +1311,10 @@ impl EncodeSize for Record {
             Self::PayoutHead(record) => record.encode_size(),
             Self::Deposit(record) => record.encode_size(),
             Self::Withdrawal(record) => record.encode_size(),
+            Self::Carried(record) => record.encode_size(),
             Self::Registration(record) => record.encode_size(),
             Self::Claimed(record) => record.encode_size(),
+            Self::Intake(record) => record.encode_size(),
             Self::HardFault(record) => record.encode_size(),
             Self::Refund(record) => record.encode_size(),
             Self::Fault(record) => record.encode_size(),
@@ -1118,13 +1343,12 @@ impl Read for Record {
             1 => Ok(Self::Anchor(Digest::read(buf)?)),
             2 => Ok(Self::Admitted(AdmittedRootsResponse::read(buf)?)),
             3 => Ok(Self::PayoutHead(crate::protocol::PayoutTip::read(buf)?)),
-            4 => Ok(Self::Deposit(DepositEvent::read(buf)?)),
-            5 => Ok(Self::Withdrawal(SignedWithdrawal::read_cfg(
-                buf,
-                &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
-            )?)),
+            4 => Ok(Self::Deposit(DepositEffect::read(buf)?)),
+            5 => Ok(Self::Withdrawal(WithdrawalEffect::read(buf)?)),
+            18 => Ok(Self::Carried(CarriedRecord::read(buf)?)),
             6 => Ok(Self::Registration(RegistrationRecord::read(buf)?)),
             7 => Ok(Self::Claimed(u64::read(buf)?)),
+            8 => Ok(Self::Intake(Intake::read(buf)?)),
             9 => Ok(Self::HardFault(HardFaultReleaseRecord::read(buf)?)),
             10 => Ok(Self::Refund(ClaimPendingDepositResponse::read(buf)?)),
             11 => Ok(Self::Fault(FaultRecord::read(buf)?)),
@@ -1167,12 +1391,10 @@ enum Reject {
     AdmissionConflict,
     /// Challenge evidence changed after it was proven.
     ChallengeConflict,
-    /// A terminal state claim position was reused.
+    /// A terminal state claim for the account was already released.
     PositionConflict,
-    /// The next settlement epoch is already registered.
-    Fenced,
-    /// A deadline-bearing transition landed outside its window, or the
-    /// assigned epoch deadlines exceed the block clock.
+    /// The deadlines a new admission frontier would receive exceed the block
+    /// clock.
     Deadline,
     /// The value exceeds the operator storage domain.
     Domain,
@@ -1182,6 +1404,9 @@ enum Reject {
     NotRegistered,
     /// The operator deposit boundary differs from settlement.
     BoundaryDivergence,
+    /// The registration's inbox end is outside the unpulled inbox of the
+    /// state its block builds on.
+    IntakeRange,
     /// The registration omits a queued settlement withdrawal.
     MissingQueuedWithdrawal,
     /// The registration signature failed authentication.
@@ -1246,8 +1471,11 @@ impl Step {
 enum Fired {
     /// The admitted close finalized.
     Finalized { epoch: u64, commit: u64 },
-    /// The deployment hard-faulted.
-    Faulted { reason: HardFaultReasonResponse },
+    /// The deployment hard-faulted, dropping every unadmitted registration.
+    Faulted {
+        reason: Box<HardFaultReasonResponse>,
+        dropped: Range<u64>,
+    },
 }
 
 /// Payout paths can be refreshed against current finality.
@@ -1266,16 +1494,12 @@ const fn claim_rejection(error: &ClaimError) -> TxOutcome {
 const fn chain_rejection(error: &SettlementError) -> Reject {
     match error {
         SettlementError::OperatorHardFaulted => Reject::Faulted,
-        SettlementError::EpochAlreadyActive => Reject::Fenced,
         SettlementError::DuplicateDeposit => Reject::DepositConflict,
         SettlementError::DuplicateWithdrawal
         | SettlementError::DuplicateWithdrawalAuthorization => Reject::WithdrawalConflict,
         SettlementError::AlreadyChallenged => Reject::ChallengeConflict,
         SettlementError::ClaimAlreadyConsumed => Reject::PositionConflict,
-        SettlementError::AdmissionAfterDeadline
-        | SettlementError::EpochAdmissionDeadlineTooLate
-        | SettlementError::EpochAdmissionDeadlineNotMonotonic
-        | SettlementError::EpochChallengeDuration => Reject::Deadline,
+        SettlementError::EpochDeadlineOverflow => Reject::Deadline,
         SettlementError::OperatorNotHardFaulted
         | SettlementError::HardFaultSettlementNotStarted => Reject::FaultUnavailable,
         _ => Reject::Chain,
@@ -1300,6 +1524,38 @@ where
             Self::Batch(batch) => batch.get(key).await,
             Self::Applied(db) => db.get(key).await,
         }
+    }
+
+    /// Reads the inbox entries at `range` with one ordered scan, which the
+    /// machine records exactly for its unpulled indices.
+    ///
+    /// A batch scan overlays unapplied ancestors and pending writes on the
+    /// committed scan, so it reads the state the block builds on even while
+    /// the applied database trails that state.
+    async fn intake(
+        &self,
+        deployment: &Digest,
+        range: Range<u64>,
+    ) -> Result<Vec<Intake>, QmdbError<mmr::Family>> {
+        let keys = intake_key(deployment, range.start)..intake_key(deployment, range.end);
+        let entries = match self {
+            Self::Batch(batch) => batch.get_range(keys).await?,
+            Self::Applied(db) => db.stream_range(keys).try_collect().await?,
+        };
+        let mut entries = entries.into_iter();
+        Ok(range
+            .map(|index| match entries.next() {
+                Some((key, Record::Intake(intake))) if key == intake_key(deployment, index) => {
+                    intake
+                }
+                // Recording writes the entry for its index, and only the
+                // registration that pulls the index deletes it.
+                Some((_, Record::Intake(_))) | None => {
+                    unreachable!("every unpulled inbox index owns its entry")
+                }
+                Some(_) => unreachable!("the inbox range holds only inbox entries"),
+            })
+            .collect())
     }
 
     async fn claimed_neighbors(
@@ -1343,12 +1599,13 @@ where
         })
     }
 
-    /// Reads one deployment's live registration record.
+    /// Reads one deployment's registration record for `epoch`.
     async fn registration(
         &self,
         deployment: &Digest,
+        epoch: u64,
     ) -> Result<Option<RegistrationRecord>, QmdbError<mmr::Family>> {
-        match self.get(&registration_key(deployment)).await? {
+        match self.get(&registration_key(deployment, epoch)).await? {
             None => Ok(None),
             Some(Record::Registration(record)) => Ok(Some(record)),
             Some(_) => unreachable!("the registration key holds a registration record"),
@@ -1386,6 +1643,10 @@ pub(crate) struct Machine {
     /// consensus verification already rejected any block whose timestamp
     /// does not exceed its parent's.
     timestamp: u64,
+    /// Inbox length of the state the current block builds on: the highest end a registration
+    /// in the block may pull. It is not encoded, because a persisted machine is exactly that
+    /// state, so decoding a persisted machine sets it to the decoded inbox length.
+    pullable: u64,
 }
 
 impl Write for Machine {
@@ -1413,8 +1674,10 @@ impl Read for Machine {
             items: buf.remaining(),
             destination: MAX_DESTINATION_BYTES,
         };
+        let chain = SettlementChain::read_cfg(buf, &bounds)?;
         Ok(Self {
-            chain: SettlementChain::read_cfg(buf, &bounds)?,
+            pullable: chain.intake(),
+            chain,
             height: u64::read(buf)?,
             timestamp: u64::read(buf)?,
         })
@@ -1438,26 +1701,63 @@ impl Machine {
             chain,
             height: 0,
             timestamp: 0,
+            pullable: 0,
         }
+    }
+
+    /// Copies this machine for a trial the block may discard. The copy keeps the block's pull
+    /// bound, which the encoding omits.
+    fn trial(&self) -> Self {
+        let mut trial = Self::decode(self.encode()).expect("machine encoding is valid");
+        trial.pullable = self.pullable;
+        trial
     }
 
     pub(crate) const fn finalized_epoch(&self) -> Option<u64> {
         self.chain.expected_epoch().checked_sub(1)
     }
 
-    /// Returns the live registered close: the bound context with the exact
+    /// Returns the admission frontier: the bound context with the exact
     /// boundary batches the chain committed at registration.
     ///
     /// This is the sealing surface: a validator seals a disseminated dealing
     /// against exactly this chain-authenticated registration, never against
-    /// operator-supplied context material.
+    /// operator-supplied context material. Epochs queued behind the frontier
+    /// have no bound predecessor yet, so none of them can be sealed.
     pub(crate) fn registered(&self) -> Option<Registered<'_, Key, Digest>> {
         self.chain.registered()
     }
 
+    /// Registered epochs awaiting admission: the frontier and the queue
+    /// behind it.
+    fn registered_epochs(&self) -> Range<u64> {
+        let (Ok(first), Ok(end)) = (
+            self.chain.next_admission_epoch(),
+            self.chain.next_registration_epoch(),
+        ) else {
+            // Registration rejects epoch `u64::MAX`, so every registered or
+            // admitted epoch has a representable successor.
+            unreachable!("registration leaves a representable successor epoch");
+        };
+        first..end
+    }
+
+    /// Returns the frontier's deadlines when the frontier is `epoch`.
+    fn frontier_deadlines(&self, epoch: u64) -> Option<(u64, u64)> {
+        self.chain
+            .registered()
+            .filter(|registered| registered.context.payment().epoch() == epoch)
+            .map(|registered| {
+                (
+                    registered.context.admission_deadline(),
+                    registered.context.challenge_deadline(),
+                )
+            })
+    }
+
     /// Observes every liveness deadline exactly once for the block at
-    /// `height` with `timestamp`, returning the state changes the
-    /// observations made so the caller can derive records from them.
+    /// `height` with `timestamp`, then finalizes at most one admitted close.
+    /// Returns the resulting state changes.
     fn advance(&mut self, height: u64, timestamp: u64) -> Vec<Fired> {
         assert!(
             height >= self.height,
@@ -1471,6 +1771,10 @@ impl Machine {
         self.timestamp = timestamp;
         let mut fired = Vec::new();
         let faulted_before = self.chain.hard_fault().is_some();
+
+        // A fault observed below drops every unadmitted registration, so their
+        // range is captured before finalization observes the clock.
+        let registered = self.registered_epochs();
 
         // Finalize the admitted pipeline front once its inclusive challenge window has passed.
         // Its trailing commit location joins the consumed ranges in the same ledger batch.
@@ -1498,21 +1802,21 @@ impl Machine {
 
         if !faulted_before && let Some(reason) = self.chain.hard_fault() {
             fired.push(Fired::Faulted {
-                reason: reason.clone().into(),
+                reason: Box::new(reason.clone().into()),
+                dropped: registered,
             });
         }
         fired
     }
 
     /// Applies one transaction routed to this machine's deployment `config`
-    /// at `height` under the chain-wide genesis `timing` policy. The block's
-    /// [`Self::advance`] observation must already have run for that height.
-    /// Replayed inputs re-execute and land on their variant's domain guard.
+    /// at `height`. The block's [`Self::advance`] observation must already
+    /// have run for that height. Replayed inputs re-execute and land on their
+    /// variant's domain guard.
     async fn apply<E>(
         &mut self,
         config: &Deployment,
         height: u64,
-        timing: &Timing,
         tx: &SettlementTx,
         view: &View<'_, E>,
     ) -> Result<Step, QmdbError<mmr::Family>>
@@ -1530,16 +1834,13 @@ impl Machine {
                 self.queue_withdrawal(config, height, request)
             }
             SettlementTx::RegisterEpoch(request) => {
-                self.register_epoch(config, height, timing, request, view)
-                    .await?
+                self.register_epoch(config, height, request, view).await?
             }
             SettlementTx::Admit(request) => self.admit(config, height, request, view).await?,
             SettlementTx::ClaimWithdrawal(request) => {
                 self.claim_withdrawal(config, request, view).await?
             }
-            SettlementTx::Challenge(request) => {
-                self.challenge(config, height, request, view).await?
-            }
+            SettlementTx::Challenge(request) => self.challenge(config, height, request),
             SettlementTx::BeginHardFaultSettlement(_) => {
                 self.begin_hard_fault_settlement(config, view).await?
             }
@@ -1563,16 +1864,27 @@ impl Machine {
             Some(holdings) if holdings <= SQLITE_U64_MAX => {}
             _ => return Step::rejected(Reject::Domain),
         }
-        if let Err(error) =
-            self.chain
+        let index =
+            match self
+                .chain
                 .record_deposit(height, event.id, event.account.clone(), event.amount)
-        {
-            return Step::rejected(chain_rejection(&error));
-        }
-        Step::applied(vec![(
-            deposit_key(config.digest(), &event.id),
-            Some(Record::Deposit(event.clone())),
-        )])
+            {
+                Ok(index) => index,
+                Err(error) => return Step::rejected(chain_rejection(&error)),
+            };
+        Step::applied(vec![
+            (
+                deposit_key(config.digest(), &event.id),
+                Some(Record::Deposit(DepositEffect {
+                    event: event.clone(),
+                    index,
+                })),
+            ),
+            (
+                intake_key(config.digest(), index),
+                Some(Record::Intake(Intake::Deposit(event.clone()))),
+            ),
+        ])
     }
 
     fn queue_withdrawal(
@@ -1581,23 +1893,34 @@ impl Machine {
         height: u64,
         request: &QueueWithdrawalRequest,
     ) -> Step {
-        if let Err(error) =
-            self.chain
-                .queue_withdrawal(height, request.request.clone(), &request.opening, eligible)
-        {
-            return Step::rejected(chain_rejection(&error));
-        }
-        Step::applied(vec![(
-            withdrawal_key(config.digest(), request.request.account()),
-            Some(Record::Withdrawal(request.request.clone())),
-        )])
+        let index = match self.chain.queue_withdrawal(
+            height,
+            request.request.clone(),
+            &request.opening,
+            eligible,
+        ) {
+            Ok(index) => index,
+            Err(error) => return Step::rejected(chain_rejection(&error)),
+        };
+        Step::applied(vec![
+            (
+                withdrawal_key(config.digest(), request.request.account()),
+                Some(Record::Withdrawal(WithdrawalEffect {
+                    request: request.request.clone(),
+                    index,
+                })),
+            ),
+            (
+                intake_key(config.digest(), index),
+                Some(Record::Intake(Intake::Withdrawal(request.request.clone()))),
+            ),
+        ])
     }
 
     async fn register_epoch<E>(
         &mut self,
         config: &Deployment,
         height: u64,
-        timing: &Timing,
         request: &RegisterEpochRequest,
         view: &View<'_, E>,
     ) -> Result<Step, QmdbError<mmr::Family>>
@@ -1607,7 +1930,7 @@ impl Machine {
         if !verify_chain_registration_signature(
             config,
             request.epoch,
-            request.predecessor_liability,
+            request.end,
             &request.deposits_root,
             &request.withdrawals,
             request.fee,
@@ -1619,38 +1942,43 @@ impl Machine {
         // A second registration for an already-registered epoch conflicts:
         // the record guard makes an exact replay a harmless no-op and any
         // different material a typed conflict.
-        if let Some(existing) = view.registration(config.digest()).await?
-            && existing.epoch == request.epoch
+        if view
+            .registration(config.digest(), request.epoch)
+            .await?
+            .is_some()
         {
             return Ok(Step::rejected(Reject::RegistrationConflict));
         }
 
-        // The successor's registration window opens at admission: the next
-        // admissible epoch extends the pipeline head, so a registration is
-        // acceptable as soon as its predecessor's close is admitted, while
-        // that close's challenge window is still open.
-        let pending = u64::try_from(self.chain.pending_epoch_count())
-            .expect("pending epochs fit the epoch counter");
-        if Some(request.epoch) != self.chain.expected_epoch().checked_add(pending) {
+        // Registration requires only that the previous epoch is registered.
+        // It does not wait for that epoch's close to be built, certified, or
+        // admitted.
+        if request.epoch != self.registered_epochs().end {
             return Ok(Step::rejected(Reject::EpochSequence));
         }
 
-        // Execution assigns the epoch's absolute deadlines from the inclusion
-        // height under the chain-wide genesis policy: the operator chooses
-        // nothing about timing.
-        let assigned = height
-            .checked_add(timing.admission_offset)
-            .and_then(|admission_deadline| {
-                admission_deadline
-                    .checked_add(timing.challenge_duration)
-                    .map(|challenge_deadline| (admission_deadline, challenge_deadline))
-            });
-        let Some((admission_deadline, challenge_deadline)) = assigned else {
-            return Ok(Step::rejected(Reject::Deadline));
-        };
+        // The registration pulls the inbox from the first unpulled index up
+        // to its signed end, which cannot pass the inbox length of the state
+        // the block builds on. Every validator derives that bound from the
+        // parent, applied or not. Intake recorded in this block, even ahead
+        // of the registration, sits at or past it and waits for a later
+        // registration.
+        let start = self.chain.pulled();
+        if request.end < start || request.end > self.pullable {
+            return Ok(Step::rejected(Reject::IntakeRange));
+        }
 
-        // The deposit root must match settlement custody before registration consumes a slot.
-        let deposits = self.chain.pending_deposits();
+        // Only registrations delete inbox entries, and a block's
+        // registrations pull disjoint consecutive ranges from the first
+        // unpulled index. No write in this block reaches the scanned range, so
+        // the scan reads exactly the entries the parent state holds there.
+        let intake = view.intake(config.digest(), start..request.end).await?;
+        let Ok(deposits) = deposit_batch(intake.iter().filter_map(|entry| match entry {
+            Intake::Deposit(event) => Some(event),
+            Intake::Withdrawal(_) => None,
+        })) else {
+            return Ok(Step::rejected(Reject::Chain));
+        };
         let Ok(derived_root) = deposits.root::<Sha256>() else {
             return Ok(Step::rejected(Reject::Chain));
         };
@@ -1660,66 +1988,70 @@ impl Machine {
         let Ok(withdrawals_root) = request.withdrawals.root::<Sha256>() else {
             return Ok(Step::rejected(Reject::Chain));
         };
-
-        // The submitted batch may carry operator-collected requests beyond
-        // the queued set, but every queued request must still appear
-        // verbatim.
-        let pending = self.chain.pending_withdrawals();
-        for queued in pending.requests() {
-            if request.withdrawals.request_for(queued.account()) != Some(queued) {
-                return Ok(Step::rejected(Reject::MissingQueuedWithdrawal));
-            }
-        }
-
-        let Ok(context) = epoch_context_at(
-            *config.digest(),
-            config.operator.clone(),
-            request.epoch,
-            &deposits,
-            &request.withdrawals,
-            request.predecessor_liability,
-            admission_deadline,
-            challenge_deadline,
-        ) else {
+        let Ok(context) = committee().and_then(|committee| {
+            epoch_context_at(
+                *config.digest(),
+                config.operator.clone(),
+                request.epoch,
+                &deposits,
+                &request.withdrawals,
+                committee.commitment::<Sha256>(),
+            )
+        }) else {
             return Ok(Step::rejected(Reject::Chain));
         };
         let anchor = *context.payment().anchor();
+
+        // Registration captures the current floors, and a queued epoch keeps
+        // them until it becomes the frontier. Every uncarried chain-queued
+        // request the pull reaches must appear verbatim.
+        let floors = self.chain.registration_floors();
         if let Err(error) = self.chain.register_epoch(
             height,
             context,
+            request.end,
+            deposits,
             request.withdrawals.clone(),
-            &request.openings,
             eligible,
         ) {
-            return Ok(Step::rejected(chain_rejection(&error)));
+            return Ok(Step::rejected(match error {
+                SettlementError::WithdrawalWitness => Reject::MissingQueuedWithdrawal,
+                error => chain_rejection(&error),
+            }));
         }
         let record = RegistrationRecord {
             epoch: request.epoch,
-            predecessor_liability: request.predecessor_liability,
             anchor,
-            admission_deadline,
-            challenge_deadline,
+            height,
+            deadlines: self.frontier_deadlines(request.epoch),
             deposits_root: request.deposits_root,
-
             withdrawals_root,
+            pulled: start..request.end,
+            intake: self.chain.intake(),
+            floors,
             admitted: None,
-            floors: self
-                .chain
-                .registered()
-                .expect("registration succeeded")
-                .context
-                .floors(),
         };
-        Ok(Step::applied(vec![
+        let mut writes = vec![
             (
                 anchor_key(config.digest(), request.epoch),
                 Some(Record::Anchor(anchor)),
             ),
             (
-                registration_key(config.digest()),
+                registration_key(config.digest(), request.epoch),
                 Some(Record::Registration(record)),
             ),
-        ]))
+        ];
+        writes.extend((start..request.end).map(|index| (intake_key(config.digest(), index), None)));
+        writes.extend(request.withdrawals.requests().iter().map(|withdrawal| {
+            (
+                carried_key(config.digest(), withdrawal.account()),
+                Some(Record::Carried(CarriedRecord {
+                    epoch: request.epoch,
+                    id: withdrawal.id::<Sha256>(),
+                })),
+            )
+        }));
+        Ok(Step::applied(writes))
     }
 
     /// Admits one certified close.
@@ -1751,26 +2083,22 @@ impl Machine {
         {
             return Ok(Step::rejected(Reject::AdmissionConflict));
         }
-        if request.epoch < self.chain.expected_epoch() {
-            return Ok(Step::rejected(Reject::EpochSequence));
-        }
-        let Some(registration) = view.registration(config.digest()).await? else {
+        let Some(mut record) = view.registration(config.digest(), request.epoch).await? else {
             return Ok(Step::rejected(Reject::NotRegistered));
         };
-        if registration.admitted.is_some() {
+        if record.admitted.is_some() {
             return Ok(Step::rejected(Reject::AdmissionConflict));
         }
-        if registration.epoch != request.epoch {
+
+        // Only the admission frontier has a bound predecessor. A queued epoch
+        // waits until every earlier epoch is admitted.
+        if request.epoch != self.registered_epochs().start {
             return Ok(Step::rejected(Reject::EpochSequence));
         }
-        let activity_start = self
-            .chain
-            .registered()
-            .expect("registered close checked")
-            .context
-            .predecessor_logs()
-            .activity
-            .operations;
+        let Some(frontier) = self.chain.registered() else {
+            return Ok(Step::rejected(Reject::NotRegistered));
+        };
+        let activity_start = frontier.context.predecessor_logs().activity.operations;
         let batch_id = match self.chain.admit(
             height,
             request.header,
@@ -1781,9 +2109,8 @@ impl Machine {
             Ok(batch_id) => batch_id,
             Err(error) => return Ok(Step::rejected(chain_rejection(&error))),
         };
-        let mut record = registration;
         record.admitted = Some(batch_id);
-        Ok(Step::applied(vec![
+        let mut writes = vec![
             (
                 admitted_key(config.digest(), request.epoch),
                 Some(Record::Admitted(AdmittedRootsResponse::new(
@@ -1794,22 +2121,41 @@ impl Machine {
                 ))),
             ),
             (
-                registration_key(config.digest()),
+                registration_key(config.digest(), request.epoch),
                 Some(Record::Registration(record)),
             ),
-        ]))
+        ];
+
+        // Admission promotes the next queued epoch, which receives its
+        // deadlines at this height.
+        if let Some(successor) = request.epoch.checked_add(1)
+            && let Some(deadlines) = self.frontier_deadlines(successor)
+        {
+            let Some(mut promoted) = view.registration(config.digest(), successor).await? else {
+                // Every accepted registration writes its record, and only
+                // finalization or an invalidating range removes it.
+                unreachable!("every registered epoch owns its registration record");
+            };
+            promoted.deadlines = Some(deadlines);
+            writes.push((
+                registration_key(config.digest(), successor),
+                Some(Record::Registration(promoted)),
+            ));
+        }
+        Ok(Step::applied(writes))
     }
 
-    async fn challenge<E>(
-        &mut self,
-        config: &Deployment,
-        height: u64,
-        request: &ChallengeRequest,
-        view: &View<'_, E>,
-    ) -> Result<Step, QmdbError<mmr::Family>>
-    where
-        E: StorageContext + Spawner,
-    {
+    fn challenge(&mut self, config: &Deployment, height: u64, request: &ChallengeRequest) -> Step {
+        // A proven challenge invalidates the challenged close and every later
+        // registration, so the range is captured before adjudication.
+        let tail = self.registered_epochs().end;
+        let challenged = self
+            .chain
+            .pending_batches()
+            .position(|batch| batch.header.batch_id::<Sha256>() == request.batch_id)
+            .and_then(|position| u64::try_from(position).ok())
+            .and_then(|position| self.chain.expected_epoch().checked_add(position));
+
         // The evidence length was already bounded by the transaction codec,
         // so the bounded decode inside the chain uses it directly. The chain
         // adjudicates with the sequential strategy.
@@ -1820,10 +2166,10 @@ impl Machine {
             request.evidence.len(),
         ) {
             Ok(verdict) => verdict,
-            Err(error) => return Ok(Step::rejected(chain_rejection(&error))),
+            Err(error) => return Step::rejected(chain_rejection(&error)),
         };
         match verdict {
-            Verdict::NoContradiction => Ok(Step::outcome(TxOutcome::NoContradiction)),
+            Verdict::NoContradiction => Step::outcome(TxOutcome::NoContradiction),
             Verdict::Proven(_) => {
                 let reason: HardFaultReasonResponse = self
                     .chain
@@ -1835,13 +2181,16 @@ impl Machine {
                     fault_key(config.digest()),
                     Some(Record::Fault(FaultRecord::Faulted(reason))),
                 )];
-
-                // A proven challenge invalidates the admitted close and
-                // clears the live registration slot with it.
-                if view.registration(config.digest()).await?.is_some() {
-                    writes.push((registration_key(config.digest()), None));
-                }
-                Ok(Step::applied(writes))
+                let Some(first) = challenged else {
+                    // Adjudication proves a contradiction only against a
+                    // close in the admitted pipeline, which `challenged`
+                    // indexes by the same batch id.
+                    unreachable!("a proven challenge targets an admitted close");
+                };
+                writes.extend(
+                    (first..tail).map(|epoch| (registration_key(config.digest(), epoch), None)),
+                );
+                Step::applied(writes)
             }
         }
     }
@@ -1930,13 +2279,18 @@ impl Machine {
     }
 
     /// The status record for a block at `height` with `timestamp`.
-    const fn status(&self, deployment: Digest, height: u64, timestamp: u64) -> StatusRecord {
+    fn status(&self, deployment: Digest, height: u64, timestamp: u64) -> StatusRecord {
+        let registered = self.registered_epochs();
         StatusRecord {
             height,
             timestamp,
             deployment,
             state_root: self.chain.current_state_root(),
             last_finalized: self.chain.expected_epoch().checked_sub(1),
+            next_admission: registered.start,
+            next_registration: registered.end,
+            intake: self.chain.intake(),
+            pulled: self.chain.pulled(),
             custody: self.chain.custody_balance(),
             claimable: self.chain.claimable_balance(),
             hard_faulted: self.chain.hard_fault().is_some(),
@@ -2185,15 +2539,12 @@ where
 
         // Trial machines own the entire compound operation. Block deadline observations already
         // belong to the originals and remain durable when either trial rejects.
-        let mut source_trial = Machine::decode(
-            machines[source]
-                .as_ref()
-                .expect("source machine loaded")
-                .encode(),
-        )
-        .expect("machine encoding is valid");
+        let mut source_trial = machines[source]
+            .as_ref()
+            .expect("source machine loaded")
+            .trial();
         let mut step = source_trial
-            .apply(source_config, height, timing, &claim_tx, view)
+            .apply(source_config, height, &claim_tx, view)
             .await?;
         if step.outcome != TxOutcome::Applied {
             return Ok(step);
@@ -2206,13 +2557,10 @@ where
             None
         } else {
             Some(
-                Machine::decode(
-                    machines[target]
-                        .as_ref()
-                        .expect("target machine loaded")
-                        .encode(),
-                )
-                .expect("machine encoding is valid"),
+                machines[target]
+                    .as_ref()
+                    .expect("target machine loaded")
+                    .trial(),
             )
         };
         let target_machine = target_trial.as_mut().unwrap_or(&mut source_trial);
@@ -2255,7 +2603,9 @@ where
             ));
         }
         SettlementTx::RegisterEpoch(request) => {
-            let fee = u64::from(entry.max_dealing_bytes).div_ceil(1024) * native.epoch_fee;
+            let fee = native
+                .epoch_cost(entry.max_dealing_bytes)
+                .expect("genesis bounds every deployment's epoch fee");
             if request.fee != fee {
                 return Ok(Step::rejected(Reject::Fee));
             }
@@ -2274,7 +2624,7 @@ where
     let mut step = machines[index]
         .as_mut()
         .expect("routed machine loaded")
-        .apply(config, height, timing, tx, view)
+        .apply(config, height, tx, view)
         .await?;
     if step.outcome == TxOutcome::Applied {
         step.writes.extend(balances);
@@ -2519,9 +2869,13 @@ where
                         })),
                     )];
 
-                    if let Some(previous) = epoch.checked_sub(1) {
-                        emitted.push((admitted_key(deployment, previous), None));
-                        emitted.push((anchor_key(deployment, previous), None));
+                    // Bodies of an epoch bind the terminals of the epoch before it. An
+                    // epoch's admission and anchor therefore stay until the epoch after its
+                    // successor finalizes, so a wallet that returns after the successor
+                    // finalizes can still decide both epochs.
+                    if let Some(retired) = epoch.checked_sub(2) {
+                        emitted.push((admitted_key(deployment, retired), None));
+                        emitted.push((anchor_key(deployment, retired), None));
                     }
 
                     let neighbors = view.claimed_neighbors(deployment, *commit).await?;
@@ -2529,31 +2883,24 @@ where
                         .expect("a newly finalized commit is a fresh consumed location");
                     emitted.extend(claimed_writes(deployment, range, neighbors[1]));
 
-                    // Finalization retires the slot only when the singleton
-                    // still belongs to the finalized epoch: a successor
-                    // registered at admission has already taken it over and
-                    // stays live.
-                    if let Some(registration) = view.registration(deployment).await?
-                        && registration.epoch == *epoch
-                    {
-                        emitted.push((registration_key(deployment), None));
-                    }
+                    // Finalization retires the epoch's own registration.
+                    emitted.push((registration_key(deployment, *epoch), None));
                     emitted
                 }
-                Fired::Faulted { reason } => {
+                Fired::Faulted { reason, dropped } => {
                     let mut emitted = vec![(
                         fault_key(deployment),
-                        Some(Record::Fault(FaultRecord::Faulted(reason.clone()))),
+                        Some(Record::Fault(FaultRecord::Faulted(reason.as_ref().clone()))),
                     )];
 
-                    // The fault drops an unadmitted registration. An admitted
-                    // close survives for FIFO finalization, which retires its
-                    // record itself.
-                    if let Some(registration) = view.registration(deployment).await?
-                        && registration.admitted.is_none()
-                    {
-                        emitted.push((registration_key(deployment), None));
-                    }
+                    // The fault drops every unadmitted registration. An
+                    // admitted close survives for FIFO finalization, which
+                    // retires its record itself.
+                    emitted.extend(
+                        dropped
+                            .clone()
+                            .map(|epoch| (registration_key(deployment, epoch), None)),
+                    );
                     emitted
                 }
             };
@@ -2620,7 +2967,7 @@ mod codec_tests {
     use crate::protocol::identities;
     use bytes::BytesMut;
     use commonware_codec::FixedSize as _;
-    use commonware_glue::stateful::db::DatabaseSet as _;
+    use commonware_glue::stateful::db::{DatabaseSet as _, Merkleized as _};
     use commonware_runtime::{Metrics as _, Runner as _, Supervisor as _, deterministic};
 
     #[test]
@@ -2698,6 +3045,92 @@ mod codec_tests {
         });
     }
 
+    /// One inbox entry per index, distinct across indices and deployments.
+    fn inbox_entry(deployment: &Digest, index: u64) -> Intake {
+        Intake::Deposit(DepositEvent {
+            id: Sha256::hash(&[deployment.as_ref(), &index.to_be_bytes()]),
+            account: identities()[0].key.clone(),
+            amount: index + 1,
+        })
+    }
+
+    /// Writes `deployment`'s inbox entries at `indices` into `batch`.
+    fn record_inbox(
+        mut batch: Batch<deterministic::Context>,
+        deployment: &Digest,
+        indices: Range<u64>,
+    ) -> Batch<deterministic::Context> {
+        for index in indices {
+            batch = batch.write(
+                intake_key(deployment, index),
+                Some(Record::Intake(inbox_entry(deployment, index))),
+            );
+        }
+        batch
+    }
+
+    /// Inbox reads scan entries in index order across committed state, an
+    /// unapplied parent, and pending writes. The indices cross a byte of the
+    /// big-endian index, and the exact translator gives each key its own
+    /// bucket.
+    #[test]
+    fn intake_reads_scan_entries_in_index_order() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = crate::chain::tests::open(context.child("inbox"), "inbox-order").await;
+            let deployment = Sha256::hash(&[b"inbox-order-deployment"]);
+            let other = Sha256::hash(&[b"inbox-order-other"]);
+
+            // Committed state holds indices 0 through 199 of both deployments.
+            let batch = record_inbox(db.new_batches().await, &deployment, 0..200);
+            let batch = record_inbox(batch, &other, 0..200);
+            db.apply(batch.merkleize().await.unwrap()).await;
+
+            // An unapplied parent records indices 200 through 299 and pulls 0 through 9.
+            let mut parent = record_inbox(db.new_batches().await, &deployment, 200..300);
+            for index in 0..10 {
+                parent = parent.write(intake_key(&deployment, index), None);
+            }
+            let parent = parent.merkleize().await.unwrap();
+
+            // The child holds indices 300 through 319 as pending writes.
+            let child = record_inbox(parent.new_batch(), &deployment, 300..320);
+
+            // Every unpulled range of the child's view reads back in index order.
+            let view = View::Batch(&child);
+            for range in [10..320, 250..260, 255..257, 299..301, 42..42] {
+                let expected: Vec<_> = range
+                    .clone()
+                    .map(|index| inbox_entry(&deployment, index))
+                    .collect();
+                assert_eq!(view.intake(&deployment, range).await.unwrap(), expected);
+            }
+
+            // The applied view scans committed state alone, one deployment at a time.
+            let guard = db.read().await;
+            let view = View::Applied(&guard);
+            for deployment in [deployment, other] {
+                let expected: Vec<_> = (0..200)
+                    .map(|index| inbox_entry(&deployment, index))
+                    .collect();
+                assert_eq!(view.intake(&deployment, 0..200).await.unwrap(), expected);
+            }
+        });
+    }
+
+    /// A gap in the scanned inbox is a broken recording invariant, not a
+    /// shorter pull.
+    #[test]
+    #[should_panic(expected = "every unpulled inbox index owns its entry")]
+    fn intake_read_panics_on_a_missing_entry() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = crate::chain::tests::open(context, "inbox-gap").await;
+            let deployment = Sha256::hash(&[b"inbox-gap-deployment"]);
+            let batch = record_inbox(db.new_batches().await, &deployment, 0..4)
+                .write(intake_key(&deployment, 2), None);
+            let _ = View::Batch(&batch).intake(&deployment, 0..4).await;
+        });
+    }
+
     #[test]
     fn machine_checkpoint_record_uses_available_bytes() {
         let mut malformed = vec![12_u8];
@@ -2732,6 +3165,7 @@ mod codec_tests {
                 .unwrap(),
                 height: 0,
                 timestamp: 0,
+                pullable: 0,
             };
             let empty = machine.encode();
             let ids_offset = deployment.digest().encode_size()
@@ -2858,6 +3292,151 @@ mod codec_tests {
             trailing.push(0xff);
             assert!(Record::decode(Bytes::from(trailing)).is_err());
         }
+    }
+
+    /// Status, registration, intake effect, carriage, and inbox records encode
+    /// their fields in declaration order and refuse every truncation and
+    /// trailing byte.
+    #[test]
+    fn epoch_record_codecs_round_trip() {
+        let root = VectorRoot {
+            digest: Sha256::hash(&[b"epoch-record-root"]),
+        };
+        let status = StatusRecord {
+            height: 5,
+            timestamp: 6,
+            deployment: Sha256::hash(&[b"epoch-record-deployment"]),
+            state_root: StateRoot::new(Sha256::hash(&[b"epoch-record-state"])),
+            last_finalized: Some(1),
+            next_admission: 2,
+            next_registration: 4,
+            intake: 9,
+            pulled: 7,
+            custody: 400,
+            claimable: 3,
+            hard_faulted: false,
+        };
+        let queued = RegistrationRecord {
+            epoch: 3,
+            anchor: Sha256::hash(&[b"epoch-record-anchor"]),
+            height: 5,
+            deadlines: None,
+            deposits_root: root,
+            withdrawals_root: root,
+            pulled: 4..7,
+            intake: 9,
+            floors: commonware_clearing::bajillion::logs::Floors {
+                activity: 7,
+                payouts: 8,
+            },
+            admitted: None,
+        };
+        let frontier = RegistrationRecord {
+            epoch: 2,
+            deadlines: Some((10, 11)),
+            pulled: 1..4,
+            admitted: Some(BatchId::new(Sha256::hash(&[b"epoch-record-batch"]))),
+            ..queued
+        };
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"epoch-record-deposit"]),
+            account: identities()[0].key.clone(),
+            amount: 9,
+        };
+        let effect = DepositEffect {
+            event: event.clone(),
+            index: 7,
+        };
+        let request = SignedWithdrawal::sign(
+            Sha256::hash(&[b"epoch-record-deployment"]),
+            Bytes::copy_from_slice(identities()[1].key.as_ref()),
+            commonware_clearing::bajillion::boundary::WithdrawalAction::Close,
+            20,
+            crate::protocol::wallets()[0].signer(),
+        );
+        let withdrawal = WithdrawalEffect {
+            request: request.clone(),
+            index: 8,
+        };
+        let carried = CarriedRecord {
+            epoch: 3,
+            id: request.id::<Sha256>(),
+        };
+
+        // The inbox counters follow the next registration in the status layout.
+        let mut expected = Vec::new();
+        status.height.write(&mut expected);
+        status.timestamp.write(&mut expected);
+        status.deployment.write(&mut expected);
+        status.state_root.write(&mut expected);
+        status.last_finalized.write(&mut expected);
+        status.next_admission.write(&mut expected);
+        status.next_registration.write(&mut expected);
+        status.intake.write(&mut expected);
+        status.pulled.write(&mut expected);
+        status.custody.write(&mut expected);
+        status.claimable.write(&mut expected);
+        status.hard_faulted.write(&mut expected);
+        assert_eq!(status.encode().as_ref(), expected);
+
+        // A registration carries its inclusion height and optional deadlines
+        // between its anchor and its boundary roots, and its pulled inbox
+        // range and the inbox length at execution after them.
+        for registration in [&queued, &frontier] {
+            let mut expected = Vec::new();
+            registration.epoch.write(&mut expected);
+            registration.anchor.write(&mut expected);
+            registration.height.write(&mut expected);
+            registration.deadlines.write(&mut expected);
+            registration.deposits_root.write(&mut expected);
+            registration.withdrawals_root.write(&mut expected);
+            registration.pulled.start.write(&mut expected);
+            registration.pulled.end.write(&mut expected);
+            registration.intake.write(&mut expected);
+            registration.floors.write(&mut expected);
+            registration.admitted.write(&mut expected);
+            assert_eq!(registration.encode().as_ref(), expected);
+        }
+
+        // Intake effects append the inbox index to the event or request.
+        let mut expected = Vec::new();
+        effect.event.write(&mut expected);
+        effect.index.write(&mut expected);
+        assert_eq!(effect.encode().as_ref(), expected);
+        let mut expected = Vec::new();
+        withdrawal.request.write(&mut expected);
+        withdrawal.index.write(&mut expected);
+        assert_eq!(withdrawal.encode().as_ref(), expected);
+
+        // A carriage record names the carrying epoch before the request id.
+        let mut expected = Vec::new();
+        carried.epoch.write(&mut expected);
+        carried.id.write(&mut expected);
+        assert_eq!(carried.encode().as_ref(), expected);
+
+        // Every record round-trips and rejects truncation and trailing bytes.
+        for record in [
+            Record::Status(status),
+            Record::Registration(queued),
+            Record::Registration(frontier),
+            Record::Deposit(effect),
+            Record::Withdrawal(withdrawal),
+            Record::Carried(carried),
+            Record::Intake(Intake::Deposit(event)),
+            Record::Intake(Intake::Withdrawal(request)),
+        ] {
+            let encoded = record.encode();
+            assert_eq!(Record::decode(encoded.clone()).unwrap(), record);
+            for end in 0..encoded.len() {
+                assert!(Record::decode(encoded.slice(..end)).is_err());
+            }
+            let mut trailing = encoded.to_vec();
+            trailing.push(0xff);
+            assert!(Record::decode(Bytes::from(trailing)).is_err());
+        }
+
+        // An inbox entry with an unknown tag fails to decode.
+        assert!(Record::decode(Bytes::from_static(&[8, 2])).is_err());
     }
 
     #[test]

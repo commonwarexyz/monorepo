@@ -602,7 +602,7 @@ fn native_source_serves_admitted_parent_while_every_donor_has_an_unadmitted_chil
         let server = serve_source(&context, address, vec![donor.lane], Some((entered, released))).await;
         let fresh = Fixture::new(&context, "fresh", 8).await;
         let (owner, _) = tests::sealer(&context, "snapshot", &deployment).await;
-        let status = StatusRecord { deployment: *deployment.digest(), height: 20, timestamp: 20, state_root: parent.roots.successor, last_finalized: Some(0), custody: 0, claimable: 0, hard_faulted: false };
+        let status = StatusRecord { deployment: *deployment.digest(), height: 20, timestamp: 20, state_root: parent.roots.successor, last_finalized: Some(0), next_admission: 1, next_registration: 1, intake: 0, pulled: 0, custody: 0, claimable: 0, hard_faulted: false };
         let admitted = AdmittedRootsResponse::new(parent.header.batch_id::<Sha256>(), parent.roots, parent.context.predecessor_logs().activity.operations, true);
         let batch = owner.db.new_batches().await.write(status_key(deployment.digest()), Some(Record::Status(status.clone()))).write(admitted_key(deployment.digest(), 0), Some(Record::Admitted(admitted))).merkleize().await.unwrap();
         owner.db.apply(batch).await;
@@ -707,7 +707,7 @@ fn failed_source_preserves_other_lanes_and_imports_the_admitted_competing_candid
         let response = mailbox.native(sync::NativeRequest { deployment: *deployment.digest(), query: sync::Query::Checkpoint { max_next: 0 } }).await.unwrap();
         assert!(matches!(response, sync::NativeResponse::Checkpoint(transfer) if transfer.checkpoint.next == 0));
         select! { _ = blocked => {}, _ = context.sleep(Duration::from_secs(2)) => panic!("failed native source never started"), }
-        let batch = db.new_batches().await.write(status_key(deployment.digest()), Some(Record::Status(StatusRecord { deployment: *deployment.digest(), height: 1000, timestamp: 1000, state_root: deployment.genesis().root(), last_finalized: None, custody: 0, claimable: 0, hard_faulted: true }))).merkleize().await.unwrap();
+        let batch = db.new_batches().await.write(status_key(deployment.digest()), Some(Record::Status(StatusRecord { deployment: *deployment.digest(), height: 1000, timestamp: 1000, state_root: deployment.genesis().root(), last_finalized: None, next_admission: 0, next_registration: 0, intake: 0, pulled: 0, custody: 0, claimable: 0, hard_faulted: true }))).merkleize().await.unwrap();
         db.apply(batch).await;
         let response = select! {
             response = mailbox.native(sync::NativeRequest { deployment: *other.digest(), query: sync::Query::Checkpoint { max_next: 0 } }) => response.unwrap(),
@@ -845,6 +845,7 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
                         )
                     })
                     .collect(),
+                previous: None,
             };
             let logs = hot.lane.state.as_ref().unwrap().logs();
             let protected_head = ballots[128].roots.withdrawal_outputs;
@@ -1192,6 +1193,10 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
                     deployment: *deployment.digest(),
                     state_root: ballots[finalized].roots.successor,
                     last_finalized: Some(finalized as u64),
+                    next_admission: ballots.len() as u64,
+                    next_registration: ballots.len() as u64,
+                    intake: 0,
+                    pulled: 0,
                     custody: 0,
                     claimable: 0,
                     hard_faulted: false,
@@ -1232,6 +1237,111 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
                 .retained_starts()
                 .payouts
                 >= config::LOG_OPERATIONS_PER_SECTION.get()
+        );
+    });
+}
+
+/// Pruning keeps the previous finalized close's rows while the chain retains its admission.
+///
+/// Two closes are promoted, the second with its activity floor past the first's rows. While the
+/// chain retains both finalized admissions, retention starts at the first close's rows, so
+/// wallets can still read them to decide the epoch after it. Once the first admission retires,
+/// retention starts at the second close's floor.
+#[test]
+fn retention_keeps_the_previous_finalized_rows() {
+    use crate::chain::state::{AdmittedRootsResponse, StatusRecord, admitted_key};
+    use commonware_glue::stateful::db::{DatabaseSet as _, Unmerkleized as _};
+    deterministic::Runner::default().start(|context| async move {
+        let mut fixture = Fixture::new(&context, "previous_rows", 8).await;
+
+        // The second close's floors sit at the first close's commit locations.
+        let (first, _, prepared) = fixture
+            .prepare(
+                3,
+                1,
+                Floors {
+                    activity: 0,
+                    payouts: 0,
+                },
+            )
+            .await;
+        fixture.candidate(first.clone(), prepared).await;
+        fixture.promote().await;
+        let floors = Floors {
+            activity: first.roots.change.operations - 1,
+            payouts: first.roots.withdrawal_outputs.operations - 1,
+        };
+        let (second, _, prepared) = fixture.prepare(3, 1, floors).await;
+        fixture.candidate(second.clone(), prepared).await;
+        fixture.promote().await;
+
+        // Both closes finalized, and the chain retains both admissions.
+        let deployment = fixture.lane.deployment.clone();
+        let (owner, _) = tests::sealer(&context, "previous_rows_owner", &deployment).await;
+        let admitted = |ballot: &Ballot| {
+            AdmittedRootsResponse::new(
+                ballot.header.batch_id::<Sha256>(),
+                ballot.roots,
+                ballot.context.predecessor_logs().activity.operations,
+                true,
+            )
+        };
+        let status = StatusRecord {
+            deployment: *deployment.digest(),
+            height: 20,
+            timestamp: 20,
+            state_root: second.roots.successor,
+            last_finalized: Some(1),
+            next_admission: 2,
+            next_registration: 2,
+            intake: 0,
+            pulled: 0,
+            custody: 0,
+            claimable: 0,
+            hard_faulted: false,
+        };
+        let batch = owner
+            .db
+            .new_batches()
+            .await
+            .write(
+                status_key(deployment.digest()),
+                Some(Record::Status(status)),
+            )
+            .write(
+                admitted_key(deployment.digest(), 0),
+                Some(Record::Admitted(admitted(&first))),
+            )
+            .write(
+                admitted_key(deployment.digest(), 1),
+                Some(Record::Admitted(admitted(&second))),
+            )
+            .merkleize()
+            .await
+            .unwrap();
+        owner.db.apply(batch).await;
+        let target = fixture.lane.manifest().canonical.checkpoint.clone();
+        let start = first.context.predecessor_logs().activity.operations;
+        assert!(start < floors.activity);
+        let authority = sync::capture(&owner.db, deployment.digest()).await.unwrap();
+        assert_eq!(authority.previous, Some(start));
+        assert_eq!(authority.retention(&target, 0).unwrap().activity, start);
+
+        // Retiring the first admission moves retention to the second close's floor.
+        let batch = owner
+            .db
+            .new_batches()
+            .await
+            .write(admitted_key(deployment.digest(), 0), None)
+            .merkleize()
+            .await
+            .unwrap();
+        owner.db.apply(batch).await;
+        let authority = sync::capture(&owner.db, deployment.digest()).await.unwrap();
+        assert_eq!(authority.previous, None);
+        assert_eq!(
+            authority.retention(&target, 0).unwrap().activity,
+            floors.activity
         );
     });
 }

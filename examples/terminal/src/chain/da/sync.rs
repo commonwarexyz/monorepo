@@ -46,6 +46,9 @@ pub(super) struct Authorities {
     pub(super) first: u64,
     pub(super) finalized: Option<u64>,
     pub(super) entries: Vec<AdmittedRootsResponse>,
+    /// The first activity location of the close finalized before `first`, while the chain
+    /// retains its admission. Wallets decide the epoch after it from its rows.
+    pub(super) previous: Option<u64>,
 }
 impl Authorities {
     pub(super) const fn next(&self) -> u64 {
@@ -68,7 +71,11 @@ impl Authorities {
             } else {
                 0
             },
-            activity: first.activity_start.min(target.head.logs.activity.floor),
+            activity: self
+                .previous
+                .unwrap_or(first.activity_start)
+                .min(first.activity_start)
+                .min(target.head.logs.activity.floor),
             payouts: payout_commit.min(target.head.logs.payouts.floor),
         })
     }
@@ -83,6 +90,13 @@ pub(super) async fn capture<E: StorageContext + Spawner>(
         _ => None,
     };
     let first = finalized.unwrap_or(0);
+    let previous = match first.checked_sub(1) {
+        Some(epoch) => match db.get(&admitted_key(deployment, epoch)).await? {
+            Some(Record::Admitted(admitted)) => Some(admitted.activity_start),
+            _ => None,
+        },
+        None => None,
+    };
     let mut epoch = first;
     let mut entries = Vec::new();
     while let Some(Record::Admitted(admitted)) = db.get(&admitted_key(deployment, epoch)).await? {
@@ -93,6 +107,7 @@ pub(super) async fn capture<E: StorageContext + Spawner>(
         first,
         finalized,
         entries,
+        previous,
     })
 }
 

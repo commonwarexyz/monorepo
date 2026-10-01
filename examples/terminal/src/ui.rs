@@ -211,16 +211,19 @@ pub(crate) async fn run_with_io<E: Env>(
             }
             Ok(false)
         };
-        let summary = {
+        let (summary, convicted) = {
             let assurance = async {
                 let _ = agent.intake_incoming(network, chain, operator).await;
                 agent.ensure_store_usable()?;
-                agent.reconcile(network, chain, operator).await
+                let summary = agent.reconcile(network, chain, operator).await;
+                agent.ensure_store_usable()?;
+                let convicted = agent.enforce(network, chain).await;
+                anyhow::Ok((summary, convicted))
             };
             let mut assurance = std::pin::pin!(assurance);
             loop {
                 select! {
-                    result = &mut assurance => break result,
+                    result = &mut assurance => break result?,
                     _ = network.sleep(REFRESH_BUDGET) => {
                         if poll_input()? { return Ok(()); }
                     },
@@ -228,6 +231,13 @@ pub(crate) async fn run_with_io<E: Env>(
             }
         };
         agent.ensure_store_usable()?;
+        if let Ok(convicted) = convicted {
+            for epoch in convicted {
+                state.log(format!(
+                    "epoch {epoch} omitted an acknowledged send, convicted via HigherAckDebit; the close is invalidated"
+                ));
+            }
+        }
         if let Ok(summary) = summary {
             for epoch in summary.convicted {
                 state.log(format!(
@@ -285,7 +295,7 @@ pub(crate) async fn run_with_io<E: Env>(
             KeyCode::PageDown => state.amount = state.amount.saturating_sub(10).max(1),
             KeyCode::PageUp => state.amount = state.amount.saturating_add(10),
             KeyCode::Char('p' | 'b') if agent.has_pending_payment() => {
-                state.log("A saved payment is awaiting confirmation; press R to retry it.");
+                state.log("A saved payment is awaiting confirmation; press R to retry it, or f to close the account.");
             }
             KeyCode::Char('p') => {
                 let receiver = agent.receiver_name(state.receiver);
@@ -331,7 +341,7 @@ pub(crate) async fn run_with_io<E: Env>(
                         }
                     }
                     Ok(None) => state.log("No payment is awaiting confirmation."),
-                    Err(error) => state.log(format!("Payment still unresolved; press R to retry: {error:#}")),
+                    Err(error) => state.log(format!("Payment still unresolved; press R to retry, or f to close the account: {error:#}")),
                 }
             }
             KeyCode::Char('a') => {
@@ -427,10 +437,10 @@ pub(crate) async fn run_with_io<E: Env>(
                 match agent.withdraw(network, chain, operator, action).await {
                     Ok(WithdrawalOutcome::Applied { epoch, request }) => match request.body().action() {
                         WithdrawalAction::Amount(amount) => state.log(format!(
-                            "epoch {epoch} withdrawal carried by operator: {amount}"
+                            "epoch {epoch} withdrawal of {amount} accepted by operator; press c to claim after finalization, or x to escalate it onchain if no registration carries it"
                         )),
                         WithdrawalAction::Close => state.log(format!(
-                            "epoch {epoch} Close carried by operator; press c to claim after finalization"
+                            "epoch {epoch} Close accepted by operator; press c to claim after finalization, or x to escalate it onchain if no registration carries it"
                         )),
                     },
                     Ok(WithdrawalOutcome::Signed {
@@ -447,7 +457,7 @@ pub(crate) async fn run_with_io<E: Env>(
             }
             KeyCode::Char('x') => match agent.escalate_withdrawal(network, chain).await {
                 Ok(request) => state.log(format!(
-                    "withdrawal escalated to settlement through deadline {}; the next registered close must carry it verbatim; if the operator stalls, expiry becomes hard-fault recovery via h",
+                    "withdrawal escalated to settlement through deadline {}; the registration that pulls it, or an earlier one, must carry it verbatim; if the operator stalls, expiry becomes hard-fault recovery via h",
                     request.body().deadline()
                 )),
                 Err(error) => state.log(format!("withdrawal escalation rejected: {error:#}")),
@@ -655,8 +665,7 @@ async fn scripted_payment<E: Env>(
     unreachable!("payment attempt budget is nonzero")
 }
 
-/// Starts one asynchronous close and drives it to the operator's certified
-/// finalization, returning the closed epoch.
+/// Drives an owned work epoch to the operator's certified finalization.
 async fn close_epoch<E: Env>(
     network: &E,
     operator: SocketAddr,
@@ -670,7 +679,7 @@ async fn close_epoch<E: Env>(
         format_args!("epoch {epoch}; waiting for certification and finality..."),
     );
     loop {
-        match agent.poll_close(network, operator, close.epoch).await? {
+        match agent.poll_close(network, operator, epoch).await? {
             PollCloseResponse::NoEvent => network.sleep(Duration::from_millis(10)).await,
             PollCloseResponse::Finished(finished) => {
                 ensure!(
@@ -685,7 +694,7 @@ async fn close_epoch<E: Env>(
                         finished.dealing_bytes as f64 / 1_000.0
                     ),
                 );
-                return Ok(close.epoch);
+                return Ok(epoch);
             }
             PollCloseResponse::Failed { epoch, error } => {
                 anyhow::bail!(
@@ -700,15 +709,14 @@ async fn close_epoch<E: Env>(
 /// Waits for the script's sole deposit to reach the certified finalized head.
 async fn finalized_deposit<E: Env>(
     network: &E,
-    operator: SocketAddr,
     chain: &mut Client,
     agent: &mut Agent,
     expected: u64,
 ) -> Result<u64> {
     for _ in 0..FINALIZE_ATTEMPTS {
-        if let Ok((status, opening)) = agent.finalized_head(network, chain, operator).await {
+        if let Ok((status, opening)) = agent.validator_head(network, chain).await {
             ensure!(!status.hard_faulted, "the deposit deployment hard-faulted");
-            if opening.balance.get() == expected
+            if opening.is_some_and(|opening| opening.balance.get() == expected)
                 && let Some(epoch) = status.last_finalized
             {
                 return Ok(epoch);
@@ -740,7 +748,7 @@ async fn complete_pending_withdrawal<E: Env>(
             }
             Err(error) => {
                 last = Some(error);
-                agent.observe_withdrawal_expiry(network, chain).await?;
+                agent.observe_withdrawal(network, chain).await?;
                 if agent.pending_withdrawal_action().is_none()
                     && !agent.has_pending_withdrawal_claim()
                 {
@@ -809,16 +817,10 @@ pub(crate) async fn scripted<E: Env>(
         format_args!("{} moved into chain custody", deposit.amount),
     );
 
-    // The withdrawal signs the finalized root containing this deposit. Wait for
-    // the operator to observe that finality before sending the fresh request.
-    let deposit_epoch = finalized_deposit(
-        network,
-        operator,
-        &mut chain,
-        &mut agent,
-        start + deposit.amount,
-    )
-    .await?;
+    // Poll the validators until the deposit reaches the certified finalized
+    // balance before sending the fresh request.
+    let deposit_epoch =
+        finalized_deposit(network, &mut chain, &mut agent, start + deposit.amount).await?;
     close_epoch(network, operator, &mut agent, deposit_epoch).await?;
     walkthrough::event(
         "Balance",
@@ -844,6 +846,7 @@ pub(crate) async fn scripted<E: Env>(
     }
     let withdrawal = withdrawal
         .context("the signed withdrawal remains unresolved; retry keeps the saved request")?;
+
     walkthrough::event(
         "Withdrawal",
         format_args!("3 queued for epoch {withdrawal}; claim after finality"),
@@ -855,10 +858,8 @@ pub(crate) async fn scripted<E: Env>(
         "The operator returns receipts before settlement.",
     );
 
-    // An interrupted run can also lose a staged payment's response. Resubmit
-    // the exact staged bytes here, after this run's deposit and withdrawal:
-    // the resumed send registers the epoch and becomes its first payment,
-    // which freezes the boundary that intake had to enter first.
+    // An interrupted run can lose a staged payment's response. The wallet resolves that
+    // exact authorization before this walkthrough creates another payment intent.
     if let Some(outcomes) = agent
         .resume_pending_payment(network, &mut chain, operator)
         .await
@@ -1052,6 +1053,8 @@ pub(crate) async fn scripted<E: Env>(
         format_args!("withdrawal of 2 queued for epoch {eve_withdrawal}"),
     );
 
+    // Eve's withdrawal can outlive the payer's last signing context.
+    agent.head(network, &mut chain, operator, 1).await?;
     let successor = scripted_payment(network, operator, &mut chain, &mut agent, &[(1, 1)]).await?;
     walkthrough::event(
         agent.name(),
@@ -1060,11 +1063,7 @@ pub(crate) async fn scripted<E: Env>(
             successor.epoch
         ),
     );
-    // The successor payment registered the next epoch's payment context, so
-    // close that epoch too, inside its admission runway: an activated context
-    // left registered would expire its admission deadline and permanently
-    // hard-fault the deployment.
-    close_epoch(
+    let last_close = close_epoch(
         network,
         operator,
         &mut agent,
@@ -1081,23 +1080,22 @@ pub(crate) async fn scripted<E: Env>(
         format_args!("{} returned to Eve onchain", eve_release.amount),
     );
 
-    // Every close completes only on its certified finalization, which
-    // retires the registration slot, and nothing after the last close
-    // registers, so only validator serving lag separates this read from the
-    // proven absence.
-    let mut retired = false;
-    for _ in 0..100 {
-        if chain.registration(network).await?.is_none() {
-            retired = true;
+    // Finality covers the walkthrough's work while the operator continues serving successors.
+    let mut finalized = false;
+    for _ in 0..EFFECT_ATTEMPTS {
+        let status = chain.status(network).await?;
+        ensure!(!status.hard_faulted, "the deployment hard-faulted");
+        if status
+            .last_finalized
+            .is_some_and(|epoch| epoch >= last_close)
+        {
+            finalized = true;
             break;
         }
-        network.sleep(Duration::from_millis(100)).await;
+        network.sleep(POLL).await;
     }
-    ensure!(retired, "a live registration outlived the walkthrough");
-    walkthrough::event(
-        "Complete",
-        "all live closes finalized; no pending epoch deadlines",
-    );
+    ensure!(finalized, "the walkthrough's last close did not finalize");
+    walkthrough::event("Complete", "payments and withdrawals finalized");
 
     Ok(())
 }
@@ -1148,45 +1146,43 @@ pub(crate) fn fraud_arc() -> Result<()> {
                 )),
             )
             .await?;
-        let mut recorded = false;
+        let mut recorded = None;
         for _ in 0..EFFECT_ATTEMPTS {
-            if let Ok(Some(_)) = chain.deposit(&context, deposit_id).await {
-                recorded = true;
+            if let Ok(Some(effect)) = chain.deposit(&context, deposit_id).await {
+                recorded = Some(effect.index);
                 break;
             }
             context.sleep(POLL).await;
         }
-        ensure!(recorded, "the fraud deposit earned no custody record");
+        let index = recorded.context("the fraud deposit earned no custody record")?;
         let protocol = Protocol::new(NonZeroUsize::MIN)?;
         let deposits_root = deposits.root::<Sha256>()?;
         let withdrawals = WithdrawalBatch::empty();
-        let fee = chain.genesis().native.epoch_fee.checked_mul(
-            u64::from(chain.registered(&context).await?.max_dealing_bytes).div_ceil(1024),
-        ).context("epoch fee overflow")?;
-        let signature = protocol.sign_chain_registration(
-            0,
-            400,
-            &deposits_root,
-            &withdrawals,
-            fee,
-        );
+        let max_dealing_bytes = chain.registered(&context).await?.max_dealing_bytes;
+        let fee = chain
+            .genesis()
+            .native
+            .epoch_cost(max_dealing_bytes)
+            .context("epoch fee overflow")?;
+        // The registration pulls the inbox through the fraud deposit.
+        let end = index.checked_add(1).context("inbox index overflow")?;
+        let signature =
+            protocol.sign_chain_registration(0, end, &deposits_root, &withdrawals, fee);
         let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
             fee,
             deployment: deployment(),
             epoch: 0,
-            predecessor_liability: 400,
+            end,
             deposits_root,
-
             withdrawals,
-            openings: Vec::new(),
             signature,
         });
         chain.deliver(&context, &register).await?;
 
-        // The registration's effect is its certified record, and the chain
-        // assigned the deadlines at inclusion, so the fraudulent close is
-        // built only after that read-back reveals them: the same completion
-        // the honest operator performs.
+        // The registration's effect is its certified record. The first epoch
+        // becomes the admission frontier at inclusion, so the read-back reveals
+        // its deadlines and the fraudulent close is built only after it: the
+        // same completion the honest operator performs.
         let mut registered = None;
         for _ in 0..EFFECT_ATTEMPTS {
             if let Ok(Some(record)) = chain.registration(&context).await {
@@ -1197,6 +1193,9 @@ pub(crate) fn fraud_arc() -> Result<()> {
         }
         let record = registered.context("the registered epoch left no certified record")?;
         ensure!(record.epoch == 0, "the certified record is not epoch 0");
+        let (admission_deadline, challenge_deadline) = record
+            .deadlines
+            .context("the first registered epoch has no admission deadline")?;
         let state = crate::protocol::init_replica(
             context.child("fraud_replica"), "fraud-replica",
             commonware_parallel::Rayon::new(NonZeroUsize::MIN)?,
@@ -1206,8 +1205,8 @@ pub(crate) fn fraud_arc() -> Result<()> {
         let fraud = Box::pin(omitting_close(
             state,
             &mut fraud_rng,
-            record.admission_deadline,
-            record.challenge_deadline,
+            admission_deadline,
+            challenge_deadline,
         ))
         .await?;
         ensure!(
@@ -1320,7 +1319,6 @@ mod tests {
         protocol::deployment,
         rpc,
     };
-    use commonware_clearing::bajillion::boundary::WithdrawalBatch;
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_runtime::{
         Clock as _, Listener as _, Network as _, Runner as _, Spawner as _, Supervisor as _,
@@ -1404,9 +1402,7 @@ mod tests {
             let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
             control
                 .submit(SettlementTx::RegisterEpoch(
-                    operator
-                        .signed_registration(&WithdrawalBatch::empty())
-                        .unwrap(),
+                    operator.signed_registration().unwrap(),
                 ))
                 .await;
             operator
@@ -1561,6 +1557,10 @@ mod tests {
                     digest: Sha256::hash(&[b"stale-display-root"]),
                 },
                 last_finalized: None,
+                next_admission: 0,
+                next_registration: 0,
+                intake: 0,
+                pulled: 0,
                 custody: 400,
                 claimable: 0,
                 hard_faulted: false,

@@ -295,6 +295,14 @@ impl Chain for AdmissionRetention {
         Ok(verified)
     }
 
+    async fn inbox<E: Env>(
+        &mut self,
+        context: &E,
+        indices: std::ops::Range<u64>,
+    ) -> anyhow::Result<Vec<crate::chain::state::Intake>> {
+        crate::chain::client::inbox(context, self, indices).await
+    }
+
     async fn submit<E: Env>(
         &mut self,
         context: &E,
@@ -367,15 +375,16 @@ fn admission_survives_ingress_retention_and_transient_renewal_failures() {
         let registration = client.registration(&context).await.unwrap().unwrap();
         let submitted_at = fixture.finalized.latest().unwrap().height;
         assert_eq!(registration.epoch, 0);
-        assert_eq!(registration.admission_deadline, submitted_at + 300);
+        let (admission_deadline, challenge_deadline) = registration.deadlines.unwrap();
+        assert_eq!(admission_deadline, submitted_at + 300);
         let close = close_fixture(
             chain_id,
             &protocol,
             0,
             predecessor,
             label,
-            registration.admission_deadline,
-            registration.challenge_deadline,
+            admission_deadline,
+            challenge_deadline,
         );
         assert_eq!(close.deposit_tx, deposit);
         assert_eq!(close.register_tx, register);
@@ -392,7 +401,7 @@ fn admission_survives_ingress_retention_and_transient_renewal_failures() {
             fixture,
             client,
             saved: saved.clone(),
-            deadline: registration.admission_deadline,
+            deadline: admission_deadline,
             submitted_at,
             polls: 0,
             submissions: Vec::new(),
@@ -539,6 +548,14 @@ impl Chain for RegistrationRace {
         request: &ReadRequest,
     ) -> anyhow::Result<light::Verified> {
         self.read(context, request).await
+    }
+
+    async fn inbox<E: Env>(
+        &mut self,
+        context: &E,
+        indices: std::ops::Range<u64>,
+    ) -> anyhow::Result<Vec<crate::chain::state::Intake>> {
+        crate::chain::client::inbox(context, self, indices).await
     }
 
     async fn submit<E: Env>(

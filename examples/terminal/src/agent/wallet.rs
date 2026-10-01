@@ -9,16 +9,24 @@ use super::{
 use crate::{
     chain::{
         client::{Chain, Client, Env},
-        state::{AdmittedRootsResponse, FaultRecord, HardFaultReasonResponse, StatusRecord},
+        query::Lookup,
+        state::{
+            AdmittedRootsResponse, FaultRecord, HardFaultReasonResponse, Record, StatusRecord,
+        },
     },
     operator::rpc as operator_rpc,
-    protocol::{AccountIdentity, Key, Wallet, eve_identity, eve_wallet, identities, wallets},
+    protocol::{
+        AccountIdentity, Key, Wallet, eve_identity, eve_wallet, identities, wallets,
+        withdrawal_notice,
+    },
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use commonware_clearing::bajillion::{
-    boundary::SignedWithdrawal, payment::PaymentContext, qmdb::StateOpening,
+    boundary::SignedWithdrawal,
+    payment::{PaymentContext, SendAuthorization},
+    qmdb::StateOpening,
 };
-use commonware_cryptography::sha256::Digest;
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_runtime::{Clock, Network};
 use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 
@@ -35,7 +43,8 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 ///
 /// Cached contexts and verified balance floors keep successful payments local until submission.
 /// Accepted debit, sequence, and vector state belong to their exact epoch and anchor.
-/// A corrective reply cannot replace an ambiguous authorization; settlement resolves it first.
+/// A usable corrective report re-signs an ambiguous authorization in the successor epoch
+/// against the reported endpoint. Otherwise settlement resolves it first.
 ///
 /// Frozen-root recovery requires an opening at the last finalized root, which advances
 /// with every finalization by anyone. Openings refresh on every head read or balance
@@ -66,6 +75,9 @@ pub(crate) struct Agent {
     /// verified affordability floor. Absent for a fresh wallet and after invalidation.
     pub(super) cache: Option<ContextCache>,
     pub(super) pending_payments: Vec<PendingPayment>,
+    /// Undecided copies of the pending intents in the epoch before the pending batch,
+    /// aligned with it by position, or empty.
+    pub(super) superseded: Vec<SendAuthorization<Key, Digest>>,
     pub(super) pending_deposit: Option<crate::chain::tx::DepositRequest>,
     pub(super) pending_transfer: Option<crate::chain::tx::NativeTransferRequest>,
     pub(super) pending_withdrawal: Option<SignedWithdrawal<Key, Digest>>,
@@ -176,6 +188,7 @@ impl Agent {
             deposit_nonce,
             cache: state.cache,
             pending_payments: state.pending_payments,
+            superseded: state.superseded,
             pending_deposit: state.pending_deposit,
             pending_transfer: state.pending_transfer,
             pending_withdrawal: state.pending_withdrawal,
@@ -218,9 +231,14 @@ impl Agent {
         Ok(())
     }
 
-    /// Retires an expired authorization from a healthy certified view without creating a
-    /// replacement. Its archived discovery hint and any independent payout candidate survive.
-    pub(crate) async fn observe_withdrawal_expiry<E: Env>(
+    /// Resolves the active authorization from a healthy certified view.
+    ///
+    /// A request that entered settlement retires at its deadline. One whose notice window closed
+    /// without entering is discarded and leaves the signing floor in place. Queueing and
+    /// registration each record the request in the block that accepts it, and only a later
+    /// request from this account overwrites either record. A retired request keeps its archived
+    /// discovery hint, and any independent payout candidate survives.
+    pub(crate) async fn observe_withdrawal<E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,
@@ -233,15 +251,55 @@ impl Agent {
             status.deployment == self.deployment,
             "withdrawal status has an unexpected deployment"
         );
-        if status.height < request.body().deadline() {
-            return Ok(());
-        }
         if status.hard_faulted {
             return Ok(());
         }
-        self.store
-            .retire_withdrawal(&request)
-            .context("retire expired withdrawal authorization")?;
+        let deadline = request.body().deadline();
+        let timing = chain.genesis().timing();
+        if withdrawal_notice(&timing, status.height).is_ok_and(|window| *window.start() <= deadline)
+        {
+            return Ok(());
+        }
+
+        // Both records must be at least as recent as the status, since a registration can carry
+        // the request at any height before its window closed.
+        let account = self.account();
+        let queued = chain
+            .recent(
+                ctx,
+                &chain.request(Lookup::Withdrawal {
+                    account: account.clone(),
+                }),
+            )
+            .await?;
+        let carried = chain
+            .recent(ctx, &chain.request(Lookup::Carried { account }))
+            .await?;
+        if queued.height < status.height || carried.height < status.height {
+            return Ok(());
+        }
+        let queued = match queued.record {
+            Some(Record::Withdrawal(effect)) => effect.request == request,
+            None => false,
+            Some(_) => bail!("certified withdrawal read returned a foreign record"),
+        };
+        let carried = match carried.record {
+            Some(Record::Carried(record)) => record.id == request.id::<Sha256>(),
+            None => false,
+            Some(_) => bail!("certified carriage read returned a foreign record"),
+        };
+        if queued || carried {
+            if status.height < deadline {
+                return Ok(());
+            }
+            self.store
+                .retire_withdrawal(&request)
+                .context("retire expired withdrawal authorization")?;
+        } else {
+            self.store
+                .discard_withdrawal(&request)
+                .context("discard unentered withdrawal authorization")?;
+        }
         self.pending_withdrawal = None;
         self.cache = None;
         Ok(())
@@ -305,15 +363,16 @@ impl Agent {
     /// opening is retained through [`Self::verify_head`] or [`Self::retain_head`], so a
     /// wallet that only watches its balance still refreshes its frozen-root recovery
     /// evidence and, from an operator head, re-anchors its optimistic signing state.
-    /// Payments use the cached context. A corrective rejection triggers authenticated
-    /// resolution of the exact pending intent before a new context can be used.
+    /// Payments use the cached context. A corrective rejection resolves the exact pending
+    /// intent before a new context can be used: a usable report re-signs it in the successor
+    /// epoch, and otherwise authenticated settlement decides it.
     pub(crate) async fn balance<E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,
         operator: SocketAddr,
     ) -> Result<u64> {
-        self.observe_withdrawal_expiry(ctx, chain).await?;
+        self.observe_withdrawal(ctx, chain).await?;
         let operator_error =
             match operator_head(ctx, operator, self.account(), &self.operator).await {
                 Ok(head) => {
@@ -334,28 +393,10 @@ impl Agent {
         Ok(opening.map_or(0, |opening| opening.balance.get()))
     }
 
-    /// Returns the operator-served account opening verified against the certified
-    /// finalized root, together with the status that authenticates that root.
-    pub(crate) async fn finalized_head<E: Env>(
-        &mut self,
-        ctx: &E,
-        chain: &mut Client,
-        operator: SocketAddr,
-    ) -> Result<(StatusRecord, StateOpening<Key, Digest>)> {
-        let head = operator_head(ctx, operator, self.account(), &self.operator).await?;
-        let status = settlement_status(ctx, chain, self.deployment).await?;
-        ensure!(
-            status.state_root == head.root,
-            "payer opening is not the exact finalized head"
-        );
-        self.verify_head(ctx, chain, &head, &status).await?;
-        Ok((status, head.opening))
-    }
-
     /// This wallet's leaf at the certified head, opened by the validators,
     /// verified against the status root, and retained: the head read that
     /// needs no operator.
-    pub(super) async fn validator_head<E: Env>(
+    pub(crate) async fn validator_head<E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,
@@ -463,11 +504,12 @@ pub(super) async fn receipt_epoch<E: Env>(
     match anchor {
         Some(anchor) if anchor != *context.anchor() => return Ok(ReceiptEpoch::Invalidated),
         None => {
+            // A registered later epoch proves this one already registered, so its absent
+            // anchor is final once the permanent boundary is re-read below.
             let status = chain.recent_status(ctx).await?;
-            let registration = chain.registration(ctx).await?;
             if status.hard_faulted
                 || status.last_finalized.is_some_and(|last| last >= epoch)
-                || registration.is_some_and(|registered| registered.epoch > epoch)
+                || status.next_registration > epoch.saturating_add(1)
             {
                 // The absence must follow the permanent boundary, since a registration
                 // can become visible between the initial anchor and boundary reads.
@@ -502,7 +544,7 @@ pub(super) async fn receipt_epoch<E: Env>(
         return Ok(ReceiptEpoch::Finalized(*record));
     }
     let registration = if admitted.is_none() {
-        chain.registration(ctx).await?
+        chain.registration_at(ctx, epoch).await?
     } else {
         None
     };
@@ -535,27 +577,55 @@ pub(super) async fn receipt_epoch<E: Env>(
         }
         return Ok(ReceiptEpoch::Faulted(record));
     }
-    if status.last_finalized.is_some_and(|last| last >= epoch) {
-        if let Some(record) = admitted {
-            return Ok(ReceiptEpoch::Finalized(record));
-        }
+
+    // A healthy unfinalized registration is live whether it is the frontier or still queued
+    // behind an unadmitted predecessor. Only the frontier carries a deadline.
+    let finalized = status.last_finalized.is_some_and(|last| last >= epoch);
+    let live = !finalized
+        && registration.is_some_and(|registered| {
+            registered.epoch == epoch
+                && registered.anchor == *context.anchor()
+                && registered.admitted.is_none()
+                && registered
+                    .deadlines
+                    .is_none_or(|(admission, _)| status.height <= admission)
+        });
+
+    // An epoch registers, then admits its close, then finalizes it, and finalizing the epoch
+    // after its successor retires the admission. Every read is at least as recent as the one
+    // before it, so a registration or status past a live unadmitted epoch means the close
+    // admitted after the absent admission read. The admission is read again, and a retirement
+    // in between resolves through the retired rule.
+    let admitted = match admitted {
+        None if !live => match chain.admitted(ctx, epoch).await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                return finalized_receipt(ctx, chain, deployment, context)
+                    .await?
+                    .ok_or(error);
+            }
+        },
+        admitted => admitted,
+    };
+    if let Some(record) = admitted
+        && (finalized || record.finalized)
+    {
+        return Ok(ReceiptEpoch::Finalized(record));
+    }
+    if finalized {
         return finalized_receipt(ctx, chain, deployment, context)
             .await?
             .context("finalized receipt history is not visible yet");
     }
 
-    // Native admission deadlines strictly increase, challenge duration is fixed, and each
-    // sequential block finalizes the ready front. A healthy nonfinal admitted close
+    // Each frontier receives its deadlines at its registration or at its predecessor's
+    // admission, so native admission deadlines never decrease, challenge duration is
+    // fixed, and each sequential block finalizes the ready front. A healthy nonfinal admitted close
     // therefore still has a live challenge window, even after its successor registers.
     if admitted.is_some() {
         return Ok(ReceiptEpoch::Live(admitted));
     }
-    if registration.is_some_and(|registered| {
-        registered.epoch == epoch
-            && registered.anchor == *context.anchor()
-            && registered.admitted.is_none()
-            && status.height <= registered.admission_deadline
-    }) {
+    if live {
         return Ok(ReceiptEpoch::Live(None));
     }
     Ok(ReceiptEpoch::Unresolved)
@@ -573,13 +643,21 @@ async fn finalized_receipt<E: Env>(
         status.deployment == deployment,
         "receipt checkpoint has another deployment"
     );
-    if !status
-        .last_finalized
-        .is_some_and(|last| context.epoch() <= last)
-    {
+    if !retired(&status, context.epoch()) {
         return Ok(None);
     }
     Ok(Some(ReceiptEpoch::Retired))
+}
+
+/// Whether finality retired `epoch`'s admission and anchor records.
+///
+/// The chain keeps them until the epoch after `epoch`'s successor finalizes, because bodies of
+/// the successor bind `epoch`'s terminals. A failed read of a record that is still retained is
+/// never retirement.
+pub(super) fn retired(status: &StatusRecord, epoch: u64) -> bool {
+    status
+        .last_finalized
+        .is_some_and(|last| last.checked_sub(epoch).is_some_and(|gap| gap >= 2))
 }
 
 /// Whether the published fault boundary permanently invalidates this nonfinal admitted epoch.

@@ -350,11 +350,14 @@ mod tests {
         .unwrap();
         let root = vector.root::<Sha256, ShaDigest>().unwrap();
         let body = VectorSendBody::new(&context, account.clone(), 0, 3, root);
+        let empty = OutVector::empty(7, account.clone())
+            .root::<Sha256, ShaDigest>()
+            .unwrap();
         let mut row = AccountRow {
             account: account.clone(),
             predecessor: 10,
             successor: 10,
-            outgoing: Some(SendAuthorization::sign(body.clone(), &private)),
+            outgoing: Some(SendAuthorization::sign(body.clone(), empty, &private)),
             output: SettlementOutput::None,
         };
         let leaf = AccountChange::from_row(&row, root);
@@ -385,9 +388,6 @@ mod tests {
         assert!(!leaf.matches_outgoing(&wrong_anchor, &body));
         assert!(!leaf.matches_outgoing(&wrong_epoch, &body));
         row.outgoing = None;
-        let empty = OutVector::empty(7, account.clone())
-            .root::<Sha256, ShaDigest>()
-            .unwrap();
         let leaf = AccountChange::from_row(&row, empty);
         assert!(!leaf.has_outgoing());
         assert!(!leaf.matches_outgoing(
@@ -450,7 +450,7 @@ mod tests {
         let payer = SigningKey::from_seed(1);
         let body = VectorSendBody::new(&context, account, 1, 1, send_root);
         changed_row.predecessor = 5;
-        changed_row.outgoing = Some(SendAuthorization::sign(body, &payer));
+        changed_row.outgoing = Some(SendAuthorization::sign(body, send_root, &payer));
         let activity = AccountChange::from_row(&changed_row, send_root);
         assert_eq!(activity.terminal_debit(), 1);
         assert_eq!(activity.terminal_seq(), 1);

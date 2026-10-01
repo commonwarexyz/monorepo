@@ -5,6 +5,8 @@ mod challenge;
 #[allow(dead_code, unused_imports)]
 mod claims;
 #[allow(dead_code, unused_imports)]
+mod lineage;
+#[allow(dead_code, unused_imports)]
 mod settlement;
 
 use std::{env, process::ExitCode};
@@ -12,7 +14,7 @@ use std::{env, process::ExitCode};
 const DEFAULT_ADDRESS: &str = "127.0.0.1:3000";
 
 fn usage(program: &str) {
-    eprintln!("Usage: {program} <certification|challenge|claims|settlement> [address]");
+    eprintln!("Usage: {program} <certification|challenge|claims|lineage|settlement> [address]");
 }
 
 fn main() -> ExitCode {
@@ -33,6 +35,7 @@ fn main() -> ExitCode {
         "certification" => certification::explore(&address),
         "challenge" => challenge::explore(&address),
         "claims" => claims::explore(&address),
+        "lineage" => lineage::explore(&address),
         "settlement" => settlement::explore(&address),
         _ => {
             usage(&program);

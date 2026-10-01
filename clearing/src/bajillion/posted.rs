@@ -1,7 +1,7 @@
 //! One canonical keyed dealing shared by every full validator.
 //!
-//! Validators derive the close commitment from the registered context, retained state,
-//! terminal payer vectors, and aggregated operator acceptance.
+//! Validators derive the close commitment from the context settlement bound for the admission
+//! frontier, retained state, terminal payer vectors, and aggregated operator acceptance.
 
 use crate::bajillion::{
     commitment::MAX_VECTOR_LENGTH,

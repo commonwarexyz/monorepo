@@ -45,14 +45,14 @@ use crate::{
         },
         setup::Genesis,
         state::{
-            AdmittedRootsResponse, ClaimPendingDepositResponse, FaultRecord,
-            HardFaultReleaseRecord, Record, RegistrationRecord, StatusRecord,
+            AdmittedRootsResponse, ClaimPendingDepositResponse, DepositEffect, FaultRecord,
+            HardFaultReleaseRecord, Intake, Record, RegistrationRecord, StatusRecord,
         },
         tx::{NativeTransferRequest, SettlementTx},
         types::now,
         validator::{NAMESPACE, Scheme},
     },
-    protocol::{DepositEvent, Key},
+    protocol::Key,
     rpc,
 };
 use anyhow::{Context as _, Result, bail, ensure};
@@ -74,7 +74,7 @@ use commonware_storage::{
     },
 };
 use rand_core::CryptoRng;
-use std::{future::Future, net::SocketAddr, num::NonZeroU64, time::Duration};
+use std::{future::Future, net::SocketAddr, num::NonZeroU64, ops::Range, time::Duration};
 
 const PAYOUT_DISCOVERY_PAGE: u64 = 128;
 
@@ -296,74 +296,6 @@ pub(crate) trait Chain: Send + 'static {
                 return Ok(page);
             }
             bail!("no custodian can authenticate the requested payout-log page")
-        }
-    }
-
-    /// Opens the registration predecessor through independently verified validator evidence.
-    fn predecessor_opening<E: Env>(
-        &mut self,
-        ctx: &E,
-        epoch: u64,
-        account: Key,
-        genesis: commonware_clearing::bajillion::settlement::Genesis<Digest>,
-    ) -> impl Future<
-        Output = Result<commonware_clearing::bajillion::qmdb::StateOpening<Key, Digest>>,
-    > + Send {
-        async move {
-            let (root, operations) = if let Some(previous) = epoch.checked_sub(1) {
-                let admitted = self
-                    .admitted(ctx, previous)
-                    .await?
-                    .context("predecessor is not admitted")?;
-                (
-                    admitted.roots.successor,
-                    admitted.roots.successor_operations,
-                )
-            } else {
-                (genesis.root(), genesis.operations())
-            };
-            let lookup = EvidenceLookup::State {
-                root,
-                operations,
-                account: account.clone(),
-            };
-            for address in self.holders()? {
-                let request = EvidenceRequest::new(self.deployment(), lookup.clone());
-                let Ok(body) = rpc::invoke(
-                    ctx,
-                    address,
-                    "balance custodian",
-                    METHOD_EVIDENCE,
-                    request.encode(),
-                )
-                .await
-                else {
-                    continue;
-                };
-                let Ok(EvidenceResponse::Served(evidence)) = EvidenceResponse::decode(body) else {
-                    continue;
-                };
-                let Evidence::State(lookup) = evidence else {
-                    continue;
-                };
-                if lookup
-                    .resolve::<Sha256>(
-                        &root,
-                        &commonware_clearing::bajillion::qmdb::account_key(&account)?,
-                    )
-                    .is_err()
-                {
-                    continue;
-                }
-                if let commonware_clearing::bajillion::qmdb::StateLookup::Present(value) = lookup {
-                    return Ok(commonware_clearing::bajillion::qmdb::StateOpening {
-                        account: account.clone(),
-                        balance: value.balance,
-                        proof: value.proof,
-                    });
-                }
-            }
-            bail!("no custodian can open the registration predecessor")
         }
     }
 
@@ -600,38 +532,69 @@ pub(crate) trait Chain: Send + 'static {
         }
     }
 
-    /// The custody record for one deposit id, or a proven exclusion.
-    /// A conflicting record can resolve a staged request; absence alone cannot.
+    /// The custody record for one deposit id, with its inbox index, or a
+    /// proven exclusion. A conflicting record can resolve a staged request.
+    /// Absence alone cannot.
     fn deposit<E: Env>(
         &mut self,
         ctx: &E,
         id: Digest,
-    ) -> impl Future<Output = Result<Option<DepositEvent>>> + Send {
+    ) -> impl Future<Output = Result<Option<DepositEffect>>> + Send {
         async move {
             let request = self.request(Lookup::Deposit { id });
             let verified = self.read(ctx, &request).await?;
             match verified.record {
-                Some(Record::Deposit(event)) => Ok(Some(event)),
+                Some(Record::Deposit(effect)) => Ok(Some(effect)),
                 Some(_) => bail!("certified deposit read returned a foreign record"),
                 None => Ok(None),
             }
         }
     }
 
-    /// The registration singleton, or a proven absence (no live registered
-    /// close).
-    fn registration<E: Env>(
+    /// The registration record for `epoch`, or a proven absence: the epoch is
+    /// not registered yet, or finality or a fault retired its record.
+    fn registration_at<E: Env>(
         &mut self,
         ctx: &E,
+        epoch: u64,
     ) -> impl Future<Output = Result<Option<RegistrationRecord>>> + Send {
         async move {
-            let request = self.request(Lookup::Registration);
+            let request = self.request(Lookup::Registration { epoch });
             let verified = self.read(ctx, &request).await?;
             match verified.record {
                 Some(Record::Registration(record)) => Ok(Some(record)),
                 Some(_) => bail!("certified registration read returned a foreign record"),
                 None => Ok(None),
             }
+        }
+    }
+
+    /// The latest registered epoch's record, or `None` when no registration
+    /// remains live.
+    ///
+    /// The status names the latest registered epoch. A successor can register,
+    /// and the record can retire, between the two reads, so the record is
+    /// reported only once a newer status names the same epoch. A moved tail is
+    /// read once more, and a tail that keeps moving reports its last record.
+    fn registration<E: Env>(
+        &mut self,
+        ctx: &E,
+    ) -> impl Future<Output = Result<Option<RegistrationRecord>>> + Send {
+        async move {
+            let mut tail = self.status(ctx).await?.next_registration;
+            let mut record = None;
+            for _ in 0..2 {
+                let Some(epoch) = tail.checked_sub(1) else {
+                    return Ok(None);
+                };
+                record = self.registration_at(ctx, epoch).await?;
+                let latest = self.status(ctx).await?.next_registration;
+                if latest == tail {
+                    return Ok(record);
+                }
+                tail = latest;
+            }
+            Ok(record)
         }
     }
 
@@ -646,12 +609,41 @@ pub(crate) trait Chain: Send + 'static {
             let request = self.request(Lookup::Withdrawal { account });
             let verified = self.read(ctx, &request).await?;
             match verified.record {
-                Some(Record::Withdrawal(request)) => Ok(Some(request)),
+                Some(Record::Withdrawal(effect)) => Ok(Some(effect.request)),
                 Some(_) => bail!("certified withdrawal read returned a foreign record"),
                 None => Ok(None),
             }
         }
     }
+
+    /// The inbox entry at `index`, or a proven absence: the index is not
+    /// recorded yet, or a registration pulled it.
+    fn intake<E: Env>(
+        &mut self,
+        ctx: &E,
+        index: u64,
+    ) -> impl Future<Output = Result<Option<Intake>>> + Send {
+        async move {
+            let request = self.request(Lookup::Intake { index });
+            let verified = self.read(ctx, &request).await?;
+            match verified.record {
+                Some(Record::Intake(intake)) => Ok(Some(intake)),
+                Some(_) => bail!("certified intake read returned a foreign record"),
+                None => Ok(None),
+            }
+        }
+    }
+
+    /// The inbox entries at `indices`, in index order.
+    ///
+    /// The caller names only unpulled recorded indices. An entry persists
+    /// from its recording until a registration pulls it, so a missing entry
+    /// is an error, never an exclusion.
+    fn inbox<E: Env>(
+        &mut self,
+        ctx: &E,
+        indices: Range<u64>,
+    ) -> impl Future<Output = Result<Vec<Intake>>> + Send;
 
     /// The fault singleton, or a proven absence (no fault).
     fn fault<E: Env>(
@@ -914,6 +906,11 @@ impl Chain for Client {
         )
     }
 
+    /// Reads one certified entry per index.
+    async fn inbox<E: Env>(&mut self, ctx: &E, indices: Range<u64>) -> Result<Vec<Intake>> {
+        inbox(ctx, self, indices).await
+    }
+
     /// Submits one transaction to the first answering validator.
     async fn submit<E: Env>(&mut self, ctx: &E, tx: &SettlementTx) -> Result<Submission> {
         let mut last = None;
@@ -928,6 +925,24 @@ impl Chain for Client {
         }
         Err(last.expect("at least one query address was attempted"))
     }
+}
+
+/// Reads the inbox entries at `indices` in index order with one proven
+/// [`Chain::intake`] read per index, since a certified read proves one key.
+pub(crate) async fn inbox<C: Chain, E: Env>(
+    ctx: &E,
+    chain: &mut C,
+    indices: Range<u64>,
+) -> Result<Vec<Intake>> {
+    let mut entries = Vec::new();
+    for index in indices {
+        let entry = chain
+            .intake(ctx, index)
+            .await?
+            .with_context(|| format!("certified inbox entry {index} is missing"))?;
+        entries.push(entry);
+    }
+    Ok(entries)
 }
 
 fn extract_status(verified: Verified) -> Result<StatusRecord> {
@@ -1060,6 +1075,10 @@ mod tests {
         }
 
         async fn recent<E: Env>(&mut self, _: &E, _: &ReadRequest) -> Result<Verified> {
+            unreachable!()
+        }
+
+        async fn inbox<E: Env>(&mut self, _: &E, _: Range<u64>) -> Result<Vec<Intake>> {
             unreachable!()
         }
 

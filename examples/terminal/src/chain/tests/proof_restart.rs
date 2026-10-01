@@ -230,7 +230,6 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
 
     let withdrawal = SignedWithdrawal::sign(
         deployment(),
-        predecessor.digest,
         withdrawal_account.encode(),
         WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
         100,
@@ -245,6 +244,8 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
     let mut recipient_balance_before_live = None;
     let mut withdrawal_amount = None;
     let mut accepted = None;
+    // Each registration pulls the inbox through the intake of its own epoch.
+    let mut end = 0;
     for (epoch, (deposit_account, deposit_amount, withdrawal_request, sends)) in
         inputs.into_iter().enumerate()
     {
@@ -264,6 +265,7 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
             )),
         )
         .await;
+        end += 1;
         let withdrawals = if let Some(request) = withdrawal_request {
             submit_one(
                 &mut fixture,
@@ -278,6 +280,7 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
                 }),
             )
             .await;
+            end += 1;
             WithdrawalBatch::new(vec![request]).unwrap()
         } else {
             WithdrawalBatch::empty()
@@ -294,13 +297,12 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
                 fee: 4096,
                 deployment: deployment(),
                 epoch,
-                predecessor_liability: liability,
+                end,
                 deposits_root,
                 withdrawals: withdrawals.clone(),
-                openings: Vec::new(),
                 signature: protocol.sign_chain_registration(
                     epoch,
-                    liability,
+                    end,
                     &deposits_root,
                     &withdrawals,
                     4096,
@@ -310,19 +312,24 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
         .await;
         let registered = registration(&fixture.db).await;
         assert_eq!(registered.epoch, epoch);
+        let (admission_deadline, challenge_deadline) = registered.deadlines.unwrap();
         let registration = protocol
-            .registration_at(
-                epoch,
-                deposits.clone(),
-                withdrawals.clone(),
-                liability,
-                registered.admission_deadline,
-                registered.challenge_deadline,
-            )
+            .registration(epoch, deposits.clone(), withdrawals.clone(), liability)
             .unwrap();
         let close_context = registration
             .context
-            .bind::<Sha256, _, _>(&balances, &deposits, &withdrawals, registered.floors)
+            .bind::<Sha256, _, _>(
+                &balances,
+                &deposits,
+                &withdrawals,
+                closes.last().map_or(0..0, |close: &CloseExpected| {
+                    close.range.start..close.range.end
+                }),
+                liability,
+                admission_deadline,
+                challenge_deadline,
+                registered.floors,
+            )
             .unwrap();
         let terminals = if sends {
             let vector = OutVector::new(
@@ -342,9 +349,15 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
                 3,
                 vector.root::<Sha256, Digest>().unwrap(),
             );
+            // Only the first epoch sends, so the payer has no preceding terminal.
+            let authorization = SendAuthorization::sign(
+                body,
+                commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+                wallets[0].signer(),
+            );
             vec![Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&body),
-                authorization: SendAuthorization::sign(body, wallets[0].signer()),
+                operator_signature: protocol.sign_ack_aggregate(&authorization),
+                authorization,
                 vector,
             }]
         } else {
@@ -490,10 +503,12 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
     while status(&fixture.db).await.last_finalized != Some(1) {
         accepted = Some(fixture.seal(&context, true).await);
     }
-    assert_eq!(
+
+    // The previous finalized admission stays until the epoch after its successor finalizes.
+    assert!(matches!(
         read(&fixture.db, &admitted_key(&deployment(), 0)).await,
-        None
-    );
+        Some(Record::Admitted(admitted)) if admitted.finalized
+    ));
     let accepted = accepted.unwrap();
     while fixture.marshal.get_processed().await.map(Processed::height) != Some(accepted.height) {
         reschedule().await;
@@ -530,7 +545,6 @@ async fn verify_recovered(context: deterministic::Context, expected: RestartExpe
         expected.identity.validators[0].query,
         expected.identity.clone(),
         expected.scheme.clone(),
-        None,
     )
     .await;
     let operator = expected
