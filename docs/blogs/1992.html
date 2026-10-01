@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > We Had It All In 1992</title>
+    <meta name="description" content="Pairing-Free Batched Threshold
+Encryption.">
+    <meta name="author" content="Guru Vamsi Policharla">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/1992" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/1992.png" />
+    <meta property="og:title" content="We Had It All In 1992" />
+    <meta property="og:description" content="Pairing-Free Batched
+Threshold Encryption." />
+    <meta property="article:author" content="Guru Vamsi Policharla" />
+    <meta property="article:published_time" content="2026-10-01T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-10-01T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/1992" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/1992" />
+    <meta property="twitter:title" content="We Had It All In 1992" />
+    <meta property="twitter:description" content="Pairing-Free Batched
+Threshold Encryption." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/1992.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+        <meta property="twitter:creator" content="https://x.com/guruvamsip" />
+    
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"
+        onload="document.querySelectorAll('.math').forEach(function (el) {
+            katex.render(el.textContent, el, {
+                displayMode: el.classList.contains('display'),
+                throwOnError: false
+            });
+        });"></script>
+    
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>We Had It All In 1992</h1>
+        <div class="meta">
+
+                        <div class="author">By <a href="https://x.com/guruvamsip">Guru
+Vamsi Policharla</a></div>
+                        <div class="date">October 1st, 2026</div>
+        </div>
+        <p>We started Batched Threshold Encryption about <a
+        href="https://eprint.iacr.org/2024/669">3 years ago</a> with the
+        goal of building <em>practical</em> encrypted mempools that
+        could one day be deployed. Although you could use Threshold
+        Encryption, the communication to decrypt a block of transactions
+        is much larger than the block itself. Specifically, decrypting
+        <span class="math inline">B</span> transactions requires <span
+        class="math inline">O(nB)</span> communication when there are
+        <span class="math inline">n</span> validators. In contrast,
+        Batched Threshold Encryption demands that <span
+        class="math inline">B</span> ciphertexts be decrypted with
+        <em>sub-linear</em> communication in the batch size, per party.
+        Almost all BTE schemes can do it with <span
+        class="math inline">O(1)</span> communication per party.</p>
+        <p>We’ve come a long way since then. Last I counted, there are
+        over 20 papers on the topic! In the early days, constructions
+        had these strange caveats like “your transaction can only be
+        included in this specific view number” or “it must be included
+        at a specific position in the batch” which could potentially
+        result in conflicts. Then we found ways of getting around these
+        issues, but at the cost of a more expensive setup. Just last
+        week, we got a nice construction that <a
+        href="https://eprint.iacr.org/2026/2205">only needs a
+        DKG</a>.</p>
+        <p><strong>Stepping Back.</strong> Recall that the whole point
+        of BTE was to build encrypted mempools for <em>blockchains</em>.
+        And virtually all of them run consensus protocols where the
+        number of validators <span class="math inline">n \geq
+        3f+1</span> in order to tolerate <span
+        class="math inline">f</span> corrupt parties. But so far, all
+        BTE schemes allow the adversary to corrupt any number of parties
+        <span class="math inline">f\leq t-1</span> up to the
+        reconstruction threshold <span class="math inline">t</span>.
+        Indeed this is the strongest notion one can achieve, and it’s
+        valuable to study but is unnecessary for encrypted mempools. So
+        what happens when we relax our requirements?</p>
+        <p>As it turns out, in the <em>ramp setting</em> where there
+        exists a gap between the corruption threshold <span
+        class="math inline">f</span> and reconstruction threshold <span
+        class="math inline">t</span>, you can avoid pairings entirely.
+        In fact, we had all the building blocks in <a
+        href="https://dl.acm.org/doi/10.1145/129712.129780">1992</a>.</p>
+        <p><strong>Packed Secret Sharing.</strong> Franklin and Yung
+        (also <a
+        href="https://link.springer.com/chapter/10.1007/3-540-39568-7_20">Blakley
+        and Meadows</a>) observed that in the ramp setting, secrets can
+        be packed more efficiently than with Shamir secret sharing.
+        Concretely, one can pack <span class="math inline">\ell</span>
+        secrets into <span class="math inline">n</span> shares, with
+        reconstruction from any <span class="math inline">f+\ell</span>
+        of them, as follows:</p>
+        <ul>
+        <li>Choose two non-intersecting domains, <span
+        class="math inline">D</span> of size <span
+        class="math inline">\ell</span> and <span
+        class="math inline">D_s</span> of size <span
+        class="math inline">n</span>. We use <span
+        class="math inline">D=[\ell]=\{1,\dots,\ell\}</span> and <span
+        class="math inline">D_s=[n^{-}]=\{-1,\dots,-n\}</span></li>
+        <li>Sample a random polynomial <span
+        class="math inline">S(X)</span> of degree at most <span
+        class="math inline">f+\ell-1</span> which evaluates to <span
+        class="math inline">(s_1,\dots,s_\ell)</span> on <span
+        class="math inline">D</span></li>
+        <li>The <em>packed</em> secret sharing is <span
+        class="math inline">\{S(-i)\}_{i\in[n]}</span></li>
+        </ul>
+        <p>Any <span class="math inline">f</span> shares are independent
+        of the secrets, and any <span class="math inline">f+\ell</span>
+        shares determine <span class="math inline">S</span>. It is
+        linearly homomorphic, and multiplying two sharings pointwise
+        gives a sharing of the Hadamard product of the secrets.</p>
+        <p><strong>Threshold ElGamal.</strong> Recall threshold ElGamal
+        in a group with generator <span class="math inline">g</span>.
+        The committee holds shares <span
+        class="math inline">\mathsf{sk}_i</span> of a secret key <span
+        class="math inline">\mathsf{sk}</span>, the public key is <span
+        class="math inline">\mathsf{pk}=g^{\mathsf{sk}}</span>, and a
+        ciphertext is</p>
+        <p><span class="math display">
+        \mathsf{ct} = (c_1, c_2) = \left(g^{r},\; \mathsf{pk}^{r}\cdot
+        M\right)
+        </span></p>
+        <p>To decrypt, party <span class="math inline">i</span>
+        publishes <span class="math inline">c_1^{\mathsf{sk}_i}</span>,
+        and by interpolating <span class="math inline">t</span> partial
+        decryptions in the exponent, anyone can recover the mask <span
+        class="math inline">\mathsf{pk}^r</span>.</p>
+        <h2 id="pairing-free-bte">Pairing-Free BTE</h2>
+        <p>This is all you need to build Batched Threshold Encryption.
+        It’s a fun exercise to build it yourself (hints below).</p>
+        <details class="collapsible">
+        <summary>
+        <strong>Hint 1</strong>
+        </summary>
+        <p>Keep the ciphertexts exactly as they are in threshold
+        ElGamal. Change how the committee shares <span
+        class="math inline">\mathsf{sk}</span> so that each party
+        publishes a <em>single</em> group element that decrypts a whole
+        batch of <span class="math inline">\ell</span> ciphertexts at
+        once. How large can <span class="math inline">\ell</span>
+        be?</p>
+        </details>
+        <details class="collapsible">
+        <summary>
+        <strong>Hint 2</strong>
+        </summary>
+        <p>Give the committee a packed sharing of <span
+        class="math inline">\ell</span> copies of <span
+        class="math inline">\mathsf{sk}</span>.</p>
+        </details>
+        <details class="collapsible">
+        <summary>
+        <strong>Hint 3</strong>
+        </summary>
+        <p>The randomness <span
+        class="math inline">r_1,\dots,r_\ell</span> of the batch also
+        defines a polynomial <span class="math inline">R(X)</span>.
+        Multiply it with the secret key.</p>
+        </details>
+        <p>Appendix A of the <a
+        href="https://eprint.iacr.org/2026/2205">updated paper</a> has
+        the full construction, including how to handle malicious
+        parties. Given that packed secret sharing is used extensively in
+        <a href="https://eprint.iacr.org/2010/106">secure multiparty
+        computation</a> to reduce communication/computation complexity,
+        it is not surprising that these techniques extend to BTE.
+        Threshold decryption is, after all, just a special-purpose
+        multi-party computation protocol.</p>
+        <h2 id="how-does-the-ddh-construction-compare">How does the DDH
+        construction compare?</h2>
+        <div data-align="center">
+        <table>
+        <colgroup>
+        <col style="width: 20%" />
+        <col style="width: 26%" />
+        <col style="width: 26%" />
+        <col style="width: 26%" />
+        </colgroup>
+        <thead>
+        <tr>
+        <th style="text-align: left;"></th>
+        <th style="text-align: center;"><a href="/blogs/bte.html">Simple
+        BTE</a></th>
+        <th style="text-align: center;"><a
+        href="https://eprint.iacr.org/2026/2205">DKG Is All You
+        Need</a></th>
+        <th style="text-align: center;">Pairing-Free BTE</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: left;">Setup</td>
+        <td style="text-align: center;">MPC</td>
+        <td style="text-align: center;">DKG</td>
+        <td style="text-align: center;">DKG</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Public parameters</td>
+        <td style="text-align: center;"><span
+        class="math inline">O(Bn/\ell)</span></td>
+        <td style="text-align: center;"><span
+        class="math inline">O(n)</span></td>
+        <td style="text-align: center;"><span
+        class="math inline">O(n)</span></td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Ciphertext</td>
+        <td style="text-align: center;"><span
+        class="math inline">\mathbb{G}_1 + 2 \mathbb{F}</span> (112
+        bytes)</td>
+        <td style="text-align: center;"><span
+        class="math inline">2\,\mathbb{G}_1 + \mathbb{G}_2</span> (192
+        bytes)<a href="#fn1" class="footnote-ref" id="fnref1"
+        role="doc-noteref"><sup>1</sup></a></td>
+        <td style="text-align: center;"><span
+        class="math inline">\mathbb{G} + 2\mathbb{F}</span> (96
+        bytes)</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Partial decryption</td>
+        <td style="text-align: center;"><span
+        class="math inline">\mathbb{G}_1</span></td>
+        <td style="text-align: center;"><span
+        class="math inline">\mathbb{G}_1</span></td>
+        <td style="text-align: center;"><span class="math inline">\lceil
+        B/\ell \rceil\, \mathbb{G} + 2\mathbb{F}</span></td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Decryption</td>
+        <td style="text-align: center;"><span
+        class="math inline">O(n\log n +
+        B\log\frac{B}{\ell})</span>,<br><span
+        class="math inline">O(B)</span> pairings</td>
+        <td style="text-align: center;"><span
+        class="math inline">O(n\log n +
+        B\log^2\frac{B}{\ell})</span>,<br><span
+        class="math inline">O(B)</span> pairings</td>
+        <td style="text-align: center;"><span
+        class="math inline">O(\frac{B}{\ell}\, n\log n)</span>,<br>no
+        pairings</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Assumption</td>
+        <td style="text-align: center;"><span
+        class="math inline">B</span>-DBPDH</td>
+        <td style="text-align: center;">DBSDH</td>
+        <td style="text-align: center;">DDH</td>
+        </tr>
+        </tbody>
+        </table>
+        </div>
+        <p>Simple BTE and DKG Is All You Need use the ramp-setting
+        optimizations from Remark 2 and Appendix B of the <a
+        href="https://eprint.iacr.org/2026/2205">updated paper</a>.</p>
+        <p>Partial decryptions are bigger in the pairing-free scheme but
+        not <em>THAT</em> much bigger. The total communication to
+        decrypt ciphertexts is still <span
+        class="math inline">O(B)</span>. While this may be larger than
+        pairing-based schemes, which only require <span
+        class="math inline">O(n)</span>, it is still <em>concretely</em>
+        comparable to the block size:</p>
+        <ul>
+        <li>with <span class="math inline">n=3f+1</span> and <span
+        class="math inline">t=2f+1</span>: <span
+        class="math inline">|\mathsf{pd}| \approx 6B/n~\mathbb{G} +
+        2\mathbb{F}</span></li>
+        <li>with <span class="math inline">n=5f+1</span> and <span
+        class="math inline">t=4f+1</span>: <span
+        class="math inline">|\mathsf{pd}| \approx 3.33 B/n~\mathbb{G} +
+        2\mathbb{F}</span></li>
+        </ul>
+        <p>Amortized per transaction, the ciphertext + partial
+        decryption overhead is:</p>
+        <ul>
+        <li><span class="math inline">\approx 288 + 64n/B</span> bytes
+        at <span class="math inline">n=3f+1</span></li>
+        <li><span class="math inline">\approx 203 + 64n/B</span> bytes
+        at <span class="math inline">n=5f+1</span></li>
+        <li><span class="math inline">112 + 48n/B</span> bytes for
+        Simple BTE</li>
+        <li><span class="math inline">192 + 48n/B</span> bytes for “DKG
+        Is All You Need”</li>
+        </ul>
+        <p>Benchmarks of total decryption time with a committee of <span
+        class="math inline">n=128</span>, run on an M5 MacBook Pro
+        (single-threaded). Both schemes are measured with a quorum of
+        <span class="math inline">t=85</span> partial decryptions. The
+        pairing-free scheme uses <span class="math inline">f=42</span>
+        and <span class="math inline">\ell=22</span>, and packed Simple
+        BTE uses <span class="math inline">\ell=16</span>. A prototype
+        of the <a
+        href="https://github.com/commonwarexyz/simple-bte/pull/3">pairing-free
+        BTE</a> on the Pallas curve is compared against a packed
+        prototype of <a
+        href="https://github.com/commonwarexyz/simple-bte/pull/3">Simple
+        BTE</a>.</p>
+        <div data-align="center">
+        <table>
+        <colgroup>
+        <col style="width: 24%" />
+        <col style="width: 27%" />
+        <col style="width: 47%" />
+        </colgroup>
+        <thead>
+        <tr>
+        <th style="text-align: center;">Batch size <span
+        class="math inline">B</span></th>
+        <th style="text-align: center;">Pairing-Free BTE</th>
+        <th style="text-align: center;">Packed <a
+        href="/blogs/bte.html">Simple BTE</a><a href="#fn2"
+        class="footnote-ref" id="fnref2"
+        role="doc-noteref"><sup>2</sup></a></th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: center;">32</td>
+        <td style="text-align: center;">21.5 ms</td>
+        <td style="text-align: center;">104 ms</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">128</td>
+        <td style="text-align: center;">75.7 ms</td>
+        <td style="text-align: center;">436 ms</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">512</td>
+        <td style="text-align: center;">297 ms</td>
+        <td style="text-align: center;">2.08 s</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">2048</td>
+        <td style="text-align: center;">1.17 s</td>
+        <td style="text-align: center;">10.07 s</td>
+        </tr>
+        </tbody>
+        </table>
+        </div>
+        <p>What it loses in communication, it makes up for in speed and
+        simplicity.</p>
+        <section id="footnotes"
+        class="footnotes footnotes-end-of-document" role="doc-endnotes">
+        <hr />
+        <ol>
+        <li id="fn1"><p>The construction in the current version of the
+        paper also attaches a NIZK to each ciphertext, which adds <span
+        class="math inline">2\mathbb{F}</span>. This can be avoided in
+        the random oracle model (paper will be updated soon).<a
+        href="#fnref1" class="footnote-back"
+        role="doc-backlink">↩︎</a></p></li>
+        <li id="fn2"><p>Although a large part of the Simple BTE
+        decryption work can be pipelined and done before partial
+        decryptions arrive, it cannot be avoided. The time to verify
+        partial decryptions is ignored for both schemes, but the
+        pairing-free version is expected to have faster verification. We
+        note that both implementations are prototypes with room for
+        optimization.<a href="#fnref2" class="footnote-back"
+        role="doc-backlink">↩︎</a></p></li>
+        </ol>
+        </section>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>
