@@ -208,8 +208,6 @@ impl<D: Digest> Read for Chunk<D> {
         reader: &mut impl Buf,
         (config, maximum): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        // Encoding rejects longer data, and the width grows with the data length, so the widest
-        // shard encodes the most data.
         let width = canonical_shard_len(
             (*maximum).min(Widen::widen(u32::MAX)),
             config.minimum_shards.widen(),
