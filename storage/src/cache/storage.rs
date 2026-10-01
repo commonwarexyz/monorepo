@@ -159,21 +159,6 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         Ok(Some(record.value))
     }
 
-    /// See [Cache::next_gap].
-    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.intervals.next_gap(index)
-    }
-
-    /// See [Cache::first].
-    fn first(&self) -> Option<u64> {
-        self.intervals.iter().next().map(|(&start, _)| start)
-    }
-
-    /// See [Cache::missing_items].
-    fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
-        self.intervals.missing_items(start, max)
-    }
-
     /// See [Cache::has].
     fn has(&self, index: u64) -> bool {
         // Update metrics
@@ -295,6 +280,13 @@ impl<E: Storage + Metrics, V: CodecShared> std::fmt::Debug for Cache<E, V> {
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
+    /// Retrieve the populated index ranges for gap queries and range iteration.
+    ///
+    /// Includes accepted writes that have not yet been synced. Range endpoints are inclusive.
+    pub fn indices(&self) -> &RMap {
+        &self.0.intervals
+    }
+
     /// Initialize a new `Cache` instance.
     ///
     /// The in-memory index for `Cache` is populated during this call
@@ -306,24 +298,6 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     /// Retrieve an item from the [Cache].
     pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
         self.0.get(index).await
-    }
-
-    /// Retrieve the next gap in the [Cache].
-    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.0.next_gap(index)
-    }
-
-    /// Returns the first index in the [Cache].
-    pub fn first(&self) -> Option<u64> {
-        self.0.first()
-    }
-
-    /// Returns up to `max` missing items starting from `start`.
-    ///
-    /// This method iterates through gaps between existing ranges, collecting missing indices
-    /// until either `max` items are found or there are no more gaps to fill.
-    pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
-        self.0.missing_items(start, max)
     }
 
     /// Check if an item exists in the [Cache].

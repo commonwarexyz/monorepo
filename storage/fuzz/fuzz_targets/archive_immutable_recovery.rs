@@ -176,20 +176,31 @@ fn assert_ranges(archive: &TestArchive, entries: &[Entry]) {
         .iter()
         .map(|(&start, &end)| (start, end))
         .collect::<Vec<_>>();
-    assert_eq!(archive.ranges().collect::<Vec<_>>(), expected);
-    assert_eq!(archive.first_index(), model.first_index());
-    assert_eq!(archive.last_index(), model.last_index());
+    assert_eq!(
+        archive
+            .indices()
+            .iter()
+            .map(|(&start, &end)| (start, end))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(archive.indices().first_index(), model.first_index());
+    assert_eq!(archive.indices().last_index(), model.last_index());
     for start in 0..=6 {
         assert_eq!(
-            archive.ranges_from(start).collect::<Vec<_>>(),
+            archive
+                .indices()
+                .iter_from(start)
+                .map(|(&start, &end)| (start, end))
+                .collect::<Vec<_>>(),
             model
                 .iter_from(start)
                 .map(|(&range_start, &range_end)| (range_start, range_end))
                 .collect::<Vec<_>>()
         );
-        assert_eq!(archive.next_gap(start), model.next_gap(start));
+        assert_eq!(archive.indices().next_gap(start), model.next_gap(start));
         assert_eq!(
-            archive.missing_items(start, 5),
+            archive.indices().missing_items(start, 5),
             model.missing_items(start, 5)
         );
     }

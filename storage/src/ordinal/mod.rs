@@ -90,7 +90,7 @@
 //!     store = store.sync().await.unwrap();
 //!
 //!     // Check for gaps
-//!     let (current_end, next_start) = store.next_gap(0);
+//!     let (current_end, next_start) = store.indices().next_gap(0);
 //!     assert_eq!(current_end, Some(0));
 //!     assert_eq!(next_start, Some(5));
 //!
@@ -372,27 +372,27 @@ mod tests {
             store = store.put(14, FixedBytes::new([14u8; 32])).await.unwrap();
 
             // Check gaps
-            let (current_end, start_next) = store.next_gap(0);
+            let (current_end, start_next) = store.indices().next_gap(0);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(1));
 
-            let (current_end, start_next) = store.next_gap(1);
+            let (current_end, start_next) = store.indices().next_gap(1);
             assert_eq!(current_end, Some(1));
             assert_eq!(start_next, Some(10));
 
-            let (current_end, start_next) = store.next_gap(10);
+            let (current_end, start_next) = store.indices().next_gap(10);
             assert_eq!(current_end, Some(11));
             assert_eq!(start_next, Some(14));
 
-            let (current_end, start_next) = store.next_gap(11);
+            let (current_end, start_next) = store.indices().next_gap(11);
             assert_eq!(current_end, Some(11));
             assert_eq!(start_next, Some(14));
 
-            let (current_end, start_next) = store.next_gap(12);
+            let (current_end, start_next) = store.indices().next_gap(12);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(14));
 
-            let (current_end, start_next) = store.next_gap(14);
+            let (current_end, start_next) = store.indices().next_gap(14);
             assert_eq!(current_end, Some(14));
             assert!(start_next.is_none());
         });
@@ -416,8 +416,8 @@ mod tests {
                     .expect("Failed to initialize store");
 
             // Test 1: Empty store - should return no items
-            assert_eq!(store.missing_items(0, 5), Vec::<u64>::new());
-            assert_eq!(store.missing_items(100, 10), Vec::<u64>::new());
+            assert_eq!(store.indices().missing_items(0, 5), Vec::<u64>::new());
+            assert_eq!(store.indices().missing_items(100, 10), Vec::<u64>::new());
 
             // Test 2: Insert values with gaps
             store = store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
@@ -427,32 +427,32 @@ mod tests {
             store = store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
 
             // Test 3: Find missing items from the beginning
-            assert_eq!(store.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
-            assert_eq!(store.missing_items(0, 6), vec![0, 3, 4, 7, 8, 9]);
-            assert_eq!(store.missing_items(0, 7), vec![0, 3, 4, 7, 8, 9]);
+            assert_eq!(store.indices().missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+            assert_eq!(store.indices().missing_items(0, 6), vec![0, 3, 4, 7, 8, 9]);
+            assert_eq!(store.indices().missing_items(0, 7), vec![0, 3, 4, 7, 8, 9]);
 
             // Test 4: Find missing items from within a gap
-            assert_eq!(store.missing_items(3, 3), vec![3, 4, 7]);
-            assert_eq!(store.missing_items(4, 2), vec![4, 7]);
+            assert_eq!(store.indices().missing_items(3, 3), vec![3, 4, 7]);
+            assert_eq!(store.indices().missing_items(4, 2), vec![4, 7]);
 
             // Test 5: Find missing items from within a range
-            assert_eq!(store.missing_items(1, 3), vec![3, 4, 7]);
-            assert_eq!(store.missing_items(2, 4), vec![3, 4, 7, 8]);
-            assert_eq!(store.missing_items(5, 2), vec![7, 8]);
+            assert_eq!(store.indices().missing_items(1, 3), vec![3, 4, 7]);
+            assert_eq!(store.indices().missing_items(2, 4), vec![3, 4, 7, 8]);
+            assert_eq!(store.indices().missing_items(5, 2), vec![7, 8]);
 
             // Test 6: Find missing items after the last range (no more gaps)
-            assert_eq!(store.missing_items(11, 5), Vec::<u64>::new());
-            assert_eq!(store.missing_items(100, 10), Vec::<u64>::new());
+            assert_eq!(store.indices().missing_items(11, 5), Vec::<u64>::new());
+            assert_eq!(store.indices().missing_items(100, 10), Vec::<u64>::new());
 
             // Test 7: Large gap scenario
             store = store.put(1000, FixedBytes::new([100u8; 32])).await.unwrap();
 
             // Gap between 10 and 1000
-            let items = store.missing_items(11, 10);
+            let items = store.indices().missing_items(11, 10);
             assert_eq!(items, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
 
             // Request more items than available in gap
-            let items = store.missing_items(990, 15);
+            let items = store.indices().missing_items(990, 15);
             assert_eq!(
                 items,
                 vec![990, 991, 992, 993, 994, 995, 996, 997, 998, 999]
@@ -460,8 +460,8 @@ mod tests {
 
             // Test 8: After syncing (data should remain consistent)
             store = store.sync().await.unwrap();
-            assert_eq!(store.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
-            assert_eq!(store.missing_items(3, 3), vec![3, 4, 7]);
+            assert_eq!(store.indices().missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+            assert_eq!(store.indices().missing_items(3, 3), vec![3, 4, 7]);
 
             // Test 9: Cross-blob boundary scenario
             store = store.put(9999, FixedBytes::new([99u8; 32])).await.unwrap();
@@ -471,7 +471,7 @@ mod tests {
                 .unwrap();
 
             // Find missing items across blob boundary (10000 is the boundary)
-            let items = store.missing_items(9998, 5);
+            let items = store.indices().missing_items(9998, 5);
             assert_eq!(items, vec![9998, 10000]);
         });
     }
@@ -547,7 +547,7 @@ mod tests {
                 }
 
                 // Check gaps are preserved
-                let (current_end, start_next) = store.next_gap(0);
+                let (current_end, start_next) = store.indices().next_gap(0);
                 assert_eq!(current_end, Some(0));
                 assert_eq!(start_next, Some(100));
             }
@@ -1046,7 +1046,7 @@ mod tests {
 
             // Test next_gap on various indices
             for i in 0..10 {
-                let _ = store.next_gap(i * 100);
+                let _ = store.indices().next_gap(i * 100);
             }
 
             // Sync and drop the store
@@ -1206,11 +1206,11 @@ mod tests {
             store = store.sync().await.unwrap();
 
             // Check gaps before pruning
-            let (current_end, next_start) = store.next_gap(0);
+            let (current_end, next_start) = store.indices().next_gap(0);
             assert!(current_end.is_none());
             assert_eq!(next_start, Some(5));
 
-            let (current_end, next_start) = store.next_gap(5);
+            let (current_end, next_start) = store.indices().next_gap(5);
             assert_eq!(current_end, Some(5));
             assert_eq!(next_start, Some(105));
 
@@ -1225,11 +1225,11 @@ mod tests {
             assert!(store.has(105));
             assert!(store.has(305));
 
-            let (current_end, next_start) = store.next_gap(0);
+            let (current_end, next_start) = store.indices().next_gap(0);
             assert!(current_end.is_none());
             assert_eq!(next_start, Some(105));
 
-            let (current_end, next_start) = store.next_gap(105);
+            let (current_end, next_start) = store.indices().next_gap(105);
             assert_eq!(current_end, Some(105));
             assert_eq!(next_start, Some(305));
         });
@@ -1391,7 +1391,7 @@ mod tests {
                 assert!(store.has(200));
 
                 // Check gaps
-                let (current_end, next_start) = store.next_gap(0);
+                let (current_end, next_start) = store.indices().next_gap(0);
                 assert!(current_end.is_none());
                 assert_eq!(next_start, Some(100));
             }

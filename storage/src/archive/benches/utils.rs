@@ -4,6 +4,7 @@ use commonware_codec::config::RangeCfg;
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
     archive::{Archive as ArchiveTrait, Identifier, immutable, prunable},
+    rmap::RMap,
     translator::TwoCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes, test_rng};
@@ -101,10 +102,16 @@ impl Archive {
     }
 }
 
-// Implement Archive trait methods for the enum
 impl ArchiveTrait for Archive {
     type Key = Key;
     type Value = Val;
+
+    fn indices(&self) -> &RMap {
+        match self {
+            Self::Immutable(a) => a.indices(),
+            Self::Prunable(a) => a.indices(),
+        }
+    }
 
     async fn put(
         self,
@@ -135,48 +142,6 @@ impl ArchiveTrait for Archive {
         match self {
             Self::Immutable(a) => a.has(identifier).await,
             Self::Prunable(a) => a.has(identifier).await,
-        }
-    }
-
-    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        match self {
-            Self::Immutable(a) => a.next_gap(index),
-            Self::Prunable(a) => a.next_gap(index),
-        }
-    }
-
-    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
-        match self {
-            Self::Immutable(a) => a.missing_items(index, max),
-            Self::Prunable(a) => a.missing_items(index, max),
-        }
-    }
-
-    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
-        match self {
-            Self::Immutable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
-            Self::Prunable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
-        }
-    }
-
-    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
-        match self {
-            Self::Immutable(a) => a.ranges_from(from).collect::<Vec<_>>().into_iter(),
-            Self::Prunable(a) => a.ranges_from(from).collect::<Vec<_>>().into_iter(),
-        }
-    }
-
-    fn first_index(&self) -> Option<u64> {
-        match self {
-            Self::Immutable(a) => a.first_index(),
-            Self::Prunable(a) => a.first_index(),
-        }
-    }
-
-    fn last_index(&self) -> Option<u64> {
-        match self {
-            Self::Immutable(a) => a.last_index(),
-            Self::Prunable(a) => a.last_index(),
         }
     }
 

@@ -315,7 +315,11 @@ fn assert_range_helpers(
         model.insert(index);
     }
     let expected_ranges: Vec<_> = model.iter().map(|(&start, &end)| (start, end)).collect();
-    let ranges: Vec<_> = archive.ranges().collect();
+    let ranges: Vec<_> = archive
+        .indices()
+        .iter()
+        .map(|(&start, &end)| (start, end))
+        .collect();
     let mut actual = BTreeSet::new();
     for &(start, end) in &ranges {
         assert!(start <= end, "archive exposed an inverted index range");
@@ -335,12 +339,12 @@ fn assert_range_helpers(
     );
 
     assert_eq!(
-        archive.first_index(),
+        archive.indices().first_index(),
         model.first_index(),
         "first_index disagrees with the expected index set"
     );
     assert_eq!(
-        archive.last_index(),
+        archive.indices().last_index(),
         model.last_index(),
         "last_index disagrees with the expected index set"
     );
@@ -357,17 +361,21 @@ fn assert_range_helpers(
             .map(|(&range_start, &range_end)| (range_start, range_end))
             .collect();
         assert_eq!(
-            archive.ranges_from(start).collect::<Vec<_>>(),
+            archive
+                .indices()
+                .iter_from(start)
+                .map(|(&start, &end)| (start, end))
+                .collect::<Vec<_>>(),
             expected_from,
             "ranges_from disagrees with the expected index set"
         );
         assert_eq!(
-            archive.next_gap(start),
+            archive.indices().next_gap(start),
             model.next_gap(start),
             "next_gap disagrees with the expected index set"
         );
         assert_eq!(
-            archive.missing_items(start, 8),
+            archive.indices().missing_items(start, 8),
             model.missing_items(start, 8),
             "missing_items disagrees with the expected index set"
         );

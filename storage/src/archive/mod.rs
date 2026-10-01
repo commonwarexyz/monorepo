@@ -6,6 +6,7 @@
 //! to be retrieved). The same key may be stored at multiple indices in either case, and a key lookup may
 //! return any of the associated values.
 
+use crate::rmap::RMap;
 use commonware_codec::CodecShared;
 use commonware_runtime::Handle;
 use commonware_utils::Array;
@@ -117,29 +118,10 @@ pub trait Archive: Send + Sized {
         identifier: Identifier<'a, Self::Key>,
     ) -> impl Future<Output = Result<bool, Error>> + Send + use<'a, Self>;
 
-    /// Retrieve the end of the current range including `index` (inclusive) and
-    /// the start of the next range after `index` (if it exists).
+    /// Retrieve the populated index ranges for gap queries and range iteration.
     ///
-    /// This is useful for driving backfill operations over the archive.
-    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>);
-
-    /// Returns up to `max` missing items starting from `start`.
-    ///
-    /// This method iterates through gaps between existing ranges, collecting missing indices
-    /// until either `max` items are found or there are no more gaps to fill.
-    fn missing_items(&self, index: u64, max: usize) -> Vec<u64>;
-
-    /// Retrieve an iterator over all populated ranges (inclusive) within the [Archive].
-    fn ranges(&self) -> impl Iterator<Item = (u64, u64)>;
-
-    /// Retrieve an iterator over ranges that overlap or follow `from`.
-    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)>;
-
-    /// Retrieve the first index in the [Archive].
-    fn first_index(&self) -> Option<u64>;
-
-    /// Retrieve the last index in the [Archive].
-    fn last_index(&self) -> Option<u64>;
+    /// Includes accepted writes that have not yet been synced. Range endpoints are inclusive.
+    fn indices(&self) -> &RMap;
 
     /// Sync all pending writes.
     fn sync(self) -> impl Future<Output = Result<Self, Error>> + Send;
@@ -708,7 +690,7 @@ mod tests {
             let sorted_indices: Vec<u64> = keys.keys().cloned().collect();
 
             // Check gap before the first element
-            let (current_end, start_next) = archive.next_gap(0);
+            let (current_end, start_next) = archive.indices().next_gap(0);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(sorted_indices[0]));
 
@@ -730,7 +712,7 @@ mod tests {
                     None
                 };
 
-                let (current_end, start_next) = archive.next_gap(current_index);
+                let (current_end, start_next) = archive.indices().next_gap(current_index);
                 assert_eq!(current_end, Some(block_end_index));
                 assert_eq!(start_next, next_actual_index);
 
@@ -739,7 +721,7 @@ mod tests {
                     && next_index > block_end_index + 1
                 {
                     let in_gap_index = block_end_index + 1;
-                    let (current_end, start_next) = archive.next_gap(in_gap_index);
+                    let (current_end, start_next) = archive.indices().next_gap(in_gap_index);
                     assert!(current_end.is_none());
                     assert_eq!(start_next, Some(next_index));
                 }
@@ -748,7 +730,7 @@ mod tests {
 
             // Check the last element
             let last_index = *sorted_indices.last().unwrap();
-            let (current_end, start_next) = archive.next_gap(last_index);
+            let (current_end, start_next) = archive.indices().next_gap(last_index);
             assert!(current_end.is_some());
             assert!(start_next.is_none());
         }
@@ -1209,7 +1191,7 @@ mod tests {
         assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(200));
 
         // Gap tracking works across mixed usage
-        let (end, next) = archive.next_gap(1);
+        let (end, next) = archive.indices().next_gap(1);
         assert_eq!(end, Some(3));
         assert!(next.is_none());
 

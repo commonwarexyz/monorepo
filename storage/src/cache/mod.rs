@@ -35,7 +35,8 @@
 //! # Querying for Gaps
 //!
 //! [Cache] tracks gaps in the index space to enable the caller to efficiently fetch unknown keys
-//! using `next_gap`. This is a very common pattern when syncing blocks in a blockchain.
+//! using [RMap::next_gap](crate::rmap::RMap::next_gap) through [Cache::indices]. This is a very
+//! common pattern when syncing blocks in a blockchain.
 //!
 //! # Example
 //!
@@ -67,7 +68,7 @@
 //!
 //!     // Check for gaps in the index space
 //!     cache = cache.put(10, 200u32).await.unwrap();
-//!     let (current_end, start_next) = cache.next_gap(5);
+//!     let (current_end, start_next) = cache.indices().next_gap(5);
 //!     assert!(current_end.is_none());
 //!     assert_eq!(start_next, Some(10));
 //!
@@ -195,7 +196,7 @@ mod tests {
             for (index, data) in &items {
                 cache = cache.put(*index, *data).await.expect("Failed to put data");
             }
-            assert_eq!(cache.first(), Some(1));
+            assert_eq!(cache.indices().first_index(), Some(1));
 
             // Check metrics
             let buffer = context.encode();
@@ -213,7 +214,7 @@ mod tests {
                     assert_eq!(retrieved.expect("Data not found"), data);
                 }
             }
-            assert_eq!(cache.first(), Some(3));
+            assert_eq!(cache.indices().first_index(), Some(3));
 
             // Check metrics
             let buffer = context.encode();
@@ -221,11 +222,11 @@ mod tests {
 
             // Try to prune older section
             cache = cache.prune(2).await.expect("Failed to prune");
-            assert_eq!(cache.first(), Some(3));
+            assert_eq!(cache.indices().first_index(), Some(3));
 
             // Try to prune current section again
             cache = cache.prune(3).await.expect("Failed to prune");
-            assert_eq!(cache.first(), Some(3));
+            assert_eq!(cache.indices().first_index(), Some(3));
 
             // A put below the prune floor is satisfied without storing
             let cache = cache.put(1, 1).await.expect("Failed to put below floor");
@@ -420,8 +421,11 @@ mod tests {
                 .await
                 .expect("Failed to initialize cache");
 
-            // Check first
-            assert_eq!(cache.first(), None);
+            // Check the empty index view
+            assert_eq!(cache.indices().first_index(), None);
+            assert_eq!(cache.indices().last_index(), None);
+            assert_eq!(cache.indices().iter().next(), None);
+            assert_eq!(cache.indices().iter_from(u64::MAX).next(), None);
 
             // Insert values with gaps
             cache = cache.put(1, 1).await.unwrap();
@@ -429,29 +433,44 @@ mod tests {
             cache = cache.put(11, 11).await.unwrap();
             cache = cache.put(14, 14).await.unwrap();
 
+            assert_eq!(cache.indices().last_index(), Some(14));
+            assert_eq!(
+                cache.indices().iter().collect::<Vec<_>>(),
+                vec![(&1, &1), (&10, &11), (&14, &14)]
+            );
+            assert_eq!(
+                cache.indices().iter_from(11).collect::<Vec<_>>(),
+                vec![(&10, &11), (&14, &14)]
+            );
+            assert_eq!(
+                cache.indices().iter_from(12).collect::<Vec<_>>(),
+                vec![(&14, &14)]
+            );
+            assert_eq!(cache.indices().iter_from(u64::MAX).next(), None);
+
             // Check gaps
-            let (current_end, start_next) = cache.next_gap(0);
+            let (current_end, start_next) = cache.indices().next_gap(0);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(1));
-            assert_eq!(cache.first(), Some(1));
+            assert_eq!(cache.indices().first_index(), Some(1));
 
-            let (current_end, start_next) = cache.next_gap(1);
+            let (current_end, start_next) = cache.indices().next_gap(1);
             assert_eq!(current_end, Some(1));
             assert_eq!(start_next, Some(10));
 
-            let (current_end, start_next) = cache.next_gap(10);
+            let (current_end, start_next) = cache.indices().next_gap(10);
             assert_eq!(current_end, Some(11));
             assert_eq!(start_next, Some(14));
 
-            let (current_end, start_next) = cache.next_gap(11);
+            let (current_end, start_next) = cache.indices().next_gap(11);
             assert_eq!(current_end, Some(11));
             assert_eq!(start_next, Some(14));
 
-            let (current_end, start_next) = cache.next_gap(12);
+            let (current_end, start_next) = cache.indices().next_gap(12);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(14));
 
-            let (current_end, start_next) = cache.next_gap(14);
+            let (current_end, start_next) = cache.indices().next_gap(14);
             assert_eq!(current_end, Some(14));
             assert!(start_next.is_none());
         });
@@ -475,9 +494,9 @@ mod tests {
                 .expect("Failed to initialize cache");
 
             // Test 1: Empty cache - should return no items
-            assert_eq!(cache.first(), None);
-            assert_eq!(cache.missing_items(0, 5), Vec::<u64>::new());
-            assert_eq!(cache.missing_items(100, 10), Vec::<u64>::new());
+            assert_eq!(cache.indices().first_index(), None);
+            assert_eq!(cache.indices().missing_items(0, 5), Vec::<u64>::new());
+            assert_eq!(cache.indices().missing_items(100, 10), Vec::<u64>::new());
 
             // Test 2: Insert values with gaps
             cache = cache.put(1, 1).await.unwrap();
@@ -487,32 +506,32 @@ mod tests {
             cache = cache.put(10, 10).await.unwrap();
 
             // Test 3: Find missing items from the beginning
-            assert_eq!(cache.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
-            assert_eq!(cache.missing_items(0, 6), vec![0, 3, 4, 7, 8, 9]);
-            assert_eq!(cache.missing_items(0, 7), vec![0, 3, 4, 7, 8, 9]);
+            assert_eq!(cache.indices().missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+            assert_eq!(cache.indices().missing_items(0, 6), vec![0, 3, 4, 7, 8, 9]);
+            assert_eq!(cache.indices().missing_items(0, 7), vec![0, 3, 4, 7, 8, 9]);
 
             // Test 4: Find missing items from within a gap
-            assert_eq!(cache.missing_items(3, 3), vec![3, 4, 7]);
-            assert_eq!(cache.missing_items(4, 2), vec![4, 7]);
+            assert_eq!(cache.indices().missing_items(3, 3), vec![3, 4, 7]);
+            assert_eq!(cache.indices().missing_items(4, 2), vec![4, 7]);
 
             // Test 5: Find missing items from within a range
-            assert_eq!(cache.missing_items(1, 3), vec![3, 4, 7]);
-            assert_eq!(cache.missing_items(2, 4), vec![3, 4, 7, 8]);
-            assert_eq!(cache.missing_items(5, 2), vec![7, 8]);
+            assert_eq!(cache.indices().missing_items(1, 3), vec![3, 4, 7]);
+            assert_eq!(cache.indices().missing_items(2, 4), vec![3, 4, 7, 8]);
+            assert_eq!(cache.indices().missing_items(5, 2), vec![7, 8]);
 
             // Test 6: Find missing items after the last range (no more gaps)
-            assert_eq!(cache.missing_items(11, 5), Vec::<u64>::new());
-            assert_eq!(cache.missing_items(100, 10), Vec::<u64>::new());
+            assert_eq!(cache.indices().missing_items(11, 5), Vec::<u64>::new());
+            assert_eq!(cache.indices().missing_items(100, 10), Vec::<u64>::new());
 
             // Test 7: Large gap scenario
             cache = cache.put(1000, 1000).await.unwrap();
 
             // Gap between 10 and 1000
-            let items = cache.missing_items(11, 10);
+            let items = cache.indices().missing_items(11, 10);
             assert_eq!(items, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
 
             // Request more items than available in gap
-            let items = cache.missing_items(990, 15);
+            let items = cache.indices().missing_items(990, 15);
             assert_eq!(
                 items,
                 vec![990, 991, 992, 993, 994, 995, 996, 997, 998, 999]
@@ -520,15 +539,15 @@ mod tests {
 
             // Test 8: After syncing (data should remain consistent)
             cache = cache.sync().await.unwrap();
-            assert_eq!(cache.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
-            assert_eq!(cache.missing_items(3, 3), vec![3, 4, 7]);
+            assert_eq!(cache.indices().missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+            assert_eq!(cache.indices().missing_items(3, 3), vec![3, 4, 7]);
 
             // Test 9: Cross-section boundary scenario
             cache = cache.put(DEFAULT_ITEMS_PER_BLOB - 1, 99).await.unwrap();
             cache = cache.put(DEFAULT_ITEMS_PER_BLOB + 1, 101).await.unwrap();
 
             // Find missing items across section boundary
-            let items = cache.missing_items(DEFAULT_ITEMS_PER_BLOB - 2, 5);
+            let items = cache.indices().missing_items(DEFAULT_ITEMS_PER_BLOB - 2, 5);
             assert_eq!(
                 items,
                 vec![DEFAULT_ITEMS_PER_BLOB - 2, DEFAULT_ITEMS_PER_BLOB]
@@ -570,16 +589,16 @@ mod tests {
                     .expect("Failed to initialize cache");
 
                 // Check gaps are preserved
-                let (current_end, start_next) = cache.next_gap(0);
+                let (current_end, start_next) = cache.indices().next_gap(0);
                 assert_eq!(current_end, Some(0));
                 assert_eq!(start_next, Some(100));
 
-                let (current_end, start_next) = cache.next_gap(100);
+                let (current_end, start_next) = cache.indices().next_gap(100);
                 assert_eq!(current_end, Some(100));
                 assert_eq!(start_next, Some(1000));
 
                 // Check missing items
-                let items = cache.missing_items(1, 5);
+                let items = cache.indices().missing_items(1, 5);
                 assert_eq!(items, vec![1, 2, 3, 4, 5]);
             }
         });
@@ -609,7 +628,7 @@ mod tests {
             cache = cache.put(350, 350).await.unwrap();
 
             // Check gaps before pruning
-            let (current_end, start_next) = cache.next_gap(0);
+            let (current_end, start_next) = cache.indices().next_gap(0);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(50));
 
@@ -621,12 +640,12 @@ mod tests {
             assert!(!cache.has(150));
 
             // Check gaps after pruning - should not include pruned ranges
-            let (current_end, start_next) = cache.next_gap(200);
+            let (current_end, start_next) = cache.indices().next_gap(200);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(250));
 
             // Missing items should not include pruned ranges
-            let items = cache.missing_items(200, 5);
+            let items = cache.indices().missing_items(200, 5);
             assert_eq!(items, vec![200, 201, 202, 203, 204]);
 
             // Verify remaining data is still accessible
@@ -673,11 +692,11 @@ mod tests {
             assert!(!cache.has(499));
 
             // Verify gap detection works correctly
-            let (current_end, start_next) = cache.next_gap(50);
+            let (current_end, start_next) = cache.indices().next_gap(50);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(99));
 
-            let (current_end, start_next) = cache.next_gap(99);
+            let (current_end, start_next) = cache.indices().next_gap(99);
             assert_eq!(current_end, Some(100));
             assert_eq!(start_next, Some(500));
 
@@ -715,15 +734,15 @@ mod tests {
             // Test edge case: single item
             cache = cache.put(42, 42).await.unwrap();
 
-            let (current_end, start_next) = cache.next_gap(42);
+            let (current_end, start_next) = cache.indices().next_gap(42);
             assert_eq!(current_end, Some(42));
             assert!(start_next.is_none());
 
-            let (current_end, start_next) = cache.next_gap(41);
+            let (current_end, start_next) = cache.indices().next_gap(41);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(42));
 
-            let (current_end, start_next) = cache.next_gap(43);
+            let (current_end, start_next) = cache.indices().next_gap(43);
             assert!(current_end.is_none());
             assert!(start_next.is_none());
 
@@ -731,18 +750,18 @@ mod tests {
             cache = cache.put(43, 43).await.unwrap();
             cache = cache.put(44, 44).await.unwrap();
 
-            let (current_end, start_next) = cache.next_gap(42);
+            let (current_end, start_next) = cache.indices().next_gap(42);
             assert_eq!(current_end, Some(44));
             assert!(start_next.is_none());
 
             // Test edge case: boundary values
             cache = cache.put(u64::MAX - 1, 999).await.unwrap();
 
-            let (current_end, start_next) = cache.next_gap(u64::MAX - 2);
+            let (current_end, start_next) = cache.indices().next_gap(u64::MAX - 2);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(u64::MAX - 1));
 
-            let (current_end, start_next) = cache.next_gap(u64::MAX - 1);
+            let (current_end, start_next) = cache.indices().next_gap(u64::MAX - 1);
             assert_eq!(current_end, Some(u64::MAX - 1));
             assert!(start_next.is_none());
         });
@@ -776,7 +795,7 @@ mod tests {
             assert_eq!(cache.get(10).await.unwrap(), Some(10)); // Should still be original value
 
             // Verify intervals are correct
-            let (current_end, start_next) = cache.next_gap(10);
+            let (current_end, start_next) = cache.indices().next_gap(10);
             assert_eq!(current_end, Some(10));
             assert!(start_next.is_none());
 
@@ -785,7 +804,7 @@ mod tests {
             cache = cache.put(11, 11).await.unwrap();
 
             // Verify intervals updated correctly
-            let (current_end, start_next) = cache.next_gap(9);
+            let (current_end, start_next) = cache.indices().next_gap(9);
             assert_eq!(current_end, Some(11));
             assert!(start_next.is_none());
         });

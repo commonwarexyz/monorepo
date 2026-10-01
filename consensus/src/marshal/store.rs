@@ -277,12 +277,13 @@ where
     }
 
     fn last_index(&self) -> Option<Height> {
-        <Self as Archive>::last_index(self).map(Height::new)
+        self.indices().last_index().map(Height::new)
     }
 
     fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
-        <Self as Archive>::ranges_from(self, from.get())
-            .map(|(s, e)| (Height::new(s), Height::new(e)))
+        self.indices()
+            .iter_from(from.get())
+            .map(|(&s, &e)| (Height::new(s), Height::new(e)))
     }
 }
 
@@ -319,19 +320,20 @@ where
     }
 
     fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
-        <Self as Archive>::missing_items(self, start.get(), max)
+        self.indices()
+            .missing_items(start.get(), max)
             .into_iter()
             .map(Height::new)
             .collect()
     }
 
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
-        let (a, b) = <Self as Archive>::next_gap(self, value.get());
+        let (a, b) = self.indices().next_gap(value.get());
         (a.map(Height::new), b.map(Height::new))
     }
 
     fn last_index(&self) -> Option<Height> {
-        <Self as Archive>::last_index(self).map(Height::new)
+        self.indices().last_index().map(Height::new)
     }
 }
 
@@ -381,12 +383,13 @@ where
     }
 
     fn last_index(&self) -> Option<Height> {
-        <Self as Archive>::last_index(self).map(Height::new)
+        self.indices().last_index().map(Height::new)
     }
 
     fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
-        <Self as Archive>::ranges_from(self, from.get())
-            .map(|(s, e)| (Height::new(s), Height::new(e)))
+        self.indices()
+            .iter_from(from.get())
+            .map(|(&s, &e)| (Height::new(s), Height::new(e)))
     }
 }
 
@@ -423,18 +426,19 @@ where
     }
 
     fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
-        <Self as Archive>::missing_items(self, start.get(), max)
+        self.indices()
+            .missing_items(start.get(), max)
             .into_iter()
             .map(Height::new)
             .collect()
     }
 
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
-        let (a, b) = <Self as Archive>::next_gap(self, value.get());
+        let (a, b) = self.indices().next_gap(value.get());
         (a.map(Height::new), b.map(Height::new))
     }
 
     fn last_index(&self) -> Option<Height> {
-        <Self as Archive>::last_index(self).map(Height::new)
+        self.indices().last_index().map(Height::new)
     }
 }

@@ -490,36 +490,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         Ok((self, handle))
     }
 
-    /// See [crate::archive::Archive::next_gap].
-    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.intervals.next_gap(index)
-    }
-
-    /// See [crate::archive::Archive::missing_items].
-    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
-        self.intervals.missing_items(index, max)
-    }
-
-    /// See [crate::archive::Archive::ranges].
-    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
-        self.intervals.iter().map(|(&s, &e)| (s, e))
-    }
-
-    /// See [crate::archive::Archive::ranges_from].
-    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
-        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
-    }
-
-    /// See [crate::archive::Archive::first_index].
-    fn first_index(&self) -> Option<u64> {
-        self.intervals.first_index()
-    }
-
-    /// See [crate::archive::Archive::last_index].
-    fn last_index(&self) -> Option<u64> {
-        self.intervals.last_index()
-    }
-
     /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
         Ok(self.oversized.destroy().await?)
@@ -593,8 +563,8 @@ pub struct Archive<T: Translator, E: Context, K: Array, V: CodecShared>(Box<Inne
 impl<T: Translator, E: Context, K: Array, V: CodecShared> std::fmt::Debug for Archive<T, E, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Archive")
-            .field("first_index", &self.0.first_index())
-            .field("last_index", &self.0.last_index())
+            .field("first_index", &self.0.intervals.first_index())
+            .field("last_index", &self.0.intervals.last_index())
             .finish_non_exhaustive()
     }
 }
@@ -625,6 +595,10 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::Archiv
     type Key = K;
     type Value = V;
 
+    fn indices(&self) -> &RMap {
+        &self.0.intervals
+    }
+
     async fn put(mut self, index: u64, key: K, data: &V) -> Result<Self, Error> {
         self.0 = self.0.put_internal(index, key, data, true).await?;
         Ok(self)
@@ -647,30 +621,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::Archiv
         let handle;
         (self.0, handle) = self.0.start_sync().await?;
         Ok((self, handle))
-    }
-
-    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.0.next_gap(index)
-    }
-
-    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
-        self.0.missing_items(index, max)
-    }
-
-    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
-        self.0.ranges()
-    }
-
-    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
-        self.0.ranges_from(from)
-    }
-
-    fn first_index(&self) -> Option<u64> {
-        self.0.first_index()
-    }
-
-    fn last_index(&self) -> Option<u64> {
-        self.0.last_index()
     }
 
     async fn destroy(self) -> Result<(), Error> {

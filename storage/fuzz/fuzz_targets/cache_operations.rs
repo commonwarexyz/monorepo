@@ -194,7 +194,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::First => {
                     if let Some(ref cache) = cache_opt {
-                        let first = cache.first();
+                        let first = cache.indices().first_index();
 
                         let expected_first = expected_data
                             .keys()
@@ -214,7 +214,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::NextGap { from } => {
                     if let Some(ref cache) = cache_opt {
-                        let (current_end, start_next) = cache.next_gap(from);
+                        let (current_end, start_next) = cache.indices().next_gap(from);
                         if let Some(current_end) = current_end {
                             assert!(expected_data.contains_key(&current_end));
                         }
@@ -226,7 +226,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::MissingItems { from, limit } => {
                     if let Some(ref cache) = cache_opt {
-                        let missing = cache.missing_items(from, limit);
+                        let missing = cache.indices().missing_items(from, limit);
                         assert!(missing.len() <= limit);
 
                         for &item in &missing {

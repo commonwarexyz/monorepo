@@ -965,7 +965,11 @@ mod tests {
                         .await
                         .unwrap();
                 assert_eq!(
-                    archive.ranges().collect::<Vec<_>>(),
+                    archive
+                        .indices()
+                        .iter()
+                        .map(|(&start, &end)| (start, end))
+                        .collect::<Vec<_>>(),
                     if retained == 0 {
                         Vec::new()
                     } else {
@@ -986,7 +990,7 @@ mod tests {
                 let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child(name), cfg)
                     .await
                     .unwrap();
-                assert_eq!(archive.last_index(), retained.checked_sub(1));
+                assert_eq!(archive.indices().last_index(), retained.checked_sub(1));
                 archive.destroy().await.unwrap();
             }
         });
@@ -1030,7 +1034,7 @@ mod tests {
                 Archive::<_, _, FixedBytes<64>, i32>::init(context.child("repair"), cfg.clone())
                     .await
                     .unwrap();
-            assert_eq!(archive.last_index(), None);
+            assert_eq!(archive.indices().last_index(), None);
             drop(archive);
             let (_, value_size) = context
                 .open(&cfg.value_partition, &0u64.to_be_bytes())
@@ -1117,7 +1121,14 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 1)]);
+            assert_eq!(
+                archive
+                    .indices()
+                    .iter()
+                    .map(|(&start, &end)| (start, end))
+                    .collect::<Vec<_>>(),
+                vec![(0, 1)]
+            );
             drop(archive);
 
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
@@ -1139,7 +1150,14 @@ mod tests {
                 Archive::<_, _, FixedBytes<64>, i32>::init(context.child("third_open"), cfg)
                     .await
                     .unwrap();
-            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 2)]);
+            assert_eq!(
+                archive
+                    .indices()
+                    .iter()
+                    .map(|(&start, &end)| (start, end))
+                    .collect::<Vec<_>>(),
+                vec![(0, 2)]
+            );
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
             assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(30));
@@ -1535,8 +1553,15 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(pending.calls(), 1);
-            assert_eq!(archive.last_index(), Some(0));
-            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 0)]);
+            assert_eq!(archive.indices().last_index(), Some(0));
+            assert_eq!(
+                archive
+                    .indices()
+                    .iter()
+                    .map(|(&start, &end)| (start, end))
+                    .collect::<Vec<_>>(),
+                vec![(0, 0)]
+            );
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
             drop(archive);
@@ -1692,7 +1717,14 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 0), (4, 4)]);
+            assert_eq!(
+                archive
+                    .indices()
+                    .iter()
+                    .map(|(&start, &end)| (start, end))
+                    .collect::<Vec<_>>(),
+                vec![(0, 0), (4, 4)]
+            );
             drop(archive);
 
             Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_reopen"), cfg)
@@ -1928,7 +1960,11 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                archive.ranges().collect::<Vec<_>>(),
+                archive
+                    .indices()
+                    .iter()
+                    .map(|(&start, &end)| (start, end))
+                    .collect::<Vec<_>>(),
                 vec![(0, 0), (4, 4), (8, 8)]
             );
             archive.destroy().await.unwrap();
@@ -2560,7 +2596,7 @@ mod tests {
                     assert_eq!(retrieved, data);
 
                     // Check range
-                    let (current_end, start_next) = archive.next_gap(index);
+                    let (current_end, start_next) = archive.indices().next_gap(index);
                     assert_eq!(current_end.unwrap(), num_keys as u64 - 1);
                     assert!(start_next.is_none());
                 } else {
@@ -2572,7 +2608,7 @@ mod tests {
                     removed += 1;
 
                     // Check range
-                    let (current_end, start_next) = archive.next_gap(index);
+                    let (current_end, start_next) = archive.indices().next_gap(index);
                     assert!(current_end.is_none());
                     assert_eq!(start_next.unwrap(), min);
                 }

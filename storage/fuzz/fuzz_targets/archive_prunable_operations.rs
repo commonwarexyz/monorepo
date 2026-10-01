@@ -269,7 +269,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 ArchiveOperation::NextGap { start } => {
-                    let (gap, next_written) = archive.next_gap(*start);
+                    let (gap, next_written) = archive.indices().next_gap(*start);
 
                     if let Some(gap_index) = gap {
                         // Gap should be at or after start

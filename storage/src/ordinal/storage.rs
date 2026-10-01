@@ -356,36 +356,6 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         self.intervals.get(&index).is_some()
     }
 
-    /// See [Ordinal::next_gap].
-    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.intervals.next_gap(index)
-    }
-
-    /// See [Ordinal::ranges].
-    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.intervals.iter().map(|(&s, &e)| (s, e))
-    }
-
-    /// See [Ordinal::ranges_from].
-    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
-    }
-
-    /// See [Ordinal::first_index].
-    fn first_index(&self) -> Option<u64> {
-        self.intervals.first_index()
-    }
-
-    /// See [Ordinal::last_index].
-    fn last_index(&self) -> Option<u64> {
-        self.intervals.last_index()
-    }
-
-    /// See [Ordinal::missing_items].
-    fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
-        self.intervals.missing_items(start, max)
-    }
-
     /// See [Ordinal::prune].
     async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Collect sections to remove
@@ -481,6 +451,13 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> std::fmt::Debug for Ordinal<E, V> {
 }
 
 impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
+    /// Retrieve the populated index ranges for gap queries and range iteration.
+    ///
+    /// Includes accepted writes that have not yet been synced. Range endpoints are inclusive.
+    pub fn indices(&self) -> &RMap {
+        &self.0.intervals
+    }
+
     /// Initialize a new [Ordinal] instance with a collection of [BitMap]s (indicating which
     /// records should be considered available).
     ///
@@ -512,39 +489,6 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Check if an index exists.
     pub fn has(&self, index: u64) -> bool {
         self.0.has(index)
-    }
-
-    /// Get the next gap information for backfill operations.
-    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.0.next_gap(index)
-    }
-
-    /// Get an iterator over all ranges in the [Ordinal].
-    pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.0.ranges()
-    }
-
-    /// Get an iterator over ranges that overlap or follow `from`.
-    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.0.ranges_from(from)
-    }
-
-    /// Retrieve the first index in the [Ordinal].
-    pub fn first_index(&self) -> Option<u64> {
-        self.0.first_index()
-    }
-
-    /// Retrieve the last index in the [Ordinal].
-    pub fn last_index(&self) -> Option<u64> {
-        self.0.last_index()
-    }
-
-    /// Returns up to `max` missing items starting from `start`.
-    ///
-    /// This method iterates through gaps between existing ranges, collecting missing indices
-    /// until either `max` items are found or there are no more gaps to fill.
-    pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
-        self.0.missing_items(start, max)
     }
 
     /// Prune indices older than `min` by removing entire blobs.

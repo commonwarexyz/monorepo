@@ -150,7 +150,7 @@ fn fuzz(input: FuzzInput) {
 
                 OrdinalOperation::NextGap { index } => {
                     if let Some(ordinal) = store.as_ref() {
-                        let (current_end, next_start) = ordinal.next_gap(*index);
+                        let (current_end, next_start) = ordinal.indices().next_gap(*index);
 
                         if let Some(end) = current_end {
                             assert!(ordinal.has(end), "current_end {end} should exist");
