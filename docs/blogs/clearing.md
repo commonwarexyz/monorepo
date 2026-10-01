@@ -11,9 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (10/1/26): Operators use their receipt key to sign the final payer states once per close. Validator signatures still aggregate into the close certificate.*
-
-*Update (10/1/26): Restores continuous payments while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice.*
+*Update (10/1/26): Restores continuous payments while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice. Operators sign the final payer states once per close with their receipt key; validators aggregate their signatures into the close certificate.*
 
 *Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 
@@ -191,7 +189,7 @@ Every validator keeps each live account's balance under its public key. Deposits
 
 When a payment names a new public key, the operator records a balance for it without an onchain registration transaction. The recipient can spend the balance after the close is admitted, or let payments from many senders accumulate across multiple closes before requesting a withdrawal of the full balance.
 
-At each close, the operator publishes a shared settlement record called the **dealing**. It contains active account keys, senders' final signed payer states, and cumulative payment entries. The operator signs one canonical batch of final payer states, bound to the epoch, using the same key that signs payment receipts. A CDN can cache this shared record for efficient distribution.
+At each close, the operator publishes a signed settlement record called the **dealing**, containing active account keys, senders' final signed payer states, and cumulative payment entries. A CDN can cache this shared record for efficient distribution.
 
 Each validator checks the payer signatures and the operator's batch signature, derives incoming credits, and combines them with its stored balances and the deposits and withdrawals fixed at epoch registration.
 

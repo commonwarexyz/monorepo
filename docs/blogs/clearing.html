@@ -101,13 +101,13 @@ years." />
 O’Grady</a></div>
                         <div class="date">August 19th, 2026</div>
         </div>
-        <p><em>Update (10/1/26): Operators use their receipt key to sign the
-        final payer states once per close. Validator signatures still
-        aggregate into the close certificate.</em></p>
         <p><em>Update (10/1/26): Restores continuous payments while the
         previous epoch’s close is built, certified, and admitted. Each
         payment signature binds the payer’s final vector root from that
-        epoch, preventing retries from settling twice.</em></p>
+        epoch, preventing retries from settling twice. Operators sign the
+        final payer states once per close with their receipt key;
+        validators aggregate their signatures into the close
+        certificate.</em></p>
         <p><em>Update (9/18/26): Settlement certificates require at
         least <span class="math inline">f+1</span> signatures: every
         signer validates and retains the complete close. The settlement
@@ -382,13 +382,11 @@ O’Grady</a></div>
         recipient can spend the balance after the close is admitted, or
         let payments from many senders accumulate across multiple closes
         before requesting a withdrawal of the full balance.</p>
-        <p>At each close, the operator publishes a shared settlement
-        record called the <strong>dealing</strong>. It contains active
+        <p>At each close, the operator publishes a signed settlement
+        record called the <strong>dealing</strong>, containing active
         account keys, senders’ final signed payer states, and cumulative
-        payment entries. The operator signs one canonical batch of final
-        payer states, bound to the epoch, using the same key that signs
-        payment receipts. A CDN can cache this shared record for
-        efficient distribution.</p>
+        payment entries. A CDN can cache this shared record for efficient
+        distribution.</p>
         <p>Each validator checks the payer signatures and the operator’s
         batch signature, derives incoming credits, and combines them
         with its stored balances and the deposits and withdrawals fixed
