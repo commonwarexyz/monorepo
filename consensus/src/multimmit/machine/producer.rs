@@ -177,7 +177,6 @@ pub struct ProducerProgress {
     chain: ChainId,
     produced: Height,
     certified: Height,
-    window: Height,
     da_quorum: usize,
     pipeline_window: u64,
     prepared: usize,
@@ -202,12 +201,6 @@ impl ProducerProgress {
     /// Returns the latest locally held DA-certified height.
     pub const fn certified(self) -> Height {
         self.certified
-    }
-
-    /// Returns the height the pipeline window starts from: the latest locally held DA-certified
-    /// height, or a higher height finality reported for the chain.
-    pub const fn window(self) -> Height {
-        self.window
     }
 
     /// Returns the DA share quorum.
@@ -313,22 +306,16 @@ impl<D: Digest> ProducerState<D> {
 }
 
 impl<V: Variant, D: Digest> ChainState<V, D> {
-    /// Returns the own chain's production state, if this node produces. `finalized` is the
-    /// highest final block height finality reported, by chain index.
-    pub(crate) fn producer_status<H: Hasher<Digest = D>>(
-        &self,
-        finalized: &[Height],
-    ) -> Option<ProducerProgress> {
+    /// Returns the own chain's production state, if this node produces.
+    pub(crate) fn producer_status<H: Hasher<Digest = D>>(&self) -> Option<ProducerProgress> {
         let producer = self.producer.as_ref()?;
         let certified = self.da.chains[producer.chain.index()].certified_height();
-        let window = window_base(certified, finalized, producer.chain);
         let pipeline_window = self.pipeline_window(producer.chain);
 
         Some(ProducerProgress {
             chain: producer.chain,
             produced: producer.produced.height(),
             certified,
-            window,
             da_quorum: self.da_quorum,
             pipeline_window,
             prepared: producer.prepared.len(),
@@ -336,7 +323,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 .planned_tip::<H>()
                 .height()
                 .get()
-                .saturating_sub(window.get())
+                .saturating_sub(certified.get())
                 >= pipeline_window,
             wake: producer.wake,
             timer_armed: producer.deadline.is_some(),
@@ -649,12 +636,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     }
 
     /// Issues the next build when production credit, the pipeline window and the producer's
-    /// state all allow one. `finalized` is the highest final block height finality reported, by
-    /// chain index.
+    /// state all allow one.
     pub(crate) fn drive<H: Hasher<Digest = D>>(
         &mut self,
         generation: Generation,
-        finalized: &[Height],
     ) -> Result<(), ChainError> {
         let Some(chain) = self.producer.as_ref().map(|producer| producer.chain) else {
             return Ok(());
@@ -677,7 +662,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .last_key_value()
             .map(|(height, _)| *height)
             .ok_or(ChainError::Context)?;
-        let certified = window_base(certified, finalized, parent.chain());
         let next = parent
             .height()
             .get()
@@ -700,16 +684,4 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .push(Capability::Application(AppJob::Build(job)));
         Ok(())
     }
-}
-
-/// Returns the height the own chain's pipeline window starts from: the newest locally held
-/// certificate, or a higher finalized height.
-///
-/// Finality orders only certified blocks, but a leader anchors an already ordered tip without
-/// carrying its certificate again. A producer that lost its own certificates before they became
-/// durable would otherwise never regain them, and its window would stay full.
-fn window_base(certified: Height, finalized: &[Height], chain: ChainId) -> Height {
-    finalized
-        .get(chain.index())
-        .map_or(certified, |finalized| certified.max(*finalized))
 }
