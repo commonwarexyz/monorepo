@@ -301,7 +301,7 @@ Even if the operator disappears, recovery depends on a correct, live settlement 
 
 More frequent closes can reduce the wait for admission, at the cost of more preparation and certification. Shorter challenge windows can reduce the wait for finality, but must leave receipt holders enough time to obtain public openings and get a challenge included.
 
-Whatever the epoch length, payments must continue across the boundary to avoid interrupting user flows. The operator can register $e+1$'s payment anchor onchain while still accepting payments in $e$. Once that registration is included onchain, it can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
+Whatever the epoch length, payments must continue across the boundary to avoid interrupting user flows. The operator can register $e+1$'s payment anchor onchain while still accepting payments in $e$. Once that registration is included onchain, it can begin accepting payments in $e+1$ while $e$'s close is built, certified, and admitted. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
 
 Once $e+1$ is registered and $e$'s close is admitted, settlement binds $e+1$ to that close's state root and sets its admission and challenge deadlines from that time. Admission and finalization follow epoch order. A missed admission deadline discards every registration still awaiting admission.
 
@@ -320,8 +320,8 @@ $$
 $$
 
 ```{=html}
-<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated balance update for account a when payments switch from epoch e to the registered epoch e+1. A payment in epoch e leaves a spendable balance of 80. Two connected rails branch from that balance. The closing balance for epoch e is 85. The spendable balance in epoch e+1 falls to 60 after a payment of 20, rises to 65 when the remaining credit is added, and falls to 50 after a payment of 15. One vertical marker identifies the same incoming credit of 5 in both calculations. The closing balance of 85 never replaces the spendable balance.">
-  <noscript>When payments switch to the registered epoch e+1, e's closing balance is 80 plus 5, or 85. The spendable balance is 80 minus 20 plus the same 5 minus 15, or 50. Adding the remaining credit preserves the new payments instead of replacing the spendable balance with 85.</noscript>
+<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated balance update for account a as payments begin in the registered epoch e+1. A payment in epoch e leaves a spendable balance of 80. Two connected rails branch from that balance. The closing balance for epoch e is 85. The spendable balance in epoch e+1 falls to 60 after a payment of 20, rises to 65 when the remaining credit is added, and falls to 50 after a payment of 15. One vertical marker identifies the same incoming credit of 5 in both calculations. The closing balance of 85 never replaces the spendable balance.">
+  <noscript>When payments begin in the registered epoch e+1, e's closing balance is 80 plus 5, or 85. The spendable balance is 80 minus 20 plus the same 5 minus 15, or 50. Adding the remaining credit preserves the new payments instead of replacing the spendable balance with 85.</noscript>
 </div>
 ```
 

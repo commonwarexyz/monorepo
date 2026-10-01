@@ -572,7 +572,7 @@ function buildRolloverMinimal(mount) {
     'stroke-width': 1.2,
     'stroke-dasharray': '5 5',
   });
-  s.label(205, 490, 'switch to epoch e+1', {
+  s.label(205, 490, 'payments begin in e+1', {
     'text-anchor': 'middle',
     'font-size': 11.5,
     fill: GRAY,
