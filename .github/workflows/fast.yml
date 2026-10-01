@@ -149,14 +149,7 @@ jobs:
           - os: macos-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
-          # Emulated CPUs pin each SIMD tier, and every tier tests each crate with CPU-specific kernels. QEMU emulates
-          # every supported tier below AVX-512, and Intel SDE covers AVX-512, GFNI, VPCLMULQDQ, and IFMA, which QEMU does
-          # not implement. Every x86 tier has the AVX2, BMI2, and ADX that x86-64 builds require.
-          # Tiers with static features test the no_std crates without std, so they select kernels from the compile-time
-          # target features.
-          # Tiers with rustflags pass --target when the flags must stay off build scripts and proc-macros.
-          #
-          # An Ice Lake server has every x86 feature the kernels use.
+          # Ice Lake servers have AVX-512 with SHA-NI, IFMA, GFNI, and VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
