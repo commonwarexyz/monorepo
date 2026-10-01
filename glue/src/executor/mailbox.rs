@@ -59,6 +59,16 @@ pub(super) enum Message<B: Digestible> {
         block: Arc<B>,
         response: oneshot::Sender<bool>,
     },
+    /// Answers whether the chain has neither a base nor a state sync target.
+    AwaitsFloor { response: oneshot::Sender<bool> },
+    /// Answers whether marshal delivered an input after `index` while the chain had no base, or
+    /// whether the chain has a base.
+    ResumedAfter {
+        index: OutputIndex,
+        response: oneshot::Sender<bool>,
+    },
+    /// Answers whether the chain has a base.
+    HasBase { response: oneshot::Sender<bool> },
 }
 
 /// Keeps every request in order, and drops reads whose caller left.
@@ -181,6 +191,32 @@ impl<B: Block> Mailbox<B> {
     pub async fn sync_to(&self, block: Arc<B>) -> bool {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Target { block, response });
+        receiver.await.unwrap_or(false)
+    }
+
+    /// Returns whether the chain has neither a base nor a state sync target, the only time
+    /// marshal's floor may be installed.
+    pub async fn awaits_floor(&self) -> bool {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::AwaitsFloor { response });
+        receiver.await.unwrap_or(false)
+    }
+
+    /// Returns whether marshal delivered an input after `index` while the chain had no base,
+    /// which shows it resumed the stream from a floor that resumes after `index`. Returns `true`
+    /// once the chain has a base, and `false` once the executor stopped.
+    pub async fn resumed_after(&self, index: OutputIndex) -> bool {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .enqueue(Message::ResumedAfter { index, response });
+        receiver.await.unwrap_or(false)
+    }
+
+    /// Returns whether the chain has a base, or `false` once the executor stopped.
+    pub async fn has_base(&self) -> bool {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::HasBase { response });
         receiver.await.unwrap_or(false)
     }
 }
