@@ -312,9 +312,7 @@ where
         )?;
 
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
-        for value in self.appends {
-            ops.push(Operation::Append(value));
-        }
+        ops.extend(self.appends.into_iter().map(Operation::Append));
         ops.push(Operation::Commit(metadata.clone(), inactivity_floor));
 
         let operations = Arc::new(ops);
