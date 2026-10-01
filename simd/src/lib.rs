@@ -3,25 +3,32 @@
 //! # Design
 //!
 //! The proposed design separates instruction semantics, algorithm implementations, and
-//! execution. [`Portable`] defines the initial instruction interface. The remaining names
-//! and signatures below are sketches for a prototype.
+//! execution. [`Simd`] defines the common instruction and execution interface, and
+//! [`Operation`] defines equivalent algorithm paths. The concrete backends, accelerated
+//! instructions, and dispatch signatures below are sketches for a prototype.
 //!
 //! ## Instruction profiles
 //!
-//! Operations expose a fixed set of algorithm paths: portable, AVX-512, and NEON. Each path is
-//! generic over a trait describing the instructions it may use. [`Portable`] provides the
-//! portable baseline. The proposed `Simd` trait combines it with execution; accelerated
-//! profiles extend `Simd` and target the following deployment platforms:
+//! Operations expose a fixed set of algorithm paths: portable, Ice Lake, Armv9, and NEON.
+//! Each path is generic over a trait describing the instructions it may use. `Simd` provides
+//! the common vector instructions and execution of child operations. Accelerated profiles extend
+//! `Simd` and target the following deployment platforms:
 //!
-//! - `Avx512`: 512-bit AVX-512F operations, GFNI byte arithmetic, and AVX-512 IFMA's 52-bit
+//! - `IceLake`: 512-bit AVX-512F operations, GFNI byte arithmetic, and AVX-512 IFMA's 52-bit
 //!   multiply-accumulates. This is a crate-defined bundle; AVX-512F alone does not imply GFNI
 //!   or IFMA support. Any additional AVX-512 subsets required by modeled operations must also
 //!   be documented and checked.
-//! - `Neon`: AArch64 NEON operations.
+//! - `ArmV9`: Armv9-A with SVE and SVE2 explicitly required. Optional SVE2 extensions must
+//!   be documented and checked separately. The profile does not imply a fixed vector width.
+//! - `Neon`: Baseline AArch64 NEON operations on 128-bit vectors.
 //!
-//! GFNI and IFMA can remain separate instruction capabilities composed into `Avx512`. Profiles
-//! describe explicit feature sets rather than a hierarchy of CPU generations, whose supported
-//! instructions need not increase monotonically. AVX2 is not an initial accelerated target.
+//! Profiles describe checked instruction bundles, not required CPU models or vendors. A backend
+//! can implement a profile whenever it satisfies that contract. CPU generations do not imply
+//! monotonically increasing feature support. AVX2 is not an initial accelerated target.
+//!
+//! Algorithms specialize when additional instructions change their strategy. Different vector
+//! widths alone do not require a separate algorithm: common instruction loops remain generic
+//! over `Simd`. NEON operations can use the portable default until a distinct strategy is needed.
 //!
 //! The accelerated profiles have native and bit-exact emulated implementations. Emulation preserves
 //! lane widths, wrapping arithmetic, truncation, shuffle domains, masks, and memory-access behavior.
@@ -30,14 +37,19 @@
 //!
 //! ## Concrete backends
 //!
-//! The prototype uses concrete backend types: `Scalar`, `NativeAvx512`, `EmulatedAvx512`,
-//! `NativeNeon`, and `EmulatedNeon`. Each type acts as an execution token and implements its
-//! instruction capabilities. `Avx512` and `Neon` are capability traits; `NativeAvx512` and
-//! `EmulatedAvx512` both implement `Avx512`, so a generic AVX-512 algorithm can run with either.
+//! The prototype uses concrete backend types: `Scalar`, `NativeIceLake`, `EmulatedIceLake`,
+//! `NativeArmV9`, `EmulatedArmV9`, `NativeNeon`, and `EmulatedNeon`. Each type acts as an execution
+//! token and implements its instruction profile. `NativeIceLake` and `EmulatedIceLake` both
+//! implement `IceLake`, so a generic Ice Lake algorithm can run with either. The same applies
+//! to the Armv9 and NEON providers.
 //! Vector and mask representations are associated types of the instruction traits. Native and
 //! emulated backends can use different representations while preserving the same lane semantics.
+//! Both Ice Lake providers use eight `u64` lanes; both NEON providers use two. SVE vector-length
+//! handling for the Armv9 providers remains to be defined. Emulators use the corresponding
+//! native widths even on hosts with a different instruction set, so tests
+//! exercise each profile's vector boundaries and tail handling.
 //!
-//! `Scalar` implements platform-independent vector operations through [`Portable`]. It may use
+//! `Scalar` implements the common vector operations through `Simd`. It may use
 //! compiler vectorization or scalar lanes; portability does not promise that every
 //! operation maps to one hardware instruction, even for small vectors. The architecture emulators
 //! instead model the exact instructions and vector shapes used by the accelerated algorithms.
@@ -50,24 +62,54 @@
 //!
 //! ## Execution and composition
 //!
-//! A concrete backend token implements `Executor` and its instruction traits. `Simd` extends
-//! `Executor` and [`Portable`]; `Avx512` and `Neon` extend `Simd`. Native tokens have private
-//! construction and are obtained only after establishing the required CPU features. Their execution methods invoke
-//! the corresponding operation path through crate-owned target-feature wrappers. Portable and
-//! emulated tokens invoke their paths without requiring those hardware features.
+//! A concrete backend token implements `Simd` and its accelerated instruction profiles, if any.
+//! `Simd` supplies both common vector instructions and `execute`; no separate executor trait is
+//! required. Native tokens have private construction and are obtained only after establishing
+//! the required CPU features. Their execution methods invoke the corresponding operation path
+//! through crate-owned target-feature wrappers. Scalar and emulated tokens invoke their paths
+//! without requiring those hardware features.
 //!
-//! Computations implement one `Operation` trait, capturing their arguments and defining a common
-//! output type. The portable implementation is required. AVX-512 and NEON methods have portable
-//! defaults, so an operation only overrides the paths it specializes. Each specialized algorithm
-//! is generic over its instruction profile and shared between native and emulated providers.
+//! Computations that expose alternative algorithm paths implement `Operation`, capturing their
+//! arguments and defining a common output type. The portable implementation is required.
+//! Ice Lake, Armv9, and NEON methods have portable defaults, so an operation only overrides
+//! the paths it specializes. Each specialized algorithm is generic over its instruction profile and shared
+//! between native and emulated providers.
 //!
 //! ```rust,ignore
+//! pub trait Simd: Copy {
+//!     type U64: Copy;
+//!     const U64_LANES: usize;
+//!
+//!     fn u64_load(self, input: &[u64]) -> Self::U64;
+//!     fn u64_store(self, value: Self::U64, output: &mut [u64]);
+//!     fn u64_splat(self, value: u64) -> Self::U64;
+//!     fn u64_add(self, a: Self::U64, b: Self::U64) -> Self::U64;
+//!
+//!     fn execute<O: Operation>(self, operation: O) -> O::Output;
+//! }
+//!
+//! pub trait IceLake: Simd {
+//!     // AVX-512, GFNI, and IFMA profile instructions.
+//! }
+//!
+//! pub trait ArmV9: Simd {
+//!     // SVE2 profile instructions.
+//! }
+//!
+//! pub trait Neon: Simd {
+//!     // NEON profile instructions.
+//! }
+//!
 //! pub trait Operation: Sized {
 //!     type Output;
 //!
 //!     fn portable<S: Simd>(self, s: S) -> Self::Output;
 //!
-//!     fn avx512<S: Avx512>(self, s: S) -> Self::Output {
+//!     fn ice_lake<S: IceLake>(self, s: S) -> Self::Output {
+//!         self.portable(s)
+//!     }
+//!
+//!     fn arm_v9<S: ArmV9>(self, s: S) -> Self::Output {
 //!         self.portable(s)
 //!     }
 //!
@@ -75,11 +117,11 @@
 //!         self.portable(s)
 //!     }
 //! }
-//!
-//! pub trait Executor: Copy + Sized {
-//!     fn execute<O: Operation>(self, operation: O) -> O::Output;
-//! }
 //! ```
+//!
+//! The mutual references between `Simd` and `Operation` constrain methods; they do not form
+//! circular supertrait bounds. Each concrete token implements `execute` by calling its chosen
+//! operation entry point. The accelerated defaults call `portable` with that same token.
 //!
 //! Taking the operation by value permits owned inputs and borrowed mutable buffers without
 //! allocating. A module can keep its operation type private and expose an opaque constructor:
@@ -90,9 +132,19 @@
 //! }
 //! ```
 //!
-//! `Executor::execute` selects a path statically for its concrete token: `Scalar` invokes
-//! `portable`, both AVX-512 tokens invoke `avx512`, and both NEON tokens invoke `neon`. Generic
-//! composition only needs `Simd`, which provides instruction access and execution of child operations:
+//! `Simd::execute` selects a path statically for its concrete token: `Scalar` invokes
+//! `portable`, both Ice Lake tokens invoke `ice_lake`, both Armv9 tokens invoke `arm_v9`, and
+//! both NEON tokens invoke `neon`. Generic functions can use common instructions directly
+//! without implementing `Operation`:
+//!
+//! ```rust,ignore
+//! fn double<S: Simd>(s: S, input: &[u64], output: &mut [u64]) {
+//!     let value = s.u64_load(input);
+//!     s.u64_store(s.u64_add(value, value), output);
+//! }
+//! ```
+//!
+//! Ordinary functions bounded only by `Simd` can also execute specialized child operations:
 //!
 //! ```rust,ignore
 //! fn composed<S: Simd>(s: S, input: &[u8]) -> Output {
@@ -100,6 +152,9 @@
 //!     s.execute(bar(intermediate))
 //! }
 //! ```
+//!
+//! Operation boundaries normally exchange buffers or scalar results. `Operation::Output` must
+//! be common to all profiles; backend-specific vectors instead compose inside generic functions.
 //!
 //! A parent operation can implement only `portable` and call such a composition function. Its
 //! default accelerated methods preserve the supplied token, so specialized children still take
@@ -123,9 +178,10 @@
 //! or concrete closures can bridge the outer dispatch boundary; ordinary closures cannot have
 //! call methods generic over backend types.
 //!
-//! Executors establish the target-feature scope around bulk computations, including when
-//! re-entering from surrounding code that has been outlined. This re-entry does not repeat CPU
-//! detection. Holding a token does not propagate compiler target features to arbitrary callees;
+//! Native implementations of `execute` establish the target-feature scope around bulk
+//! computations, including when re-entering from surrounding code that has been outlined.
+//! This re-entry does not repeat CPU detection. Holding a token does not propagate compiler
+//! target features to arbitrary callees;
 //! native instruction helpers must remain sound independently of inlining. Small components
 //! should inline within the feature scope, but Rust does not guarantee inlining, so representative
 //! cross-crate compositions need emitted-code and performance checks.
@@ -135,8 +191,8 @@
 //! ## Consistency testing
 //!
 //! A differential helper takes an operation factory and compares execution through `Scalar`,
-//! `EmulatedAvx512`, and `EmulatedNeon` without requiring native hardware. It exercises the same
-//! execution entry points as production, including specialized children and portable defaults
+//! `EmulatedIceLake`, `EmulatedArmV9`, and `EmulatedNeon` without requiring native hardware.
+//! It exercises the same execution entry points as production, including specialized children and portable defaults
 //! throughout composed operations:
 //!
 //! ```rust,ignore
@@ -150,7 +206,7 @@
 //! a snapshot for comparison. Merely comparing a return value would miss divergent buffer writes.
 //! The comparison may use semantic equality when valid representations differ, such as canonical
 //! field equality. Backend vector representations do not need to be comparable across backends.
-//! A portable-only leaf may run the same algorithm three times, while a parent with only portable
+//! A portable-only leaf may run the same algorithm four times, while a parent with only portable
 //! orchestration can still exercise different specialized children. Testing composed operations
 //! is therefore useful in addition to testing leaves.
 //!
@@ -167,15 +223,15 @@
 //!
 //! ## Future work
 //!
-//! 1. Define the `Avx512` (including GFNI and IFMA) and `Neon` profiles and precise primitive
+//! 1. Define instructions for the `IceLake`, `ArmV9`, and `Neon` profiles and precise primitive
 //!    semantics, starting with operations needed by existing erasure-coding or curve-arithmetic
-//!    kernels. Extend [`Portable`] as needed for the common instruction interface.
-//! 2. Implement the concrete `Scalar`, `NativeAvx512`, `EmulatedAvx512`, `NativeNeon`, and
-//!    `EmulatedNeon` backends, with associated vector types and instruction-level hardware tests.
-//! 3. Prototype the fixed-profile `Operation` methods and defaults, `Executor`, and the instruction
-//!    hierarchy `Simd: Portable + Executor`, `Avx512: Simd`, and `Neon: Simd`. Add opaque operation
-//!    constructors and a crate-owned outer dispatcher. Validate generic composition with specialized leaves
-//!    under a parent that only implements portable orchestration, without consumer-side macros.
+//!    kernels. Extend [`Simd`]'s common instructions as needed.
+//! 2. Implement the concrete scalar, native, and emulated backends, with associated vector types
+//!    and instruction-level hardware tests. Define SVE vector-length handling for `ArmV9`.
+//! 3. Implement backend execution of the fixed-profile [`Operation`] methods and defaults.
+//!    Add opaque operation constructors and a crate-owned outer dispatcher. Validate ordinary
+//!    `S: Simd` functions executing specialized children, including under a parent with only
+//!    portable orchestration, without consumer-side macros.
 //! 4. Add the fixed-profile consistency helper and differential fuzz coverage for both leaves and
 //!    composed operations, including observable mutable state. Keep hardware primitive validation
 //!    separate and verify that native tests actually execute the selected hardware path.
@@ -238,5 +294,5 @@
 
 commonware_macros::stability_scope!(ALPHA {
     mod core;
-    pub use core::Portable;
+    pub use core::{ArmV9, IceLake, Neon, Operation, Simd};
 });
