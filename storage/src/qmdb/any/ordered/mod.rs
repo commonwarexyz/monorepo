@@ -11,7 +11,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_utils::range::contains_cyclic;
+use commonware_utils::{futures::try_join_all, range::contains_cyclic};
 use core::{
     future::Future,
     ops::{
@@ -21,12 +21,14 @@ use core::{
 };
 use futures::{
     TryStreamExt as _,
-    future::try_join_all,
     stream::{self, Stream},
 };
 
 pub mod fixed;
 pub mod variable;
+
+#[cfg(test)]
+mod concurrency_tests;
 
 pub use crate::qmdb::any::operation::{Ordered as Operation, update::Ordered as Update};
 

@@ -15,10 +15,8 @@ use aws_sdk_s3::{
     types::{BucketLocationConstraint, CreateBucketConfiguration, Delete, ObjectIdentifier},
 };
 use commonware_cryptography::{Hasher as _, Sha256};
-use futures::{
-    future::try_join_all,
-    stream::{self, StreamExt, TryStreamExt},
-};
+use commonware_utils::futures::try_join_all;
+use futures::stream::{self, StreamExt, TryStreamExt};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io::Read,
