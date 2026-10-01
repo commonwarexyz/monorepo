@@ -395,8 +395,8 @@ where
     ///
     /// The shard buffers hold at most `peer_buffer_size` shards per `latest.primary` peer. Each
     /// shard is no wider than the coding scheme produces for a `max_block_size` block under the
-    /// coding config the shard claims. A config that claims one minimum shard makes a shard as
-    /// wide as the whole coded block, so each peer buffers at most `peer_buffer_size` blocks.
+    /// coding config the shard claims. A config that claims one minimum shard makes a shard span
+    /// the whole coded block, so each peer buffers about `peer_buffer_size` blocks.
     pub peer_buffer_size: NonZeroUsize,
 
     /// The maximum number of commitment records retained.
