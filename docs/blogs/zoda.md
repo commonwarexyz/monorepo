@@ -27,7 +27,7 @@ ZODA is particularly exciting, because it achieves the guarantees of something l
 Reed-Solomon + KZG, without requiring a trusted setup, and while being more performant,
 and having less data transmission overhead.
 
-In a future post we will cover lower-level details of [our implementation](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs), like
+In a future post we will cover lower-level details of [our implementation](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda/mod.rs), like
 the field we use for Reed-Solomon coding, and the optimizations needed for
 fast fourier transforms, but this one will stick to an overview.
 
@@ -123,7 +123,7 @@ as forming our encoded message.
 With some algebra, any $n$ of these evaluations can be interpolated back into
 the original polynomial $d(X)$, whose coefficients spell out our message.
 
-We have an implementation of this scheme [here](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/reed_solomon/mod.rs).
+We have an implementation of this scheme [here](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/reed_solomon.rs).
 
 These details are not essential: what matters is that we take $n$ symbols,
 encode them into $m$, such that any $n$ of the encoded symbols are good enough
@@ -376,7 +376,7 @@ Some more advanced schemes, like [Ligerito](https://eprint.iacr.org/2025/1187)
 can pave the way for verifying arbitrary properties of the sharded data, which
 we're excited about.
 
-Our initial implementation of this scheme can be found [in the Commonware Library](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs).
+Our initial implementation of this scheme can be found [in the Commonware Library](https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda/mod.rs).
 
 Looking to develop a better intuition for ZODA? Check out our [podcast](https://www.youtube.com/watch?v=eOGQOaqvgnI) with [Guillermo Angeris](https://x.com/GuilleAngeris) and
 [Alex Evans](https://x.com/alexhevans) from [Bain Capital Crypto](https://baincapitalcrypto.com/).
