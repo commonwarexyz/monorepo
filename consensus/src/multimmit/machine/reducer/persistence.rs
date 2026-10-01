@@ -219,7 +219,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     ///
     /// Returns whether the event's batch is urgent and the publication to release only once the
     /// batch enters the journal; every other released action is pushed to `capabilities` or
-    /// deferred behind the own-signature exposure floor.
+    /// deferred until a barrier acknowledges its event or the own-signature exposure floor.
     fn release_policy(
         &mut self,
         event: &DomainEvent<V, H::Digest>,
@@ -238,6 +238,18 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         };
         if event.change().records_local_signature() {
             self.pipeline.own_exposure = cursor;
+            self.pipeline
+                .deferred_releases
+                .push_back((cursor, DeferredRelease::Outbox(id)));
+            return StagedRelease {
+                urgent: true,
+                release_after_enqueue: None,
+            };
+        }
+        if matches!(event.change(), Change::DaCertificateAdvanced { .. }) {
+            // Peers retire their DA-vote publications once they hold the certificate, and only the
+            // producer can rebuild it from those votes. Releasing it before its record is durable
+            // could leave the network certified above a producer that crashed without the record.
             self.pipeline
                 .deferred_releases
                 .push_back((cursor, DeferredRelease::Outbox(id)));
