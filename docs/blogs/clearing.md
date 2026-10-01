@@ -299,7 +299,7 @@ Even if the operator disappears, recovery depends on a correct, live settlement 
 
 ## Streamlined Epoch Transitions
 
-A payment reaches finality through an admitted close, after that close's challenge deadline. Shorter epochs with earlier deadlines can reduce that wait, but require more frequent preparation and certification.
+More frequent closes can reduce the wait for admission, at the cost of more preparation and certification. Shorter challenge windows can reduce the wait for finality, but must leave receipt holders enough time to obtain public openings and get a challenge included.
 
 The operator can register $e+1$ while still accepting payments in $e$. Once that registration is included onchain, the operator can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. Registration fixes deposits and signed withdrawal authorizations before the first payment in $e+1$ is acknowledged. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
 

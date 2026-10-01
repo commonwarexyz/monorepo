@@ -604,10 +604,11 @@ O’Grady</a></div>
         against them.</p>
         <h2 id="streamlined-epoch-transitions">Streamlined Epoch
         Transitions</h2>
-        <p>A payment reaches finality through an admitted close, after
-        that close’s challenge deadline. Shorter epochs with earlier
-        deadlines can reduce that wait, but require more frequent
-        preparation and certification.</p>
+        <p>More frequent closes can reduce the wait for admission, at
+        the cost of more preparation and certification. Shorter
+        challenge windows can reduce the wait for finality, but must
+        leave receipt holders enough time to obtain public openings and
+        get a challenge included.</p>
         <p>The operator can register <span
         class="math inline">e+1</span> while still accepting payments in
         <span class="math inline">e</span>. Once that registration is
