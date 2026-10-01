@@ -1407,19 +1407,19 @@ fn producer_recovers_the_canonical_da_quorum_and_retains_the_certificate() {
         }
             if matches!(artifact.as_ref(), Artifact::DaCertificate(actual) if actual == &certificate)
     ));
+    let broadcasts = |effect: &Capability<MinPk, Digest>| {
+        matches!(durable_effect(effect).and_then(EffectExt::broadcast_one), Some(artifact)
+            if matches!(artifact.as_ref(), Artifact::DaCertificate(actual) if actual == &certificate))
+    };
     assert!(
-        recovered.has(|effect| {
-            matches!(durable_effect(effect).and_then(EffectExt::broadcast_one), Some(artifact)
-                if matches!(artifact.as_ref(), Artifact::DaCertificate(actual) if actual == &certificate))
-        }),
-        "staging must release the recovered certificate"
+        !recovered.has(broadcasts),
+        "staging must not release the certificate before its record is durable"
     );
     let published = machine.persist(&recovered.persist_job(), Until::CursorAdvance);
-    assert!(!matches!(
-        published.capabilities().first().and_then(durable_effect).and_then(EffectExt::broadcast_one),
-        Some(artifact)
-            if matches!(artifact.as_ref(), Artifact::DaCertificate(actual) if actual == &certificate)
-    ));
+    assert!(
+        published.has(broadcasts),
+        "the durable record must release the recovered certificate"
+    );
     assert_eq!(machine.inspect().local_artifacts(), 1);
 }
 
