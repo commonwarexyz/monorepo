@@ -11,7 +11,7 @@ use commonware_runtime::{
 use commonware_utils::bitmap::BitMap;
 use futures::future::try_join_all;
 use std::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
     sync::Arc,
 };
@@ -296,36 +296,41 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     }
 
     /// See [Ordinal::put].
-    async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
+    async fn put(mut self: Box<Self>, index: u64, value: V) -> Result<Box<Self>, Error> {
         self.puts.inc();
 
-        // Check if blob exists
+        // Merge the record into the section's buffer when it fits
         let items_per_blob = self.config.items_per_blob.get();
         let section = index / items_per_blob;
-        if let Entry::Vacant(entry) = self.blobs.entry(section) {
-            let (blob, len) = self
-                .context
-                .open(&self.config.partition, &section.to_be_bytes())
-                .await?;
-            entry.insert(Write::from_pooler(
-                &self.context,
-                blob,
-                len,
-                self.config.write_buffer,
-            ));
-            debug!(section, "created blob");
+        let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
+        let record = Record::encode(&value);
+        let merged = self
+            .blobs
+            .get_mut(&section)
+            .is_some_and(|blob| blob.try_write_at(offset, &record));
+
+        // Otherwise remove the section's writer, opening it if absent, and write through it
+        if !merged {
+            let blob = match self.blobs.remove(&section) {
+                Some(blob) => blob,
+                None => {
+                    let (blob, len) = self
+                        .context
+                        .open(&self.config.partition, &section.to_be_bytes())
+                        .await?;
+                    debug!(section, "created blob");
+                    Write::from_pooler(&self.context, blob, len, self.config.write_buffer)
+                }
+            };
+            let blob = blob.write_at(offset, record).await?;
+            self.blobs.insert(section, blob);
         }
 
-        // Write the value to the blob
-        let blob = self.blobs.get_mut(&section).unwrap();
-        let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        blob.write_at(offset, Record::encode(&value)).await?;
+        // Track the accepted record for syncing and lookup.
         self.pending.insert(section);
-
-        // Add to intervals
         self.intervals.insert(index);
 
-        Ok(())
+        Ok(self)
     }
 
     /// See [Ordinal::get].
@@ -387,7 +392,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     }
 
     /// See [Ordinal::prune].
-    async fn prune(&mut self, min: u64) -> Result<(), Error> {
+    async fn prune(mut self: Box<Self>, min: u64) -> Result<Box<Self>, Error> {
         // Collect sections to remove
         let items_per_blob = self.config.items_per_blob.get();
         let min_section = min / items_per_blob;
@@ -420,29 +425,30 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         // Clean pending entries that fall into pruned sections.
         self.pending.retain(|&section| section >= min_section);
 
-        Ok(())
+        Ok(self)
     }
 
     /// See [Ordinal::sync].
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         self.syncs.inc();
 
         if self.pending.is_empty() {
-            return Ok(());
+            return Ok(self);
         }
 
+        // Own pending writers across their syncs and restore them only after every sync succeeds.
         let futures: Vec<_> = self
             .blobs
-            .iter_mut()
-            .filter(|(section, _)| self.pending.contains(section))
-            .map(|(_, blob)| blob.sync())
+            .extract_if(.., |section, _| self.pending.contains(section))
+            .map(|(section, blob)| async move { blob.sync().await.map(|blob| (section, blob)) })
             .collect();
-        try_join_all(futures).await?;
+        let blobs = try_join_all(futures).await?;
+        self.blobs.extend(blobs);
 
         // Clear pending sections.
         self.pending.clear();
 
-        Ok(())
+        Ok(self)
     }
 
     /// See [Ordinal::destroy].
@@ -500,7 +506,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
     /// Add a value at the specified index (pending until sync).
     pub async fn put(mut self, index: u64, value: V) -> Result<Self, Error> {
-        self.0.put(index, value).await?;
+        self.0 = self.0.put(index, value).await?;
         Ok(self)
     }
 
@@ -552,13 +558,13 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Pruning is done at blob boundaries to avoid partial deletions. A blob is pruned only if
     /// all possible indices in that blob are less than `min`.
     pub async fn prune(mut self, min: u64) -> Result<Self, Error> {
-        self.0.prune(min).await?;
+        self.0 = self.0.prune(min).await?;
         Ok(self)
     }
 
     /// Write all pending entries and sync all modified [Blob]s.
     pub async fn sync(mut self) -> Result<Self, Error> {
-        self.0.sync().await?;
+        self.0 = self.0.sync().await?;
         Ok(self)
     }
 

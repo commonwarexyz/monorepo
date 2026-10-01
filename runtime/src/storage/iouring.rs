@@ -969,7 +969,7 @@ mod tests {
                 .unwrap();
             let item: Vec<u8> = (0..1000u32).flat_map(|i| i.to_be_bytes()).collect();
             for _ in 0..12 {
-                writer.append(&item).await.unwrap();
+                (writer, _) = writer.append(&item).await.unwrap();
             }
             let logical_size = writer.size();
             writer.sync().await.unwrap();
