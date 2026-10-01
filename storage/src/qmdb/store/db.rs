@@ -88,28 +88,29 @@ use crate::{
     journal::{
         authenticated::{Backing as _, BackingRecovery as _},
         contiguous::{
-            Contiguous,
+            Contiguous, Many,
             variable::{Config as JournalConfig, Journal},
         },
     },
     merkle::mmr::Location,
     qmdb::{
         any::{
-            VariableValue,
+            BITMAP_CHUNK_BYTES, VariableValue,
             unordered::{Update, variable::Operation},
         },
-        build_snapshot_from_log, delete_key,
+        bitmap::fill_from,
+        build_snapshot_serial,
         floor::{Action, Compact, Entry, Limits, Policy},
-        operation::{Committable as _, Floored as _, Key},
-        update_key,
+        operation::{Committable as _, Floored as _, Key, Operation as _},
     },
     translator::Translator,
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
+use commonware_utils::{Widen, bitmap};
 use core::{num::NonZeroUsize, ops::Range};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
 type Error = crate::qmdb::Error<crate::mmr::Family>;
@@ -235,6 +236,15 @@ where
     /// The number of active keys in the store.
     active_keys: usize,
 
+    /// Activity status of each retained operation.
+    ///
+    /// # Invariants
+    ///
+    /// - `bitmap.len() == log.size()`.
+    /// - Bit `i` is set iff location `i` holds the current update of an active key, or is the
+    ///   last commit.
+    bitmap: bitmap::Prunable<BITMAP_CHUNK_BYTES>,
+
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     inactivity_floor_loc: Location,
@@ -359,6 +369,7 @@ where
         }
 
         let bounds = self.log.bounds();
+        self.bitmap.prune_to_bit(bounds.start);
         let log_size = Location::new(bounds.end);
         let oldest_retained_loc = Location::new(bounds.start);
         debug!(
@@ -433,25 +444,35 @@ where
         let cache_size = cfg.init_cache;
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
-        let (inactivity_floor_loc, active_keys) = {
-            let op = log.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
-            let active_keys = build_snapshot_from_log(
-                inactivity_floor_loc,
-                &log,
-                &mut snapshot,
-                init_buffer,
-                cache_size,
-                |_, _| {},
-            )
-            .await?;
-            (inactivity_floor_loc, active_keys)
-        };
+        let op = log.read(*last_commit_loc).await?;
+        let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
+        let (active_keys, activity) = build_snapshot_serial(
+            inactivity_floor_loc,
+            &log,
+            &mut snapshot,
+            init_buffer,
+            cache_size,
+        )
+        .await?;
+
+        // Seed the bitmap so its pruned prefix matches the retained log boundary. Operations
+        // below the inactivity floor are inactive.
+        let bounds = log.bounds();
+        let pruned_chunks =
+            (bounds.start / bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS) as usize;
+        let mut bitmap = bitmap::Prunable::new_with_pruned_chunks(pruned_chunks)
+            .expect("pruned chunk count fits in u64 bits");
+        bitmap.extend_to(*inactivity_floor_loc);
+        for is_active in activity.iter() {
+            bitmap.push(is_active);
+        }
+        assert_eq!(bitmap.len(), bounds.end);
 
         Ok(Self {
             log,
             snapshot,
             active_keys,
+            bitmap,
             inactivity_floor_loc,
         })
     }
@@ -493,78 +514,122 @@ where
         let start_loc = self.size();
         let Changeset { diff, metadata } = batch;
 
+        let mut resolved = {
+            // Read each bucket in rounds sized by its unresolved batch keys. A sparse write stops
+            // at its matching update, while a batch covering the bucket reads all its updates
+            // together.
+            let mut buckets = HashMap::<Location, usize>::new();
+            let mut sources: Vec<(_, usize)> = Vec::new();
+            for key in diff.keys() {
+                let mut locations = self.snapshot.get(key);
+                let Some(&first) = locations.next() else {
+                    continue;
+                };
+                if let Some(&index) = buckets.get(&first) {
+                    sources[index].1 += 1;
+                } else {
+                    buckets.insert(first, sources.len());
+                    sources.push((core::iter::once(first).chain(locations.copied()), 1));
+                }
+            }
+            let mut resolved = HashMap::new();
+            let mut candidates = Vec::new();
+            loop {
+                candidates.clear();
+                for (index, (locations, pending)) in sources.iter_mut().enumerate() {
+                    candidates.extend(locations.by_ref().take(*pending).map(|loc| (loc, index)));
+                }
+                if candidates.is_empty() {
+                    break;
+                }
+                candidates.sort_unstable_by_key(|(loc, _)| *loc);
+                let positions: Vec<_> = candidates.iter().map(|(loc, _)| **loc).collect();
+                let read = self.log.read_many(&positions).await?;
+                for ((loc, index), op) in candidates.iter().zip(read) {
+                    let key = op.into_key().expect("snapshot operation has key");
+                    if diff.contains_key(&key) {
+                        resolved.insert(key, *loc);
+                        sources[*index].1 -= 1;
+                    }
+                }
+            }
+            resolved
+        };
+
+        // Generate operations in key order. Earlier writes can change a bucket's layout, but
+        // each surviving original update still has its resolved location.
+        let mut ops: Vec<Operation<crate::mmr::Family, K, V>> = Vec::with_capacity(diff.len() + 1);
         let mut steps = 0usize;
         for (key, value) in diff {
+            let new_loc = Location::new(*start_loc + ops.len() as u64);
+            let old_loc = resolved.remove(&key);
+            let matches = |loc: &Location| Some(*loc) == old_loc;
             if let Some(value) = value {
-                let updated = {
-                    let new_loc = self.log.bounds().end;
-                    update_key::<crate::mmr::Family, _, _>(
-                        &mut self.snapshot,
-                        &self.log,
-                        &key,
-                        Location::new(new_loc),
-                        None,
-                    )
-                    .await?
-                };
-                if updated.is_some() {
+                if let Some(mut cursor) = self.snapshot.get_mut_or_insert(&key, new_loc) {
+                    if cursor.find(matches) {
+                        cursor.update(new_loc);
+                    } else {
+                        cursor.insert(new_loc);
+                    }
+                }
+                if let Some(old_loc) = old_loc {
+                    self.bitmap.set_bit(*old_loc, false);
                     steps += 1;
                 } else {
                     self.active_keys += 1;
                 }
-                (self.log, _) = self
-                    .log
-                    .append(&Operation::Update(Update(key, value)))
-                    .await?;
-            } else {
-                let deleted = delete_key::<crate::mmr::Family, _, _>(
-                    &mut self.snapshot,
-                    &self.log,
-                    &key,
-                    None,
-                )
-                .await?;
-                if deleted.is_some() {
-                    (self.log, _) = self.log.append(&Operation::Delete(key)).await?;
-                    steps += 2;
-                    self.active_keys -= 1;
-                }
+                self.bitmap.push(true);
+                ops.push(Operation::Update(Update(key, value)));
+            } else if let Some(mut cursor) = self.snapshot.get_mut(&key)
+                && cursor.find(matches)
+            {
+                cursor.delete();
+                self.bitmap
+                    .set_bit(*old_loc.expect("matched update"), false);
+                self.bitmap.push(false);
+                ops.push(Operation::Delete(key));
+                steps += 2;
+                self.active_keys -= 1;
             }
         }
+
+        // The previous commit becomes inactive.
+        self.bitmap.set_bit(*start_loc - 1, false);
 
         // Advance the floor as the policy's limits direct. An empty store has no active update to
         // move or decide.
         if !self.is_empty() {
-            self = match limits {
+            match limits {
                 // Keep up to one active update for each update the batch supersedes, each delete
                 // it appends, and its previous commit. Moves stop at the tip as it stood before
                 // them, so no update moves twice.
                 Limits::Proportional => {
-                    let tip = self.size();
+                    let tip = Location::new(*start_loc + ops.len() as u64);
                     let entries = steps + 1;
                     let mut keep = Compact {
                         entries,
                         skips: u64::MAX,
                     };
-                    self.advance(tip, &mut keep, entries, u64::MAX).await?
+                    self.advance(tip, &mut keep, entries, u64::MAX, &mut ops)
+                        .await?
                 }
                 Limits::Fixed { entries, skips } => {
-                    self.advance(start_loc, policy, entries, skips).await?
+                    self.advance(start_loc, policy, entries, skips, &mut ops)
+                        .await?
                 }
             };
         }
 
         // The writes or the policy's evictions may leave the store empty.
         if self.is_empty() {
-            self.inactivity_floor_loc = self.size();
+            self.inactivity_floor_loc = Location::new(*start_loc + ops.len() as u64);
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         }
 
-        // Append the commit operation with the new inactivity floor.
-        (self.log, _) = self
-            .log
-            .append(&Operation::CommitFloor(metadata, self.inactivity_floor_loc))
-            .await?;
+        // Append the batch's operations and its commit with the new inactivity floor.
+        self.bitmap.push(true);
+        ops.push(Operation::CommitFloor(metadata, self.inactivity_floor_loc));
+        (self.log, _) = self.log.append_many(Many::Flat(&ops)).await?;
 
         let end_loc = self.size();
         Ok((self, start_loc..end_loc))
@@ -573,64 +638,95 @@ where
     /// Run `policy` from the inactivity floor over the active updates below `end` and set the
     /// floor where the pass ends. The pass decides at most `entries` updates and passes at most
     /// `skips` inactive locations.
+    ///
+    /// `ops` holds the unappended operations starting at `log.size()`, and the bitmap covers them
+    /// with the previous commit inactive. `end` is at most that staged tip; moves append to `ops`.
     async fn advance<P>(
-        mut self,
+        &mut self,
         end: Location,
         policy: &mut P,
         mut entries: usize,
         mut skips: u64,
-    ) -> Result<Self, Error>
+        ops: &mut Vec<Operation<crate::mmr::Family, K, V>>,
+    ) -> Result<(), Error>
     where
         P: Policy<crate::mmr::Family, K, V>,
     {
+        // Passing an update spends one entry; passing an inactive location spends one skip.
+        // Their sum with the floor stays constant, bounding every candidate read in this pass.
+        let start = self.log.size();
         let mut floor = self.inactivity_floor_loc;
+        let window = (*floor)
+            .saturating_add(skips)
+            .saturating_add(Widen::widen(entries))
+            .min(*end);
+        let mut candidates = Vec::<u64>::new();
         'pass: while entries > 0 {
-            // Each inactive location passed costs a skip, so an active update past the remaining
-            // skips is out of reach.
-            let reach = Location::new((*floor).saturating_add(skips).saturating_add(1)).min(end);
-            let mut loc = floor;
-            let op = loop {
-                // With no active update before `reach`, the floor passes the inactive locations
-                // up to it that the remaining skips cover, and the pass ends.
-                if loc == reach {
-                    floor += (*reach - *floor).min(skips);
-                    break 'pass;
-                }
-                if let Operation::Update(Update(key, value)) = self.log.read(*loc).await?
-                    && let Some(mut cursor) = self.snapshot.get_mut(&key)
-                    && cursor.find(|&active| active == loc)
-                {
-                    skips -= *loc - *floor;
-                    floor = loc;
-
-                    // Keeping or replacing writes the key's update at the tip, and evicting
-                    // deletes the key. Stopping leaves the update in place with the floor at its
-                    // location. The cursor stays on the update's snapshot slot across the
-                    // synchronous decision, so the action rewrites or removes that slot without a
-                    // second lookup.
-                    break match policy.decide(Entry::new(loc, &key, value)).into_action() {
-                        Action::Keep(value) | Action::Replace(value) => {
-                            cursor.update(Location::new(self.log.size()));
-                            Operation::Update(Update(key, value))
-                        }
-                        Action::Evict => {
-                            cursor.delete();
-                            Operation::Delete(key)
-                        }
-                        Action::Stop => break 'pass,
-                    };
-                }
-                loc += 1;
-            };
-            (self.log, _) = self.log.append(&op).await?;
-            if matches!(op, Operation::Delete(_)) {
-                self.active_keys -= 1;
+            // The i-th candidate requires all preceding gaps to fit in the skip budget. Later
+            // candidates cannot become reachable once that cumulative gap exceeds it.
+            candidates.clear();
+            fill_from(&self.bitmap, *floor, window, entries, &mut candidates);
+            if let Some(cut) = candidates
+                .iter()
+                .enumerate()
+                .position(|(i, &loc)| loc - *floor - Widen::widen(i) > skips)
+            {
+                candidates.truncate(cut);
             }
-            entries -= 1;
-            floor = loc + 1;
+            if candidates.is_empty() {
+                floor += (*end - *floor).min(skips);
+                break;
+            }
+
+            // Read ahead at most the remaining entries. Candidates in the batch's own region
+            // already have their operations in memory.
+            let committed = candidates.partition_point(|&loc| loc < start);
+            let mut reads = if committed == 0 {
+                Vec::new()
+            } else {
+                self.log.read_many(&candidates[..committed]).await?
+            }
+            .into_iter();
+            for &loc in &candidates {
+                let gap = loc - *floor;
+                skips -= gap;
+                floor = Location::new(loc);
+                let op = if loc < start {
+                    reads.next().expect("one read per committed candidate")
+                } else {
+                    ops[(loc - start) as usize].clone()
+                };
+                let Operation::Update(Update(key, value)) = op else {
+                    unreachable!("active candidate must be an update");
+                };
+
+                // The cursor stays on the active update's slot across the synchronous decision,
+                // so each action rewrites or removes it without a second snapshot lookup.
+                let mut cursor = self.snapshot.get_mut(&key).expect("active key in snapshot");
+                assert!(cursor.find(|active| **active == loc));
+                let new_loc = Location::new(start + ops.len() as u64);
+                let op = match policy.decide(Entry::new(floor, &key, value)).into_action() {
+                    Action::Keep(value) | Action::Replace(value) => {
+                        cursor.update(new_loc);
+                        self.bitmap.push(true);
+                        Operation::Update(Update(key, value))
+                    }
+                    Action::Evict => {
+                        cursor.delete();
+                        self.active_keys -= 1;
+                        self.bitmap.push(false);
+                        Operation::Delete(key)
+                    }
+                    Action::Stop => break 'pass,
+                };
+                self.bitmap.set_bit(loc, false);
+                ops.push(op);
+                entries -= 1;
+                floor += 1;
+            }
         }
         self.inactivity_floor_loc = floor;
-        Ok(self)
+        Ok(())
     }
 
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
@@ -684,9 +780,10 @@ mod test {
         reschedule,
         telemetry::traces::collector::TraceStorage,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, test_rng};
     use core::{future::Future, hash::BuildHasher};
     use futures::FutureExt as _;
+    use rand::RngExt as _;
     use std::{
         cell::Cell,
         collections::BTreeSet,
@@ -1332,6 +1429,51 @@ mod test {
         });
     }
 
+    /// Rewriting the first key of a collision bucket reads that key's update and the floor's
+    /// moves, not every key in the bucket.
+    #[test_traced("WARN")]
+    fn test_store_collision_head_rewrite_reads() {
+        for count in [8u64, 64] {
+            deterministic::Runner::default().start(move |context| async move {
+                let db = create_test_store(context.child("store")).await;
+                let keys: Vec<_> = (0..count)
+                    .map(|i| {
+                        let mut bytes = [0u8; 32];
+                        bytes[..2].copy_from_slice(&[0xa5, 0x5a]);
+                        bytes[24..].copy_from_slice(&i.to_be_bytes());
+                        Digest::from(bytes)
+                    })
+                    .collect();
+                let writes = keys
+                    .iter()
+                    .enumerate()
+                    .map(|(i, key)| (*key, Some(vec![i as u8; 4096])));
+                let (db, _) = apply_entries(db, writes).await;
+                assert_eq!(*db.inactivity_floor_loc(), 2);
+                assert_eq!(
+                    db.snapshot.get(&keys[0]).next().copied(),
+                    Some(Location::new(count + 1))
+                );
+
+                // A head-key match reads one update; the proportional pass reads its two moves.
+                let before = counter(&context, "log_items_read_total");
+                let (db, _) = apply_entries(db, [(keys[0], Some(vec![255; 4096]))]).await;
+                let reads = counter(&context, "log_items_read_total") - before;
+                assert_eq!(reads, 3);
+                assert_eq!(*db.inactivity_floor_loc(), 4);
+                assert_eq!(db.active_keys(), count as usize);
+                for (i, key) in keys.iter().enumerate() {
+                    let value = if i == 0 { 255 } else { i as u8 };
+                    assert_eq!(db.get(key).await.unwrap(), Some(vec![value; 4096]));
+                }
+                drop(db.commit().await.unwrap());
+                let db = create_test_store(context.child("reopened")).await;
+                assert_eq!(db.get(&keys[0]).await.unwrap(), Some(vec![255; 4096]));
+                db.destroy().await.unwrap();
+            });
+        }
+    }
+
     #[test_traced("DEBUG")]
     fn test_store_build_snapshot_keys_with_shared_prefix() {
         let executor = deterministic::Runner::default();
@@ -1963,6 +2105,7 @@ mod test {
             for (key, value) in seed {
                 assert_eq!(db.get(&key).await.unwrap(), value);
             }
+            assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
         });
     }
@@ -1992,6 +2135,7 @@ mod test {
             let (db, range) = apply(db, writes, &mut policy).await;
             assert_eq!(*range.end - *range.start, 9);
             assert_eq!(*db.inactivity_floor_loc(), 11);
+            assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
         });
     }
@@ -2054,6 +2198,7 @@ mod test {
                 .unwrap();
             assert_eq!(*range.end - *range.start, 2);
             assert_eq!(lookups.load(Ordering::Relaxed), 1);
+            assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
         });
     }
@@ -2089,6 +2234,7 @@ mod test {
                 assert_eq!(op, Operation::Update(Update(key, value.unwrap())));
                 assert_eq!(db.get(&key).await.unwrap(), value);
             }
+            assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
         });
     }
@@ -2153,6 +2299,7 @@ mod test {
             let kept = db.get(&colliding(0)).await.unwrap();
             assert_eq!(kept.map(|value| value.0), Some(20));
             assert_eq!(db.active_keys(), 1);
+            assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
         });
     }
@@ -2222,6 +2369,7 @@ mod test {
             for (key, value) in expected {
                 assert_eq!(db.get(&key).await.unwrap(), value);
             }
+            assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
         });
     }
@@ -2242,6 +2390,26 @@ mod test {
             assert!(db.is_empty());
             assert_eq!(*range.start..*range.end, 3..5);
             assert_eq!(*db.inactivity_floor_loc(), 4);
+            assert_bitmap_consistent(&db).await;
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// An inactive floor with no skips makes all following updates unreachable, regardless of
+    /// the read-ahead entry budget.
+    #[test_traced("WARN")]
+    fn test_store_policy_does_not_read_unreachable_candidates() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open(context.child("store"), "unreachable").await;
+            let (db, _) = apply(db, seed(100), &mut Hold).await;
+            let before = counter(&context, "log_items_read_total");
+            let mut policy = Compact {
+                entries: 100,
+                skips: 0,
+            };
+            let (db, _) = apply(db, [], &mut policy).await;
+            assert_eq!(*db.inactivity_floor_loc(), 0);
+            assert_eq!(counter(&context, "log_items_read_total") - before, 0);
             db.destroy().await.unwrap();
         });
     }
@@ -2259,7 +2427,7 @@ mod test {
             }
             assert_eq!((*db.inactivity_floor_loc(), *db.size()), (0, 41));
 
-            // A pass without skips reads only the floor.
+            // A pass without skips passes no inactive location and reads no operation.
             let reads = || counter(&context, "log_items_read_total");
             let before = reads();
             let mut policy = Compact {
@@ -2268,10 +2436,10 @@ mod test {
             };
             let (db, _) = apply(db, [], &mut policy).await;
             assert_eq!(*db.inactivity_floor_loc(), 0);
-            assert_eq!(reads() - before, 1);
+            assert_eq!(reads() - before, 0);
 
             // A pass whose skips end one short of the active update reads only the locations below
-            // it.
+            // it, without reading those inactive operations.
             let before = reads();
             let mut policy = Compact {
                 entries: 1,
@@ -2279,7 +2447,28 @@ mod test {
             };
             let (db, _) = apply(db, [], &mut policy).await;
             assert_eq!(*db.inactivity_floor_loc(), 38);
-            assert_eq!(reads() - before, 39);
+            assert_eq!(reads() - before, 0);
+
+            // Including the active update in the read window reads it once and passes its gap.
+            let before = reads();
+            let mut policy = Compact {
+                entries: 1,
+                skips: 1,
+            };
+            let (db, _) = apply(db, [], &mut policy).await;
+            assert_eq!(*db.inactivity_floor_loc(), 40);
+            assert_eq!(reads() - before, 1);
+
+            // Zero entries leave even unlimited skips unspent and read no candidate.
+            let before = reads();
+            let mut policy = Compact {
+                entries: 0,
+                skips: u64::MAX,
+            };
+            let (db, _) = apply(db, [], &mut policy).await;
+            assert_eq!(*db.inactivity_floor_loc(), 40);
+            assert_eq!(reads() - before, 0);
+            assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
         });
     }
@@ -2300,6 +2489,136 @@ mod test {
             let (db, _) = apply(db, [], &mut policy).await;
             assert_eq!(policy.reads.get(), 1);
             assert_eq!(policy.decided, 1);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Assert the activity bitmap covers every retained location and marks exactly the current
+    /// update of each active key plus the last commit.
+    async fn assert_bitmap_consistent<E, K, V, T>(db: &Db<E, K, V, T>)
+    where
+        E: Context,
+        K: Key,
+        V: VariableValue,
+        T: Translator,
+    {
+        let bounds = db.log.bounds();
+        assert_eq!(db.bitmap.len(), bounds.end);
+        let chunk_bits = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
+        assert_eq!(
+            db.bitmap.pruned_bits(),
+            bounds.start / chunk_bits * chunk_bits
+        );
+        let mut active_updates = 0;
+        for loc in bounds.start..bounds.end {
+            let expected = match db.log.read(loc).await.unwrap() {
+                Operation::Update(Update(key, _)) => db.snapshot.get(&key).any(|l| **l == loc),
+                _ => loc == bounds.end - 1,
+            };
+            assert_eq!(db.bitmap.get_bit(loc), expected, "bit {loc}");
+            if expected && loc != bounds.end - 1 {
+                active_updates += 1;
+            }
+        }
+        assert_eq!(active_updates, db.active_keys);
+    }
+
+    #[test_traced]
+    fn test_store_bitmap_tracks_activity() {
+        struct BitmapPolicy<'a> {
+            action: usize,
+            expected: &'a mut BTreeMap<Digest, Vec<u8>>,
+            decisions: &'a mut [usize; 4],
+        }
+
+        impl Policy<crate::mmr::Family, Digest, Vec<u8>> for BitmapPolicy<'_> {
+            fn limits(&self) -> Limits {
+                Limits::Fixed {
+                    entries: 3,
+                    skips: u64::MAX,
+                }
+            }
+
+            fn decide<'a>(
+                &mut self,
+                entry: Entry<'a, crate::mmr::Family, Digest, Vec<u8>>,
+            ) -> crate::qmdb::floor::Decision<'a, Vec<u8>> {
+                self.decisions[self.action] += 1;
+                match self.action {
+                    0 => entry.keep(),
+                    1 => {
+                        let value = vec![0xFF];
+                        self.expected.insert(*entry.key(), value.clone());
+                        entry.replace(value)
+                    }
+                    2 => {
+                        self.expected.remove(entry.key());
+                        entry.evict().0
+                    }
+                    _ => entry.stop(),
+                }
+            }
+        }
+
+        deterministic::Runner::default().start(|context| async move {
+            let mut rng = test_rng();
+            let mut db = create_test_store(context.child("store").with_attribute("index", 0)).await;
+
+            // A small key universe whose keys share 3 translated prefixes, so batches routinely
+            // update, delete, and recreate colliding keys.
+            let keys: Vec<Digest> = (0u8..24)
+                .map(|i| {
+                    let mut key = Blake3::hash(&[&[i]]);
+                    key.0[0..2].copy_from_slice(&[0, i % 3]);
+                    key
+                })
+                .collect();
+            let mut expected = BTreeMap::new();
+            let mut decisions = [0; 4];
+            for round in 0..60u64 {
+                let mut changes = Vec::new();
+                for _ in 0..rng.random_range(0..12) {
+                    let key = keys[rng.random_range(0..keys.len())];
+                    if rng.random_bool(0.3) {
+                        changes.push((key, None));
+                        expected.remove(&key);
+                    } else {
+                        let value = round.to_be_bytes().to_vec();
+                        changes.push((key, Some(value.clone())));
+                        expected.insert(key, value);
+                    }
+                }
+                (db, _) = apply_entries(db, changes).await;
+                assert_bitmap_consistent(&db).await;
+                let mut policy = BitmapPolicy {
+                    action: round as usize % 4,
+                    expected: &mut expected,
+                    decisions: &mut decisions,
+                };
+                (db, _) = db
+                    .apply_batch(core::iter::empty().collect(), &mut policy)
+                    .await
+                    .unwrap();
+                assert_bitmap_consistent(&db).await;
+
+                if round % 10 == 9 {
+                    let floor = db.inactivity_floor_loc();
+                    db = db.prune(floor).await.unwrap();
+                    assert_bitmap_consistent(&db).await;
+                }
+                if round % 20 == 19 {
+                    db.commit().await.unwrap().sync().await.unwrap();
+                    db = create_test_store(
+                        context.child("store").with_attribute("index", round + 1),
+                    )
+                    .await;
+                    assert_bitmap_consistent(&db).await;
+                }
+            }
+            assert!(decisions.into_iter().all(|count| count > 0));
+            for key in &keys {
+                assert_eq!(db.get(key).await.unwrap(), expected.get(key).cloned());
+            }
             db.destroy().await.unwrap();
         });
     }
