@@ -356,7 +356,6 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
                 wallets[0].signer(),
             );
             vec![Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&authorization),
                 authorization,
                 vector,
             }]
@@ -366,6 +365,7 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &balances,
             &close_context,
+            protocol.operator(),
             &deposits,
             &withdrawals,
             terminals,

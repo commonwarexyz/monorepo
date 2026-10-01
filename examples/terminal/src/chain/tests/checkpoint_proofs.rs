@@ -45,7 +45,6 @@ fn certified_absence_omits_private_checkpoint_across_restart() {
         let registration = RegisterDeploymentRequest::sign(
             native.chain_id(),
             Sha256::hash(&[b"checkpoint-runtime-registration"]),
-            operator_ack_key(10),
             ed25519::PrivateKey::from_seed(991_004).public_key(),
             1024,
             10,

@@ -55,7 +55,8 @@ Validator:  dealing --> decode --> validate-close --> sign-vote --> apply
             [---------------------- receive-apply ---------------------]
 ```
 
-`prepare` assembles and encodes signed activity without reading QMDB. The
+`prepare` assembles payer-authorized activity, signs the ordered batch with the
+operator receipt key, and encodes the dealing without reading QMDB. The
 operator's proof-serving QMDB is separate from this timer. `fanout` creates 100
 references to the same encoded `Bytes`, without network transfer.
 

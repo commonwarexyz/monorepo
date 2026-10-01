@@ -598,7 +598,7 @@ async fn catch_up<E: Context + Spawner>(
         // comparison below also checks them against the values settlement bound.
         let data = source.load(applied)?;
         let registration = registration_for(protocol, &data)?;
-        let terminals = replica_terminals(protocol, &data)?;
+        let terminals = replica_terminals(&data)?;
         let rows = match applied.checked_sub(1) {
             Some(previous) => source
                 .stored_result(previous)?
@@ -625,6 +625,7 @@ async fn catch_up<E: Context + Spawner>(
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &replica,
             &context,
+            protocol.operator(),
             &registration.deposits,
             &registration.withdrawals,
             terminals,

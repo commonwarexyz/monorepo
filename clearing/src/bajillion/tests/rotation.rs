@@ -121,7 +121,6 @@ async fn prepare_epoch(
                 ack.payer_signature().clone(),
             );
             Terminal {
-                operator_signature: bls_ack(&fixture.operator_bls_private, &authorization),
                 authorization,
                 vector,
             }
@@ -130,6 +129,7 @@ async fn prepare_epoch(
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         state,
         &context,
+        &fixture.operator,
         &deposits,
         &withdrawals,
         terminals,
@@ -180,7 +180,6 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
             scheme,
             &replica,
             &first.context,
-            &fixture.operator_bls,
             &first.deposits,
             &first.withdrawals,
             first.prepared.encoded().clone(),
@@ -293,7 +292,6 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
                 &schemes_in[0],
                 &replica,
                 &second.context,
-                &fixture.operator_bls,
                 &second.deposits,
                 &second.withdrawals,
                 second.prepared.encoded().clone(),
@@ -399,7 +397,6 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
                         scheme,
                         &replica,
                         &second.context,
-                        &fixture.operator_bls,
                         &second.deposits,
                         &second.withdrawals,
                         damaged,
@@ -416,7 +413,6 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
                     &schemes_out[0],
                     &replica,
                     &second.context,
-                    &fixture.operator_bls,
                     &second.deposits,
                     &second.withdrawals,
                     second.prepared.encoded().clone(),
@@ -431,7 +427,6 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
             scheme,
             &replica,
             &second.context,
-            &fixture.operator_bls,
             &second.deposits,
             &second.withdrawals,
             second.prepared.encoded().clone(),

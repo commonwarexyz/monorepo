@@ -36,7 +36,6 @@ fn bench_receive_apply(c: &mut Criterion) {
                             mut state,
                             accounts,
                             operator,
-                            operator_bls,
                             deposits,
                             withdrawals,
                             prepared,
@@ -65,6 +64,7 @@ fn bench_receive_apply(c: &mut Criterion) {
                                 terminal_material(profile, &accounts, &context, &operator);
                             let encoded = prepare_dealing::<Sha256, _, _>(
                                 context.epoch_context(),
+                                &operator,
                                 &deposits,
                                 &withdrawals,
                                 terminals,
@@ -79,7 +79,6 @@ fn bench_receive_apply(c: &mut Criterion) {
                                         &signer,
                                         &state,
                                         &context,
-                                        &operator_bls,
                                         &deposits,
                                         &withdrawals,
                                         encoded,

@@ -14,7 +14,7 @@ fn decode_with_each_strategy(
     let concurrent = posted::decode_with_strategy(wire, context, parallel);
     assert_eq!(serial.is_ok(), concurrent.is_ok());
     if let (Ok(serial), Ok(concurrent)) = (&serial, &concurrent) {
-        assert_eq!(serial.aggregate, concurrent.aggregate);
+        assert_eq!(serial.signature, concurrent.signature);
         assert_eq!(serial.rows.len(), concurrent.rows.len());
         for (serial, concurrent) in serial.rows.iter().zip(&concurrent.rows) {
             assert_eq!(serial.account, concurrent.account);
@@ -30,14 +30,20 @@ struct Offsets {
     outgoing: Vec<usize>,
     vectors: Vec<usize>,
     entries: Vec<Vec<[usize; 3]>>,
-    aggregate: usize,
+    signature: usize,
 }
 
 #[test]
 fn empty_dealing_contains_only_activity_and_operator_acceptance() {
     deterministic::Runner::default().start(|runtime| async move {
         let fixture = fixture(runtime, 4, 0, 4, 1).await;
-        assert_eq!(fixture.prepared.encoded().as_ref(), &[0, 0]);
+        let wire = fixture.prepared.encoded();
+        let dealing = decode_with_each_strategy(wire.clone(), &fixture.context).unwrap();
+        assert!(dealing.rows.is_empty());
+        let mut expected = vec![0];
+        expected.extend_from_slice(&dealing.signature.encode());
+        assert_eq!(wire.as_ref(), expected.as_slice());
+        validate(&fixture, wire.clone()).await.unwrap();
     });
 }
 
@@ -47,6 +53,7 @@ fn validators_derive_the_commitment_from_their_registered_predecessor() {
         let fixture = fixture(runtime.child("fixture"), 4, 4, 2, 1).await;
         let dealing = prepare_dealing::<Sha256, _, _>(
             fixture.context.epoch_context(),
+            &fixture.operator,
             &fixture.deposits,
             &fixture.withdrawals,
             fixture.terminals.clone(),
@@ -90,7 +97,6 @@ fn validators_derive_the_commitment_from_their_registered_predecessor() {
         let candidate = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
             &state,
             &context,
-            &fixture.operator_bls,
             &fixture.deposits,
             &fixture.withdrawals,
             dealing,
@@ -155,10 +161,9 @@ fn preparing_dealing_enforces_the_sender_entry_limit() {
                 ack.predecessor(),
                 ack.payer_signature().clone(),
             );
-            terminal.operator_signature =
-                bls_ack(&fixture.operator_bls_private, &terminal.authorization);
             let result = prepare_dealing::<Sha256, _, _>(
                 &context,
+                &fixture.operator,
                 &fixture.deposits,
                 &fixture.withdrawals,
                 vec![terminal],
@@ -212,7 +217,7 @@ fn offsets(wire: &Bytes) -> Offsets {
         outgoing,
         vectors,
         entries,
-        aggregate: position(&reader),
+        signature: position(&reader),
     }
 }
 
@@ -220,11 +225,19 @@ fn offsets(wire: &Bytes) -> Offsets {
 fn keyed_dealing_validates_unsigned_account_keys() {
     deterministic::Runner::default().start(|runtime| async move {
         let fixture = fixture(runtime, 4, 4, 2, 1).await;
+        let signature = posted::decode::<VerifyingKey, ShaDigest>(
+            fixture.prepared.encoded().clone(),
+            &fixture.context,
+        )
+        .unwrap()
+        .signature
+        .encode();
         let encode = |key: &[u8]| {
             let mut wire = Vec::new();
             wire.push(1);
             wire.extend_from_slice(key);
-            wire.extend_from_slice(&[0, 0, 0]);
+            wire.extend_from_slice(&[0, 0]);
+            wire.extend_from_slice(&signature);
             Bytes::from(wire)
         };
         assert!(
@@ -284,7 +297,6 @@ fn keyed_dealing_rejects_noncanonical_keys_indices_tags_and_infeasible_edges() {
             ("zero amount", offsets.entries[0][0][1], 0),
             ("zero count", offsets.entries[0][0][2], 0),
             ("count exceeds amount", offsets.entries[0][0][2], 2),
-            ("aggregate tag", offsets.aggregate, 2),
         ] {
             let mut tampered = wire.to_vec();
             tampered[offset] = value;
@@ -296,15 +308,32 @@ fn keyed_dealing_rejects_noncanonical_keys_indices_tags_and_infeasible_edges() {
         let mut reversed = wire.to_vec();
         reversed.swap(offsets.entries[0][1][0], offsets.entries[0][0][0]);
         cases.push(("reversed recipients", reversed));
-        let mut missing = wire[..offsets.aggregate].to_vec();
-        missing.push(0);
-        cases.push(("missing aggregate", missing));
+        cases.push(("missing signature", wire[..offsets.signature].to_vec()));
+        cases.push(("truncated signature", wire[..wire.len() - 1].to_vec()));
         for (name, wire) in cases {
             assert!(
                 decode_with_each_strategy(wire.into(), &fixture.context).is_err(),
                 "{name}"
             );
         }
+    });
+}
+
+#[test]
+fn malformed_batch_signature_is_rejected_during_authentication() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let fixture = fixture(runtime, 4, 4, 2, 1).await;
+        let wire = fixture.prepared.encoded();
+        let offsets = offsets(wire);
+        let before = *fixture.state.state().head();
+        let mut malformed = wire.to_vec();
+        malformed[offsets.signature..].fill(0xff);
+        decode_with_each_strategy(malformed.clone().into(), &fixture.context).unwrap();
+        assert!(matches!(
+            validate(&fixture, malformed.into()).await,
+            Err(CloseError::Ack(AckError::InvalidOperatorSignature))
+        ));
+        assert_eq!(*fixture.state.state().head(), before);
     });
 }
 
@@ -360,7 +389,6 @@ fn keyed_dealing_strategies_preserve_alignment_and_authenticated_state() {
             let prepared = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
                 &fixture.state,
                 &fixture.context,
-                &fixture.operator_bls,
                 &fixture.deposits,
                 &fixture.withdrawals,
                 dealing,
@@ -494,10 +522,11 @@ fn malformed_terminal_material_is_rejected_before_state_preparation() {
                 prepare_close_with_strategy::<Sha256, _, _, _, _>(
                     &fixture.state,
                     &fixture.context,
+                    &fixture.operator,
                     &fixture.deposits,
                     &fixture.withdrawals,
                     terminals,
-                    &Sequential
+                    &Sequential,
                 )
                 .await
                 .is_err(),
@@ -586,12 +615,11 @@ fn decoded_context_cannot_change_limits_or_deadlines_behind_the_signed_anchor() 
                 validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
                     &fixture.state,
                     &context,
-                    &fixture.operator_bls,
                     &fixture.deposits,
                     &fixture.withdrawals,
                     dealing,
                     &mut TestRng::new(90),
-                    &Sequential
+                    &Sequential,
                 )
                 .await
                 .is_err()

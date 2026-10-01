@@ -37,10 +37,12 @@
 //! earlier entry's amount and count. Different payers can advance independently, including
 //! payments to the same recipient.
 //!
-//! The operator countersigns the exact payer-signed message in two distinct roles: the private
-//! receipt uses [`payment::VectorAck`], and a separate aggregable acceptance signature
-//! authenticates the terminal messages in the close. The committee certificate signs the close
-//! commitment. These signatures use separate domains.
+//! The operator countersigns each accepted message for the private [`payment::VectorAck`] receipt.
+//! At close, the same key signs the registered epoch context and the canonical ordered batch of
+//! complete terminal messages, including their predecessor roots. This signature authenticates
+//! the selected endpoints, including an empty batch, without attesting to private receipt delivery.
+//! The committee's aggregate certificate signs the derived close commitment. Private receipts,
+//! terminal batches, and committee votes use separate signature domains.
 //!
 //! A wallet keeps at most one unacknowledged batch for an account. It stages the exact signed
 //! request, retries those bytes after response loss, verifies the acknowledgment and entry
@@ -74,7 +76,7 @@
 //! Payment counters belong to their epoch's evidence and are not stored in the balance record.
 //!
 //! Each dealing identifies its activity accounts once, with payer authorizations, cumulative
-//! payment entries, and one combined operator acceptance. Every validator derives incoming credit
+//! payment entries, and one operator batch signature. Every validator derives incoming credit
 //! from the signed payer vectors, applies the registered deposits and withdrawals, and computes
 //! the resulting balances. It checks per-account limits, overflow, spendability, and the exact
 //! boundary/output rules before preparing one canonical QMDB batch. Equal old and new balances

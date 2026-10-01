@@ -46,7 +46,7 @@ use commonware_clearing::bajillion::{
     boundary::{SignedWithdrawal, WithdrawalBatch},
     commitment::VectorRoot,
     qmdb::StateOpening,
-    transition::{BatchId, Header, OperatorKey, RootBundle, WithdrawalClaim},
+    transition::{BatchId, Header, RootBundle, WithdrawalClaim},
 };
 use commonware_codec::{
     Buf, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -65,7 +65,6 @@ pub(crate) struct RegisterDeploymentRequest {
     pub(crate) chain_id: Digest,
     pub(crate) registration_id: Digest,
     pub(crate) operator: Key,
-    pub(crate) operator_ack: OperatorKey,
     pub(crate) network_key: ed25519::PublicKey,
     pub(crate) max_dealing_bytes: u32,
     pub(crate) fee: u64,
@@ -76,7 +75,6 @@ fn registration_message(
     chain_id: Digest,
     registration_id: Digest,
     operator: &Key,
-    operator_ack: OperatorKey,
     network_key: &ed25519::PublicKey,
     max_dealing_bytes: u32,
     fee: u64,
@@ -85,7 +83,6 @@ fn registration_message(
         chain_id,
         registration_id,
         operator.clone(),
-        operator_ack,
         network_key.clone(),
         max_dealing_bytes,
         fee,
@@ -98,7 +95,6 @@ impl RegisterDeploymentRequest {
     pub(crate) fn sign(
         chain_id: Digest,
         registration_id: Digest,
-        operator_ack: OperatorKey,
         network_key: ed25519::PublicKey,
         max_dealing_bytes: u32,
         fee: u64,
@@ -109,7 +105,6 @@ impl RegisterDeploymentRequest {
             chain_id,
             registration_id,
             &operator,
-            operator_ack,
             &network_key,
             max_dealing_bytes,
             fee,
@@ -118,7 +113,6 @@ impl RegisterDeploymentRequest {
             chain_id,
             registration_id,
             operator,
-            operator_ack,
             network_key,
             max_dealing_bytes,
             fee,
@@ -131,7 +125,6 @@ impl RegisterDeploymentRequest {
             self.chain_id,
             self.registration_id,
             &self.operator,
-            self.operator_ack,
             &self.network_key,
             self.max_dealing_bytes,
             self.fee,
@@ -149,7 +142,6 @@ impl RegisterDeploymentRequest {
             deployment: Deployment::configured(
                 self.deployment_id(),
                 self.operator.clone(),
-                self.operator_ack,
                 Vec::new(),
                 native.empty_root,
                 native.empty_operations,
@@ -175,7 +167,6 @@ impl Write for RegisterDeploymentRequest {
         self.chain_id.write(buf);
         self.registration_id.write(buf);
         self.operator.write(buf);
-        self.operator_ack.write(buf);
         self.network_key.write(buf);
         self.max_dealing_bytes.write(buf);
         self.fee.write(buf);
@@ -188,7 +179,6 @@ impl EncodeSize for RegisterDeploymentRequest {
         self.chain_id.encode_size()
             + self.registration_id.encode_size()
             + self.operator.encode_size()
-            + self.operator_ack.encode_size()
             + self.network_key.encode_size()
             + self.max_dealing_bytes.encode_size()
             + self.fee.encode_size()
@@ -204,7 +194,6 @@ impl Read for RegisterDeploymentRequest {
             chain_id: Digest::read(buf)?,
             registration_id: Digest::read(buf)?,
             operator: Key::read(buf)?,
-            operator_ack: OperatorKey::read(buf)?,
             network_key: ed25519::PublicKey::read(buf)?,
             max_dealing_bytes: u32::read(buf)?,
             fee: u64::read(buf)?,
@@ -953,7 +942,6 @@ mod tests {
         let request = RegisterDeploymentRequest::sign(
             chain,
             Sha256::hash(&[b"registration-id"]),
-            crate::protocol::operator_ack_key(0),
             ed25519::PrivateKey::from_seed(50).public_key(),
             4096,
             10,
@@ -964,15 +952,14 @@ mod tests {
             RegisterDeploymentRequest::decode(request.encode()).unwrap(),
             request
         );
-        for field in 0..7 {
+        for field in 0..6 {
             let mut changed = request.clone();
             match field {
                 0 => changed.chain_id = Sha256::hash(&[b"another-chain"]),
                 1 => changed.registration_id = Sha256::hash(&[b"another-id"]),
                 2 => changed.operator = wallets()[0].public_key(),
-                3 => changed.operator_ack = crate::protocol::operator_ack_key(1),
-                4 => changed.network_key = ed25519::PrivateKey::from_seed(51).public_key(),
-                5 => changed.max_dealing_bytes += 1,
+                3 => changed.network_key = ed25519::PrivateKey::from_seed(51).public_key(),
+                4 => changed.max_dealing_bytes += 1,
                 _ => changed.fee += 1,
             }
             assert_ne!(request.deployment_id(), changed.deployment_id());

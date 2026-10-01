@@ -60,10 +60,6 @@ fn terminal(
     );
     let authorization = SendAuthorization::sign(body, predecessor, payer);
     Terminal {
-        operator_signature: bls_ack(
-            &BlsPrivate::new(Scalar::from(OPERATOR_SEED)),
-            &authorization,
-        ),
         authorization,
         vector,
     }
@@ -85,6 +81,7 @@ async fn verify(
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         state,
         context,
+        &SigningKey::from_seed(OPERATOR_SEED),
         deposits,
         withdrawals,
         terminals,
@@ -93,13 +90,9 @@ async fn verify(
     .await
     .unwrap();
     let dealing = posted::decode(prepared.encoded().clone(), context).unwrap();
-    let operator = compute_public::<crate::bajillion::transition::OperatorVariant>(
-        &BlsPrivate::new(Scalar::from(OPERATOR_SEED)),
-    );
     let verified = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
         state,
         context,
-        &operator,
         deposits,
         withdrawals,
         dealing,
@@ -183,6 +176,7 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
         let rejected = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
+            &SigningKey::from_seed(OPERATOR_SEED),
             &deposits,
             &withdrawals,
             vec![
@@ -508,6 +502,7 @@ fn receiving_balance_creation_respects_live_account_limit() {
         let rejected = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
+            &SigningKey::from_seed(OPERATOR_SEED),
             &deposits,
             &withdrawals,
             vec![terminal(&context, empty_root(), &a, &[(&b, 20)])],

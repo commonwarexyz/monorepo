@@ -185,7 +185,6 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
                     payer.signer(),
                 );
                 vec![Terminal {
-                    operator_signature: protocol.sign_ack_aggregate(&authorization),
                     authorization,
                     vector,
                 }]

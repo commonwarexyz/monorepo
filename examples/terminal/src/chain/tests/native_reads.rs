@@ -621,7 +621,6 @@ fn registration_completion_survives_its_fee_debit() {
         let request = RegisterDeploymentRequest::sign(
             chain_id,
             Sha256::hash(&[b"registration-race-request"]),
-            operator_ack_key(71),
             native.deployments[0].network_key.clone(),
             1024,
             fee,
@@ -727,7 +726,6 @@ fn registration_completion_rotates_past_certified_absence_replay() {
         let request = RegisterDeploymentRequest::sign(
             native.chain_id(),
             Sha256::hash(&[b"registration-absence-replay"]),
-            operator_ack_key(0),
             native.deployments[0].network_key.clone(),
             1024,
             native.registration_fee,
@@ -840,7 +838,6 @@ fn certified_registry_fits_busy_block() {
             let registration = RegisterDeploymentRequest::sign(
                 chain_id,
                 Sha256::hash(&[b"native-read-registration", &[index]]),
-                operator_ack_key(0),
                 native.deployments[0].network_key.clone(),
                 native.max_dealing_bytes,
                 native.registration_fee,

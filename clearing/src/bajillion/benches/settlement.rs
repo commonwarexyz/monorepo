@@ -7,19 +7,11 @@ use commonware_clearing::bajillion::{
     qmdb::{self, State, StateHead, StateOpening, account_key},
     settlement::{EpochDeadlinePolicy, Genesis, SettlementChain, SettlementConfig},
     transition::{
-        CloseContext, CloseLimits, EpochContext, Header, OperatorKey, RootBundle,
-        prepare_close_with_strategy, validate_close_with_strategy,
+        CloseContext, CloseLimits, EpochContext, Header, RootBundle, prepare_close_with_strategy,
+        validate_close_with_strategy,
     },
 };
-use commonware_cryptography::{
-    Hasher, Sha256, Signer as _,
-    bls12381::primitives::{
-        group::{Private, Scalar},
-        ops::compute_public,
-        variant::MinSig,
-    },
-    sha256::Digest,
-};
+use commonware_cryptography::{Hasher, Sha256, Signer as _, sha256::Digest};
 use commonware_cryptography_curve25519::signing::{
     BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
@@ -48,7 +40,6 @@ const WITHDRAWAL_DEADLINE: u64 = 100;
 const MAXIMUM_WITHDRAWAL_NOTICE: u64 = 1_000;
 const FAULT_DEADLINE: u64 = 2;
 const OPERATOR_SEED: u64 = 1;
-const OPERATOR_BLS_SEED: u64 = 777;
 const ACCOUNT_SEED_START: u64 = 10_000;
 
 const QUEUE_DEPTHS: &[usize] = &[0, 1, 4, 16];
@@ -149,12 +140,6 @@ const fn settlement_config(live_accounts: usize) -> SettlementConfig {
 
 fn deployment() -> Digest {
     Sha256::hash(&[b"clearing-settlement-benchmark"])
-}
-
-// The benchmark closes carry no payments, so this key countersigns nothing and only threads
-// through close validation.
-fn operator_bls() -> OperatorKey {
-    compute_public::<MinSig>(&Private::new(Scalar::from(OPERATOR_BLS_SEED)))
 }
 
 fn state_config(context: &deterministic::Context) -> qmdb::Config<commonware_parallel::Rayon> {
@@ -319,6 +304,7 @@ async fn admission_fixture(
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &context,
+        &SigningKey::from_seed(OPERATOR_SEED),
         &deposits,
         &withdrawals,
         Vec::new(),
@@ -331,7 +317,6 @@ async fn admission_fixture(
     let validated = validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
         &state,
         &context,
-        &operator_bls(),
         &deposits,
         &withdrawals,
         dealing,

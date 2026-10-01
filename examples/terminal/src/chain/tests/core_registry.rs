@@ -77,7 +77,6 @@ fn directory_preserves_accepted_registrations_across_blocks() {
                 RegisterDeploymentRequest::sign(
                     native.chain_id(),
                     Sha256::hash(&[&id.to_le_bytes()]),
-                    operator_ack_key(0),
                     ed25519::PrivateKey::from_seed(88_888).public_key(),
                     1024,
                     fee,
@@ -151,7 +150,6 @@ fn registration_and_deposit_share_an_atomic_directory_update() {
             RegisterDeploymentRequest::sign(
                 native.chain_id(),
                 Sha256::hash(&[salt]),
-                operator_ack_key(0),
                 ed25519::PrivateKey::from_seed(88_888).public_key(),
                 1024,
                 10,
@@ -443,7 +441,6 @@ fn runtime_registration_uses_the_trusted_empty_qmdb_head() {
     let request = RegisterDeploymentRequest::sign(
         native.chain_id(),
         Sha256::hash(&[b"empty-head-contract"]),
-        operator_ack_key(0),
         ed25519::PrivateKey::from_seed(99).public_key(),
         1024,
         10,

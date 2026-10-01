@@ -1618,7 +1618,6 @@ async fn omit_resign(context: &deterministic::Context, timing: crate::protocol::
     registration.floors = Some(successor.floors);
     registration.deadlines = successor.deadlines;
     let terminal = Terminal {
-        operator_signature: protocol.sign_ack_aggregate(&authorization),
         authorization,
         vector: OutVector::new(1, agent.account(), bob_edge(5, 1)).unwrap(),
     };

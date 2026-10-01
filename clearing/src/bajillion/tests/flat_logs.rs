@@ -57,6 +57,7 @@ fn empty_activity_range_excludes_previous_epoch_and_commit_positions() {
         let empty = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &replica,
             &context,
+            &fixture.operator,
             &fixture.deposits,
             &fixture.withdrawals,
             vec![],
@@ -112,11 +113,10 @@ fn proposal_identity_distinguishes_equal_balance_results_before_tree_derivation(
         );
         terminals[0].authorization =
             SendAuthorization::sign(changed, empty_root(), &fixture.accounts[0].1);
-        terminals[0].operator_signature =
-            bls_ack(&fixture.operator_bls_private, &terminals[0].authorization);
         let alternative = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &fixture.state,
             &fixture.context,
+            &fixture.operator,
             &fixture.deposits,
             &fixture.withdrawals,
             terminals,
@@ -188,6 +188,7 @@ fn accepted_replay_rejects_changed_original_records() {
         let second = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
+            &fixture.operator,
             &fixture.deposits,
             &fixture.withdrawals,
             vec![],

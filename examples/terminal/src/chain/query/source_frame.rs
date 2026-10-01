@@ -104,7 +104,6 @@ async fn old_payout_frame_from_maximum_native_epoch(context: deterministic::Cont
                 payer,
             );
             Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&authorization),
                 authorization,
                 vector,
             }

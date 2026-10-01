@@ -14,7 +14,7 @@ use commonware_clearing::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
     custody::Epoch,
     logs::{Floors, LogHead, Opening as LogOpening, PayoutOperation},
-    payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
+    payment::{SendAuthorization, VectorAck, VectorSendBody},
     qmdb::{StateHead, StateOpening, StateRoot, account_key},
     settlement::{
         BatchStatus, Bounds, ClaimedRange, EpochDeadlinePolicy, Genesis, HardFaultReason,
@@ -22,9 +22,8 @@ use commonware_clearing::bajillion::{
     },
     state::SettlementOutput,
     transition::{
-        ActivityRange, BatchId, Close, CloseContext, CloseLimits, EpochContext, OperatorKey,
-        OperatorSignature, OperatorVariant, PreparedClose, Terminal, WithdrawalClaim,
-        WithdrawalOutput, prepare_close_with_strategy,
+        ActivityRange, BatchId, Close, CloseContext, CloseLimits, EpochContext, PreparedClose,
+        Terminal, WithdrawalClaim, WithdrawalOutput, prepare_close_with_strategy,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
@@ -33,7 +32,7 @@ use commonware_cryptography::{
     Hasher, Sha256, Signer,
     bls12381::primitives::{
         group::{Private, Scalar},
-        ops::{compute_public, sign_message},
+        ops::compute_public,
         variant::MinSig,
     },
     sha256::Digest,
@@ -345,8 +344,6 @@ struct Harness {
     claims: BTreeMap<u64, u64>,
     deployment: Digest,
     operator: SigningKey,
-    operator_ack: Private,
-    operator_bls: OperatorKey,
     validator: bls12381::Scheme,
     committee_digest: Digest,
     accounts: Vec<SigningKey>,
@@ -436,8 +433,6 @@ impl Harness {
         let seed = input.seed.to_be_bytes();
         let deployment = Sha256::hash(&[b"settlement-stateful-fuzz", &seed]);
         let operator = SigningKey::from_seed(input.seed ^ 0xa5a5_a5a5_a5a5_a5a5);
-        let operator_ack = Private::new(Scalar::from((input.seed ^ 0x0f0f_0f0f_0f0f_0f0f).max(1)));
-        let operator_bls = compute_public::<OperatorVariant>(&operator_ack);
         let validator_bls = Private::new(Scalar::from((input.seed ^ 0x1357_9bdf_2468_ace0).max(1)));
         let committee = Committee::new(vec![compute_public::<MinSig>(&validator_bls)])
             .expect("one validator is an exact 3f+1 committee");
@@ -489,8 +484,6 @@ impl Harness {
             claims: BTreeMap::new(),
             deployment,
             operator,
-            operator_ack,
-            operator_bls,
             validator,
             committee_digest,
             accounts,
@@ -1436,6 +1429,7 @@ impl Harness {
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             self.state.as_ref().unwrap(),
             &context,
+            &self.operator,
             &registration.deposits,
             &registration.withdrawals,
             Vec::new(),
@@ -1526,7 +1520,6 @@ impl Harness {
         );
         let outgoing = SendAuthorization::sign(body, self.predecessor(&leaf.account), payer);
         let terminal = Terminal {
-            operator_signature: bls_ack(&self.operator_ack, &outgoing),
             authorization: outgoing,
             vector: out_vector,
         };
@@ -1557,7 +1550,6 @@ impl Harness {
         let mut ineligible = vec![
             terminal.clone(),
             Terminal {
-                operator_signature: bls_ack(&self.operator_ack, &recipient_outgoing),
                 authorization: recipient_outgoing,
                 vector: recipient_vector,
             },
@@ -1572,10 +1564,11 @@ impl Harness {
             prepare_close_with_strategy::<Sha256, _, _, _, _>(
                 self.state.as_ref().unwrap(),
                 &context,
+                &self.operator,
                 &deposits,
                 &withdrawals,
                 ineligible,
-                &Sequential,
+                &Sequential
             )
             .await
             .is_err(),
@@ -1585,6 +1578,7 @@ impl Harness {
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             self.state.as_ref().unwrap(),
             &context,
+            &self.operator,
             &deposits,
             &withdrawals,
             vec![terminal],
@@ -1697,7 +1691,6 @@ impl Harness {
             &self.validator,
             self.state.as_ref().unwrap(),
             &prepared.context,
-            &self.operator_bls,
             &prepared.deposits,
             &prepared.withdrawals,
             prepared.close.encoded().clone(),
@@ -3243,17 +3236,6 @@ fn output_total(outputs: &[WithdrawalOutput]) -> u64 {
         .iter()
         .try_fold(0_u64, |total, release| total.checked_add(release.amount()))
         .expect("authenticated withdrawal outputs fit custody")
-}
-
-fn bls_ack(
-    private: &Private,
-    authorization: &SendAuthorization<VerifyingKey, Digest>,
-) -> OperatorSignature {
-    sign_message::<OperatorVariant>(
-        private,
-        VECTOR_ACK_AGGREGATE_NAMESPACE,
-        authorization.message().as_ref(),
-    )
 }
 
 // The predecessor a payer signs when the admitted head has no row for it.

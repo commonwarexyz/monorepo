@@ -5,9 +5,9 @@
 //! Genesis commits the native supply, resource and timing policy, and initial
 //! deployment configurations under the fresh consensus identity.
 //!
-//! An operator prepared for an existing chain receives fresh network,
-//! clearing and acknowledgment keys plus an exact signed registration. After
-//! its native account is funded, registration joins the certified registry.
+//! An operator prepared for an existing chain receives fresh network and clearing keys
+//! plus an exact signed registration. After its native account is funded, registration
+//! joins the certified registry.
 //! Validators authorize its network key from that registry; network.json
 //! supplies bootstrap addresses only.
 //!
@@ -30,14 +30,13 @@ use crate::{
     },
     protocol::{
         Account, Deployment, Key, MIN_DEALING_BYTES, Timing, accounts, clearing_private, committee,
-        deployment_of, empty_genesis, operator_ack_key, operator_ack_signer, operator_signer,
-        wallets,
+        deployment_of, empty_genesis, operator_signer, wallets,
     },
 };
 use anyhow::Context as _;
 use bytes::BytesMut;
 use clap::Args;
-use commonware_clearing::bajillion::{qmdb::StateRoot, transition::OperatorKey};
+use commonware_clearing::bajillion::qmdb::StateRoot;
 use commonware_codec::{Decode as _, Encode as _, Write as _};
 use commonware_cryptography::{
     Hasher as _, Sha256, Signer as _,
@@ -214,11 +213,6 @@ pub(crate) struct OperatorConfig {
     /// The operator's clearing signing key.
     #[serde(with = "hex_clearing_signer")]
     pub(crate) clearing: ClearingSigner,
-    /// The operator's aggregable-acknowledgment BLS signing key (a demo protocol
-    /// constant): the close carries the countersignature for each sender
-    /// under this key.
-    #[serde(with = "hex_clearing")]
-    pub(crate) ack: ClearingKey,
 }
 
 impl OperatorConfig {
@@ -339,10 +333,6 @@ struct EncodedDeployment {
     /// Hex curve25519 operator clearing public key.
     #[serde(with = "hex_clearing_public")]
     operator: Key,
-    /// Hex BLS aggregable-acknowledgment public key, genesis-fixed like the
-    /// operator clearing key.
-    #[serde(with = "hex_operator_ack")]
-    operator_ack: OperatorKey,
     /// The accounts and initial balances the deployment's genesis machine
     /// opens with.
     accounts: Vec<EncodedAccount>,
@@ -363,7 +353,6 @@ impl From<&Deployment> for EncodedDeployment {
             operations: deployment.genesis().operations(),
             digest: *deployment.digest(),
             operator: deployment.operator.clone(),
-            operator_ack: deployment.operator_ack,
             accounts: deployment
                 .accounts
                 .iter()
@@ -383,7 +372,6 @@ impl TryFrom<EncodedDeployment> for Deployment {
         Self::configured(
             encoded.digest,
             encoded.operator,
-            encoded.operator_ack,
             encoded
                 .accounts
                 .into_iter()
@@ -719,11 +707,9 @@ pub fn prepare_operator(args: OperatorSetup) -> anyhow::Result<()> {
     let mut rng = rand::make_rng::<StdRng>();
     let signing_key = PrivateKey::random(&mut rng);
     let clearing = ClearingSigner::random(&mut rng);
-    let ack = ClearingKey::random(&mut rng);
     let request = RegisterDeploymentRequest::sign(
         genesis.native.chain_id(),
         Digest::random(&mut rng),
-        compute_public::<MinSig>(&ack),
         signing_key.public_key(),
         args.max_dealing_bytes,
         genesis.native.registration_fee,
@@ -735,7 +721,6 @@ pub fn prepare_operator(args: OperatorSetup) -> anyhow::Result<()> {
         listen: args.listen,
         dial: args.listen,
         clearing,
-        ack,
     };
     fs::create_dir_all(&args.node_dir)?;
     write_json(&args.node_dir.join("node.json"), &node)?;
@@ -786,7 +771,6 @@ pub async fn register_operator(
         request.verify(&chain_id)
             && request.deployment_id() == node.deployment
             && request.operator == node.clearing.public_key()
-            && request.operator_ack == compute_public::<MinSig>(&node.ack)
             && request.network_key == node.public_key(),
         "registration does not match this operator and chain"
     );
@@ -876,7 +860,6 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
             Deployment::new(
                 deployment_of(&operator_signer(index).public_key()),
                 operator_signer(index).public_key(),
-                operator_ack_key(index),
                 accounts(),
             )
         })
@@ -997,7 +980,6 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         fs::create_dir_all(&operator_dir)?;
         let index = u64::try_from(index).expect("operator index fits u64");
         let clearing = operator_signer(index);
-        let ack = operator_ack_signer(index);
         let index = usize::try_from(index).expect("operator index fits usize");
         write_json(
             &operator_dir.join("node.json"),
@@ -1007,7 +989,6 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
                 listen: operator_addresses[index],
                 dial: operator_addresses[index],
                 clearing,
-                ack,
             },
         )?;
         write_json(&operator_dir.join("network.json"), &network)?;
@@ -1366,26 +1347,6 @@ mod hex_committee_key {
     }
 }
 
-/// Serde codec for a hex-encoded BLS aggregable-acknowledgment public key.
-mod hex_operator_ack {
-    use super::*;
-
-    pub(crate) fn serialize<S: Serializer>(
-        value: &OperatorKey,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&hex(&value.encode()))
-    }
-
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<OperatorKey, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        OperatorKey::decode_cfg(bytes, &()).map_err(D::Error::custom)
-    }
-}
-
 /// Serde codec for the hex-encoded threshold [`Identity`].
 mod hex_genesis {
     use super::*;
@@ -1585,6 +1546,10 @@ mod tests {
 
         let first = node_dir.join("validator-0");
         let node = NodeConfig::load(&first).unwrap();
+        let node_json: serde_json::Value = read_json(&first.join("node.json")).unwrap();
+        assert_eq!(node_json["signing_key"], hex(&node.signing_key.encode()));
+        assert_eq!(node_json["clearing"], hex(&node.clearing.encode()));
+        assert!(node_json.get("ack").is_none());
         let network = NetworkConfig::load(&first).unwrap();
         network.validate(&read_genesis(&first).unwrap()).unwrap();
         assert_eq!(network.participants.len(), 4);
@@ -1599,6 +1564,13 @@ mod tests {
         for index in 0..2u16 {
             let operator_dir = node_dir.join(format!("operator-{index}"));
             let operator = OperatorConfig::load(&operator_dir).unwrap();
+            let node_json: serde_json::Value = read_json(&operator_dir.join("node.json")).unwrap();
+            assert_eq!(
+                node_json["signing_key"],
+                hex(&operator.signing_key.encode())
+            );
+            assert_eq!(node_json["clearing"], hex(&operator.clearing.encode()));
+            assert!(node_json.get("ack").is_none());
             assert_eq!(
                 interactive["procs"][format!("Eve {index}")]["cmd"][10],
                 fs::canonicalize(&operator_dir)
@@ -1616,6 +1588,15 @@ mod tests {
                 crate::protocol::operator_signer(u64::from(index)).public_key()
             );
             let genesis = read_genesis(&operator_dir).unwrap();
+            let genesis_json: serde_json::Value =
+                read_json(&operator_dir.join("genesis.json")).unwrap();
+            let configured =
+                &genesis_json["native"]["deployments"][usize::from(index)]["deployment"];
+            assert_eq!(
+                configured["operator"],
+                hex(&operator.clearing.public_key().encode())
+            );
+            assert!(configured.get("operator_ack").is_none());
             assert_eq!(genesis.players().len(), 4);
             assert_eq!(
                 operator.deployment,
@@ -1632,12 +1613,6 @@ mod tests {
                     .deployment
                     .operator,
                 operator.clearing.public_key()
-            );
-            assert_eq!(
-                genesis.native.deployments[usize::from(index)]
-                    .deployment
-                    .operator_ack,
-                operator_ack_key(u64::from(index))
             );
         }
 
@@ -1804,6 +1779,13 @@ mod tests {
         let bytes = from_hex(&encoded).unwrap();
         let registration = RegisterDeploymentRequest::decode_cfg(bytes, &()).unwrap();
         let operator = OperatorConfig::load(&joining).unwrap();
+        let node_json: serde_json::Value = read_json(&joining.join("node.json")).unwrap();
+        assert_eq!(
+            node_json["signing_key"],
+            hex(&operator.signing_key.encode())
+        );
+        assert_eq!(node_json["clearing"], hex(&operator.clearing.encode()));
+        assert!(node_json.get("ack").is_none());
         let imported = NetworkConfig::load(&joining).unwrap();
         assert_eq!(imported.participants, relocated.participants);
         for (actual, expected) in imported.peers.iter().zip(&relocated.peers) {
@@ -1882,7 +1864,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&node_dir);
         fs::create_dir_all(&node_dir).unwrap();
-        let mut rng = rand::make_rng::<StdRng>();
+        let mut rng = commonware_utils::test_rng();
         let players = Set::from_iter_dedup([PrivateKey::random(&mut rng).public_key()]);
         let (output, _) = deal::<MinSig, _, N3f1>(&mut rng, SHARING_MODE, players).unwrap();
         let validators = || {
@@ -1919,7 +1901,7 @@ mod tests {
         write_json(&path, &encode(duplicated)).unwrap();
         assert!(read_genesis_file(&path).is_err());
         let mut foreign = validators();
-        foreign[2].clearing = operator_ack_key(0);
+        foreign[2].clearing = compute_public::<MinSig>(&ClearingKey::random(&mut rng));
         write_json(&path, &encode(foreign)).unwrap();
         assert!(read_genesis_file(&path).is_err());
         let mut shared = validators();

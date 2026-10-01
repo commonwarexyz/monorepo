@@ -1277,11 +1277,7 @@ mod tests {
             .deployments
             .remove(0)
             .deployment;
-        let account_offset = 1
-            + Digest::SIZE
-            + Key::SIZE
-            + deployment.operator_ack.encode_size()
-            + deployment.accounts.len().encode_size();
+        let account_offset = 1 + Digest::SIZE + Key::SIZE + deployment.accounts.len().encode_size();
         let entry = crate::chain::native::RegistryEntry {
             network_key: commonware_cryptography::ed25519::PublicKey::decode(
                 deployment.operator.encode(),

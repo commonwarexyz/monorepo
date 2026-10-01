@@ -7,20 +7,13 @@ use commonware_clearing::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     posted,
     transition::{
-        CloseContext, OperatorKey, OperatorVariant, PreparedClose, Terminal,
-        prepare_close_with_strategy, validate_close_with_strategy,
+        CloseContext, PreparedClose, Terminal, prepare_close_with_strategy,
+        validate_close_with_strategy,
     },
     vector::OutEntry,
 };
 use commonware_codec::Encode as _;
-use commonware_cryptography::{
-    Sha256, Signer as _,
-    bls12381::primitives::{
-        group::{Private, Scalar},
-        ops::compute_public,
-    },
-    sha256::Digest,
-};
+use commonware_cryptography::{Sha256, Signer as _, sha256::Digest};
 use commonware_cryptography_curve25519::signing::{
     BatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
@@ -60,7 +53,6 @@ struct Input {
     context: CloseContext<VerifyingKey, Digest>,
     deposits: DepositBatch<VerifyingKey>,
     withdrawals: WithdrawalBatch<VerifyingKey, Digest>,
-    operator: OperatorKey,
     expected: PreparedClose<VerifyingKey, Digest, Rayon>,
 }
 
@@ -117,6 +109,7 @@ async fn input(runtime: deterministic::Context, workload: Workload) -> Input {
         let batch = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
+            &operator,
             &deposits,
             &empty_withdrawals,
             terminals(&keys, rows, &context, &operator),
@@ -171,6 +164,7 @@ async fn input(runtime: deterministic::Context, workload: Workload) -> Input {
     let expected = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &context,
+        &operator,
         &deposits,
         &withdrawals,
         material,
@@ -195,13 +189,11 @@ async fn input(runtime: deterministic::Context, workload: Workload) -> Input {
         expected.close().withdrawal_total,
         workload.payouts as u64 * fixtures::OPENING_BALANCE
     );
-    let operator = compute_public::<OperatorVariant>(&Private::new(Scalar::from(1u64)));
     Input {
         state,
         context,
         deposits,
         withdrawals,
-        operator,
         expected,
     }
 }
@@ -253,7 +245,6 @@ async fn measure(
         context,
         deposits,
         withdrawals,
-        operator,
         expected,
     } = input(runtime.child("input"), workload).await;
     let baseline = state.head();
@@ -291,7 +282,6 @@ async fn measure(
             let validated = validate_close_with_strategy::<Sha256, _, _, _, _, BatchVerifier, _>(
                 &state,
                 &context,
-                &operator,
                 &deposits,
                 &withdrawals,
                 decoded,

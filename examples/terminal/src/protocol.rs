@@ -11,13 +11,13 @@ use commonware_clearing::bajillion::{
     commitment::{self, Opening, VectorKind, VectorRoot},
     custody::Epoch,
     logs::{Floors, LogHead, Logs},
-    payment::{EntryReceipt, PaymentContext, SendAuthorization, VectorAck, VectorSendBody},
+    payment::{EntryReceipt, PaymentContext, VectorAck, VectorSendBody},
     qmdb::{State, StateRoot},
     replica::{PreparedReplica, Replica},
     settlement::{EpochDeadlinePolicy, Genesis as ConfiguredGenesis, SettlementConfig},
     transition::{
-        Close, CloseContext, CloseLimits, EpochContext, Header, OperatorKey, OperatorSignature,
-        OperatorVariant, ProposalId, RootBundle, Terminal, prepare_dealing,
+        Close, CloseContext, CloseLimits, EpochContext, Header, ProposalId, RootBundle, Terminal,
+        prepare_dealing,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
@@ -28,7 +28,7 @@ use commonware_cryptography::{
     Hasher, Sha256, Signer as _,
     bls12381::primitives::{
         group::{G1, Private, Scalar},
-        ops::{compute_public, sign_message},
+        ops::compute_public,
         variant::MinSig,
     },
     sha256::Digest,
@@ -108,7 +108,6 @@ pub(crate) fn deployment_of(operator: &Key) -> Digest {
 const CHAIN_REGISTRATION_SIGNATURE_NAMESPACE: &[u8] =
     b"_COMMONWARE_EXAMPLES_TERMINAL_CHAIN_REGISTRATION";
 const VALIDATOR_SEED_START: u64 = 10_000;
-const OPERATOR_ACK_SEED_START: u64 = 20_000;
 const VALIDATORS: usize = 4;
 
 /// The fixed terminal committee requires consensus intersection for admission and recovery.
@@ -760,24 +759,6 @@ pub(crate) fn operator_key() -> Key {
     operator_signer(0).public_key()
 }
 
-/// The aggregable-acknowledgment BLS signing key of demo operator `index`.
-///
-/// Deployment-fixed and dedicated like the operator clearing key: the close carries one
-/// combined countersignature per complete close under this key, and validators verify the
-/// aggregates against the public half committed in the genesis deployment list.
-pub(crate) fn operator_ack_signer(index: u64) -> Private {
-    Private::new(Scalar::from(
-        OPERATOR_ACK_SEED_START
-            .checked_add(index)
-            .and_then(|seed| seed.checked_add(1))
-            .expect("the demo operator index fits the seed space"),
-    ))
-}
-
-pub(crate) fn operator_ack_key(index: u64) -> OperatorKey {
-    compute_public::<OperatorVariant>(&operator_ack_signer(index))
-}
-
 /// One authenticated genesis balance allocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Account {
@@ -785,30 +766,23 @@ pub(crate) struct Account {
     pub(crate) balance: u64,
 }
 
-/// One deployment's identity, signing authorities, and initial account state.
+/// One deployment's identity, signing authority, and initial account state.
 /// The registry authenticates the identity within its chain's replay domain.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Deployment {
     digest: Digest,
     pub(crate) operator: Key,
-    pub(crate) operator_ack: OperatorKey,
     /// Bootstrap allocations; any canonical key can receive credits or deposit later.
     pub(crate) accounts: Vec<Account>,
     genesis: Option<ConfiguredGenesis<Digest>>,
 }
 
 impl Deployment {
-    pub(crate) const fn new(
-        digest: Digest,
-        operator: Key,
-        operator_ack: OperatorKey,
-        accounts: Vec<Account>,
-    ) -> Self {
+    pub(crate) const fn new(digest: Digest, operator: Key, accounts: Vec<Account>) -> Self {
         Self {
             digest,
             genesis: None,
             operator,
-            operator_ack,
             accounts,
         }
     }
@@ -856,12 +830,11 @@ impl Deployment {
     pub(crate) fn configured(
         digest: Digest,
         operator: Key,
-        operator_ack: OperatorKey,
         accounts: Vec<Account>,
         root: StateRoot<Digest>,
         operations: u64,
     ) -> Result<Self> {
-        let mut deployment = Self::new(digest, operator, operator_ack, accounts);
+        let mut deployment = Self::new(digest, operator, accounts);
         deployment.genesis = Some(ConfiguredGenesis::new(
             root,
             operations,
@@ -1010,7 +983,6 @@ impl Write for Deployment {
     fn write(&self, buf: &mut impl BufMut) {
         self.digest.write(buf);
         self.operator.write(buf);
-        self.operator_ack.write(buf);
         self.accounts.write(buf);
         self.genesis().root().write(buf);
         self.genesis().operations().write(buf);
@@ -1021,7 +993,6 @@ impl EncodeSize for Deployment {
     fn encode_size(&self) -> usize {
         self.digest.encode_size()
             + self.operator.encode_size()
-            + self.operator_ack.encode_size()
             + self.accounts.encode_size()
             + self.genesis().root().encode_size()
             + self.genesis().operations().encode_size()
@@ -1035,7 +1006,6 @@ impl Read for Deployment {
         Self::configured(
             Digest::read(buf)?,
             Key::read(buf)?,
-            OperatorKey::read(buf)?,
             Vec::<Account>::read_cfg(buf, &(RangeCfg::new(0..=MAX_GENESIS_ACCOUNTS), ()))?,
             StateRoot::read(buf)?,
             u64::read(buf)?,
@@ -1087,12 +1057,7 @@ pub(crate) fn accounts() -> Vec<Account> {
 /// The compiled default deployment set: the seed-1 operator alone, the
 /// configuration the fixture and harness paths run under.
 pub(crate) fn deployments() -> Vec<Deployment> {
-    vec![Deployment::new(
-        deployment(),
-        operator_key(),
-        operator_ack_key(0),
-        accounts(),
-    )]
+    vec![Deployment::new(deployment(), operator_key(), accounts())]
 }
 
 /// Digest committing to the whole configured deployment set in genesis
@@ -1353,8 +1318,6 @@ pub(crate) fn epoch_context_at(
 pub(crate) struct Protocol {
     deployment: Digest,
     operator: SigningKey,
-    operator_ack: Private,
-    operator_ack_key: OperatorKey,
     validators: Validators,
     committee: Digest,
     strategy: Rayon,
@@ -1364,48 +1327,23 @@ impl Protocol {
     /// Protocol machinery for the compiled default deployment (the seed-1
     /// demo operator): the fixture and harness path.
     pub(crate) fn new(workers: NonZeroUsize) -> Result<Self> {
-        Self::with_signer(
-            workers,
-            deployment(),
-            operator_signer(0),
-            operator_ack_signer(0),
-        )
+        Self::with_signer(workers, deployment(), operator_signer(0))
     }
 
-    /// Protocol machinery bound to a registered deployment and its signing keys.
+    /// Protocol machinery bound to a registered deployment and its signing key.
     pub(crate) fn with_signer(
         workers: NonZeroUsize,
         deployment: Digest,
         operator: SigningKey,
-        operator_ack: Private,
     ) -> Result<Self> {
         let validators = Validators::new()?;
         Ok(Self {
             deployment,
             operator,
-            operator_ack_key: compute_public::<OperatorVariant>(&operator_ack),
-            operator_ack,
             committee: validators.committee.commitment::<Sha256>(),
             validators,
             strategy: Rayon::new(workers).context("create clearing worker pool")?,
         })
-    }
-
-    /// The operator's aggregable-acknowledgment public key.
-    pub(crate) const fn operator_ack_key(&self) -> &OperatorKey {
-        &self.operator_ack_key
-    }
-
-    /// Countersigns one accepted message for the close's complete-close aggregate.
-    pub(crate) fn sign_ack_aggregate(
-        &self,
-        authorization: &SendAuthorization<Key, Digest>,
-    ) -> OperatorSignature {
-        sign_message::<OperatorVariant>(
-            &self.operator_ack,
-            commonware_clearing::bajillion::payment::VECTOR_ACK_AGGREGATE_NAMESPACE,
-            authorization.message().as_ref(),
-        )
     }
 
     pub(crate) const fn strategy(&self) -> &Rayon {
@@ -1504,6 +1442,7 @@ impl Protocol {
         let started = Instant::now();
         let dealing = prepare_dealing::<Sha256, _, _>(
             &registration.context,
+            &self.operator,
             &registration.deposits,
             &registration.withdrawals,
             terminals,
@@ -1583,7 +1522,6 @@ impl Protocol {
                 &scheme,
                 state,
                 &context,
-                &self.operator_ack_key,
                 &epoch.registration.deposits,
                 &epoch.registration.withdrawals,
                 epoch.encoded().clone(),
@@ -1636,7 +1574,6 @@ impl Protocol {
             let deployment = Deployment::new(
                 protocol.deployment,
                 protocol.operator.public_key(),
-                protocol.operator_ack_key,
                 accounts,
             );
             let balances = genesis_balances(&deployment)?;
@@ -1724,7 +1661,6 @@ where
     let deployment = Deployment::new(
         protocol.deployment,
         protocol.operator.public_key(),
-        protocol.operator_ack_key,
         accounts.to_vec(),
     );
     let candidate = state
@@ -1975,7 +1911,8 @@ pub(crate) fn encoded_artifacts(result: &SettlementResult) -> (Vec<u8>, Vec<u8>,
 mod tests {
     use super::*;
     use commonware_clearing::bajillion::{
-        boundary::SignedWithdrawal, qmdb::account_key, transition::WithdrawalClaim,
+        boundary::SignedWithdrawal, payment::SendAuthorization, qmdb::account_key,
+        transition::WithdrawalClaim,
     };
     use commonware_codec::DecodeExt as _;
     use commonware_runtime::{Runner as _, deterministic};
@@ -2007,6 +1944,84 @@ mod tests {
         assert_eq!(config.deposit_inclusion_timeout.get(), 400);
         assert_eq!(config.minimum_withdrawal_notice.get(), 1_201);
         assert_eq!(config.maximum_withdrawal_notice.get(), 1_301);
+    }
+
+    #[test]
+    fn committee_rejects_wrong_operator_and_tampered_terminal_batch() {
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let impostor =
+            Protocol::with_signer(NonZeroUsize::MIN, protocol.deployment(), operator_signer(1))
+                .unwrap();
+        let payer = wallets().remove(0);
+        let accounts = vec![Account {
+            key: payer.public_key(),
+            balance: 10,
+        }];
+        let genesis = protocol.fixture_genesis(&accounts).unwrap();
+        let registration = protocol
+            .registration(
+                0,
+                DepositBatch::empty(),
+                WithdrawalBatch::empty(),
+                genesis.liability(),
+            )
+            .unwrap();
+        let vector = OutVector::new(
+            0,
+            payer.public_key(),
+            vec![OutEntry {
+                recipient: eve_wallet().public_key(),
+                cumulative: 1,
+                count: 1,
+            }],
+        )
+        .unwrap();
+        let authorization = SendAuthorization::sign(
+            VectorSendBody::new(
+                registration.context.payment(),
+                payer.public_key(),
+                1,
+                1,
+                vector.root::<Sha256, Digest>().unwrap(),
+            ),
+            commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+            payer.signer(),
+        );
+        for terminals in [
+            Vec::new(),
+            vec![Terminal {
+                authorization,
+                vector,
+            }],
+        ] {
+            let wrong = impostor
+                .prepare(registration.clone(), terminals.clone())
+                .unwrap();
+            assert!(
+                protocol
+                    .fixture_complete(&accounts, &[], wrong, 36)
+                    .is_err()
+            );
+
+            let prepared = protocol.prepare(registration.clone(), terminals).unwrap();
+            let mut tampered = prepared.clone();
+            let mut encoded = tampered.encoded.to_vec();
+            *encoded.last_mut().unwrap() ^= 1;
+            tampered.encoded = encoded.into();
+            assert!(
+                protocol
+                    .fixture_complete(&accounts, &[], tampered, 37)
+                    .is_err()
+            );
+            let result = protocol
+                .fixture_complete(&accounts, &[], prepared, 38)
+                .unwrap();
+            assert!(
+                protocol
+                    .verifier()
+                    .verify(&result.header, &result.certificate)
+            );
+        }
     }
 
     #[test]
@@ -2111,7 +2126,6 @@ mod tests {
                 wallet.signer(),
             );
             let terminal = Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&authorization),
                 authorization,
                 vector,
             };

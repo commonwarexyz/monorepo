@@ -6,10 +6,7 @@ use crate::bajillion::{
     },
     commitment::{self, VectorKind, VectorRoot},
     logs::{self, ActivityRecord, Heads, LogHead, Logs, Opening},
-    payment::{
-        AckError, PaymentContext, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE,
-        VectorSendBody, verify_ack_signatures,
-    },
+    payment::{AckError, PaymentContext, SendAuthorization, VectorSendBody, verify_ack_signatures},
     posted::{self, Dealing},
     qmdb::{self, PreparedState, StateRoot, account_key},
     replica::{self, PreparedReplica, Replica},
@@ -20,24 +17,17 @@ use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec::Vec,
 };
-use bytes::{BufMut, Bytes};
+use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{
     Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
-use commonware_cryptography::{
-    BatchVerifier, Digest, Hasher, PublicKey,
-    bls12381::primitives::{
-        ops::aggregate::{self, combine_messages, combine_signatures, verify_same_signer},
-        variant::{MinSig, Variant},
-    },
-};
+use commonware_cryptography::{BatchVerifier, Digest, Hasher, PublicKey, Signer};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::Spawner;
 use commonware_storage::{
     Context,
     merkle::{self, Family as _, Location, mmr},
 };
-use commonware_utils::iter::NonEmpty;
 use core::{cmp::Ordering, num::NonZeroU64, ops::Range};
 use rand_core::CryptoRng;
 use thiserror::Error;
@@ -48,6 +38,10 @@ pub const BATCH_ID_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BATCH_ID";
 pub const HEADER_ROOT_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_HEADER_ROOT";
 /// Hash namespace for immutable epoch payment anchors.
 pub const EPOCH_ANCHOR_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_EPOCH_ANCHOR";
+/// Signature namespace for the operator's canonical batch of terminal payer messages.
+pub const TERMINAL_BATCH_SIGNATURE_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_TERMINAL_BATCH";
+/// Hash namespace for the epoch context and complete ordered terminal messages.
+pub const TERMINAL_BATCH_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_TERMINAL_BATCH_HASH";
 
 /// Hash of one canonical close header.
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -89,21 +83,6 @@ impl<D: Digest> Read for BatchId<D> {
         Ok(Self(D::read(reader)?))
     }
 }
-
-/// Signature variant carrying the operator's aggregable close countersignatures.
-///
-/// The prototype pins the committee's MinSig variant rather than threading a second variant
-/// parameter through every close structure.
-pub type OperatorVariant = MinSig;
-/// The operator's aggregable-acceptance public key.
-///
-/// Deployment-fixed and dedicated: never a committee member's consensus key, even though the
-/// signing namespaces already separate the message spaces.
-pub type OperatorKey = <OperatorVariant as Variant>::Public;
-/// One per-acknowledgment aggregable countersignature.
-pub type OperatorSignature = <OperatorVariant as Variant>::Signature;
-/// Combined acceptance of every terminal payer body in a close.
-pub type OperatorAggregate = aggregate::Signature<OperatorVariant>;
 
 /// Identity of canonical operator activity, independent of validator-derived commitments.
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -1088,8 +1067,6 @@ pub struct Terminal<P: PublicKey, D: Digest> {
     pub authorization: SendAuthorization<P, D>,
     /// Entries authenticated by that authorization.
     pub vector: OutVector<P>,
-    /// Operator acceptance in the aggregate-signature domain.
-    pub operator_signature: OperatorSignature,
 }
 
 /// Complete derived activity and native append inputs for one close.
@@ -1174,15 +1151,17 @@ impl<P: PublicKey, D: Digest, S: Strategy> PreparedClose<P, D, S> {
     }
 }
 
-/// Constructs a state candidate from terminal activity without authenticating signatures.
+/// Signs terminal activity and constructs a state candidate without authenticating signatures.
 ///
 /// The caller authenticates the registered context, including its predecessor rows and liability.
-/// Each terminal's predecessor is read from those rows, not from the supplied authorization.
+/// The operator signs the supplied authorizations, including their predecessors. State derivation
+/// reads each predecessor from the retained rows; validators check signatures against those roots.
 /// Validators authenticate an untrusted dealing with [`validate_close_with_strategy`].
 /// This constructor is useful when the caller already owns the accepted endpoints.
 pub async fn prepare_close_with_strategy<H, P, D, E, S>(
     replica: &Replica<E, H, P, S>,
     context: &CloseContext<P, D>,
+    operator: &impl Signer<PublicKey = P, Signature = P::Signature>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     terminals: Vec<Terminal<P, D>>,
@@ -1195,18 +1174,27 @@ where
     E: Context + Spawner,
     S: Strategy,
 {
-    let dealing =
-        prepare_dealing::<H, P, D>(context.epoch_context(), deposits, withdrawals, terminals)?;
+    let dealing = prepare_dealing::<H, P, D>(
+        context.epoch_context(),
+        operator,
+        deposits,
+        withdrawals,
+        terminals,
+    )?;
     derive::<H, P, D, E, S>(replica, context, deposits, withdrawals, dealing, strategy).await
 }
 
 /// Encodes accepted activity for every validator without reading account state.
 ///
-/// The dealing contains account keys, terminal payer authorizations and vectors, and aggregated
-/// operator acceptance. Validators derive balances, cumulative logs, and the final commitment.
-/// This constructor checks canonical structure and endpoint consistency, not signatures.
+/// The registered operator signs a commitment to the epoch context and the strictly payer-ordered
+/// batch of complete terminal messages, including their predecessor vector roots. The empty batch
+/// still binds the context. Validators reconstruct predecessors from retained history,
+/// authenticate both the payer signatures and batch signature, and derive the close commitments.
+///
+/// This constructor checks canonical structure and endpoint consistency, not supplied signatures.
 pub fn prepare_dealing<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
     context: &EpochContext<P, D>,
+    operator: &impl Signer<PublicKey = P, Signature = P::Signature>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     terminals: Vec<Terminal<P, D>>,
@@ -1271,14 +1259,20 @@ pub fn prepare_dealing<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
     {
         return Err(TransitionError::CloseLimit);
     }
+    let signature = operator.sign(
+        TERMINAL_BATCH_SIGNATURE_NAMESPACE,
+        terminal_batch_digest::<H, P, D>(
+            context,
+            terminals.iter().map(|terminal| &terminal.authorization),
+        )
+        .as_ref(),
+    );
     let mut rows = Vec::with_capacity(accounts.len());
-    let mut signatures = Vec::with_capacity(terminals.len());
     let mut terminal = terminals.into_iter().peekable();
     for account in accounts.into_values() {
         let (outgoing, vector) = match terminal.peek() {
             Some(next) if next.authorization.body().payer() == &account => {
                 let next = terminal.next().expect("peeked terminal");
-                signatures.push(next.operator_signature);
                 (
                     Some((
                         next.authorization.body().seq(),
@@ -1301,11 +1295,10 @@ pub fn prepare_dealing<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
     if terminal.next().is_some() {
         return Err(TransitionError::NonCanonicalRows);
     }
-    let aggregate = NonEmpty::try_new(signatures.iter()).map(combine_signatures);
-    let encoded = posted::encode(&rows, &aggregate)?;
+    let encoded = posted::encode(&rows, &signature)?;
     Ok(Dealing {
         rows,
-        aggregate,
+        signature,
         encoded,
     })
 }
@@ -1318,7 +1311,6 @@ pub fn prepare_dealing<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
 pub async fn validate_close_with_strategy<H, P, D, E, S, B, R>(
     replica: &Replica<E, H, P, S>,
     context: &CloseContext<P, D>,
-    operator: &OperatorKey,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     dealing: Dealing<P>,
@@ -1334,7 +1326,7 @@ where
     B: BatchVerifier<PublicKey = P>,
     R: CryptoRng,
 {
-    let aggregate = dealing.aggregate.clone();
+    let signature = dealing.signature.clone();
     let prepared =
         derive::<H, P, D, E, S>(replica, context, deposits, withdrawals, dealing, strategy).await?;
     if !verify_ack_signatures::<P, D, B, R, _>(
@@ -1348,7 +1340,21 @@ where
     ) {
         return Err(TransitionError::Ack(AckError::InvalidPayerSignature));
     }
-    verify_operator_aggregate(operator, &prepared.close.rows, aggregate.as_ref(), strategy)?;
+    let digest = terminal_batch_digest::<H, P, D>(
+        context.epoch_context(),
+        prepared
+            .close
+            .rows
+            .iter()
+            .filter_map(|row| row.outgoing.as_ref()),
+    );
+    if !context.payment().operator().verify(
+        TERMINAL_BATCH_SIGNATURE_NAMESPACE,
+        digest.as_ref(),
+        &signature,
+    ) {
+        return Err(TransitionError::Ack(AckError::InvalidOperatorSignature));
+    }
     Ok(prepared)
 }
 
@@ -1725,31 +1731,27 @@ where
     Ok(())
 }
 
-fn verify_operator_aggregate<P: PublicKey, D: Digest>(
-    operator: &OperatorKey,
-    rows: &[AccountRow<P, D>],
-    aggregate: Option<&OperatorAggregate>,
-    strategy: &impl Strategy,
-) -> Result<(), TransitionError> {
-    let messages = rows
-        .iter()
-        .filter_map(|row| row.outgoing.as_ref())
-        .map(SendAuthorization::message)
-        .collect::<Vec<_>>();
-    let pairs = messages
-        .iter()
-        .map(|message| (VECTOR_ACK_AGGREGATE_NAMESPACE, message.as_ref()))
-        .collect::<Vec<_>>();
-    match (NonEmpty::try_new(pairs.iter()), aggregate) {
-        (None, None) => Ok(()),
-        (Some(messages), Some(signature)) => verify_same_signer::<OperatorVariant>(
-            operator,
-            &combine_messages::<OperatorVariant, _>(messages, strategy),
-            signature,
-        )
-        .map_err(|_| TransitionError::Ack(AckError::InvalidOperatorSignature)),
-        _ => Err(TransitionError::Ack(AckError::InvalidOperatorSignature)),
+// Fixed-width context and messages make the encoding injective, including an empty batch.
+// Callers establish strict payer ordering before signing or after decoding. Predecessors come
+// from accepted authorizations when signing and authenticated retained rows when verifying.
+fn terminal_batch_digest<'a, H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
+    context: &EpochContext<P, D>,
+    terminals: impl Iterator<Item = &'a SendAuthorization<P, D>>,
+) -> D {
+    let mut hasher = H::default();
+    hasher.update(TERMINAL_BATCH_HASH_NAMESPACE);
+    let mut message = BytesMut::with_capacity(
+        EpochContext::<P, D>::SIZE.max(VectorSendBody::<P, D>::SIZE + VectorRoot::<D>::SIZE),
+    );
+    context.write(&mut message);
+    hasher.update(&message);
+    for terminal in terminals {
+        message.clear();
+        terminal.body().write(&mut message);
+        terminal.predecessor().write(&mut message);
+        hasher.update(&message);
     }
+    hasher.finalize().1
 }
 
 /// Checks that the complete descriptor reconstructs the claimed header.

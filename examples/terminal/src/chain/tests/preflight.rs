@@ -163,7 +163,6 @@ fn preflight_registration_and_deposit_follow_canonical_membership() {
         let request = RegisterDeploymentRequest::sign(
             native.chain_id(),
             Sha256::hash(&[b"preflight-registration"]),
-            operator_ack_key(0),
             ed25519::PrivateKey::from_seed(98).public_key(),
             1024,
             10,
@@ -810,7 +809,6 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
                 payer.signer(),
             );
             let terminal = Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&authorization),
                 authorization,
                 vector,
             };

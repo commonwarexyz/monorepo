@@ -59,7 +59,7 @@ fn runtime_registration_starts_empty() {
             wallets()[0].signer(),
         ));
         let request = RegisterDeploymentRequest::sign(native.chain_id(), Sha256::hash(&[b"empty-registration"]),
-            operator_ack_key(10), ed25519::PrivateKey::from_seed(991_002).public_key(), 1024, 10, &owner);
+            ed25519::PrivateKey::from_seed(991_002).public_key(), 1024, 10, &owner);
         let id = request.deployment_id();
         seal_native(&db, 1, &native, &[funding, SettlementTx::RegisterDeployment(request)]).await;
         let entry = registry_entry(&db, &native, &id).await.unwrap().expect("empty registration is valid");
@@ -188,7 +188,6 @@ fn first_credit(invalidated: bool) {
             let authorization = SendAuthorization::sign(body, predecessor, payer.signer());
             predecessor = vector.root::<Sha256, Digest>().unwrap();
             let terminal = Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&authorization),
                 authorization,
                 vector,
             };

@@ -323,22 +323,19 @@ impl Operator {
     }
 
     /// Opens the operator from the identity and initial balances of its certified deployment.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_remote(
         path: &Path,
         workers: NonZeroUsize,
         pipeline: Pipeline,
         config: &Deployment,
         clearing: commonware_cryptography_curve25519::signing::SigningKey,
-        ack: commonware_cryptography::bls12381::primitives::group::Private,
         epoch_fee: u64,
         proof_replica: bool,
     ) -> Result<Self> {
-        let protocol = Protocol::with_signer(workers, *config.digest(), clearing, ack)?;
+        let protocol = Protocol::with_signer(workers, *config.digest(), clearing)?;
         ensure!(
-            protocol.operator().public_key() == config.operator
-                && protocol.operator_ack_key() == &config.operator_ack,
-            "operator signing keys differ from the certified deployment"
+            protocol.operator().public_key() == config.operator,
+            "operator signing key differs from the certified deployment"
         );
         let known = identities();
         let identities = config
@@ -429,13 +426,8 @@ impl Operator {
         let mut registration = registration_for(&protocol, &current)?;
         registration.intake = store.live_intake()?;
         store.ensure_current_context(registration.context.payment())?;
-        validate_epoch_data(
-            &protocol,
-            &current,
-            &registration,
-            &store.predecessors(current.epoch)?,
-        )
-        .context("validate current SQLite epoch")?;
+        validate_epoch_data(&current, &registration, &store.predecessors(current.epoch)?)
+            .context("validate current SQLite epoch")?;
         ensure!(
             projected_liability(&current)? == store.current_liability()?,
             "stored live liability differs from the projected account state"
@@ -1705,7 +1697,6 @@ impl Operator {
     fn validate_current_epoch(&mut self) -> Result<()> {
         let current = self.store.load_current()?;
         validate_epoch_data(
-            &self.protocol,
             &current,
             &self.registration,
             &self.store.predecessors(current.epoch)?,
@@ -1815,12 +1806,8 @@ impl Operator {
                             payment_context == *registration.context.payment(),
                             "frozen epoch context differs from its durable close job"
                         );
-                        let assembled = assemble_epoch(
-                            &protocol,
-                            &data,
-                            &registration,
-                            &reader.predecessors(epoch)?,
-                        )?;
+                        let assembled =
+                            assemble_epoch(&data, &registration, &reader.predecessors(epoch)?)?;
                         let prepared = protocol.prepare(registration, assembled.terminals)?;
                         #[cfg(test)]
                         if let Some(gate) = close_gate.take_if(|gate| gate.stage == Stage::Certify)
@@ -2218,12 +2205,8 @@ impl Operator {
         data: EpochData,
         registration: EpochRegistration,
     ) -> Result<PreparedEpoch> {
-        let assembled = assemble_epoch(
-            &self.protocol,
-            &data,
-            &registration,
-            &self.store.predecessors(data.epoch)?,
-        )?;
+        let assembled =
+            assemble_epoch(&data, &registration, &self.store.predecessors(data.epoch)?)?;
         self.protocol.prepare(registration, assembled.terminals)
     }
 
@@ -2544,12 +2527,11 @@ fn close_tail(predecessor: u64, deposit: u64, credit: u64, debit: u64) -> Result
 }
 
 fn validate_epoch_data(
-    protocol: &Protocol,
     data: &EpochData,
     registration: &EpochRegistration,
     predecessors: &BTreeMap<Key, VectorRoot<Digest>>,
 ) -> Result<()> {
-    assemble_epoch(protocol, data, registration, predecessors)?;
+    assemble_epoch(data, registration, predecessors)?;
     Ok(())
 }
 
@@ -2557,7 +2539,6 @@ fn validate_epoch_data(
 ///
 /// `predecessors` holds each payer's terminal root in the preceding epoch.
 pub(super) fn assemble_epoch(
-    protocol: &Protocol,
     data: &EpochData,
     registration: &EpochRegistration,
     predecessors: &BTreeMap<Key, VectorRoot<Digest>>,
@@ -2772,15 +2753,12 @@ pub(super) fn assemble_epoch(
     }
 
     Ok(EpochAssembly {
-        terminals: terminal_vectors(protocol, data.epoch, terminals, outgoing)?,
+        terminals: terminal_vectors(data.epoch, terminals, outgoing)?,
     })
 }
 
 /// Reconstructs accepted endpoints for the proof replica from the operator's retained log.
-pub(super) fn replica_terminals(
-    protocol: &Protocol,
-    data: &EpochData,
-) -> Result<Vec<Terminal<Key, Digest>>> {
+pub(super) fn replica_terminals(data: &EpochData) -> Result<Vec<Terminal<Key, Digest>>> {
     let mut terminals = BTreeMap::new();
     for ack in &data.acks {
         terminals.insert(ack.body().payer().clone(), ack.clone());
@@ -2792,11 +2770,10 @@ pub(super) fn replica_terminals(
             .or_default()
             .push(edge.entry.clone());
     }
-    terminal_vectors(protocol, data.epoch, terminals, outgoing)
+    terminal_vectors(data.epoch, terminals, outgoing)
 }
 
 fn terminal_vectors(
-    protocol: &Protocol,
     epoch: u64,
     terminals: BTreeMap<Key, Ack>,
     mut outgoing: BTreeMap<Key, Vec<OutEntry<Key>>>,
@@ -2820,7 +2797,6 @@ fn terminal_vectors(
                 ack.payer_signature().clone(),
             );
             Ok(Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&authorization),
                 authorization,
                 vector,
             })

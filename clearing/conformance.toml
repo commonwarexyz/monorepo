@@ -1,5 +1,5 @@
 ["commonware_clearing::bajillion::tests::conformance::FullDealing"]
-hash = "9b1cb3236f417aa644a8f5c6bed4af1b53fe3011689d7a5ad48e87de6a4100b7"
+hash = "81eab48a0f852c3c606ae76cf1233092f120b47578f63bb04fb70b8a9ceba696"
 n_cases = 64
 
 ["conformance::CodecConformance<AccountChange<VerifyingKey,Sha256Digest>>"]

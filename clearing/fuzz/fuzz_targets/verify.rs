@@ -13,14 +13,14 @@ use commonware_clearing::bajillion::{
     },
     commitment::{Builder, Opening, RangeOpening, VectorKind, VectorRoot},
     payment::{
-        AckError, EntryReceipt, PaymentContext, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE,
-        VECTOR_ACK_SIGNATURE_NAMESPACE, VECTOR_SEND_SIGNATURE_NAMESPACE, VectorAck, VectorSendBody,
+        AckError, EntryReceipt, PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE,
+        VECTOR_SEND_SIGNATURE_NAMESPACE, VectorAck, VectorSendBody,
     },
     posted,
     qmdb::{StateOpening, StateRoot, account_key},
     transition::{
-        Close, CloseContext, CloseLimits, Header, OperatorKey, OperatorSignature, OperatorVariant,
-        RootBundle, Terminal, prepare_close_with_strategy, validate_close_with_strategy,
+        Close, CloseContext, CloseLimits, Header, RootBundle, Terminal,
+        prepare_close_with_strategy, validate_close_with_strategy,
     },
     vector::{Error as VectorError, OutEntry, OutTipLookup, OutVector},
 };
@@ -29,7 +29,7 @@ use commonware_cryptography::{
     Hasher, Sha256, Signer,
     bls12381::primitives::{
         group::{Private, Scalar},
-        ops::{compute_public, sign_message},
+        ops::compute_public,
         variant::MinSig,
     },
     sha256::Digest,
@@ -137,26 +137,9 @@ fn payment_context(seed: u64, operator: &SigningKey) -> TestContext {
     )
 }
 
-fn bls_pair(seed: u64) -> (Private, OperatorKey) {
-    let private = Private::new(Scalar::from(seed.max(1)));
-    let public = compute_public::<OperatorVariant>(&private);
-    (private, public)
-}
-
 // The predecessor every payer signs in an epoch without predecessor rows.
 fn empty_root() -> VectorRoot<Digest> {
     commonware_clearing::bajillion::commitment::empty_root::<Sha256>(VectorKind::OutEntry)
-}
-
-fn bls_ack(
-    private: &Private,
-    authorization: &SendAuthorization<VerifyingKey, Digest>,
-) -> OperatorSignature {
-    sign_message::<OperatorVariant>(
-        private,
-        VECTOR_ACK_AGGREGATE_NAMESPACE,
-        authorization.message().as_ref(),
-    )
 }
 
 fn fuzz_payment(case: PaymentCase) {
@@ -489,7 +472,6 @@ fn exercise_no_contradiction(
 
 async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
     let (operator, payer, recipient, other) = private_keys(case.seed);
-    let (operator_ack, operator_bls) = bls_pair(case.seed ^ 0x5a5a_5a5a_5a5a_5a5a);
     let cache = support::new_state(
         runtime,
         "challenge",
@@ -551,10 +533,10 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &cache,
         &context,
+        &operator,
         &deposits,
         &withdrawals,
         vec![Terminal {
-            operator_signature: bls_ack(&operator_ack, &authorization),
             authorization,
             vector: out_vector,
         }],
@@ -566,7 +548,6 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
     let prepared = validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
         &cache,
         &context,
-        &operator_bls,
         &deposits,
         &withdrawals,
         dealing,
@@ -917,7 +898,6 @@ fn fuzz_vector(case: VectorCase) {
 async fn validate_bytes(
     state: &TestState,
     context: &TestCloseContext,
-    operator: &OperatorKey,
     deposits: &DepositBatch<VerifyingKey>,
     withdrawals: &WithdrawalBatch<VerifyingKey, Digest>,
     encoded: Bytes,
@@ -927,7 +907,6 @@ async fn validate_bytes(
         Ok(dealing) => validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
             state,
             context,
-            operator,
             deposits,
             withdrawals,
             dealing,
@@ -944,7 +923,6 @@ async fn validate_bytes(
 
 async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) {
     let (operator, payer, recipient, absent) = private_keys(case.seed);
-    let (ack_key, operator_bls) = bls_pair(case.seed ^ 0x55aa);
     let amount = u64::from(case.amount) + 1;
     let balance = if case.delete && !case.zero_net {
         amount
@@ -1004,7 +982,6 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         );
         let authorization = SendAuthorization::sign(body, empty_root(), sender);
         terminals.push(Terminal {
-            operator_signature: bls_ack(&ack_key, &authorization),
             authorization,
             vector,
         });
@@ -1018,6 +995,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &context,
+        &operator,
         &deposits,
         &withdrawals,
         terminals.clone(),
@@ -1026,17 +1004,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
     .await
     .unwrap();
     let encoded = prepared.encoded().clone();
-    assert!(
-        validate_bytes(
-            &state,
-            &context,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            encoded.clone()
-        )
-        .await
-    );
+    assert!(validate_bytes(&state, &context, &deposits, &withdrawals, encoded.clone()).await);
     let mut wrong_terminal = terminals.clone();
     let original = wrong_terminal[0].authorization.body().clone();
     let message = wrong_terminal[0].authorization.message();
@@ -1048,6 +1016,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
     let bad = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &context,
+        &operator,
         &deposits,
         &withdrawals,
         wrong_terminal,
@@ -1059,7 +1028,6 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         !validate_bytes(
             &state,
             &context,
-            &operator_bls,
             &deposits,
             &withdrawals,
             bad.encoded().clone()
@@ -1072,6 +1040,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
+            &operator,
             &deposits,
             &withdrawals,
             duplicate_terminal,
@@ -1138,17 +1107,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         }
         _ => malformed.truncate(1),
     }
-    assert!(
-        !validate_bytes(
-            &state,
-            &context,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            malformed.into()
-        )
-        .await
-    );
+    assert!(!validate_bytes(&state, &context, &deposits, &withdrawals, malformed.into()).await);
     let wrong = close_context(
         Sha256::hash(&[b"wrong-context"]),
         case.seed,
@@ -1167,26 +1126,25 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
             payouts: 0,
         },
     );
-    assert!(
-        !validate_bytes(
-            &state,
-            &wrong,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            encoded.clone()
-        )
-        .await
-    );
-    let (_, wrong_operator) = bls_pair(case.seed ^ 0x33cc);
+    assert!(!validate_bytes(&state, &wrong, &deposits, &withdrawals, encoded.clone()).await);
+    let wrong_operator = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        &state,
+        &context,
+        &absent,
+        &deposits,
+        &withdrawals,
+        terminals.clone(),
+        &Sequential,
+    )
+    .await
+    .unwrap();
     assert!(
         !validate_bytes(
             &state,
             &context,
-            &wrong_operator,
             &deposits,
             &withdrawals,
-            encoded.clone()
+            wrong_operator.encoded().clone()
         )
         .await
     );
@@ -1400,10 +1358,10 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &successor,
+            &operator,
             &deposits,
             &withdrawals,
             vec![Terminal {
-                operator_signature: bls_ack(&ack_key, &authorization),
                 authorization,
                 vector,
             }],
@@ -1415,7 +1373,6 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
             validate_bytes(
                 &state,
                 &successor,
-                &operator_bls,
                 &deposits,
                 &withdrawals,
                 prepared.encoded().clone()
@@ -1450,7 +1407,6 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
         return;
     };
     let operator = SigningKey::from_seed(case.seed.wrapping_add(100));
-    let (_, operator_bls) = bls_pair(case.seed.wrapping_add(300));
     let account = SigningKey::from_seed(case.seed.wrapping_add(200));
     let state = support::new_state(runtime, "admission", Vec::new()).await;
     let deposits = DepositBatch::new(vec![
@@ -1479,6 +1435,7 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &context,
+        &operator,
         &deposits,
         &withdrawals,
         Vec::new(),
@@ -1494,7 +1451,6 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
             &scheme,
             &state,
             &context,
-            &operator_bls,
             &deposits,
             &withdrawals,
             prepared.encoded().clone(),
@@ -1513,7 +1469,6 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
                 &scheme,
                 &state,
                 &context,
-                &operator_bls,
                 &deposits,
                 &withdrawals,
                 bytes.into(),

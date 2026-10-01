@@ -19,9 +19,6 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         )
         .await;
         let operator = SigningKey::from_seed(OPERATOR_SEED);
-        let operator_bls_private = BlsPrivate::new(Scalar::from(OPERATOR_SEED));
-        let operator_bls =
-            compute_public::<crate::bajillion::transition::OperatorVariant>(&operator_bls_private);
         let deployment = Sha256::hash(&[b"boundary-deployment"]);
         let deposits = DepositBatch::new(vec![
             DepositRecord::new(offset.public_key(), 10).unwrap(),
@@ -104,13 +101,13 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         );
         let authorization = SendAuthorization::sign(body, empty_root(), payer);
         let terminal = Terminal {
-            operator_signature: bls_ack(&operator_bls_private, &authorization),
             authorization,
             vector,
         };
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
+            &operator,
             &deposits,
             &withdrawals,
             vec![terminal],
@@ -122,7 +119,6 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         let verified = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
             &state,
             &context,
-            &operator_bls,
             &deposits,
             &withdrawals,
             dealing,
@@ -234,9 +230,6 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
         )
         .await;
         let operator = SigningKey::from_seed(OPERATOR_SEED);
-        let operator_bls = compute_public::<crate::bajillion::transition::OperatorVariant>(
-            &BlsPrivate::new(Scalar::from(OPERATOR_SEED)),
-        );
         let deployment = Sha256::hash(&[b"withdrawal-read-deployment"]);
         let counts = || {
             let metrics = runtime.encode();
@@ -351,6 +344,7 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
             let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                 &state,
                 &context,
+                &operator,
                 &deposits,
                 &withdrawals,
                 vec![],
@@ -364,7 +358,6 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
             let verified = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
                 &state,
                 &context,
-                &operator_bls,
                 &deposits,
                 &withdrawals,
                 dealing,

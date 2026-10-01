@@ -5,7 +5,7 @@ use crate::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
     posted,
     replica::Replica,
-    transition::{self, CloseContext, OperatorKey, PreparedClose},
+    transition::{self, CloseContext, PreparedClose},
 };
 use bytes::Bytes;
 pub use certificate::{
@@ -36,7 +36,6 @@ pub async fn seal<H, P, D, E, S, B, R>(
     scheme: &bls12381::Scheme,
     replica: &Replica<E, H, P, S>,
     context: &CloseContext<P, D>,
-    operator: &OperatorKey,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     encoded: Bytes,
@@ -63,7 +62,6 @@ where
     let prepared = transition::validate_close_with_strategy::<H, P, D, E, S, B, R>(
         replica,
         context,
-        operator,
         deposits,
         withdrawals,
         dealing,

@@ -20,8 +20,8 @@ use commonware_clearing::bajillion::{
     qmdb::{AccountKey, StateLookup, StateOpening, StateRoot, account_key},
     state::AccountChange,
     transition::{
-        Close, CloseContext, OperatorAggregate, WithdrawalClaim, WithdrawalOutput,
-        prepare_close_with_strategy, validate_close_with_strategy,
+        Close, CloseContext, WithdrawalClaim, WithdrawalOutput, prepare_close_with_strategy,
+        validate_close_with_strategy,
     },
     vector::{OutEntry, OutTipLookup},
 };
@@ -59,7 +59,7 @@ struct DealingBytes {
     recipient_indices: usize,
     cumulative_amounts: usize,
     entry_counts: usize,
-    operator_aggregate: usize,
+    operator_signature: usize,
 }
 
 impl DealingBytes {
@@ -72,7 +72,7 @@ impl DealingBytes {
     }
 
     const fn total(&self) -> usize {
-        self.rows() + self.payer_signatures + self.entries() + self.operator_aggregate
+        self.rows() + self.payer_signatures + self.entries() + self.operator_signature
     }
 }
 
@@ -105,8 +105,10 @@ fn dealing_bytes(close: &Close<VerifyingKey, Digest>) -> DealingBytes {
             sizes.entry_counts += field(&mut wire, &UInt(entry.count));
         }
     }
-    let aggregate = Option::<OperatorAggregate>::decode(wire.clone()).expect("aggregate decodes");
-    sizes.operator_aggregate = field(&mut wire, &aggregate);
+    let signature =
+        <VerifyingKey as commonware_cryptography::Verifier>::Signature::decode(wire.clone())
+            .expect("operator signature decodes");
+    sizes.operator_signature = field(&mut wire, &signature);
     assert!(wire.is_empty());
     assert_eq!(sizes.total(), close.encoded().len());
     sizes
@@ -190,6 +192,7 @@ async fn omitted_payer_sizes(
     let CloseFixture {
         state,
         context,
+        operator,
         deposits,
         withdrawals,
         prepared,
@@ -199,6 +202,7 @@ async fn omitted_payer_sizes(
     let omitted = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &context,
+        &operator,
         &deposits,
         &withdrawals,
         terminals,
@@ -510,13 +514,13 @@ fn calculator_parity() {
                         &fixture.operator, 1, entries).0
                 }).collect();
                 let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
-                    &fixture.state, &fixture.context, &fixture.deposits, &fixture.withdrawals,
+                    &fixture.state, &fixture.context, &fixture.operator, &fixture.deposits, &fixture.withdrawals,
                     terminals, strategy(),
                 ).await.expect("calculator close prepares");
                 let decoded = posted::decode(prepared.encoded().clone(), &fixture.context)
                     .expect("calculator dealing decodes");
                 let validated = validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
-                    &fixture.state, &fixture.context, &fixture.operator_bls, &fixture.deposits,
+                    &fixture.state, &fixture.context, &fixture.deposits,
                     &fixture.withdrawals, decoded, &mut TestRng::new(0), strategy(),
                 ).await.expect("calculator close validates");
                 assert_eq!(prepared.close().header, validated.close().header);
@@ -526,9 +530,9 @@ fn calculator_parity() {
                 let parts = dealing_bytes(close);
                 let graph = if sparse { "sparse_first_last" } else { "cyclic" };
                 println!(
-                    "clearing calculator parity: graph={graph} N={live_accounts} S={senders} K={degree} E={} A={} rows_bytes={} signatures_bytes={} entries_bytes={} operator_bytes={} dealing_bytes={}",
+                    "clearing calculator parity: graph={graph} N={live_accounts} S={senders} K={degree} E={} A={} rows_bytes={} signatures_bytes={} entries_bytes={} operator_signature_bytes={} dealing_bytes={}",
                     senders * degree, close.rows.len(), parts.rows(), parts.payer_signatures,
-                    parts.entries(), parts.operator_aggregate, parts.total(),
+                    parts.entries(), parts.operator_signature, parts.total(),
                 );
             }
         });

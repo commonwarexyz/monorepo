@@ -620,8 +620,8 @@ where
                 && leaf.has_outgoing()
                 && !leaf.matches_outgoing(context.payment(), &body)
             {
-                // The close certificate authenticates the terminal body through the aggregate
-                // operator signature. A private countersignature on a different body at the
+                // The close certificate authenticates the terminal body through the operator's
+                // batch signature. A private countersignature on a different body at the
                 // same sequence proves equivocation against that certified terminal.
                 if ack.seq == leaf.terminal_seq() {
                     return Ok(Verdict::Proven(ChallengeKind::HigherAckDebit));

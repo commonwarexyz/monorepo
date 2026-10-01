@@ -13,11 +13,12 @@ use std::{
 
 fn bench_prepare(c: &mut Criterion) {
     for (_, profile) in selected_active_profiles() {
-        let (context, deposits, withdrawals, terminals, expected) = super::fixtures::runner()
-            .start(|runtime| async move {
+        let (context, operator, deposits, withdrawals, terminals, expected) =
+            super::fixtures::runner().start(|runtime| async move {
                 let fixture = active_close_fixture(runtime, profile).await;
                 (
                     fixture.context,
+                    fixture.operator,
                     fixture.deposits,
                     fixture.withdrawals,
                     fixture.terminals,
@@ -39,6 +40,7 @@ fn bench_prepare(c: &mut Criterion) {
                         let start = Instant::now();
                         let prepared = prepare_dealing::<Sha256, _, _>(
                             context.epoch_context(),
+                            &operator,
                             &deposits,
                             &withdrawals,
                             terminals,
@@ -63,11 +65,12 @@ pub(crate) fn samples() {
     };
     let profile = *profile;
     let samples = raw::samples();
-    let (context, deposits, withdrawals, terminals, expected) =
-        super::fixtures::runner().start(|runtime| async move {
+    let (context, operator, deposits, withdrawals, terminals, expected) = super::fixtures::runner()
+        .start(|runtime| async move {
             let fixture = active_close_fixture(runtime, profile).await;
             (
                 fixture.context,
+                fixture.operator,
                 fixture.deposits,
                 fixture.withdrawals,
                 fixture.terminals,
@@ -94,6 +97,7 @@ pub(crate) fn samples() {
         let start = Instant::now();
         let prepared = prepare_dealing::<Sha256, _, _>(
             context.epoch_context(),
+            &operator,
             &deposits,
             &withdrawals,
             terminals,

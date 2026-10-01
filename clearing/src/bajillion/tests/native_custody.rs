@@ -182,11 +182,10 @@ fn native_activity_accepts_recipient_local_decreasing_totals() {
         );
         terminal.authorization =
             SendAuthorization::sign(body, empty_root(), &fixture.accounts[0].1);
-        terminal.operator_signature =
-            bls_ack(&fixture.operator_bls_private, &terminal.authorization);
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &fixture.state,
             &fixture.context,
+            &fixture.operator,
             &fixture.deposits,
             &fixture.withdrawals,
             terminals,
@@ -270,6 +269,7 @@ fn current_payout_proof_survives_old_activity_retirement() {
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
+            &fixture.operator,
             &fixture.deposits,
             &withdrawals,
             vec![],
@@ -313,6 +313,7 @@ fn current_payout_proof_survives_old_activity_retirement() {
             let batch = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                 &state,
                 &next,
+                &fixture.operator,
                 &fixture.deposits,
                 &empty,
                 vec![],

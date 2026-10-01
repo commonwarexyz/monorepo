@@ -62,7 +62,6 @@ impl Fixture {
         let deployment = Deployment::new(
             *template.digest(),
             template.operator,
-            template.operator_ack,
             wallets
                 .iter()
                 .map(|wallet| Account {
@@ -91,7 +90,6 @@ impl Fixture {
         let deployment = Deployment::configured(
             *deployment.digest(),
             deployment.operator,
-            deployment.operator_ack,
             deployment.accounts,
             state.state().root(),
             state.state().head().operations(),
@@ -195,7 +193,6 @@ impl Fixture {
                 payer.signer(),
             );
             vec![Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&authorization),
                 authorization,
                 vector,
             }]
@@ -203,6 +200,7 @@ impl Fixture {
         let prepared = Box::pin(prepare_close_with_strategy::<Sha256, _, _, _, _>(
             replica,
             &context,
+            protocol.operator(),
             &deposits,
             &withdrawals,
             terminals,
@@ -357,6 +355,7 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
     let prepared = Box::pin(prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &registered,
+        protocol.operator(),
         &deposits,
         &withdrawals,
         Vec::new(),
@@ -392,6 +391,7 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
     let alternate = Box::pin(prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &registered,
+        protocol.operator(),
         &deposits,
         &withdrawals,
         vec![{
@@ -401,7 +401,6 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
                 wallets[0].signer(),
             );
             Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&authorization),
                 authorization,
                 vector,
             }
@@ -548,7 +547,7 @@ fn discarded_vote_survives_private_pruning_and_crash_before_another_valid_propos
         let strategy = context.strategy(NZUsize!(1));
         let (_, prepared) = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
             &initial.scheme, lane.state.as_ref().unwrap(), registered.context,
-            &deployment.operator_ack, registered.deposits, registered.withdrawals,
+            registered.deposits, registered.withdrawals,
             alternate.bytes.clone(), &mut validation_context, &strategy,
         ).await.unwrap();
         assert_ne!(prepared.close().header, lane.manifest().decision.as_ref().unwrap().header);

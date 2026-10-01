@@ -152,6 +152,7 @@ async fn semantic_header(
     >(
         &state,
         &context,
+        &operator,
         &deposits,
         &withdrawals,
         vec![],

@@ -71,7 +71,6 @@ fn sparse_activity_batch_commits_without_serial_rollover_waits() {
                 scheme,
                 &replica,
                 &input.context,
-                &deployment.operator_ack,
                 &input.deposits,
                 &input.withdrawals,
                 input.encoded_dealing.clone(),

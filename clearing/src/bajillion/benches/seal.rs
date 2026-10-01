@@ -36,7 +36,6 @@ fn bench_seal(c: &mut Criterion) {
                                 &signer,
                                 &fixture.state,
                                 &fixture.context,
-                                &fixture.operator_bls,
                                 &fixture.deposits,
                                 &fixture.withdrawals,
                                 wire,

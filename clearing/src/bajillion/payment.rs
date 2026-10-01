@@ -29,8 +29,6 @@ use thiserror::Error;
 pub const VECTOR_SEND_SIGNATURE_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_VECTOR_SEND";
 /// Signature namespace for operator acknowledgment countersignatures.
 pub const VECTOR_ACK_SIGNATURE_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_VECTOR_ACK";
-/// Signature namespace for the operator's aggregable close countersignatures.
-pub const VECTOR_ACK_AGGREGATE_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_VECTOR_ACK_AGG";
 
 /// Monotonically increasing clearing epoch number.
 pub type Epoch = u64;
@@ -239,10 +237,9 @@ impl<P: PublicKey, D: Digest> Read for VectorSendBody<P, D> {
 /// admitted close ended at that root. The dealing omits the predecessor because validators read
 /// it from the preceding close.
 ///
-/// One aggregate countersignature authenticates the operator's acceptance of every terminal
-/// message in the close, so rows carry only the payer signature. Receipts keep the dual-signed
-/// [VectorAck]: the operator signs each accepted message twice, once for the receipt and once,
-/// under [VECTOR_ACK_AGGREGATE_NAMESPACE], for the close aggregate.
+/// One operator signature authenticates the complete ordered batch of terminal messages in the
+/// close, so rows carry only the payer signature. Private receipts keep the individually
+/// verifiable dual-signed [VectorAck].
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SendAuthorization<P: PublicKey, D: Digest> {
     body: VectorSendBody<P, D>,

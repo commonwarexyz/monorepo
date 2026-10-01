@@ -1771,6 +1771,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-cryptography-curve25519",
  "commonware-macros",
+ "commonware-math",
  "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",

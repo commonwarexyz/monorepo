@@ -10,8 +10,9 @@ use crate::bajillion::{
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_cryptography::{BatchVerifier, PublicKey, Verifier};
+use commonware_cryptography::{BatchVerifier, PublicKey, Signer, Verifier};
 use commonware_cryptography_curve25519::signing::Signature;
+use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span};
 use core::{cmp::Ordering, fmt, ops::Deref};
@@ -69,6 +70,26 @@ impl Verifier for ReverseKey {
     }
 }
 impl PublicKey for ReverseKey {}
+
+#[derive(Clone)]
+struct ReverseSigner(SigningKey);
+impl Random for ReverseSigner {
+    fn random(rng: impl CryptoRng) -> Self {
+        Self(SigningKey::random(rng))
+    }
+}
+impl Signer for ReverseSigner {
+    type Signature = Signature;
+    type PublicKey = ReverseKey;
+
+    fn public_key(&self) -> ReverseKey {
+        ReverseKey(self.0.public_key())
+    }
+
+    fn sign(&self, namespace: &[u8], message: &[u8]) -> Signature {
+        self.0.sign(namespace, message)
+    }
+}
 
 struct ReverseBatch(AckBatchVerifier);
 impl BatchVerifier for ReverseBatch {
@@ -323,6 +344,7 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
+            &ReverseSigner(keys[0].1.clone()),
             &deposits,
             &withdrawals,
             vec![],
@@ -404,13 +426,9 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         assert_eq!(deposits.amount_for(&keys[2].0), 7);
         assert_eq!(deposits.amount_for(&keys[1].0), 10);
         assert_eq!(deposits.amount_for(&keys[3].0), 20);
-        let operator = compute_public::<crate::bajillion::transition::OperatorVariant>(
-            &BlsPrivate::new(Scalar::from(8)),
-        );
         let checked = validate_close_with_strategy::<Sha256, _, _, _, _, ReverseBatch, _>(
             &state,
             &context,
-            &operator,
             &deposits,
             &withdrawals,
             posted::decode(prepared.encoded().clone(), &context).unwrap(),
@@ -504,7 +522,7 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
         let withdrawals = WithdrawalBatch::empty();
         let validator_private = BlsPrivate::new(Scalar::from(33));
         let committee = Committee::new(vec![compute_public::<
-            crate::bajillion::transition::OperatorVariant,
+            commonware_cryptography::bls12381::primitives::variant::MinSig,
         >(&validator_private)])
         .unwrap();
         let scheme = bls12381::Scheme::signer(committee.clone(), validator_private).unwrap();
@@ -532,9 +550,6 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
             },
         )
         .unwrap();
-        let operator_private = BlsPrivate::new(Scalar::from(8));
-        let operator =
-            compute_public::<crate::bajillion::transition::OperatorVariant>(&operator_private);
         let mut terminals = Vec::new();
         for payer in [1, 5] {
             let vector = OutVector::new(
@@ -566,16 +581,12 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
                         .sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &message),
                 ),
                 vector,
-                operator_signature: sign_message::<crate::bajillion::transition::OperatorVariant>(
-                    &operator_private,
-                    VECTOR_ACK_AGGREGATE_NAMESPACE,
-                    &message,
-                ),
             });
         }
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
+            &ReverseSigner(keys[0].1.clone()),
             &deposits,
             &withdrawals,
             terminals,
@@ -587,7 +598,6 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
             &scheme,
             &state,
             &context,
-            &operator,
             &deposits,
             &withdrawals,
             prepared.encoded().clone(),

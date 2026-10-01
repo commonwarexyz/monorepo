@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::bajillion::{
-    challenge::HigherEntryLookup, transition::OperatorVariant, vector::OutTipLookup,
+    challenge::HigherEntryLookup,
+    transition::{TERMINAL_BATCH_HASH_NAMESPACE, TERMINAL_BATCH_SIGNATURE_NAMESPACE},
+    vector::OutTipLookup,
 };
 use commonware_codec::FixedSize;
 
@@ -65,8 +67,8 @@ fn context(
     .unwrap()
 }
 
-fn operator() -> BlsPrivate {
-    BlsPrivate::new(Scalar::from(OPERATOR_SEED))
+fn operator() -> SigningKey {
+    SigningKey::from_seed(OPERATOR_SEED)
 }
 
 fn vector(
@@ -101,8 +103,7 @@ fn body(
     )
 }
 
-// Signs `payer`'s epoch-cumulative vector at `seq` over `predecessor`. The operator's aggregate
-// countersignature covers the same message.
+// Signs `payer`'s epoch-cumulative vector at `seq` over `predecessor`.
 fn terminal(
     context: &CloseContext<VerifyingKey, ShaDigest>,
     predecessor: VectorRoot<ShaDigest>,
@@ -114,7 +115,6 @@ fn terminal(
     let authorization =
         SendAuthorization::sign(body(context, payer, seq, &vector), predecessor, payer);
     Terminal {
-        operator_signature: bls_ack(&operator(), &authorization),
         authorization,
         vector,
     }
@@ -134,6 +134,7 @@ async fn prepare(
     prepare_close_with_strategy::<Sha256, _, _, _, _>(
         state,
         context,
+        &operator(),
         &DepositBatch::empty(),
         &WithdrawalBatch::empty(),
         terminals,
@@ -153,7 +154,6 @@ async fn validate(
     validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
         state,
         context,
-        &compute_public::<OperatorVariant>(&operator()),
         &DepositBatch::empty(),
         &WithdrawalBatch::empty(),
         dealing,
@@ -414,16 +414,14 @@ fn predecessor_lookup_matches_linear_scan() {
     });
 }
 
-/// The operator's aggregate countersignature covers each terminal's predecessor. An aggregate
-/// over the bodies alone, or over another predecessor, fails.
+/// The batch signature binds the epoch context, terminal body, and derived predecessor.
 #[test]
-fn aggregate_covers_predecessor() {
+fn batch_signature_covers_context_body_and_predecessor() {
     deterministic::Runner::default().start(|runtime| async move {
         let keys = keys(2);
         let (payer, recipient) = (&keys[0], &keys[1]);
-        let state = genesis(runtime, "aggregate", &keys).await;
+        let state = genesis(runtime, "batch-signature", &keys).await;
 
-        // Epoch x leaves the payer a nonempty root.
         let first = context(&state, EPOCH, 0..0, liability(&keys));
         let prepared = prepare(
             &state,
@@ -434,26 +432,54 @@ fn aggregate_covers_predecessor() {
         let rows = rows(&first, prepared.close());
         let (state, close) = apply(state, prepared).await;
         let root = predecessor(&close, &payer.public_key());
+        assert_ne!(root, empty_root());
 
-        // Epoch x+1 validates only when the aggregate signs the body and the derived predecessor.
         let next = context(&state, EPOCH + 1, rows, liability(&keys));
         let signed = terminal(&next, root, payer, 0, &[(recipient, 2)]);
-        let body = signed.authorization.body().clone();
+        signed.authorization.verify(next.payment()).unwrap();
+        let body = signed.authorization.body();
+        let epoch = next.epoch_context().encode();
+        let complete = body.message(&root);
+        let mut canonical = epoch.to_vec();
+        canonical.extend_from_slice(&complete);
+        let mut omitted_predecessor = epoch.to_vec();
+        omitted_predecessor.extend_from_slice(&body.encode());
+        let mut wrong_predecessor = epoch.to_vec();
+        wrong_predecessor.extend_from_slice(&body.message(&empty_root()));
+        let mut wrong_context = canonical.clone();
+        wrong_context[0] ^= 1;
+        let mut wrong_body = canonical.clone();
+        wrong_body[epoch.len()] ^= 1;
+        let prepared = prepare(&state, &next, vec![signed]).await;
+        let wire = prepared.encoded();
+        let signature_start =
+            wire.len() - <VerifyingKey as commonware_cryptography::Verifier>::Signature::SIZE;
         for (message, valid) in [
-            (body.message(&root), true),
-            (body.encode(), false),
-            (body.message(&empty_root()), false),
+            (canonical, true),
+            (complete.to_vec(), false),
+            (wrong_context, false),
+            (wrong_body, false),
+            (omitted_predecessor, false),
+            (wrong_predecessor, false),
         ] {
-            let mut terminal = signed.clone();
-            terminal.operator_signature = sign_message::<OperatorVariant>(
-                &operator(),
-                VECTOR_ACK_AGGREGATE_NAMESPACE,
-                &message,
-            );
-            let prepared = prepare(&state, &next, vec![terminal]).await;
-            let result = validate(&state, &next, &prepared).await;
+            let digest = Sha256::hash(&[TERMINAL_BATCH_HASH_NAMESPACE, &message]);
+            let signature = operator().sign(TERMINAL_BATCH_SIGNATURE_NAMESPACE, digest.as_ref());
+            let mut tampered = wire[..signature_start].to_vec();
+            tampered.extend_from_slice(&signature.encode());
+            let dealing = posted::decode(tampered.into(), &next).unwrap();
+            let result = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+                &state,
+                &next,
+                &DepositBatch::empty(),
+                &WithdrawalBatch::empty(),
+                dealing,
+                &mut TestRng::new(11),
+                &Sequential,
+            )
+            .await;
             if valid {
-                result.unwrap();
+                let validated = result.unwrap();
+                assert_eq!(validated.close().header, prepared.close().header);
             } else {
                 assert!(matches!(
                     result,
@@ -524,7 +550,6 @@ fn uncarryable_acknowledgment_proves_debit_and_entry_mismatch() {
                 ack.payer_signature().clone(),
             );
             let carried = Terminal {
-                operator_signature: bls_ack(&operator(), &authorization),
                 authorization,
                 vector: payment.clone(),
             };

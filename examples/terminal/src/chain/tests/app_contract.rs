@@ -169,7 +169,6 @@ fn apply_uses_parent_batch_time_across_registration_without_clock_waits() {
         let registration = RegisterDeploymentRequest::sign(
             native.chain_id(),
             Sha256::hash(&[b"apply-contract-registration"]),
-            operator_ack_key(0),
             ed25519::PrivateKey::from_seed(88_888).public_key(),
             1024,
             native.registration_fee,

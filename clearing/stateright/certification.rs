@@ -49,8 +49,10 @@ impl CertifiedClose {
 }
 
 // The production verifier has two transition outcomes for one identical complete dealing.
-// Cryptographic, commitment, and semantic failures all reject; their byte-level checks belong
-// to production tests. Delivery completeness is modeled independently for each validator.
+// Validity includes one registered-operator endorsement of the epoch context and ordered complete
+// terminal messages, including their predecessor roots. Cryptographic, commitment, and semantic
+// failures all reject; their byte-level checks belong to production tests. Delivery completeness
+// is modeled independently for each validator.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Verification {
     Valid,

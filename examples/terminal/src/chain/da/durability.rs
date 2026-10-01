@@ -684,7 +684,7 @@ fn failed_source_preserves_other_lanes_and_imports_the_admitted_competing_candid
             }
         });
         let (mut sealer, mailbox) = tests::sealer(&context, "loser", &deployment).await;
-        let mut other = Deployment::new(Sha256::hash(&[b"independent-native-lane"]), deployment.operator.clone(), deployment.operator_ack, deployment.accounts.clone());
+        let mut other = Deployment::new(Sha256::hash(&[b"independent-native-lane"]), deployment.operator.clone(), deployment.accounts.clone());
         other.generate(context.child("other_genesis")).await.unwrap();
         let mut entries = sealer.registry.entries();
         entries.push(crate::chain::native::RegistryEntry { deployment: other.clone(), network_key: ed25519::PrivateKey::from_seed(89).public_key(), max_dealing_bytes: 4 * 1024 * 1024 });
@@ -1141,7 +1141,6 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
             let mut other = Deployment::new(
                 Sha256::hash(&[b"busy-maintenance-lane"]),
                 deployment.operator.clone(),
-                deployment.operator_ack,
                 deployment.accounts.clone(),
             );
             other.generate(context.child("busy_genesis")).await.unwrap();

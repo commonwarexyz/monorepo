@@ -188,7 +188,6 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
                     let authorization =
                         SendAuthorization::sign(body, predecessor(&close, payer), private);
                     Terminal {
-                        operator_signature: bls_ack(&fixture.operator_bls_private, &authorization),
                         authorization,
                         vector,
                     }
@@ -197,6 +196,7 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
             let second = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                 &state,
                 &context,
+                &fixture.operator,
                 &fixture.deposits,
                 &fixture.withdrawals,
                 terminals,
@@ -208,7 +208,6 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
             let second = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
                 &state,
                 &context,
-                &fixture.operator_bls,
                 &fixture.deposits,
                 &fixture.withdrawals,
                 dealing,

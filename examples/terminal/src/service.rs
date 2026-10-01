@@ -115,7 +115,6 @@ pub(crate) fn run_operator(
                 pipeline,
                 &entry.deployment,
                 config.clearing,
-                config.ack,
                 epoch_fee,
                 proof_replica,
             )

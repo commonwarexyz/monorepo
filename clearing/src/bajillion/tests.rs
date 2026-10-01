@@ -7,10 +7,7 @@ use crate::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
     custody::Epoch,
     logs::{self, ActivityInput, Floors, Heads, Logs},
-    payment::{
-        AckError, EntryReceipt, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck,
-        VectorSendBody,
-    },
+    payment::{AckError, EntryReceipt, SendAuthorization, VectorAck, VectorSendBody},
     posted,
     qmdb::{self, Mutations, State, StateHead, StateLookup, StateOpening, StateRoot, account_key},
     replica::{PreparedReplica, Replica},
@@ -28,7 +25,7 @@ use commonware_cryptography::{
     Hasher, Sha256, Signer as _,
     bls12381::primitives::{
         group::{Private as BlsPrivate, Scalar},
-        ops::{compute_public, sign_message},
+        ops::compute_public,
     },
     sha256::Digest as ShaDigest,
 };
@@ -54,6 +51,7 @@ mod ordering;
 mod predecessor;
 mod rotation;
 mod state;
+mod terminal_batch;
 mod virtual_balances;
 mod wire;
 
@@ -313,19 +311,6 @@ struct Fixture {
     acks: Vec<VectorAck<VerifyingKey, ShaDigest>>,
     terminals: Vec<Terminal<VerifyingKey, ShaDigest>>,
     operator: SigningKey,
-    operator_bls_private: BlsPrivate,
-    operator_bls: crate::bajillion::transition::OperatorKey,
-}
-
-fn bls_ack(
-    private: &BlsPrivate,
-    authorization: &SendAuthorization<VerifyingKey, ShaDigest>,
-) -> crate::bajillion::transition::OperatorSignature {
-    sign_message::<crate::bajillion::transition::OperatorVariant>(
-        private,
-        VECTOR_ACK_AGGREGATE_NAMESPACE,
-        authorization.message().as_ref(),
-    )
 }
 
 // The predecessor a payer signs when the preceding close has no row for it.
@@ -390,9 +375,6 @@ async fn fixture(
             .collect(),
     );
     let operator = SigningKey::from_seed(OPERATOR_SEED);
-    let operator_bls_private = BlsPrivate::new(Scalar::from(OPERATOR_SEED));
-    let operator_bls =
-        compute_public::<crate::bajillion::transition::OperatorVariant>(&operator_bls_private);
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
     let context = EpochContext::new::<Sha256>(
@@ -445,7 +427,6 @@ async fn fixture(
             ack.payer_signature().clone(),
         );
         terminals.push(Terminal {
-            operator_signature: bls_ack(&operator_bls_private, &authorization),
             authorization,
             vector,
         });
@@ -454,6 +435,7 @@ async fn fixture(
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &context,
+        &operator,
         &deposits,
         &withdrawals,
         terminals.clone(),
@@ -472,8 +454,6 @@ async fn fixture(
         acks,
         terminals,
         operator,
-        operator_bls_private,
-        operator_bls,
     }
 }
 
@@ -485,7 +465,6 @@ async fn validate(
     validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
         &fixture.state,
         &fixture.context,
-        &fixture.operator_bls,
         &fixture.deposits,
         &fixture.withdrawals,
         dealing,
@@ -607,6 +586,7 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
         let empty = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
+            &fixture.operator,
             &fixture.deposits,
             &fixture.withdrawals,
             vec![],
@@ -661,22 +641,23 @@ fn forged_payer_and_operator_acceptance_are_rejected() {
         let before = *fixture.state.state().head();
         for forge_payer in [false, true] {
             let mut terminals = fixture.terminals.clone();
+            let wrong = SigningKey::from_seed(999);
             if forge_payer {
-                let wrong = SigningKey::from_seed(999);
                 terminals[0].authorization = SendAuthorization::sign(
                     terminals[0].authorization.body().clone(),
                     empty_root(),
                     &wrong,
                 );
-            } else {
-                terminals[0].operator_signature = bls_ack(
-                    &BlsPrivate::new(Scalar::from(999_u64)),
-                    &terminals[0].authorization,
-                );
             }
+            let operator = if forge_payer {
+                &fixture.operator
+            } else {
+                &wrong
+            };
             let forged = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                 &fixture.state,
                 &fixture.context,
+                operator,
                 &fixture.deposits,
                 &fixture.withdrawals,
                 terminals,
@@ -709,7 +690,6 @@ fn stale_and_divergent_predecessors_cannot_validate_the_same_dealing() {
         let valid = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
             &same,
             &fixture.context,
-            &fixture.operator_bls,
             &fixture.deposits,
             &fixture.withdrawals,
             dealing,
@@ -738,12 +718,11 @@ fn stale_and_divergent_predecessors_cannot_validate_the_same_dealing() {
                 validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
                     state,
                     &fixture.context,
-                    &fixture.operator_bls,
                     &fixture.deposits,
                     &fixture.withdrawals,
                     dealing,
                     &mut TestRng::new(7),
-                    &Sequential
+                    &Sequential,
                 )
                 .await
                 .is_err()

@@ -1,11 +1,11 @@
 //! One canonical keyed dealing shared by every full validator.
 //!
 //! Validators derive the close commitment from the context settlement bound for the admission
-//! frontier, retained state, terminal payer vectors, and aggregated operator acceptance.
+//! frontier, retained state, terminal payer vectors, and the operator's batch signature.
 
 use crate::bajillion::{
     commitment::MAX_VECTOR_LENGTH,
-    transition::{CloseContext, OperatorAggregate, TransitionError},
+    transition::{CloseContext, TransitionError},
     vector::{OutEntry, OutVector},
 };
 use alloc::vec::Vec;
@@ -27,7 +27,7 @@ pub(crate) struct Row<P: PublicKey> {
 #[derive(Clone, Debug)]
 pub struct Dealing<P: PublicKey> {
     pub(crate) rows: Vec<Row<P>>,
-    pub(crate) aggregate: Option<OperatorAggregate>,
+    pub(crate) signature: P::Signature,
     pub(crate) encoded: Bytes,
 }
 impl<P: PublicKey> Dealing<P> {
@@ -130,12 +130,7 @@ pub fn decode_with_strategy<P: PublicKey, D: Digest>(
                 .map_err(|_| invalid("invalid outgoing vector"))?,
         );
     }
-    let aggregate = Option::<OperatorAggregate>::read(&mut reader)?;
-    if aggregate.is_some() != skeleton.iter().any(|(_, outgoing)| outgoing.is_some()) {
-        return Err(invalid(
-            "operator aggregate presence does not match senders",
-        ));
-    }
+    let signature = P::Signature::read(&mut reader)?;
     if reader.has_remaining() {
         return Err(invalid("trailing dealing bytes"));
     }
@@ -150,14 +145,14 @@ pub fn decode_with_strategy<P: PublicKey, D: Digest>(
         .collect();
     Ok(Dealing {
         rows,
-        aggregate,
+        signature,
         encoded,
     })
 }
 
 pub(crate) fn encode<P: PublicKey>(
     rows: &[Row<P>],
-    aggregate: &Option<OperatorAggregate>,
+    signature: &P::Signature,
 ) -> Result<Bytes, TransitionError> {
     if P::SIZE != 32
         || rows
@@ -196,6 +191,6 @@ pub(crate) fn encode<P: PublicKey>(
             UInt(entry.count).write(&mut writer);
         }
     }
-    aggregate.write(&mut writer);
+    signature.write(&mut writer);
     Ok(writer.freeze())
 }

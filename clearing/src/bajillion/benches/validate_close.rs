@@ -45,7 +45,6 @@ fn bench_validate_close(c: &mut Criterion) {
                             >(
                                 &fixture.state,
                                 &fixture.context,
-                                &fixture.operator_bls,
                                 &fixture.deposits,
                                 &fixture.withdrawals,
                                 dealing,

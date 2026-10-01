@@ -9,7 +9,6 @@ fn registration(native: &NativeGenesis) -> RegisterDeploymentRequest {
     RegisterDeploymentRequest::sign(
         native.chain_id(),
         Sha256::hash(&[b"startup-after-rejected-deposit"]),
-        operator_ack_key(0),
         native.deployments[0].network_key.clone(),
         1024,
         native.registration_fee,
@@ -90,7 +89,6 @@ async fn ready_operator(
             pipeline,
             &entry.deployment,
             operator_signer(0),
-            operator_ack_signer(0),
             epoch_fee,
             true,
         )

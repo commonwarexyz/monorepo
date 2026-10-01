@@ -253,7 +253,6 @@ mod tests {
                     RegisterDeploymentRequest::sign(
                         native.chain_id(),
                         Sha256::hash(&[b"new-registry-point", &[index]]),
-                        protocol::operator_ack_key(0),
                         ed25519::PrivateKey::from_seed(2).public_key(),
                         1024,
                         native.registration_fee,
@@ -308,7 +307,7 @@ mod tests {
             let recorder = Recorder::default();
             let handle = watch(context.child("registry"), db.clone(), native.clone(), view.clone(), recorder.clone(), committee.clone());
             let request = RegisterDeploymentRequest::sign(
-                native.chain_id(), Sha256::hash(&[b"dynamic-registration"]), protocol::operator_ack_key(0),
+                native.chain_id(), Sha256::hash(&[b"dynamic-registration"]),
                 new_peer.clone(), 1024,
                 native.registration_fee, &protocol::operator_signer(0),
             );
@@ -333,7 +332,7 @@ mod tests {
             assert_eq!(tracked[0].1.secondary, Set::from_iter_dedup([old_peer, new_peer.clone()]));
             assert!(view.get(&deployment).unwrap().deployment.accounts.is_empty());
             let request = RegisterDeploymentRequest::sign(
-                native.chain_id(), Sha256::hash(&[b"same-peer-registration"]), protocol::operator_ack_key(0),
+                native.chain_id(), Sha256::hash(&[b"same-peer-registration"]),
                 new_peer, 2048,
                 native.registration_fee, &protocol::operator_signer(0),
             );
@@ -347,7 +346,7 @@ mod tests {
             }
             assert_eq!(recorder.0.lock().len(), 1);
             let request = RegisterDeploymentRequest::sign(
-                native.chain_id(), Sha256::hash(&[b"third-peer-registration"]), protocol::operator_ack_key(0),
+                native.chain_id(), Sha256::hash(&[b"third-peer-registration"]),
                 ed25519::PrivateKey::from_seed(4).public_key(), 2048,
                 native.registration_fee, &protocol::operator_signer(0),
             );

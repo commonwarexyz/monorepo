@@ -25,10 +25,11 @@ use super::{
     registry::RegistryView,
     setup::{Genesis, ValidatorEntry},
     state::{
-        CarriedRecord, DepositEffect, FaultRecord, HardFaultReasonResponse, Intake, Record,
-        WithdrawalEffect, admitted_key, anchor_key, carried_key, claimed_key, deposit_key, execute,
-        fault_key, hard_fault_key, intake_key, native_balance, payout_head_key, refund_key,
-        registration_key, registry, registry_entry, registry_entry_key, status_key, withdrawal_key,
+        CarriedRecord, DepositEffect, FaultRecord, HardFaultReasonResponse, Intake, Machine,
+        Record, WithdrawalEffect, admitted_key, anchor_key, carried_key, claimed_key, deposit_key,
+        execute, fault_key, hard_fault_key, intake_key, machine_key, native_balance,
+        payout_head_key, refund_key, registration_key, registry, registry_entry,
+        registry_entry_key, status_key, withdrawal_key,
     },
     tx::{
         AdmitRequest, BeginHardFaultSettlementRequest, ChallengeRequest, ClaimDepositRequest,
@@ -51,8 +52,7 @@ use crate::{
     protocol::{
         Deployment, DepositEvent, INITIAL_BALANCE, Key, PreparedEpoch, Protocol, SettlementResult,
         Timing, accounts, clearing_private, committee, dealt_participant, deployment,
-        deployment_of, identities, operator_ack_key, operator_ack_signer, operator_key,
-        operator_signer, wallets,
+        deployment_of, identities, operator_key, operator_signer, wallets,
     },
     rpc,
     service::{observe, observe_closes, prepare_request},
@@ -281,16 +281,10 @@ fn native() -> NativeGenesis {
 /// account set.
 fn two_deployments() -> Vec<Deployment> {
     let mut configs = vec![
-        Deployment::new(
-            deployment(),
-            operator_key(),
-            operator_ack_key(0),
-            accounts(),
-        ),
+        Deployment::new(deployment(), operator_key(), accounts()),
         Deployment::new(
             deployment_of(&operator_signer(1).public_key()),
             operator_signer(1).public_key(),
-            operator_ack_key(1),
             accounts(),
         ),
     ];
@@ -1238,7 +1232,6 @@ fn deployment_registration_requires_funding_and_charges_fees_once() {
         let request = RegisterDeploymentRequest::sign(
             native.chain_id(),
             Sha256::hash(&[b"new-deployment"]),
-            operator_ack_key(10),
             ed25519::PrivateKey::from_seed(88_888).public_key(),
             1024,
             10,
@@ -1247,6 +1240,8 @@ fn deployment_registration_requires_funding_and_charges_fees_once() {
         let request = RegisterDeploymentRequest::decode(request.encode()).unwrap();
         assert!(request.verify(&native.chain_id()));
         let expected = request.entry(&native).unwrap();
+        assert_eq!(expected.deployment.operator, owner.public_key());
+        assert_eq!(expected.network_key, request.network_key);
         assert!(expected.deployment.accounts.is_empty());
         assert_eq!(RegistryEntry::decode(expected.encode()).unwrap(), expected);
         let scoped = request.deployment_id();
@@ -1271,7 +1266,6 @@ fn deployment_registration_requires_funding_and_charges_fees_once() {
         let wrong_fee = RegisterDeploymentRequest::sign(
             native.chain_id(),
             request.registration_id,
-            request.operator_ack,
             request.network_key.clone(),
             1024,
             9,
@@ -1329,7 +1323,6 @@ fn deployment_registration_requires_funding_and_charges_fees_once() {
             NonZeroUsize::MIN,
             scoped,
             owner.clone(),
-            operator_ack_signer(10),
         )
         .unwrap();
         let root = DepositBatch::<Key>::empty().root::<Sha256>().unwrap();
@@ -1367,6 +1360,29 @@ fn deployment_registration_requires_funding_and_charges_fees_once() {
             11
         );
         assert_supply(&db, &native, &[]).await;
+        assert!(db.finalize().await.durable().await);
+        drop(db);
+        let reopened = open(context.child("registration_reopened"), "registration-fees").await;
+        assert_eq!(registry_entry(&reopened, &native, &scoped).await.unwrap().unwrap(), expected);
+        let Some(Record::Machine(encoded)) = read(&reopened, &machine_key(&scoped)).await else {
+            panic!("registered deployment has a machine");
+        };
+        let machine = Machine::decode(encoded).unwrap();
+        let close_context = machine.registered().unwrap().context;
+        let registration = protocol.registration_at(
+            0,
+            DepositBatch::empty(),
+            WithdrawalBatch::empty(),
+            0,
+            close_context.admission_deadline(),
+            close_context.challenge_deadline(),
+        ).unwrap();
+        let prepared = protocol.prepare(registration, Vec::new()).unwrap();
+        let result = protocol.fixture_complete(&[], &[], prepared, 39).unwrap();
+        assert_eq!(result.context, *close_context);
+        seal_native(&reopened, 5, &native, &[SettlementTx::Admit(AdmitRequest::from(&result))]).await;
+        assert!(matches!(read(&reopened, &admitted_key(&scoped, 0)).await,
+            Some(Record::Admitted(admitted)) if admitted.roots == result.roots));
     });
 }
 
@@ -1580,13 +1596,7 @@ async fn registered_target(
     for height in 2..=13 {
         seal_native(db, height, native, &[]).await;
     }
-    let protocol = Protocol::with_signer(
-        NonZeroUsize::MIN,
-        target,
-        operator_signer(1),
-        operator_ack_signer(1),
-    )
-    .unwrap();
+    let protocol = Protocol::with_signer(NonZeroUsize::MIN, target, operator_signer(1)).unwrap();
     let root = DepositBatch::<Key>::empty().root::<Sha256>().unwrap();
     let withdrawals = WithdrawalBatch::empty();
     let registration = SettlementTx::RegisterEpoch(RegisterEpochRequest {
@@ -1738,7 +1748,6 @@ fn claimed_deposit_keeps_the_block_pull_bound() {
             NonZeroUsize::MIN,
             target,
             operator_signer(1),
-            operator_ack_signer(1),
         )
         .unwrap();
         let account = Key::decode(claim.claim.output().destination().clone()).unwrap();
@@ -2804,13 +2813,8 @@ fn deployment_fault_is_isolated() {
         let configured = two_deployments();
         let alpha = *configured[0].digest();
         let beta = *configured[1].digest();
-        let beta_protocol = Protocol::with_signer(
-            NonZeroUsize::MIN,
-            beta,
-            operator_signer(1),
-            operator_ack_signer(1),
-        )
-        .unwrap();
+        let beta_protocol =
+            Protocol::with_signer(NonZeroUsize::MIN, beta, operator_signer(1)).unwrap();
         let db = open(context.child("isolated"), "isolated").await;
         let state = genesis_cache();
 
@@ -3010,7 +3014,6 @@ fn unconfigured_deployment_txs_are_rejected() {
             NonZeroUsize::MIN,
             deployment_of(&operator_signer(7).public_key()),
             operator_signer(7),
-            operator_ack_signer(7),
         )
         .unwrap();
 
@@ -7356,7 +7359,6 @@ impl Walkthrough {
                 crate::protocol::Deployment::new(
                     deployment_of(&operator_signer(op).public_key()),
                     operator_signer(op).public_key(),
-                    operator_ack_key(op),
                     accounts(),
                 )
             })
@@ -7680,7 +7682,6 @@ impl EngineDefinition for Walkthrough {
             let pipeline = node::Pipeline::new(certify_mailbox, &validators, *config.digest())
                 .expect("the walkthrough committee maps to network identities");
             let clearing = operator_signer(u64::try_from(op).expect("the operator index fits u64"));
-            let ack = operator_ack_signer(u64::try_from(op).expect("the operator index fits u64"));
             let sqlite = Arc::new(Mutex::new(
                 Operator::open_remote(
                     Path::new(":memory:"),
@@ -7688,7 +7689,6 @@ impl EngineDefinition for Walkthrough {
                     pipeline,
                     config,
                     clearing,
-                    ack,
                     4096,
                     true,
                 )

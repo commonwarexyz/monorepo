@@ -3305,7 +3305,6 @@ fn foreign_deployment_head_cannot_authorize(usage: HeadUse) {
         let registration = crate::chain::tx::RegisterDeploymentRequest::sign(
             native.chain_id(),
             Sha256::hash(&[b"same-key foreign deployment"]),
-            crate::protocol::operator_ack_key(0),
             native.deployments[0].network_key.clone(),
             1024 * 1024,
             native.registration_fee,
@@ -3342,7 +3341,6 @@ fn foreign_deployment_head_cannot_authorize(usage: HeadUse) {
             NonZeroUsize::MIN,
             foreign,
             crate::protocol::operator_signer(0),
-            crate::protocol::operator_ack_signer(0),
         )
         .unwrap();
         let deposits = DepositBatch::new(vec![
@@ -3432,7 +3430,6 @@ fn foreign_deployment_head_cannot_authorize(usage: HeadUse) {
             )
             .unwrap();
             let terminal = commonware_clearing::bajillion::transition::Terminal {
-                operator_signature: protocol.sign_ack_aggregate(&send.authorization),
                 authorization: send.authorization,
                 vector,
             };
@@ -8101,7 +8098,6 @@ fn operator_dark_wallet_moves_finalized_claim_to_registered_operator() {
         let registration = crate::chain::tx::RegisterDeploymentRequest::sign(
             chain_id,
             Sha256::hash(&[b"wallet destination deployment"]),
-            crate::protocol::operator_ack_key(99),
             chain.genesis().native.deployments[0].network_key.clone(),
             1024,
             fee,

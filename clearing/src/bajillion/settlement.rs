@@ -3322,13 +3322,13 @@ mod tests {
         commitment::{VectorKind, VectorRoot},
         custody::Epoch,
         logs::{Floors, Heads},
-        payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
+        payment::{SendAuthorization, VectorAck, VectorSendBody},
         qmdb::{Mutations, StateHead, StateLookup, account_key},
         state::SettlementOutput,
         tests::{Accepted, TestState, new_state, replay_state},
         transition::{
-            ActivityRange, CloseLimits, OperatorKey, OperatorVariant, Terminal,
-            prepare_close_with_strategy, validate_close_with_strategy,
+            ActivityRange, CloseLimits, Terminal, prepare_close_with_strategy,
+            validate_close_with_strategy,
         },
         vector::{OutEntry, OutVector},
     };
@@ -3337,7 +3337,7 @@ mod tests {
         Sha256, Signer as _,
         bls12381::primitives::{
             group::{Private as BlsPrivate, Scalar},
-            ops::{compute_public, sign_message},
+            ops::compute_public,
             variant::MinSig,
         },
         sha256::Digest as ShaDigest,
@@ -4025,8 +4025,6 @@ mod tests {
         empty_cache: TestCache,
         deployment: ShaDigest,
         operator: SigningKey,
-        operator_ack: BlsPrivate,
-        operator_bls: OperatorKey,
         signer: bls12381::Scheme,
         committee: ShaDigest,
         accounts: Vec<SigningKey>,
@@ -4087,8 +4085,7 @@ mod tests {
         let committee_keys = Committee::new(vec![compute_public::<MinSig>(&validator)]).unwrap();
         let committee = committee_keys.commitment::<Sha256>();
         let signer = bls12381::Scheme::signer(committee_keys.clone(), validator).unwrap();
-        let operator_ack = BlsPrivate::new(Scalar::from(777_u64));
-        let operator_bls = compute_public::<OperatorVariant>(&operator_ack);
+
         let chain = TestChain::new(
             deployment,
             operator.public_key(),
@@ -4104,8 +4101,6 @@ mod tests {
             cache,
             deployment,
             operator,
-            operator_ack,
-            operator_bls,
             signer,
             committee,
             accounts,
@@ -4598,11 +4593,13 @@ mod tests {
     }
     fn build(
         cache: &Snapshot,
+        operator: &SigningKey,
         context: &TestContext,
         deposits: &TestDeposits,
         withdrawals: &TestWithdrawals,
         terminals: Vec<Terminal<VerifyingKey, ShaDigest>>,
     ) -> (Built, Snapshot) {
+        assert_eq!(&operator.public_key(), context.payment().operator());
         let predecessor = cache.clone();
         let snapshot = cache.clone();
         let context = context.clone();
@@ -4613,6 +4610,7 @@ mod tests {
             let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                 &state,
                 &context,
+                operator,
                 &deposits,
                 &withdrawals,
                 terminals,
@@ -4639,9 +4637,10 @@ mod tests {
             successor,
         )
     }
-    fn empty_close(cache: &Snapshot, context: &TestContext) -> Built {
+    fn empty_close(cache: &Snapshot, operator: &SigningKey, context: &TestContext) -> Built {
         build(
             cache,
+            operator,
             context,
             &DepositBatch::empty(),
             &WithdrawalBatch::empty(),
@@ -4651,15 +4650,15 @@ mod tests {
     }
     fn boundary_close(
         cache: &Snapshot,
+        operator: &SigningKey,
         context: &TestContext,
         deposits: &TestDeposits,
         withdrawals: &TestWithdrawals,
     ) -> (Built, Snapshot) {
-        build(cache, context, deposits, withdrawals, vec![])
+        build(cache, operator, context, deposits, withdrawals, vec![])
     }
     fn certificate(
         signer: &bls12381::Scheme,
-        operator_bls: &OperatorKey,
         context: &TestContext,
         deposits: &TestDeposits,
         withdrawals: &TestWithdrawals,
@@ -4680,7 +4679,6 @@ mod tests {
                 validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
                     &state,
                     &context,
-                    operator_bls,
                     &deposits,
                     &withdrawals,
                     dealing,
@@ -4699,21 +4697,13 @@ mod tests {
     fn register_and_admit(
         chain: &mut TestChain,
         signer: &bls12381::Scheme,
-        operator_bls: &OperatorKey,
         now: u64,
         context: TestContext,
         deposits: TestDeposits,
         withdrawals: TestWithdrawals,
         close: &Built,
     ) -> BatchId<ShaDigest> {
-        let certificate = certificate(
-            signer,
-            operator_bls,
-            &context,
-            &deposits,
-            &withdrawals,
-            close,
-        );
+        let certificate = certificate(signer, &context, &deposits, &withdrawals, close);
         chain.register(now, context, withdrawals, |_| true).unwrap();
         chain
             .admit(
@@ -4745,11 +4735,10 @@ mod tests {
             now,
             fixture.chain.registration_floors(),
         );
-        let close = empty_close(&snapshot, &context);
+        let close = empty_close(&snapshot, &fixture.operator, &context);
         let batch = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             now,
             context.clone(),
             DepositBatch::empty(),
@@ -4783,7 +4772,7 @@ mod tests {
     fn payment_close(
         cache: &Snapshot,
         context: &TestContext,
-        operator_ack: &BlsPrivate,
+        operator: &SigningKey,
         payer: &SigningKey,
         recipient: &SigningKey,
         withdrawals: &TestWithdrawals,
@@ -4808,20 +4797,15 @@ mod tests {
         );
         let authorization =
             SendAuthorization::sign(body, cache.predecessor(&payer.public_key()), payer);
-        let operator_signature = sign_message::<OperatorVariant>(
-            operator_ack,
-            VECTOR_ACK_AGGREGATE_NAMESPACE,
-            authorization.message().as_ref(),
-        );
         build(
             cache,
+            operator,
             context,
             &DepositBatch::empty(),
             withdrawals,
             vec![Terminal {
                 authorization,
                 vector,
-                operator_signature,
             }],
         )
     }
@@ -4966,7 +4950,7 @@ mod tests {
     fn virtual_payment_close(
         cache: &TestCache,
         context: &TestContext,
-        operator_ack: &BlsPrivate,
+        operator: &SigningKey,
         payer: &SigningKey,
         recipient: &SigningKey,
         amount: u64,
@@ -4974,7 +4958,7 @@ mod tests {
         payment_close(
             cache,
             context,
-            operator_ack,
+            operator,
             payer,
             recipient,
             &WithdrawalBatch::empty(),
@@ -4985,7 +4969,7 @@ mod tests {
     fn internal_payment_and_close(
         cache: &TestCache,
         context: &TestContext,
-        operator_ack: &BlsPrivate,
+        operator: &SigningKey,
         payer: &SigningKey,
         recipient: &SigningKey,
         withdrawals: &TestWithdrawals,
@@ -4994,7 +4978,7 @@ mod tests {
         payment_close(
             cache,
             context,
-            operator_ack,
+            operator,
             payer,
             recipient,
             withdrawals,
@@ -5124,15 +5108,8 @@ mod tests {
             .unwrap();
         fixture.chain = round_trip(&fixture.chain);
         assert_eq!(fixture.chain.registered().unwrap().context, &valid);
-        let close = empty_close(&fixture.cache, &valid);
-        let certificate = certificate(
-            &fixture.signer,
-            &fixture.operator_bls,
-            &valid,
-            &deposits,
-            &withdrawals,
-            &close,
-        );
+        let close = empty_close(&fixture.cache, &fixture.operator, &valid);
+        let certificate = certificate(&fixture.signer, &valid, &deposits, &withdrawals, &close);
         let batch = fixture
             .chain
             .admit(
@@ -5289,11 +5266,16 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, _) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             close_context.clone(),
             deposits,
@@ -5368,11 +5350,16 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, _) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             close_context.clone(),
             deposits,
@@ -5447,11 +5434,16 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, _) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             close_context.clone(),
             deposits,
@@ -5761,7 +5753,7 @@ mod tests {
         let (close, _) = virtual_payment_close(
             &fixture.cache,
             &close_context,
-            &fixture.operator_ack,
+            &fixture.operator,
             &fixture.accounts[0],
             &recipient,
             2,
@@ -5769,7 +5761,6 @@ mod tests {
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             close_context.clone(),
             deposits,
@@ -5886,11 +5877,10 @@ mod tests {
                 epoch + 1 + DELAY + WINDOW,
                 fixture.chain.registration_floors(),
             );
-            let close = empty_close(&fixture.cache, &close_context);
+            let close = empty_close(&fixture.cache, &fixture.operator, &close_context);
             batches.push(register_and_admit(
                 &mut fixture.chain,
                 &fixture.signer,
-                &fixture.operator_bls,
                 epoch + 1,
                 close_context,
                 deposits.clone(),
@@ -5951,12 +5941,11 @@ mod tests {
             2,
             fixture.chain.registration_floors(),
         );
-        let first = empty_close(&fixture.cache, &first_context);
+        let first = empty_close(&fixture.cache, &fixture.operator, &first_context);
         let first_state = first.successor.clone();
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             2,
             first_context,
             deposits.clone(),
@@ -5974,12 +5963,11 @@ mod tests {
             3,
             fixture.chain.registration_floors(),
         );
-        let second = empty_close(&first_state, &second_context);
+        let second = empty_close(&first_state, &fixture.operator, &second_context);
         let second_state = second.successor.clone();
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             3,
             second_context,
             deposits.clone(),
@@ -6074,12 +6062,11 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let first = empty_close(&fixture.cache, &first_context);
+        let first = empty_close(&fixture.cache, &fixture.operator, &first_context);
         let first_state = first.successor.clone();
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             first_context,
             deposits.clone(),
@@ -6276,11 +6263,16 @@ mod tests {
             fixture.chain.registration_floors(),
         );
         let anchor = *registered.payment().anchor();
-        let (close, _) = boundary_close(&fixture.cache, &registered, &deposits, &withdrawals);
+        let (close, _) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &registered,
+            &deposits,
+            &withdrawals,
+        );
         let withdrawal_total = close.withdrawal_total;
         let certificate = certificate(
             &fixture.signer,
-            &fixture.operator_bls,
             &registered,
             &deposits,
             &withdrawals,
@@ -6479,12 +6471,16 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let (close, successor) =
-            boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -6599,12 +6595,12 @@ mod tests {
                     .register(0, first.clone(), empty.clone(), |_| true)
                     .unwrap();
                 let (active, successor) = if debit == 0 {
-                    boundary_close(&fixture.cache, &first, &deposits, &empty)
+                    boundary_close(&fixture.cache, &fixture.operator, &first, &deposits, &empty)
                 } else {
                     payment_close(
                         &fixture.cache,
                         &first,
-                        &fixture.operator_ack,
+                        &fixture.operator,
                         &account,
                         &peer,
                         &empty,
@@ -6626,14 +6622,7 @@ mod tests {
                 assert_eq!(registered.context, &first);
                 assert!(registered.withdrawals.is_empty());
 
-                let certificate = certificate(
-                    &fixture.signer,
-                    &fixture.operator_bls,
-                    &first,
-                    &deposits,
-                    &empty,
-                    &active,
-                );
+                let certificate = certificate(&fixture.signer, &first, &deposits, &empty, &active);
                 fixture
                     .chain
                     .admit(
@@ -6666,12 +6655,18 @@ mod tests {
                     fixture.chain.registration_floors(),
                 );
                 let (close, final_state) = if credit == 0 {
-                    boundary_close(&successor, &second, &deposits, &withdrawals)
+                    boundary_close(
+                        &successor,
+                        &fixture.operator,
+                        &second,
+                        &deposits,
+                        &withdrawals,
+                    )
                 } else {
                     payment_close(
                         &successor,
                         &second,
-                        &fixture.operator_ack,
+                        &fixture.operator,
                         &peer,
                         &account,
                         &withdrawals,
@@ -6682,7 +6677,6 @@ mod tests {
                 register_and_admit(
                     &mut fixture.chain,
                     &fixture.signer,
-                    &fixture.operator_bls,
                     3,
                     second,
                     deposits,
@@ -6740,7 +6734,13 @@ mod tests {
             0,
             fixture.chain.registration_floors(),
         );
-        let (close, _) = boundary_close(&fixture.cache, &context, &deposits, &withdrawals);
+        let (close, _) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &context,
+            &deposits,
+            &withdrawals,
+        );
         fixture
             .chain
             .register(0, context.clone(), withdrawals.clone(), |_| true)
@@ -6769,14 +6769,7 @@ mod tests {
                 |_| true,
             )
             .unwrap();
-        let certificate = certificate(
-            &fixture.signer,
-            &fixture.operator_bls,
-            &context,
-            &deposits,
-            &withdrawals,
-            &close,
-        );
+        let certificate = certificate(&fixture.signer, &context, &deposits, &withdrawals, &close);
         fixture
             .chain
             .admit(
@@ -6825,13 +6818,17 @@ mod tests {
             5,
             fixture.chain.registration_floors(),
         );
-        let (close, successor) =
-            boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         let claim = close.withdrawal_claim(&account.public_key());
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             5,
             close_context,
             deposits.clone(),
@@ -7036,12 +7033,16 @@ mod tests {
             5,
             fixture.chain.registration_floors(),
         );
-        let (close, successor) =
-            boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             5,
             close_context,
             deposits.clone(),
@@ -7266,11 +7267,15 @@ mod tests {
 
         // The operator admits epoch 0 only at its admission deadline, so epoch 1 receives
         // challenge deadline 30. Nothing rejects that schedule.
-        let (close, successor) =
-            boundary_close(&fixture.cache, &first, &deposits, &first_withdrawals);
+        let (close, successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &first,
+            &deposits,
+            &first_withdrawals,
+        );
         let first_certificate = certificate(
             &fixture.signer,
-            &fixture.operator_bls,
             &first,
             &deposits,
             &first_withdrawals,
@@ -7291,10 +7296,15 @@ mod tests {
             (second.admission_deadline(), second.challenge_deadline()),
             (20, 30)
         );
-        let (close, _) = boundary_close(&successor, &second, &deposits, &second_withdrawals);
+        let (close, _) = boundary_close(
+            &successor,
+            &fixture.operator,
+            &second,
+            &deposits,
+            &second_withdrawals,
+        );
         let second_certificate = certificate(
             &fixture.signer,
-            &fixture.operator_bls,
             &second,
             &deposits,
             &second_withdrawals,
@@ -7431,14 +7441,18 @@ mod tests {
             4,
             fixture.chain.registration_floors(),
         );
-        let (close, successor) =
-            boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         let claim = close.withdrawal_claim(&signer.public_key());
         assert_eq!(close.withdrawal_total, 0);
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             4,
             close_context,
             deposits,
@@ -7521,8 +7535,13 @@ mod tests {
                     0,
                     fixture.chain.registration_floors(),
                 );
-                let (close, successor) =
-                    boundary_close(&fixture.cache, &ctx, &deposits, &withdrawals);
+                let (close, successor) = boundary_close(
+                    &fixture.cache,
+                    &fixture.operator,
+                    &ctx,
+                    &deposits,
+                    &withdrawals,
+                );
                 assert_eq!(successor.balances(), fixture.cache.balances());
                 assert!(matches!(
                     successor.account_lookup(&ctx, &close.roots, &account),
@@ -7532,7 +7551,6 @@ mod tests {
                 register_and_admit(
                     &mut fixture.chain,
                     &fixture.signer,
-                    &fixture.operator_bls,
                     0,
                     ctx,
                     deposits,
@@ -7659,13 +7677,17 @@ mod tests {
             5,
             fixture.chain.registration_floors(),
         );
-        let (close, successor) =
-            boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         let claim = close.withdrawal_claim(&account.public_key());
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             5,
             close_context,
             deposits,
@@ -7744,11 +7766,16 @@ mod tests {
             9,
             fixture.chain.registration_floors(),
         );
-        let (close, _) = boundary_close(&successor, &close_context, &deposits, &withdrawals);
+        let (close, _) = boundary_close(
+            &successor,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             9,
             close_context,
             deposits,
@@ -7891,12 +7918,16 @@ mod tests {
             2,
             fixture.chain.registration_floors(),
         );
-        let (close, successor) =
-            boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             2,
             close_context,
             deposits,
@@ -8009,15 +8040,19 @@ mod tests {
             0,
             fixture.chain.registration_floors(),
         );
-        let (create, created) =
-            boundary_close(&fixture.cache, &create_context, &deposits, &withdrawals);
+        let (create, created) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &create_context,
+            &deposits,
+            &withdrawals,
+        );
         assert_eq!(created.head().live_accounts(), 1);
         assert_eq!(created.balances()[0].0, public_key);
         assert_eq!(created.balances()[0].1, 9);
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             create_context,
             deposits,
@@ -8056,8 +8091,13 @@ mod tests {
             3,
             fixture.chain.registration_floors(),
         );
-        let (destroy, destroyed) =
-            boundary_close(&created, &destroy_context, &deposits, &withdrawals);
+        let (destroy, destroyed) = boundary_close(
+            &created,
+            &fixture.operator,
+            &destroy_context,
+            &deposits,
+            &withdrawals,
+        );
         assert!(destroyed.balances().is_empty());
         let claim = destroy.withdrawal_claim(&public_key);
         let output = claim
@@ -8067,7 +8107,6 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             3,
             destroy_context,
             deposits,
@@ -8110,7 +8149,7 @@ mod tests {
         let (close, successor) = payment_close(
             &fixture.cache,
             &close_context,
-            &fixture.operator_ack,
+            &fixture.operator,
             payer,
             &recipient,
             &withdrawals,
@@ -8141,7 +8180,6 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             close_context,
             deposits,
@@ -8201,13 +8239,17 @@ mod tests {
             0,
             fixture.chain.registration_floors(),
         );
-        let (close, closed_state) =
-            boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, closed_state) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         let claim = close.withdrawal_claim(&closed.public_key());
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             close_context,
             deposits.clone(),
@@ -8238,7 +8280,7 @@ mod tests {
         let (credit, recreated) = payment_close(
             &closed_state,
             &credit_context,
-            &fixture.operator_ack,
+            &fixture.operator,
             payer,
             closed,
             &withdrawals,
@@ -8247,7 +8289,6 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             3,
             credit_context,
             deposits,
@@ -8295,7 +8336,7 @@ mod tests {
         let (first, first_successor) = payment_close(
             &fixture.cache,
             &first_context,
-            &fixture.operator_ack,
+            &fixture.operator,
             &fixture.accounts[0],
             &first_recipient,
             &withdrawals,
@@ -8304,7 +8345,6 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             first_context,
             deposits.clone(),
@@ -8329,7 +8369,7 @@ mod tests {
         let (second, second_successor) = payment_close(
             &first_successor,
             &second_context,
-            &fixture.operator_ack,
+            &fixture.operator,
             &fixture.accounts[0],
             &second_recipient,
             &withdrawals,
@@ -8338,7 +8378,6 @@ mod tests {
         let second_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             6,
             second_context.clone(),
             deposits,
@@ -8460,12 +8499,16 @@ mod tests {
                 now,
                 fixture.chain.registration_floors(),
             );
-            let (close, successor) =
-                boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+            let (close, successor) = boundary_close(
+                &fixture.cache,
+                &fixture.operator,
+                &close_context,
+                &deposits,
+                &withdrawals,
+            );
             register_and_admit(
                 &mut fixture.chain,
                 &fixture.signer,
-                &fixture.operator_bls,
                 now,
                 close_context,
                 deposits,
@@ -8539,7 +8582,13 @@ mod tests {
             0,
             fixture.chain.registration_floors(),
         );
-        let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, _) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         let claims = queued
             .iter()
             .map(|(account, _, _, _)| close.withdrawal_claim(account))
@@ -8547,7 +8596,6 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             close_context,
             deposits,
@@ -8655,6 +8703,7 @@ mod tests {
         );
         let (first_close, first_successor) = boundary_close(
             &fixture.cache,
+            &fixture.operator,
             &first_context,
             &deposits,
             &first_withdrawals,
@@ -8663,7 +8712,6 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             first_context,
             deposits.clone(),
@@ -8703,6 +8751,7 @@ mod tests {
         );
         let (second_close, second_successor) = boundary_close(
             &fixture.cache,
+            &fixture.operator,
             &second_context,
             &deposits,
             &second_withdrawals,
@@ -8711,7 +8760,6 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             3,
             second_context,
             deposits,
@@ -8798,11 +8846,16 @@ mod tests {
             0,
             fixture.chain.registration_floors(),
         );
-        let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, _) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             close_context,
             deposits,
@@ -8848,13 +8901,17 @@ mod tests {
             0,
             fixture.chain.registration_floors(),
         );
-        let (first, first_successor) =
-            boundary_close(&fixture.cache, &first_context, &deposits, &withdrawals);
+        let (first, first_successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &first_context,
+            &deposits,
+            &withdrawals,
+        );
         let claim = first.withdrawal_claim(&account);
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             first_context,
             deposits.clone(),
@@ -8878,11 +8935,10 @@ mod tests {
             6,
             fixture.chain.registration_floors(),
         );
-        let second = empty_close(&fixture.cache, &second_context);
+        let second = empty_close(&fixture.cache, &fixture.operator, &second_context);
         let second_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             6,
             second_context.clone(),
             deposits,
@@ -8949,12 +9005,11 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let first = empty_close(&fixture.cache, &first_context);
+        let first = empty_close(&fixture.cache, &fixture.operator, &first_context);
         let first_state = first.successor.clone();
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             first_context,
             empty.clone(),
@@ -8977,7 +9032,7 @@ mod tests {
         let (second, _) = virtual_payment_close(
             &first_state,
             &second_context,
-            &fixture.operator_ack,
+            &fixture.operator,
             &fixture.accounts[0],
             &recipient,
             20,
@@ -8985,7 +9040,6 @@ mod tests {
         let second_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             2,
             second_context.clone(),
             empty,
@@ -9049,12 +9103,11 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let first = empty_close(&fixture.cache, &first_context);
+        let first = empty_close(&fixture.cache, &fixture.operator, &first_context);
         let first_state = first.successor.clone();
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             first_context,
             deposits.clone(),
@@ -9073,11 +9126,10 @@ mod tests {
             2,
             fixture.chain.registration_floors(),
         );
-        let second = empty_close(&first_state, &second_context);
+        let second = empty_close(&first_state, &fixture.operator, &second_context);
         let second_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             2,
             second_context.clone(),
             deposits.clone(),
@@ -9101,7 +9153,7 @@ mod tests {
         let (third, _) = virtual_payment_close(
             &second_state,
             &third_context,
-            &fixture.operator_ack,
+            &fixture.operator,
             &fixture.accounts[0],
             &recipient,
             20,
@@ -9109,7 +9161,6 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             3,
             third_context,
             deposits,
@@ -9180,7 +9231,7 @@ mod tests {
             fixture.chain.registration_floors(),
         );
         let acknowledged = fork_ack(&close_context, &fixture.operator, payer, 1, 3);
-        let close = empty_close(&fixture.cache, &close_context);
+        let close = empty_close(&fixture.cache, &fixture.operator, &close_context);
         let payer_lookup =
             close
                 .successor
@@ -9188,7 +9239,6 @@ mod tests {
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -9251,11 +9301,10 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let close = empty_close(&fixture.cache, &close_context);
+        let close = empty_close(&fixture.cache, &fixture.operator, &close_context);
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             close_context.clone(),
             deposits,
@@ -9323,6 +9372,7 @@ mod tests {
         );
         let (front, next_cache) = boundary_close(
             &fixture.cache,
+            &fixture.operator,
             &first_context,
             &deposits,
             &empty_withdrawals,
@@ -9330,7 +9380,6 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             first_context,
             deposits,
@@ -9387,12 +9436,16 @@ mod tests {
             4,
             fixture.chain.registration_floors(),
         );
-        let (close, _) =
-            boundary_close(&next_cache, &second_context, &DepositBatch::empty(), &mixed);
+        let (close, _) = boundary_close(
+            &next_cache,
+            &fixture.operator,
+            &second_context,
+            &DepositBatch::empty(),
+            &mixed,
+        );
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             4,
             second_context,
             DepositBatch::empty(),
@@ -9418,12 +9471,11 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let first = empty_close(&fixture.cache, &first_context);
+        let first = empty_close(&fixture.cache, &fixture.operator, &first_context);
         let first_state = first.successor.clone();
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             first_context,
             deposits.clone(),
@@ -9441,11 +9493,10 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let second = empty_close(&first_state, &second_context);
+        let second = empty_close(&first_state, &fixture.operator, &second_context);
         let second_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             second_context.clone(),
             deposits,
@@ -9505,12 +9556,11 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let first = empty_close(&fixture.cache, &first_context);
+        let first = empty_close(&fixture.cache, &fixture.operator, &first_context);
         let first_state = first.successor.clone();
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             first_context,
             empty_deposits,
@@ -9542,6 +9592,7 @@ mod tests {
         );
         let (middle, middle_cache) = boundary_close(
             &first_state,
+            &fixture.operator,
             &middle_context,
             &middle_deposits,
             &empty_withdrawals,
@@ -9549,7 +9600,6 @@ mod tests {
         let middle_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             2,
             middle_context.clone(),
             middle_deposits,
@@ -9581,6 +9631,7 @@ mod tests {
         );
         let (descendant, _) = boundary_close(
             &middle_cache,
+            &fixture.operator,
             &descendant_context,
             &descendant_deposits,
             &empty_withdrawals,
@@ -9588,7 +9639,6 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             3,
             descendant_context,
             descendant_deposits,
@@ -9820,12 +9870,16 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let (close, successor) =
-            boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -9869,12 +9923,16 @@ mod tests {
             1,
             fixture.chain.registration_floors(),
         );
-        let (close, successor) =
-            boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         assert_eq!(successor.head().live_accounts(), 2);
         let certificate = certificate(
             &fixture.signer,
-            &fixture.operator_bls,
             &close_context,
             &deposits,
             &withdrawals,
@@ -9931,14 +9989,18 @@ mod tests {
             0,
             fixture.chain.registration_floors(),
         );
-        let (close, successor) =
-            boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         assert_eq!(request.body().action(), &WithdrawalAction::Close);
         assert_eq!(close.withdrawal_total, 10);
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             close_context,
             deposits,
@@ -9991,7 +10053,7 @@ mod tests {
         let (close, successor) = internal_payment_and_close(
             &fixture.cache,
             &close_context,
-            &fixture.operator_ack,
+            &fixture.operator,
             payer,
             recipient,
             &withdrawals,
@@ -10009,7 +10071,6 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             close_context,
             deposits,
@@ -10136,13 +10197,17 @@ mod tests {
                 0,
                 fixture.chain.registration_floors(),
             );
-            let (close, successor) =
-                boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+            let (close, successor) = boundary_close(
+                &fixture.cache,
+                &fixture.operator,
+                &close_context,
+                &deposits,
+                &withdrawals,
+            );
             assert_eq!(close.withdrawal_total, 17);
             register_and_admit(
                 &mut fixture.chain,
                 &fixture.signer,
-                &fixture.operator_bls,
                 0,
                 close_context,
                 deposits,
@@ -10580,12 +10645,16 @@ mod tests {
             0,
             fixture.chain.registration_floors(),
         );
-        let (partial_close, partial_successor) =
-            boundary_close(&fixture.cache, &partial_context, &deposits, &withdrawals);
+        let (partial_close, partial_successor) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &partial_context,
+            &deposits,
+            &withdrawals,
+        );
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             partial_context,
             deposits,
@@ -10624,12 +10693,16 @@ mod tests {
             3,
             fixture.chain.registration_floors(),
         );
-        let (close, successor) =
-            boundary_close(&partial_successor, &close_context, &deposits, &withdrawals);
+        let (close, successor) = boundary_close(
+            &partial_successor,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             3,
             close_context,
             deposits,
@@ -10686,12 +10759,17 @@ mod tests {
             0,
             fixture.chain.registration_floors(),
         );
-        let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, _) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         let claim = close.withdrawal_claim(&public_key);
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
-            &fixture.operator_bls,
             0,
             close_context,
             deposits,
@@ -10836,11 +10914,16 @@ mod tests {
             2,
             fixture.chain.registration_floors(),
         );
-        let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let (close, _) = boundary_close(
+            &fixture.cache,
+            &fixture.operator,
+            &close_context,
+            &deposits,
+            &withdrawals,
+        );
         let claim = close.withdrawal_claim(&signer.public_key());
         let certificate = certificate(
             &fixture.signer,
-            &fixture.operator_bls,
             &close_context,
             &deposits,
             &withdrawals,
@@ -10963,29 +11046,21 @@ mod tests {
             fixture.chain.registration_floors(),
         );
         let before = context.floors();
-        let (close, _) = boundary_close(&predecessor, &context, &deposits, &withdrawals);
+        let (close, _) = boundary_close(
+            &predecessor,
+            &fixture.operator,
+            &context,
+            &deposits,
+            &withdrawals,
+        );
         fixture
             .chain
             .register(2, context.clone(), withdrawals.clone(), |_| true)
             .unwrap();
-        let first = certificate(
-            &fixture.signer,
-            &fixture.operator_bls,
-            &context,
-            &deposits,
-            &withdrawals,
-            &close,
-        );
+        let first = certificate(&fixture.signer, &context, &deposits, &withdrawals, &close);
         fixture.chain.finalize(3).unwrap();
         assert_ne!(fixture.chain.registration_floors(), before);
-        let second = certificate(
-            &fixture.signer,
-            &fixture.operator_bls,
-            &context,
-            &deposits,
-            &withdrawals,
-            &close,
-        );
+        let second = certificate(&fixture.signer, &context, &deposits, &withdrawals, &close);
         assert_eq!(first, second);
         assert_eq!(context.floors(), before);
         fixture
@@ -11036,7 +11111,13 @@ mod tests {
                 0,
                 fixture.chain.registration_floors(),
             );
-            let (close, _) = boundary_close(&fixture.cache, &context, &deposits, &withdrawals);
+            let (close, _) = boundary_close(
+                &fixture.cache,
+                &fixture.operator,
+                &context,
+                &deposits,
+                &withdrawals,
+            );
             let claims = fixture
                 .accounts
                 .iter()
@@ -11045,7 +11126,6 @@ mod tests {
             register_and_admit(
                 &mut fixture.chain,
                 &fixture.signer,
-                &fixture.operator_bls,
                 0,
                 context,
                 deposits,
@@ -11135,15 +11215,9 @@ mod tests {
         let context = registered.context.clone();
         let deposits = registered.deposits.clone();
         let withdrawals = registered.withdrawals.clone();
-        let (close, _) = boundary_close(cache, &context, &deposits, &withdrawals);
-        let certificate = certificate(
-            &fixture.signer,
-            &fixture.operator_bls,
-            &context,
-            &deposits,
-            &withdrawals,
-            &close,
-        );
+        let (close, _) =
+            boundary_close(cache, &fixture.operator, &context, &deposits, &withdrawals);
+        let certificate = certificate(&fixture.signer, &context, &deposits, &withdrawals, &close);
         let batch = fixture
             .chain
             .admit(
@@ -11187,10 +11261,9 @@ mod tests {
         // Epoch 2's close cannot be admitted ahead of epoch 1.
         let queued = fixture.chain.queued[0].context.clone();
         let early = bound(queued.clone(), &first.successor, 13, 15, floors);
-        let close = empty_close(&first.successor, &early);
+        let close = empty_close(&first.successor, &fixture.operator, &early);
         let early_certificate = certificate(
             &fixture.signer,
-            &fixture.operator_bls,
             &early,
             &DepositBatch::empty(),
             &WithdrawalBatch::empty(),
@@ -11242,7 +11315,7 @@ mod tests {
         let (close, _) = payment_close(
             cache,
             &context,
-            &fixture.operator_ack,
+            &fixture.operator,
             payer,
             recipient,
             &withdrawals,
@@ -11250,7 +11323,6 @@ mod tests {
         );
         let certificate = certificate(
             &fixture.signer,
-            &fixture.operator_bls,
             &context,
             &DepositBatch::empty(),
             &withdrawals,
@@ -11419,10 +11491,9 @@ mod tests {
         let mut earlier = round_trip(&edge.chain);
         let registered = edge.chain.registered().unwrap();
         let context = registered.context.clone();
-        let close = empty_close(&edge.cache, &context);
+        let close = empty_close(&edge.cache, &edge.operator, &context);
         let edge_certificate = certificate(
             &edge.signer,
-            &edge.operator_bls,
             &context,
             &DepositBatch::empty(),
             &WithdrawalBatch::empty(),
@@ -11995,15 +12066,15 @@ mod tests {
         let registered = fixture.chain.registered().unwrap();
         let frontier = registered.context.clone();
         let withdrawals = registered.withdrawals.clone();
-        let (close, _) = boundary_close(&genesis, &frontier, &deposits, &withdrawals);
-        let close_certificate = certificate(
-            &fixture.signer,
-            &fixture.operator_bls,
+        let (close, _) = boundary_close(
+            &genesis,
+            &fixture.operator,
             &frontier,
             &deposits,
             &withdrawals,
-            &close,
         );
+        let close_certificate =
+            certificate(&fixture.signer, &frontier, &deposits, &withdrawals, &close);
         for chain in [&mut fixture.chain, &mut restarted] {
             chain
                 .register_through(0, second.clone(), 2, WithdrawalBatch::empty(), |_| true)
@@ -12158,15 +12229,15 @@ mod tests {
         let registered = fixture.chain.registered().unwrap();
         let frontier = registered.context.clone();
         let withdrawals = registered.withdrawals.clone();
-        let (close, _) = boundary_close(&genesis, &frontier, &deposits, &withdrawals);
-        let close_certificate = certificate(
-            &fixture.signer,
-            &fixture.operator_bls,
+        let (close, _) = boundary_close(
+            &genesis,
+            &fixture.operator,
             &frontier,
             &deposits,
             &withdrawals,
-            &close,
         );
+        let close_certificate =
+            certificate(&fixture.signer, &frontier, &deposits, &withdrawals, &close);
         for chain in [&mut fixture.chain, &mut restarted] {
             assert!(chain.active.pending_withdrawals(2).is_empty());
             chain
@@ -12710,7 +12781,7 @@ mod tests {
         let (paid, _) = payment_close(
             &genesis,
             &context,
-            &credited.operator_ack,
+            &credited.operator,
             &payer,
             &receiver,
             &withdrawals,
@@ -12720,7 +12791,6 @@ mod tests {
         assert_withdrawal_output(claim.output(), &lifted, 12);
         let paid_certificate = certificate(
             &credited.signer,
-            &credited.operator_bls,
             &context,
             &DepositBatch::empty(),
             &withdrawals,
@@ -12939,10 +13009,9 @@ mod tests {
         // Admission promotes the same epoch on both chains.
         let registered = fixture.chain.registered().unwrap();
         let context = registered.context.clone();
-        let close = empty_close(&genesis, &context);
+        let close = empty_close(&genesis, &fixture.operator, &context);
         let close_certificate = certificate(
             &fixture.signer,
-            &fixture.operator_bls,
             &context,
             &DepositBatch::empty(),
             &WithdrawalBatch::empty(),

@@ -701,7 +701,6 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             &self.scheme,
             lane.state.as_ref().unwrap(),
             registered.context,
-            &lane.deployment.operator_ack,
             registered.deposits,
             registered.withdrawals,
             dealing.bytes.clone(),

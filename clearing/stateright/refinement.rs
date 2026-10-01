@@ -3,13 +3,12 @@ use crate::bajillion::{
     admission::seal,
     challenge::{AckWitness, EntryWitness},
     model::settlement as spec,
-    payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
+    payment::{SendAuthorization, VectorAck, VectorSendBody},
     qmdb::account_key,
     state::SettlementOutput,
-    transition::{OperatorVariant, Terminal, prepare_close_with_strategy},
+    transition::{Terminal, prepare_close_with_strategy},
     vector::{OutEntry, OutTipLookup, OutVector},
 };
-use commonware_cryptography::bls12381::primitives::ops::sign_message;
 use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVerifier;
 use commonware_parallel::Sequential;
 use commonware_utils::test_rng;
@@ -65,7 +64,6 @@ fn spec_batch(registration: spec::RegistrationId) -> spec::Batch {
 fn refined_payment(
     context: &TestContext,
     cache: &TestCache,
-    operator_ack: &BlsPrivate,
     payer: &SigningKey,
     recipient: &SigningKey,
     amount: u64,
@@ -89,15 +87,9 @@ fn refined_payment(
     );
     let authorization =
         SendAuthorization::sign(body, cache.predecessor(&payer.public_key()), payer);
-    let operator_signature = sign_message::<OperatorVariant>(
-        operator_ack,
-        VECTOR_ACK_AGGREGATE_NAMESPACE,
-        authorization.message().as_ref(),
-    );
     Terminal {
         authorization,
         vector,
-        operator_signature,
     }
 }
 
@@ -561,7 +553,6 @@ impl RefinementDriver {
             spec::Batch::B0 => vec![refined_payment(
                 &registered.context,
                 &cache,
-                &self.fixture.operator_ack,
                 &self.fixture.accounts[0],
                 &self.fixture.accounts[1],
                 2,
@@ -569,7 +560,6 @@ impl RefinementDriver {
             spec::Batch::B1 => vec![refined_payment(
                 &registered.context,
                 &cache,
-                &self.fixture.operator_ack,
                 &self.fixture.accounts[0],
                 &self.carol,
                 1,
@@ -582,7 +572,6 @@ impl RefinementDriver {
             spec::Batch::B2D => vec![refined_payment(
                 &registered.context,
                 &cache,
-                &self.fixture.operator_ack,
                 &self.fixture.accounts[1],
                 &self.fixture.accounts[0],
                 8,
@@ -593,6 +582,7 @@ impl RefinementDriver {
             let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                 &state,
                 &registered.context,
+                &self.fixture.operator,
                 &registered.deposits,
                 &registered.withdrawals,
                 terminals,
@@ -604,7 +594,6 @@ impl RefinementDriver {
                 &self.fixture.signer,
                 &state,
                 &registered.context,
-                &self.fixture.operator_bls,
                 &registered.deposits,
                 &registered.withdrawals,
                 prepared.encoded().clone(),

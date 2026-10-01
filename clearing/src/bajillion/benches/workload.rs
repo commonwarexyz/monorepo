@@ -2,24 +2,17 @@ use crate::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     commitment::{self, VectorKind},
     logs::Floors,
-    payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
+    payment::{SendAuthorization, VectorAck, VectorSendBody},
     replica::{Replica, ReplicaHead},
     transition::{
-        CloseContext, CloseLimits, EpochContext, Header, OperatorKey, OperatorVariant, RootBundle,
-        Terminal, prepare_close_with_strategy,
+        CloseContext, CloseLimits, EpochContext, Header, RootBundle, Terminal,
+        prepare_close_with_strategy,
     },
     vector::{OutEntry, OutVector},
 };
 use bytes::Bytes;
 use commonware_codec::Encode as _;
-use commonware_cryptography::{
-    Sha256, Signer as _,
-    bls12381::primitives::{
-        group::{Private as BlsPrivate, Scalar},
-        ops::{compute_public, sign_message},
-    },
-    sha256::Digest,
-};
+use commonware_cryptography::{Sha256, Signer as _, sha256::Digest};
 use commonware_cryptography_curve25519::signing::{SigningKey, StrictVerifyingKey as VerifyingKey};
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
@@ -61,7 +54,6 @@ impl Case {
 pub struct Keys {
     pub accounts: Vec<(VerifyingKey, SigningKey)>,
     pub operator: SigningKey,
-    pub operator_bls: OperatorKey,
 }
 
 pub fn keys<S: Strategy>(n: usize, strategy: &S) -> Keys {
@@ -74,9 +66,6 @@ pub fn keys<S: Strategy>(n: usize, strategy: &S) -> Keys {
     Keys {
         accounts,
         operator: SigningKey::from_seed(OPERATOR_SEED),
-        operator_bls: compute_public::<OperatorVariant>(&BlsPrivate::new(Scalar::from(
-            OPERATOR_SEED,
-        ))),
     }
 }
 
@@ -169,6 +158,7 @@ where
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         replica,
         &context,
+        &keys.operator,
         &deposits,
         &withdrawals,
         terminals,
@@ -289,11 +279,6 @@ fn terminal(
         ack.payer_signature().clone(),
     );
     Terminal {
-        operator_signature: sign_message::<OperatorVariant>(
-            &BlsPrivate::new(Scalar::from(OPERATOR_SEED)),
-            VECTOR_ACK_AGGREGATE_NAMESPACE,
-            authorization.message().as_ref(),
-        ),
         authorization,
         vector,
     }
@@ -327,6 +312,5 @@ mod tests {
 
         assert_eq!(encoded_key_fixture(&serial), encoded_key_fixture(&parallel));
         assert_eq!(serial.operator.public_key(), parallel.operator.public_key());
-        assert_eq!(serial.operator_bls, parallel.operator_bls);
     }
 }

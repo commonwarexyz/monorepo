@@ -5,24 +5,16 @@ use commonware_clearing::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
     custody::Epoch,
     logs::{self, Floors, Logs},
-    payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
+    payment::{SendAuthorization, VectorAck, VectorSendBody},
     qmdb::{self, State, account_key},
     replica::{self, Replica, ReplicaHead},
     transition::{
-        Close, CloseContext, CloseLimits, EpochContext, Header, OperatorKey, OperatorVariant,
-        PreparedClose, RootBundle, Terminal, prepare_close_with_strategy,
-        validate_close_with_strategy,
+        Close, CloseContext, CloseLimits, EpochContext, Header, PreparedClose, RootBundle,
+        Terminal, prepare_close_with_strategy, validate_close_with_strategy,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
-use commonware_cryptography::{
-    Hasher, Sha256, Signer as _,
-    bls12381::primitives::{
-        group::{Private as BlsPrivate, Scalar},
-        ops::{compute_public, sign_message},
-    },
-    sha256::Digest,
-};
+use commonware_cryptography::{Hasher, Sha256, Signer as _, sha256::Digest};
 use commonware_cryptography_curve25519::signing::{
     BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
@@ -461,11 +453,6 @@ pub(crate) fn terminal_for_entries(
         ack.payer_signature().clone(),
     );
     let terminal = Terminal {
-        operator_signature: sign_message::<OperatorVariant>(
-            &BlsPrivate::new(Scalar::from(OPERATOR_SEED)),
-            VECTOR_ACK_AGGREGATE_NAMESPACE,
-            authorization.message().as_ref(),
-        ),
         authorization,
         vector,
     };
@@ -480,7 +467,6 @@ pub(crate) struct CloseFixture {
     pub(crate) prepared: PreparedClose<VerifyingKey, Digest, Rayon>,
     pub(crate) accounts: Vec<(VerifyingKey, SigningKey)>,
     pub(crate) operator: SigningKey,
-    pub(crate) operator_bls: OperatorKey,
     pub(crate) terminals: Vec<BenchTerminal>,
     pub(crate) acks: Vec<BenchAck>,
     pub(crate) profile: ActiveProfile,
@@ -513,8 +499,6 @@ pub(crate) async fn active_close_fixture_with_committee(
     let accounts = accounts(profile.live_accounts);
     let state = new_state(runtime, &accounts).await;
     let operator = SigningKey::from_seed(OPERATOR_SEED);
-    let operator_bls =
-        compute_public::<OperatorVariant>(&BlsPrivate::new(Scalar::from(OPERATOR_SEED)));
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
     let context = epoch_context(
@@ -530,6 +514,7 @@ pub(crate) async fn active_close_fixture_with_committee(
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &context,
+        &operator,
         &deposits,
         &withdrawals,
         terminals.clone(),
@@ -543,7 +528,6 @@ pub(crate) async fn active_close_fixture_with_committee(
     let validated = validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
         &state,
         &context,
-        &operator_bls,
         &deposits,
         &withdrawals,
         decoded,
@@ -584,7 +568,6 @@ pub(crate) async fn active_close_fixture_with_committee(
         prepared,
         accounts,
         operator,
-        operator_bls,
         terminals,
         acks,
         profile,

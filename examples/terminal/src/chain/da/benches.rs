@@ -215,7 +215,6 @@ async fn measure<E: StorageContext + Spawner + CryptoRng>(
         scheme,
         lane.state.as_ref().unwrap(),
         &input.context,
-        &lane.deployment.operator_ack,
         &input.deposits,
         &input.withdrawals,
         encoded.clone(),
@@ -345,12 +344,7 @@ async fn setup<E: StorageContext + Spawner + CryptoRng>(
             balance: workload::OPENING_BALANCE,
         })
         .collect();
-    let initial = Deployment::new(
-        digest,
-        keys.operator.public_key(),
-        keys.operator_bls,
-        accounts,
-    );
+    let initial = Deployment::new(digest, keys.operator.public_key(), accounts);
     let replica = NativeReplica::open(
         context.child("bootstrap"),
         config(&digest, page_cache.clone(), strategy.clone()),
@@ -373,7 +367,6 @@ async fn setup<E: StorageContext + Spawner + CryptoRng>(
     let deployment = Deployment::configured(
         digest,
         initial.operator,
-        initial.operator_ack,
         initial.accounts,
         replica.state().root(),
         replica.state().head().operations(),
