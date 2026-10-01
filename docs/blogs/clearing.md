@@ -291,7 +291,7 @@ Each claim checks only its neighboring ranges. The chain also includes log posit
 
 ### Hard Fault
 
-If the operator misses an admission, deposit, or withdrawal deadline, or a holder proves a fault, the deployment permanently stops new work. Earlier pending closes that are not disputed may still finalize. Recovery then freezes the last finalized state root.
+A deposit must be registered within a fixed time of arrival. If the operator misses an admission, deposit, or withdrawal deadline, or a holder proves a fault, the deployment permanently stops new work. Earlier pending closes that are not disputed may still finalize. Recovery then freezes the last finalized state root.
 
 The recovery rules keep finalized payouts independently claimable, with no expiry, and refund deposits whose closes never finalize. Accounts recover their balances with QMDB proofs against the frozen root, and each account can claim only once. A close that was never admitted or was invalidated changes neither the recoverable balances nor the finalized payouts.
 
@@ -301,9 +301,7 @@ Even if the operator disappears, recovery depends on a correct, live settlement 
 
 More frequent closes can reduce the wait for admission, at the cost of more preparation and certification. Shorter challenge windows can reduce the wait for finality, but must leave receipt holders enough time to obtain public openings and get a challenge included.
 
-The operator can register $e+1$ while still accepting payments in $e$. Once that registration is included onchain, it can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
-
-Registration fixes deposits and signed withdrawal authorizations before payments begin. Each registration takes the next range from an ordered inbox of deposits and onchain withdrawal requests, so later arrivals cannot change that boundary. A deposit must be registered within a fixed time of arrival, but has no further deposit deadline. Further epochs can register while earlier closes are pending.
+Whatever the epoch length, payments should continue across the boundary. The operator can register $e+1$ while still accepting payments in $e$. Once that registration is included onchain, it can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
 
 Once $e+1$ is registered and $e$'s close is admitted, settlement binds $e+1$ to that close's state root and sets its admission and challenge deadlines from that time. Admission and finalization follow epoch order. A missed admission deadline discards every registration still awaiting admission.
 

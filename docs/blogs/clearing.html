@@ -586,7 +586,8 @@ O’Grady</a></div>
         class="math inline">U+1</span> ranges remain, even under
         adversarial claim order.</p>
         <h3 id="hard-fault">Hard Fault</h3>
-        <p>If the operator misses an admission, deposit, or withdrawal
+        <p>A deposit must be registered within a fixed time of arrival.
+        If the operator misses an admission, deposit, or withdrawal
         deadline, or a holder proves a fault, the deployment permanently
         stops new work. Earlier pending closes that are not disputed may
         still finalize. Recovery then freezes the last finalized state
@@ -609,7 +610,8 @@ O’Grady</a></div>
         challenge windows can reduce the wait for finality, but must
         leave receipt holders enough time to obtain public openings and
         get a challenge included.</p>
-        <p>The operator can register <span
+        <p>Whatever the epoch length, payments should continue across
+        the boundary. The operator can register <span
         class="math inline">e+1</span> while still accepting payments in
         <span class="math inline">e</span>. Once that registration is
         included onchain, it can switch payments to <span
@@ -618,13 +620,6 @@ O’Grady</a></div>
         admitted. The anchor <span class="math inline">\mathcal
         A_{e+1}</span> is independent of <span
         class="math inline">e</span>’s close.</p>
-        <p>Registration fixes deposits and signed withdrawal
-        authorizations before payments begin. Each registration takes
-        the next range from an ordered inbox of deposits and onchain
-        withdrawal requests, so later arrivals cannot change that
-        boundary. A deposit must be registered within a fixed time of
-        arrival, but has no further deposit deadline. Further epochs can
-        register while earlier closes are pending.</p>
         <p>Once <span class="math inline">e+1</span> is registered and
         <span class="math inline">e</span>’s close is admitted,
         settlement binds <span class="math inline">e+1</span> to that
