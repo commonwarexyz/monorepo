@@ -69,7 +69,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
-    Sha256,
+    ChaCha20Poly1305, Sha256,
     certificate::{ConstantProvider, Provider as _},
     ed25519,
     sha256::Digest,
@@ -86,7 +86,10 @@ use commonware_runtime::{
     tokio,
 };
 use commonware_storage::{Context as StorageContext, archive::prunable, translator::TwoCap};
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
 use commonware_utils::{
     Acknowledgement as _, Faults as _, N3f1, NZU64, NZUsize, Participant,
     acknowledgement::Exact,
@@ -870,7 +873,15 @@ pub(crate) async fn start(
         .collect();
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
     let mut p2p_config = discovery::Config::local(
-        Handshake::new(operator.signing_key.clone()),
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer: operator.signing_key.clone(),
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        ),
         &[NAMESPACE, b"_P2P"].concat(),
         operator.listen,
         operator.dial,

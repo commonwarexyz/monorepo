@@ -1740,7 +1740,6 @@ fn test_shutdown_cancels_tasks_before_destruction() {
                         context.shared.panicker.clone(),
                         tree.clone(),
                     );
-                    tree.register(handle.aborter().unwrap());
                     let task = Task::new(future, context.origin.clone());
                     if matches!(placement, Placement::Foreign) {
                         thread::spawn(move || assert!(Tasks::register(task).is_ok()))

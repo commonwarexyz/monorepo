@@ -8,10 +8,7 @@ use commonware_codec::{
 #[cfg(test)]
 use commonware_runtime::Listener;
 use commonware_runtime::{Clock, Network, Sink, Stream};
-use commonware_stream::{
-    encrypted::Error,
-    utils::codec::{recv_frame, send_frame},
-};
+use commonware_stream::utils::codec::{Error as FrameError, recv_frame, send_frame};
 use std::time::Duration;
 
 /// Maximum response frame: a full block, certified record, and ordered proof.
@@ -50,6 +47,15 @@ pub(crate) fn error_response(message: String) -> Response {
     Response::Error {
         error: bounded_utf8(message, MAX_ERROR_BYTES),
     }
+}
+
+/// Failure to exchange one RPC frame.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Error {
+    #[error(transparent)]
+    Frame(#[from] FrameError),
+    #[error("unable to decode: {0}")]
+    Decode(#[from] CodecError),
 }
 
 /// A single request sent over a native clearing connection.
@@ -136,9 +142,9 @@ impl Read for Response {
 /// be discarded because a partial frame may already have been written.
 pub(crate) async fn send_request<S: Sink>(sink: &mut S, request: &Request) -> Result<(), Error> {
     if request.body.len() > MAX_REQUEST_BODY_SIZE {
-        return Err(Error::SendTooLarge(request.body.len()));
+        return Err(FrameError::SendTooLarge(request.body.len()).into());
     }
-    send_frame(sink, request.encode(), MAX_REQUEST_FRAME_SIZE).await
+    Ok(send_frame(sink, request.encode(), MAX_REQUEST_FRAME_SIZE).await?)
 }
 
 /// Receives and fully decodes exactly one request frame.
@@ -155,9 +161,9 @@ pub(crate) async fn send_response<S: Sink>(sink: &mut S, response: &Response) ->
         Response::Error { error } => error.len(),
     };
     if body_size > MAX_BODY_SIZE {
-        return Err(Error::SendTooLarge(body_size));
+        return Err(FrameError::SendTooLarge(body_size).into());
     }
-    send_frame(sink, response.encode(), MAX_FRAME_SIZE).await
+    Ok(send_frame(sink, response.encode(), MAX_FRAME_SIZE).await?)
 }
 
 /// Receives and fully decodes exactly one response frame.
@@ -336,7 +342,7 @@ mod tests {
             let result = recv_response(&mut stream).await;
             assert!(matches!(
                 result,
-                Err(Error::UnableToDecode(CodecError::InvalidEnum(0xff)))
+                Err(Error::Decode(CodecError::InvalidEnum(0xff)))
             ));
         });
     }
@@ -355,7 +361,7 @@ mod tests {
             let result = recv_request(&mut stream).await;
             assert!(matches!(
                 result,
-                Err(Error::UnableToDecode(CodecError::InvalidLength(length)))
+                Err(Error::Decode(CodecError::InvalidLength(length)))
                     if length == MAX_REQUEST_BODY_SIZE + 1
             ));
         });
@@ -372,7 +378,8 @@ mod tests {
             let result = recv_request(&mut stream).await;
             assert!(matches!(
                 result,
-                Err(Error::RecvTooLarge(length)) if length == MAX_REQUEST_FRAME_SIZE as usize + 1
+                Err(Error::Frame(FrameError::RecvTooLarge(length)))
+                    if length == MAX_REQUEST_FRAME_SIZE as usize + 1
             ));
         });
     }
@@ -394,7 +401,7 @@ mod tests {
             let result = recv_request(&mut stream).await;
             assert!(matches!(
                 result,
-                Err(Error::UnableToDecode(CodecError::ExtraData(1)))
+                Err(Error::Decode(CodecError::ExtraData(1)))
             ));
         });
     }
@@ -409,7 +416,7 @@ mod tests {
             let result = recv_request(&mut stream).await;
             assert!(matches!(
                 result,
-                Err(Error::UnableToDecode(CodecError::EndOfBuffer))
+                Err(Error::Decode(CodecError::EndOfBuffer))
             ));
         });
     }
