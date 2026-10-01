@@ -1,6 +1,7 @@
 //! Messages exchanged over the probe's channel.
 
 use super::Checkpoint;
+pub(super) use crate::probe::wire::Tag;
 use bytes::BufMut;
 use commonware_codec::{Buf, Codec, EncodeSize, Error, FixedSize, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -8,41 +9,6 @@ use commonware_consensus::{
     aggregation::{scheme::Scheme, types::Certificate},
 };
 use std::sync::Arc;
-
-/// The first byte of a probe wire message.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub(super) enum Tag {
-    /// A request for the receiver's newest checkpoint.
-    Request,
-    /// A response carrying a checkpoint.
-    Response,
-}
-
-impl FixedSize for Tag {
-    const SIZE: usize = u8::SIZE;
-}
-
-impl Write for Tag {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::Request => 0u8.write(writer),
-            Self::Response => 1u8.write(writer),
-        }
-    }
-}
-
-impl Read for Tag {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        match u8::read(reader)? {
-            0 => Ok(Self::Request),
-            1 => Ok(Self::Response),
-            n => Err(Error::InvalidEnum(n)),
-        }
-    }
-}
 
 /// A message exchanged with peers over the probe's channel.
 pub(super) enum Message<S, B, F>
