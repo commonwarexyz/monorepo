@@ -766,12 +766,11 @@ impl Invariants {
             assert_eq!(producer.chain(), ChainId::new(node as u32));
             assert_eq!(producer.da_quorum(), self.da_quorum);
             assert!(producer.certified() <= producer.produced());
-            assert!(producer.certified() <= producer.window());
             assert!(
                 producer
                     .produced()
                     .get()
-                    .saturating_sub(producer.window().get())
+                    .saturating_sub(producer.certified().get())
                     <= producer.pipeline_depth()
             );
         }
@@ -811,10 +810,10 @@ mod tests {
     use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
 
     #[test]
-    fn healed_cluster_progresses_after_a_producer_loses_its_certificates() {
+    fn healed_cluster_progresses_after_a_producer_crashes_while_certifying() {
         // Each input reloads or interrupts the recovery of a producer before every node
-        // restarts, so the producer may lose certificates of its own blocks that finality
-        // already ordered.
+        // restarts, which can crash the producer between assembling a DA certificate and
+        // recording it.
         fuzz::<MinSig>(&[74]);
         fuzz::<MinPk>(&[35]);
         fuzz::<MinPk>(&[69, 5, 91]);
