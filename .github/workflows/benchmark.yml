@@ -53,6 +53,9 @@ jobs:
           - package: commonware-utils
             cargo_flags: ""
             benchmark_name: "commonware-utils"
+          - package: commonware-consensus
+            cargo_flags: ""
+            benchmark_name: "commonware-consensus"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Configure swap
@@ -97,14 +100,28 @@ jobs:
         include:
           - package: commonware-cryptography
             benchmark_name: "commonware-cryptography"
+            alert_threshold: "200%"
+            fail_on_alert: false
           - package: commonware-storage
             benchmark_name: "commonware-storage"
+            alert_threshold: "200%"
+            fail_on_alert: false
           - package: commonware-coding
             benchmark_name: "commonware-coding"
+            alert_threshold: "200%"
+            fail_on_alert: false
           - package: commonware-formatting
             benchmark_name: "commonware-formatting"
+            alert_threshold: "200%"
+            fail_on_alert: false
           - package: commonware-utils
             benchmark_name: "commonware-utils"
+            alert_threshold: "200%"
+            fail_on_alert: false
+          - package: commonware-consensus
+            benchmark_name: "commonware-consensus"
+            alert_threshold: "105%"
+            fail_on_alert: true
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Configure swap
@@ -139,3 +156,6 @@ jobs:
           benchmark-data-dir-path: 'docs'
           auto-push: true
           max-items-in-chart: 60
+          alert-threshold: ${{ matrix.alert_threshold }}
+          fail-threshold: ${{ matrix.alert_threshold }}
+          fail-on-alert: ${{ matrix.fail_on_alert }}
