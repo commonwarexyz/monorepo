@@ -10,8 +10,7 @@
 //!
 //! **Core Operations:**
 //! - [`run`](Strategy::run): Chooses between serial and parallel operation bodies
-//! - [`run_batches`](Strategy::run_batches): Supplies batches of an input extent for the caller
-//!   to prepare and execute
+//! - [`run_batches`](Strategy::run_batches): Runs an operation over batches of its input
 //! - [`fold`](Strategy::fold): Reduces a collection to a single value
 //! - [`try_fold`](Strategy::try_fold): Like `fold`, but stops applying the fold operation after
 //!   failures
