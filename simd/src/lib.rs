@@ -37,19 +37,19 @@
 //!
 //! ## Concrete backends
 //!
-//! The prototype uses concrete backend types: `Scalar`, `NativeIceLake`, `EmulatedIceLake`,
-//! `NativeArmV9`, `EmulatedArmV9`, `NativeNeon`, and `EmulatedNeon`. Each type acts as an execution
-//! token and implements its instruction profile. `NativeIceLake` and `EmulatedIceLake` both
-//! implement `IceLake`, so a generic Ice Lake algorithm can run with either. The same applies
-//! to the Armv9 and NEON providers.
+//! [`emulated`] provides array-backed `EmulatedScalar`, `EmulatedIceLake`, `EmulatedArmV9`, and
+//! `EmulatedNeon` execution tokens.
+//! Native providers remain proposed: `NativeIceLake`, `NativeArmV9`, and `NativeNeon`.
+//! Each token implements its instruction profile, so a generic profile algorithm can run
+//! with either a native or an emulated provider.
 //! Vector and mask representations are associated types of the instruction traits. Native and
 //! emulated backends can use different representations while preserving the same lane semantics.
-//! Both Ice Lake providers use eight `u64` lanes; both NEON providers use two. SVE vector-length
-//! handling for the Armv9 providers remains to be defined. Emulators use the corresponding
-//! native widths even on hosts with a different instruction set, so tests
+//! Ice Lake uses eight `u64` lanes; NEON uses two. [`emulated::EmulatedArmV9`] uses two lanes,
+//! matching Graviton4's 128-bit SVE vectors. Native SVE vector-length
+//! handling remains to be defined. Emulators preserve the modeled widths on any host, so tests
 //! exercise each profile's vector boundaries and tail handling.
 //!
-//! `Scalar` implements the common vector operations through `Simd`. It may use
+//! `EmulatedScalar` implements the common vector operations through `Simd`. It may use
 //! compiler vectorization or scalar lanes; portability does not promise that every
 //! operation maps to one hardware instruction, even for small vectors. The architecture emulators
 //! instead model the exact instructions and vector shapes used by the accelerated algorithms.
@@ -132,7 +132,7 @@
 //! }
 //! ```
 //!
-//! `Simd::execute` selects a path statically for its concrete token: `Scalar` invokes
+//! `Simd::execute` selects a path statically for its concrete token: `EmulatedScalar` invokes
 //! `portable`, both Ice Lake tokens invoke `ice_lake`, both Armv9 tokens invoke `arm_v9`, and
 //! both NEON tokens invoke `neon`. Generic functions can use common instructions directly
 //! without implementing `Operation`:
@@ -163,7 +163,7 @@
 //! without specializations use their portable defaults. This requires neither trait-implementation
 //! discovery nor overlapping fallback implementations.
 //!
-//! A crate-owned dispatcher selects an available native token or `Scalar` at the outer boundary
+//! A crate-owned dispatcher selects an available native token or `EmulatedScalar` at the outer boundary
 //! and executes the root operation. The concrete token threads through the tree. Child calls to
 //! `execute` repeat neither feature detection nor runtime backend selection and use static dispatch.
 //! Passing a runtime enum through the tree and matching it at every child would lose this property.
@@ -190,13 +190,12 @@
 //!
 //! ## Consistency testing
 //!
-//! A differential helper takes an operation factory and compares execution through `Scalar`,
-//! `EmulatedIceLake`, `EmulatedArmV9`, and `EmulatedNeon` without requiring native hardware.
-//! It exercises the same execution entry points as production, including specialized children and portable defaults
-//! throughout composed operations:
+//! [`check_consistent`] takes an operation factory and compares scalar execution
+//! with every emulated profile. It exercises `execute`,
+//! including specialized children and portable defaults throughout composed operations:
 //!
 //! ```rust,ignore
-//! simd::test::check_consistent(|| foo(&input));
+//! simd::check_consistent(|| foo(&input));
 //! ```
 //!
 //! The factory constructs independent operations with identical initial state for each execution.
@@ -206,12 +205,14 @@
 //! a snapshot for comparison. Merely comparing a return value would miss divergent buffer writes.
 //! The comparison may use semantic equality when valid representations differ, such as canonical
 //! field equality. Backend vector representations do not need to be comparable across backends.
-//! A portable-only leaf may run the same algorithm four times, while a parent with only portable
+//! A portable-only leaf runs the same algorithm at different widths, while a parent with only portable
 //! orchestration can still exercise different specialized children. Testing composed operations
 //! is therefore useful in addition to testing leaves.
 //!
-//! A fuzz harness generates inputs and calls this helper. Tests should include boundary values
-//! for carries, truncation, shuffles, masks, and partial memory operations. Agreement between
+//! Once specific profile instructions are available, simple operations such as a hash can
+//! exercise different strategies through the consistency helper. Shared fuzz plans should
+//! generate inputs once for all executions and include boundary values for carries,
+//! truncation, shuffles, masks, and partial memory operations. Agreement between
 //! implementations does not replace an independent mathematical oracle.
 //!
 //! Native instruction tests belong in this crate and compare each hardware primitive with its
@@ -226,15 +227,13 @@
 //! 1. Define instructions for the `IceLake`, `ArmV9`, and `Neon` profiles and precise primitive
 //!    semantics, starting with operations needed by existing erasure-coding or curve-arithmetic
 //!    kernels. Extend [`Simd`]'s common instructions as needed.
-//! 2. Implement the concrete scalar, native, and emulated backends, with associated vector types
-//!    and instruction-level hardware tests. Define SVE vector-length handling for `ArmV9`.
-//! 3. Implement backend execution of the fixed-profile [`Operation`] methods and defaults.
-//!    Add opaque operation constructors and a crate-owned outer dispatcher. Validate ordinary
-//!    `S: Simd` functions executing specialized children, including under a parent with only
-//!    portable orchestration, without consumer-side macros.
-//! 4. Add the fixed-profile consistency helper and differential fuzz coverage for both leaves and
-//!    composed operations, including observable mutable state. Keep hardware primitive validation
-//!    separate and verify that native tests actually execute the selected hardware path.
+//! 2. Implement native backends and instruction-level hardware tests. Define native SVE
+//!    vector-length handling for `ArmV9` and extend emulation as profile instructions are added.
+//! 3. Add opaque operation constructors for real kernels and a crate-owned outer dispatcher.
+//!    Preserve generic composition with specialized children under portable parent defaults.
+//! 4. Use [`check_consistent`] in shared fuzz plans when specific instructions enable
+//!    meaningful alternative strategies, including observable mutable state. Keep hardware
+//!    primitive validation separate and verify that native tests execute the selected path.
 //! 5. Integrate a real composed kernel and verify nested and cross-crate code generation and
 //!    performance. Use the results to refine the API before expanding instruction coverage.
 //! 6. Explore narrower capability declarations within the fixed profiles after the prototype.
@@ -293,6 +292,9 @@
 // 19 can use shifts and additions, with native code generation checked against existing kernels.
 
 commonware_macros::stability_scope!(ALPHA {
+    mod consistency;
+    pub use consistency::check_consistent;
     mod core;
     pub use core::{ArmV9, IceLake, Neon, Operation, Simd};
+    pub mod emulated;
 });
