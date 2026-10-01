@@ -76,7 +76,7 @@ struct ReadOp {
     offset: u16,
     /// Number of bytes to read (1-256).
     len: u16,
-    /// Whether to use the Read wrapper (true) or Append.read_at (false).
+    /// Whether to use streaming Replay (true) or Writer::read_at (false).
     use_reader: bool,
 }
 
@@ -210,7 +210,8 @@ fn fuzz(input: FuzzInput) {
                 let mut replay;
                 (append, replay) = match replay_result {
                     Ok(r) => r,
-                    Err(_) => return, // Replay creation failed and dropped the writer.
+                    // A failed replay creation consumes the writer and ends this input.
+                    Err(_) => return,
                 };
 
                 // Skip to the offset by ensuring and advancing

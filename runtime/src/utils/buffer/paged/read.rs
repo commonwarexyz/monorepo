@@ -665,8 +665,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Ensure all data - this requires 4 separate fill() calls (one per page).
-            // Each fill() creates a new BufferState, so we'll have 4 BufferStates.
+            // Load all four logical pages with one-page prefetches and a frozen partial tail.
             assert!(replay.ensure(400).await.unwrap());
             assert_eq!(replay.remaining(), 400);
 
@@ -686,6 +685,7 @@ mod tests {
             }
 
             assert_eq!(collected, data);
+
             // With prefetch_count=1 and 4 pages, we expect at least 4 chunks
             // (one per page, though partial reads could result in more).
             assert!(
@@ -776,11 +776,10 @@ mod tests {
             // Seek beyond blob size should error
             assert!(replay.seek_to(data.len() as u64 + 1).is_err());
 
-            // Test that remaining() is correct after seek by reading all data.
+            // Seek into the blob, then drain the remaining bytes and verify their exact contents.
             let seek_offset = 150usize;
             replay.seek_to(seek_offset as u64).unwrap();
             let expected_remaining = data.len() - seek_offset;
-            // Read all bytes and verify content
             let mut collected = Vec::new();
             loop {
                 // Load more data if needed

@@ -48,8 +48,8 @@ use futures::{
 use std::future::pending;
 use std::{
     collections::BTreeMap,
+    iter::once,
     marker::PhantomData,
-    mem::take,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
     sync::Arc,
@@ -1504,12 +1504,14 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         // Data outside the selected offset prefix must be removed, including partial tails
         // and whole blobs excluded by inspection.
         let tail = position_to_blob(size, per_blob);
-        let retained_bytes = |blob| {
-            if blob == tail {
-                Some(terminal)
-            } else {
-                self.recovered_scans.get(&blob).map(|scan| scan.valid_size)
-            }
+
+        // Blobs below the tail keep their scanned prefix, and the tail keeps the selected
+        // terminal offset.
+        let retained = || {
+            self.recovered_scans
+                .range(..tail)
+                .map(|(&blob, scan)| (blob, scan.valid_size))
+                .chain(once((tail, terminal)))
         };
         let repair_data = !self.discarded.is_empty()
             || self
@@ -1517,12 +1519,13 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 .keys()
                 .next_back()
                 .is_some_and(|&blob| blob > tail)
-            || self.pending.iter().any(|(&blob, writer)| {
-                retained_bytes(blob).is_some_and(|bytes| bytes < writer.size())
+            || retained().any(|(blob, bytes)| {
+                self.pending
+                    .get(&blob)
+                    .is_some_and(|writer| bytes < writer.size())
             });
         if repair_data {
-            // Delete excluded blobs newest-first, then durably shorten each retained data blob to
-            // the frame boundary established by inspection.
+            // Delete excluded blobs newest-first so every crash leaves a contiguous prefix.
             for blob in self.discarded.into_iter().rev() {
                 self.partition.remove(blob).await?;
             }
@@ -1531,12 +1534,17 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             if self.halt_after_data_removal {
                 pending::<()>().await;
             }
-            for (blob, writer) in take(&mut self.pending) {
-                let writer = match retained_bytes(blob) {
-                    Some(bytes) if bytes < writer.size() => writer.truncate(bytes).await?,
-                    _ => writer,
-                };
-                self.pending.insert(blob, writer);
+
+            // Shorten each retained blob to its prefix, oldest first.
+            for (blob, bytes) in retained() {
+                if self
+                    .pending
+                    .get(&blob)
+                    .is_some_and(|writer| bytes < writer.size())
+                {
+                    let writer = self.pending.remove(&blob).expect("blob is present");
+                    self.pending.insert(blob, writer.truncate(bytes).await?);
+                }
             }
         }
 
@@ -1755,6 +1763,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             .checked_add(items_count as u64)
             .ok_or(Error::SizeOverflow)?;
 
+        // Split the batch at blob boundaries so data and its offsets rotate together.
         let items_per_blob = self.items_per_blob.get();
         let mut written = 0;
         while written < items_count {
@@ -1769,10 +1778,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 .copied()
                 .unwrap_or(encoded.len());
 
-            // Append pre-encoded data to the tail, then convert relative item starts into
-            // absolute offsets. A batch that fits is buffered in place. A large batch is written
-            // whole-page-direct to the blob. The returned offset is where this batch's first byte
-            // was written.
+            // Buffer fitting batches in place and write large batches directly as whole pages.
+            // The returned offset locates this batch's first byte in the tail blob.
             let base_offset = match self
                 .blobs
                 .try_append(&encoded.as_ref()[batch_start..batch_end])
@@ -1788,6 +1795,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 }
             };
 
+            // Convert batch-relative starts into absolute offsets within the data blob.
             let absolute_offsets = item_starts[written..written + batch_count]
                 .iter()
                 .map(|&start| {
@@ -1810,7 +1818,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
             // Seal the just-filled tail, start syncing it, and open the next blob as the new tail.
             if self.bounds.end.is_multiple_of(items_per_blob) {
-                self.blobs.seal_tail().await?;
+                self.blobs = self.blobs.seal_tail().await?;
             }
         }
 
@@ -1898,7 +1906,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.offsets = self.offsets.commit().await?;
         self.barrier.mark_durable(self.bounds.end);
 
-        self.blobs.prune(min_blob).await?;
+        self.blobs = self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
         #[cfg(test)]
@@ -1922,21 +1930,27 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Journal::start_sync].
     pub(crate) async fn start_sync(mut self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
         self.metrics.start_sync_calls.inc();
+
+        // Start independent durability barriers for the data and its offsets.
         let (blobs, data) = self.blobs.start_sync().await?;
         self.blobs = blobs;
         let (offsets_journal, offsets) = self.offsets.start_data_sync().await?;
 
+        // Publish only the watermark already proved by a completed combined barrier.
         let size = self.barrier.boundary();
         let (offsets_journal, watermark_handle) =
             offsets_journal.start_watermark_sync(size).await?;
         self.offsets = offsets_journal;
 
+        // Record this prefix so the barrier advances once both data and offsets are durable.
         let journal_completion: SyncCompletion =
             async move { try_join(data, offsets).await.map(|_| ()) }
                 .boxed()
                 .shared();
         self.barrier
             .record(self.bounds.end, journal_completion.clone());
+
+        // The caller observes both the new durability barrier and watermark publication.
         let handle = Handle::from_future(async move {
             journal_completion.await?;
             watermark_handle.await
@@ -1958,6 +1972,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     pub(crate) async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
+
+        // Make data durable before the offsets journal can acknowledge its prefix.
         let size = self.bounds.end;
         let (blobs, handle) = self.blobs.start_sync().await?;
         self.blobs = blobs;
@@ -1992,7 +2008,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // Stage in offsets first so a crash mid-clear leaves an intent that recovery completes.
         // `clear_to_size` re-stages the same target idempotently before completing.
         self.offsets = self.offsets.stage_clear_intent(new_size).await?;
-        self.blobs
+        self.blobs = self
+            .blobs
             .clear(position_to_blob(new_size, self.items_per_blob.get()))
             .await?;
         self.offsets = self.offsets.clear_to_size(new_size).await?;
@@ -2271,10 +2288,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             return Ok(());
         }
 
+        // Own writers with sync work and restore them only after every sync succeeds.
         let start_blob = position_to_blob(start_position, items_per_blob);
         let end_blob = position_to_blob(end_position - 1, items_per_blob);
         let futures: Vec<_> = pending
-            .extract_if(start_blob..=end_blob, |_, _| true)
+            .extract_if(start_blob..=end_blob, |_, writer| writer.needs_sync())
             .map(|(blob, writer)| async move { writer.sync().await.map(|writer| (blob, writer)) })
             .collect();
         let synced = try_join_all(futures).await?;
@@ -2701,13 +2719,13 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
 #[cfg(test)]
 impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Test helper: Prune the data blobs directly (simulates crash scenario).
-    pub(crate) async fn test_prune_data(&mut self, min_blob: u64) -> Result<bool, Error> {
+    pub(crate) async fn test_prune_data(mut self, min_blob: u64) -> Result<(Self, bool), Error> {
         let min_blob = min_blob.min(self.0.blobs.tail_blob_index());
         if min_blob <= self.0.blobs.oldest_blob_index() {
-            return Ok(false);
+            return Ok((self, false));
         }
-        self.0.blobs.prune(min_blob).await?;
-        Ok(true)
+        self.0.blobs = self.0.blobs.prune(min_blob).await?;
+        Ok((self, true))
     }
 
     /// Test helper: Prune the internal offsets journal directly (simulates crash scenario).
@@ -5883,14 +5901,11 @@ mod tests {
             let (mut variable, _) = variable.prune(10).await.unwrap();
             assert_eq!(variable.bounds().start, 10);
 
-            // === Simulate crash: Prune data blobs but not offsets journal ===
-            // Manually prune data blobs to blob 2 (position 20)
-            variable.test_prune_data(2).await.unwrap();
-            // Offsets journal still has data from position 10-19
-
+            // Persist data pruning to position 20 while offsets still retain positions 10-19.
+            (variable, _) = variable.test_prune_data(2).await.unwrap();
             variable.sync().await.unwrap();
 
-            // === Verify recovery ===
+            // Reopen to reconcile the offsets with the retained data.
             let (recovery_context, recordings) = RecordingContext::new(context.child("second"));
             let variable = Journal::<_, u64>::init(recovery_context, cfg.clone())
                 .await
@@ -6012,14 +6027,14 @@ mod tests {
                 (variable, _) = variable.append(&(i * 100)).await.unwrap();
             }
 
-            // Prune offsets journal ahead of data blobs (impossible state)
-            let (mut variable, _) = variable.test_prune_offsets(20).await.unwrap(); // Prune to position 20
-            variable.test_prune_data(1).await.unwrap(); // Only prune data blobs to blob 1 (position 10)
+            // Put offsets ahead of the data floor. Normal pruning cannot produce this state.
+            let (mut variable, _) = variable.test_prune_offsets(20).await.unwrap();
+            (variable, _) = variable.test_prune_data(1).await.unwrap();
 
             let variable = variable.sync().await.unwrap();
             drop(variable);
 
-            // === Verify corruption detected ===
+            // Recovery must reject the contradictory floors.
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -6087,7 +6102,7 @@ mod tests {
 
             // Prune data to blob 1 (position 10), but truncate offsets to 5. The offsets range
             // then ends before the oldest retained data position.
-            journal.test_prune_data(1).await.unwrap();
+            (journal, _) = journal.test_prune_data(1).await.unwrap();
             let journal = journal.test_truncate_offsets(5).await.unwrap();
             drop(journal);
 
@@ -6122,7 +6137,7 @@ mod tests {
 
             // Prune data to blob 1 (position 10) but rewind offsets to 5, so the retained start is
             // 10 while the offsets end at 5.
-            journal.test_prune_data(1).await.unwrap();
+            (journal, _) = journal.test_prune_data(1).await.unwrap();
             let journal = journal.test_truncate_offsets(5).await.unwrap();
             drop(journal);
 
@@ -7142,14 +7157,11 @@ mod tests {
             let (mut variable, _) = variable.prune(10).await.unwrap();
             assert_eq!(variable.bounds().start, 10);
 
-            // === Simulate crash: Multiple prunes on data blobs, not on offsets journal ===
-            // Manually prune data blobs to blob 3 (position 30)
-            variable.test_prune_data(3).await.unwrap();
-            // Offsets journal still thinks oldest is position 10
-
+            // Persist data pruning to position 30 while offsets still start at position 10.
+            (variable, _) = variable.test_prune_data(3).await.unwrap();
             variable.sync().await.unwrap();
 
-            // === Verify recovery ===
+            // Reopen to reconcile the offsets with the retained data.
             let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();

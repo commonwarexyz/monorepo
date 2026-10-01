@@ -111,6 +111,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
         // Initialize metrics before creating sub-contexts
         let Metrics { tip, floor, next } = Metrics::init(&context);
 
+        // Recover the journal that backs the queue's retained items.
         let journal = variable::Journal::init(
             context.child("journal"),
             variable::Config {

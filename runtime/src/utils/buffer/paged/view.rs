@@ -417,6 +417,7 @@ mod tests {
     #[test]
     fn test_reads_cross_buffer_chunks_and_cache() {
         deterministic::Runner::default().start(|context| async move {
+            // Use a small pool class so the buffered suffix spans multiple backing allocations.
             let pool = BufferPool::new(
                 BufferPoolConfig::for_storage()
                     .with_size_classes([(NZUsize!(8), NZU32!(1))])
@@ -433,6 +434,8 @@ mod tests {
             let mut writer = Writer::new(blob, size, page * 32, cache.clone())
                 .await
                 .unwrap();
+
+            // Persist a prefix, then extend the tip with many smaller chunks.
             let data: Vec<_> = (0..page * 20 + 13).map(|i| (i % 251) as u8).collect();
             let persisted = page * 3 + 17;
             (writer, _) = writer.append(&data[..persisted]).await.unwrap();
@@ -441,10 +444,12 @@ mod tests {
                 (writer, _) = writer.append(chunk).await.unwrap();
             }
 
+            // Cached pages and buffered chunks serve a synchronous read of the whole blob.
             let mut all = vec![0; data.len()];
             assert!(writer.try_read_sync_into(&mut all, 0));
             assert_eq!(all, data);
 
+            // Fixed-size reads cross both page and buffered-chunk boundaries.
             let offsets = [
                 page - 8,
                 page * 3 - 8,
@@ -465,6 +470,7 @@ mod tests {
             );
             assert_eq!(batch, expected);
 
+            // Variable-size reads include empty ranges and the final partial tail.
             let ranges = [
                 (0, 0),
                 ((page - 4) as u64, 16),
@@ -487,6 +493,7 @@ mod tests {
             );
             assert_eq!(ranged, expected_ranges);
 
+            // Evict persisted pages to exercise asynchronous cache-miss reads.
             cache.clear();
             writer
                 .read_many_into(&mut batch, &offsets, NZUsize!(17))
@@ -502,6 +509,8 @@ mod tests {
                     .as_ref(),
                 data
             );
+
+            // Persist the buffered suffix and verify it through a fresh open with an empty cache.
             writer = writer.sync().await.unwrap();
             drop(writer);
             cache.clear();

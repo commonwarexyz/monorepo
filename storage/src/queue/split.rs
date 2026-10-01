@@ -24,7 +24,7 @@ use std::{
 };
 use tracing::debug;
 
-/// A published view of the committed items.
+/// A published view of the queue's items.
 type Snapshot<E, V> = Arc<variable::Reader<'static, E, V>>;
 
 /// Writer handle for enqueueing items.
@@ -73,10 +73,13 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
         mut self,
         items: impl IntoIterator<Item = V>,
     ) -> Result<(Self, Range<u64>), Error> {
+        // Append the batch before publishing it to the reader.
         let start = self.journal.size();
         for item in items {
             (self, _) = self.append(item).await?;
         }
+
+        // Only a nonempty batch needs a commit.
         let end = self.journal.size();
         if end > start {
             self = self.commit().await?;
@@ -109,9 +112,14 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
     /// Persist appended items as for [Queue::sync](super::Queue::sync), prune items below the
     /// reader's ack floor, then publish the result to the reader.
     pub async fn sync(mut self) -> Result<Self, Error> {
+        // Make appended items durable before pruning their predecessors.
         self.journal = self.journal.sync().await?;
+
+        // Sample the reader's monotonic floor. A stale value only delays pruning.
         let floor = self.floor.load(Ordering::Relaxed);
         (self.journal, _) = self.journal.prune(floor).await?;
+
+        // Publish a view with the retained bounds.
         self.publish().await
     }
 
@@ -126,6 +134,8 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
         if bounds == self.published {
             return Ok(self);
         }
+
+        // Capture the new view before publishing its bounds and waking the reader.
         let snapshot;
         (self.journal, snapshot) = self.journal.snapshot().await?;
         self.published = bounds;
@@ -164,6 +174,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn recv(&mut self) -> Result<Option<(u64, V)>, Error> {
+        // Drain published items before waiting for the next snapshot or the writer's departure.
         loop {
             if let Some(item) = self.try_recv().await? {
                 return Ok(Some(item));
@@ -184,6 +195,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn try_recv(&mut self) -> Result<Option<(u64, V)>, Error> {
+        // Deliver from the current snapshot before switching to a newer view.
         if let Some(item) = self.cursor.dequeue(&*self.snapshot).await? {
             return Ok(Some(item));
         }
@@ -251,12 +263,14 @@ pub(super) async fn handles<E: Context, V: CodecShared>(
     cursor: Cursor,
     tip: Gauge,
 ) -> Result<(Writer<E, V>, Reader<E, V>), Error> {
+    // Share the current view and acknowledgement floor between the two handles.
     let published = journal.bounds();
     let (journal, snapshot) = journal.snapshot().await?;
     let snapshot = Arc::new(snapshot);
     let (sender, receiver) = watch::channel(snapshot.clone());
     let floor = Arc::new(AtomicU64::new(cursor.ack_floor()));
 
+    // The writer owns journal mutations, and the reader owns delivery and acknowledgement state.
     let writer = Writer {
         journal,
         tip,
@@ -316,6 +330,7 @@ mod tests {
     fn test_split_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Create independent handles for publishing, receiving, and acknowledging one item.
             let cfg = test_config("test_split_basic", &context);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
@@ -340,6 +355,7 @@ mod tests {
     fn test_split_continues_from_queue() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Initialize the unsplit queue so delivery state can be carried into the split.
             let cfg = test_config("test_split_continues", &context);
             let mut queue = Queue::init(context, cfg).await.unwrap();
 
@@ -369,6 +385,7 @@ mod tests {
     fn test_split_append_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Initialize separate handles to observe the publication boundary.
             let cfg = test_config("test_split_append_commit", &context);
             let (mut writer, mut reader) = init(context, cfg).await.unwrap();
 
@@ -405,15 +422,18 @@ mod tests {
     fn test_split_enqueue_bulk() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Initialize a reader that will observe the entire batch after one commit.
             let cfg = test_config("test_split_bulk", &context);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
+            // Publish the batch with a single commit.
             let (_writer, range) = writer
                 .enqueue_bulk((0..5u8).map(|i| vec![i]))
                 .await
                 .unwrap();
             assert_eq!(range, 0..5);
 
+            // Verify FIFO delivery and acknowledge every item in the published batch.
             for i in 0..5 {
                 let (pos, item) = reader.recv().await.unwrap().unwrap();
                 assert_eq!(pos, i);
@@ -428,6 +448,7 @@ mod tests {
     fn test_split_concurrent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Give concurrent producer and consumer tasks handles over the same journal.
             let cfg = test_config("test_split_concurrent", &context);
             let (writer, mut reader) = init(context.child("storage"), cfg).await.unwrap();
 
@@ -462,6 +483,7 @@ mod tests {
     fn test_split_select() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Prepare a split queue for receiving through select with a bounded wait.
             let cfg = test_config("test_split_select", &context);
             let (writer, mut reader) = init(context.child("storage"), cfg).await.unwrap();
 
@@ -488,6 +510,7 @@ mod tests {
     fn test_split_writer_dropped() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Initialize both handles before testing delivery after the writer is dropped.
             let cfg = test_config("test_split_writer_dropped", &context);
             let (writer, mut reader) = init(context.child("storage"), cfg).await.unwrap();
 
@@ -513,6 +536,7 @@ mod tests {
     fn test_split_try_recv() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Start with an empty published view for nonblocking receive checks.
             let cfg = test_config("test_split_try_recv", &context);
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
@@ -536,6 +560,7 @@ mod tests {
     fn test_split_interrupted_writer_ends_queue() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Wrap storage so a writer operation can be parked during its durability barrier.
             let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
@@ -568,6 +593,7 @@ mod tests {
     fn test_split_sync_prunes_below_ack_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Populate multiple sections so acknowledgements can advance the pruning boundary.
             let cfg = test_config("test_split_sync_prunes", &context);
             let (writer, mut reader) = init(context.child("first"), cfg.clone()).await.unwrap();
             let (writer, _) = writer
@@ -596,7 +622,7 @@ mod tests {
             drop(writer);
             drop(reader);
 
-            // A restart re-delivers every unpruned item.
+            // A restart resumes delivery at the pruning boundary.
             let (_writer, mut reader) = init(context.child("second"), cfg).await.unwrap();
             assert_eq!(reader.ack_floor(), 10);
             let (pos, item) = reader.recv().await.unwrap().unwrap();

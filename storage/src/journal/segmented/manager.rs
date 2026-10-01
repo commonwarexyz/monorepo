@@ -404,10 +404,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Sync the given `sections` to storage.
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
+        // Validate the entire selection before extracting any writer.
         let sections = sections.sections().collect::<BTreeSet<_>>();
         for &section in &sections {
             self.prune_guard(section)?;
         }
+
         self.sync_selected(|section| sections.contains(&section))
             .await?;
         Ok(self)
@@ -426,10 +428,13 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         mut self,
         sections: impl crate::Sections,
     ) -> Result<(Self, Handle<()>), Error> {
+        // Validate the entire selection before extracting any writer.
         let sections = sections.sections().collect::<BTreeSet<_>>();
         for &section in &sections {
             self.prune_guard(section)?;
         }
+
+        // Extract only writers with sync work. Restore them once every sync has started.
         let mut count = 0;
         let futures: Vec<_> = self
             .blobs
@@ -674,9 +679,13 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         if sizes.is_empty() {
             return Ok(self);
         }
+
+        // Validate all requested bounds before extracting any writer.
         for &section in sizes.keys() {
             self.prune_guard(section)?;
         }
+
+        // Own only sections that shrink, restoring them after every truncation is durable.
         let futures: Vec<_> = self
             .blobs
             .extract_if(.., |section, blob| {

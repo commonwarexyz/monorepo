@@ -46,8 +46,10 @@ impl From<crate::Handle<()>> for Completion {
 ///   handle (completed syncs resolve immediately), so re-requesting a sync is a cheap way to
 ///   observe outstanding work.
 /// - A failure is never lost: every handle cloned from the shared completion reports it, and
-///   an unobserved failure surfaces on the next [SyncState::wait_for_pending] call, which also
-///   marks the state [SyncState::Dirty] since the mutations still need durability.
+///   an unobserved failure surfaces on the next [SyncState::wait_for_pending] call. Callers
+///   propagate that error through the consuming writer operation.
+///
+/// The owner must be dropped after any failed operation.
 enum SyncState {
     // No unsynced mutations.
     Clean,
@@ -63,31 +65,14 @@ impl SyncState {
         matches!(self, Self::Clean)
     }
 
-    /// Mark a new unsynced mutation.
-    fn mark_dirty(&mut self) {
-        assert!(
-            !matches!(self, Self::Pending(_)),
-            "pending sync must be joined before marking dirty"
-        );
-        *self = Self::Dirty;
-    }
-
     /// Wait for an in-flight sync before reusing or mutating the blob.
     async fn wait_for_pending(&mut self) -> Result<(), crate::Error> {
         let Self::Pending(pending) = self else {
             return Ok(());
         };
-        match pending.wait().await {
-            Ok(()) => {
-                *self = Self::Clean;
-                Ok(())
-            }
-            Err(err) => {
-                // The sync failed, so the pending mutations still need durability.
-                *self = Self::Dirty;
-                Err(err)
-            }
-        }
+        pending.wait().await?;
+        *self = Self::Clean;
+        Ok(())
     }
 
     /// Write data with the provided options while tracking durability.
@@ -101,9 +86,8 @@ impl SyncState {
         self.wait_for_pending().await?;
         let bufs = bufs.into();
         if !options.contains(WriteOptions::SYNC) {
-            // A failed write may still have landed bytes, so it dirties the blob either way.
-            self.mark_dirty();
             blob.write_at(offset, bufs, options).await?;
+            *self = Self::Dirty;
             return Ok(());
         }
 
@@ -116,13 +100,7 @@ impl SyncState {
                 *self = Self::Clean;
                 Ok(())
             }
-            Self::Clean => {
-                // If this fails, a later sync must still cover the attempted write.
-                self.mark_dirty();
-                blob.write_at(offset, bufs, options).await?;
-                *self = Self::Clean;
-                Ok(())
-            }
+            Self::Clean => blob.write_at(offset, bufs, options).await,
             Self::Pending(_) => unreachable!("pending sync waited above"),
         }
     }
@@ -130,10 +108,8 @@ impl SyncState {
     /// Resize the blob and require a later sync.
     async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
-
-        // A failed resize may still have changed the length, so it dirties the blob either way.
-        self.mark_dirty();
         blob.resize(len).await?;
+        *self = Self::Dirty;
         Ok(())
     }
 
@@ -1332,7 +1308,7 @@ mod tests {
     fn test_write_close() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Test that closing writer flushes and persists buffered data
+            // Buffer bytes to persist before releasing the writer.
             let (blob_orig, size) = context.open("partition", b"write_close").await.unwrap();
             let mut writer = Write::from_pooler(&context, blob_orig, size, NZUsize!(8));
             writer = writer.write_at(0, b"pending").await.unwrap();
@@ -1530,10 +1506,9 @@ mod tests {
                 .unwrap();
             let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(10));
 
-            // Initial buffered write
-            writer = writer.write_at(0, b"INITIAL").await.unwrap(); // 7 bytes
+            // Buffer the initial seven bytes at the logical tip.
+            writer = writer.write_at(0, b"INITIAL").await.unwrap();
             assert_eq!(writer.size(), 7);
-            // Buffer contains "INITIAL", inner.position = 0
 
             // Non-contiguous write, forces flush of "INITIAL" and direct write of "NONCONTIG"
             writer = writer.write_at(20, b"NONCONTIG").await.unwrap();
@@ -1544,7 +1519,7 @@ mod tests {
             // Append at the new size
             let end = writer.size();
             writer = writer.write_at(end, b"APPEND").await.unwrap();
-            assert_eq!(writer.size(), 35); // 29 + 6
+            assert_eq!(writer.size(), 35);
             writer = writer.sync().await.unwrap();
             assert_eq!(writer.size(), 35);
 
@@ -1577,26 +1552,23 @@ mod tests {
                 .unwrap();
             let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(10));
 
-            // Write initial data and sync
-            writer = writer.write_at(0, b"0123456789ABCDEF").await.unwrap(); // 16 bytes
+            // Persist the initial 16 bytes, leaving the tip buffer empty.
+            writer = writer.write_at(0, b"0123456789ABCDEF").await.unwrap();
             assert_eq!(writer.size(), 16);
-            writer = writer.sync().await.unwrap(); // inner.position = 16, buffer empty
+            writer = writer.sync().await.unwrap();
             assert_eq!(writer.size(), 16);
 
-            // Resize
+            // Durably shorten the blob and its logical tip to five bytes.
             let resize_to = 5;
             writer = writer.resize(resize_to).await.unwrap();
-            // after resize, inner.position should be `resize_to` (5)
-            // buffer should be empty
             assert_eq!(writer.size(), resize_to);
-            writer = writer.sync().await.unwrap(); // Ensure truncation is persisted for verify step
+            writer = writer.sync().await.unwrap();
             assert_eq!(writer.size(), resize_to);
 
-            // Append at the new (resized) size
+            // Buffer five more bytes at the resized tip, then persist the combined contents.
             let end = writer.size();
-            writer = writer.write_at(end, b"XXXXX").await.unwrap(); // 5 bytes
-            // inner.buffer = "XXXXX", inner.position = 5
-            assert_eq!(writer.size(), 10); // 5 (resized) + 5 (XXXXX)
+            writer = writer.write_at(end, b"XXXXX").await.unwrap();
+            assert_eq!(writer.size(), 10);
             writer = writer.sync().await.unwrap();
             assert_eq!(writer.size(), 10);
 
@@ -1714,7 +1686,7 @@ mod tests {
         });
     }
 
-    // Verifies start_sync flushes current bytes, completes durability, and marks the writer clean.
+    /// Observing a completed started sync lets the next write use range sync.
     #[test_traced]
     fn test_write_start_sync_persists_and_marks_clean() {
         let executor = deterministic::Runner::default();
@@ -1735,8 +1707,7 @@ mod tests {
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 0);
 
-            // The started sync marked the writer clean, so the next buffered write can use a
-            // range-scoped sync.
+            // The next mutation observes the completed sync and can sync just its new range.
             writer = writer.write_at(3, b"d").await.unwrap();
             writer = writer.sync().await.unwrap();
             let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
@@ -1998,29 +1969,6 @@ mod tests {
             assert_eq!(writes, 2);
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 1);
-        });
-    }
-
-    #[test_traced]
-    fn test_sync_state_failed_sync_write_does_not_mark_clean() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let name = b"failed_sync_write";
-            let (blob, _) = context.open("partition", name).await.unwrap();
-
-            // Removing the blob makes a range-scoped write from a clean state fail.
-            context.remove("partition", Some(name)).await.unwrap();
-            let mut state = SyncState::Clean;
-            assert!(
-                state
-                    .write_at(&blob, 0, b"abc", WriteOptions::SYNC)
-                    .await
-                    .is_err()
-            );
-
-            // The failed write must leave a pending full-sync barrier, so a later sync cannot
-            // report success.
-            assert!(state.sync(&blob).await.is_err());
         });
     }
 

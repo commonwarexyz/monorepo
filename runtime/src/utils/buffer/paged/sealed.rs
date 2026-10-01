@@ -392,6 +392,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rdr_pages").await.unwrap();
+
             // A single-page cache forces most full-page reads to miss and hit the blob.
             let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
@@ -632,6 +633,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany_sync").await.unwrap();
+
             // Capacity of one page makes hit/miss behavior deterministic: the cache holds
             // exactly the last page touched.
             let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
@@ -695,6 +697,7 @@ mod tests {
                 .open("test_partition", b"rranges_sync")
                 .await
                 .unwrap();
+
             // Capacity of one page makes hit/miss behavior deterministic: the cache holds
             // exactly the last page touched.
             let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
@@ -1079,6 +1082,7 @@ mod tests {
                 expected.len()
             };
             let mut replay = if writer_replay {
+                // Capture the capped prefix, including its owned partial tail.
                 let replay;
                 (writer, replay) = writer
                     .replay_prefix(cap, NZUsize!(BUFFER_SIZE), ReadOptions::default())
@@ -1086,6 +1090,7 @@ mod tests {
                     .unwrap();
                 replay
             } else {
+                // Capture the entire snapshot, whose partial tail is already frozen.
                 snapshot
                     .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
                     .unwrap()

@@ -853,11 +853,14 @@ async fn run_ops<J: FuzzJournal>(
             }
 
             JournalOperation::Read { pos } => {
+                // A clamped retained position must read successfully before testing raw bounds.
                 let bounds = journal.bounds();
                 if !bounds.is_empty() {
                     let target = bounds.start + (*pos % (bounds.end - bounds.start));
                     assert_read(journal.read(target).await, target, &bounds);
                 }
+
+                // The raw position independently exercises out-of-range validation.
                 assert_read(journal.read(*pos).await, *pos, &bounds);
                 journal
             }
@@ -900,9 +903,9 @@ async fn run_ops<J: FuzzJournal>(
                 }
             }
 
-            // A snapshot flushes buffered data without a durability barrier, changing no
-            // durability expectation. It schedules unsynced partial-page rewrites for the
-            // next crash to cut.
+            // A snapshot writes buffered full pages without a durability barrier and keeps the
+            // partial tail in memory. A full-page write may extend a previously partial page.
+            // No durability expectation changes.
             JournalOperation::Snapshot => match journal.snapshot().await {
                 Ok(journal) => journal,
                 Err(err) => {
@@ -941,6 +944,8 @@ async fn run_ops<J: FuzzJournal>(
                     } else {
                         bounds.start + (*size % (bounds.end - bounds.start + 1))
                     };
+
+                    // Establish the pre-cap durable image and release its owner before recovery.
                     let synced = match journal.sync().await {
                         Ok(journal) => journal,
                         Err(_) => return,
@@ -1055,6 +1060,8 @@ async fn run_ops<J: FuzzJournal>(
                         )
                     });
                 assert_replay_suffix(&items, clamped, &bounds);
+
+                // Cross-check replayed values through the independent random-read path.
                 for (pos, item) in &items {
                     let via_read = journal
                         .read(*pos)
@@ -1062,6 +1069,8 @@ async fn run_ops<J: FuzzJournal>(
                         .unwrap_or_else(|e| panic!("read({pos}) cross-check during replay: {e:?}"));
                     assert_eq!(*item, via_read, "replay/read divergence at {pos}");
                 }
+
+                // The raw start separately exercises replay bounds validation.
                 assert_raw_replay(
                     journal.replay(*start_pos, NZUsize!(*buffer)).await,
                     *start_pos,
@@ -1179,6 +1188,7 @@ where
             }
         };
 
+        // Rebase the next operation cycle on the state verified during clean recovery.
         let mut expected = to_expected(&journal).await;
 
         // Faults on for the operation phase. Returning drops the journal (the crash).
@@ -1266,6 +1276,7 @@ fn run<J: FuzzJournal + Send + 'static>(input: FuzzInput, tag: &str)
 where
     J::Config: Send,
 {
+    // Carry the fuzzed storage geometry and mutation-fault rates through every restart.
     let params = Params {
         page_size: NonZeroU16::new(input.page_size).unwrap(),
         page_cache_size: NonZeroUsize::new(input.page_cache_size).unwrap(),
@@ -1286,6 +1297,8 @@ where
     let cfg = deterministic::Config::default().with_rng(input.entropy);
     let mut runner = deterministic::Runner::new(cfg);
     let mut expected = Expected::default();
+
+    // Alternate clean recovery and modeled operations with a faulted restart attempt.
     for (i, cycle) in cycles.iter().enumerate() {
         let (next, checkpoint) =
             run_cycle::<J>(runner, expected, cycle.clone(), partition.clone(), params);
@@ -1364,6 +1377,8 @@ mod tests {
     use super::*;
 
     fn regression_params(write_config: deterministic::WriteConfig) -> Params {
+        // The large write buffer keeps appends in memory until start_sync. Only writes are
+        // faulted, so the regression isolates the first flush from later durability steps.
         Params {
             page_size: NonZeroU16::new(44).unwrap(),
             page_cache_size: NZUsize!(1),
@@ -1388,6 +1403,7 @@ mod tests {
     where
         J::Config: Send,
     {
+        // Arm mutation faults after clean initialization, then crash when the operation run ends.
         let (expected, checkpoint) =
             deterministic::Runner::default().start_and_recover(move |ctx| async move {
                 let journal = J::init(ctx.child("journal"), J::config(partition, &ctx, &params))
@@ -1407,6 +1423,7 @@ mod tests {
                 expected
             });
 
+        // Recover the crashed image without faults and verify the retained model.
         deterministic::Runner::from(checkpoint).start(move |ctx| async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
             let journal = J::init(

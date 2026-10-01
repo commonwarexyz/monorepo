@@ -208,6 +208,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
             let offset = match blob.try_append(&buf) {
                 Some(offset) => offset,
                 None => {
+                    // Return the writer to the manager only after the owned append succeeds.
                     let blob = self.manager.take(section).await?;
                     let (blob, offset) = blob.append_owned(IoBuf::from(buf)).await?;
                     self.manager.put(section, blob);
@@ -222,6 +223,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
             let offset = match blob.try_append_value(&frame) {
                 Some(offset) => offset,
                 None => {
+                    // Return the writer to the manager only after the owned append succeeds.
                     let blob = self.manager.take(section).await?;
                     let (blob, offset) = blob.append_owned(frame.encode_mut().into()).await?;
                     self.manager.put(section, blob);
@@ -498,12 +500,15 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<E, V>, Error> {
+        // Capture independent replay views while returning each writer to the manager.
         let mut sections = VecDeque::new();
         let replayed: Vec<_> = self.0.manager.sections_from(start_section).collect();
         for section in replayed {
             let blob = self.0.manager.take(section).await?;
             let (blob, reader) = blob.replay(buffer, read_options).await?;
             self.0.manager.put(section, blob);
+
+            // Only the first section skips bytes preceding the validated starting boundary.
             let skip_bytes = if section == start_section {
                 start_offset
             } else {

@@ -66,12 +66,13 @@ impl Cursor {
             self.read_pos = end.saturating_add(1);
         }
 
-        // If the read position is greater than the size of the journal, return None.
+        // Record the next candidate position and stop when no unread item remains.
         let _ = self.next.try_set(self.read_pos);
         if self.read_pos >= size {
             return Ok(None);
         }
 
+        // Advance delivery only after the item has been read successfully.
         let item = items.read(self.read_pos).await?;
         let pos = self.read_pos;
         self.read_pos += 1;
@@ -101,7 +102,7 @@ impl Cursor {
             return Ok(());
         }
 
-        // Check if we can advance the floor
+        // Advance the floor only when its first unacknowledged item is acknowledged.
         if position == self.ack_floor {
             // Advance floor, consuming any contiguous acked items
             let next = position + 1;
@@ -114,7 +115,7 @@ impl Cursor {
             let _ = self.floor.try_set(self.ack_floor);
             debug!(floor = self.ack_floor, "advanced ack floor");
         } else {
-            // Floor is not advancing, so add to acked_above
+            // Retain acknowledgements above the gap at the floor.
             self.acked_above.insert(position);
             debug!(position, "acked item above floor");
         }

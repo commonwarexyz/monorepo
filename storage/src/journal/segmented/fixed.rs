@@ -364,12 +364,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             !self.unrecovered.contains(&section),
             "section {section} must be replayed before append"
         );
-        let blob = self.manager.get_or_create(section).await?;
 
-        // Encode the item
+        // Buffer the item in place when it fits. Otherwise own the writer across the flush.
+        let blob = self.manager.get_or_create(section).await?;
         let offset = match blob.try_append_value(item) {
             Some(offset) => offset,
             None => {
+                // Return the writer to the manager only after the owned append succeeds.
                 let blob = self.manager.take(section).await?;
                 let (blob, offset) = blob.append_owned(item.encode_mut().into()).await?;
                 self.manager.put(section, blob);
@@ -792,6 +793,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<E, A>, Error> {
+        // Capture independent replay views while returning each writer to the manager.
         let mut sections = VecDeque::new();
         let replayed: Vec<_> = self.0.manager.sections_from(start_section).collect();
         for section in replayed {
@@ -799,6 +801,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             let blob_size = blob.size();
             let (blob, mut reader) = blob.replay(buffer, read_options).await?;
             self.0.manager.put(section, blob);
+
             // For the first section, seek to the start position
             let position = if section == start_section {
                 let start = start_position

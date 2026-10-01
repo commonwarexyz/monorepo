@@ -118,6 +118,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let writer = self.manager.get_or_create(section).await?;
         let offset = writer.size();
         if !writer.try_write_at(offset, &buf) {
+            // Return the writer to the manager only after the owned write succeeds.
             let writer = self.manager.take(section).await?;
             let writer = writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
             self.manager.put(section, writer);

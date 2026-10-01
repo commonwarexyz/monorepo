@@ -325,9 +325,9 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
             let blob = blob.write_at(offset, record).await?;
             self.blobs.insert(section, blob);
         }
-        self.pending.insert(section);
 
-        // Add to intervals
+        // Track the accepted record for syncing and lookup.
+        self.pending.insert(section);
         self.intervals.insert(index);
 
         Ok(self)
@@ -436,6 +436,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
             return Ok(self);
         }
 
+        // Own pending writers across their syncs and restore them only after every sync succeeds.
         let futures: Vec<_> = self
             .blobs
             .extract_if(.., |section, _| self.pending.contains(section))

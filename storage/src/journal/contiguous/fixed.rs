@@ -34,8 +34,8 @@
 //!   and byte offset.
 //!
 //! - `Writable` owns the files: the contiguous sealed blobs plus the one writable tail. When the
-//!   tail fills, it is sealed and an fsync of it begins. `Writable` tracks that in-flight sync
-//!   along with any started sync of the new tail.
+//!   tail fills, it is sealed and an fsync of it begins. `Writable` tracks that in-flight sync,
+//!   and its tail writer tracks any started sync of the new tail.
 //!
 //! - `Checkpoint` owns the durable recovery hints (mid-blob pruning boundary, recovery
 //!   watermark, staged clear target) consulted before trusting blob state on startup.
@@ -726,9 +726,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             .get_mut(&blob)
             .is_some_and(|writer| writer.try_append_value(item).is_some());
 
-        // Completed blobs remain open until publication. Flush them here so each retains at most a
-        // partial page while recovery continues appending. Keep the checkpoint unchanged: flushing
-        // a blob alone does not establish that this prefix is ready to publish.
         let completed = end.is_multiple_of(self.cfg.items_per_blob.get());
 
         // Take the writer only to open it, append through the owned fallback, or flush it. The
@@ -741,6 +738,9 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             if !appended && writer.try_append_value(item).is_none() {
                 (writer, _) = writer.append_owned(item.encode_mut().into()).await?;
             }
+
+            // Completed blobs stay open until publication. Flush them to bound retained buffers,
+            // without advancing the checkpoint before the recovered prefix is ready to publish.
             if completed {
                 writer = writer.sync().await?;
             }
@@ -1216,9 +1216,13 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// See [Journal::start_sync].
     pub(crate) async fn start_sync(self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
         self.metrics.start_sync_calls.inc();
+
+        // Start data durability, then cap watermark publication at the completed barrier.
         let (mut journal, data) = self.start_data_sync().await?;
         let size = journal.barrier.boundary();
         let (journal, watermark) = journal.start_watermark_sync(size).await?;
+
+        // Completion requires both the data and the selected watermark to be durable.
         let handle = Handle::from_future(async move {
             data.await?;
             watermark.await
@@ -1242,11 +1246,15 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
+
+        // Complete data durability before advancing the checkpoint that acknowledges it.
         let size = self.bounds.end;
         let (blobs, handle) = self.blobs.start_sync().await?;
         self.blobs = blobs;
         handle.await?;
         self.barrier.mark_durable(size);
+
+        // Publish the durable prefix as the recovery watermark.
         self.checkpoint = self
             .checkpoint
             .persist(self.items_per_blob.get(), self.bounds.start, size)
@@ -1297,7 +1305,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                 .append_many_inner(Many::Flat(std::slice::from_ref(item)))
                 .await;
         }
-        self.advance_tail(new_size).await?;
+        self = self.advance_tail(new_size).await?;
         let position = self.finish_append();
         Ok((self, position))
     }
@@ -1375,6 +1383,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             .checked_add(items_count as u64)
             .ok_or(Error::SizeOverflow)?;
 
+        // Split the batch at blob boundaries so each full tail can be sealed before continuing.
         let mut written = 0;
         while written < items_count {
             let batch_count = super::batch_count_to_blob_boundary(
@@ -1384,9 +1393,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             );
             let start = written * A::SIZE;
             let end = start + batch_count * A::SIZE;
-            // Overflow checked above.
             let new_size = self.bounds.end + batch_count as u64;
 
+            // Buffer a batch in place when it fits. Otherwise own the writer across the flush.
             if self
                 .blobs
                 .try_append(&items_buf.as_ref()[start..end])
@@ -1394,7 +1403,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             {
                 (self.blobs, _) = self.blobs.append_owned(items_buf.slice(start..end)).await?;
             }
-            self.advance_tail(new_size).await?;
+            self = self.advance_tail(new_size).await?;
             written += batch_count;
         }
 
@@ -1403,12 +1412,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     // Advance appended bounds and rotate a full tail. Both append paths use the same ordering.
-    async fn advance_tail(&mut self, new_size: u64) -> Result<(), Error> {
+    async fn advance_tail(mut self: Box<Self>, new_size: u64) -> Result<Box<Self>, Error> {
         self.bounds.end = new_size;
         if new_size.is_multiple_of(self.items_per_blob.get()) {
-            self.blobs.seal_tail().await?;
+            self.blobs = self.blobs.seal_tail().await?;
         }
-        Ok(())
+        Ok(self)
     }
 
     // Record state metrics once after a successful append, including multi-blob batches.
@@ -1454,7 +1463,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.barrier.mark_durable(self.bounds.end);
 
         let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
-        self.blobs.prune(min_blob).await?;
+        self.blobs = self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
         self.metrics.update(
@@ -1501,7 +1510,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.checkpoint = self.checkpoint.stage_clear(new_size).await?;
 
         // Remove every blob, then start fresh at the new size.
-        self.blobs
+        self.blobs = self
+            .blobs
             .clear(super::position_to_blob(new_size, self.items_per_blob.get()))
             .await?;
         self.bounds = new_size..new_size;
@@ -3172,34 +3182,86 @@ mod tests {
         });
     }
 
-    /// A failed tail sync whose handle was dropped surfaces at the next rollover.
+    enum TailSyncBoundary {
+        Rollover,
+        Clear,
+        Destroy,
+    }
+
+    /// The unobserved sync that fails.
+    enum FailedSync {
+        /// The live tail's started sync, whose handle is dropped.
+        Tail,
+        /// The sync started when the previous tail was sealed.
+        Predecessor,
+    }
+
+    /// A failed sync nobody observed prevents data blob creation and removal.
+    #[rstest::rstest]
     #[test_traced]
-    fn test_fixed_dropped_failed_start_sync_surfaces_after_rollover() {
+    fn test_fixed_dropped_failed_start_sync_blocks_blob_changes(
+        #[values(FailedSync::Tail, FailedSync::Predecessor)] failed: FailedSync,
+        #[values(
+            TailSyncBoundary::Rollover,
+            TailSyncBoundary::Clear,
+            TailSyncBoundary::Destroy
+        )]
+        boundary: TailSyncBoundary,
+    ) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
+            let data_partition = blob_partition(&cfg);
             let mut journal = Box::new(
                 Inner::<_, u64>::init(context.child("journal"), cfg)
                     .await
                     .unwrap(),
             );
-
-            // Buffer an item, then fail the sync started by start_sync, dropping the returned
-            // handle unobserved.
-            (journal, _) = journal.append(&0).await.unwrap();
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(probability!(1.0)),
-                ..Default::default()
+            let fail_syncs = |rate| {
+                *context.storage_fault_config().write() = deterministic::FaultConfig {
+                    sync_rate: Some(rate),
+                    ..Default::default()
+                };
             };
-            let (journal, handle) = journal.start_sync().await.unwrap();
-            drop(handle);
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            // Appending through the blob boundary must surface the failure.
-            assert!(matches!(
-                journal.append_many(Many::Flat(&[1, 2, 3])).await,
-                Err(Error::Runtime(_))
-            ));
+            // Fail a sync without observing it: either the tail's started sync, whose handle is
+            // dropped, or the sync started by the rollover that seals the first blob.
+            let blobs = match failed {
+                FailedSync::Tail => {
+                    (journal, _) = journal.append(&0).await.unwrap();
+                    fail_syncs(probability!(1.0));
+                    let handle;
+                    (journal, handle) = journal.start_sync().await.unwrap();
+                    drop(handle);
+                    1
+                }
+                FailedSync::Predecessor => {
+                    (journal, _) = journal.append_many(Many::Flat(&[0, 1])).await.unwrap();
+                    fail_syncs(probability!(1.0));
+                    (journal, _) = journal.append(&2).await.unwrap();
+                    2
+                }
+            };
+            fail_syncs(probability!(0.0));
+
+            // The failure must surface before the operation changes the data blob namespace.
+            // Clearing may persist its checkpoint intent before reaching this boundary.
+            let size = journal.size();
+            let result = match boundary {
+                TailSyncBoundary::Rollover => journal
+                    .append_many(Many::Flat(&[size, size + 1, size + 2]))
+                    .await
+                    .map(|_| ()),
+                TailSyncBoundary::Clear => journal.clear_to_size(size).await.map(|_| ()),
+                TailSyncBoundary::Destroy => journal.destroy().await,
+            };
+            assert!(matches!(result, Err(Error::Runtime(_))));
+            let mut names = scan_partition(&context, &data_partition).await;
+            names.sort();
+            let expected: Vec<_> = (0..blobs)
+                .map(|blob: u64| blob.to_be_bytes().to_vec())
+                .collect();
+            assert_eq!(names, expected);
         });
     }
 
@@ -3228,9 +3290,8 @@ mod tests {
             drop(handle);
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            // An in-blob flush never consults the tail sync slot, so the tail writer alone must
-            // surface the failure: the append fails instead of treating the unsynced checksum
-            // as durable and overwriting the slot that still is.
+            // The flush must observe the failed sync before reusing a checksum slot that still
+            // protects the durable prefix.
             let overflow = vec![0u64; 300];
             assert!(matches!(
                 journal.append_many(Many::Flat(&overflow[..])).await,
