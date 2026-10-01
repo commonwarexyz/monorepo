@@ -245,7 +245,7 @@ where
     muxer_size: usize,
     partition_prefix: String,
     latest_epoch: Gauge,
-    _payload: PhantomData<(DV, C)>,
+    _payload: PhantomData<C>,
 }
 
 impl<E, B, M, P, MV, DV, C, A, L, T, ACK> Actor<E, B, M, P, MV, DV, C, A, L, T, ACK>
