@@ -94,6 +94,11 @@ commonware_macros::stability_scope!(BETA {
     pub use crate::crc32::Crc32;
 
     #[cfg(feature = "std")]
+    pub mod chacha20_poly1305;
+    #[cfg(feature = "std")]
+    pub use crate::chacha20_poly1305::ChaCha20Poly1305;
+
+    #[cfg(feature = "std")]
     pub mod handshake;
 
     /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
@@ -312,6 +317,31 @@ commonware_macros::stability_scope!(BETA {
         /// Consume the hasher, returning a freshly-reset hasher alongside the
         /// digest of everything written so far.
         fn finalize(self) -> (Self, Self::Digest);
+    }
+
+    /// Authenticated encryption of an ordered sequence of messages.
+    ///
+    /// Every message is encrypted and authenticated with its associated data. The nth call to
+    /// [Cipher::open] accepts only the nth message sealed under the same key, so replayed,
+    /// reordered, or modified messages fail to open. A failed call consumes the cipher. At most
+    /// one instance may seal under a given key.
+    pub trait Cipher: Random + Sized + Send + Sync + 'static {
+        /// Authentication tag produced for each message.
+        type Tag: Array;
+
+        /// Encrypts the next message in place, authenticated together with `aad`, and returns
+        /// the cipher with the tag.
+        ///
+        /// Returns `None` if sealing fails, in which case the contents of `data` are unspecified.
+        #[must_use = "the cipher is returned only if sealing succeeds"]
+        fn seal(self, aad: &[u8], data: &mut [u8]) -> Option<(Self, Self::Tag)>;
+
+        /// Decrypts the next message in place if `tag` authenticates it together with `aad`, and
+        /// returns the cipher.
+        ///
+        /// Returns `None` if opening fails, in which case the contents of `data` are unspecified.
+        #[must_use = "data is authentic only if opening succeeds"]
+        fn open(self, aad: &[u8], data: &mut [u8], tag: &Self::Tag) -> Option<Self>;
     }
 });
 

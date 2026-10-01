@@ -2553,20 +2553,19 @@ dependencies = [
 name = "commonware-stream"
 version = "2026.9.0"
 dependencies = [
- "chacha20poly1305",
+ "arbitrary",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-formatting",
  "commonware-macros",
+ "commonware-math",
  "commonware-runtime",
  "commonware-utils",
- "criterion",
  "futures",
  "rand 0.10.2",
  "rand_core 0.10.1",
  "thiserror 2.0.18",
- "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]
@@ -2574,7 +2573,6 @@ name = "commonware-stream-fuzz"
 version = "2026.9.0"
 dependencies = [
  "arbitrary",
- "chacha20poly1305",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-runtime",

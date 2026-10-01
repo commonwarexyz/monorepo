@@ -35,7 +35,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
-    Digestible as _, Sha256,
+    ChaCha20Poly1305, Digestible as _, Sha256,
     bls12381::primitives::{
         sharing::{Mode, ModeVersion},
         variant::MinSig,
@@ -58,7 +58,10 @@ use commonware_storage::{
     archive::prunable, journal::contiguous::variable::Config as VariableJournalConfig,
     merkle::full::Config as MerkleConfig, translator::TwoCap,
 };
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
 use commonware_utils::{NZU32, NZU64, NZUsize, ordered::Set};
 use std::{
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -275,7 +278,15 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let provider = ConstantProvider::new(scheme.clone());
 
     let mut p2p_config = discovery::Config::local(
-        Handshake::new(node.signing_key.clone()),
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer: node.signing_key.clone(),
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        ),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,
