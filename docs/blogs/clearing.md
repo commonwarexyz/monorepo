@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (10/1/26): Restores continuous payments while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice.*
+*Update (10/1/26): Restores continuous payments while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice. Operators sign the final payer states once per close with their receipt key.*
 
 *Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 
@@ -189,9 +189,9 @@ Every validator keeps each live account's balance under its public key. Deposits
 
 When a payment names a new public key, the operator records a balance for it without an onchain registration transaction. The recipient can spend the balance after the close is admitted, or let payments from many senders accumulate across multiple closes before requesting a withdrawal of the full balance.
 
-At each close, the operator publishes a shared settlement record called the **dealing**. It contains active account keys, senders' final signed payer states, and cumulative payment entries. A CDN can cache this shared record for efficient distribution.
+At each close, the operator publishes a signed settlement record called the **dealing**, containing active account keys, senders' final signed payer states, and cumulative payment entries. A CDN can cache this shared record for efficient distribution.
 
-Each validator checks the payer signatures and the operator's countersignatures, derives incoming credits, and combines them with its stored balances and the deposits and withdrawals fixed at epoch registration.
+Each validator checks the payer signatures and the operator's batch signature, derives incoming credits, and combines them with its stored balances and the deposits and withdrawals fixed at epoch registration.
 
 From these results, every validator derives three roots:
 
@@ -224,7 +224,7 @@ The operator hashes the dealing with the epoch's registered parameters to identi
 The operator can then verify the certificate and check that the proposal hash matches, without rebuilding the validators' logs.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 34-of-100 certificate.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the canonical batch of final payer states for a, b, c, and d, which the operator signs once with its receipt key. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 34-of-100 certificate.">
 ```
 
 ::: {.image-caption}
