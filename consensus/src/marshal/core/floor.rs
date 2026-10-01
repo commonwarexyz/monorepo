@@ -217,22 +217,19 @@ impl<S: Scheme, C: Digest> State<S, C> {
         FetchAdmission::Issued
     }
 
-    pub(super) fn fetch_all_if_permitted<R>(
+    pub(super) fn fetch_finalizations_if_permitted<R>(
         &self,
         resolver: &mut R,
-        fetches: impl IntoIterator<Item = Request<C>>,
+        mut heights: Vec<Height>,
     ) -> FetchAdmission
     where
         R: Resolver<Key = Key<C>, Subscriber = Annotation>,
     {
-        let mut fetches = fetches
-            .into_iter()
-            .filter(|fetch| self.permits(fetch))
-            .peekable();
-        if fetches.peek().is_none() {
+        heights.retain(|height| self.permits(&Request::finalized(*height)));
+        if heights.is_empty() {
             return FetchAdmission::Denied;
         }
-        resolver.fetch_all(fetches);
+        resolver.fetch_all(heights.into_iter().map(Request::finalized));
         FetchAdmission::Issued
     }
 }
@@ -449,18 +446,18 @@ mod tests {
     }
 
     #[test]
-    fn fetch_all_if_permitted_filters_denied_requests() {
+    fn fetch_finalizations_if_permitted_filters_denied_requests() {
         let floor = floor();
         let mut resolver = TestResolver::default();
 
         assert!(matches!(
-            floor.fetch_all_if_permitted(
+            floor.fetch_finalizations_if_permitted(
                 &mut resolver,
                 vec![
-                    Request::finalized(Height::new(5)),
-                    Request::finalized(Height::new(6)),
-                    Request::notarized(round(5)),
-                    Request::notarized(round(6)),
+                    Height::new(5),
+                    Height::new(6),
+                    Height::new(4),
+                    Height::new(7),
                 ],
             ),
             FetchAdmission::Issued
@@ -469,18 +466,13 @@ mod tests {
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), 2);
         assert!(matches!(fetches[0].key, Key::Finalized { height } if height == Height::new(6)));
-        assert!(
-            matches!(fetches[1].key, Key::Notarized { round: request_round } if request_round == round(6))
-        );
+        assert!(matches!(fetches[1].key, Key::Finalized { height } if height == Height::new(7)));
 
         let mut resolver = TestResolver::default();
         assert!(matches!(
-            floor.fetch_all_if_permitted(
+            floor.fetch_finalizations_if_permitted(
                 &mut resolver,
-                vec![
-                    Request::finalized(Height::new(5)),
-                    Request::notarized(round(5)),
-                ],
+                vec![Height::new(5), Height::new(4),],
             ),
             FetchAdmission::Denied
         ));
