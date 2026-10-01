@@ -121,8 +121,8 @@ pub type Recovery<B> = Writer<B, Recovering>;
 
 /// Unique writer to a cache-wrapped [Blob].
 ///
-/// Asynchronous mutating methods consume the writer and return it only on success: an error (or
-/// a dropped future) destroys the writer.
+/// Storage-mutating functions consume the writer and return it only on success: an error (or a
+/// dropped future) destroys the handle.
 pub struct Writer<B: Blob, Phase = Append> {
     /// Distinguishes the recovery owner from the append-only writer.
     phase: PhantomData<Phase>,

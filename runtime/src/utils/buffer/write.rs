@@ -26,8 +26,8 @@ use std::num::NonZeroUsize;
 /// buffer state and [Self::sync] may use [Blob::write_at] with [WriteOptions::SYNC], which is
 /// not a durability barrier for those external mutations.
 ///
-/// Asynchronous mutating methods consume the writer and return it only on success: an error (or
-/// a dropped future) destroys the writer.
+/// Storage-mutating functions consume the writer and return it only on success: an error (or a
+/// dropped future) destroys the handle.
 ///
 /// # Example
 ///

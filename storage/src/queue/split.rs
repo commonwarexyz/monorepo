@@ -29,9 +29,9 @@ type Snapshot<E, V> = Arc<variable::Reader<'static, E, V>>;
 
 /// Writer handle for enqueueing items.
 ///
-/// Methods that mutate storage consume the writer and return it only on success: an error (or
-/// a dropped future) destroys it. The reader then delivers every published item and returns
-/// `None`.
+/// Storage-mutating functions consume the writer and return it only on success: an error (or a
+/// dropped future) destroys the handle.
+/// The reader then delivers every published item and returns `None`.
 pub struct Writer<E: Context, V: CodecShared> {
     /// The underlying journal storing queue items.
     journal: variable::Journal<E, V>,
