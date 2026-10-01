@@ -211,12 +211,12 @@ impl<D: Digest> Read for Chunk<D> {
 
     fn read_cfg(
         reader: &mut impl Buf,
-        (config, maximum_data): &Self::Cfg,
+        (config, maximum): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         // Encoding rejects longer data, and the width grows with the data length, so the widest
         // shard encodes the most data.
         let width = canonical_shard_len(
-            (*maximum_data).min(Widen::widen(u32::MAX)),
+            (*maximum).min(Widen::widen(u32::MAX)),
             config.minimum_shards.widen(),
         );
         let shard = Bytes::read_cfg(reader, &RangeCfg::new(..=width))?;

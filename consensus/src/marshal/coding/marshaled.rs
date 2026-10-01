@@ -118,6 +118,7 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
+use futures::future::Either;
 use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span, warn};
@@ -330,9 +331,14 @@ where
         // cached block before verification registers its wait, verification is left with neither
         // the block nor an active fetch. Register the wait before the caller publishes the gate so
         // it receives the cached block or is waiting when recovery delivers it.
-        let block_request = prefetched_block
-            .is_none()
-            .then(|| marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait));
+        let candidate = prefetched_block.map_or_else(
+            || {
+                Either::Right(
+                    marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait),
+                )
+            },
+            Either::Left,
+        );
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -364,12 +370,9 @@ where
                 // Get the candidate block either from the caller or by waiting for
                 // local reconstruction. Candidate data remains local-only: a
                 // notarization is not sufficient reason to request it from peers.
-                let block = if let Some(block) = prefetched_block {
-                    block
-                } else {
-                    let block_request =
-                        block_request.expect("a missing prefetched block registers a wait");
-                    select! {
+                let block = match candidate {
+                    Either::Left(block) => block,
+                    Either::Right(block_request) => select! {
                         _ = tx.closed() => {
                             debug!(
                                 reason = "consensus dropped receiver",
@@ -384,7 +387,7 @@ where
                                 return;
                             }
                         },
-                    }
+                    },
                 };
 
                 // Start the candidate store immediately: it depends on neither the
