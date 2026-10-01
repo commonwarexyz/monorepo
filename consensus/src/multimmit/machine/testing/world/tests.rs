@@ -172,25 +172,30 @@ mod successor_matrix {
         effects: &[Capability<MinPk, Digest>],
         id: EffectId,
     ) -> PublicationWitness {
-        effects
-            .iter()
-            .find_map(|effect| {
-                let job = match effect {
-                    Capability::Released(job) if job.issued().id() == id => Some(job.clone()),
-                    Capability::Journal(directive) => directive
-                        .clone()
-                        .release_after_enqueue
-                        .into_iter()
-                        .find(|job| job.issued().id() == id),
-                    _ => None,
-                }?;
-                Some(PublicationWitness {
-                    id,
-                    generation: job.issued().generation(),
-                    effect: job.request().clone(),
-                })
-            })
+        find_publication(effects, id)
             .unwrap_or_else(|| panic!("publication {id:?} was absent from {effects:?}"))
+    }
+
+    fn find_publication(
+        effects: &[Capability<MinPk, Digest>],
+        id: EffectId,
+    ) -> Option<PublicationWitness> {
+        effects.iter().find_map(|effect| {
+            let job = match effect {
+                Capability::Released(job) if job.issued().id() == id => Some(job.clone()),
+                Capability::Journal(directive) => directive
+                    .clone()
+                    .release_after_enqueue
+                    .into_iter()
+                    .find(|job| job.issued().id() == id),
+                _ => None,
+            }?;
+            Some(PublicationWitness {
+                id,
+                generation: job.issued().generation(),
+                effect: job.request().clone(),
+            })
+        })
     }
 
     fn authenticate_one(
@@ -373,12 +378,14 @@ mod successor_matrix {
                 let expected = DurableEffect::broadcast(Arc::new(certificate.clone()));
                 let step = authenticate_one(runner, certificate);
                 let barrier = only_persist(&step);
-                let released = publication_witness(
-                    step.capabilities(),
-                    EffectId::from_cursor(barrier.last_cursor()),
+                // The certificate is published only once its record is durable.
+                assert!(
+                    find_publication(
+                        step.capabilities(),
+                        EffectId::from_cursor(barrier.last_cursor())
+                    )
+                    .is_none()
                 );
-                assert_eq!(released.generation, barrier.generation());
-                assert_eq!(released.effect, expected);
                 (barrier, Some(expected))
             }
             SuccessorFamily::ForwardedExit => {
@@ -620,7 +627,12 @@ mod successor_matrix {
             BarrierCut::BeforeAppend => {}
             BarrierCut::AfterAppend => runner.append(&target).unwrap(),
             BarrierCut::AfterAck => {
-                runner.persist(&target, Until::Step);
+                let acknowledged = runner.persist(&target, Until::Step);
+                if family == SuccessorFamily::Da {
+                    let released = publication_witness(acknowledged.capabilities(), replacement_id);
+                    assert_eq!(released.generation, target.generation());
+                    assert_eq!(replacement.as_ref(), Some(&released.effect));
+                }
             }
         }
 
