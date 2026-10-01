@@ -386,10 +386,8 @@ where
         let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
 
         // Observe durable syncs that no consensus caller awaits (the
-        // notarization and finalization paths). A flush failure inside
-        // `start_sync` is reported only through the returned handle, so every
-        // handle must be observed to apply the fatal policy. This pool does
-        // so without blocking the actor on a sync.
+        // notarization and finalization paths), so a failure applies the fatal
+        // policy without waiting for a later archive call or blocking the actor.
         let mut syncs = Pool::<PooledSync>::default();
 
         // Anchor all startup work under a single root span. Tip recovery, floor

@@ -16,17 +16,16 @@
 //!
 //! # Concurrent Access
 //!
-//! For concurrent access from separate writer and reader tasks, use the [shared] module.
-//! Writers can be cloned for multiple producer tasks.
+//! For concurrent access from separate writer and reader tasks, use [Queue::split].
 //!
 //! ```rust,ignore
-//! use commonware_storage::queue::shared;
+//! use commonware_storage::queue::Queue;
 //! use commonware_macros::select;
 //!
-//! let (writer, mut reader) = shared::init(context, config).await?;
+//! let (writer, mut reader) = Queue::init(context, config).await?.split().await?;
 //!
-//! // Writer task (can clone for multiple producers)
-//! writer.enqueue(item).await?;
+//! // Writer task
+//! let (writer, position) = writer.enqueue(item).await?;
 //!
 //! // Reader task
 //! loop {
@@ -34,7 +33,7 @@
 //!         result = reader.recv() => {
 //!             let Some((pos, item)) = result? else { break };
 //!             // Process item...
-//!             reader.ack(pos).await?;
+//!             reader.ack(pos)?;
 //!         }
 //!         _ = shutdown => break,
 //!     }
@@ -86,11 +85,12 @@
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
+mod cursor;
 mod metrics;
-pub mod shared;
+mod split;
 mod storage;
 
-pub use shared::{Reader, Writer};
+pub use split::{Reader, Writer};
 pub use storage::{Config, Queue};
 use thiserror::Error;
 
@@ -101,8 +101,4 @@ pub enum Error {
     Journal(#[from] crate::journal::Error),
     #[error("position out of range: {0} (queue size is {1})")]
     PositionOutOfRange(u64, u64),
-    #[error(
-        "queue is no longer usable: a previous operation failed or was interrupted; reopen it to recover"
-    )]
-    Unavailable,
 }

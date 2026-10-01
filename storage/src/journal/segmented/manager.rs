@@ -13,7 +13,7 @@ use commonware_runtime::{
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use futures::future::{join_all, try_join_all};
+use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     future::Future,
@@ -87,8 +87,8 @@ pub trait SectionBuffer: Sized + Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> u64;
 
-    /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync or
-    /// retained failure. When false, [Self::sync] and [Self::start_sync] perform no I/O.
+    /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync.
+    /// When false, [Self::sync] and [Self::start_sync] perform no I/O.
     fn needs_sync(&self) -> bool;
 
     /// Ensure all data accepted by this buffer is durably persisted.
@@ -99,7 +99,7 @@ pub trait SectionBuffer: Sized + Send + Sync {
     /// The returned handle covers every write accepted before this call returns; later writes
     /// need a new sync. Implementations must wait for an outstanding sync before mutating the
     /// underlying blob and may reuse an in-flight handle when no newer writes need syncing.
-    fn start_sync(self) -> impl Future<Output = (Self, Handle<()>)> + Send;
+    fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), RError>> + Send;
 
     /// Wait for any started sync to complete without starting a new sync.
     fn wait_for_sync(self) -> impl Future<Output = Result<Self, RError>> + Send;
@@ -121,7 +121,7 @@ impl<B: Blob> SectionBuffer for PagedRecovery<B> {
         Self::sync(self).await
     }
 
-    async fn start_sync(self) -> (Self, Handle<()>) {
+    async fn start_sync(self) -> Result<(Self, Handle<()>), RError> {
         Self::start_sync(self).await
     }
 
@@ -148,7 +148,7 @@ impl<B: Blob> SectionBuffer for Write<B> {
         Self::sync(self).await
     }
 
-    async fn start_sync(self) -> (Self, Handle<()>) {
+    async fn start_sync(self) -> Result<(Self, Handle<()>), RError> {
         Self::start_sync(self).await
     }
 
@@ -238,11 +238,10 @@ pub struct Config<F> {
 ///
 /// # In-flight syncs
 ///
-/// Syncs started by [Manager::start_sync] complete in the background, so every path that removes a
-/// blob from `blobs` (`prune`, `remove_section`, `truncate_pending`, `clear`, `destroy`) must call
-/// [SectionBuffer::wait_for_sync] before dropping it. This resolves the sync's shared completion
-/// first, guaranteeing that caller-held sync handles always report the sync's true result and that
-/// no buffer is dropped with I/O in flight.
+/// Syncs started by [Manager::start_sync] complete in the background, so every path that discards
+/// a section (`prune`, `remove_section`, `truncate_pending`, `clear`, `destroy`) must call
+/// [SectionBuffer::wait_for_sync] before dropping its buffer. This resolves the sync's shared
+/// completion first, so caller-held sync handles report the sync's true result.
 pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     context: E,
     partition: String,
@@ -421,8 +420,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// that sync's handle rather than starting a new one.
     ///
     /// The handle is a detached observer: dropping it does not cancel the sync, and a failure of
-    /// the started sync, or of the flush that precedes it, resurfaces from the buffer on the
-    /// section's next sync or flushing operation.
+    /// the started sync resurfaces from the buffer on the section's next sync or flushing
+    /// operation.
     pub async fn start_sync(
         mut self,
         sections: impl crate::Sections,
@@ -442,16 +441,21 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
                 blob.needs_sync()
             })
             .map(|(section, blob)| async move {
-                let (blob, handle) = blob.start_sync().await;
-                ((section, blob), handle)
+                blob.start_sync()
+                    .await
+                    .map(|(blob, handle)| ((section, blob), handle))
             })
             .collect();
+        let (blobs, handles): (Vec<_>, Vec<_>) = try_join_all(futures)
+            .await
+            .map_err(Error::Runtime)?
+            .into_iter()
+            .unzip();
+        self.blobs.extend(blobs);
 
         // Count every selected section, including reused syncs and clean sections left in place,
         // matching `sync` and `sync_all`.
         self.synced.inc_by(count);
-        let (blobs, handles): (Vec<_>, Vec<_>) = join_all(futures).await.into_iter().unzip();
-        self.blobs.extend(blobs);
         let handle = Handle::from_future(async move { try_join_all(handles).await.map(|_| ()) });
         Ok((self, handle))
     }
@@ -842,10 +846,10 @@ pub(super) mod tests {
             Ok(self)
         }
 
-        async fn start_sync(mut self) -> (Self, Handle<()>) {
+        async fn start_sync(mut self) -> Result<(Self, Handle<()>), RError> {
             if let Some(syncing) = &self.syncing {
                 let handle = Handle::from_future(syncing.clone());
-                return (self, handle);
+                return Ok((self, handle));
             }
             self.dirty = false;
             let (sender, receiver) = oneshot::channel();
@@ -857,7 +861,7 @@ pub(super) mod tests {
             .boxed()
             .shared();
             self.syncing = Some(sync.clone());
-            (self, Handle::from_future(sync))
+            Ok((self, Handle::from_future(sync)))
         }
 
         async fn wait_for_sync(mut self) -> Result<Self, RError> {

@@ -53,7 +53,7 @@ enum SyncState {
     Clean,
     // Unsynced mutations need a sync.
     Dirty,
-    // A started sync is in flight, or a retained failure awaits observation.
+    // A started sync is in flight or awaits observation.
     Pending(Completion),
 }
 
@@ -88,15 +88,6 @@ impl SyncState {
                 Err(err)
             }
         }
-    }
-
-    /// Retain a failed mutation for [Self::wait_for_pending] and return a handle that reports
-    /// the same failure.
-    fn fail(&mut self, err: crate::Error) -> crate::Handle<()> {
-        let failed = Completion::from(crate::Handle::ready(Err(err)));
-        let handle = failed.handle();
-        *self = Self::Pending(failed);
-        handle
     }
 
     /// Write data with the provided options while tracking durability.
@@ -1622,8 +1613,9 @@ mod tests {
         });
     }
 
+    /// A failed flush inside `start_sync` returns an error.
     #[test_traced]
-    fn test_write_start_sync_flush_failure_is_retained() {
+    fn test_write_start_sync_flush_failure_returns_err() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let faults = WriteFaults::default();
@@ -1632,21 +1624,17 @@ mod tests {
                 faults: faults.clone(),
             };
             let (blob, size) = context
-                .open("partition", b"retained_flush_failure")
+                .open("partition", b"start_sync_flush_failure")
                 .await
                 .unwrap();
-            let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
+            let writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
 
-            // The buffered write inside start_sync fails. The handle reports it, and the writer
-            // must too, because a caller may drop the handle unobserved.
-            writer = writer.write_at(0, b"abc").await.unwrap();
+            // Buffer a write so start_sync must flush it.
+            let writer = writer.write_at(0, b"abc").await.unwrap();
+
+            // The flush inside start_sync fails.
             faults.arm();
-            let (writer, handle) = writer.start_sync().await;
-            faults.disarm();
-            assert!(handle.await.is_err());
-
-            // The writer retains the flush failure and reports it on the next sync.
-            assert!(writer.sync().await.is_err());
+            assert!(writer.start_sync().await.is_err());
         });
     }
 
@@ -1669,6 +1657,10 @@ mod tests {
 
             // An overflowing offset is refused, leaving write_at to report the overflow.
             assert!(!writer.try_write_at(u64::MAX, b"x"));
+            assert_eq!(writer.size(), 3);
+
+            // An empty write leaves the writer unchanged, like write_at.
+            assert!(writer.try_write_at(6, &[]));
             assert_eq!(writer.size(), 3);
 
             // The merged bytes read back and persist through a sync.
@@ -1700,13 +1692,25 @@ mod tests {
 
             // A started sync needs observation while it is in flight and after it completes.
             writer = writer.write_at(3, b"d").await.unwrap();
-            let (writer, handle) = writer.start_sync().await;
+            let (writer, handle) = writer.start_sync().await.unwrap();
             assert!(writer.needs_sync());
             next_pending_sync(&pending).release.send(Ok(())).unwrap();
             handle.await.unwrap();
             assert!(writer.needs_sync());
             let writer = writer.wait_for_sync().await.unwrap();
             assert!(!writer.needs_sync());
+
+            // A failed started sync keeps the writer in need of a sync. The handle reports the
+            // failure, and so does the next sync.
+            let writer = writer.write_at(4, b"e").await.unwrap();
+            let (writer, handle) = writer.start_sync().await.unwrap();
+            next_pending_sync(&pending)
+                .release
+                .send(Err(Error::Closed))
+                .unwrap();
+            assert!(handle.await.is_err());
+            assert!(writer.needs_sync());
+            assert!(writer.sync().await.is_err());
         });
     }
 
@@ -1721,7 +1725,7 @@ mod tests {
 
             // Start a sync for buffered bytes and wait for the returned handle.
             writer = writer.write_at(0, b"abc").await.unwrap();
-            let (mut writer, handle) = writer.start_sync().await;
+            let (mut writer, handle) = writer.start_sync().await.unwrap();
             handle.await.unwrap();
 
             // The buffered write required a full sync because the fresh writer starts dirty.
@@ -1742,7 +1746,7 @@ mod tests {
             assert_eq!(range_syncs, 1);
 
             // Nothing left to sync.
-            let (_, handle) = writer.start_sync().await;
+            let (_, handle) = writer.start_sync().await.unwrap();
             handle.await.unwrap();
             let (_, _, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(full_syncs, 1);
@@ -1761,7 +1765,7 @@ mod tests {
             let writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
             // Hold the started sync open so a later sync cannot finish right away.
-            let (writer, handle) = writer.start_sync().await;
+            let (writer, handle) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
 
             // The attempted sync reaches the pending handle and cannot complete yet.
@@ -1800,7 +1804,7 @@ mod tests {
             let writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
             // Begin syncing the initial dirty state and keep that sync blocked.
-            let (mut writer, handle) = writer.start_sync().await;
+            let (mut writer, handle) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
 
             // The tip must not reach the blob while the earlier sync is pending.
@@ -1848,7 +1852,7 @@ mod tests {
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let writer = Write::from_pooler(&context, blob, inner.size(), NZUsize!(8));
 
-            let (mut writer, handle) = writer.start_sync().await;
+            let (mut writer, handle) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
 
             // This append is local while the earlier sync is pending.
@@ -1897,7 +1901,7 @@ mod tests {
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let writer = Write::from_pooler(&context, blob, inner.size(), NZUsize!(8));
 
-            let (writer, handle) = writer.start_sync().await;
+            let (writer, handle) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
             let original_size = inner.size();
 

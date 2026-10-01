@@ -124,7 +124,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
 }
 
 impl<E: Storage + Metrics, A: CodecFixed> Inner<E, A> {
-    /// The section's writer. A replayed section cannot be removed while the replay owns the journal.
+    /// The section's writer. Only a failed or cancelled repair removes a replayed section, and
+    /// either ends the replay.
     fn writer(&self, section: u64) -> Result<&PagedRecovery<E::Blob>, Error> {
         Ok(self
             .manager

@@ -122,8 +122,7 @@ pub type Recovery<B> = Writer<B, Recovering>;
 /// Unique writer to a cache-wrapped [Blob].
 ///
 /// Asynchronous mutating methods consume the writer and return it only on success: an error (or
-/// a dropped future) destroys the writer. [Self::start_sync] returns the writer even when its
-/// flush fails. The returned handle reports that failure.
+/// a dropped future) destroys the writer.
 pub struct Writer<B: Blob, Phase = Append> {
     /// Distinguishes the recovery owner from the append-only writer.
     phase: PhantomData<Phase>,
@@ -141,7 +140,7 @@ pub struct Writer<B: Blob, Phase = Append> {
     ///
     /// Rewrites preserve this slot byte-identically so a torn rewrite can never lose the page's
     /// last durable contents. It trails [Self::partial_page_state] until a completed sync proves
-    /// the flushed state durable: an unsynced flush ([Self::replay], [Self::snapshot]) must not
+    /// the flushed state durable: an unsynced flush ([Self::replay], [Self::start_sync]) must not
     /// advance it, or a later rewrite would evict the durable checksum and a crash cutting both
     /// writes could leave no slot covering the synced prefix.
     durable_page_state: Option<ActiveChecksum>,
@@ -519,14 +518,15 @@ impl<B: Blob> Writer<B> {
         Ok((None, 0, invalid_data_found))
     }
 
-    /// Flush buffered data and capture an immutable [`Sealed`] view.
+    /// Capture an immutable [`Sealed`] view of the logical bytes.
     ///
-    /// This writes buffered bytes to the blob layout but does not make them durable. Call
-    /// [`Self::sync`] if the returned handle's bytes must survive a crash.
+    /// Buffered full pages are written to the blob, and the partial page is copied into the view.
+    /// Neither is made durable. Call [`Self::sync`] if the returned handle's bytes must survive a
+    /// crash.
     ///
     /// Later appends preserve this view, including its frozen partial page.
     pub async fn snapshot(mut self) -> Result<(Self, Sealed<B>), Error> {
-        self.flush_internal(true, false).await?;
+        self.flush_internal(false, false).await?;
         let sealed = self.sealed_handle(self.id);
         Ok((self, sealed))
     }
@@ -705,6 +705,15 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             self.flush_internal(false, false).await?;
         }
         Ok((self, offset))
+    }
+
+    /// Append `buf` to the write buffer if it fits.
+    ///
+    /// Returns its logical offset on success. Returns `None` without changing the writer when
+    /// there is insufficient buffer space. Performs no I/O and does not make the append durable.
+    /// Callers can fall back to [`Self::append_owned`] when it does not fit.
+    pub fn try_append(&mut self, buf: &[u8]) -> Option<u64> {
+        self.buffer.try_append(buf)
     }
 
     /// Encode a value directly into the write buffer if it fits.
@@ -909,7 +918,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         let write_at_offset = self.current_page * physical_page_size as u64;
 
         // Update state before writing. No blob mutation follows a failed write: the failing
-        // method drops the writer, and `start_sync` retains the failure for the next one.
+        // method drops the writer.
         self.current_page += pages_to_cache as u64;
         self.partial_page_state = partial_page_state;
         if pages_to_cache > 0 {
@@ -953,8 +962,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         self.buffer.size()
     }
 
-    /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync or
-    /// retained failure.
+    /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync.
     pub fn needs_sync(&self) -> bool {
         !self.sync_state.is_clean() || self.has_flush_work(true)
     }
@@ -1253,15 +1261,12 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     ///
     /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
-    /// mutate the blob first wait for any outstanding start_sync handles. A flush failure is
-    /// retained the same way: the handle reports it, and so does the next such call.
-    #[must_use]
-    pub async fn start_sync(mut self) -> (Self, Handle<()>) {
-        let handle = match self.flush_internal(true, false).await {
-            Ok(_) => self.sync_state.start_sync(&self.blob).await,
-            Err(err) => self.sync_state.fail(err),
-        };
-        (self, handle)
+    /// mutate the blob first wait for any outstanding start_sync handles. A failure of the started
+    /// sync is reported by the handle and by the next such call.
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        self.flush_internal(true, false).await?;
+        let handle = self.sync_state.start_sync(&self.blob).await;
+        Ok((self, handle))
     }
 
     /// Length of the longest contiguous prefix of well-formed pages on the blob.
@@ -1401,6 +1406,34 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    /// `try_append` buffers bytes within the flush threshold at the writer's size and leaves the
+    /// writer unchanged otherwise.
+    #[test_traced]
+    fn test_try_append_capacity() {
+        deterministic::Runner::default().start(|context| async move {
+            let (blob, size) = context.open("try_append", b"blob").await.unwrap();
+            let cache = CacheRef::from_pooler(&context, NZU16!(16), NZUsize!(4));
+            let mut writer = Writer::new(blob, size, 32, cache).await.unwrap();
+
+            // Bytes within the threshold are buffered at the current size.
+            assert_eq!(writer.try_append(&[1; 20]), Some(0));
+            assert_eq!(writer.try_append(&[2; 12]), Some(20));
+            assert_eq!(writer.size(), 32);
+
+            // Bytes past the threshold are refused without changing the writer.
+            assert_eq!(writer.try_append(&[3]), None);
+            assert_eq!(writer.size(), 32);
+
+            // The refused bytes take the ordinary flushing path, and everything reads back.
+            let (writer, offset) = writer.append(&[3]).await.unwrap();
+            assert_eq!(offset, 32);
+            let read = writer.read_at(0, 33).await.unwrap().coalesce();
+            assert_eq!(&read.as_ref()[..20], &[1; 20]);
+            assert_eq!(&read.as_ref()[20..32], &[2; 12]);
+            assert_eq!(read.as_ref()[32], 3);
+        });
+    }
 
     #[test_traced]
     fn test_append_value_capacity_snapshot_and_recovery() {
@@ -1591,7 +1624,7 @@ mod tests {
         });
     }
 
-    /// Unsynced partial-page flushes ([Writer::snapshot], [Writer::replay]) rewrite the tail
+    /// Unsynced partial-page flushes ([Writer::replay]) rewrite the tail
     /// page without a durability barrier. Every rewrite must keep the page's durable checksum
     /// slot byte-identical: a crash can cut the unsynced rewrites per byte, and whichever bytes
     /// land, the footer must still validate the synced prefix.
@@ -1602,7 +1635,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let physical_page = page_size + CHECKSUM_SIZE as usize;
             let (blob, blob_size) = context
-                .open("test_partition", b"snapshot_torn")
+                .open("test_partition", b"replay_torn")
                 .await
                 .unwrap();
             let blob = Arc::new(blob);
@@ -1623,9 +1656,15 @@ mod tests {
 
             // Two unsynced rewrites of the same page.
             (writer, _) = writer.append(&[25u8; 8]).await.unwrap();
-            (writer, _) = writer.snapshot().await.unwrap();
+            (writer, _) = writer
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .await
+                .unwrap();
             (writer, _) = writer.append(&[26u8; 8]).await.unwrap();
-            writer.snapshot().await.unwrap();
+            writer
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .await
+                .unwrap();
             let torn_image = blob
                 .read_at(0, physical_page, ReadOptions::default())
                 .await
@@ -1637,7 +1676,7 @@ mod tests {
             let mut crash = durable_image.as_ref().to_vec();
             crash[page_size..].copy_from_slice(&torn_image.as_ref()[page_size..]);
             let (crashed, _) = context
-                .open("test_partition", b"snapshot_crash")
+                .open("test_partition", b"replay_crash")
                 .await
                 .unwrap();
             crashed
@@ -3130,7 +3169,7 @@ mod tests {
                 .unwrap();
 
             // A fresh writer is dirty, so start_sync does one full fsync; nothing is buffered to write.
-            let (mut writer, handle) = writer.start_sync().await;
+            let (mut writer, handle) = writer.start_sync().await.unwrap();
             // Let the started sync finish.
             handle.await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
@@ -3148,7 +3187,7 @@ mod tests {
             assert_eq!(range_syncs, 1);
 
             // Nothing left to sync, so start_sync does nothing.
-            let (_, handle) = writer.start_sync().await;
+            let (_, handle) = writer.start_sync().await.unwrap();
             handle.await.unwrap();
             let (_, _, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(full_syncs, 1);
@@ -3164,8 +3203,9 @@ mod tests {
         });
     }
 
+    /// A failed flush inside `start_sync` returns an error.
     #[test_traced("DEBUG")]
-    fn test_start_sync_flush_failure_is_retained() {
+    fn test_start_sync_flush_failure_returns_err() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let faults = WriteFaults::default();
@@ -3174,7 +3214,7 @@ mod tests {
                 faults: faults.clone(),
             };
             let (blob, size) = context
-                .open("test_partition", b"retained_flush_failure")
+                .open("test_partition", b"start_sync_flush_failure")
                 .await
                 .unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -3187,29 +3227,18 @@ mod tests {
             writer = writer.sync().await.unwrap();
             (writer, _) = writer.append(&[2u8; 8]).await.unwrap();
 
-            // The rewrite inside start_sync fails. The handle reports it, and the writer must too,
-            // because a caller may drop the handle unobserved.
+            // The rewrite inside start_sync fails.
             faults.arm();
-            let (writer, handle) = writer.start_sync().await;
-            faults.disarm();
-            assert!(handle.await.is_err());
-
-            // The writer retains the flush failure and reports it on the next sync.
-            assert!(writer.sync().await.is_err());
+            assert!(writer.start_sync().await.is_err());
         });
     }
 
     /// `needs_sync` reports whether `sync` has work: buffered pages, unsynced mutations, or a
-    /// started sync (including a retained flush failure) that the writer has not observed.
+    /// started sync that the writer has not observed.
     #[test_traced("DEBUG")]
     fn test_needs_sync_tracks_sync_work() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let faults = WriteFaults::default();
-            let context = WriteFaultContext {
-                inner: context,
-                faults: faults.clone(),
-            };
             let (blob, size) = context.open("test_partition", b"needs_sync").await.unwrap();
             let (blob, pending) = DelayedSyncBlob::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -3230,7 +3259,7 @@ mod tests {
 
             // A started sync needs observation while it is in flight and after it completes.
             (writer, _) = writer.append(&[2u8; 4]).await.unwrap();
-            let (writer, handle) = writer.start_sync().await;
+            let (writer, handle) = writer.start_sync().await.unwrap();
             assert!(writer.needs_sync());
             next_pending_sync(&pending).release.send(Ok(())).unwrap();
             handle.await.unwrap();
@@ -3238,14 +3267,16 @@ mod tests {
             let mut writer = writer.wait_for_sync().await.unwrap();
             assert!(!writer.needs_sync());
 
-            // A failed flush inside start_sync keeps the writer in need of a sync, which then
-            // reports the failure.
+            // A failed started sync keeps the writer in need of a sync. The handle reports the
+            // failure, and so does the next sync.
             (writer, _) = writer.append(&[3u8; 8]).await.unwrap();
-            faults.arm();
-            let (writer, handle) = writer.start_sync().await;
-            faults.disarm();
-            assert!(writer.needs_sync());
+            let (writer, handle) = writer.start_sync().await.unwrap();
+            next_pending_sync(&pending)
+                .release
+                .send(Err(Error::Closed))
+                .unwrap();
             assert!(handle.await.is_err());
+            assert!(writer.needs_sync());
             assert!(writer.sync().await.is_err());
         });
     }
@@ -3261,7 +3292,7 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
-            let (writer, handle) = writer.start_sync().await;
+            let (writer, handle) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
 
             // Try to sync while the started sync is still blocked.
@@ -3295,7 +3326,7 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
-            let (writer, handle) = writer.start_sync().await;
+            let (writer, handle) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
             let (writer, _) = writer.append(b"hello world").await.unwrap();
 
@@ -3332,7 +3363,7 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
-            let (mut writer, handle) = writer.start_sync().await;
+            let (mut writer, handle) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
 
             let data = vec![7; BUFFER_SIZE + PAGE_SIZE.get() as usize];
@@ -3372,7 +3403,7 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
-            let (mut writer, prior) = writer.start_sync().await;
+            let (mut writer, prior) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
             (writer, _) = writer.append(b"hello world").await.unwrap();
 
@@ -3422,23 +3453,20 @@ mod tests {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
-            // Start a sync, then buffer newer bytes not covered by it.
-            let (mut writer, prior) = writer.start_sync().await;
+            // Start a sync, then buffer a full page and a partial page not covered by it.
+            let data = [7u8; PAGE_SIZE.get() as usize + 47];
+            let (mut writer, prior) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
-            (writer, _) = writer.append(b"hello world").await.unwrap();
+            (writer, _) = writer.append(&data).await.unwrap();
 
             let snapshot = context.child("snapshot").spawn(move |_| async move {
                 let (writer, snapshot) = writer.snapshot().await.unwrap();
-                let read = snapshot
-                    .read_at(0, b"hello world".len())
-                    .await
-                    .unwrap()
-                    .coalesce();
-                assert_eq!(read.as_ref(), b"hello world");
+                let read = snapshot.read_at(0, data.len()).await.unwrap().coalesce();
+                assert_eq!(read.as_ref(), data.as_slice());
                 writer
             });
 
-            // Snapshot must wait before flushing buffered bytes.
+            // Snapshot must wait before flushing the full page.
             deferred
                 .blocked
                 .await
@@ -3448,7 +3476,7 @@ mod tests {
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
-            // Releasing the sync lets snapshot flush and read the buffered bytes.
+            // Releasing the sync lets snapshot flush the full page and read the buffered bytes.
             deferred.release.send(Ok(())).unwrap();
             let _writer = snapshot.await.unwrap();
             prior.await.unwrap();
@@ -3456,6 +3484,35 @@ mod tests {
             assert_eq!(writes, 1);
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 0);
+        });
+    }
+
+    /// A snapshot copies the partial page instead of writing it, and later appends and syncs
+    /// leave its view unchanged.
+    #[test_traced("DEBUG")]
+    fn test_snapshot_copies_partial_page_without_writing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = Arc::new(SyncTrackingBlob::new());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Snapshot a partial page without writing it.
+            let (writer, _) = writer.append(b"hello").await.unwrap();
+            let (writer, snapshot) = writer.snapshot().await.unwrap();
+            let (_, writes, _, _) = blob.snapshot();
+            assert_eq!(writes, 0);
+
+            // Appending and syncing later bytes writes the page without changing the view.
+            let (writer, _) = writer.append(b" world").await.unwrap();
+            let _writer = writer.sync().await.unwrap();
+            let (_, writes, _, _) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(snapshot.size(), 5);
+            let read = snapshot.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
         });
     }
 
@@ -3471,7 +3528,7 @@ mod tests {
             let writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
             // Start a sync, then buffer newer bytes not covered by it.
-            let (mut writer, prior) = writer.start_sync().await;
+            let (mut writer, prior) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
             (writer, _) = writer.append(b"hello world").await.unwrap();
 
@@ -3517,7 +3574,7 @@ mod tests {
             let writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
             // Start a sync before growing into the direct-write path.
-            let (mut writer, prior) = writer.start_sync().await;
+            let (mut writer, prior) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
 
             let target_size = (BUFFER_SIZE + PAGE_SIZE.get() as usize) as u64;
@@ -3566,7 +3623,7 @@ mod tests {
             (writer, _) = writer.append(&data).await.unwrap();
             writer = writer.sync().await.unwrap();
             (writer, _) = writer.append(b"x").await.unwrap();
-            let (mut writer, prior) = writer.start_sync().await;
+            let (mut writer, prior) = writer.start_sync().await.unwrap();
             let deferred = next_pending_sync(&pending);
             let physical_size = inner.size();
 

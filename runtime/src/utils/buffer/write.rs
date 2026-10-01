@@ -27,8 +27,7 @@ use std::num::NonZeroUsize;
 /// not a durability barrier for those external mutations.
 ///
 /// Asynchronous mutating methods consume the writer and return it only on success: an error (or
-/// a dropped future) destroys the writer. [Self::start_sync] returns the writer even when its
-/// flush fails. The returned handle reports that failure.
+/// a dropped future) destroys the writer.
 ///
 /// # Example
 ///
@@ -100,8 +99,7 @@ impl<B: Blob> Write<B> {
         self.buffer.size()
     }
 
-    /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync or
-    /// retained failure.
+    /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync.
     pub const fn needs_sync(&self) -> bool {
         !self.buffer.is_empty() || !self.sync_state.is_clean()
     }
@@ -161,7 +159,8 @@ impl<B: Blob> Write<B> {
     /// fit. Performs no I/O and does not make the write durable. Callers can fall back to
     /// [`Self::write_at`] when it does not fit.
     pub fn try_write_at(&mut self, offset: u64, buf: &[u8]) -> bool {
-        offset.checked_add(buf.len() as u64).is_some() && self.buffer.merge(buf, offset)
+        buf.is_empty()
+            || (offset.checked_add(buf.len() as u64).is_some() && self.buffer.merge(buf, offset))
     }
 
     /// Write bytes from `buf` at `offset`.
@@ -262,22 +261,16 @@ impl<B: Blob> Write<B> {
     ///
     /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
-    /// mutate the blob wait before issuing blob operations. A flush failure is retained the same
-    /// way: the handle reports it, and so does the next such call.
-    #[must_use]
-    pub async fn start_sync(mut self) -> (Self, Handle<()>) {
-        if let Some((buf, offset)) = self.buffer.take()
-            && let Err(err) = self
-                .sync_state
+    /// mutate the blob wait before issuing blob operations. A failure of the started sync is
+    /// reported by the handle and by the next such call.
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        if let Some((buf, offset)) = self.buffer.take() {
+            self.sync_state
                 .write_at(&self.blob, offset, buf, WriteOptions::default())
-                .await
-        {
-            let handle = self.sync_state.fail(err);
-            return (self, handle);
+                .await?;
         }
-
         let handle = self.sync_state.start_sync(&self.blob).await;
-        (self, handle)
+        Ok((self, handle))
     }
 
     /// Wait for any started sync to complete without starting a new sync.

@@ -1,14 +1,16 @@
 //! Queue storage implementation.
 
-use super::{Error, metrics};
+use super::{Error, Reader, Writer, cursor::Cursor, metrics::Metrics, split};
 use crate::{
     Context,
     journal::contiguous::{Contiguous as _, variable},
-    rmap::RMap,
 };
 use commonware_codec::CodecShared;
 use commonware_macros::boxed;
-use commonware_runtime::{buffer::paged::CacheRef, telemetry::metrics::GaugeExt};
+use commonware_runtime::{
+    buffer::paged::CacheRef,
+    telemetry::metrics::{Gauge, GaugeExt},
+};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
@@ -61,11 +63,12 @@ pub struct Config<C> {
 /// - [dequeue](Self::dequeue): Return the next unacked item in FIFO order.
 /// - [ack](Self::ack) / [ack_up_to](Self::ack_up_to): Mark items as processed (in-memory only).
 /// - [sync](Self::sync): Commit, then prune completed sections below the ack floor.
+/// - [split](Self::split): Hand out an exclusive [Writer] and a [Reader] for separate tasks.
 ///
 /// # Acknowledgment
 ///
 /// Acks are tracked in-memory with an `ack_floor` (all positions below are acked)
-/// plus an [RMap] of acked positions above the floor. When items are acked
+/// plus an [RMap](crate::rmap::RMap) of acked positions above the floor. When items are acked
 /// contiguously from the floor, the floor advances automatically.
 ///
 /// Acks are **not** persisted. The durable equivalent is the journal's pruning
@@ -84,25 +87,13 @@ pub struct Queue<E: Context, V: CodecShared> {
     /// The underlying journal storing queue items.
     journal: variable::Journal<E, V>,
 
-    /// Position of the next item to dequeue.
+    /// Delivery and acknowledgement state.
     ///
-    /// Invariant: `read_pos <= journal.size()`. Note that `ack_up_to` can advance
-    /// `ack_floor` past `read_pos`; in this case, `dequeue` skips the already-acked items.
-    read_pos: u64,
+    /// Invariant: `cursor.read_position() <= journal.size()`.
+    cursor: Cursor,
 
-    /// All items at positions < ack_floor are considered acknowledged.
-    ///
-    /// On restart, this is initialized to `journal.bounds().start`.
-    ack_floor: u64,
-
-    /// Ranges of acknowledged items at positions >= ack_floor (in-memory only).
-    ///
-    /// When an item at position == ack_floor is acked, the floor advances
-    /// and any contiguous acked items are consumed. Lost on restart.
-    acked_above: RMap,
-
-    /// Metrics for monitoring queue state.
-    metrics: metrics::Metrics,
+    /// Total enqueued items.
+    tip: Gauge,
 }
 
 impl<E: Context, V: CodecShared> Queue<E, V> {
@@ -118,7 +109,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     #[boxed]
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metrics before creating sub-contexts
-        let metrics = metrics::Metrics::init(&context);
+        let Metrics { tip, floor, next } = Metrics::init(&context);
 
         let journal = variable::Journal::init(
             context.child("journal"),
@@ -135,29 +126,30 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
         .await?;
 
         // On restart, ack_floor is the pruning boundary (items below are deleted).
-        // acked_above is empty (in-memory state lost on restart).
+        // In-memory acknowledgements are lost on restart.
         let bounds = journal.bounds();
-        let acked_above = RMap::new();
-
         debug!(floor = bounds.start, size = bounds.end, "queue initialized");
-
-        // Set initial metric values
-        let _ = metrics.tip.try_set(bounds.end);
-        let _ = metrics.floor.try_set(bounds.start);
-        let _ = metrics.next.try_set(bounds.start);
+        let _ = tip.try_set(bounds.end);
 
         Ok(Self {
             journal,
-            read_pos: bounds.start,
-            ack_floor: bounds.start,
-            acked_above,
-            metrics,
+            cursor: Cursor::new(bounds.start, next, floor),
+            tip,
         })
+    }
+
+    /// Split the queue into an exclusive [Writer] and a [Reader] for separate tasks.
+    ///
+    /// The reader continues from the queue's read position and acknowledgements. It receives
+    /// every item appended before the split and every item the writer commits afterward. Both
+    /// handles must be dropped before the queue is reopened.
+    pub async fn split(self) -> Result<(Writer<E, V>, Reader<E, V>), Error> {
+        split::handles(self.journal, self.cursor, self.tip).await
     }
 
     /// Returns whether a specific position has been acknowledged.
     pub fn is_acked(&self, position: u64) -> bool {
-        position < self.ack_floor || self.acked_above.get(&position).is_some()
+        self.cursor.is_acked(position)
     }
 
     /// Append an item without persisting. Call [Self::commit] or [Self::sync]
@@ -170,7 +162,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     pub async fn append(mut self, item: V) -> Result<(Self, u64), Error> {
         let pos;
         (self.journal, pos) = self.journal.append(&item).await?;
-        let _ = self.metrics.tip.try_set(pos + 1);
+        let _ = self.tip.try_set(pos + 1);
         debug!(pos, "appended item");
         Ok((self, pos))
     }
@@ -195,30 +187,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn dequeue(&mut self) -> Result<Option<(u64, V)>, Error> {
-        let size = self.journal.bounds().end;
-
-        // Fast-forward above ack floor
-        if self.read_pos < self.ack_floor {
-            self.read_pos = self.ack_floor;
-        }
-
-        // Fast-forward past the ack range containing read_pos (if any).
-        if let Some((_, end)) = self.acked_above.get(&self.read_pos) {
-            self.read_pos = end.saturating_add(1);
-        }
-
-        // If the read position is greater than the size of the journal, return None.
-        let _ = self.metrics.next.try_set(self.read_pos);
-        if self.read_pos >= size {
-            return Ok(None);
-        }
-
-        let item = self.journal.read(self.read_pos).await?;
-        let pos = self.read_pos;
-        self.read_pos += 1;
-        let _ = self.metrics.next.try_set(self.read_pos);
-        debug!(position = pos, "dequeued item");
-        Ok(Some((pos, item)))
+        self.cursor.dequeue(&self.journal).await
     }
 
     /// Mark the item at `position` as processed (in-memory only).
@@ -229,39 +198,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     ///
     /// Returns [Error::PositionOutOfRange] if `position >= queue size`.
     pub fn ack(&mut self, position: u64) -> Result<(), Error> {
-        let size = self.journal.size();
-        if position >= size {
-            return Err(Error::PositionOutOfRange(position, size));
-        }
-
-        // Already acked (below floor)
-        if position < self.ack_floor {
-            return Ok(());
-        }
-
-        // Already acked (above floor)
-        if self.acked_above.get(&position).is_some() {
-            return Ok(());
-        }
-
-        // Check if we can advance the floor
-        if position == self.ack_floor {
-            // Advance floor, consuming any contiguous acked items
-            let next = position + 1;
-            let final_floor = match self.acked_above.get(&next) {
-                Some((_, end)) => end + 1,
-                None => next,
-            };
-            self.acked_above.remove(next, final_floor - 1);
-            self.ack_floor = final_floor;
-            let _ = self.metrics.floor.try_set(self.ack_floor);
-            debug!(floor = self.ack_floor, "advanced ack floor");
-        } else {
-            // Floor is not advancing, so add to acked_above
-            self.acked_above.insert(position);
-            debug!(position, "acked item above floor");
-        }
-        Ok(())
+        self.cursor.ack(position, self.journal.size())
     }
 
     /// Acknowledge all items in `[ack_floor, up_to)` by advancing the floor
@@ -271,42 +208,21 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     ///
     /// Returns [Error::PositionOutOfRange] if `up_to > queue size`.
     pub fn ack_up_to(&mut self, up_to: u64) -> Result<(), Error> {
-        let size = self.journal.size();
-        if up_to > size {
-            return Err(Error::PositionOutOfRange(up_to, size));
-        }
-
-        // Nothing to do if up_to is at or below current floor
-        if up_to <= self.ack_floor {
-            return Ok(());
-        }
-
-        // Determine final floor: either up_to, or past any contiguous acked range at up_to
-        let final_floor = match self.acked_above.get(&up_to) {
-            Some((_, end)) => end + 1,
-            None => up_to,
-        };
-
-        // Remove all entries covered by the new floor and advance
-        self.acked_above.remove(self.ack_floor, final_floor - 1);
-        self.ack_floor = final_floor;
-        let _ = self.metrics.floor.try_set(self.ack_floor);
-        debug!(floor = self.ack_floor, "batch acked up to");
-        Ok(())
+        self.cursor.ack_up_to(up_to, self.journal.size())
     }
 
     /// Returns the current read position.
     ///
     /// This is the position of the next item that will be checked by [Queue::dequeue].
     pub const fn read_position(&self) -> u64 {
-        self.read_pos
+        self.cursor.read_position()
     }
 
     /// Returns the current ack floor.
     ///
     /// All items at positions less than this value are considered acknowledged.
     pub const fn ack_floor(&self) -> u64 {
-        self.ack_floor
+        self.cursor.ack_floor()
     }
 
     /// Returns the total number of items that have been enqueued.
@@ -319,28 +235,21 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
 
     /// Returns whether all enqueued items have been acknowledged.
     pub fn is_empty(&self) -> bool {
-        // If acked_above is non-empty, there's a gap at ack_floor (otherwise floor
-        // would have advanced). So all items acked implies ack_floor == size.
-        self.ack_floor >= self.journal.size()
+        self.cursor.is_empty(self.journal.size())
     }
 
     /// Reset the read position to the ack floor so [Self::dequeue] re-delivers
     /// all unacknowledged items from the beginning.
     pub fn reset(&mut self) {
-        let old_pos = self.read_pos;
-        self.read_pos = self.ack_floor;
-        let _ = self.metrics.next.try_set(self.read_pos);
-        debug!(
-            old_read_pos = old_pos,
-            new_read_pos = self.read_pos,
-            "reset read position"
-        );
+        self.cursor.reset();
     }
 
     /// Returns the number of items not yet read (test-only).
     #[cfg(test)]
     fn pending(&self) -> u64 {
-        self.journal.size().saturating_sub(self.read_pos)
+        self.journal
+            .size()
+            .saturating_sub(self.cursor.read_position())
     }
 
     /// Durably persist the queue, guaranteeing the current state will survive a crash.
@@ -358,7 +267,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     /// This also prunes acknowledged items.
     pub async fn sync(mut self) -> Result<Self, Error> {
         self.journal = self.journal.sync().await?;
-        (self.journal, _) = self.journal.prune(self.ack_floor).await?;
+        (self.journal, _) = self.journal.prune(self.cursor.ack_floor()).await?;
         Ok(self)
     }
 
@@ -406,11 +315,7 @@ mod tests {
     }
 
     fn acked_above_count<E: Context, V: CodecShared>(queue: &Queue<E, V>) -> usize {
-        queue
-            .acked_above
-            .iter()
-            .map(|(&s, &e)| (e - s + 1) as usize)
-            .sum()
+        queue.cursor.acked_above_count()
     }
 
     #[test_traced]

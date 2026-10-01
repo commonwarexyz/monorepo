@@ -145,8 +145,8 @@ struct Inner<E: Storage + Metrics, V: Codec> {
 }
 
 impl<E: Storage + Metrics, V: Codec> Inner<E, V> {
-    /// The section's writer. A replayed section cannot be removed while the replay owns the
-    /// journal.
+    /// The section's writer. Only a failed or cancelled repair removes a replayed section, and
+    /// either ends the replay.
     fn writer(&self, section: u64) -> Result<&PagedRecovery<E::Blob>, Error> {
         Ok(self
             .manager
@@ -204,9 +204,16 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
             // Buffer compressed output to determine its length before appending the frame.
             let mut buf = Vec::new();
             let item_len = encode_compressed_frame_into(level, item, &mut buf)?;
-            let blob = self.manager.take(section).await?;
-            let (blob, offset) = blob.append_owned(IoBuf::from(buf)).await?;
-            self.manager.put(section, blob);
+            let blob = self.manager.get_or_create(section).await?;
+            let offset = match blob.try_append(&buf) {
+                Some(offset) => offset,
+                None => {
+                    let blob = self.manager.take(section).await?;
+                    let (blob, offset) = blob.append_owned(IoBuf::from(buf)).await?;
+                    self.manager.put(section, blob);
+                    offset
+                }
+            };
             (offset, item_len)
         } else {
             // Encode directly into the write buffer when the frame fits.

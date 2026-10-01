@@ -1043,7 +1043,13 @@ mod tests {
             let extension = vec![0xBB; SNAPSHOT_TAIL - DURABLE_TAIL];
             (writer, _) = writer.append(&extension).await.unwrap();
             expected.extend_from_slice(&extension);
-            let (mut writer, snapshot) = writer.snapshot().await.unwrap();
+            let (writer, snapshot) = writer.snapshot().await.unwrap();
+
+            // Write the extension to disk without syncing it.
+            let (mut writer, _) = writer
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .await
+                .unwrap();
 
             // The synced control has a durable fallback that already includes the snapshot.
             if sync_snapshot {
@@ -1100,7 +1106,8 @@ mod tests {
                 started,
                 resume: released,
             });
-            let mut flushing = Box::pin(writer.snapshot());
+            let mut flushing =
+                Box::pin(writer.replay(NZUsize!(BUFFER_SIZE), ReadOptions::default()));
             commonware_macros::select! {
                 _ = entered => {},
                 _ = flushing.as_mut() => panic!("write completed before its suffix was released"),

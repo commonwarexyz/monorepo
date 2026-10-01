@@ -300,6 +300,12 @@ impl<E: Context> Writable<E> {
         self.tail.try_append_value(value)
     }
 
+    /// Append `buf` to the tail's write buffer if it fits, returning its logical offset. See
+    /// [Writer::try_append].
+    pub(super) fn try_append(&mut self, buf: &[u8]) -> Option<u64> {
+        self.tail.try_append(buf)
+    }
+
     /// Append owned bytes to the tail, returning the logical offset of the first byte.
     pub(super) async fn append_owned(mut self, buf: IoBuf) -> Result<(Self, u64), Error> {
         let (tail, offset) = self.tail.append_owned(buf).await?;
@@ -340,8 +346,8 @@ impl<E: Context> Writable<E> {
     pub(super) async fn seal_tail(&mut self) -> Result<(), Error> {
         self.drain_tail_predecessor_sync().await?;
 
-        // The tail sync slot retains a failed `start_sync` flush even when its handle is dropped.
-        // Drain it before opening the next tail.
+        // The tail sync slot retains a failed sync even when its handle is dropped. Drain it
+        // before opening the next tail.
         self.drain_tail_sync().await?;
 
         // Open the next tail first so a failure leaves the current tail untouched.
@@ -431,15 +437,13 @@ impl<E: Context> Writable<E> {
 
     /// Start syncing the tail, returning a handle that completes once both the tail and its
     /// predecessor are durable.
-    pub(super) async fn start_sync(mut self) -> (Self, Handle<()>) {
+    pub(super) async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         // Keep at most one tail sync in flight. A pending predecessor sync is not awaited here:
         // the returned handle joins it, so handles from consecutive calls can be pending at once.
-        if let Some(prior) = self.tail_sync.clone()
-            && let Err(err) = prior.await
-        {
-            return (self, Handle::ready(Err(err)));
+        if let Some(prior) = self.tail_sync.clone() {
+            prior.await?;
         }
-        let (tail, handle) = self.tail.start_sync().await;
+        let (tail, handle) = self.tail.start_sync().await?;
         self.tail = tail;
         let tail = handle.boxed().shared();
         self.metrics.synced.inc();
@@ -454,7 +458,7 @@ impl<E: Context> Writable<E> {
                 tail.await
             }
         });
-        (self, handle)
+        Ok((self, handle))
     }
 
     /// Remove every blob and the partition itself.
