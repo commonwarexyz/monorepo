@@ -130,7 +130,6 @@ where
         |(_, signer)| {
             SignedWithdrawal::sign(
                 deployment,
-                replica.state().root().digest,
                 Bytes::from_static(WITHDRAWAL_DESTINATION),
                 WithdrawalAction::Close,
                 challenge_deadline,

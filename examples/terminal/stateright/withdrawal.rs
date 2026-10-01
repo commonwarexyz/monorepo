@@ -1,12 +1,27 @@
 //! Finite native withdrawal lifecycle and deterministic refinement traces.
 //!
 //! Each fixture has three close epochs and three immutable signed requests. The
-//! first two transfers are one-use environment inputs. Leases remain timely,
-//! and at most one admitted predecessor awaits finality. Apply and registration
-//! construction are atomic. A published live epoch stages fresh authorizations
-//! for its successor without reserving balances. Successor publication precedes
-//! the atomic cut, which adopts it and resolves reservations from the closing tail.
-//! Fresh Apply while the successor packet is frozen is outside this model.
+//! first two transfers are one-use environment inputs. Leases remain timely.
+//! Freeze waits for the predecessor's admission, so at most one cut close
+//! awaits admission. The service registers and cuts without waiting for
+//! admission, and two unadmitted cut epochs are outside this model. Apply and
+//! registration construction are atomic. An adopted live epoch whose boundary
+//! is published stages fresh authorizations for its successor without reserving
+//! balances. Successor publication precedes the atomic cut, which adopts it and
+//! resolves reservations from the closing tail. Fresh Apply while the successor
+//! packet is frozen is outside this model.
+//!
+//! Operator inbox observation and the pulls it drives are outside this model.
+//! A chain-queued request therefore never replaces an unreserved successor
+//! authorization for its account here.
+//!
+//! A request enters settlement only while its notice window is open. The fixture
+//! assumes that every window closes by the admission that ends the phase its
+//! request was signed in, and that A0's closes before B0's. A window closes early
+//! only while no admitted close awaits finality. Real timing keeps a window open
+//! for 100 blocks after signing, so a request signed shortly before an admission
+//! can enter after that admission or after a finalization. That entry is outside
+//! this model, as is the wallet's discard of a request whose window closed.
 //!
 //! Reconciliation has one outstanding genuine certified read. A later read can
 //! start only after the previous reply is delivered, so certificate heights are
@@ -33,7 +48,7 @@ const REQUIRED_WITNESSES: [&str; 11] = [
     "stale fresh authorization released",
     "mixed fresh and queued reconciliation",
     "published registration survives lost response",
-    "captured status precedes root advance",
+    "captured status precedes expiry",
     "captured anchor excludes stale request",
     "captured exclusion loses local boundary race",
     "faulted clean prefix remains claimable",
@@ -63,6 +78,14 @@ impl RequestId {
 
     pub const fn bit(self) -> u8 {
         1 << self.index()
+    }
+
+    /// The order in which windows signed in one phase close.
+    pub const fn slot(self) -> u8 {
+        match self {
+            Self::A0 => 0,
+            Self::B0 | Self::A1 => 1,
+        }
     }
 }
 
@@ -149,6 +172,7 @@ pub enum Action {
     Sign(RequestId),
     Queue(RequestId),
     Apply(RequestId),
+    Expire(RequestId),
     Freeze,
     Publish(PacketId),
     ObserveRegistration,
@@ -217,12 +241,6 @@ pub struct Trace {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct Signed {
-    root: Root,
-    balance: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Authorization {
     epoch: Epoch,
     reserved: Option<u64>,
@@ -244,7 +262,7 @@ struct ClaimCache {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Reply {
-    Status(Root),
+    Status { expired: u8, faulted: bool },
     Withdrawal(Option<RequestId>),
     Anchor(Option<PacketId>),
 }
@@ -253,7 +271,7 @@ enum Reply {
 struct Reconciliation {
     epoch: Epoch,
     boundary: u8,
-    root: Root,
+    expired: u8,
     excluded: u8,
     remaining: u8,
     kind: ReadKind,
@@ -265,7 +283,11 @@ pub struct State {
     epoch: Epoch,
     balances: [u64; ACCOUNTS],
     predecessor: [u64; ACCOUNTS],
-    signed: [Option<Signed>; REQUESTS],
+    signed: u8,
+    /// Requests whose notice windows have closed.
+    expired: u8,
+    /// The latest window slot the current phase has closed.
+    closed: Option<u8>,
     authorizations: [Option<Authorization>; REQUESTS],
     prepared: Option<PacketId>,
     successor_prepared: Option<PacketId>,
@@ -372,6 +394,22 @@ impl State {
         }
     }
 
+    const fn signed(&self, id: RequestId) -> bool {
+        self.signed & id.bit() != 0
+    }
+
+    const fn expired(&self, id: RequestId) -> bool {
+        self.expired & id.bit() != 0
+    }
+
+    // Whether an admitted close awaits finality.
+    fn finalizing(&self) -> bool {
+        self.admitted
+            .get(self.root as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
     fn staged_account(&self, account: usize) -> bool {
         RequestId::ALL.into_iter().any(|id| {
             id.account() == account
@@ -467,7 +505,9 @@ impl WithdrawalModel {
             epoch: 0,
             balances: INITIAL_BALANCES,
             predecessor: INITIAL_BALANCES,
-            signed: [None; REQUESTS],
+            signed: 0,
+            expired: 0,
+            closed: None,
             authorizations: [None; REQUESTS],
             prepared: None,
             successor_prepared: None,
@@ -552,6 +592,7 @@ impl WithdrawalModel {
                 Action::Sign(_)
                     | Action::Queue(_)
                     | Action::Apply(_)
+                    | Action::Expire(_)
                     | Action::Freeze
                     | Action::Publish(_)
                     | Action::ObserveRegistration
@@ -564,29 +605,28 @@ impl WithdrawalModel {
         }
         match action {
             Action::Sign(id) => {
-                if state.signed[id.index()].is_some() {
+                if state.signed(id) {
                     return Outcome::Unchanged;
                 }
-                let balance = state.finalized_balances[id.account()];
-                if balance == 0 {
-                    return Outcome::Rejected;
+                state.signed |= id.bit();
+
+                // A request signed after its phase closed its slot is born with a closed window.
+                if state.closed.is_some_and(|closed| id.slot() <= closed) {
+                    state.expired |= id.bit();
                 }
-                state.signed[id.index()] = Some(Signed {
-                    root: state.root,
-                    balance,
-                });
                 Outcome::Accepted
             }
             Action::Queue(id) => {
-                let Some(signed) = state.signed[id.index()] else {
+                if !state.signed(id) {
                     return Outcome::Rejected;
-                };
-                let eligible = signed.root == state.root
-                    && signed.balance > 0
+                }
+                let balance = state.finalized_balances[id.account()];
+                let eligible = !state.expired(id)
+                    && balance > 0
                     && state.consumed & id.bit() == 0
                     && !state.occupied(id.account())
                     && match self.instance.withdrawal(id) {
-                        Withdrawal::Amount(amount) => amount <= signed.balance,
+                        Withdrawal::Amount(amount) => amount <= balance,
                         Withdrawal::Close => true,
                     };
                 if eligible {
@@ -605,9 +645,9 @@ impl WithdrawalModel {
                 if let Some(acknowledgement) = state.acknowledgement(id) {
                     return Outcome::Acknowledged(acknowledgement);
                 }
-                let Some(signed) = state.signed[id.index()] else {
+                if !state.signed(id) {
                     return Outcome::Rejected;
-                };
+                }
                 let epoch = state.intake_epoch();
                 if epoch as usize >= EPOCHS
                     || state.successor_prepared.is_some()
@@ -615,8 +655,13 @@ impl WithdrawalModel {
                 {
                     return Outcome::Rejected;
                 }
+
+                // A published live boundary stages successor intake only once it is adopted.
+                if state.prepared.is_some() && !state.adopted {
+                    return Outcome::Rejected;
+                }
                 let queued = state.receipts[id.account()] == Some(id);
-                if !queued && (signed.root != state.root || state.predecessor[id.account()] == 0) {
+                if !queued && (state.expired(id) || state.predecessor[id.account()] == 0) {
                     return Outcome::Rejected;
                 }
 
@@ -626,7 +671,10 @@ impl WithdrawalModel {
                     return Outcome::Rejected;
                 }
                 if !queued
-                    && matches!(self.instance.withdrawal(id), Withdrawal::Amount(amount) if amount > state.balances[id.account()])
+                    && matches!(
+                        self.instance.withdrawal(id),
+                        Withdrawal::Amount(amount) if amount > state.balances[id.account()]
+                    )
                 {
                     return Outcome::Rejected;
                 }
@@ -645,6 +693,29 @@ impl WithdrawalModel {
                 }
                 state.authorizations[id.index()] = Some(Authorization { epoch, reserved });
                 Outcome::Acknowledged(Acknowledgement { epoch, request: id })
+            }
+            Action::Expire(id) => {
+                if !state.signed(id) {
+                    return Outcome::Rejected;
+                }
+                if state.expired(id) {
+                    return Outcome::Unchanged;
+                }
+                if state.finalizing() {
+                    return Outcome::Rejected;
+                }
+
+                // Closing a slot closes every window of this phase in or before it.
+                let closed = state
+                    .closed
+                    .map_or(id.slot(), |closed| closed.max(id.slot()));
+                state.closed = Some(closed);
+                for other in RequestId::ALL {
+                    if state.signed(other) && other.slot() <= closed {
+                        state.expired |= other.bit();
+                    }
+                }
+                Outcome::Accepted
             }
             Action::Freeze => {
                 let epoch = state.epoch + u8::from(state.adopted);
@@ -701,21 +772,19 @@ impl WithdrawalModel {
                 }
                 // A carried request equal to its account's queued record
                 // rides as that record, even when the queue landed after the
-                // freeze. Any other carried request runs settlement intake
-                // against the finalized root. Its release resolves from the
-                // carrying epoch's tail, so registration checks no balance. A
-                // queued request the packet omits sits past the pulled prefix
-                // and waits in the inbox for a later registration, unless the
-                // packet carries another request for its account, which
-                // supersedes it.
+                // freeze. Any other carried request runs settlement intake,
+                // which admits it only inside its notice window. Its release
+                // resolves from the carrying epoch's tail, so registration
+                // checks no balance. A queued request the packet omits sits
+                // past the pulled prefix and waits in the inbox for a later
+                // registration, unless the packet carries another request for
+                // its account, which supersedes it.
                 let mut superseded = [false; ACCOUNTS];
                 for id in RequestId::ALL {
                     if packet.requests & id.bit() == 0 || state.pending[id.account()] == Some(id) {
                         continue;
                     }
-                    let signed =
-                        state.signed[id.index()].expect("saved packets have signed requests");
-                    if signed.root != state.root
+                    if state.expired(id)
                         || state.consumed & id.bit() != 0
                         || state.carried(id.account())
                     {
@@ -849,6 +918,10 @@ impl WithdrawalModel {
                     }
                 }
                 state.admitted[epoch as usize] = true;
+
+                // The admission ends the phase, and with it every window signed in it.
+                state.expired |= state.signed;
+                state.closed = None;
                 Outcome::Accepted
             }
             Action::Finalize => {
@@ -869,13 +942,13 @@ impl WithdrawalModel {
                 }
                 let epoch = state.reconciliation_epoch();
                 let boundary = state.boundary_at(epoch);
-                if boundary == 0 || (epoch == state.epoch && state.adopted) {
+                if state.faulted || boundary == 0 || (epoch == state.epoch && state.adopted) {
                     return Outcome::Accepted;
                 }
                 state.reconciliation = Some(Reconciliation {
                     epoch,
                     boundary,
-                    root: 0,
+                    expired: 0,
                     excluded: 0,
                     remaining: boundary,
                     kind: ReadKind::Status,
@@ -891,7 +964,10 @@ impl WithdrawalModel {
                     return Outcome::Rejected;
                 }
                 operation.reply = Some(match operation.kind {
-                    ReadKind::Status => Reply::Status(state.root),
+                    ReadKind::Status => Reply::Status {
+                        expired: state.expired,
+                        faulted: state.faulted,
+                    },
                     ReadKind::Withdrawal(account) => Reply::Withdrawal(state.receipts[account]),
                     ReadKind::Anchor(epoch) => Reply::Anchor(state.anchors[epoch as usize]),
                 });
@@ -911,6 +987,8 @@ impl WithdrawalModel {
                     return Outcome::Rejected;
                 }
                 state.faulted = true;
+                state.expired |= state.signed;
+                state.closed = None;
                 Outcome::Accepted
             }
             Action::Refresh(output) => {
@@ -961,7 +1039,14 @@ impl WithdrawalModel {
             return Outcome::Rejected;
         };
         match reply {
-            Reply::Status(root) => operation.root = root,
+            Reply::Status { expired, faulted } => {
+                // A faulted deployment settles through recovery, so reconciliation stops.
+                if faulted {
+                    state.reconciliation = None;
+                    return Outcome::Accepted;
+                }
+                operation.expired = expired;
+            }
             Reply::Withdrawal(receipt) => {
                 let ReadKind::Withdrawal(account) = operation.kind else {
                     unreachable!()
@@ -1002,11 +1087,7 @@ impl WithdrawalModel {
             let Some(id) = request_for(operation.remaining, account) else {
                 continue;
             };
-            if state.signed[id.index()]
-                .expect("staged request is signed")
-                .root
-                == operation.root
-            {
+            if operation.expired & id.bit() == 0 {
                 operation.remaining &= !id.bit();
                 continue;
             }
@@ -1029,14 +1110,15 @@ impl WithdrawalModel {
             return true;
         }
         RequestId::ALL.into_iter().all(|id| {
-            let Some(signed) = state.signed[id.index()] else {
+            if !state.signed(id) {
                 return true;
-            };
+            }
+            let balance = state.finalized_balances[id.account()];
             let affordable = match self.instance.withdrawal(id) {
-                Withdrawal::Amount(amount) => signed.balance >= amount,
-                Withdrawal::Close => signed.balance > 0,
+                Withdrawal::Amount(amount) => balance >= amount,
+                Withdrawal::Close => balance > 0,
             };
-            if signed.root != state.root
+            if state.expired(id)
                 || !affordable
                 || state.consumed & id.bit() != 0
                 || state.pending[id.account()].is_some()
@@ -1076,18 +1158,22 @@ impl WithdrawalModel {
 
     fn staging_available(&self, state: &State) -> bool {
         let epoch = state.intake_epoch();
-        if state.faulted || state.successor_prepared.is_some() || epoch as usize >= EPOCHS {
+        if state.faulted
+            || state.successor_prepared.is_some()
+            || (state.prepared.is_some() && !state.adopted)
+            || epoch as usize >= EPOCHS
+        {
             return true;
         }
         RequestId::ALL.into_iter().all(|id| {
-            let Some(signed) = state.signed[id.index()] else {
+            if !state.signed(id) {
                 return true;
-            };
+            }
             if state.authorizations[id.index()].is_some() || state.staged_account(id.account()) {
                 return true;
             }
             let accepted = state.receipts[id.account()] == Some(id);
-            let fresh = signed.root == state.root
+            let fresh = !state.expired(id)
                 && state.predecessor[id.account()] > 0
                 && match self.instance.withdrawal(id) {
                     Withdrawal::Amount(amount) => state.balances[id.account()] >= amount,
@@ -1239,15 +1325,22 @@ impl WithdrawalModel {
             if next.authorizations[id.index()].is_some() {
                 return true;
             }
-            let signed = state.signed[id.index()].expect("authorization is signed");
             authorization.epoch == state.reconciliation_epoch()
-                && signed.root != state.root
                 && state.consumed & id.bit() == 0
                 && !state
                     .anchors
                     .iter()
                     .flatten()
                     .any(|a| a.epoch == authorization.epoch && a.requests & id.bit() != 0)
+        })
+    }
+
+    fn window_respected(&self, state: &State) -> bool {
+        let next = self.step(state, Action::DeliverRead).state;
+        RequestId::ALL.into_iter().all(|id| {
+            state.authorizations[id.index()].is_none()
+                || next.authorizations[id.index()].is_some()
+                || state.expired(id)
         })
     }
 
@@ -1264,7 +1357,7 @@ impl WithdrawalModel {
             .into_iter()
             .filter(|id| {
                 state.authorizations[id.index()].is_some_and(|a| a.epoch == epoch)
-                    && state.signed[id.index()].is_some_and(|s| s.root != state.root)
+                    && state.expired(*id)
                     && state.receipts[id.account()] != Some(*id)
             })
             .fold(0, |mask, id| mask | id.bit());
@@ -1383,6 +1476,31 @@ impl WithdrawalModel {
                     *state = model.step(state, action).state;
                     actions.push(action);
                 };
+
+                // Cuts the live epoch into its published successor after the fixture payment the
+                // cut waits for.
+                let cut = |state: &mut State, actions: &mut Vec<Action>| {
+                    let (bit, transfer) = match state.epoch {
+                        0 => (1, TransferId::Debit),
+                        _ => (2, TransferId::Credit),
+                    };
+                    if state.paid & bit == 0 {
+                        append(Action::Pay(transfer), state, actions);
+                        assert!(
+                            state.paid & bit != 0,
+                            "the fixture payment precedes the cut"
+                        );
+                    }
+                    let packet = state
+                        .successor_prepared
+                        .expect("the witness publishes a successor");
+                    append(Action::Cut, state, actions);
+                    assert_eq!(
+                        state.prepared,
+                        Some(packet),
+                        "the cut carries the anchored successor"
+                    );
+                };
                 if name == "queued tail finalized"
                     || name == "later receipt preserves original acknowledgement"
                 {
@@ -1401,8 +1519,7 @@ impl WithdrawalModel {
                 } else if name == "intake during active registration" {
                     append(Action::Queue(RequestId::A0), &mut state, &mut actions);
                 } else if name == "queue after freeze keeps publication" {
-                    append(Action::ObserveRegistration, &mut state, &mut actions);
-                    assert!(state.adopted);
+                    cut(&mut state, &mut actions);
                 } else {
                     if name == "captured anchor excludes stale request"
                         || name == "published registration survives lost response"
@@ -1420,7 +1537,7 @@ impl WithdrawalModel {
                         };
                         append(action, &mut state, &mut actions);
                     }
-                    if name == "captured status precedes root advance" {
+                    if name == "captured status precedes expiry" {
                         append(Action::StartReconcile, &mut state, &mut actions);
                         while let Some(operation) = state.reconciliation {
                             let action = if operation.reply.is_some() {
@@ -1431,11 +1548,10 @@ impl WithdrawalModel {
                             append(action, &mut state, &mut actions);
                         }
                     }
-                    if name == "published registration survives lost response" {
-                        append(Action::ObserveRegistration, &mut state, &mut actions);
-                    }
                     let epoch = state.intake_epoch();
-                    if state.anchors[usize::from(epoch)].is_none()
+                    if name == "published registration survives lost response" {
+                        cut(&mut state, &mut actions);
+                    } else if state.anchors[usize::from(epoch)].is_none()
                         && state.successor_prepared.is_none()
                     {
                         let old = state
@@ -1485,14 +1601,17 @@ impl Model for WithdrawalModel {
                         && state.closes[1].is_some_and(|c| c.requests & RequestId::A0.bit() != 0)
                 }
             };
-            if state.signed[id.index()].is_none() && signing_phase {
+            if !state.signed(id) && signing_phase {
                 actions.push(Action::Sign(id));
             }
-            if state.signed[id.index()].is_some() {
+            if state.signed(id) {
                 actions.push(Action::Queue(id));
                 if state.successor_prepared.is_none() || state.authorizations[id.index()].is_some()
                 {
                     actions.push(Action::Apply(id));
+                }
+                if !state.expired(id) && !state.faulted && !state.finalizing() {
+                    actions.push(Action::Expire(id));
                 }
             }
         }
@@ -1580,6 +1699,10 @@ impl Model for WithdrawalModel {
                 Self::safe_discard,
             ),
             Property::<Self>::always(
+                "reconciliation never discards a fresh authorization whose window is open",
+                Self::window_respected,
+            ),
+            Property::<Self>::always(
                 "delivered exclusion evidence restores registration progress",
                 Self::cleanup_progress,
             ),
@@ -1639,11 +1762,12 @@ impl Model for WithdrawalModel {
                     && s.anchors[2].is_some_and(|p| p.requests != 0)
                     && s.boundary_at(2) != 0
             }),
-            Property::<Self>::sometimes("captured status precedes root advance", |_, s| {
+            Property::<Self>::sometimes("captured status precedes expiry", |_, s| {
                 !s.faulted
-                    && s.reconciliation.is_some_and(
-                        |r| matches!(r.reply, Some(Reply::Status(root)) if root < s.root),
-                    )
+                    && s.reconciliation.is_some_and(|r| match r.reply {
+                        Some(Reply::Status { expired, .. }) => expired != s.expired,
+                        _ => false,
+                    })
             }),
             Property::<Self>::sometimes("captured anchor excludes stale request", |_, s| {
                 !s.faulted
@@ -1682,7 +1806,7 @@ fn stale_released(state: &State, mixed: bool) -> bool {
         && state.successor_prepared.is_none()
         && [RequestId::A0, RequestId::B0].into_iter().any(|id| {
             state.authorizations[id.index()].is_none()
-                && state.signed[id.index()].is_some_and(|s| s.root == 0)
+                && state.expired(id)
                 && state
                     .packets
                     .iter()

@@ -25,10 +25,10 @@ use super::{
     registry::RegistryView,
     setup::{Genesis, ValidatorEntry},
     state::{
-        DepositEffect, FaultRecord, HardFaultReasonResponse, Intake, Record, WithdrawalEffect,
-        admitted_key, anchor_key, claimed_key, deposit_key, execute, fault_key, hard_fault_key,
-        intake_key, native_balance, payout_head_key, refund_key, registration_key, registry,
-        registry_entry, registry_entry_key, status_key, withdrawal_key,
+        CarriedRecord, DepositEffect, FaultRecord, HardFaultReasonResponse, Intake, Record,
+        WithdrawalEffect, admitted_key, anchor_key, carried_key, claimed_key, deposit_key, execute,
+        fault_key, hard_fault_key, intake_key, native_balance, payout_head_key, refund_key,
+        registration_key, registry, registry_entry, registry_entry_key, status_key, withdrawal_key,
     },
     tx::{
         AdmitRequest, BeginHardFaultSettlementRequest, ChallengeRequest, ClaimDepositRequest,
@@ -1381,7 +1381,6 @@ pub(super) fn withdrawal_fixture() -> (SettlementTx, SettlementTx, WithdrawalCla
         .unwrap();
     let request = SignedWithdrawal::sign(
         deployment(),
-        state.root().digest,
         account.encode(),
         WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
         50,
@@ -2307,7 +2306,6 @@ fn superseded_request_recovers_every_unit_after_a_hard_fault() {
         seal(&db, 1, &[deposit_tx(pulled)]).await;
         let queued = SignedWithdrawal::sign(
             deployment(),
-            state.root().digest,
             destination.encode(),
             WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
             60,
@@ -2324,7 +2322,6 @@ fn superseded_request_recovers_every_unit_after_a_hard_fault() {
         // that stays unpulled.
         let extra = SignedWithdrawal::sign(
             deployment(),
-            state.root().digest,
             destination.encode(),
             WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()),
             60,
@@ -2436,6 +2433,104 @@ fn superseded_request_recovers_every_unit_after_a_hard_fault() {
     });
 }
 
+/// Each accepted registration records the epoch and id of every request it carries, chain-queued
+/// or fresh. A rejected registration records nothing, and a later registration that carries no
+/// request for an account leaves its record.
+#[test]
+fn registration_records_each_carried_request() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("carried"), "carried-records").await;
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+        let wallets = wallets();
+        let (queued_wallet, fresh_wallet) = (&wallets[0], &wallets[1]);
+        let uninvolved = wallets[2].public_key();
+        let sign = |wallet: &crate::protocol::Wallet, amount, deadline| {
+            SignedWithdrawal::sign(
+                deployment(),
+                wallet.public_key().encode(),
+                WithdrawalAction::Amount(NonZeroU64::new(amount).unwrap()),
+                deadline,
+                wallet.signer(),
+            )
+        };
+        let carried = |account: &Key| carried_key(&deployment(), account);
+
+        // Block 1 queues one account's request at inbox index 0.
+        let queued = sign(queued_wallet, 7, 60);
+        let queue = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
+            request: queued.clone(),
+            opening: state.opening(&queued_wallet.public_key()).unwrap(),
+        });
+        seal(&db, 1, &[queue]).await;
+
+        // Block 2 rejects a registration whose fresh extra misses the minimum notice, and no
+        // carriage is recorded.
+        let late = WithdrawalBatch::new(vec![queued.clone(), sign(fresh_wallet, 3, 3)]).unwrap();
+        seal(
+            &db,
+            2,
+            &[register_tx(&protocol, 0, 1, &DepositBatch::empty(), late)],
+        )
+        .await;
+        assert_eq!(read(&db, &registration_key(&deployment(), 0)).await, None);
+        for wallet in [queued_wallet, fresh_wallet] {
+            assert_eq!(read(&db, &carried(&wallet.public_key())).await, None);
+        }
+
+        // Block 3 registers epoch 0 carrying the queued request and a fresh extra.
+        let fresh = sign(fresh_wallet, 3, 60);
+        let withdrawals = WithdrawalBatch::new(vec![queued.clone(), fresh.clone()]).unwrap();
+        seal(
+            &db,
+            3,
+            &[register_tx(
+                &protocol,
+                0,
+                1,
+                &DepositBatch::empty(),
+                withdrawals,
+            )],
+        )
+        .await;
+        assert_eq!(registration(&db).await.epoch, 0);
+        for request in [&queued, &fresh] {
+            assert_eq!(
+                read(&db, &carried(request.account())).await,
+                Some(Record::Carried(CarriedRecord {
+                    epoch: 0,
+                    id: request.id::<Sha256>(),
+                }))
+            );
+        }
+        assert_eq!(read(&db, &carried(&uninvolved)).await, None);
+
+        // Block 4 registers epoch 1 without withdrawals, which leaves both records.
+        seal(
+            &db,
+            4,
+            &[register_tx(
+                &protocol,
+                1,
+                1,
+                &DepositBatch::empty(),
+                WithdrawalBatch::empty(),
+            )],
+        )
+        .await;
+        assert_eq!(status(&db).await.next_registration, 2);
+        for request in [&queued, &fresh] {
+            assert_eq!(
+                read(&db, &carried(request.account())).await,
+                Some(Record::Carried(CarriedRecord {
+                    epoch: 0,
+                    id: request.id::<Sha256>(),
+                }))
+            );
+        }
+    });
+}
+
 #[test]
 fn expired_registration_faults_the_deployment() {
     deterministic::Runner::default().start(|context| async move {
@@ -2501,7 +2596,8 @@ fn expired_deposit_faults_the_deployment() {
             ))) if expired_at == timeout + 1
         ));
 
-        // The stranded deposit refunds after the fault.
+        // The stranded deposit refunds to the account's native balance after the fault.
+        let before = native_balance(&db, &native(), &account).await.unwrap();
         let refund = SettlementTx::ClaimPendingDeposit(ClaimPendingDepositRequest {
             deployment: deployment(),
             account: account.clone(),
@@ -2513,6 +2609,11 @@ fn expired_deposit_faults_the_deployment() {
             Some(Record::Refund(_))
         ));
         assert_eq!(status(&db).await.custody, 400);
+        assert_eq!(
+            native_balance(&db, &native(), &account).await.unwrap(),
+            before + 7
+        );
+        assert_supply(&db, &native(), &[]).await;
     });
 }
 
@@ -2525,7 +2626,6 @@ fn expired_withdrawal_faults_the_deployment() {
         let account = wallet.public_key();
         let request = SignedWithdrawal::sign(
             deployment(),
-            state.root().digest,
             wallet.public_key().encode(),
             WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
             50,
@@ -2573,7 +2673,6 @@ fn minimum_withdrawal_notice_covers_a_full_native_pipeline() {
                 .get();
             let request = SignedWithdrawal::sign(
                 deployment(),
-                state.root().digest,
                 account.encode(),
                 WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
                 deadline,
@@ -2727,7 +2826,6 @@ fn deployment_fault_is_isolated() {
         let account = wallet.public_key();
         let request = SignedWithdrawal::sign(
             alpha,
-            state.root().digest,
             wallet.public_key().encode(),
             WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
             deadline,
@@ -2970,7 +3068,6 @@ fn unconfigured_deployment_txs_are_rejected() {
         let queue = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
             request: SignedWithdrawal::sign(
                 foreign.deployment(),
-                state.root().digest,
                 wallet.public_key().encode(),
                 WithdrawalAction::Amount(NonZeroU64::new(1).unwrap()),
                 50,
@@ -3706,6 +3803,7 @@ fn registration_deadlines_are_assigned_at_inclusion() {
             0,
             &DepositBatch::empty(),
             &WithdrawalBatch::empty(),
+            crate::protocol::committee().unwrap().commitment::<Sha256>(),
         )
         .unwrap();
         assert_eq!(&record.anchor, context.payment().anchor());
@@ -5538,7 +5636,6 @@ fn registration_requires_every_queued_withdrawal() {
         // One withdrawal queues directly on the chain.
         let queued = SignedWithdrawal::sign(
             deployment(),
-            state.root().digest,
             wallet.public_key().encode(),
             commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
                 std::num::NonZeroU64::new(7).unwrap(),
@@ -5588,7 +5685,6 @@ fn registration_requires_every_queued_withdrawal() {
             .map(|extra_wallet| {
                 SignedWithdrawal::sign(
                     deployment(),
-                    state.root().digest,
                     wallet.public_key().encode(),
                     commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
                         std::num::NonZeroU64::new(3).unwrap(),
@@ -6184,7 +6280,6 @@ fn queued_withdrawal(state: &TestState) -> (SignedWithdrawal<Key, Digest>, Settl
     let wallet = wallets().remove(1);
     let request = SignedWithdrawal::sign(
         deployment(),
-        state.root().digest,
         wallet.public_key().encode(),
         WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
         60,
@@ -6772,7 +6867,6 @@ fn live_obligations_keep_registration_available() {
         let wallet = wallets().remove(1);
         let withdrawal = SignedWithdrawal::sign(
             deployment(),
-            state.root().digest,
             wallet.public_key().encode(),
             commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
                 std::num::NonZeroU64::new(7).unwrap(),
@@ -8164,10 +8258,9 @@ async fn walkthrough(
         claimed.custody,
         claimed.claimable
     );
+
     // A payout consumes its native position while the signed authorization remains live.
-    alice
-        .observe_withdrawal_expiry(&context, &mut alice_chain)
-        .await?;
+    alice.observe_withdrawal(&context, &mut alice_chain).await?;
     anyhow::ensure!(
         alice.has_pending_withdrawal_claim()
             && alice.pending_withdrawal_action() == Some(WithdrawalAction::Amount(withdrawal)),
@@ -8550,7 +8643,9 @@ impl Property<ed25519::PublicKey, State<Threshold>> for WalkthroughSettled {
                     (state.reader)(registration_key(&deployment(), 2)).await,
                     Some(Record::Registration(record))
                         if record.epoch == 2 && record.admitted.is_none()
-                            && record.deadlines.is_some_and(|(deadline, _)| status.height <= deadline)
+                            && record
+                                .deadlines
+                                .is_some_and(|(deadline, _)| status.height <= deadline)
                 ) || status.next_admission != 2
                     || status.next_registration != 3
                 {
@@ -8640,7 +8735,9 @@ impl Property<ed25519::PublicKey, State<Threshold>> for TenantsSettled {
                         (state.reader)(registration_key(scoped, 2)).await,
                         Some(Record::Registration(record))
                             if record.epoch == 2 && record.admitted.is_none()
-                                && record.deadlines.is_some_and(|(deadline, _)| status.height <= deadline)
+                                && record
+                                    .deadlines
+                                    .is_some_and(|(deadline, _)| status.height <= deadline)
                     ) || status.next_admission != 2
                         || status.next_registration != 3
                     {

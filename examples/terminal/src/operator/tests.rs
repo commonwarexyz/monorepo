@@ -490,10 +490,8 @@ fn capacity_leaves_the_suffix_for_the_next_epoch() {
     let mut operator = operator();
     let wallet = wallets().remove(0);
     let account = wallet.public_key();
-    let opening = operator.withdrawal_opening(&account).unwrap();
     let extra = SignedWithdrawal::sign(
         deployment(),
-        opening.root.digest,
         account.encode(),
         amount(5),
         100,
@@ -576,11 +574,9 @@ fn superseding_queued_withdrawal_discards_the_extra() {
     let mut operator = operator();
     let wallet = wallets().remove(0);
     let account = wallet.public_key();
-    let opening = operator.withdrawal_opening(&account).unwrap();
     let sign = |action, deadline| {
         SignedWithdrawal::sign(
             deployment(),
-            opening.root.digest,
             account.encode(),
             action,
             deadline,
@@ -660,20 +656,8 @@ fn withdrawal_intake_rejects_non_native_destinations_without_mutation() {
         Bytes::from(vec![0; 31]),
         Bytes::from(suffixed_key),
     ] {
-        let request = SignedWithdrawal::sign(
-            deployment(),
-            operator
-                .balances
-                .as_ref()
-                .unwrap()
-                .root(operator.registration.context.payment().epoch())
-                .unwrap()
-                .digest,
-            destination,
-            amount(3),
-            50,
-            wallet.signer(),
-        );
+        let request =
+            SignedWithdrawal::sign(deployment(), destination, amount(3), 50, wallet.signer());
         request.verify_signature().unwrap();
         assert!(
             operator.apply_withdrawal(request, false).is_err(),
@@ -711,13 +695,6 @@ fn withdrawal_intake_accepts_arbitrary_native_destination() {
         );
         let request = SignedWithdrawal::sign(
             deployment(),
-            operator
-                .balances
-                .as_ref()
-                .unwrap()
-                .root(operator.registration.context.payment().epoch())
-                .unwrap()
-                .digest,
             destination.encode(),
             amount(3),
             50,
@@ -1465,7 +1442,7 @@ fn unfinalized_closes_allow_successor_batches_and_restart() {
 }
 
 #[test]
-fn wallet_withdrawal_uses_finalized_root_across_pending_closes() {
+fn signed_withdrawal_is_carried_across_pending_closes() {
     for (action, queued) in [
         (amount(25), false),
         (WithdrawalAction::Close, false),
@@ -1518,27 +1495,6 @@ fn wallet_withdrawal_uses_finalized_root_across_pending_closes() {
             let account = wallets()[0].public_key();
             let native_before = client.native_balance(&context, chain.control.identity().native.chain_id(), account.clone()).await.unwrap();
 
-            let wrong = SignedWithdrawal::sign(
-                deployment(),
-                operator.balances.as_ref().unwrap().root(6).unwrap().digest,
-                account.encode(),
-                action,
-                finalized.height + crate::protocol::settlement_config(&timing).unwrap().maximum_withdrawal_notice.get(),
-                wallets()[0].signer(),
-            );
-            let operator = Mutex::new(operator);
-            let error = service::prepare_request(
-                &context,
-                &mut client,
-                &operator,
-                &operator_rpc::OperatorRequest::ApplyWithdrawal(operator_rpc::ApplyWithdrawalRequest { request: wrong.clone() }),
-                timing,
-            ).await.unwrap_err();
-            assert!(format!("{error:#}").contains("current finalized state"));
-            assert!(operator.lock().staged_withdrawal(&wrong).unwrap().is_none());
-            assert!(operator.lock().store.load_current().unwrap().withdrawals.is_empty());
-            let mut operator = operator.into_inner();
-
             let unavailable = SocketAddr::from(([127, 0, 0, 1], 9_802));
             let mut agent = Agent::open(database.path(), 0).unwrap();
             if queued {
@@ -1561,7 +1517,6 @@ fn wallet_withdrawal_uses_finalized_root_across_pending_closes() {
                 assert_eq!(operator.pending_epochs().unwrap(), [6]);
                 let current = chain.status().await;
                 assert_eq!(current.last_finalized, Some(5));
-                assert_ne!(request.body().state_root(), &current.state_root.digest);
                 assert!(current.height < request.body().deadline());
                 assert!(request.body().deadline() < current.height + crate::protocol::settlement_config(&timing).unwrap().minimum_withdrawal_notice.get());
                 assert_eq!(client.withdrawal(&context, account.clone()).await.unwrap(), Some(request));
@@ -1572,7 +1527,8 @@ fn wallet_withdrawal_uses_finalized_root_across_pending_closes() {
                 assert_eq!(opening.opening.verify::<Sha256>(&opening.root).unwrap().get(), INITIAL_BALANCE - 6);
             }
 
-            // This fixture owns native admission; hold the offline worker through the RPC handoff.
+            // This fixture owns native admission. It holds the offline worker through the RPC
+            // handoff.
             let held_close = (!queued).then(|| operator.pause_next_close());
             let mut listener = context.bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.unwrap();
             let operator_address = listener.local_addr().unwrap();
@@ -1598,14 +1554,13 @@ fn wallet_withdrawal_uses_finalized_root_across_pending_closes() {
                     let operator_rpc::OperatorRequest::ApplyWithdrawal(body) = &request else {
                         panic!("unexpected withdrawal request");
                     };
-                    assert_eq!(body.request.body().state_root(), &finalized.state_root.digest);
                     match &expected {
                         Some(expected) => assert_eq!(&body.request, expected),
                         None => expected = Some(body.request.clone()),
                     }
                     applies += 1;
                     let prepared = service::prepare_request(&context, &mut serving_chain, &operator, &request, timing).await.unwrap();
-                    let response = prepared.unwrap_or_else(|| operator_rpc::handle_decoded(&mut operator.lock(), request));
+                    let response = prepared.expect("a withdrawal request prepares its response");
                     if applies != 2 {
                         rpc::send_response(&mut sink, &response).await.unwrap();
                     }
@@ -1615,7 +1570,7 @@ fn wallet_withdrawal_uses_finalized_root_across_pending_closes() {
 
             let outcome = agent.withdraw(&context, &mut client, operator_address, action).await.unwrap();
             let WithdrawalOutcome::Applied { epoch, request } = outcome else {
-                panic!("withdrawal against the finalized root must be carried: {outcome:?}");
+                panic!("the signed withdrawal must be carried: {outcome:?}");
             };
             assert_eq!(epoch, 7);
             drop(agent);
@@ -1624,8 +1579,11 @@ fn wallet_withdrawal_uses_finalized_root_across_pending_closes() {
                 WithdrawalOutcome::Signed { request: ref retained, .. } if retained == &request));
             drop(agent);
             let mut agent = Agent::open(database.path(), 0).unwrap();
-            assert!(matches!(agent.withdraw(&context, &mut client, operator_address, action).await.unwrap(),
-                WithdrawalOutcome::Applied { epoch: 7, request: ref retained } if retained == &request));
+            assert!(matches!(
+                agent.withdraw(&context, &mut client, operator_address, action).await.unwrap(),
+                WithdrawalOutcome::Applied { epoch: 7, request: ref retained }
+                    if retained == &request
+            ));
             let mut operator = server.await.unwrap();
             if let Some((started, resume)) = held_close {
                 started.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -4353,10 +4311,8 @@ fn intake_after_publication_waits_for_the_successor() {
         let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
 
         // Alice's close sweeps her epoch-0 tail, and epoch 0 registers.
-        let opening = operator.withdrawal_opening(&account).unwrap();
         let close = SignedWithdrawal::sign(
             deployment(),
-            opening.root.digest,
             account.encode(),
             WithdrawalAction::Close,
             100,
@@ -4476,6 +4432,128 @@ fn intake_after_publication_waits_for_the_successor() {
     );
     resume.send(()).unwrap();
     operator.wait_for_closes().unwrap();
+}
+
+/// A fresh extra waits while an earlier epoch whose close has not finalized carries a
+/// withdrawal for its account, since settlement rejects every registration carrying it until
+/// that close finalizes. Other accounts keep staging.
+#[test]
+fn unfinalized_withdrawal_defers_a_fresh_extra_for_its_account() {
+    let mut operator = operator();
+    let wallets = wallets();
+    let wallet = &wallets[0];
+    let sign = |action, deadline| {
+        SignedWithdrawal::sign(
+            deployment(),
+            wallet.public_key().encode(),
+            action,
+            deadline,
+            wallet.signer(),
+        )
+    };
+
+    // Epoch 0 carries a withdrawal for the account and is cut while its close is held.
+    operator
+        .apply_withdrawal(sign(amount(5), 100), false)
+        .unwrap();
+    operator.adopt_at(0, None).unwrap();
+    let (started, resume) = operator.pause_next_close();
+    assert_eq!(operator.start_close_at(0).unwrap().epoch, 0);
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    // The successor refuses the account's fresh extra without a mutation or a fence.
+    let fresh = sign(amount(3), 101);
+    let changes = operator.store.total_changes();
+    let Err(error) = operator.apply_withdrawal(fresh.clone(), false) else {
+        panic!("a fresh extra staged beside an unfinalized withdrawal");
+    };
+    assert!(
+        format!("{error:#}").contains("the account has an unfinalized withdrawal"),
+        "{error:#}"
+    );
+    assert_eq!(operator.store.total_changes(), changes);
+    assert!(operator.fault().is_none());
+
+    // Another account's fresh extra stages.
+    let other = &wallets[1];
+    let extra = SignedWithdrawal::sign(
+        deployment(),
+        other.public_key().encode(),
+        amount(2),
+        100,
+        other.signer(),
+    );
+    assert_eq!(operator.apply_withdrawal(extra, false).unwrap().epoch, 2);
+
+    // Once epoch 0 finalizes, the account's fresh extra stages into the successor.
+    resume.send(()).unwrap();
+    operator.wait_for_closes().unwrap();
+    assert_eq!(operator.apply_withdrawal(fresh, false).unwrap().epoch, 2);
+}
+
+/// A published live boundary stages no successor intake until it adopts its certified
+/// registration. Its fresh extra can then expire and unpublish it, and observation takes the
+/// chain-queued request into the live epoch.
+#[test]
+fn unadopted_publication_defers_successor_staging() {
+    let mut operator = operator();
+    let wallets = wallets();
+    let fresh_wallet = &wallets[0];
+    let queued_wallet = &wallets[1];
+
+    // A fresh extra joins epoch 0, which publishes without adopting its registration.
+    let fresh = SignedWithdrawal::sign(
+        deployment(),
+        fresh_wallet.public_key().encode(),
+        WithdrawalAction::Close,
+        100,
+        fresh_wallet.signer(),
+    );
+    operator.apply_withdrawal(fresh.clone(), false).unwrap();
+    operator.signed_registration().unwrap();
+    assert!(!operator.adopted());
+
+    // A chain-queued request is observed, but the successor stages nothing.
+    let queued = SignedWithdrawal::sign(
+        deployment(),
+        queued_wallet.public_key().encode(),
+        amount(3),
+        100,
+        queued_wallet.signer(),
+    );
+    assert!(
+        operator
+            .observe(0, &[Intake::Withdrawal(queued.clone())])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(operator.withdrawals_frozen().unwrap());
+    let Err(error) = operator.apply_withdrawal(queued.clone(), true) else {
+        panic!("an unadopted publication staged successor intake");
+    };
+    assert!(
+        format!("{error:#}").contains("withdrawal boundary is published"),
+        "{error:#}"
+    );
+    assert!(operator.staged_withdrawal(&queued).unwrap().is_none());
+
+    // The expired extra unpublishes epoch 0.
+    let (expected, withdrawals) = operator.unregistered_withdrawals().unwrap().unwrap();
+    assert_eq!(withdrawals.requests(), std::slice::from_ref(&fresh));
+    operator
+        .discard_unregistered_withdrawals(&expected, &withdrawals)
+        .unwrap();
+
+    // Observation takes the queued request into the live epoch.
+    assert!(operator.observe(1, &[]).unwrap().is_empty());
+    assert_eq!(
+        operator.staged_withdrawal(&queued).unwrap().unwrap().epoch,
+        0
+    );
+    assert_eq!(
+        operator.registration.withdrawals.requests(),
+        std::slice::from_ref(&queued)
+    );
 }
 
 /// An operator cuts only an epoch whose certified registration it adopted.
@@ -4989,13 +5067,6 @@ fn close_construction_binds_adopted_deadlines() {
     let wallet = wallets().remove(0);
     let request = SignedWithdrawal::sign(
         deployment(),
-        operator
-            .balances
-            .as_ref()
-            .unwrap()
-            .root(operator.registration.context.payment().epoch())
-            .unwrap()
-            .digest,
         Bytes::copy_from_slice(wallet.public_key().as_ref()),
         amount(5),
         500,
@@ -6807,10 +6878,9 @@ fn queued_withdrawal_uses_the_settled_offset_balance() {
         let opening = operator.withdrawal_opening(&account).unwrap();
         let queued = SignedWithdrawal::sign(
             operator.protocol.deployment(),
-            opening.root.digest,
             Bytes::copy_from_slice(operator.wallets[0].public_key().as_ref()),
             amount(7),
-            50,
+            51,
             operator.wallets[0].signer(),
         );
         chain
@@ -7314,10 +7384,8 @@ fn virtual_credits_accumulate_before_one_owner_exit_and_recreate_afterward() {
         );
     }
     assert_eq!(operator.payment_head(&key).unwrap().balance, 90);
-    let opening = operator.withdrawal_opening(&key).unwrap();
     let request = SignedWithdrawal::sign(
         operator.protocol.deployment(),
-        opening.root.digest,
         Bytes::copy_from_slice(key.as_ref()),
         WithdrawalAction::Close,
         crate::protocol::epoch_start(3).unwrap() + 50,
@@ -7382,10 +7450,9 @@ fn virtual_first_credit_rejects_unadmitted_withdrawal() {
         .prepare_epoch(frozen, operator.registration.clone())
         .unwrap();
     rotate_epoch(&mut operator, 0);
-    let result = operator.complete_prepared(prepared, 105).unwrap();
+    operator.complete_prepared(prepared, 105).unwrap();
     let request = SignedWithdrawal::sign(
         operator.protocol.deployment(),
-        result.roots.successor.digest,
         Bytes::copy_from_slice(key.as_ref()),
         WithdrawalAction::Close,
         crate::protocol::epoch_start(1).unwrap() + 50,
@@ -7631,4 +7698,67 @@ fn virtual_empty_bootstrap_deposits_and_receives_without_enrollment() {
         1
     );
     assert_eq!(operator.payment_head(&recipient).unwrap().balance, 1);
+}
+
+/// The cached successor projection equals one planned from scratch as inbox rows arrive, the
+/// successor stages a fresh extra, and a queued request replaces that extra.
+#[test]
+fn successor_projection_matches_a_fresh_plan() {
+    let mut operator = operator();
+    let wallet = &wallets()[1];
+
+    // Returns the cached projection after checking it against a fresh plan.
+    let check = |operator: &Operator| {
+        let (cached, takes) = operator.successor().unwrap();
+        operator.projection.replace(None);
+        let (fresh, expected) = operator.successor().unwrap();
+        assert_eq!(cached.context, fresh.context);
+        assert_eq!(cached.intake, fresh.intake);
+        assert_eq!(cached.liability, fresh.liability);
+        let summary = |takes: &[Take]| {
+            takes
+                .iter()
+                .map(|take| (take.index, take.replacement.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(summary(&takes), summary(&expected));
+        cached
+    };
+
+    // Epoch 0 publishes and adopts its registration, so later intake waits for the successor.
+    operator.pay(0, 1, 1).unwrap();
+    operator.signed_registration().unwrap();
+    operator.adopt_at(0, None).unwrap();
+
+    // Deposits observed one at a time extend the cached plan.
+    for amount in 1..=3 {
+        assert!(operator.deposit(0, amount).is_err());
+        assert_eq!(check(&operator).intake.end, amount);
+    }
+
+    // A fresh withdrawal stages into the successor and changes the base of the plan.
+    let extra = operator
+        .withdraw(1, WithdrawalAction::Amount(NonZeroU64::new(2).unwrap()))
+        .unwrap();
+    assert_eq!(extra.epoch, 1);
+    assert_eq!(check(&operator).withdrawals.len(), 1);
+
+    // A queued request for the same account replaces the unreserved extra.
+    let queued = SignedWithdrawal::sign(
+        operator.protocol.deployment(),
+        Bytes::copy_from_slice(wallet.public_key().as_ref()),
+        WithdrawalAction::Close,
+        60,
+        wallet.signer(),
+    );
+    let index = operator.observed().unwrap();
+    operator
+        .observe(index, &[Intake::Withdrawal(queued.clone())])
+        .unwrap();
+    let successor = check(&operator);
+    assert_eq!(
+        successor.withdrawals.request_for(queued.account()),
+        Some(&queued)
+    );
+    assert_eq!(successor.intake.end, index + 1);
 }

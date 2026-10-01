@@ -31,7 +31,6 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         let withdrawals = WithdrawalBatch::new(vec![
             SignedWithdrawal::sign(
                 deployment,
-                state.state().root().digest,
                 Bytes::from_static(b"payer-destination"),
                 WithdrawalAction::Amount(NZU64!(90)),
                 99,
@@ -39,7 +38,6 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             ),
             SignedWithdrawal::sign(
                 deployment,
-                state.state().root().digest,
                 Bytes::from_static(b"close-destination"),
                 WithdrawalAction::Close,
                 99,
@@ -47,7 +45,6 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             ),
             SignedWithdrawal::sign(
                 deployment,
-                state.state().root().digest,
                 Bytes::from_static(b"offset-destination"),
                 WithdrawalAction::Amount(NZU64!(10)),
                 99,
@@ -310,7 +307,6 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
                     .map(|(signer, action)| {
                         SignedWithdrawal::sign(
                             deployment,
-                            state.state().root().digest,
                             Bytes::from_static(b"destination"),
                             action,
                             99,

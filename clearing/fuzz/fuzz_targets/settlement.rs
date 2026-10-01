@@ -1838,7 +1838,6 @@ impl Harness {
         let len = usize::from(destination_len) % MAX_DESTINATION_BYTES + 1;
         let mut destination = Bytes::from(vec![destination_seed as u8; len]);
         let mut deployment = self.deployment;
-        let mut root = self.finalized.root().digest;
         let mut deadline = now.saturating_add(MINIMUM_WITHDRAWAL_NOTICE + 8);
         let mut eligible = true;
         let mut replay = None;
@@ -1854,7 +1853,7 @@ impl Harness {
             }
             3 => destination = Bytes::from(vec![0; MAX_DESTINATION_BYTES + 1]),
             4 => deployment = self.digest(b"wrong-deployment", destination_seed),
-            5 => root = self.digest(b"wrong-root", destination_seed),
+            5 => deadline = now.saturating_add(MINIMUM_WITHDRAWAL_NOTICE - 1),
             6 => eligible = false,
             7 => {
                 if let Some(excessive) = minimum_balance.checked_add(1) {
@@ -1890,7 +1889,6 @@ impl Harness {
                     {
                         let request = SignedWithdrawal::sign(
                             deployment,
-                            root,
                             destination.clone(),
                             WithdrawalAction::Amount(NonZeroU64::MIN),
                             deadline,
@@ -1911,7 +1909,7 @@ impl Harness {
                     NonZeroU64::new(amount).expect("sanitized withdrawal amount is positive"),
                 )
             };
-            SignedWithdrawal::sign(deployment, root, destination, action, deadline, &key)
+            SignedWithdrawal::sign(deployment, destination, action, deadline, &key)
         });
         if variant == 10 && !(mutation / 11).is_multiple_of(2) {
             let body = request.body().clone();
@@ -2071,7 +2069,6 @@ impl Harness {
                 .get(&request_id)
                 .is_some_and(|deadline| *deadline > now)
             || body.deployment() != &self.deployment
-            || body.state_root() != &self.finalized.root().digest
             || request.verify_signature().is_err()
             || !destination_is_eligible
             || body.deadline() < minimum_deadline

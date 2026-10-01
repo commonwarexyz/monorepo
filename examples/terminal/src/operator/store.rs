@@ -300,6 +300,7 @@ pub(crate) struct StagedDeposit {
 
 /// One untaken inbox row a boundary takes, in index order, with the payment context the boundary
 /// commits after it.
+#[derive(Clone)]
 pub(crate) struct Take {
     pub(crate) index: u64,
     pub(crate) kind: TakeKind,
@@ -307,6 +308,7 @@ pub(crate) struct Take {
 }
 
 /// What taking one inbox row does to the boundary.
+#[derive(Clone)]
 pub(crate) enum TakeKind {
     /// Credits a certified deposit to its account.
     Deposit {
@@ -325,7 +327,7 @@ pub(crate) enum TakeKind {
         request: SignedWithdrawal<Key, Digest>,
     },
     /// Consumes a chain-queued request that settlement dropped because a registration carries
-    /// another request for its account.
+    /// another request for its account. The store records its id and refuses it as later intake.
     Superseded {
         request: SignedWithdrawal<Key, Digest>,
     },
@@ -712,6 +714,10 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS withdrawals_pending_close_epoch
                  ON withdrawals(epoch, account) WHERE applied_amount IS NULL;
+
+             CREATE TABLE IF NOT EXISTS superseded (
+                 request_id BLOB PRIMARY KEY CHECK (length(request_id) = 32)
+             );
 
              CREATE TABLE IF NOT EXISTS registrations (
                  epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
@@ -1741,8 +1747,14 @@ impl Store {
                 // Unpublishing lets the boundary take intake again before it republishes.
                 transaction.execute("DELETE FROM registrations WHERE epoch = ?1", [epoch_sql])?;
                 if epoch == live {
-                    transaction.execute("UPDATE operator_meta SET payment_context = ?1, live_liability = ?2 WHERE singleton = 1",
-                params![replacement.encode().as_ref(), liability.to_be_bytes().as_slice()])?;
+                    transaction.execute(
+                        "UPDATE operator_meta SET payment_context = ?1, live_liability = ?2
+                         WHERE singleton = 1",
+                        params![
+                            replacement.encode().as_ref(),
+                            liability.to_be_bytes().as_slice()
+                        ],
+                    )?;
                 }
                 Ok(())
             },
@@ -1782,7 +1794,7 @@ impl Store {
             let epoch = expected.epoch();
             let successor = live.checked_add(1) == Some(epoch);
             ensure!(
-                epoch == live || (successor && published(transaction, live)?),
+                epoch == live || (successor && adopted(transaction, live)?),
                 "withdrawal context is stale"
             );
             if !successor {
@@ -1799,6 +1811,21 @@ impl Store {
                 "withdrawals are frozen once registration publication begins"
             );
 
+            // Settlement keeps a superseded request's replay id consumed through its deadline.
+            ensure!(
+                !superseded_request(transaction, request)?,
+                "settlement superseded the withdrawal"
+            );
+
+            // Settlement rejects every registration carrying a fresh extra for an account that
+            // an unfinalized earlier epoch carries a withdrawal for.
+            if !queued {
+                ensure!(
+                    !unfinalized_withdrawal(transaction, live, request.account())?,
+                    "the account has an unfinalized withdrawal"
+                );
+            }
+
             if successor {
                 if !queued {
                     let account = eligible_account(transaction, live, request.account())?;
@@ -1813,22 +1840,34 @@ impl Store {
                         );
                     }
                 }
+
                 // A queued request can replace an unreserved extra before publication.
                 let stored = transaction.execute(
-                    "INSERT INTO withdrawals(epoch, account, request_id, applied_amount, encoded, idx)
+                    "INSERT INTO withdrawals
+                         (epoch, account, request_id, applied_amount, encoded, idx)
                      VALUES(?1, ?2, ?3, NULL, ?4, NULL)
                      ON CONFLICT(epoch, account) DO UPDATE
                      SET request_id = excluded.request_id, encoded = excluded.encoded
                      WHERE ?5 AND withdrawals.applied_amount IS NULL AND withdrawals.idx IS NULL",
-                    params![sql_u64(epoch, "epoch")?, request.account().as_ref(), request.id::<Sha256>().digest().as_ref(), request.encode().as_ref(), queued],
+                    params![
+                        sql_u64(epoch, "epoch")?,
+                        request.account().as_ref(),
+                        request.id::<Sha256>().digest().as_ref(),
+                        request.encode().as_ref(),
+                        queued
+                    ],
                 )?;
                 ensure!(stored == 1, "the successor withdrawal could not be staged");
             } else {
                 let mut liability = metadata_live_liability(transaction)?;
                 stage_request(transaction, epoch, request, queued, None, &mut liability)?;
                 transaction.execute(
-                    "UPDATE operator_meta SET payment_context = ?1, live_liability = ?2 WHERE singleton = 1",
-                    params![replacement.encode().as_ref(), liability.to_be_bytes().as_slice()],
+                    "UPDATE operator_meta SET payment_context = ?1, live_liability = ?2
+                     WHERE singleton = 1",
+                    params![
+                        replacement.encode().as_ref(),
+                        liability.to_be_bytes().as_slice()
+                    ],
                 )?;
             }
             Ok(StagedWithdrawal {
@@ -2833,7 +2872,13 @@ fn apply_take(
             ensure!(updated == 1, "the linked withdrawal is not staged");
             None
         }
-        TakeKind::Superseded { .. } => None,
+        TakeKind::Superseded { request } => {
+            transaction.execute(
+                "INSERT INTO superseded(request_id) VALUES(?1)",
+                [request.id::<Sha256>().digest().as_ref()],
+            )?;
+            None
+        }
     };
     transaction.execute("DELETE FROM intake WHERE idx = ?1", [index])?;
     Ok(staged)
@@ -3080,12 +3125,57 @@ fn adopt_registration(
         None => (None, None),
     };
     transaction.execute(
-        "INSERT INTO registrations(epoch, floors, admission_deadline, challenge_deadline, intake_end, intake)
+        "INSERT INTO registrations
+             (epoch, floors, admission_deadline, challenge_deadline, intake_end, intake)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(epoch) DO UPDATE SET floors = ?2, admission_deadline = ?3, challenge_deadline = ?4, intake_end = ?5, intake = ?6",
-        params![sql_u64(epoch, "epoch")?, record.floors.encode().as_ref(), admission, challenge, sql_u64(record.pulled.end, "inbox end")?, sql_u64(record.intake, "inbox length")?],
+         ON CONFLICT(epoch) DO UPDATE
+         SET floors = ?2, admission_deadline = ?3, challenge_deadline = ?4, intake_end = ?5,
+             intake = ?6",
+        params![
+            sql_u64(epoch, "epoch")?,
+            record.floors.encode().as_ref(),
+            admission,
+            challenge,
+            sql_u64(record.pulled.end, "inbox end")?,
+            sql_u64(record.intake, "inbox length")?
+        ],
     )?;
     Ok(())
+}
+
+// Whether `epoch` adopted its certified registration.
+fn adopted(connection: &Connection, epoch: u64) -> Result<bool> {
+    connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM registrations WHERE epoch = ?1 AND floors IS NOT NULL)",
+        )?
+        .query_row([sql_u64(epoch, "epoch")?], |row| row.get(0))
+        .map_err(Into::into)
+}
+
+// Whether settlement superseded `request` at a take.
+fn superseded_request(
+    connection: &Connection,
+    request: &SignedWithdrawal<Key, Digest>,
+) -> Result<bool> {
+    connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM superseded WHERE request_id = ?1)")?
+        .query_row([request.id::<Sha256>().digest().as_ref()], |row| row.get(0))
+        .map_err(Into::into)
+}
+
+// Whether an epoch below `live` whose close has not finalized carries a withdrawal for `account`.
+fn unfinalized_withdrawal(connection: &Connection, live: u64, account: &Key) -> Result<bool> {
+    connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM close_jobs JOIN withdrawals USING(epoch)
+             WHERE close_jobs.status IN ('closing', 'failed') AND close_jobs.epoch < ?2
+               AND withdrawals.account = ?1)",
+        )?
+        .query_row(params![account.as_ref(), sql_u64(live, "epoch")?], |row| {
+            row.get(0)
+        })
+        .map_err(Into::into)
 }
 
 // Whether registration publication began for `epoch`.
@@ -4261,7 +4351,6 @@ mod tests {
         let liability = fixture.store.current_liability().unwrap();
         let request = SignedWithdrawal::sign(
             deployment(),
-            Sha256::hash(&[b"carried-credit-root"]),
             Bytes::from_static(b"destination"),
             WithdrawalAction::Amount(NonZeroU64::new(INITIAL_BALANCE).unwrap()),
             100,
@@ -4421,7 +4510,6 @@ mod tests {
             let account = fixture.receiver.public_key();
             let request = SignedWithdrawal::sign(
                 deployment(),
-                Sha256::hash(&[b"queued-amount-root"]),
                 Bytes::from_static(b"destination"),
                 WithdrawalAction::Amount(NonZeroU64::new(requested).unwrap()),
                 100,
@@ -4516,7 +4604,6 @@ mod tests {
             assert!(fixture.store.current_account(&account).unwrap().is_none());
             let request = SignedWithdrawal::sign(
                 deployment(),
-                Sha256::hash(&[b"queued-absent-root"]),
                 Bytes::from_static(b"destination"),
                 action,
                 100,
@@ -4579,7 +4666,6 @@ mod tests {
         let mut fixture = PaymentFixture::new();
         let request = SignedWithdrawal::sign(
             deployment(),
-            Sha256::hash(&[b"fresh-amount-root"]),
             Bytes::from_static(b"destination"),
             WithdrawalAction::Amount(NonZeroU64::new(INITIAL_BALANCE + 1).unwrap()),
             100,
@@ -4612,7 +4698,6 @@ mod tests {
         let signer = SigningKey::from_seed(101);
         let request = SignedWithdrawal::sign(
             deployment(),
-            Sha256::hash(&[b"amount-output-root"]),
             Bytes::from_static(b"destination"),
             WithdrawalAction::Amount(NonZeroU64::new(10).unwrap()),
             100,
@@ -4638,7 +4723,6 @@ mod tests {
         let predecessor_liability = u64::try_from(identities.len()).unwrap() * INITIAL_BALANCE;
         let request = SignedWithdrawal::sign(
             deployment(),
-            Sha256::hash(&[b"store-close-safety-root"]),
             Bytes::from_static(b"destination"),
             WithdrawalAction::Close,
             100,

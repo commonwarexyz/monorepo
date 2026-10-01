@@ -1,6 +1,10 @@
 //! Custody flows: deposits, withdrawal authorization and escalation, and recovery.
 
-use super::{Agent, evidence::unusable_head, wallet::settlement_status};
+use super::{
+    Agent,
+    evidence::{check_opening, unusable_head},
+    wallet::settlement_status,
+};
 use crate::{
     chain::{
         client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
@@ -15,10 +19,7 @@ use crate::{
     protocol::{DepositEvent, Key, settlement_config},
 };
 use anyhow::{Context, Result, ensure};
-use commonware_clearing::bajillion::{
-    boundary::{SignedWithdrawal, WithdrawalAction},
-    qmdb::StateRoot,
-};
+use commonware_clearing::bajillion::boundary::{SignedWithdrawal, WithdrawalAction};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 #[cfg(not(test))]
@@ -54,7 +55,8 @@ pub(super) fn initial_deposit_nonce() -> u64 {
 }
 
 impl Agent {
-    /// The active authorization remains the retry authority until its certified deadline.
+    /// The active authorization is the retry authority until it retires, or until the chain
+    /// proves it never entered settlement and the wallet discards it.
     pub(crate) fn pending_withdrawal_action(&self) -> Option<WithdrawalAction> {
         self.pending_withdrawal
             .as_ref()
@@ -131,6 +133,10 @@ impl Agent {
 
     /// Returns no release when the account is absent from the authenticated frozen state.
     /// Finalized withdrawal reserves remain independently claimable.
+    ///
+    /// Settlement refuses to begin terminal settlement before a fault and while an admitted close
+    /// that no challenge invalidated awaits finalization. The call then fails without effect and
+    /// succeeds when retried after those closes finalize.
     pub(crate) async fn recover_hard_fault<E: Env>(
         &mut self,
         ctx: &E,
@@ -156,7 +162,10 @@ impl Agent {
             }
             ctx.sleep(POLL).await;
         }
-        let hard_fault = settling.context("terminal settlement never certifiably began")?;
+        let hard_fault = settling.context(
+            "terminal settlement never certifiably began; retry after a fault once no admitted \
+             close awaits finalization",
+        )?;
 
         // Only the frozen root owns recoverable state. A retained opening or a
         // validator's authenticated membership or absence resolves that state.
@@ -230,6 +239,10 @@ impl Agent {
         Ok(Some(release))
     }
 
+    /// Refunds the account's deposits in the current fault phase.
+    ///
+    /// Before terminal settlement begins, the refund covers the deposits no admitted close
+    /// carried. Afterward it also covers the deposits of invalidated closes.
     pub(crate) async fn recover_pending_deposit<E: Env>(
         &self,
         ctx: &E,
@@ -395,6 +408,14 @@ impl Agent {
         Ok(event.event)
     }
 
+    /// Signs a withdrawal request at a recent settlement head and offers it to the operator, or
+    /// offers the active request again.
+    ///
+    /// A new `Amount` request requires that no payment batch is pending. A carried send could
+    /// leave the balance at the end of the carrying epoch below the amount, and an uncovered amount
+    /// releases nothing. A new `Close` request takes the balance at the end of the carrying epoch,
+    /// so a pending send that is carried only lowers the payout. The wallet signs no payment while
+    /// a request is active.
     pub(crate) async fn withdraw<E: Env>(
         &mut self,
         ctx: &E,
@@ -402,7 +423,7 @@ impl Agent {
         operator: SocketAddr,
         action: WithdrawalAction,
     ) -> Result<WithdrawalOutcome> {
-        self.observe_withdrawal_expiry(ctx, chain).await?;
+        self.observe_withdrawal(ctx, chain).await?;
         if let Some(request) = self.pending_withdrawal.clone() {
             ensure!(
                 request.body().action() == &action,
@@ -413,8 +434,8 @@ impl Agent {
             Some(_) => {}
             None => {
                 ensure!(
-                    self.pending_payments.is_empty(),
-                    "a payment batch remains unresolved"
+                    self.pending_payments.is_empty() || action == WithdrawalAction::Close,
+                    "a payment batch remains unresolved; only a Close can be signed"
                 );
                 // The signed deadline is an absolute block height, so it is
                 // chosen from a recency-bounded status read: a certified tip
@@ -436,7 +457,8 @@ impl Agent {
 
                 // Retain a head opening before signing. It is not sent anywhere: if the
                 // deployment later hard-faults while frozen at this root, recovery needs it.
-                // The operator serves it first, and the validators when it does not.
+                // The operator's opening is used when it verifies against the head, and the
+                // validators serve one otherwise.
                 if self
                     .store
                     .recovery_opening(&status.state_root)
@@ -456,6 +478,7 @@ impl Agent {
                             status.state_root == opening.root,
                             "operator opening is not the settlement head"
                         );
+                        check_opening(&opening.opening, &status.state_root, &self.account())?;
                         Ok(opening.opening)
                     });
                     let opening = match served {
@@ -475,7 +498,6 @@ impl Agent {
                 let deadline = withdrawal_deadline(status.height, &chain.genesis().timing())?;
                 let request = SignedWithdrawal::sign(
                     status.deployment,
-                    status.state_root.digest,
                     self.account().encode(),
                     action,
                     deadline,
@@ -534,21 +556,25 @@ impl Agent {
 
     /// Escalates a signed withdrawal the operator would not carry directly to the chain.
     ///
-    /// This is the censorship-fallback exit. When [`Self::withdraw`] returns
-    /// [`WithdrawalOutcome::Signed`] because the operator is unreachable, the wallet queues the
-    /// exact retained request and its head opening on the chain, where its deadline becomes an
-    /// on-chain obligation that expires into hard-fault recovery. Execution deduplicates the
-    /// account's queued request (a replay lands on the queue-slot guard), so a lost response
-    /// resubmits unchanged and completes on the certified queued record, and the retained
-    /// opening remains the durable evidence hard-fault recovery later releases against.
+    /// This is the censorship-fallback exit. When the operator does not carry a request that
+    /// [`Self::withdraw`] signed, whether that call returned [`WithdrawalOutcome::Signed`] or
+    /// [`WithdrawalOutcome::Applied`], the wallet queues the exact retained request on the chain,
+    /// where its deadline becomes an on-chain obligation that expires into hard-fault recovery.
+    /// Settlement accepts the queue only within the notice window, which closes 100 blocks after
+    /// the signing height. The queue proves affordability with an opening at the current finalized
+    /// root, which the wallet retains. Hard-fault recovery releases against that opening when the
+    /// frozen root equals its root, and otherwise against an opening validators serve at the frozen
+    /// root. Execution deduplicates the account's queued request (a replay lands on the queue-slot
+    /// guard), so a lost response resubmits unchanged and completes on the certified queued record.
     ///
     /// A `Signed` outcome does not prove the operator skipped the request: it may have applied
-    /// it and lost only the response, in which case the next registered close must carry the
-    /// queued request verbatim and finalizes an operator-carried claim. The wallet therefore
-    /// opens the claim slot exactly like the applied path, so that claim stays recoverable. The
-    /// two payout paths are exclusive: a carried request finalizes a claimable reserve and no
-    /// fault occurs, while an expired obligation faults the deployment and hard-fault recovery
-    /// pays out, leaving the idle claim intent permanently unavailable and harmless.
+    /// it and lost only the response, in which case the registration that pulls the queued
+    /// request, or an earlier one, must carry it verbatim, and its close finalizes an
+    /// operator-carried claim. The wallet therefore opens the claim slot exactly like the applied
+    /// path, so that claim stays recoverable. The two payout paths are exclusive: a carried
+    /// request finalizes a claimable reserve and no fault occurs, while an expired obligation
+    /// faults the deployment and hard-fault recovery pays out, leaving the idle claim intent
+    /// permanently unavailable and harmless.
     pub(crate) async fn escalate_withdrawal<E: Env>(
         &mut self,
         ctx: &E,
@@ -558,18 +584,21 @@ impl Agent {
             .pending_withdrawal
             .clone()
             .context("no signed withdrawal awaits escalation")?;
-        let root = StateRoot {
-            digest: *request.body().state_root(),
-        };
-        let opening = self
-            .store
-            .recovery_opening(&root)?
-            .context("no retained head opening for the signed withdrawal")?;
         let status = settlement_status(ctx, chain, self.deployment).await?;
-        ensure!(
-            status.state_root == root,
-            "the signed withdrawal reference root is no longer finalized"
-        );
+        let opening = match self.store.recovery_opening(&status.state_root)? {
+            Some(opening) => opening,
+            None => {
+                let opening = self
+                    .holders
+                    .validator_opening(ctx, chain, &self.account(), &status)
+                    .await
+                    .context("read escalation opening")?;
+                self.store
+                    .retain_recovery_opening(&status.state_root, &opening)
+                    .context("durably retain escalation opening")?;
+                opening
+            }
+        };
         let tx = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
             request: request.clone(),
             opening,

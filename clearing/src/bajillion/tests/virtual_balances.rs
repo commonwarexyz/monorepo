@@ -303,7 +303,6 @@ fn close_deletes_balance_and_recredit_recreates_same_owner() {
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
             Sha256::hash(&[b"virtual-balances"]),
-            state.state().root().digest,
             Bytes::from_static(b"destination"),
             WithdrawalAction::Close,
             99,

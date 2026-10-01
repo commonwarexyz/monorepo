@@ -148,7 +148,6 @@ impl WithdrawalId {
                 action: WithdrawalAction::Amount(2),
                 deadline: 10,
                 deployment: Deployment::Current,
-                context_root: Root::R0,
                 signature_valid: true,
             },
             Self::Close => WithdrawalRequest {
@@ -157,16 +156,14 @@ impl WithdrawalId {
                 action: WithdrawalAction::Close,
                 deadline: 11,
                 deployment: Deployment::Current,
-                context_root: Root::R1,
                 signature_valid: true,
             },
             Self::CloseAfterFault => WithdrawalRequest {
                 account: Account::Alice,
                 destination: Destination::Alice,
                 action: WithdrawalAction::Close,
-                deadline: 11,
+                deadline: 12,
                 deployment: Deployment::Current,
-                context_root: Root::R0,
                 signature_valid: true,
             },
             Self::Offset => WithdrawalRequest {
@@ -175,7 +172,6 @@ impl WithdrawalId {
                 action: WithdrawalAction::Amount(2),
                 deadline: 2,
                 deployment: Deployment::Current,
-                context_root: Root::R0,
                 signature_valid: true,
             },
             // Operator-carried and exactly offsetting Bob's staged deposit,
@@ -186,7 +182,6 @@ impl WithdrawalId {
                 action: WithdrawalAction::Amount(2),
                 deadline: 5,
                 deployment: Deployment::Current,
-                context_root: Root::R0,
                 signature_valid: true,
             },
             // Operator-carried through B1C's registration without queueing.
@@ -198,7 +193,6 @@ impl WithdrawalId {
                 action: WithdrawalAction::Amount(10),
                 deadline: 11,
                 deployment: Deployment::Current,
-                context_root: Root::R1,
                 signature_valid: true,
             },
         }
@@ -229,7 +223,6 @@ pub(crate) struct WithdrawalRequest {
     pub(crate) action: WithdrawalAction,
     pub(crate) deadline: u8,
     pub(crate) deployment: Deployment,
-    pub(crate) context_root: Root,
     pub(crate) signature_valid: bool,
 }
 
@@ -244,7 +237,6 @@ impl WithdrawalRequest {
                     && canonical.action == self.action
                     && canonical.deadline == self.deadline
                     && canonical.deployment == self.deployment
-                    && canonical.context_root == self.context_root
             })
             .map_or(WithdrawalKey::Other, WithdrawalKey::Known)
     }
@@ -362,8 +354,7 @@ impl RegistrationId {
                 latest: 2,
             },
             // B1's epoch slot with an operator-carried request that was never
-            // chain-queued. Registerable only after B0 finalizes, since the
-            // carried request binds the finalized root R1.
+            // chain-queued.
             Self::B1C => Registration {
                 epoch: 1,
                 predecessor: Root::R1,
@@ -1156,7 +1147,6 @@ impl SettlementModel {
             && !Self::registered_withdrawal(state, request.account)
             && request.signature_valid
             && request.deployment == Deployment::Current
-            && request.context_root == state.current_root
             && request.destination.encoded_len() <= MAX_DESTINATION_BYTES
             && request.deadline >= earliest
             && request.deadline <= latest
@@ -1265,7 +1255,6 @@ impl SettlementModel {
             && !Self::registered_withdrawal(state, request.account)
             && request.signature_valid
             && request.deployment == Deployment::Current
-            && request.context_root == state.current_root
             && request.destination.encoded_len() <= MAX_DESTINATION_BYTES
             && attempt.destination_eligible
             && request.deadline >= earliest
@@ -1945,7 +1934,8 @@ impl SettlementModel {
             state.admission_fence_epoch.is_some()
                 && state.frontier.is_none()
                 && state.queued.is_none()
-                && state.clean_prefix_len <= 3
+                // A fault leaves at most four admitted closes to finalize.
+                && state.clean_prefix_len <= 4
         }
     }
 
@@ -2548,6 +2538,11 @@ fn fault_drops_queue(_: &SettlementModel, state: &SettlementState) -> bool {
     state.last == SettlementEdge::Fault(2) && state.pending != [0; ACCOUNT_COUNT]
 }
 
+// A fault leaves four admitted closes to finalize, so the fence bound is tight.
+const fn fault_leaves_four_clean_closes(_: &SettlementModel, state: &SettlementState) -> bool {
+    !state.fault.healthy() && state.clean_prefix_len == 4
+}
+
 impl Model for SettlementModel {
     type State = SettlementState;
     type Action = SettlementAction;
@@ -2748,6 +2743,10 @@ impl Model for SettlementModel {
                 "a fault drops the frontier and a queued registration",
                 fault_drops_queue,
             ),
+            Property::sometimes(
+                "a fault leaves four admitted closes to finalize",
+                fault_leaves_four_clean_closes,
+            ),
         ]
     }
 }
@@ -2769,7 +2768,7 @@ fn settlement_checker_explores_the_complete_finite_graph() {
         .join();
     assert!(checker.is_done());
     checker.assert_properties();
-    assert_eq!(checker.unique_state_count(), 13_542_822);
+    assert_eq!(checker.unique_state_count(), 45_528_473);
 }
 
 #[test]

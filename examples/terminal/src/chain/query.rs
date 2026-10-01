@@ -31,9 +31,10 @@ use crate::{
         da::Mailbox as SealerMailbox,
         ingress::Mailbox as IngressMailbox,
         state::{
-            Record, admitted_key, anchor_key, claimed_key, deposit_key, fault_key, hard_fault_key,
-            intake_key, native_balance_key, native_transfer_key, payout_head_key, refund_key,
-            registration_key, registry_entry_key, registry_key, status_key, withdrawal_key,
+            Record, admitted_key, anchor_key, carried_key, claimed_key, deposit_key, fault_key,
+            hard_fault_key, intake_key, native_balance_key, native_transfer_key, payout_head_key,
+            refund_key, registration_key, registry_entry_key, registry_key, status_key,
+            withdrawal_key,
         },
         types::{Block, Database, Exclusion, Proof, StateKey},
     },
@@ -114,6 +115,8 @@ pub(crate) enum Lookup {
     Registration { epoch: u64 },
     /// The latest accepted withdrawal receipt, retained after carriage.
     Withdrawal { account: Key },
+    /// The latest request a registration carried for this account.
+    Carried { account: Key },
     /// The claimed range containing this native payout index, if already consumed.
     Claimed { index: u64 },
     /// The inbox entry at this index, until a registration pulls it.
@@ -169,6 +172,7 @@ impl ReadRequest {
             Lookup::Deposit { id } => deposit_key(deployment, id),
             Lookup::Registration { epoch } => registration_key(deployment, *epoch),
             Lookup::Withdrawal { account } => withdrawal_key(deployment, account),
+            Lookup::Carried { account } => carried_key(deployment, account),
             Lookup::Claimed { index } => claimed_key(deployment, *index),
             Lookup::Intake { index } => intake_key(deployment, *index),
             Lookup::HardFault { account } => hard_fault_key(deployment, account),
@@ -225,6 +229,10 @@ impl Write for Lookup {
             }
             Self::Withdrawal { account } => {
                 6_u8.write(buf);
+                account.write(buf);
+            }
+            Self::Carried { account } => {
+                16_u8.write(buf);
                 account.write(buf);
             }
             Self::Claimed { index } => {
@@ -292,7 +300,9 @@ impl EncodeSize for Lookup {
             }
             Self::Deposit { id } => id.encode_size(),
             Self::Claimed { index } | Self::Intake { index } => index.encode_size(),
-            Self::Withdrawal { account } | Self::HardFault { account } => account.encode_size(),
+            Self::Withdrawal { account }
+            | Self::Carried { account }
+            | Self::HardFault { account } => account.encode_size(),
             Self::Refund { account, terminal } => account.encode_size() + terminal.encode_size(),
         }
     }
@@ -349,6 +359,9 @@ impl Read for Lookup {
             15 => Ok(Self::RegistryEntry {
                 chain_id: Digest::read(buf)?,
                 deployment: Digest::read(buf)?,
+            }),
+            16 => Ok(Self::Carried {
+                account: Key::read(buf)?,
             }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }

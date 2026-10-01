@@ -65,7 +65,6 @@ async fn old_payout_frame_from_maximum_native_epoch(context: deterministic::Cont
             .map(|signer| {
                 SignedWithdrawal::sign(
                     protocol.deployment(),
-                    replica.state().root().digest,
                     Bytes::from(vec![0xa5; protocol::MAX_DESTINATION_BYTES]),
                     WithdrawalAction::Amount(NZU64!(1)),
                     100,

@@ -425,8 +425,22 @@ impl Store {
         let result = retire_withdrawal_transaction(
             &mut self.connection,
             request.encode().as_ref(),
-            request.body().deadline(),
+            Some(request.body().deadline()),
         );
+        self.finish_mutation(result)
+    }
+
+    /// Discards the active authorization after the chain proved it can never enter settlement.
+    ///
+    /// The retirement floor and any payout candidate keep their values.
+    pub(crate) fn discard_withdrawal(
+        &mut self,
+        request: &SignedWithdrawal<Key, Digest>,
+    ) -> Result<()> {
+        self.ensure_usable()?;
+        validate_pending_withdrawal(&self.connection, &self.account, request)?;
+        let result =
+            retire_withdrawal_transaction(&mut self.connection, request.encode().as_ref(), None);
         self.finish_mutation(result)
     }
 
@@ -2499,9 +2513,6 @@ fn validate_pending_withdrawal(
         "pending withdrawal has another destination"
     );
     request.verify_deployment(&read_binding(connection)?.deployment)?;
-    let root = StateRoot::new(*request.body().state_root());
-    read_recovery_opening(connection, &root, account)?
-        .context("pending withdrawal recovery opening is missing")?;
     Ok(())
 }
 
@@ -3899,7 +3910,7 @@ fn stage_withdrawal_transaction(connection: &mut Connection, request: &[u8]) -> 
 fn retire_withdrawal_transaction(
     connection: &mut Connection,
     request: &[u8],
-    deadline: u64,
+    floor: Option<u64>,
 ) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3912,20 +3923,22 @@ fn retire_withdrawal_transaction(
         )? == 1,
         "withdrawal retirement does not match the active authorization"
     );
-    let encoded = transaction.query_row(
-        "SELECT length(retired_withdrawal_deadline), retired_withdrawal_deadline
-         FROM agent_meta WHERE singleton = 1",
-        [],
-        |row| read_fixed_blob(row, 0, 1, u64::SIZE, "retired withdrawal deadline"),
-    )?;
-    let retired = u64::decode(encoded)?.max(deadline).encode();
-    ensure!(
-        transaction.execute(
-            "UPDATE agent_meta SET retired_withdrawal_deadline = ?1 WHERE singleton = 1",
-            [retired.as_ref()],
-        )? == 1,
-        "agent metadata is missing"
-    );
+    if let Some(deadline) = floor {
+        let encoded = transaction.query_row(
+            "SELECT length(retired_withdrawal_deadline), retired_withdrawal_deadline
+             FROM agent_meta WHERE singleton = 1",
+            [],
+            |row| read_fixed_blob(row, 0, 1, u64::SIZE, "retired withdrawal deadline"),
+        )?;
+        let retired = u64::decode(encoded)?.max(deadline).encode();
+        ensure!(
+            transaction.execute(
+                "UPDATE agent_meta SET retired_withdrawal_deadline = ?1 WHERE singleton = 1",
+                [retired.as_ref()],
+            )? == 1,
+            "agent metadata is missing"
+        );
+    }
     transaction.execute("DELETE FROM agent_context WHERE singleton = 1", [])?;
     transaction
         .commit()
@@ -4201,13 +4214,11 @@ mod tests {
 
     fn signed_withdrawal(
         wallet: &Wallet,
-        root: &StateRoot<Digest>,
         amount: u64,
         deadline: u64,
     ) -> SignedWithdrawal<Key, Digest> {
         SignedWithdrawal::sign(
             deployment(),
-            root.digest,
             wallet.public_key().encode(),
             WithdrawalAction::Amount(NonZeroU64::new(amount).unwrap()),
             deadline,
@@ -4223,7 +4234,7 @@ mod tests {
         let (root, opening) = recovery_evidence(&account, 100);
         let (mut store, _) = open_store(database.path(), &account);
         store.retain_recovery_opening(&root, &opening).unwrap();
-        let request = signed_withdrawal(&wallet, &root, 7, 10);
+        let request = signed_withdrawal(&wallet, 7, 10);
         store.stage_withdrawal(&request).unwrap();
         store.retire_withdrawal(&request).unwrap();
         drop(store);
@@ -4233,10 +4244,10 @@ mod tests {
         assert!(state.pending_withdrawal_claim.is_none());
         assert_eq!(store.retired_withdrawal_deadline().unwrap(), Some(10));
 
-        let later = signed_withdrawal(&wallet, &root, 7, 75);
+        let later = signed_withdrawal(&wallet, 7, 75);
         store.stage_withdrawal(&later).unwrap();
         store.retire_withdrawal(&later).unwrap();
-        let earlier = signed_withdrawal(&wallet, &root, 7, 20);
+        let earlier = signed_withdrawal(&wallet, 7, 20);
         store.stage_withdrawal(&earlier).unwrap();
         store.retire_withdrawal(&earlier).unwrap();
         assert_eq!(store.retired_withdrawal_deadline().unwrap(), Some(75));

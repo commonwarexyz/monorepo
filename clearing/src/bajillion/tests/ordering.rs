@@ -285,7 +285,6 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
             .map(|index| {
                 let body = WithdrawalBody::new(
                     deployment,
-                    state.state().root().digest,
                     Bytes::from(vec![index as u8]),
                     WithdrawalAction::Amount(NonZeroU64::new(index as u64).unwrap()),
                     50,

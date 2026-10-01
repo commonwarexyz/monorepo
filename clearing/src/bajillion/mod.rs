@@ -215,13 +215,14 @@
 //!
 //! A censored withdrawal can be queued onchain against one finalized balance opening, including
 //! while epochs are registered. It leaves every registered boundary unchanged and must appear in
-//! the registration that pulls its inbox index. Fresh operator-carried requests are authorized at
-//! the same finalized root but carry no balance proof. The carrying epoch's tail resolves their
-//! release: the requested amount when the tail covers it, and zero otherwise. Intervening payments
-//! can change either request's final release. A fresh request supersedes a different request its
-//! account queued after the registration's pull ended, since the signer authorized both, so intake
-//! that races a published boundary cannot fail its registration. Recovery always uses the
-//! surviving finalized balance.
+//! the registration that pulls its inbox index. Fresh operator-carried requests carry no balance
+//! proof. Every authorization enters settlement only while its deadline lies within the notice
+//! window of the accepting block, and its replay id stays consumed until the deadline. The
+//! carrying epoch's tail resolves the release: the requested amount when the tail covers it, and
+//! zero otherwise. Intervening payments can change either request's final release. A fresh request
+//! supersedes a different request its account queued after the registration's pull ended, since
+//! the signer authorized both, so intake that races a published boundary cannot fail its
+//! registration. Recovery always uses the surviving finalized balance.
 //!
 //! Clean FIFO finalization updates one approved cumulative payout root/count and marks its trailing
 //! native Commit location as consumed. The external ledger stores disjoint claimed

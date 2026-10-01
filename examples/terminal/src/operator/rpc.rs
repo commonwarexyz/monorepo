@@ -1526,11 +1526,9 @@ mod tests {
         let wallets = wallets();
         let payer = &wallets[0];
         let deployment = Sha256::hash(&[b"withdrawal-ack-deployment"]);
-        let state_root = Sha256::hash(&[b"withdrawal-ack-state"]);
         let amount = WithdrawalAction::Amount(NonZeroU64::new(7).unwrap());
         let baseline = SignedWithdrawal::sign(
             deployment,
-            state_root,
             Bytes::from_static(b"destination"),
             amount,
             50,
@@ -1539,7 +1537,6 @@ mod tests {
         let mut variants = vec![
             SignedWithdrawal::sign(
                 Sha256::hash(&[b"another-deployment"]),
-                state_root,
                 Bytes::from_static(b"destination"),
                 amount,
                 50,
@@ -1547,15 +1544,6 @@ mod tests {
             ),
             SignedWithdrawal::sign(
                 deployment,
-                Sha256::hash(&[b"another-state-root"]),
-                Bytes::from_static(b"destination"),
-                amount,
-                50,
-                payer.signer(),
-            ),
-            SignedWithdrawal::sign(
-                deployment,
-                state_root,
                 Bytes::from_static(b"another-destination"),
                 amount,
                 50,
@@ -1563,7 +1551,6 @@ mod tests {
             ),
             SignedWithdrawal::sign(
                 deployment,
-                state_root,
                 Bytes::from_static(b"destination"),
                 WithdrawalAction::Close,
                 50,
@@ -1571,7 +1558,6 @@ mod tests {
             ),
             SignedWithdrawal::sign(
                 deployment,
-                state_root,
                 Bytes::from_static(b"destination"),
                 amount,
                 51,
@@ -1579,7 +1565,6 @@ mod tests {
             ),
             SignedWithdrawal::sign(
                 deployment,
-                state_root,
                 Bytes::from_static(b"destination"),
                 amount,
                 50,
@@ -1679,7 +1664,6 @@ mod tests {
         let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
         let oversized = SignedWithdrawal::sign(
             protocol.deployment(),
-            Sha256::hash(&[b"oversized-withdrawal-root"]),
             Bytes::from(vec![0; MAX_DESTINATION_BYTES + 1]),
             WithdrawalAction::Amount(NonZeroU64::MIN),
             100,
@@ -1772,7 +1756,6 @@ mod tests {
         let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
         let withdrawal = SignedWithdrawal::sign(
             protocol.deployment(),
-            opening.root.digest,
             payer_key.encode(),
             WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
             100,
@@ -1805,9 +1788,9 @@ mod tests {
             ),
         )))
         .unwrap();
+        assert_eq!(close_opening.opening.account, close_account);
         let close = SignedWithdrawal::sign(
             protocol.deployment(),
-            close_opening.root.digest,
             close_account.encode(),
             WithdrawalAction::Close,
             100,
@@ -1868,7 +1851,6 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(started.epoch, 0);
-        assert!(started.queued);
 
         loop {
             let event = PollCloseResponse::decode(success_body(handle(

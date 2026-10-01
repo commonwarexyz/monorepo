@@ -151,7 +151,7 @@ hash = "c5261529a7fb2afd2befd9cb6820e57f6a93aab3469ac2f03bf933525bcac932"
 n_cases = 1024
 
 ["conformance::CodecConformance<SettlementChain<Sha256,VerifyingKey>>"]
-hash = "4a4e5e10f0bf7107b727ef4bfc527c1282c7387b819fbe581f59175fb191a352"
+hash = "6199c519c6305694967886e75b171b8c86a69933a51b222ad4cb6106772dffa1"
 n_cases = 256
 
 ["conformance::CodecConformance<SettlementOutput>"]
@@ -159,7 +159,7 @@ hash = "00c76bd9abde37bfde878906040a1afca0904422d5726b904cbea804041e384e"
 n_cases = 65536
 
 ["conformance::CodecConformance<SignedWithdrawal<VerifyingKey,Sha256Digest>>"]
-hash = "6294b3d4f60f78baf9ca38f9fbf2a2a36628a81fb38be30dcd44547b8ac8a7fb"
+hash = "6e36549d41302b69b44be42aa3efc176176db72ac2f4162948a3157fed6735b7"
 n_cases = 1024
 
 ["conformance::CodecConformance<StateHead<Sha256Digest>>"]
@@ -211,11 +211,11 @@ hash = "7485eabcabb775b3bc3b963b2609ef20f49d8460073c1a36e5b9352ef302cc06"
 n_cases = 65536
 
 ["conformance::CodecConformance<WithdrawalBatch<VerifyingKey,Sha256Digest>>"]
-hash = "1bef3bb68cb95e7a2b1c7284a8c0bcb2bbc9effe6a9a380e18a68b909f0c75ad"
+hash = "c427c28da319f702912233e4a651487e52083947e538abefd00a1f51e48776ba"
 n_cases = 1024
 
 ["conformance::CodecConformance<WithdrawalBody<Sha256Digest>>"]
-hash = "136732ac030f7dde36617d20babe64a1c39253481f1390eea9c1f52f905f8cf0"
+hash = "9ffbaae24f3f895f004a7a0d2acc80b58ae04903d7990a902f1de0c248e6453f"
 n_cases = 65536
 
 ["conformance::CodecConformance<WithdrawalClaim<Sha256Digest>>"]

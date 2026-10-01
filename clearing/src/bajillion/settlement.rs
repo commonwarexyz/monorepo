@@ -1090,9 +1090,9 @@ where
     /// Validates one withdrawal request's shared intake gates, other than the one unfinalized
     /// withdrawal per account, and returns its id.
     ///
-    /// Both intake paths check the finalized authorization root. Queueing also proves
-    /// affordability there. Certification derives the release from the carrying epoch's final
-    /// balance.
+    /// The notice window bounds every authorization, and its replay id stays consumed until its
+    /// deadline. Queueing also proves affordability at the finalized root. Certification derives
+    /// the release from the carrying epoch's final balance.
     fn ensure_withdrawal_intake<F>(
         &self,
         now: u64,
@@ -1109,7 +1109,7 @@ where
         if self.consumed_withdrawal_ids.contains(&request_id) {
             return Err(SettlementError::DuplicateWithdrawalAuthorization);
         }
-        request.verify_context(&self.deployment, &self.current_state_root.digest)?;
+        request.verify_deployment(&self.deployment)?;
         if !destination_is_eligible(request.body().destination()) {
             return Err(SettlementError::IneligibleDestination);
         }
@@ -1235,9 +1235,9 @@ where
     /// `end` verbatim. It may carry an uncarried chain-queued request recorded later, which is
     /// then carried early, and operator-collected signed requests, giving an uncensored signer a
     /// single-transaction exit: the claim. A request a live registration already carries is
-    /// rejected. Fresh extras run the shared intake checks at the finalized authorization root
-    /// and carry no balance proof. Certification derives every release from the carrying epoch's
-    /// final balance, including a zero release when an `Amount` is not covered.
+    /// rejected. Fresh extras run the shared intake checks and carry no balance proof.
+    /// Certification derives every release from the carrying epoch's final balance, including a
+    /// zero release when an `Amount` is not covered.
     ///
     /// A fresh extra supersedes a different uncarried chain-queued request for its account
     /// recorded at or past `end`, which no pull owes yet. The signer authorized both, so the
@@ -4187,7 +4187,6 @@ mod tests {
 
     fn withdrawal(
         deployment: ShaDigest,
-        root: StateRoot<ShaDigest>,
         account: &SigningKey,
         destination: &'static [u8],
         action: WithdrawalAction,
@@ -4195,7 +4194,6 @@ mod tests {
     ) -> SignedWithdrawal<VerifyingKey, ShaDigest> {
         SignedWithdrawal::sign(
             deployment,
-            root.digest,
             Bytes::from_static(destination),
             action,
             deadline,
@@ -4367,7 +4365,6 @@ mod tests {
         let opening = genesis.opening(&account).unwrap();
         let request = withdrawal(
             fixture.deployment,
-            genesis.root(),
             &fixture.accounts[0],
             b"exit",
             WithdrawalAction::Close,
@@ -5212,7 +5209,6 @@ mod tests {
         let withdrawing = &fixture.accounts[0];
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             withdrawing,
             b"terminal-destination",
             amount_action(2),
@@ -5265,7 +5261,6 @@ mod tests {
         let withdrawing = &fixture.accounts[0];
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             withdrawing,
             b"admitted-terminal-destination",
             amount_action(2),
@@ -5345,7 +5340,6 @@ mod tests {
         // while the frozen finalized balance alone cannot.
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             &withdrawing,
             b"carried-terminal-destination",
             amount_action(9),
@@ -5425,7 +5419,6 @@ mod tests {
         let closer = &fixture.accounts[0];
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             closer,
             b"admitted-full-tail-destination",
             WithdrawalAction::Close,
@@ -5542,7 +5535,6 @@ mod tests {
             .unwrap();
         let amount_request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             &fixture.accounts[1],
             b"amount-fault-destination",
             amount_action(4),
@@ -5550,7 +5542,6 @@ mod tests {
         );
         let close_request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             &fixture.accounts[2],
             b"close-fault-destination",
             WithdrawalAction::Close,
@@ -5646,7 +5637,7 @@ mod tests {
     #[test]
     fn packed_withdrawal_lookup_uses_encoded_key_order() {
         let deployment = Sha256::hash(&[b"packed-withdrawal-order"]);
-        let body = |action| WithdrawalBody::new(deployment, deployment, Bytes::new(), action, 10);
+        let body = |action| WithdrawalBody::new(deployment, Bytes::new(), action, 10);
         let signature = SigningKey::from_seed(1).sign(b"test", b"test");
         let requests = vec![
             SignedWithdrawal::from_raw_unchecked(
@@ -6504,7 +6495,6 @@ mod tests {
         let successor_opening = successor.opening(&account.public_key()).unwrap();
         let request = withdrawal(
             fixture.deployment,
-            fixture.chain.current_state_root(),
             account,
             b"eligible",
             amount_action(4),
@@ -6534,7 +6524,6 @@ mod tests {
         ));
         let too_large = withdrawal(
             fixture.deployment,
-            fixture.chain.current_state_root(),
             account,
             b"eligible",
             amount_action(11),
@@ -6548,7 +6537,6 @@ mod tests {
         ));
         let close = withdrawal(
             fixture.deployment,
-            fixture.chain.current_state_root(),
             account,
             b"eligible",
             WithdrawalAction::Close,
@@ -6559,14 +6547,7 @@ mod tests {
             .chain
             .queue_withdrawal(1, request, &predecessor_opening, |_| true)
             .unwrap();
-        let second = withdrawal(
-            fixture.deployment,
-            fixture.chain.current_state_root(),
-            account,
-            b"other",
-            amount_action(3),
-            6,
-        );
+        let second = withdrawal(fixture.deployment, account, b"other", amount_action(3), 6);
         assert!(matches!(
             fixture.chain.queue_withdrawal(
                 1,
@@ -6630,14 +6611,7 @@ mod tests {
                         debit,
                     )
                 };
-                let request = withdrawal(
-                    fixture.deployment,
-                    fixture.cache.root(),
-                    &account,
-                    b"exit",
-                    action,
-                    20,
-                );
+                let request = withdrawal(fixture.deployment, &account, b"exit", action, 20);
                 fixture
                     .chain
                     .queue_withdrawal(
@@ -6751,22 +6725,8 @@ mod tests {
         let mut fixture = harness(&[10, 10]);
         let first = fixture.accounts[0].clone();
         let second = fixture.accounts[1].clone();
-        let carried = withdrawal(
-            fixture.deployment,
-            fixture.cache.root(),
-            &first,
-            b"carried",
-            amount_action(4),
-            20,
-        );
-        let queued = withdrawal(
-            fixture.deployment,
-            fixture.cache.root(),
-            &second,
-            b"queued",
-            amount_action(2),
-            9,
-        );
+        let carried = withdrawal(fixture.deployment, &first, b"carried", amount_action(4), 20);
+        let queued = withdrawal(fixture.deployment, &second, b"queued", amount_action(2), 9);
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::new(vec![carried.clone()]).unwrap();
         let context = context(
@@ -6847,14 +6807,7 @@ mod tests {
     fn carried_withdrawal_clears_without_queueing() {
         let mut fixture = harness(&[10, 10]);
         let account = fixture.accounts[0].clone();
-        let request = withdrawal(
-            fixture.deployment,
-            fixture.cache.root(),
-            &account,
-            b"exit",
-            amount_action(4),
-            9,
-        );
+        let request = withdrawal(fixture.deployment, &account, b"exit", amount_action(4), 9);
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::new(vec![request.clone()]).unwrap();
         assert_eq!(
@@ -6939,7 +6892,6 @@ mod tests {
         let fresh_signer = fixture.accounts[2].clone();
         let queued = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             &queued_signer,
             b"queued",
             amount_action(2),
@@ -6954,7 +6906,6 @@ mod tests {
         // A batch that drops the chain-queued request never registers.
         let missing = WithdrawalBatch::new(vec![withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             &extra_signer,
             b"extra",
             amount_action(4),
@@ -6986,7 +6937,6 @@ mod tests {
             queued.clone(),
             withdrawal(
                 fixture.deployment,
-                fixture.cache.root(),
                 &extra_signer,
                 b"extra",
                 amount_action(4),
@@ -7017,7 +6967,6 @@ mod tests {
             queued.clone(),
             withdrawal(
                 fixture.deployment,
-                fixture.cache.root(),
                 &extra_signer,
                 b"extra",
                 amount_action(4),
@@ -7046,7 +6995,6 @@ mod tests {
             queued,
             withdrawal(
                 fixture.deployment,
-                fixture.cache.root(),
                 &extra_signer,
                 b"extra",
                 amount_action(4),
@@ -7104,7 +7052,6 @@ mod tests {
         // An account with an admitted-unfinalized withdrawal cannot carry another.
         let duplicate = WithdrawalBatch::new(vec![withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             &queued_signer,
             b"again",
             amount_action(1),
@@ -7129,38 +7076,10 @@ mod tests {
             Err(SettlementError::DuplicateWithdrawal)
         ));
 
-        // A carried request must bind the finalized root, not an unfinalized
-        // successor.
-        let stale = WithdrawalBatch::new(vec![withdrawal(
-            fixture.deployment,
-            successor.root(),
-            &fresh_signer,
-            b"fresh",
-            amount_action(4),
-            11,
-        )])
-        .unwrap();
-        let stale_context = context(
-            fixture.deployment,
-            &fixture.operator,
-            fixture.committee,
-            1,
-            &successor,
-            &deposits,
-            &stale,
-            6,
-            fixture.chain.registration_floors(),
-        );
-        assert!(matches!(
-            fixture.chain.register(6, stale_context, stale, |_| true),
-            Err(SettlementError::Boundary(BoundaryError::WrongContext))
-        ));
-
         // A fresh extra carries no balance proof: its release is resolved from the carrying
         // epoch's tail.
         let valid = WithdrawalBatch::new(vec![withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             &fresh_signer,
             b"fresh",
             amount_action(4),
@@ -7184,6 +7103,98 @@ mod tests {
             .unwrap();
     }
 
+    /// A fresh extra signed before a finalization registers after it. Its notice window alone
+    /// bounds when it can enter settlement.
+    #[test]
+    fn extra_created_before_finalization_registers_after_it() {
+        let mut fixture = harness(&[10]);
+        let genesis = fixture.cache.clone();
+        let account = fixture.accounts[0].public_key();
+
+        // The account signs a fresh extra while genesis is the finalized state.
+        let extra = withdrawal(
+            fixture.deployment,
+            &fixture.accounts[0],
+            b"extra",
+            amount_action(4),
+            20,
+        );
+
+        // An empty epoch finalizes and advances the finalized root.
+        let (first, _, _) = admit_empty(&mut fixture, &genesis, 0, 1);
+        fixture.chain.finalize(4).unwrap();
+        assert_eq!(fixture.chain.current_state_root(), first.root());
+        assert_ne!(first.root(), genesis.root());
+
+        // The next registration carries the extra as a fresh request.
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::new(vec![extra]).unwrap();
+        let ctx = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            1,
+            &first,
+            &deposits,
+            &withdrawals,
+            4,
+            fixture.chain.registration_floors(),
+        );
+        fixture
+            .chain
+            .register(4, ctx, withdrawals, |_| true)
+            .unwrap();
+        assert_eq!(
+            fixture.chain.unfinalized_withdrawal_deadline(&account),
+            Some(20)
+        );
+    }
+
+    /// Queueing after a finalization proves affordability with an opening at the new finalized
+    /// root. An opening at the replaced root no longer authenticates the balance.
+    #[test]
+    fn queue_after_finalization_opens_the_new_root() {
+        let mut fixture = harness(&[10]);
+        let genesis = fixture.cache.clone();
+        let account = fixture.accounts[0].public_key();
+
+        // The account signs while genesis is the finalized state.
+        let request = withdrawal(
+            fixture.deployment,
+            &fixture.accounts[0],
+            b"exit",
+            amount_action(4),
+            20,
+        );
+
+        // An empty epoch finalizes and advances the finalized root.
+        let (first, _, _) = admit_empty(&mut fixture, &genesis, 0, 1);
+        fixture.chain.finalize(4).unwrap();
+
+        // An opening at the replaced root is rejected without mutating settlement.
+        let before = fixture.chain.encode();
+        assert!(matches!(
+            fixture.chain.queue_withdrawal(
+                4,
+                request.clone(),
+                &genesis.opening(&account).unwrap(),
+                |_| true,
+            ),
+            Err(SettlementError::State(_))
+        ));
+        assert_eq!(fixture.chain.encode(), before);
+
+        // An opening at the new root queues the same authorization.
+        fixture
+            .chain
+            .queue_withdrawal(4, request, &first.opening(&account).unwrap(), |_| true)
+            .unwrap();
+        assert_eq!(
+            fixture.chain.unfinalized_withdrawal_deadline(&account),
+            Some(20)
+        );
+    }
+
     /// A fresh extra's deadline must clear the earliest tick its close can finalize. The frontier
     /// knows its challenge deadline exactly. A queued epoch is checked against the deadlines it
     /// would receive if promoted immediately, and an operator that later promotes it too late for
@@ -7205,7 +7216,6 @@ mod tests {
         let extra = |fixture: &Harness, signer: &SigningKey, deadline: u64| {
             WithdrawalBatch::new(vec![withdrawal(
                 fixture.deployment,
-                fixture.cache.root(),
                 signer,
                 b"extra",
                 amount_action(4),
@@ -7407,14 +7417,7 @@ mod tests {
     fn uncovered_carried_amount_registers_and_releases_zero() {
         let mut fixture = harness(&[10, 10]);
         let signer = fixture.accounts[0].clone();
-        let request = withdrawal(
-            fixture.deployment,
-            fixture.cache.root(),
-            &signer,
-            b"exit",
-            amount_action(11),
-            11,
-        );
+        let request = withdrawal(fixture.deployment, &signer, b"exit", amount_action(11), 11);
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::new(vec![request.clone()]).unwrap();
         let close_context = context(
@@ -7463,7 +7466,6 @@ mod tests {
                 let account = signer.public_key();
                 let request = withdrawal(
                     fixture.deployment,
-                    fixture.cache.root(),
                     &signer,
                     b"offset-exit",
                     amount_action(4),
@@ -7600,14 +7602,7 @@ mod tests {
         let mut fixture = harness_with_config(&[10, 10], settlement_config);
         let account = &fixture.accounts[0];
         let opening = fixture.cache.opening(&account.public_key()).unwrap();
-        let oversized = withdrawal(
-            fixture.deployment,
-            fixture.cache.root(),
-            account,
-            b"12345",
-            amount_action(2),
-            9,
-        );
+        let oversized = withdrawal(fixture.deployment, account, b"12345", amount_action(2), 9);
         assert!(matches!(
             fixture
                 .chain
@@ -7625,42 +7620,21 @@ mod tests {
             None
         );
 
-        let too_soon = withdrawal(
-            fixture.deployment,
-            fixture.cache.root(),
-            account,
-            b"1234",
-            amount_action(2),
-            8,
-        );
+        let too_soon = withdrawal(fixture.deployment, account, b"1234", amount_action(2), 8);
         assert!(matches!(
             fixture
                 .chain
                 .queue_withdrawal(5, too_soon, &opening, |_| true),
             Err(SettlementError::WithdrawalDeadlineTooSoon)
         ));
-        let too_late = withdrawal(
-            fixture.deployment,
-            fixture.cache.root(),
-            account,
-            b"1234",
-            amount_action(2),
-            10,
-        );
+        let too_late = withdrawal(fixture.deployment, account, b"1234", amount_action(2), 10);
         assert!(matches!(
             fixture
                 .chain
                 .queue_withdrawal(5, too_late, &opening, |_| true,),
             Err(SettlementError::WithdrawalDeadlineTooLate)
         ));
-        let request = withdrawal(
-            fixture.deployment,
-            fixture.cache.root(),
-            account,
-            b"1234",
-            amount_action(2),
-            9,
-        );
+        let request = withdrawal(fixture.deployment, account, b"1234", amount_action(2), 9);
         fixture
             .chain
             .queue_withdrawal(5, request.clone(), &opening, |_| true)
@@ -7727,7 +7701,7 @@ mod tests {
                 &successor.opening(&account.public_key()).unwrap(),
                 |_| true,
             ),
-            Err(SettlementError::Boundary(BoundaryError::WrongContext))
+            Err(SettlementError::WithdrawalDeadlineTooSoon)
         ));
 
         let deposit_account = fixture.accounts[1].public_key();
@@ -8055,7 +8029,6 @@ mod tests {
 
         let request = withdrawal(
             fixture.deployment,
-            created.root(),
             &account,
             b"destroy-account-destination",
             WithdrawalAction::Close,
@@ -8201,7 +8174,6 @@ mod tests {
         let payer = &fixture.accounts[1];
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             closed,
             b"closed-account-withdrawal",
             WithdrawalAction::Close,
@@ -8462,7 +8434,6 @@ mod tests {
             let account = &fixture.accounts[epoch as usize % 2];
             let request = withdrawal(
                 fixture.deployment,
-                fixture.cache.root(),
                 account,
                 b"retained-claim",
                 amount_action(1),
@@ -8539,7 +8510,6 @@ mod tests {
                 let amount = 3 + index as u64;
                 let request = withdrawal(
                     fixture.deployment,
-                    fixture.cache.root(),
                     account,
                     b"withdrawal-destination",
                     amount_action(amount),
@@ -8656,7 +8626,6 @@ mod tests {
         let account = fixture.accounts[0].public_key();
         let first_request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             &fixture.accounts[0],
             b"first-batch-destination",
             amount_action(3),
@@ -8706,7 +8675,6 @@ mod tests {
 
         let second_request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             &fixture.accounts[0],
             b"second-batch-destination",
             amount_action(4),
@@ -8798,7 +8766,6 @@ mod tests {
         for account in &fixture.accounts {
             let request = SignedWithdrawal::sign(
                 fixture.deployment,
-                fixture.cache.root().digest,
                 Bytes::from_owner(DropTrackedDestination {
                     bytes: b"withdrawal-destination",
                     drops: drops.clone(),
@@ -8854,7 +8821,6 @@ mod tests {
         let account = fixture.accounts[0].public_key();
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             &fixture.accounts[0],
             b"surviving-finalized-withdrawal",
             amount_action(4),
@@ -9327,8 +9293,9 @@ mod tests {
         assert!(fixture.chain.hard_fault_is_settled());
     }
 
+    /// Requests queued before and after the front close finalizes share one registered boundary.
     #[test]
-    fn mixed_request_local_roots_survive_front_finalization() {
+    fn requests_queued_across_front_finalization_share_one_boundary() {
         let mut fixture = harness(&[10, 10]);
         let first_account = &fixture.accounts[0];
         let second_account = &fixture.accounts[1];
@@ -9373,9 +9340,8 @@ mod tests {
 
         let first_request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             first_account,
-            b"first-root",
+            b"first",
             amount_action(2),
             100,
         );
@@ -9383,7 +9349,7 @@ mod tests {
             .chain
             .queue_withdrawal(
                 1,
-                first_request.clone(),
+                first_request,
                 &fixture.cache.opening(&first_account.public_key()).unwrap(),
                 |_| true,
             )
@@ -9393,9 +9359,8 @@ mod tests {
 
         let second_request = withdrawal(
             fixture.deployment,
-            next_cache.root(),
             second_account,
-            b"second-root",
+            b"second",
             amount_action(3),
             100,
         );
@@ -9403,17 +9368,13 @@ mod tests {
             .chain
             .queue_withdrawal(
                 4,
-                second_request.clone(),
+                second_request,
                 &next_cache.opening(&second_account.public_key()).unwrap(),
                 |_| true,
             )
             .unwrap();
         let mixed = fixture.chain.pending_withdrawals();
         assert_eq!(mixed.len(), 2);
-        assert_ne!(
-            first_request.body().state_root(),
-            second_request.body().state_root()
-        );
 
         let second_context = context(
             fixture.deployment,
@@ -9734,7 +9695,6 @@ mod tests {
         let withdrawing = &fixture.accounts[0];
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             withdrawing,
             b"timeout-cut",
             amount_action(4),
@@ -9943,7 +9903,6 @@ mod tests {
         let account = &fixture.accounts[0];
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             account,
             b"close-destination",
             WithdrawalAction::Close,
@@ -10001,7 +9960,6 @@ mod tests {
         let recipient = &fixture.accounts[1];
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             payer,
             b"zero-tail-close",
             WithdrawalAction::Close,
@@ -10080,7 +10038,6 @@ mod tests {
         let public_key = account.public_key();
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             account,
             b"timeout-exit-destination",
             WithdrawalAction::Close,
@@ -10137,7 +10094,6 @@ mod tests {
             let public_key = account.public_key();
             let request = withdrawal(
                 fixture.deployment,
-                fixture.cache.root(),
                 account,
                 b"deposit-close-destination",
                 WithdrawalAction::Close,
@@ -10215,7 +10171,6 @@ mod tests {
             .unwrap();
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             withdrawing,
             b"equal-expiry-withdrawal",
             amount_action(1),
@@ -10246,7 +10201,6 @@ mod tests {
         let source = &fixture.accounts[0];
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             source,
             b"terminal-close",
             WithdrawalAction::Close,
@@ -10282,7 +10236,6 @@ mod tests {
         let deposited = SigningKey::from_seed(999);
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             source,
             b"opaque-adapter-destination",
             amount_action(4),
@@ -10454,7 +10407,6 @@ mod tests {
             }
             let request = withdrawal(
                 fixture.deployment,
-                fixture.cache.root(),
                 signer,
                 b"offset-horizon",
                 amount_action(1),
@@ -10514,7 +10466,6 @@ mod tests {
         .unwrap();
         let request = withdrawal(
             withdrawal_fixture.deployment,
-            withdrawal_fixture.cache.root(),
             &withdrawal_fixture.accounts[0],
             b"exhausted-epoch-withdrawal",
             amount_action(1),
@@ -10562,7 +10513,6 @@ mod tests {
                 let account = &fixture.accounts[0];
                 let request = withdrawal(
                     fixture.deployment,
-                    fixture.cache.root(),
                     account,
                     b"active-epoch-exit",
                     action,
@@ -10602,7 +10552,6 @@ mod tests {
         let public_key = account.public_key();
         let partial = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             account,
             b"penultimate-partial-withdrawal",
             amount_action(1),
@@ -10648,7 +10597,6 @@ mod tests {
 
         let close = withdrawal(
             fixture.deployment,
-            partial_successor.root(),
             account,
             b"last-finalizable-close",
             WithdrawalAction::Close,
@@ -10710,7 +10658,6 @@ mod tests {
         let public_key = account.public_key();
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             account,
             b"maximum-reserve",
             amount_action(u64::MAX),
@@ -10820,7 +10767,6 @@ mod tests {
         let mut deadline_harness = harness(&[1]);
         let deadline_request = withdrawal(
             deadline_harness.deployment,
-            deadline_harness.cache.root(),
             &deadline_harness.accounts[0],
             b"deadline-overflow",
             amount_action(1),
@@ -10868,14 +10814,7 @@ mod tests {
                 3,
             )
             .unwrap();
-        let request = withdrawal(
-            fixture.deployment,
-            fixture.cache.root(),
-            &signer,
-            b"exit",
-            amount_action(4),
-            9,
-        );
+        let request = withdrawal(fixture.deployment, &signer, b"exit", amount_action(4), 9);
         let opening = fixture.cache.opening(&signer.public_key()).unwrap();
         fixture
             .chain
@@ -11069,7 +11008,6 @@ mod tests {
             for account in &fixture.accounts {
                 let request = withdrawal(
                     fixture.deployment,
-                    fixture.cache.root(),
                     account,
                     b"claimed-ledger",
                     amount_action(1),
@@ -11810,14 +11748,7 @@ mod tests {
 
         // Queued while epoch 0 is registered, the request enters the inbox at index 0.
         register_next(&mut fixture, 0, vec![]).unwrap();
-        let request = withdrawal(
-            fixture.deployment,
-            fixture.cache.root(),
-            &signer,
-            b"pulled",
-            amount_action(4),
-            20,
-        );
+        let request = withdrawal(fixture.deployment, &signer, b"pulled", amount_action(4), 20);
         assert_eq!(
             fixture
                 .chain
@@ -11863,14 +11794,7 @@ mod tests {
         ));
 
         // Another request for the same account duplicates its unfinalized withdrawal.
-        let other = withdrawal(
-            fixture.deployment,
-            fixture.cache.root(),
-            &signer,
-            b"other",
-            amount_action(3),
-            20,
-        );
+        let other = withdrawal(fixture.deployment, &signer, b"other", amount_action(3), 20);
         let duplicate = WithdrawalBatch::new(vec![other]).unwrap();
         let context = epoch(&fixture, 2, &duplicate);
         assert!(matches!(
@@ -11919,14 +11843,7 @@ mod tests {
                 .unwrap(),
             1
         );
-        let request = withdrawal(
-            fixture.deployment,
-            genesis.root(),
-            &signer,
-            b"later",
-            amount_action(4),
-            20,
-        );
+        let request = withdrawal(fixture.deployment, &signer, b"later", amount_action(4), 20);
         assert_eq!(
             fixture
                 .chain
@@ -12007,14 +11924,7 @@ mod tests {
         let depositor = fixture.accounts[0].public_key();
         let signer = fixture.accounts[1].clone();
         let account = signer.public_key();
-        let request = withdrawal(
-            fixture.deployment,
-            genesis.root(),
-            &signer,
-            b"early",
-            amount_action(4),
-            20,
-        );
+        let request = withdrawal(fixture.deployment, &signer, b"early", amount_action(4), 20);
         let early = WithdrawalBatch::new(vec![request.clone()]).unwrap();
         let queue = |fixture: &mut Harness| {
             fixture
@@ -12156,22 +12066,8 @@ mod tests {
         let signer = fixture.accounts[1].clone();
         let account = signer.public_key();
         let opening = genesis.opening(&account).unwrap();
-        let extra = withdrawal(
-            fixture.deployment,
-            genesis.root(),
-            &signer,
-            b"extra",
-            amount_action(3),
-            20,
-        );
-        let queued = withdrawal(
-            fixture.deployment,
-            genesis.root(),
-            &signer,
-            b"queued",
-            amount_action(4),
-            20,
-        );
+        let extra = withdrawal(fixture.deployment, &signer, b"extra", amount_action(3), 20);
+        let queued = withdrawal(fixture.deployment, &signer, b"queued", amount_action(4), 20);
         let carried = WithdrawalBatch::new(vec![extra.clone()]).unwrap();
         let build = |fixture: &mut Harness| {
             fixture
@@ -12218,7 +12114,6 @@ mod tests {
         // Neither request can be queued again, and another extra for the account is rejected.
         let another = withdrawal(
             fixture.deployment,
-            genesis.root(),
             &signer,
             b"another",
             amount_action(1),
@@ -12333,22 +12228,8 @@ mod tests {
 
         // The signer queues a request at index 1. Epoch 1 pulls only index 0 and carries a fresh
         // extra for the signer, which supersedes the queued request.
-        let queued = withdrawal(
-            fixture.deployment,
-            finalized.root(),
-            &signer,
-            b"queued",
-            amount_action(4),
-            40,
-        );
-        let extra = withdrawal(
-            fixture.deployment,
-            finalized.root(),
-            &signer,
-            b"extra",
-            amount_action(3),
-            40,
-        );
+        let queued = withdrawal(fixture.deployment, &signer, b"queued", amount_action(4), 40);
+        let extra = withdrawal(fixture.deployment, &signer, b"extra", amount_action(3), 40);
         assert_eq!(
             fixture
                 .chain
@@ -12746,7 +12627,6 @@ mod tests {
         assert_eq!(fixture.chain.encode(), before);
         let request = withdrawal(
             fixture.deployment,
-            fixture.cache.root(),
             &signer,
             b"overflow",
             amount_action(1),
@@ -12773,14 +12653,7 @@ mod tests {
         let genesis = fixture.cache.clone();
         let signers = fixture.accounts.clone();
         let request = |signer: &SigningKey, destination: &'static [u8], action| {
-            withdrawal(
-                fixture.deployment,
-                genesis.root(),
-                signer,
-                destination,
-                action,
-                20,
-            )
+            withdrawal(fixture.deployment, signer, destination, action, 20)
         };
 
         // Queued requests below and equal to the tail and a Close, plus a fresh Amount above it.
@@ -12826,7 +12699,6 @@ mod tests {
         let payer = credited.accounts[1].clone();
         let lifted = withdrawal(
             credited.deployment,
-            genesis.root(),
             &receiver,
             b"lifted",
             amount_action(12),
@@ -12887,7 +12759,6 @@ mod tests {
             .unwrap();
         let request = withdrawal(
             fixture.deployment,
-            genesis.root(),
             &withdrawer,
             b"recurrence",
             amount_action(4),
@@ -13042,14 +12913,7 @@ mod tests {
             .record_deposit(0, Sha256::hash(&[b"codec-deposit"]), depositor, 2)
             .unwrap();
         register_next(&mut fixture, 0, vec![]).unwrap();
-        let request = withdrawal(
-            fixture.deployment,
-            genesis.root(),
-            &signer,
-            b"codec",
-            amount_action(1),
-            20,
-        );
+        let request = withdrawal(fixture.deployment, &signer, b"codec", amount_action(1), 20);
         fixture
             .chain
             .queue_withdrawal(

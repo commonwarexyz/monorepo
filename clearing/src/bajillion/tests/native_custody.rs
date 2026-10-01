@@ -224,7 +224,6 @@ fn current_payout_proof_survives_old_activity_retirement() {
         let fixture = fixture(runtime.child("initial"), 1, 0, 0, 0).await;
         let request = SignedWithdrawal::sign(
             *fixture.context.deployment(),
-            fixture.state.state().root().digest,
             Bytes::from_static(b"destination"),
             WithdrawalAction::Close,
             100,

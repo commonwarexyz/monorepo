@@ -125,7 +125,6 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
             .map(|(index, wallet)| {
                 SignedWithdrawal::sign(
                     deployment(),
-                    genesis.root().digest,
                     wallet.public_key().encode(),
                     WithdrawalAction::Amount(
                         NonZeroU64::new(if index == 0 { 100 } else { 1 }).unwrap(),
@@ -541,7 +540,6 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
         let deadline = 50;
         let pending = SignedWithdrawal::sign(
             deployment(),
-            replica.state().root().digest,
             wallets[0].public_key().encode(),
             WithdrawalAction::Amount(NonZeroU64::MIN),
             deadline,
@@ -684,7 +682,6 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_claimed_merges
                 .map(|wallet| {
                     SignedWithdrawal::sign(
                         deployment(),
-                        state.root().digest,
                         wallet.public_key().encode(),
                         WithdrawalAction::Amount(NonZeroU64::MIN),
                         100,

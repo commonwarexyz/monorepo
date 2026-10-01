@@ -28,6 +28,9 @@ use std::{
 
 const CHAIN: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9_703);
+/// An address nothing binds, so the wallet reads its balance from the validators.
+const UNREACHABLE: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9_704);
 const TIMING: Timing = Timing {
     admission_offset: 1_000,
     challenge_duration: 8,
@@ -41,6 +44,19 @@ fn client(context: &deterministic::Context, control: &harness::Control) -> Clien
         context.child("chain_rng"),
     )
     .unwrap()
+}
+
+/// The certified native balance of `account`.
+async fn native(
+    context: &deterministic::Context,
+    chain: &mut Client,
+    account: crate::protocol::Key,
+) -> u64 {
+    let chain_id = chain.genesis().native.chain_id();
+    chain
+        .native_balance(context, chain_id, account)
+        .await
+        .unwrap()
 }
 
 struct ReleaseClose(Option<SyncSender<()>>);
@@ -89,6 +105,7 @@ fn successor_receipt_precedes_predecessor_construction_and_admission() {
             client(&context, &control),
             operator.clone(),
             strategy,
+            TIMING,
         );
         let server = context.child("operator_rpc").spawn({
             let operator = operator.clone();
@@ -228,7 +245,7 @@ struct HeldRegistration {
 }
 
 impl HeldRegistration {
-    async fn hold<E: Env>(&self, ctx: &E, publication: bool) {
+    async fn hold(&self, publication: bool) {
         let Some(gate) = &self.gate else { return };
         loop {
             {
@@ -245,13 +262,13 @@ impl HeldRegistration {
                     return;
                 }
             }
-            ctx.sleep(Duration::from_millis(10)).await;
+            commonware_runtime::reschedule().await;
         }
     }
 
-    async fn readback<E: Env>(&self, ctx: &E, verified: &crate::chain::light::Verified) {
+    async fn readback(&self, verified: &crate::chain::light::Verified) {
         if matches!(&verified.record, Some(Record::Registration(record)) if record.epoch == 1) {
-            self.hold(ctx, false).await;
+            self.hold(false).await;
         }
     }
 }
@@ -279,7 +296,7 @@ impl Chain for HeldRegistration {
         request: &crate::chain::query::ReadRequest,
     ) -> Result<crate::chain::light::Verified> {
         let verified = self.inner.read(ctx, request).await?;
-        self.readback(ctx, &verified).await;
+        self.readback(&verified).await;
         Ok(verified)
     }
 
@@ -289,7 +306,7 @@ impl Chain for HeldRegistration {
         request: &crate::chain::query::ReadRequest,
     ) -> Result<crate::chain::light::Verified> {
         let verified = self.inner.recent(ctx, request).await?;
-        self.readback(ctx, &verified).await;
+        self.readback(&verified).await;
         Ok(verified)
     }
 
@@ -299,15 +316,18 @@ impl Chain for HeldRegistration {
         tx: &SettlementTx,
     ) -> Result<crate::chain::ingress::Submission> {
         if matches!(tx, SettlementTx::RegisterEpoch(request) if request.epoch == 1) {
-            self.hold(ctx, true).await;
+            self.hold(true).await;
         }
         self.inner.submit(ctx, tx).await
     }
 }
 
+/// The operator keeps receipting in the registered epoch while its successor registration is
+/// submitted and read back, and switches to the successor anchor only at the certified handoff.
 #[test]
 fn current_receipts_continue_until_successor_registration_is_certified() {
     deterministic::Runner::timed(Duration::from_secs(20)).start(|context| async move {
+        // Alice pays in epoch 0 while successor submission and read-back are both held.
         let control = chain(&context).await;
         let operator = operator();
         let (publishing, published) = oneshot::channel();
@@ -319,20 +339,25 @@ fn current_receipts_continue_until_successor_registration_is_certified() {
             publishing: Some(publishing),
             reading: Some(reading),
         }));
-        let service = Service::start_held(&context, &control, &operator, Some(gate.clone()), 0).await;
+        let service =
+            Service::start_held(&context, &control, &operator, Some(gate.clone()), 0).await;
         let mut alice = Agent::new(0).unwrap();
         let mut bob = Agent::new(1).unwrap();
         let mut alice_chain = client(&context, &control);
         let mut bob_chain = client(&context, &control);
         assert_eq!(
             accepted(
-                alice.pay(&context, &mut alice_chain, service.address, &[(1, 2)])
+                alice
+                    .pay(&context, &mut alice_chain, service.address, &[(1, 2)])
                     .await
                     .unwrap(),
-            ).epoch,
+            )
+            .epoch,
             0
         );
 
+        // A close request starts successor registration, and payments continue in epoch 0 while
+        // its submission is held.
         let (started, release) = operator.lock().pause_next_close();
         let mut release = ReleaseClose(Some(release));
         let closing = context.child("manual_close").spawn({
@@ -341,7 +366,8 @@ fn current_receipts_continue_until_successor_registration_is_certified() {
             move |context| async move {
                 let closed = operator_rpc::start_close(&context, address, 0).await?;
                 let mut trigger = Agent::new(2)?;
-                trigger.pay(&context, &mut trigger_chain, address, &[(1, 1)])
+                trigger
+                    .pay(&context, &mut trigger_chain, address, &[(1, 1)])
                     .await?;
                 Ok::<_, anyhow::Error>(closed)
             }
@@ -357,11 +383,15 @@ fn current_receipts_continue_until_successor_registration_is_certified() {
         );
         published.await.unwrap();
         assert!(
-            control.record(registration_key(&deployment(), 1)).await.is_none()
+            control
+                .record(registration_key(&deployment(), 1))
+                .await
+                .is_none()
         );
 
+        let payment = alice.pay(&context, &mut alice_chain, service.address, &[(1, 3)]);
         let during = commonware_macros::select! {
-            result = alice.pay(&context, &mut alice_chain, service.address, &[(1, 3)]) => Some(result),
+            result = payment => Some(result),
             _ = context.sleep(Duration::from_secs(1)) => None,
         };
         if during.is_none() {
@@ -378,10 +408,16 @@ fn current_receipts_continue_until_successor_registration_is_certified() {
         let during = accepted(during.unwrap().unwrap());
         assert_eq!(during.epoch, 0);
         assert_eq!(operator.lock().status().unwrap().epoch, 0);
+
+        // The registration lands but its read-back is held, so the operator head stays in epoch 0.
         gate.lock().publish = false;
         read.await.unwrap();
 
-        let registered = bob_chain.registration_at(&context, 1).await.unwrap().unwrap();
+        let registered = bob_chain
+            .registration_at(&context, 1)
+            .await
+            .unwrap()
+            .unwrap();
         let visible = accepted(
             bob.pay(&context, &mut bob_chain, service.address, &[(0, 1)])
                 .await
@@ -392,11 +428,14 @@ fn current_receipts_continue_until_successor_registration_is_certified() {
             "publication alone must not switch the operator head"
         );
         let last = accepted(
-            alice.pay(&context, &mut alice_chain, service.address, &[(1, 4)])
+            alice
+                .pay(&context, &mut alice_chain, service.address, &[(1, 4)])
                 .await
                 .unwrap(),
         );
         assert_eq!(last.epoch, 0);
+
+        // The certified handoff moves Alice to the successor, bound to her final epoch-0 vector.
         let before = service.sends.lock().len();
         gate.lock().readback = false;
         assert_eq!(closing.await.unwrap().unwrap().epoch, 0);
@@ -404,7 +443,8 @@ fn current_receipts_continue_until_successor_registration_is_certified() {
         let _ = driver.await;
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         let successor = accepted(
-            alice.pay(&context, &mut alice_chain, service.address, &[(1, 5)])
+            alice
+                .pay(&context, &mut alice_chain, service.address, &[(1, 5)])
                 .await
                 .unwrap(),
         );
@@ -431,16 +471,25 @@ fn current_receipts_continue_until_successor_registration_is_certified() {
         .root::<Sha256, Digest>()
         .unwrap();
         assert_eq!(sent[1].authorization.predecessor(), predecessor);
-        assert!(control.record(admitted_key(&deployment(), 0)).await.is_none());
+        assert!(
+            control
+                .record(admitted_key(&deployment(), 0))
+                .await
+                .is_none()
+        );
         release.release();
         operator.lock().wait_for_closes().unwrap();
         service.stop().await;
     });
 }
 
+/// A successor registration cancelled after submission stays discoverable. A wallet that finds
+/// its anchor retries the same send until the next close driver completes the handoff, while
+/// payments continue in the registered epoch.
 #[test]
 fn discoverable_successor_retries_after_cancelled_registration_without_stopping_current_payments() {
     deterministic::Runner::timed(Duration::from_secs(20)).start(|context| async move {
+        // Alice pays in epoch 0, then successor registration is cancelled during read-back.
         let control = chain(&context).await;
         let operator = operator();
         let (reading, read) = oneshot::channel();
@@ -449,15 +498,18 @@ fn discoverable_successor_retries_after_cancelled_registration_without_stopping_
             reading: Some(reading),
             ..RegistrationGate::default()
         }));
-        let service = Service::start_held(&context, &control, &operator, Some(gate.clone()), 0).await;
+        let service =
+            Service::start_held(&context, &control, &operator, Some(gate.clone()), 0).await;
         let mut alice = Agent::new(0).unwrap();
         let mut alice_chain = client(&context, &control);
         assert_eq!(
             accepted(
-                alice.pay(&context, &mut alice_chain, service.address, &[(1, 1)])
+                alice
+                    .pay(&context, &mut alice_chain, service.address, &[(1, 1)])
                     .await
                     .unwrap(),
-            ).epoch,
+            )
+            .epoch,
             0
         );
         let (started, release) = operator.lock().pause_next_close();
@@ -469,7 +521,7 @@ fn discoverable_successor_retries_after_cancelled_registration_without_stopping_
                 gate: Some(gate.clone()),
             };
             move |context| async move {
-                register_successor(&context, &mut chain, &operator, 0)
+                register_successor(&context, &mut chain, &operator, 0, TIMING)
                     .await
                     .map(|started| started.epoch)
             }
@@ -479,6 +531,8 @@ fn discoverable_successor_retries_after_cancelled_registration_without_stopping_
         let _ = closing.await;
         assert!(operator.lock().successor_pending().unwrap());
         assert_eq!(operator.lock().status().unwrap().epoch, 0);
+
+        // A cold wallet signs under the discoverable successor and waits without a result.
         gate.lock().hide_heads = true;
         let mut future = context.child("future_wallet").spawn({
             let address = service.address;
@@ -486,7 +540,8 @@ fn discoverable_successor_retries_after_cancelled_registration_without_stopping_
             move |context| async move {
                 let mut wallet = Agent::new(2).unwrap();
                 let receipt = accepted(
-                    wallet.pay(&context, &mut chain, address, &[(1, 1)])
+                    wallet
+                        .pay(&context, &mut chain, address, &[(1, 1)])
                         .await
                         .unwrap(),
                 );
@@ -495,42 +550,58 @@ fn discoverable_successor_retries_after_cancelled_registration_without_stopping_
         });
         let payer = crate::protocol::wallets()[2].public_key();
         let pending = loop {
-            if let Some(send) = service.sends.lock()
+            if let Some(send) = service
+                .sends
+                .lock()
                 .iter()
                 .find(|send| send.authorization.body().payer() == &payer)
                 .cloned()
             {
                 break send;
             }
-            context.sleep(Duration::from_millis(10)).await;
+            commonware_runtime::reschedule().await;
         };
         assert_eq!(pending.authorization.body().epoch(), 1);
         commonware_macros::select! {
-            result = &mut future => panic!("future epoch received a result before handoff: {result:?}"),
+            result = &mut future => {
+                panic!("future epoch received a result before handoff: {result:?}")
+            },
             _ = context.sleep(Duration::from_millis(250)) => {},
         }
         assert_eq!(
             accepted(
-                alice.pay(&context, &mut alice_chain, service.address, &[(1, 2)])
+                alice
+                    .pay(&context, &mut alice_chain, service.address, &[(1, 2)])
                     .await
                     .unwrap(),
-            ).epoch,
+            )
+            .epoch,
             0
         );
+
+        // The next driver tick hands off, and the retried send is receipted in epoch 1.
         gate.lock().readback = false;
-        drive_closes(&context, &mut alice_chain, &operator, TIMING).await.unwrap();
+        drive_closes(&context, &mut alice_chain, &operator, TIMING)
+            .await
+            .unwrap();
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         let (receipt, held) = future.await.unwrap();
         assert_eq!((receipt.epoch, held), (1, 1));
         {
             let sent = service.sends.lock();
-            let retries = sent.iter()
+            let retries = sent
+                .iter()
                 .filter(|send| send.authorization.body().payer() == &payer)
                 .collect::<Vec<_>>();
             assert!(retries.len() >= 2);
             assert!(retries.iter().all(|send| **send == pending));
         }
-        assert!(control.record(admitted_key(&deployment(), 0)).await.is_none());
+        assert!(
+            control
+                .record(admitted_key(&deployment(), 0))
+                .await
+                .is_none()
+        );
         release.release();
         operator.lock().wait_for_closes().unwrap();
         service.stop().await;
@@ -601,6 +672,7 @@ impl Service {
             },
             operator.clone(),
             strategy,
+            TIMING,
         );
         let sends = Arc::new(Mutex::new(Vec::new()));
         let withdrawals = Arc::new(Mutex::new(Vec::new()));
@@ -1078,7 +1150,6 @@ async fn withdrawal(
     let wallet = &crate::protocol::wallets()[wallet];
     SignedWithdrawal::sign(
         deployment(),
-        head.state_root.digest,
         wallet.public_key().encode(),
         WithdrawalAction::Amount(NonZeroU64::new(amount).unwrap()),
         head.height
@@ -1120,9 +1191,12 @@ fn apply(
         })
 }
 
+/// A withdrawal staged into the successor, and its exact retry, are acknowledged only after the
+/// certified handoff. Until then the predecessor keeps receipting and its balances stay spendable.
 #[test]
 fn future_withdrawal_ack_and_exact_retry_wait_for_certified_handoff() {
     deterministic::Runner::timed(Duration::from_secs(20)).start(|context| async move {
+        // Alice pays in the registered epoch 0.
         let control = chain(&context).await;
         let operator = operator();
         let (publishing, published) = oneshot::channel();
@@ -1158,13 +1232,13 @@ fn future_withdrawal_ack_and_exact_retry_wait_for_certified_handoff() {
             if let Some(staged) = operator.lock().staged_withdrawal(&request).unwrap() {
                 break staged;
             }
-            context.sleep(Duration::from_millis(10)).await;
+            commonware_runtime::reschedule().await;
         };
         assert_eq!(staged.epoch, 1);
         assert_eq!(operator.lock().status().unwrap().epoch, 0);
         let mut replay = apply(&context, service.address, &request);
         while service.withdrawals.lock().len() < 2 {
-            context.sleep(Duration::from_millis(10)).await;
+            commonware_runtime::reschedule().await;
         }
 
         // Submission and certified read-back each hold ACKs before the payment handoff.
@@ -1315,14 +1389,22 @@ impl Drop for WithdrawalDatabase {
     }
 }
 
+/// A successor withdrawal whose request is cancelled after publication survives an operator
+/// restart. Its replay waits for the handoff, the handoff completes without any request
+/// attached, and a later replay answers from the retained row without reading the chain.
 #[test]
 fn cancelled_future_withdrawal_replays_after_restart_and_independent_handoff() {
     deterministic::Runner::timed(Duration::from_secs(20)).start(|context| async move {
+        // Epoch 0 registers and pays, and a signed withdrawal waits for intake.
         let database = WithdrawalDatabase::new();
         let control = chain(&context).await;
-        let operator = Arc::new(Mutex::new(Operator::open(&database.path(), NonZeroUsize::MIN).unwrap()));
+        let operator = Arc::new(Mutex::new(
+            Operator::open(&database.path(), NonZeroUsize::MIN).unwrap(),
+        ));
         let mut chain = client(&context, &control);
-        register_epoch(&context, &mut chain, &operator, |_| Ok(true)).await.unwrap();
+        register_epoch(&context, &mut chain, &operator, TIMING, |_| Ok(true))
+            .await
+            .unwrap();
         operator.lock().pay(0, 1, 2).unwrap();
         let request = withdrawal(&context, &mut chain, 1, 3).await;
         let (publishing, published) = oneshot::channel();
@@ -1333,26 +1415,26 @@ fn cancelled_future_withdrawal_replays_after_restart_and_independent_handoff() {
             ..RegistrationGate::default()
         }));
 
-        // The service attempt owns polling; SQLite owns intake and publication intent.
+        // The service attempt owns polling. SQLite owns intake and publication intent.
         let mut original = context.child("cancelled_withdrawal").spawn({
             let operator = operator.clone();
             let request = request.clone();
-            let mut chain = HeldRegistration { inner: client(&context, &control), gate: Some(gate.clone()) };
+            let mut chain = HeldRegistration {
+                inner: client(&context, &control),
+                gate: Some(gate.clone()),
+            };
+            let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
+                operator_rpc::ApplyWithdrawalRequest { request },
+            );
             move |context| async move {
-                prepare_request(
-                    &context,
-                    &mut chain,
-                    &operator,
-                    &operator_rpc::OperatorRequest::ApplyWithdrawal(operator_rpc::ApplyWithdrawalRequest { request }),
-                    TIMING,
-                ).await
+                prepare_request(&context, &mut chain, &operator, &request, TIMING).await
             }
         });
         let staged = loop {
             if let Some(staged) = operator.lock().staged_withdrawal(&request).unwrap() {
                 break staged;
             }
-            context.sleep(Duration::from_millis(10)).await;
+            commonware_runtime::reschedule().await;
         };
         assert_eq!(staged.epoch, 1);
         pending(&context, &mut original).await;
@@ -1361,22 +1443,34 @@ fn cancelled_future_withdrawal_replays_after_restart_and_independent_handoff() {
         assert!(original.await.is_err());
         assert!(operator.lock().successor_pending().unwrap());
         assert_eq!(operator.lock().status().unwrap().epoch, 0);
-        assert!(control.record(registration_key(&deployment(), 1)).await.is_none());
+        assert!(
+            control
+                .record(registration_key(&deployment(), 1))
+                .await
+                .is_none()
+        );
         drop(operator);
 
-        let operator = Arc::new(Mutex::new(Operator::open(&database.path(), NonZeroUsize::MIN).unwrap()));
-        let service = Service::start_held(&context, &control, &operator, Some(gate.clone()), 0).await;
+        // The restarted operator holds the replay until the registration read-back is released.
+        let operator = Arc::new(Mutex::new(
+            Operator::open(&database.path(), NonZeroUsize::MIN).unwrap(),
+        ));
+        let service =
+            Service::start_held(&context, &control, &operator, Some(gate.clone()), 0).await;
         let (started, release) = operator.lock().pause_next_close();
         let mut release = ReleaseClose(Some(release));
         let driver = start_close_driver(
             &context,
-            HeldRegistration { inner: client(&context, &control), gate: Some(gate.clone()) },
+            HeldRegistration {
+                inner: client(&context, &control),
+                gate: Some(gate.clone()),
+            },
             operator.clone(),
             TIMING,
         );
         let mut replay = apply(&context, service.address, &request);
         while service.withdrawals.lock().is_empty() {
-            context.sleep(Duration::from_millis(10)).await;
+            commonware_runtime::reschedule().await;
         }
         pending(&context, &mut replay).await;
         assert_eq!(operator.lock().status().unwrap().epoch, 0);
@@ -1387,7 +1481,10 @@ fn cancelled_future_withdrawal_replays_after_restart_and_independent_handoff() {
         let registered = chain.registration_at(&context, 1).await.unwrap().unwrap();
         assert_eq!(
             registered.withdrawals_root,
-            WithdrawalBatch::new(vec![request.clone()]).unwrap().root::<Sha256>().unwrap(),
+            WithdrawalBatch::new(vec![request.clone()])
+                .unwrap()
+                .root::<Sha256>()
+                .unwrap(),
         );
         pending(&context, &mut replay).await;
 
@@ -1397,23 +1494,28 @@ fn cancelled_future_withdrawal_replays_after_restart_and_independent_handoff() {
         service.stop().await;
         gate.lock().readback = false;
         while operator.lock().status().unwrap().epoch == 0 {
-            context.sleep(Duration::from_millis(10)).await;
+            commonware_runtime::reschedule().await;
         }
         assert_eq!(operator.lock().status().unwrap().epoch, 1);
         driver.abort();
         let _ = driver.await;
         started.recv_timeout(Duration::from_secs(5)).unwrap();
-        register_successor(&context, &mut chain, &operator, 1).await.unwrap();
+        register_successor(&context, &mut chain, &operator, 1, TIMING)
+            .await
+            .unwrap();
         assert_eq!(operator.lock().status().unwrap().epoch, 2);
 
         // Historical replays use their exact retained row while registration read-back is held.
         // Bindings belong to the deterministic runtime, so each listener has a distinct address.
         gate.lock().readback = true;
-        let service = Service::start_held(&context, &control, &operator, Some(gate.clone()), 1).await;
+        let service =
+            Service::start_held(&context, &control, &operator, Some(gate.clone()), 1).await;
         let mut historical = apply(&context, service.address, &request);
         let historical = commonware_macros::select! {
             result = &mut historical => result.unwrap().unwrap(),
-            _ = context.sleep(Duration::from_millis(250)) => panic!("retained exact replay waited for the chain"),
+            _ = context.sleep(Duration::from_millis(250)) => {
+                panic!("retained exact replay waited for the chain")
+            },
         };
         assert_eq!(historical.epoch, staged.epoch);
         assert_eq!(historical.digest, operator_rpc::withdrawal_digest(&request));
@@ -1424,13 +1526,17 @@ fn cancelled_future_withdrawal_replays_after_restart_and_independent_handoff() {
     });
 }
 
+/// A private successor withdrawal replaced by a chain-queued request for its account never
+/// receives an ACK, even once its original epoch becomes live. The queued replacement is
+/// registered and answers from its retained row.
 #[test]
 fn replaced_future_withdrawal_cannot_ack_when_its_original_epoch_becomes_live() {
     deterministic::Runner::timed(Duration::from_secs(20)).start(|context| async move {
+        // Epoch 0 registers and pays, and a fresh withdrawal stages into epoch 1.
         let control = chain(&context).await;
         let operator = operator();
         let mut chain = client(&context, &control);
-        register_epoch(&context, &mut chain, &operator, |_| Ok(true))
+        register_epoch(&context, &mut chain, &operator, TIMING, |_| Ok(true))
             .await
             .unwrap();
         operator.lock().pay(0, 1, 2).unwrap();
@@ -1478,6 +1584,8 @@ fn replaced_future_withdrawal_cannot_ack_when_its_original_epoch_becomes_live() 
                 .epoch,
             staged.epoch
         );
+
+        // The original request's retry waits while the successor registration is held.
         let (publishing, published) = oneshot::channel();
         let (reading, read) = oneshot::channel();
         let gate = Arc::new(Mutex::new(RegistrationGate {
@@ -1493,7 +1601,7 @@ fn replaced_future_withdrawal_cannot_ack_when_its_original_epoch_becomes_live() 
         let mut release = ReleaseClose(Some(release));
         let mut original = apply(&context, service.address, &request);
         while service.withdrawals.lock().is_empty() {
-            context.sleep(Duration::from_millis(10)).await;
+            commonware_runtime::reschedule().await;
         }
         let driver = start_close_driver(
             &context,
@@ -1554,6 +1662,341 @@ fn replaced_future_withdrawal_cannot_ack_when_its_original_epoch_becomes_live() 
         );
         release.release();
         operator.lock().wait_for_closes().unwrap();
+        service.stop().await;
+    });
+}
+
+/// The operator's live epoch 1 after its native balance can no longer pay the epoch fee.
+struct Unfunded {
+    control: harness::Control,
+    operator: Arc<Mutex<Operator>>,
+    service: Service,
+    driver: Handle<()>,
+    alice: Agent,
+    bob: Agent,
+    chain: Client,
+    /// The fee recipient's native balance after the operator's balance is drained.
+    fees: u64,
+    /// The native fee one epoch registration pays.
+    fee: u64,
+}
+
+/// Finalizes epoch 0 with Alice's payment of 7 to Bob, drains the operator's native balance,
+/// and receipts Alice's payment of 5 to Bob in epoch 1. The close driver then tries to register
+/// epoch 2, and every attempt fails without charging a fee.
+async fn unfunded(context: &deterministic::Context) -> Unfunded {
+    let control = chain(context).await;
+    let operator = operator();
+    let service = Service::start(context, &control, &operator).await;
+    let mut alice = Agent::new(0).unwrap();
+    let bob = Agent::new(1).unwrap();
+    let mut chain = client(context, &control);
+    let native = control.identity().native.clone();
+    let entry = native
+        .deployments
+        .iter()
+        .find(|entry| entry.deployment.digest() == &deployment())
+        .unwrap();
+    let fee = native.epoch_cost(entry.max_dealing_bytes).unwrap();
+    let owner = crate::protocol::operator_key();
+
+    // Epoch 0 finalizes with Alice's payment to Bob.
+    let first = accepted(
+        alice
+            .pay(context, &mut chain, service.address, &[(1, 7)])
+            .await
+            .unwrap(),
+    );
+    assert_eq!(first.epoch, 0);
+    operator_rpc::start_close(context, service.address, 0)
+        .await
+        .unwrap();
+    operator.lock().wait_for_closes().unwrap();
+    let close = operator.lock().retained_result(0).unwrap().unwrap();
+    let height = control.advance(0).await;
+    control
+        .advance(close.context.admission_deadline() - height - 1)
+        .await;
+    admit(&control, &operator, 0).await;
+    let height = control.advance(0).await;
+    control
+        .advance(close.context.challenge_deadline() - height + 1)
+        .await;
+    assert_eq!(chain.status(context).await.unwrap().last_finalized, Some(0));
+
+    // The operator's native balance is drained.
+    let balance = chain
+        .native_balance(context, native.chain_id(), owner.clone())
+        .await
+        .unwrap();
+    chain
+        .deliver(
+            context,
+            &SettlementTx::NativeTransfer(crate::chain::tx::NativeTransferRequest::sign(
+                native.chain_id(),
+                Sha256::hash(&[b"drain-operator"]),
+                crate::protocol::Wallet::from_seed("fee sink", 9_999).public_key(),
+                balance,
+                &crate::protocol::operator_signer(0),
+            )),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        chain
+            .native_balance(context, native.chain_id(), owner.clone())
+            .await
+            .unwrap(),
+        0
+    );
+    let fees = chain
+        .native_balance(context, native.chain_id(), native.fee_recipient.clone())
+        .await
+        .unwrap();
+
+    // Alice pays Bob in epoch 1, and every successor registration fails without a fee.
+    let second = accepted(
+        alice
+            .pay(context, &mut chain, service.address, &[(1, 5)])
+            .await
+            .unwrap(),
+    );
+    assert_eq!(second.epoch, 1);
+    let driver = start_close_driver(context, client(context, &control), operator.clone(), TIMING);
+    while !operator.lock().successor_pending().unwrap() {
+        commonware_runtime::reschedule().await;
+    }
+    control.advance(10).await;
+    assert!(
+        control
+            .record(registration_key(&deployment(), 2))
+            .await
+            .is_none()
+    );
+    assert_eq!(operator.lock().status().unwrap().epoch, 1);
+    assert_eq!(
+        chain
+            .native_balance(context, native.chain_id(), owner)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        chain
+            .native_balance(context, native.chain_id(), native.fee_recipient.clone())
+            .await
+            .unwrap(),
+        fees
+    );
+    Unfunded {
+        control,
+        operator,
+        service,
+        driver,
+        alice,
+        bob,
+        chain,
+        fees,
+        fee,
+    }
+}
+
+/// An operator that cannot pay its successor's epoch fee faults the deployment, and every
+/// account's finalized balance leaves through the chain.
+///
+/// The operator's successor registrations fail, so live epoch 1 never closes. The operator has
+/// already published the successor boundary, so it stages no withdrawal, and Alice escalates
+/// hers. Epoch 1 expires at its admission deadline. Hard-fault recovery pays each account its
+/// balance at epoch 0's root, with Alice's queued Amount routed to her. The payment Alice made in
+/// epoch 1 never settles.
+#[test]
+fn fee_exhaustion_faults_and_recovers_frozen_balances() {
+    deterministic::Runner::timed(Duration::from_secs(300)).start(|context| async move {
+        let Unfunded {
+            control,
+            operator,
+            service,
+            driver,
+            mut alice,
+            mut bob,
+            mut chain,
+            ..
+        } = Box::pin(unfunded(&context)).await;
+        let frozen = chain.status(&context).await.unwrap().state_root;
+
+        // The operator stages no withdrawal, so Alice escalates hers.
+        let crate::agent::WithdrawalOutcome::Signed { request, .. } = alice
+            .withdraw(
+                &context,
+                &mut chain,
+                service.address,
+                WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("the unfunded operator acknowledged the withdrawal");
+        };
+        assert!(
+            operator
+                .lock()
+                .staged_withdrawal(&request)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            alice
+                .escalate_withdrawal(&context, &mut chain)
+                .await
+                .unwrap(),
+            request
+        );
+        assert_eq!(
+            chain.withdrawal(&context, alice.account()).await.unwrap(),
+            Some(request)
+        );
+
+        // Epoch 1 expires at its admission deadline.
+        let (admission, _) = chain
+            .registration_at(&context, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .deadlines
+            .unwrap();
+        let height = control.advance(0).await;
+        control.advance(admission - height).await;
+        assert!(!chain.status(&context).await.unwrap().hard_faulted);
+        control.advance(1).await;
+        assert!(matches!(
+            chain.fault(&context).await.unwrap(),
+            Some(FaultRecord::Faulted(HardFaultReasonResponse::ExpiredRegistration {
+                epoch: 1,
+                expired_at,
+                ..
+            })) if expired_at == admission
+        ));
+        driver.abort();
+        let _ = driver.await;
+        service.stop().await;
+        drop(operator);
+
+        // Recovery pays each account its balance at epoch 0's root.
+        let custody = chain.status(&context).await.unwrap().custody;
+        let paid = native(&context, &mut chain, alice.account()).await;
+        let received = native(&context, &mut chain, bob.account()).await;
+        let release = alice
+            .recover_hard_fault(&context, &mut chain)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            chain
+                .hard_fault(&context, alice.account())
+                .await
+                .unwrap()
+                .unwrap()
+                .root,
+            frozen
+        );
+        assert_eq!(
+            release.released_custody,
+            crate::protocol::INITIAL_BALANCE - 7
+        );
+        assert_eq!(
+            release.withdrawal.as_ref().map(|output| output.amount()),
+            Some(3)
+        );
+        assert_eq!(release.residual, crate::protocol::INITIAL_BALANCE - 10);
+        let credited = bob
+            .recover_hard_fault(&context, &mut chain)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            credited.released_custody,
+            crate::protocol::INITIAL_BALANCE + 7
+        );
+        assert_eq!(
+            native(&context, &mut chain, alice.account()).await,
+            paid + crate::protocol::INITIAL_BALANCE - 7
+        );
+        assert_eq!(
+            native(&context, &mut chain, bob.account()).await,
+            received + crate::protocol::INITIAL_BALANCE + 7
+        );
+        assert_eq!(
+            chain.status(&context).await.unwrap().custody,
+            custody - 2 * crate::protocol::INITIAL_BALANCE
+        );
+    });
+}
+
+/// Funding the operator before the deadline resumes epochs.
+///
+/// The operator's successor registrations fail for want of the epoch fee. Alice transfers one
+/// epoch fee to the operator's account, the close driver registers epoch 2 and cuts epoch 1,
+/// and epoch 1's close finalizes Bob's credits from both epochs without a fault.
+#[test]
+fn operator_funding_before_deadline_resumes_epochs() {
+    deterministic::Runner::timed(Duration::from_secs(300)).start(|context| async move {
+        let Unfunded {
+            control,
+            operator,
+            service,
+            driver,
+            mut alice,
+            mut bob,
+            mut chain,
+            fees,
+            fee,
+        } = Box::pin(unfunded(&context)).await;
+        let native_genesis = control.identity().native.clone();
+
+        // Alice funds one epoch fee, and the close driver registers epoch 2 and cuts epoch 1.
+        alice
+            .transfer_native(&context, &mut chain, crate::protocol::operator_key(), fee)
+            .await
+            .unwrap();
+        while control
+            .record(registration_key(&deployment(), 2))
+            .await
+            .is_none()
+            || operator.lock().status().unwrap().epoch != 2
+        {
+            commonware_runtime::reschedule().await;
+        }
+        assert_eq!(
+            chain
+                .native_balance(
+                    &context,
+                    native_genesis.chain_id(),
+                    native_genesis.fee_recipient.clone(),
+                )
+                .await
+                .unwrap(),
+            fees + fee
+        );
+
+        // Epoch 1's close finalizes Bob's credits without a fault.
+        operator.lock().wait_for_closes().unwrap();
+        admit(&control, &operator, 1).await;
+        let close = operator.lock().retained_result(1).unwrap().unwrap();
+        let height = control.advance(0).await;
+        control
+            .advance(close.context.challenge_deadline() - height + 1)
+            .await;
+        let status = chain.status(&context).await.unwrap();
+        assert_eq!(status.last_finalized, Some(1));
+        assert!(!status.hard_faulted);
+        assert_eq!(
+            bob.balance(&context, &mut chain, UNREACHABLE)
+                .await
+                .unwrap(),
+            crate::protocol::INITIAL_BALANCE + 12
+        );
+        driver.abort();
+        let _ = driver.await;
         service.stop().await;
     });
 }

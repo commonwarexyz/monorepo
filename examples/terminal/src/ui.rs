@@ -295,7 +295,7 @@ pub(crate) async fn run_with_io<E: Env>(
             KeyCode::PageDown => state.amount = state.amount.saturating_sub(10).max(1),
             KeyCode::PageUp => state.amount = state.amount.saturating_add(10),
             KeyCode::Char('p' | 'b') if agent.has_pending_payment() => {
-                state.log("A saved payment is awaiting confirmation; press R to retry it.");
+                state.log("A saved payment is awaiting confirmation; press R to retry it, or f to close the account.");
             }
             KeyCode::Char('p') => {
                 let receiver = agent.receiver_name(state.receiver);
@@ -341,7 +341,7 @@ pub(crate) async fn run_with_io<E: Env>(
                         }
                     }
                     Ok(None) => state.log("No payment is awaiting confirmation."),
-                    Err(error) => state.log(format!("Payment still unresolved; press R to retry: {error:#}")),
+                    Err(error) => state.log(format!("Payment still unresolved; press R to retry, or f to close the account: {error:#}")),
                 }
             }
             KeyCode::Char('a') => {
@@ -437,10 +437,10 @@ pub(crate) async fn run_with_io<E: Env>(
                 match agent.withdraw(network, chain, operator, action).await {
                     Ok(WithdrawalOutcome::Applied { epoch, request }) => match request.body().action() {
                         WithdrawalAction::Amount(amount) => state.log(format!(
-                            "epoch {epoch} withdrawal carried by operator: {amount}"
+                            "epoch {epoch} withdrawal of {amount} accepted by operator; press c to claim after finalization, or x to escalate it onchain if no registration carries it"
                         )),
                         WithdrawalAction::Close => state.log(format!(
-                            "epoch {epoch} Close carried by operator; press c to claim after finalization"
+                            "epoch {epoch} Close accepted by operator; press c to claim after finalization, or x to escalate it onchain if no registration carries it"
                         )),
                     },
                     Ok(WithdrawalOutcome::Signed {
@@ -457,7 +457,7 @@ pub(crate) async fn run_with_io<E: Env>(
             }
             KeyCode::Char('x') => match agent.escalate_withdrawal(network, chain).await {
                 Ok(request) => state.log(format!(
-                    "withdrawal escalated to settlement through deadline {}; the next registered close must carry it verbatim; if the operator stalls, expiry becomes hard-fault recovery via h",
+                    "withdrawal escalated to settlement through deadline {}; the registration that pulls it, or an earlier one, must carry it verbatim; if the operator stalls, expiry becomes hard-fault recovery via h",
                     request.body().deadline()
                 )),
                 Err(error) => state.log(format!("withdrawal escalation rejected: {error:#}")),
@@ -748,7 +748,7 @@ async fn complete_pending_withdrawal<E: Env>(
             }
             Err(error) => {
                 last = Some(error);
-                agent.observe_withdrawal_expiry(network, chain).await?;
+                agent.observe_withdrawal(network, chain).await?;
                 if agent.pending_withdrawal_action().is_none()
                     && !agent.has_pending_withdrawal_claim()
                 {
@@ -817,8 +817,8 @@ pub(crate) async fn scripted<E: Env>(
         format_args!("{} moved into chain custody", deposit.amount),
     );
 
-    // The withdrawal signs the finalized root containing this deposit. Wait for
-    // the operator to observe that finality before sending the fresh request.
+    // Poll the validators until the deposit reaches the certified finalized
+    // balance before sending the fresh request.
     let deposit_epoch =
         finalized_deposit(network, &mut chain, &mut agent, start + deposit.amount).await?;
     close_epoch(network, operator, &mut agent, deposit_epoch).await?;
@@ -1158,9 +1158,12 @@ pub(crate) fn fraud_arc() -> Result<()> {
         let protocol = Protocol::new(NonZeroUsize::MIN)?;
         let deposits_root = deposits.root::<Sha256>()?;
         let withdrawals = WithdrawalBatch::empty();
-        let fee = chain.genesis().native.epoch_fee.checked_mul(
-            u64::from(chain.registered(&context).await?.max_dealing_bytes).div_ceil(1024),
-        ).context("epoch fee overflow")?;
+        let max_dealing_bytes = chain.registered(&context).await?.max_dealing_bytes;
+        let fee = chain
+            .genesis()
+            .native
+            .epoch_cost(max_dealing_bytes)
+            .context("epoch fee overflow")?;
         // The registration pulls the inbox through the fraud deposit.
         let end = index.checked_add(1).context("inbox index overflow")?;
         let signature =

@@ -22,10 +22,10 @@
 //! deadlines before processing transactions, retaining those observations even if a subsequent
 //! request is rejected. Epochs register in sequence without waiting for earlier closes. Each
 //! registration owns one record, and the admission frontier receives its deadlines from genesis
-//! policy when it is promoted. Finalization consumes the FIFO front strictly after its challenge
-//! window. A hard fault permanently fences its deployment and retires every unadmitted
-//! registration while preserving the valid pending prefix, finalized reserves, and independent
-//! terminal claims.
+//! policy when it is promoted. Each block finalizes at most one close per deployment, consuming
+//! the FIFO front strictly after its challenge window. A hard fault permanently fences its
+//! deployment and retires every unadmitted registration while preserving the valid pending
+//! prefix, finalized reserves, and independent terminal claims.
 //!
 //! # Persistence and replay
 //!
@@ -58,7 +58,7 @@ use crate::{
 };
 use bytes::{BufMut, Bytes};
 use commonware_clearing::bajillion::{
-    boundary::SignedWithdrawal,
+    boundary::{SignedWithdrawal, WithdrawalId},
     challenge::{ChallengeKind, Verdict},
     commitment::VectorRoot,
     qmdb::StateRoot,
@@ -107,6 +107,7 @@ enum Domain {
     NativeBalance = 14,
     NativeTransfer = 15,
     RegistryEntry = 16,
+    Carried = 17,
     Machine = 254,
 }
 
@@ -152,6 +153,11 @@ pub(crate) fn deposit_key(deployment: &Digest, id: &Digest) -> StateKey {
 /// Carriage retains this receipt so a lost intake response remains provable.
 pub(crate) fn withdrawal_key(deployment: &Digest, account: &Key) -> StateKey {
     derive(deployment, Domain::Withdrawal, &account.encode())
+}
+
+/// Key of the latest request a registration carried for `account`.
+pub(crate) fn carried_key(deployment: &Digest, account: &Key) -> StateKey {
+    derive(deployment, Domain::Carried, &account.encode())
 }
 
 /// Key of one deployment's registration record for `epoch`.
@@ -558,6 +564,39 @@ impl Read for WithdrawalEffect {
         Ok(Self {
             request: SignedWithdrawal::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
             index: u64::read(buf)?,
+        })
+    }
+}
+
+/// The latest request a registration carried for one account and the epoch
+/// that carried it. Only a later registration carrying another request for the
+/// account overwrites it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CarriedRecord {
+    pub(crate) epoch: u64,
+    pub(crate) id: WithdrawalId<Digest>,
+}
+
+impl Write for CarriedRecord {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.epoch.write(buf);
+        self.id.write(buf);
+    }
+}
+
+impl EncodeSize for CarriedRecord {
+    fn encode_size(&self) -> usize {
+        self.epoch.encode_size() + self.id.encode_size()
+    }
+}
+
+impl Read for CarriedRecord {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            epoch: u64::read(buf)?,
+            id: WithdrawalId::read(buf)?,
         })
     }
 }
@@ -1165,6 +1204,7 @@ pub(crate) enum Record {
     PayoutHead(crate::protocol::PayoutTip),
     Deposit(DepositEffect),
     Withdrawal(WithdrawalEffect),
+    Carried(CarriedRecord),
     Registration(RegistrationRecord),
     Claimed(u64),
     Intake(Intake),
@@ -1221,6 +1261,10 @@ impl Write for Record {
                 5_u8.write(buf);
                 record.write(buf);
             }
+            Self::Carried(record) => {
+                18_u8.write(buf);
+                record.write(buf);
+            }
             Self::Registration(record) => {
                 6_u8.write(buf);
                 record.write(buf);
@@ -1267,6 +1311,7 @@ impl EncodeSize for Record {
             Self::PayoutHead(record) => record.encode_size(),
             Self::Deposit(record) => record.encode_size(),
             Self::Withdrawal(record) => record.encode_size(),
+            Self::Carried(record) => record.encode_size(),
             Self::Registration(record) => record.encode_size(),
             Self::Claimed(record) => record.encode_size(),
             Self::Intake(record) => record.encode_size(),
@@ -1300,6 +1345,7 @@ impl Read for Record {
             3 => Ok(Self::PayoutHead(crate::protocol::PayoutTip::read(buf)?)),
             4 => Ok(Self::Deposit(DepositEffect::read(buf)?)),
             5 => Ok(Self::Withdrawal(WithdrawalEffect::read(buf)?)),
+            18 => Ok(Self::Carried(CarriedRecord::read(buf)?)),
             6 => Ok(Self::Registration(RegistrationRecord::read(buf)?)),
             7 => Ok(Self::Claimed(u64::read(buf)?)),
             8 => Ok(Self::Intake(Intake::read(buf)?)),
@@ -1345,7 +1391,7 @@ enum Reject {
     AdmissionConflict,
     /// Challenge evidence changed after it was proven.
     ChallengeConflict,
-    /// A terminal state claim position was reused.
+    /// A terminal state claim for the account was already released.
     PositionConflict,
     /// The deadlines a new admission frontier would receive exceed the block
     /// clock.
@@ -1710,8 +1756,8 @@ impl Machine {
     }
 
     /// Observes every liveness deadline exactly once for the block at
-    /// `height` with `timestamp`, returning the state changes the
-    /// observations made so the caller can derive records from them.
+    /// `height` with `timestamp`, then finalizes at most one admitted close.
+    /// Returns the resulting state changes.
     fn advance(&mut self, height: u64, timestamp: u64) -> Vec<Fired> {
         assert!(
             height >= self.height,
@@ -1942,13 +1988,16 @@ impl Machine {
         let Ok(withdrawals_root) = request.withdrawals.root::<Sha256>() else {
             return Ok(Step::rejected(Reject::Chain));
         };
-        let Ok(context) = epoch_context_at(
-            *config.digest(),
-            config.operator.clone(),
-            request.epoch,
-            &deposits,
-            &request.withdrawals,
-        ) else {
+        let Ok(context) = committee().and_then(|committee| {
+            epoch_context_at(
+                *config.digest(),
+                config.operator.clone(),
+                request.epoch,
+                &deposits,
+                &request.withdrawals,
+                committee.commitment::<Sha256>(),
+            )
+        }) else {
             return Ok(Step::rejected(Reject::Chain));
         };
         let anchor = *context.payment().anchor();
@@ -1993,6 +2042,15 @@ impl Machine {
             ),
         ];
         writes.extend((start..request.end).map(|index| (intake_key(config.digest(), index), None)));
+        writes.extend(request.withdrawals.requests().iter().map(|withdrawal| {
+            (
+                carried_key(config.digest(), withdrawal.account()),
+                Some(Record::Carried(CarriedRecord {
+                    epoch: request.epoch,
+                    id: withdrawal.id::<Sha256>(),
+                })),
+            )
+        }));
         Ok(Step::applied(writes))
     }
 
@@ -2545,7 +2603,9 @@ where
             ));
         }
         SettlementTx::RegisterEpoch(request) => {
-            let fee = u64::from(entry.max_dealing_bytes).div_ceil(1024) * native.epoch_fee;
+            let fee = native
+                .epoch_cost(entry.max_dealing_bytes)
+                .expect("genesis bounds every deployment's epoch fee");
             if request.fee != fee {
                 return Ok(Step::rejected(Reject::Fee));
             }
@@ -3234,9 +3294,9 @@ mod codec_tests {
         }
     }
 
-    /// Status, registration, intake effect, and inbox records encode their
-    /// fields in declaration order and refuse every truncation and trailing
-    /// byte.
+    /// Status, registration, intake effect, carriage, and inbox records encode
+    /// their fields in declaration order and refuse every truncation and
+    /// trailing byte.
     #[test]
     fn epoch_record_codecs_round_trip() {
         let root = VectorRoot {
@@ -3289,7 +3349,6 @@ mod codec_tests {
         };
         let request = SignedWithdrawal::sign(
             Sha256::hash(&[b"epoch-record-deployment"]),
-            Sha256::hash(&[b"epoch-record-state"]),
             Bytes::copy_from_slice(identities()[1].key.as_ref()),
             commonware_clearing::bajillion::boundary::WithdrawalAction::Close,
             20,
@@ -3298,6 +3357,10 @@ mod codec_tests {
         let withdrawal = WithdrawalEffect {
             request: request.clone(),
             index: 8,
+        };
+        let carried = CarriedRecord {
+            epoch: 3,
+            id: request.id::<Sha256>(),
         };
 
         // The inbox counters follow the next registration in the status layout.
@@ -3345,6 +3408,12 @@ mod codec_tests {
         withdrawal.index.write(&mut expected);
         assert_eq!(withdrawal.encode().as_ref(), expected);
 
+        // A carriage record names the carrying epoch before the request id.
+        let mut expected = Vec::new();
+        carried.epoch.write(&mut expected);
+        carried.id.write(&mut expected);
+        assert_eq!(carried.encode().as_ref(), expected);
+
         // Every record round-trips and rejects truncation and trailing bytes.
         for record in [
             Record::Status(status),
@@ -3352,6 +3421,7 @@ mod codec_tests {
             Record::Registration(frontier),
             Record::Deposit(effect),
             Record::Withdrawal(withdrawal),
+            Record::Carried(carried),
             Record::Intake(Intake::Deposit(event)),
             Record::Intake(Intake::Withdrawal(request)),
         ] {

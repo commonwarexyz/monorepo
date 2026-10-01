@@ -574,7 +574,6 @@ fn withdrawal_preflight_survives_active_epochs_and_new_admissions() {
         let account = wallet.public_key();
         let request = SignedWithdrawal::sign(
             deployment(),
-            genesis.root().digest,
             account.encode(),
             WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
             50,
@@ -766,14 +765,8 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
             let payer = wallets().remove(0);
             let recipient = wallets().remove(1);
             let account = payer.public_key();
-            let request = SignedWithdrawal::sign(
-                deployment(),
-                genesis.root().digest,
-                account.encode(),
-                action,
-                50,
-                payer.signer(),
-            );
+            let request =
+                SignedWithdrawal::sign(deployment(), account.encode(), action, 50, payer.signer());
             let queue = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
                 request: request.clone(),
                 opening: genesis.opening(&account).unwrap(),

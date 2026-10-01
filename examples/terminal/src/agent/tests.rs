@@ -17,12 +17,13 @@ use crate::{
             METHOD_READ, ReadRequest,
         },
         state::{
-            FaultRecord, HardFaultReasonResponse, Record, RegistrationRecord, admitted_key,
-            anchor_key, deposit_key, fault_key, registration_key, status_key, withdrawal_key,
+            FaultRecord, HardFaultReasonResponse, Intake, Record, RegistrationRecord, admitted_key,
+            anchor_key, carried_key, deposit_key, fault_key, refund_key, registration_key,
+            status_key, withdrawal_key,
         },
         tx::{
-            AdmitRequest, BeginHardFaultSettlementRequest, ChallengeRequest, RegisterEpochRequest,
-            SettlementTx, WithdrawalClaimRequest,
+            AdmitRequest, BeginHardFaultSettlementRequest, ChallengeRequest,
+            QueueWithdrawalRequest, RegisterEpochRequest, SettlementTx, WithdrawalClaimRequest,
         },
     },
     operator::{Operator, rpc as operator_rpc},
@@ -36,7 +37,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
-    challenge::{AckWitness, Challenge, EntryWitness, HigherEntryLookup},
+    challenge::{AckWitness, Challenge, ChallengeKind, EntryWitness, HigherEntryLookup},
     commitment::{self, VectorKind, VectorRoot},
     payment::{PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE, VectorSendBody},
     qmdb::{StateLookup, StateOpening, StateRoot, StateValueOpening},
@@ -112,6 +113,56 @@ async fn chain(context: &deterministic::Context) -> (harness::Control, Client) {
     )
     .unwrap();
     (control, client)
+}
+
+/// Starts the settlement chain with `timing` and a verified client over it.
+async fn chain_with(
+    context: &deterministic::Context,
+    timing: crate::protocol::Timing,
+) -> (harness::Control, Client) {
+    let control = harness::start_with_native(
+        context,
+        CHAIN,
+        "chain",
+        harness::native(crate::protocol::deployments()),
+        timing,
+    )
+    .await;
+    let client = Client::new(
+        control.identity(),
+        deployment(),
+        vec![CHAIN],
+        context.child("client_rng"),
+    )
+    .unwrap();
+    (control, client)
+}
+
+/// Seals blocks until the harness chain reaches `height`.
+async fn advance_to(control: &harness::Control, height: u64) {
+    let current = control.advance(0).await;
+    if current < height {
+        control.advance(height - current).await;
+    }
+}
+
+/// The certified native balance of `account`.
+async fn native(context: &deterministic::Context, chain: &mut Client, account: Key) -> u64 {
+    let chain_id = chain.genesis().native.chain_id();
+    chain
+        .native_balance(context, chain_id, account)
+        .await
+        .unwrap()
+}
+
+/// Binds an operator at `address` that refuses every request, counting the requests it refuses.
+async fn refusing(context: &deterministic::Context, address: SocketAddr) -> Arc<AtomicUsize> {
+    garbage_holder(
+        context,
+        address,
+        rpc::error_response("operator refuses".into()),
+    )
+    .await
 }
 
 /// A verified client over the running chain whose genesis lists every
@@ -759,11 +810,12 @@ async fn finalize(control: &harness::Control, result: &SettlementResult) {
 }
 
 /// Keeps the registered successor healthy while waiting for a withdrawal authorization to expire.
+/// The live frontier keeps room for the successor registration and admission of one more close.
 async fn advance_with_closes(control: &harness::Control, operator: &mut Operator, until: u64) {
     loop {
         register(control, operator).await;
         let record = registration_record_at(control, operator.status().unwrap().epoch).await;
-        if record.deadlines.unwrap().0 > until {
+        if record.deadlines.unwrap().0 > until + 2 {
             break;
         }
         let result = complete_chain_close(control, operator, 20_000 + record.epoch).await;
@@ -827,6 +879,7 @@ async fn registered_context(control: &harness::Control) -> EpochContext<Key, Dig
         0,
         &DepositBatch::empty(),
         &withdrawals,
+        crate::protocol::committee().unwrap().commitment::<Sha256>(),
     )
     .unwrap();
     assert_eq!(context.payment().anchor(), &record.anchor);
@@ -1045,25 +1098,21 @@ fn empty() -> VectorRoot<Digest> {
     commitment::empty_root::<Sha256>(VectorKind::OutEntry)
 }
 
-/// Opens a claim intent around the exact authorization the wallet must retain.
+/// Opens a claim intent around the exact authorization the wallet must retain, with its genesis
+/// opening as recovery evidence.
 fn stage_withdrawal_intent(agent: &mut Agent, request: &SignedWithdrawal<Key, Digest>) {
-    let root = StateRoot::new(*request.body().state_root());
     let genesis = genesis_cache();
-    assert_eq!(root, genesis.root(), "fixture withdrawal is not at genesis");
     let opening = genesis.opening(&agent.account()).unwrap();
-    stage_withdrawal_intent_at(agent, request, opening);
+    stage_withdrawal_intent_at(agent, request, &genesis.root(), opening);
 }
 
 fn stage_withdrawal_intent_at(
     agent: &mut Agent,
     request: &SignedWithdrawal<Key, Digest>,
+    root: &StateRoot<Digest>,
     opening: StateOpening<Key, Digest>,
 ) {
-    let root = StateRoot::new(*request.body().state_root());
-    agent
-        .store
-        .retain_recovery_opening(&root, &opening)
-        .unwrap();
+    agent.store.retain_recovery_opening(root, &opening).unwrap();
     agent.store.stage_withdrawal(request).unwrap();
     agent.pending_withdrawal = Some(request.clone());
     agent.pending_withdrawal_claim = None;
@@ -1127,6 +1176,7 @@ fn unregistered_context(operator: Key, epoch: u64) -> EpochContext<Key, Digest> 
         epoch,
         &deposits,
         &WithdrawalBatch::empty(),
+        crate::protocol::committee().unwrap().commitment::<Sha256>(),
     )
     .unwrap()
 }
@@ -3163,7 +3213,6 @@ fn withdrawal_uses_only_the_exact_retained_head_when_the_operator_is_unreachable
             request.body().action(),
             &WithdrawalAction::Amount(NonZeroU64::new(7).unwrap())
         );
-        assert_eq!(request.body().state_root(), &current_root.digest);
         assert!(format!("{error:#}").contains("apply operator withdrawal"));
         assert_eq!(agent.pending_withdrawal.as_ref(), Some(&request));
 
@@ -4133,20 +4182,21 @@ fn withdrawal_claim_positions_are_global_across_epochs() {
                 .unwrap(),
             native_before + 25
         );
+
+        // The fixture operator signed the second request with this wallet's key, which moved the
+        // account's carriage record, so the finished first authorization retires directly.
         advance_with_closes(&control, &mut operator, first_request.body().deadline()).await;
-        agent
-            .observe_withdrawal_expiry(&context, &mut chain)
-            .await
-            .unwrap();
-        assert!(agent.pending_withdrawal.is_none());
+        agent.store.retire_withdrawal(&first_request).unwrap();
+        agent.pending_withdrawal = None;
         drop(agent);
 
         let mut agent = Agent::open(database.path(), 0).unwrap();
-        assert_eq!(
-            second_recovery.root.digest,
-            *second_request.body().state_root()
+        stage_withdrawal_intent_at(
+            &mut agent,
+            &second_request,
+            &second_recovery.root,
+            second_recovery.opening,
         );
-        stage_withdrawal_intent_at(&mut agent, &second_request, second_recovery.opening);
         assert!(
             chain
                 .payout_status(&context, first_position)
@@ -4529,7 +4579,6 @@ fn consumed_equal_output_cannot_complete_another_exact_request_after_retirement(
         let initial = status(&control).await;
         let first = SignedWithdrawal::sign(
             deployment(),
-            initial.state_root.digest,
             account.encode(),
             action,
             withdrawal_deadline(initial.height, &chain.genesis().timing()).unwrap(),
@@ -4837,6 +4886,87 @@ fn cached_evidence_claims_after_the_operator_vanishes() {
     });
 }
 
+/// A payout cached at an older head refreshes its proof from the validators while the operator
+/// refuses every proof, and the payout reaches the native balance.
+///
+/// The operator carries Alice's withdrawal, and its close finalizes. Alice caches the payout at
+/// that head, and a later close moves the head. With the validators unreachable, the refresh
+/// fails and the candidate stays cached. Through the validators, the claim completes.
+#[test]
+fn cached_payout_refreshes_from_validators_while_the_operator_refuses_proofs() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let address = SocketAddr::from(([127, 0, 0, 1], 9_810));
+        let refused = refusing(&context, address).await;
+        let account = wallets()[0].public_key();
+
+        // The operator carries Alice's withdrawal, and its close finalizes.
+        operator
+            .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
+            .unwrap();
+        register(&control, &mut operator).await;
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let result = complete_chain_close(&control, &mut operator, 25).await;
+        finalize(&control, &result).await;
+        let (request, position, claim) =
+            settlement_withdrawal(&operator, &result, &withdrawals, &account);
+
+        // Alice caches the payout at the finalized head, and the candidate survives a reopen.
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        stage_withdrawal_intent(&mut agent, &request);
+        let head = result.roots.withdrawal_outputs;
+        agent
+            .store
+            .cache_withdrawal_claim(&PendingWithdrawalClaim { head, claim })
+            .unwrap();
+        drop(agent);
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let cached = agent.pending_withdrawal_claim.as_ref().unwrap();
+        assert_eq!(cached.head, head);
+        assert_eq!(cached.claim.position(), position);
+
+        // A later close moves the payout head, and the operator stops closing.
+        finalize_next(&control, &mut operator, 26).await;
+        drop(operator);
+        let current = chain.payout_status(&context, position).await.unwrap();
+        assert_ne!(current.head, head);
+        assert!(current.claimed.is_none());
+
+        // With the validators unreachable, the refresh fails and the candidate stays cached.
+        let mut dead = client_with_holders(&context, &control, UNREACHABLE);
+        let error = agent
+            .claim_withdrawal(&context, &mut dead, address)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("refresh payout proof from configured custodians"),
+            "{error:#}"
+        );
+        assert_eq!(agent.pending_withdrawal_claim.as_ref().unwrap().head, head);
+
+        // Through the validators, the claim completes while the operator refuses every proof.
+        let before = native(&context, &mut chain, account.clone()).await;
+        let payout = agent
+            .claim_withdrawal(&context, &mut chain, address)
+            .await
+            .unwrap();
+        assert_eq!(payout.amount, 25);
+        assert_eq!(native(&context, &mut chain, account).await, before + 25);
+        assert!(
+            chain
+                .payout_status(&context, position)
+                .await
+                .unwrap()
+                .claimed
+                .is_some()
+        );
+        assert!(agent.pending_withdrawal_claim.is_none());
+        assert!(refused.load(Ordering::Relaxed) >= 2);
+    });
+}
+
 #[test]
 fn activity_resolved_payment_recovers_after_hard_fault_frozen_at_its_head() {
     deterministic::Runner::default().start(|context| async move {
@@ -5103,7 +5233,7 @@ fn withdrawal_is_refused_while_a_prior_claim_is_unfinished() {
         let deadline = agent.pending_withdrawal.as_ref().unwrap().body().deadline();
         advance_with_closes(&control, &mut operator, deadline).await;
         agent
-            .observe_withdrawal_expiry(&context, &mut chain)
+            .observe_withdrawal(&context, &mut chain)
             .await
             .unwrap();
         assert!(agent.pending_withdrawal.is_none());
@@ -5215,12 +5345,11 @@ fn balance_poll_retains_the_head_for_hard_fault_recovery() {
     });
 }
 
-/// Registers the omitting boundary on the chain, builds the deterministic
-/// omitting close at the chain-assigned deadlines (the admitted close credits
-/// a deposit to a bystander and omits Bob, while Bob holds an operator-signed
-/// receipt crediting him), and admits it, so its inclusive challenge window
-/// is open until the assigned absolute deadline.
-async fn admit_omitting(
+/// Registers the omitting boundary on the chain and builds the deterministic
+/// omitting close at the chain-assigned deadlines: the close credits a deposit
+/// to a bystander and omits Bob, while Bob holds an operator-signed receipt
+/// crediting him.
+async fn register_omitting(
     context: &deterministic::Context,
     control: &harness::Control,
 ) -> crate::protocol::OmittingClose {
@@ -5259,14 +5388,23 @@ async fn admit_omitting(
     )
     .await
     .unwrap();
-    let fixture = Box::pin(crate::protocol::omitting_close(
+    Box::pin(crate::protocol::omitting_close(
         state,
         &mut TestRng::new(7),
         admission_deadline,
         challenge_deadline,
     ))
     .await
-    .unwrap();
+    .unwrap()
+}
+
+/// Registers the omitting boundary and admits its close, so its inclusive
+/// challenge window is open until the assigned absolute deadline.
+async fn admit_omitting(
+    context: &deterministic::Context,
+    control: &harness::Control,
+) -> crate::protocol::OmittingClose {
+    let fixture = Box::pin(register_omitting(context, control)).await;
     applied(
         control,
         &SettlementTx::Admit(AdmitRequest::from(&fixture.result)),
@@ -5404,6 +5542,276 @@ fn omitted_credit_is_convicted_by_the_held_receipt() {
         assert!(bob.store.unreconciled_incoming_epochs().unwrap().is_empty());
         assert_eq!(bob.last_reconciled_epoch(), None);
         operator_server.await.unwrap();
+    });
+}
+
+/// The certified native balances of every wallet, in wallet order.
+async fn balances(context: &deterministic::Context, chain: &mut Client) -> Vec<u64> {
+    let mut balances = Vec::new();
+    for wallet in wallets() {
+        balances.push(native(context, chain, wallet.public_key()).await);
+    }
+    balances
+}
+
+/// Serves one page holding Bob's receipt at an operator address, returning the address and the
+/// server task.
+async fn serve_receipt(
+    context: &deterministic::Context,
+    receipt: Receipt,
+) -> (SocketAddr, commonware_runtime::Handle<()>) {
+    let mut listener = context
+        .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = context.child("operator").spawn(move |_| async move {
+        respond(&mut listener, |request| {
+            assert!(matches!(
+                request,
+                operator_rpc::OperatorRequest::IncomingPayments(_)
+            ));
+            rpc::Response::Success {
+                body: incoming_response(&[(receipt, 1)]).encode(),
+            }
+        })
+        .await;
+    });
+    (address, server)
+}
+
+/// Recovers every wallet's genesis balance after a proven challenge invalidates the omitting
+/// close, returns Carol's deposit through the terminal refund, and checks that custody drains
+/// into the native balances recorded in `before`.
+async fn release_omitting(
+    context: &deterministic::Context,
+    control: &harness::Control,
+    chain: &mut Client,
+    fixture: &crate::protocol::OmittingClose,
+    genesis: StateRoot<Digest>,
+    before: &[u64],
+) {
+    for (index, wallet) in wallets().iter().enumerate() {
+        let release = Agent::new(index)
+            .unwrap()
+            .recover_hard_fault(context, chain)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.account, wallet.public_key());
+        assert_eq!(release.released_custody, INITIAL_BALANCE);
+        assert_eq!(release.residual, INITIAL_BALANCE);
+        assert_eq!(release.withdrawal, None);
+    }
+    let Some(Record::Fault(FaultRecord::Settling(settlement))) =
+        control.record(fault_key(&deployment())).await
+    else {
+        panic!("terminal settlement began");
+    };
+    assert_eq!(settlement.invalid_from, Some(admitted_batch(fixture)));
+    assert_eq!(settlement.frozen_state_root, genesis);
+    let refund = Agent::new(2)
+        .unwrap()
+        .recover_pending_deposit(context, chain)
+        .await
+        .unwrap();
+    assert_eq!(refund.amount, 1);
+    assert_eq!(status(control).await.custody, 0);
+    let after = balances(context, chain).await;
+    for (index, (before, after)) in before.iter().zip(&after).enumerate() {
+        let refunded = u64::from(index == 2);
+        assert_eq!(*after, before + INITIAL_BALANCE + refunded);
+    }
+}
+
+/// A recipient's conviction of an omitting close pays every account its frozen balance.
+///
+/// The operator admits a close that omits Bob's receipted credit and carries Carol's deposit.
+/// Bob convicts it with the operator's own served lookup. With the operator gone, every wallet
+/// recovers its genesis balance, so the payer keeps the omitted amount. Carol's terminal refund
+/// returns the deposit the invalidated close carried, and custody drains.
+#[test]
+fn omitted_credit_conviction_releases_frozen_balances() {
+    deterministic::Runner::default().start(|context| async move {
+        let (control, mut chain) = chain(&context).await;
+        let mut convicting = client_with_holders(&context, &control, UNREACHABLE);
+        let genesis = status(&control).await.state_root;
+        let fixture = Box::pin(admit_omitting(&context, &control)).await;
+        let before = balances(&context, &mut chain).await;
+        assert_eq!(status(&control).await.custody, 4 * INITIAL_BALANCE + 1);
+
+        // Bob convicts the omitting close with the operator's served lookup.
+        let receipt = fixture.held_receipt.clone();
+        let lookup = fixture.held_lookup.clone();
+        let mut listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = context.child("operator").spawn(move |_| async move {
+            respond(&mut listener, |request| {
+                assert!(matches!(
+                    request,
+                    operator_rpc::OperatorRequest::IncomingPayments(_)
+                ));
+                rpc::Response::Success {
+                    body: incoming_response(&[(receipt, 1)]).encode(),
+                }
+            })
+            .await;
+            respond(&mut listener, move |request| {
+                assert!(matches!(
+                    request,
+                    operator_rpc::OperatorRequest::CommittedEntry(_)
+                ));
+                rpc::Response::Success {
+                    body: lookup.encode(),
+                }
+            })
+            .await;
+        });
+        let mut bob = Agent::new(1).unwrap();
+        bob.intake_incoming(&context, &mut convicting, address)
+            .await
+            .unwrap();
+        let summary = bob
+            .reconcile(&context, &mut convicting, address)
+            .await
+            .unwrap();
+        assert_eq!(summary.convicted, [0]);
+        assert!(matches!(
+            control.record(fault_key(&deployment())).await,
+            Some(Record::Fault(FaultRecord::Faulted(
+                HardFaultReasonResponse::ProvenChallenge {
+                    batch_id,
+                    kind: ChallengeKind::HigherAckEntry,
+                }
+            ))) if batch_id == admitted_batch(&fixture)
+        ));
+        server.await.unwrap();
+
+        // With the operator gone, every account's funds leave.
+        release_omitting(&context, &control, &mut chain, &fixture, genesis, &before).await;
+    });
+}
+
+/// A close admitted at its admission deadline is convicted in the last block of its challenge
+/// window, and every account's funds then leave.
+///
+/// The omitting close is admitted at its admission deadline under the generated defaults. Bob
+/// holds his receipt and reconciles only in the block before the challenge deadline, so his
+/// challenge seals at the challenge deadline. With the operator gone, every wallet recovers its
+/// genesis balance, and Carol's terminal refund returns her deposit.
+#[test]
+fn deadline_admission_is_convicted_in_the_last_block() {
+    deterministic::Runner::default().start(|context| async move {
+        let timing = crate::protocol::Timing::GENESIS;
+        let (control, mut chain) = chain_with(&context, timing).await;
+        let genesis = status(&control).await.state_root;
+        let fixture = Box::pin(register_omitting(&context, &control)).await;
+        let (admission, challenge) = registration_record(&control).await.deadlines.unwrap();
+        assert_eq!(challenge, admission + timing.challenge_duration);
+        let before = balances(&context, &mut chain).await;
+
+        // The close is admitted at its admission deadline.
+        advance_to(&control, admission - 1).await;
+        let admitted = control
+            .submit(SettlementTx::Admit(AdmitRequest::from(&fixture.result)))
+            .await;
+        assert_eq!(admitted, admission);
+        assert!(!status(&control).await.hard_faulted);
+        assert!(matches!(
+            control.record(admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(record)) if !record.finalized
+        ));
+
+        // Bob holds his receipt.
+        let (address, server) = serve_receipt(&context, fixture.held_receipt.clone()).await;
+        let mut bob = Agent::new(1).unwrap();
+        bob.intake_incoming(&context, &mut chain, address)
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        // Bob reconciles in the block before the challenge deadline, and his challenge seals at
+        // the deadline.
+        advance_to(&control, challenge - 1).await;
+        let summary = bob.reconcile(&context, &mut chain, address).await.unwrap();
+        assert_eq!(summary.convicted, [0]);
+        assert_eq!(control.advance(0).await, challenge);
+        assert!(matches!(
+            control.record(fault_key(&deployment())).await,
+            Some(Record::Fault(FaultRecord::Faulted(
+                HardFaultReasonResponse::ProvenChallenge {
+                    batch_id,
+                    kind: ChallengeKind::HigherAckEntry,
+                }
+            ))) if batch_id == admitted_batch(&fixture)
+        ));
+
+        // With the operator gone, every account's funds leave.
+        release_omitting(&context, &control, &mut chain, &fixture, genesis, &before).await;
+    });
+}
+
+/// A close admitted at its admission deadline finalizes its omission when no challenge lands by
+/// its challenge deadline.
+///
+/// Bob holds his receipt, but every block through the challenge deadline seals empty. The
+/// following block finalizes the close before any transaction, so Bob's reconciliation records
+/// the credit as unenforceable, and the finalized balances leave the omitted amount with the
+/// payer.
+#[test]
+fn deadline_admission_missed_by_one_block_finalizes_the_omission() {
+    deterministic::Runner::default().start(|context| async move {
+        let timing = crate::protocol::Timing::GENESIS;
+        let (control, mut chain) = chain_with(&context, timing).await;
+        let fixture = Box::pin(register_omitting(&context, &control)).await;
+        let (admission, challenge) = registration_record(&control).await.deadlines.unwrap();
+        assert_eq!(challenge, admission + timing.challenge_duration);
+
+        // The close is admitted at its admission deadline, and Bob holds his receipt.
+        advance_to(&control, admission - 1).await;
+        let admitted = control
+            .submit(SettlementTx::Admit(AdmitRequest::from(&fixture.result)))
+            .await;
+        assert_eq!(admitted, admission);
+        let (address, server) = serve_receipt(&context, fixture.held_receipt.clone()).await;
+        let mut bob = Agent::new(1).unwrap();
+        bob.intake_incoming(&context, &mut chain, address)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(bob.incoming().total, 5);
+
+        // Every block through the challenge deadline seals empty, and the next block finalizes
+        // the close.
+        assert_eq!(
+            control.advance(timing.challenge_duration + 1).await,
+            challenge + 1
+        );
+        let finalized = status(&control).await;
+        assert_eq!(finalized.last_finalized, Some(0));
+        assert!(!finalized.hard_faulted);
+
+        // Bob records the credit as unenforceable, and the payer keeps the omitted amount.
+        let summary = bob.reconcile(&context, &mut chain, address).await.unwrap();
+        assert_eq!(summary.unenforceable, [0]);
+        assert!(summary.convicted.is_empty());
+        assert_eq!(
+            bob.balance(&context, &mut chain, UNREACHABLE)
+                .await
+                .unwrap(),
+            INITIAL_BALANCE
+        );
+        assert_eq!(
+            Agent::new(0)
+                .unwrap()
+                .balance(&context, &mut chain, UNREACHABLE)
+                .await
+                .unwrap(),
+            INITIAL_BALANCE
+        );
     });
 }
 
@@ -6372,7 +6780,6 @@ fn signed_withdrawal_escalates_to_settlement() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
-        let genesis_root = status(&control).await.state_root;
         let account = wallets()[0].public_key();
         let mut agent = Agent::open(database.path(), 0).unwrap();
 
@@ -6430,7 +6837,6 @@ fn signed_withdrawal_escalates_to_settlement() {
                 .await,
             Some(Record::Withdrawal(queued)) if queued.request == request
         ));
-        assert_eq!(genesis_root.digest, *request.body().state_root());
 
         // Escalation retains the exact request for retry without fabricating a payout candidate
         // before a finalized output exists.
@@ -6439,6 +6845,78 @@ fn signed_withdrawal_escalates_to_settlement() {
         let reopened = Agent::open(database.path(), 0).unwrap();
         assert!(reopened.pending_withdrawal_claim.is_none());
         assert_eq!(reopened.pending_withdrawal.as_ref(), Some(&request));
+    });
+}
+
+/// Escalation after a finalization queues the exact request with an opening the wallet fetches
+/// at the new finalized root, and the next registration carries it.
+#[test]
+fn escalation_after_finality_uses_the_current_root() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let account = wallets()[0].public_key();
+        let genesis_root = status(&control).await.state_root;
+
+        // With the operator unreachable, the wallet signs and retains its genesis opening.
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let WithdrawalOutcome::Signed { request, .. } = agent
+            .withdraw(
+                &context,
+                &mut chain,
+                UNREACHABLE,
+                WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("the unreachable operator applied the withdrawal");
+        };
+        assert!(
+            agent
+                .store
+                .recovery_opening(&genesis_root)
+                .unwrap()
+                .is_some()
+        );
+
+        // An epoch finalizes and advances the finalized root.
+        register(&control, &mut operator).await;
+        operator.pay(2, 3, 1).unwrap();
+        let result = complete_chain_close(&control, &mut operator, 61).await;
+        finalize(&control, &result).await;
+        let current = status(&control).await.state_root;
+        assert_ne!(current, genesis_root);
+        assert!(agent.store.recovery_opening(&current).unwrap().is_none());
+
+        // Escalation queues the exact request with an opening fetched at the new root.
+        assert_eq!(
+            agent
+                .escalate_withdrawal(&context, &mut chain)
+                .await
+                .unwrap(),
+            request
+        );
+        assert!(agent.store.recovery_opening(&current).unwrap().is_some());
+        let Some(Record::Withdrawal(queued)) = control
+            .record(withdrawal_key(&deployment(), &account))
+            .await
+        else {
+            panic!("the escalated request was not queued");
+        };
+        assert_eq!(queued.request, request);
+
+        // The next registration carries it.
+        operator
+            .observe(queued.index, &[Intake::Withdrawal(request.clone())])
+            .unwrap();
+        let successor = register_successor(&control, &mut operator).await;
+        assert!(matches!(
+            control.record(carried_key(&deployment(), &account)).await,
+            Some(Record::Carried(carried))
+                if carried.epoch == successor.epoch && carried.id == request.id::<Sha256>()
+        ));
     });
 }
 
@@ -6506,7 +6984,7 @@ fn head_and_withdrawal_use_validators_with_operator_unreachable() {
         );
         assert!(agent.cache.is_none());
 
-        // The withdrawal signs over that retained head and escalates to the chain.
+        // The withdrawal escalates to the chain with that retained opening.
         let outcome = agent
             .withdraw(
                 &context,
@@ -6519,7 +6997,6 @@ fn head_and_withdrawal_use_validators_with_operator_unreachable() {
         let WithdrawalOutcome::Signed { request, .. } = outcome else {
             panic!("the unreachable operator applied the withdrawal");
         };
-        assert_eq!(request.body().state_root(), &genesis_root.digest);
         assert_eq!(
             agent
                 .escalate_withdrawal(&context, &mut chain)
@@ -6668,7 +7145,163 @@ fn reconcile_convicts_with_validator_served_lookup_while_operator_withholds() {
         ));
         assert_eq!(withheld.load(Ordering::Relaxed), 0);
         assert!(bob.store.unreconciled_incoming_epochs().unwrap().is_empty());
+
+        // With the operator still withholding, Bob recovers his genesis balance.
+        let before = native(&context, &mut chain, bob.account()).await;
+        let release = bob
+            .recover_hard_fault(&context, &mut chain)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.residual, INITIAL_BALANCE);
+        assert_eq!(
+            native(&context, &mut chain, bob.account()).await,
+            before + INITIAL_BALANCE
+        );
+        assert_eq!(withheld.load(Ordering::Relaxed), 0);
     });
+}
+
+/// A recipient whose incoming receipts the operator withholds still exits with its finalized
+/// credit.
+///
+/// Alice pays Bob, and the operator withholds every receipt from Bob, so Bob holds nothing.
+/// Once the close finalizes, Bob's balance poll reads the credit from the validators. Bob then
+/// withdraws his whole balance: through a close that carries his acknowledged Close, or, when
+/// the operator censors him, through an escalated Close and hard-fault recovery.
+#[test]
+fn withheld_receipts_recipient_exits_finalized_credit() {
+    for censored in [false, true] {
+        deterministic::Runner::default().start(move |context| async move {
+            let (control, mut chain) = chain(&context).await;
+            let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            register(&control, &mut operator).await;
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut alice = Agent::new(0).unwrap();
+            let mut bob = Agent::new(1).unwrap();
+            let before = native(&context, &mut chain, bob.account()).await;
+
+            // Alice pays Bob in epoch 0, and the operator withholds Bob's receipt.
+            let paying = context.child("paying").spawn(move |_| async move {
+                relay(&mut listener, &mut operator).await;
+                relay(&mut listener, &mut operator).await;
+                respond(&mut listener, |request| {
+                    let operator_rpc::OperatorRequest::IncomingPayments(request) = request else {
+                        panic!("expected the receipt intake");
+                    };
+                    rpc::Response::Success {
+                        body: operator_rpc::IncomingPaymentsResponse {
+                            pairs: Vec::new(),
+                            next_cursor: request.cursor,
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+                (listener, operator)
+            });
+            let payment = accepted(
+                alice
+                    .pay(&context, &mut chain, address, &[(1, 16)])
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(payment.epoch, 0);
+            bob.intake_incoming(&context, &mut chain, address)
+                .await
+                .unwrap();
+            let (mut listener, mut operator) = paying.await.unwrap();
+            assert!(
+                bob.reconcile(&context, &mut chain, address)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                bob.incoming(),
+                IncomingSummary {
+                    total: 0,
+                    count: 0,
+                    cursor: 0
+                }
+            );
+
+            // Epoch 0 finalizes, and Bob's balance poll reads the credit from the validators.
+            let close = complete_chain_close(&control, &mut operator, 31).await;
+            finalize(&control, &close).await;
+            let credited = INITIAL_BALANCE + 16;
+            assert_eq!(
+                bob.balance(&context, &mut chain, UNREACHABLE)
+                    .await
+                    .unwrap(),
+                credited
+            );
+
+            if censored {
+                // The operator censors Bob, so he escalates his Close. The operator stops, epoch
+                // 1 expires, and recovery routes Bob's whole balance to him.
+                let WithdrawalOutcome::Signed { request, .. } = bob
+                    .withdraw(&context, &mut chain, UNREACHABLE, WithdrawalAction::Close)
+                    .await
+                    .unwrap()
+                else {
+                    panic!("the unreachable operator applied the withdrawal");
+                };
+                assert_eq!(
+                    bob.escalate_withdrawal(&context, &mut chain).await.unwrap(),
+                    request
+                );
+                drop(operator);
+                expire(&control, 1).await;
+                assert_eq!(status(&control).await.state_root, close.roots.successor);
+                let release = bob
+                    .recover_hard_fault(&context, &mut chain)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(release.account, bob.account());
+                assert_eq!(release.released_custody, credited);
+                assert_eq!(
+                    release.withdrawal.as_ref().map(|output| output.amount()),
+                    Some(credited)
+                );
+                assert_eq!(release.residual, 0);
+            } else {
+                // The operator acknowledges Bob's Close and carries it, and Bob claims the payout
+                // with the operator unreachable.
+                let acknowledging = context.child("acknowledging").spawn(move |_| async move {
+                    relay(&mut listener, &mut operator).await;
+                    operator
+                });
+                let WithdrawalOutcome::Applied { epoch, .. } = bob
+                    .withdraw(&context, &mut chain, address, WithdrawalAction::Close)
+                    .await
+                    .unwrap()
+                else {
+                    panic!("the operator did not acknowledge the withdrawal");
+                };
+                let mut operator = acknowledging.await.unwrap();
+                for seed in 1..=epoch {
+                    register(&control, &mut operator).await;
+                    let close = complete_chain_close(&control, &mut operator, 31 + seed).await;
+                    finalize(&control, &close).await;
+                }
+                let payout = bob
+                    .claim_withdrawal(&context, &mut chain, UNREACHABLE)
+                    .await
+                    .unwrap();
+                assert_eq!(payout.amount, credited);
+            }
+            assert_eq!(
+                native(&context, &mut chain, bob.account()).await,
+                before + credited
+            );
+        });
+    }
 }
 
 #[test]
@@ -7299,6 +7932,7 @@ fn hard_fault_recovery_fetches_the_frozen_root_opening() {
                 .unwrap()
                 .is_none()
         );
+        let before = native(&context, &mut chain, account.clone()).await;
         let Some(release) = passive
             .recover_hard_fault(&context, &mut chain)
             .await
@@ -7308,6 +7942,11 @@ fn hard_fault_recovery_fetches_the_frozen_root_opening() {
         };
         assert_eq!(release.account, account);
         assert_eq!(release.released_custody, INITIAL_BALANCE);
+        assert_eq!(release.residual, INITIAL_BALANCE);
+        assert_eq!(
+            native(&context, &mut chain, account).await,
+            before + INITIAL_BALANCE
+        );
 
         let mut dead = client_with_holders(&context, &control, UNREACHABLE);
         let mut stranded = Agent::new(1).unwrap();
@@ -7371,7 +8010,6 @@ fn operator_dark_wallet_moves_finalized_claim_to_registered_operator() {
         let WithdrawalOutcome::Signed { request, .. } = outcome else {
             panic!("the dark operator applied the withdrawal");
         };
-        assert_eq!(request.body().state_root(), &genesis_root.digest);
         assert!(
             agent
                 .store
@@ -7523,6 +8161,390 @@ fn operator_dark_wallet_moves_finalized_claim_to_registered_operator() {
         assert_eq!(recovered.store.debits_since(0).unwrap(), 0);
         assert!(recovered.pending_withdrawal_claim.is_none());
     });
+}
+
+/// An escalated Close that the operator's registration carries pays the whole balance.
+///
+/// The operator refuses the withdrawal. The wallet escalates the signed Close, the next
+/// registration carries it, and the wallet claims the finalized payout with the operator
+/// unreachable. A second claim finds nothing left to pay.
+#[test]
+fn escalated_close_is_carried_and_claimed_without_the_operator() {
+    deterministic::Runner::default().start(|context| async move {
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let address = SocketAddr::from(([127, 0, 0, 1], 9_810));
+        refusing(&context, address).await;
+
+        // The operator refuses the Close, and the wallet queues it on the chain.
+        let mut agent = Agent::new(0).unwrap();
+        let WithdrawalOutcome::Signed { request, .. } = agent
+            .withdraw(&context, &mut chain, address, WithdrawalAction::Close)
+            .await
+            .unwrap()
+        else {
+            panic!("the refusing operator applied the withdrawal");
+        };
+        assert_eq!(
+            agent
+                .escalate_withdrawal(&context, &mut chain)
+                .await
+                .unwrap(),
+            request
+        );
+
+        // The registration carries the queued Close, and its close finalizes.
+        operator.apply_withdrawal(request, true).unwrap();
+        register(&control, &mut operator).await;
+        let result = complete_chain_close(&control, &mut operator, 80).await;
+        finalize(&control, &result).await;
+        drop(operator);
+
+        // The wallet claims the whole balance with the operator unreachable.
+        let before = native(&context, &mut chain, agent.account()).await;
+        let payout = agent
+            .claim_withdrawal(&context, &mut chain, UNREACHABLE)
+            .await
+            .unwrap();
+        assert_eq!(payout.amount, INITIAL_BALANCE);
+        assert_eq!(payout.destination.as_ref(), agent.account().as_ref());
+        assert_eq!(
+            native(&context, &mut chain, agent.account()).await,
+            before + INITIAL_BALANCE
+        );
+        assert_eq!(status(&control).await.claimable, 0);
+
+        // Nothing is left to claim.
+        let error = agent
+            .claim_withdrawal(&context, &mut chain, UNREACHABLE)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("no unspent wallet-owned payout"),
+            "{error:#}"
+        );
+        assert_eq!(
+            native(&context, &mut chain, agent.account()).await,
+            before + INITIAL_BALANCE
+        );
+    });
+}
+
+/// Escalating a request that a registration already carries changes nothing on the chain.
+///
+/// The wallet signs a Close with the operator unreachable, and the operator's registration of
+/// epoch 0 carries it. The wallet then escalates the request. Settlement rejects the queue, so no
+/// queue record or inbox entry appears and the carriage stays as it was. The carrying close pays
+/// the whole balance once. The admission window outlasts the blocks the escalation's effect poll
+/// seals.
+#[test]
+fn carried_withdrawal_rejects_escalation_without_effect() {
+    deterministic::Runner::default().start(|context| async move {
+        let (control, mut chain) = chain_with(
+            &context,
+            crate::protocol::Timing {
+                admission_offset: 1_000,
+                challenge_duration: 8,
+            },
+        )
+        .await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+
+        // The wallet signs a Close, and the registration of epoch 0 carries it.
+        let mut agent = Agent::new(0).unwrap();
+        let WithdrawalOutcome::Signed { request, .. } = agent
+            .withdraw(&context, &mut chain, UNREACHABLE, WithdrawalAction::Close)
+            .await
+            .unwrap()
+        else {
+            panic!("the unreachable operator applied the withdrawal");
+        };
+        operator.apply_withdrawal(request.clone(), false).unwrap();
+        register(&control, &mut operator).await;
+        let account = agent.account();
+        let carried = control.record(carried_key(&deployment(), &account)).await;
+        assert!(matches!(
+            &carried,
+            Some(Record::Carried(record))
+                if record.epoch == 0 && record.id == request.id::<Sha256>()
+        ));
+        let before = status(&control).await;
+
+        // Escalation lands no queue record, so the wallet reports no certified queue.
+        let error = agent
+            .escalate_withdrawal(&context, &mut chain)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("the queued withdrawal was not certified in time"),
+            "{error:#}"
+        );
+        assert!(
+            control
+                .record(withdrawal_key(&deployment(), &account))
+                .await
+                .is_none()
+        );
+        let after = status(&control).await;
+        assert_eq!(after.intake, before.intake);
+        assert_eq!(after.pulled, before.pulled);
+        assert_eq!(
+            control.record(carried_key(&deployment(), &account)).await,
+            carried
+        );
+        assert_eq!(agent.pending_withdrawal.as_ref(), Some(&request));
+
+        // The carrying close pays the whole balance, and nothing is left to claim.
+        let result = complete_chain_close(&control, &mut operator, 81).await;
+        finalize(&control, &result).await;
+        let native_before = native(&context, &mut chain, account.clone()).await;
+        let payout = agent
+            .claim_withdrawal(&context, &mut chain, UNREACHABLE)
+            .await
+            .unwrap();
+        assert_eq!(payout.amount, INITIAL_BALANCE);
+        assert_eq!(
+            native(&context, &mut chain, account.clone()).await,
+            native_before + INITIAL_BALANCE
+        );
+        assert!(
+            agent
+                .claim_withdrawal(&context, &mut chain, UNREACHABLE)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            native(&context, &mut chain, account).await,
+            native_before + INITIAL_BALANCE
+        );
+    });
+}
+
+/// A withdrawal the operator acknowledges and never carries is discarded when its notice window
+/// closes, and a fresh request exits through the chain.
+///
+/// The operator acknowledges the request and never registers. The wallet does not escalate it,
+/// so the balance poll discards it once its notice window closes. The wallet signs a fresh
+/// request, escalates it, and recovers its balance after the obligation expires.
+#[test]
+fn acknowledged_withdrawal_is_resigned_after_its_window_closes() {
+    for action in [
+        WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+        WithdrawalAction::Close,
+    ] {
+        deterministic::Runner::default().start(move |context| async move {
+            let (control, mut chain) = chain(&context).await;
+            let notice = crate::protocol::settlement_config(&chain.genesis().timing()).unwrap();
+            let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+
+            // The operator serves the opening and acknowledges the request, then stops.
+            let acknowledging = context.child("acknowledging").spawn(move |_| async move {
+                relay(&mut listener, &mut operator).await;
+                relay(&mut listener, &mut operator).await;
+            });
+            let mut agent = Agent::new(0).unwrap();
+            let WithdrawalOutcome::Applied { request, .. } = agent
+                .withdraw(&context, &mut chain, address, action)
+                .await
+                .unwrap()
+            else {
+                panic!("the operator did not acknowledge the withdrawal");
+            };
+            acknowledging.await.unwrap();
+            assert!(
+                control
+                    .record(registration_key(&deployment(), 0))
+                    .await
+                    .is_none()
+            );
+            assert!(
+                control
+                    .record(carried_key(&deployment(), &agent.account()))
+                    .await
+                    .is_none()
+            );
+
+            // The notice window closes without a queue or carriage, and the balance poll
+            // discards the request.
+            advance_to(
+                &control,
+                request.body().deadline() - notice.minimum_withdrawal_notice.get(),
+            )
+            .await;
+            assert_eq!(
+                agent
+                    .balance(&context, &mut chain, UNREACHABLE)
+                    .await
+                    .unwrap(),
+                INITIAL_BALANCE
+            );
+            assert!(agent.pending_withdrawal.is_none());
+            assert_eq!(agent.store.retired_withdrawal_deadline().unwrap(), None);
+
+            // A fresh request escalates and expires into hard-fault recovery.
+            let height = status(&control).await.height;
+            let WithdrawalOutcome::Signed { request: fresh, .. } = agent
+                .withdraw(&context, &mut chain, UNREACHABLE, action)
+                .await
+                .unwrap()
+            else {
+                panic!("the unreachable operator applied the withdrawal");
+            };
+            assert_eq!(
+                fresh.body().deadline(),
+                height + notice.maximum_withdrawal_notice.get()
+            );
+            assert_eq!(
+                agent
+                    .escalate_withdrawal(&context, &mut chain)
+                    .await
+                    .unwrap(),
+                fresh
+            );
+            advance_to(&control, fresh.body().deadline() - 1).await;
+            assert!(!status(&control).await.hard_faulted);
+            advance_to(&control, fresh.body().deadline()).await;
+            assert!(matches!(
+                control.record(fault_key(&deployment())).await,
+                Some(Record::Fault(FaultRecord::Faulted(
+                    HardFaultReasonResponse::ExpiredWithdrawal { account, expired_at }
+                ))) if account == agent.account() && expired_at == fresh.body().deadline()
+            ));
+
+            // Recovery routes the request to the wallet's account and pays the rest to it.
+            let before = native(&context, &mut chain, agent.account()).await;
+            let release = agent
+                .recover_hard_fault(&context, &mut chain)
+                .await
+                .unwrap()
+                .unwrap();
+            let routed = match action {
+                WithdrawalAction::Amount(amount) => amount.get(),
+                WithdrawalAction::Close => INITIAL_BALANCE,
+            };
+            assert_eq!(release.released_custody, INITIAL_BALANCE);
+            let output = release.withdrawal.as_ref().unwrap();
+            assert_eq!(output.destination().as_ref(), agent.account().as_ref());
+            assert_eq!(output.amount(), routed);
+            assert_eq!(release.residual, INITIAL_BALANCE - routed);
+            assert_eq!(
+                native(&context, &mut chain, agent.account()).await,
+                before + INITIAL_BALANCE
+            );
+        });
+    }
+}
+
+/// An operator that serves an invalid withdrawal opening cannot stop an Amount or a Close.
+///
+/// The operator answers the opening request at the finalized root with a forged balance or with
+/// another account's leaf, and refuses the withdrawal. The wallet opens its own leaf through the
+/// validators, signs, and escalates. The registration carries the request, and the wallet claims
+/// the payout with the operator unreachable.
+#[test]
+fn forged_withdrawal_opening_falls_back_to_validators_and_pays_out() {
+    for foreign in [false, true] {
+        for action in [
+            WithdrawalAction::Amount(NonZeroU64::new(5).unwrap()),
+            WithdrawalAction::Close,
+        ] {
+            deterministic::Runner::default().start(move |context| async move {
+                let (control, mut chain) = chain(&context).await;
+                let mut operator =
+                    Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+                let genesis = genesis_cache();
+                let root = status(&control).await.state_root;
+                assert_eq!(root, genesis.root());
+                let account = wallets()[0].public_key();
+                let honest = genesis.opening(&account).unwrap();
+                let served = if foreign {
+                    genesis.opening(&wallets()[1].public_key()).unwrap()
+                } else {
+                    StateOpening {
+                        balance: NonZeroU64::new(honest.balance.get() + 1).unwrap(),
+                        ..honest.clone()
+                    }
+                };
+                let mut listener = context
+                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .unwrap();
+                let address = listener.local_addr().unwrap();
+
+                // The operator serves the invalid opening and refuses the withdrawal. The wallet
+                // opens its leaf through the validators and signs over it.
+                let forging = context.child("forging").spawn(move |_| async move {
+                    respond(&mut listener, |request| {
+                        assert!(matches!(
+                            request,
+                            operator_rpc::OperatorRequest::WithdrawalOpening(_)
+                        ));
+                        rpc::Response::Success {
+                            body: operator_rpc::WithdrawalOpeningResponse {
+                                root,
+                                opening: served,
+                            }
+                            .encode(),
+                        }
+                    })
+                    .await;
+                    assert!(matches!(
+                        refuse(&mut listener).await,
+                        operator_rpc::OperatorRequest::ApplyWithdrawal(_)
+                    ));
+                });
+                let mut agent = Agent::new(0).unwrap();
+                let WithdrawalOutcome::Signed { request, .. } = agent
+                    .withdraw(&context, &mut chain, address, action)
+                    .await
+                    .unwrap()
+                else {
+                    panic!("the forging operator applied the withdrawal");
+                };
+                forging.await.unwrap();
+                assert_eq!(agent.store.recovery_opening(&root).unwrap(), Some(honest));
+                assert_eq!(agent.pending_withdrawal.as_ref(), Some(&request));
+
+                // The wallet queues the request on the chain.
+                assert_eq!(
+                    agent
+                        .escalate_withdrawal(&context, &mut chain)
+                        .await
+                        .unwrap(),
+                    request
+                );
+                assert!(matches!(
+                    control.record(withdrawal_key(&deployment(), &account)).await,
+                    Some(Record::Withdrawal(queued)) if queued.request == request
+                ));
+
+                // The registration carries the queued request, its close finalizes, and the wallet
+                // claims the payout with the operator unreachable.
+                operator.apply_withdrawal(request, true).unwrap();
+                register(&control, &mut operator).await;
+                let result = complete_chain_close(&control, &mut operator, 80).await;
+                finalize(&control, &result).await;
+                drop(operator);
+                let before = native(&context, &mut chain, account.clone()).await;
+                let payout = agent
+                    .claim_withdrawal(&context, &mut chain, UNREACHABLE)
+                    .await
+                    .unwrap();
+                let paid = match action {
+                    WithdrawalAction::Amount(amount) => amount.get(),
+                    WithdrawalAction::Close => INITIAL_BALANCE,
+                };
+                assert_eq!(payout.amount, paid);
+                assert_eq!(payout.destination.as_ref(), account.as_ref());
+                assert_eq!(native(&context, &mut chain, account).await, before + paid);
+            });
+        }
+    }
 }
 
 #[test]
@@ -7810,6 +8832,353 @@ fn invalidated_receipt_is_protected_across_fault_order_and_restart() {
     }
 }
 
+/// A signed withdrawal that settlement never accepts is discarded once its notice window closes.
+/// The discard leaves the signing floor unset and frees the wallet to pay or to sign a different
+/// withdrawal, and the discarded request can never enter settlement.
+#[test]
+fn dead_withdrawal_is_discarded_once_its_window_closes() {
+    for next in ["pay", "withdraw"] {
+        deterministic::Runner::default().start(|context| async move {
+            let database = TempDatabase::new();
+            let (control, mut chain) = chain(&context).await;
+            let notice = crate::protocol::settlement_config(&chain.genesis().timing()).unwrap();
+            let action = WithdrawalAction::Amount(NonZeroU64::new(INITIAL_BALANCE + 1).unwrap());
+
+            // With the operator unreachable, the wallet signs an authorization above its balance.
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            let WithdrawalOutcome::Signed { request, .. } = agent
+                .withdraw(&context, &mut chain, UNREACHABLE, action)
+                .await
+                .unwrap()
+            else {
+                panic!("the unreachable operator applied the withdrawal");
+            };
+            let closes = request.body().deadline() - notice.minimum_withdrawal_notice.get();
+
+            // Settlement refuses to queue it, and the last block of its notice window keeps it.
+            let root = status(&control).await.state_root;
+            let opening = agent.store.recovery_opening(&root).unwrap().unwrap();
+            control
+                .submit(SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
+                    request: request.clone(),
+                    opening,
+                }))
+                .await;
+            assert!(
+                control
+                    .record(withdrawal_key(&deployment(), &agent.account()))
+                    .await
+                    .is_none()
+            );
+            let height = control.advance(0).await;
+            control.advance(closes - 1 - height).await;
+            agent
+                .observe_withdrawal(&context, &mut chain)
+                .await
+                .unwrap();
+            assert_eq!(agent.pending_withdrawal.as_ref(), Some(&request));
+
+            // One block later it is discarded durably, and the signing floor stays unset.
+            control.advance(1).await;
+            agent
+                .observe_withdrawal(&context, &mut chain)
+                .await
+                .unwrap();
+            assert!(agent.pending_withdrawal.is_none());
+            assert_eq!(agent.store.retired_withdrawal_deadline().unwrap(), None);
+            drop(agent);
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            assert!(agent.pending_withdrawal.is_none());
+
+            // A registration carrying the discarded request is refused: its deadline no longer
+            // clears the minimum notice.
+            let mut probe = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            probe.apply_withdrawal(request, true).unwrap();
+            control
+                .submit(SettlementTx::RegisterEpoch(
+                    probe.signed_registration().unwrap(),
+                ))
+                .await;
+            assert!(
+                control
+                    .record(registration_key(&deployment(), 0))
+                    .await
+                    .is_none()
+            );
+
+            let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            if next == "pay" {
+                // Once an epoch registers, paying stages a batch past the lifted barrier.
+                register(&control, &mut operator).await;
+                let error = agent
+                    .pay(&context, &mut chain, UNREACHABLE, &[(1, 1)])
+                    .await
+                    .unwrap_err();
+                assert!(
+                    !format!("{error:#}").contains("a withdrawal authorization is still active"),
+                    "{error:#}"
+                );
+                assert!(!agent.pending_payments.is_empty());
+            } else {
+                // A smaller withdrawal signs at the maximum notice, and a registration carries it.
+                let smaller = WithdrawalAction::Amount(NonZeroU64::new(7).unwrap());
+                let height = status(&control).await.height;
+                let WithdrawalOutcome::Signed { request: fresh, .. } = agent
+                    .withdraw(&context, &mut chain, UNREACHABLE, smaller)
+                    .await
+                    .unwrap()
+                else {
+                    panic!("the unreachable operator applied the withdrawal");
+                };
+                assert_eq!(fresh.body().action(), &smaller);
+                assert_eq!(
+                    fresh.body().deadline(),
+                    height + notice.maximum_withdrawal_notice.get()
+                );
+                operator.apply_withdrawal(fresh.clone(), false).unwrap();
+                register(&control, &mut operator).await;
+                assert!(matches!(
+                    control.record(carried_key(&deployment(), &agent.account())).await,
+                    Some(Record::Carried(carried))
+                        if carried.epoch == 0 && carried.id == fresh.id::<Sha256>()
+                ));
+            }
+            assert_eq!(agent.store.retired_withdrawal_deadline().unwrap(), None);
+        });
+    }
+}
+
+/// How a wallet authorization past its notice window resists being discarded.
+#[derive(Clone, Copy, Debug)]
+enum Undecided {
+    /// A registration carried it, and the acknowledgment was lost.
+    Carried,
+    /// The wallet queued it onchain.
+    Queued,
+    /// A proxy replays a carriage read from before a registration carried it.
+    Stale,
+    /// The deployment hard-faulted.
+    Faulted,
+}
+
+/// Keeps an authorization past its notice window whenever the wallet cannot prove it never
+/// entered settlement. A carried request retires at its deadline.
+fn undecided_withdrawal_is_kept(case: Undecided) {
+    deterministic::Runner::timed(Duration::from_secs(60)).start(move |context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let notice = crate::protocol::settlement_config(&chain.genesis().timing()).unwrap();
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let account = wallets()[0].public_key();
+        let carriage = ReadRequest::new(
+            deployment(),
+            Lookup::Carried {
+                account: account.clone(),
+            },
+        );
+        let absent = control.read(carriage.clone()).await;
+
+        // With the operator unreachable, the wallet signs its authorization.
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let WithdrawalOutcome::Signed { request, .. } = agent
+            .withdraw(
+                &context,
+                &mut chain,
+                UNREACHABLE,
+                WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("the unreachable operator applied the withdrawal");
+        };
+        let deadline = request.body().deadline();
+        let closes = deadline - notice.minimum_withdrawal_notice.get();
+
+        // Each case leaves the chain past the window without a proof of non-entry.
+        match case {
+            Undecided::Carried | Undecided::Stale => {
+                operator.apply_withdrawal(request.clone(), false).unwrap();
+                advance_with_closes(&control, &mut operator, closes).await;
+            }
+            Undecided::Queued => {
+                agent
+                    .escalate_withdrawal(&context, &mut chain)
+                    .await
+                    .unwrap();
+                let height = control.advance(0).await;
+                control.advance(closes - height).await;
+            }
+            Undecided::Faulted => {
+                register(&control, &mut operator).await;
+                let height = control.advance(0).await;
+                control.advance(closes - height).await;
+                assert!(status(&control).await.hard_faulted);
+            }
+        }
+        assert!(status(&control).await.height >= closes);
+
+        // The wallet keeps the authorization. A stale carriage read never certifies below the
+        // status the wallet already accepted.
+        if let Undecided::Stale = case {
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let source = control.clone();
+            let stale = carriage.encode();
+            let proxy = context.child("stale_carriage").spawn(move |_| async move {
+                loop {
+                    let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                    let request = rpc::recv_request(&mut stream).await.unwrap();
+                    let body = if request.body == stale {
+                        absent.encode()
+                    } else {
+                        source
+                            .read(ReadRequest::decode(request.body).unwrap())
+                            .await
+                            .encode()
+                    };
+                    rpc::send_response(&mut sink, &rpc::Response::Success { body })
+                        .await
+                        .unwrap();
+                }
+            });
+            let mut replayed = Client::new(
+                control.identity(),
+                deployment(),
+                vec![address],
+                context.child("stale_carriage_rng"),
+            )
+            .unwrap();
+            assert!(
+                agent
+                    .observe_withdrawal(&context, &mut replayed)
+                    .await
+                    .is_err()
+            );
+            proxy.abort();
+        } else {
+            agent
+                .observe_withdrawal(&context, &mut chain)
+                .await
+                .unwrap();
+        }
+        assert_eq!(agent.pending_withdrawal.as_ref(), Some(&request));
+        assert_eq!(agent.store.retired_withdrawal_deadline().unwrap(), None);
+
+        // At its deadline, a carried request retires into the signing floor.
+        if let Undecided::Carried = case {
+            advance_with_closes(&control, &mut operator, deadline).await;
+            agent
+                .observe_withdrawal(&context, &mut chain)
+                .await
+                .unwrap();
+            assert!(agent.pending_withdrawal.is_none());
+            assert_eq!(
+                agent.store.retired_withdrawal_deadline().unwrap(),
+                Some(deadline)
+            );
+        }
+    });
+}
+
+/// A carried request whose acknowledgment was lost survives its notice window and retires at its
+/// deadline.
+#[test]
+fn carried_withdrawal_with_lost_acknowledgment_is_kept() {
+    undecided_withdrawal_is_kept(Undecided::Carried);
+}
+
+/// A request the wallet queued onchain survives its notice window.
+#[test]
+fn queued_withdrawal_past_its_window_is_kept() {
+    undecided_withdrawal_is_kept(Undecided::Queued);
+}
+
+/// A replayed carriage read from before the carrying registration cannot discard the request.
+#[test]
+fn stale_carriage_read_keeps_the_withdrawal() {
+    undecided_withdrawal_is_kept(Undecided::Stale);
+}
+
+/// A hard fault keeps the request past its notice window.
+#[test]
+fn faulted_deployment_keeps_the_withdrawal() {
+    undecided_withdrawal_is_kept(Undecided::Faulted);
+}
+
+/// Discarding clears exactly the active authorization, keeps the payout candidate and the
+/// retirement floor, and survives reopen. Discarding another request fails.
+#[test]
+fn discard_withdrawal_clears_only_the_active_request() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, _) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let account = wallets()[0].public_key();
+
+        // A finalized close yields a payout candidate for the account.
+        operator
+            .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
+            .unwrap();
+        register(&control, &mut operator).await;
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let close = complete_chain_close(&control, &mut operator, 31).await;
+        finalize(&control, &close).await;
+        let (_, _, claim) = settlement_withdrawal(&operator, &close, &withdrawals, &account);
+        let candidate = PendingWithdrawalClaim {
+            head: close.roots.withdrawal_outputs,
+            claim,
+        };
+
+        // The wallet holds an active authorization beside the candidate and a retirement floor.
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let sign = |agent: &Agent, deadline| {
+            SignedWithdrawal::sign(
+                deployment(),
+                account.encode(),
+                WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+                deadline,
+                agent.wallet.signer(),
+            )
+        };
+        let retired = sign(&agent, 40);
+        agent.store.stage_withdrawal(&retired).unwrap();
+        agent.store.retire_withdrawal(&retired).unwrap();
+        let dead = sign(&agent, 50);
+        agent.store.stage_withdrawal(&dead).unwrap();
+        agent.store.cache_withdrawal_claim(&candidate).unwrap();
+
+        // Discarding a request that is not active fails and keeps the active one.
+        let error = agent
+            .store
+            .discard_withdrawal(&sign(&agent, 51))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("does not match the active authorization"),
+            "{error:#}"
+        );
+        drop(agent);
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        assert_eq!(agent.pending_withdrawal.as_ref(), Some(&dead));
+
+        // Discarding the active request clears it and keeps the candidate and the floor.
+        agent.store.discard_withdrawal(&dead).unwrap();
+        drop(agent);
+        let agent = Agent::open(database.path(), 0).unwrap();
+        assert!(agent.pending_withdrawal.is_none());
+        let kept = agent.pending_withdrawal_claim.as_ref().unwrap();
+        assert_eq!(kept.head, candidate.head);
+        assert_eq!(kept.claim, candidate.claim);
+        assert_eq!(agent.store.retired_withdrawal_deadline().unwrap(), Some(40));
+    });
+}
+
+/// An authorization the operator registered retires at a healthy certified deadline before any
+/// other wallet action. Views older than that deadline can then neither cache a signing context
+/// nor stage a payment.
 #[test]
 fn healthy_expiry_retires_authorization_before_other_actions() {
     for next in ["pay", "withdraw"] {
@@ -7821,27 +9190,8 @@ fn healthy_expiry_retires_authorization_before_other_actions() {
             let stale = status(&control).await;
             let stale_request = ReadRequest::new(deployment(), Lookup::Status);
             let stale_response = control.read(stale_request.clone()).await;
-            let mut agent = Agent::open(database.path(), 0).unwrap();
-            let WithdrawalOutcome::Signed { request, .. } = agent
-                .withdraw(&context, &mut chain, UNREACHABLE, action)
-                .await
-                .unwrap()
-            else {
-                panic!("operator is unavailable");
-            };
-            drop(agent);
-            let height = control.advance(0).await;
-            control
-                .advance(request.body().deadline().saturating_sub(height))
-                .await;
-            assert!(!status(&control).await.hard_faulted);
-            let mut agent = Agent::open(database.path(), 0).unwrap();
-            agent
-                .observe_withdrawal_expiry(&context, &mut chain)
-                .await
-                .unwrap();
-            assert!(agent.pending_withdrawal.is_none());
-            drop(agent);
+
+            // Epoch 0 registers, and its operator head predates the withdrawal.
             register(&control, &mut operator).await;
             let raw = operator.payment_head(&wallets()[0].public_key()).unwrap();
             let old_head = operator_rpc::PaymentHeadResponse {
@@ -7851,6 +9201,30 @@ fn healthy_expiry_retires_authorization_before_other_actions() {
                 root: raw.root,
                 opening: raw.opening,
             };
+
+            // The wallet signs while the operator is unreachable, and the operator registers the
+            // request without acknowledging it.
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            let WithdrawalOutcome::Signed { request, .. } = agent
+                .withdraw(&context, &mut chain, UNREACHABLE, action)
+                .await
+                .unwrap()
+            else {
+                panic!("operator is unavailable");
+            };
+            drop(agent);
+            operator.apply_withdrawal(request.clone(), false).unwrap();
+
+            // The authorization retires at its healthy deadline.
+            advance_with_closes(&control, &mut operator, request.body().deadline()).await;
+            assert!(!status(&control).await.hard_faulted);
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            agent
+                .observe_withdrawal(&context, &mut chain)
+                .await
+                .unwrap();
+            assert!(agent.pending_withdrawal.is_none());
+            drop(agent);
 
             let mut listener = context
                 .bind(SocketAddr::from(([127, 0, 0, 1], 9_853)))
@@ -7975,8 +9349,11 @@ fn healthy_expiry_retires_authorization_before_other_actions() {
     }
 }
 
+/// Another same-account authorization carried in the wallet's place leaves the wallet's own
+/// request unentered. Once its notice window closes, the wallet discards it without moving the
+/// signing floor and signs a new request for the same action.
 #[test]
-fn expired_unacknowledged_withdrawal_retires_into_the_signing_floor() {
+fn unentered_withdrawal_is_discarded_beside_another_carried_authorization() {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
         const HISTORY_BEFORE: u64 = 20;
         const HISTORY_AFTER: u64 = 20;
@@ -8005,7 +9382,6 @@ fn expired_unacknowledged_withdrawal_retires_into_the_signing_floor() {
         // It is only an advisory discovery candidate for the wallet-owned payout.
         let other = SignedWithdrawal::sign(
             deployment(),
-            *request.body().state_root(),
             agent.account().encode(),
             action,
             request.body().deadline().checked_sub(1).unwrap(),
@@ -8042,12 +9418,10 @@ fn expired_unacknowledged_withdrawal_retires_into_the_signing_floor() {
             panic!("unavailable operator acknowledged the replacement");
         };
         assert_ne!(replacement, request);
+        assert_eq!(replacement.body().action(), &action);
         assert!(replacement.body().deadline() > request.body().deadline());
         assert_eq!(agent.pending_withdrawal.as_ref(), Some(&replacement));
-        assert_eq!(
-            agent.store.retired_withdrawal_deadline().unwrap(),
-            Some(request.body().deadline())
-        );
+        assert_eq!(agent.store.retired_withdrawal_deadline().unwrap(), None);
     });
 }
 
@@ -8345,6 +9719,467 @@ fn invalidated_first_virtual_credit_recovers_no_frozen_balance() {
     });
 }
 
+/// Records the certified inbox entries the operator has not observed, returning the deposits it
+/// staged.
+async fn observe(
+    context: &deterministic::Context,
+    chain: &mut Client,
+    operator: &mut Operator,
+) -> Vec<crate::operator::StagedDeposit> {
+    let from = operator.observed().unwrap();
+    let intake = chain.status(context).await.unwrap().intake;
+    let records = chain.inbox(context, from..intake).await.unwrap();
+    operator.observe(from, &records).unwrap()
+}
+
+/// Challenges `close` with a receipt crediting Eve more than the close carries from Bob, whose
+/// payment of 7 the operator accepted under `payment`, and checks the proven fault.
+async fn convict(
+    control: &harness::Control,
+    operator: &Operator,
+    close: &SettlementResult,
+    payment: &PaymentContext<Key, Digest>,
+) {
+    let eve = crate::protocol::eve_wallet().public_key();
+    let held = issued_receipt(payment, &wallets()[1], &eve, 8);
+    let committed = operator
+        .committed_entry(&wallets()[1].public_key(), &eve, payment.epoch())
+        .unwrap();
+    let challenge = Challenge::HigherAckEntry {
+        entry: Box::new(EntryWitness {
+            ack: AckWitness::from_ack(&held.ack),
+            recipient: eve,
+            cumulative: 8,
+            count: 1,
+            opening: held.opening,
+        }),
+        sender: Box::new(committed),
+    };
+    let batch_id = close.header.batch_id::<Sha256>();
+    control
+        .submit(SettlementTx::Challenge(ChallengeRequest {
+            deployment: deployment(),
+            batch_id,
+            evidence: challenge.encode(),
+        }))
+        .await;
+    assert!(matches!(
+        control.record(fault_key(&deployment())).await,
+        Some(Record::Fault(FaultRecord::Faulted(
+            HardFaultReasonResponse::ProvenChallenge { batch_id: proven, .. }
+        ))) if proven == batch_id
+    ));
+}
+
+/// A deposit carried by an admitted close that a proven challenge invalidates returns to the
+/// depositor through wallet transactions alone.
+///
+/// Alice deposits, and the operator pulls the deposit into epoch 0. When `invalidated`, a second
+/// deposit joins epoch 1, which is admitted behind epoch 0. A last deposit stays unpulled. After a
+/// proven challenge against epoch 0, a refund before terminal settlement returns only the
+/// unpulled deposit. Hard-fault recovery pays Alice's genesis balance and begins terminal
+/// settlement, and a refund then returns the deposits the invalidated closes carried. A replay
+/// pays nothing more.
+#[test]
+fn admitted_deposit_returns_after_proven_challenge() {
+    for invalidated in [false, true] {
+        deterministic::Runner::default().start(move |context| async move {
+            let (control, mut chain) = chain_with(
+                &context,
+                crate::protocol::Timing {
+                    admission_offset: 40,
+                    challenge_duration: 40,
+                },
+            )
+            .await;
+            let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            let mut alice = Agent::new(0).unwrap();
+            let account = alice.account();
+            let before = native(&context, &mut chain, account.clone()).await;
+
+            // Alice deposits 7, and the operator pulls it into epoch 0.
+            alice.deposit(&context, &mut chain, 7).await.unwrap();
+            assert_eq!(observe(&context, &mut chain, &mut operator).await.len(), 1);
+            let payment = register(&control, &mut operator).await;
+            operator.pay(1, operator.wallet_count(), 7).unwrap();
+            let carried = if invalidated {
+                alice.deposit(&context, &mut chain, 5).await.unwrap();
+                assert!(
+                    observe(&context, &mut chain, &mut operator)
+                        .await
+                        .is_empty()
+                );
+                5
+            } else {
+                0
+            };
+            let first = complete_chain_close(&control, &mut operator, 1).await;
+            applied(&control, &SettlementTx::Admit(AdmitRequest::from(&first))).await;
+            if invalidated {
+                assert_eq!(registration_record_at(&control, 1).await.pulled, 1..2);
+                register(&control, &mut operator).await;
+                let second = complete_chain_close(&control, &mut operator, 2).await;
+                applied(&control, &SettlementTx::Admit(AdmitRequest::from(&second))).await;
+            }
+
+            // A last deposit stays unpulled.
+            alice.deposit(&context, &mut chain, 3).await.unwrap();
+            assert_eq!(
+                native(&context, &mut chain, account.clone()).await,
+                before - 10 - carried
+            );
+
+            // A proven challenge against epoch 0 faults the deployment.
+            convict(&control, &operator, &first, &payment).await;
+            assert_eq!(status(&control).await.last_finalized, None);
+
+            // A refund before terminal settlement returns only the unpulled deposit.
+            let refund = alice
+                .recover_pending_deposit(&context, &mut chain)
+                .await
+                .unwrap();
+            assert_eq!(refund.amount, 3);
+            assert!(
+                control
+                    .record(refund_key(&deployment(), &account, false))
+                    .await
+                    .is_some()
+            );
+            assert_eq!(
+                native(&context, &mut chain, account.clone()).await,
+                before - 7 - carried
+            );
+
+            // Recovery pays Alice's genesis balance and begins terminal settlement.
+            let release = alice
+                .recover_hard_fault(&context, &mut chain)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(release.released_custody, INITIAL_BALANCE);
+            assert_eq!(release.residual, INITIAL_BALANCE);
+            let Some(Record::Fault(FaultRecord::Settling(settlement))) =
+                control.record(fault_key(&deployment())).await
+            else {
+                panic!("terminal settlement began");
+            };
+            assert_eq!(
+                settlement.invalid_from,
+                Some(first.header.batch_id::<Sha256>())
+            );
+            assert_eq!(settlement.unfinalized_deposit_total, 7 + carried);
+
+            // A terminal refund returns the deposits the invalidated closes carried.
+            let terminal = alice
+                .recover_pending_deposit(&context, &mut chain)
+                .await
+                .unwrap();
+            assert_eq!(terminal.amount, 7 + carried);
+            assert!(
+                control
+                    .record(refund_key(&deployment(), &account, true))
+                    .await
+                    .is_some()
+            );
+            assert_eq!(
+                native(&context, &mut chain, account.clone()).await,
+                before + INITIAL_BALANCE
+            );
+
+            // A replay pays nothing more.
+            assert_eq!(
+                alice
+                    .recover_pending_deposit(&context, &mut chain)
+                    .await
+                    .unwrap(),
+                terminal
+            );
+            assert_eq!(
+                native(&context, &mut chain, account).await,
+                before + INITIAL_BALANCE
+            );
+        });
+    }
+}
+
+/// A payer's unresolved send in an admitted close that finalizes after the fault leaves the
+/// payer its frozen balance without resolution.
+///
+/// The operator carries Alice's send in epoch 0 and drops the reply. Epoch 0 is admitted, and
+/// epoch 1 expires inside epoch 0's challenge window. Recovery cannot begin until epoch 0
+/// finalizes. The reopened wallet then recovers its balance after the send while the send stays
+/// pending.
+#[test]
+fn pending_send_in_finalized_close_recovers_frozen_balance_without_resolution() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain_with(
+            &context,
+            crate::protocol::Timing {
+                admission_offset: 20,
+                challenge_duration: 100,
+            },
+        )
+        .await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        register(&control, &mut operator).await;
+        let mut listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+
+        // The operator accepts the send in epoch 0 and drops the reply.
+        let staging = context.child("staging").spawn(move |_| async move {
+            relay(&mut listener, &mut operator).await;
+            accept_and_drop(&mut listener, &mut operator).await;
+            operator
+        });
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let error = agent
+            .pay(&context, &mut chain, address, &[(1, 7)])
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("submit payment"));
+        assert_eq!(agent.pending_payments.len(), 1);
+        let mut operator = staging.await.unwrap();
+
+        // Epoch 0 is admitted carrying the send, and epoch 1 registers.
+        let close = complete_chain_close(&control, &mut operator, 34).await;
+        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
+        register(&control, &mut operator).await;
+        drop(operator);
+        let before = native(&context, &mut chain, agent.account()).await;
+
+        // Epoch 1 expires inside epoch 0's challenge window, so recovery cannot begin yet.
+        let (admission, _) = registration_record_at(&control, 1).await.deadlines.unwrap();
+        advance_to(&control, admission + 1).await;
+        let faulted = status(&control).await;
+        assert!(faulted.hard_faulted);
+        assert_eq!(faulted.last_finalized, None);
+        let error = agent
+            .recover_hard_fault(&context, &mut chain)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("terminal settlement never certifiably began"),
+            "{error:#}"
+        );
+        assert!(matches!(
+            control.record(fault_key(&deployment())).await,
+            Some(Record::Fault(FaultRecord::Faulted(_)))
+        ));
+
+        // Epoch 0 finalizes, and the reopened wallet recovers its balance after the send without
+        // resolving it.
+        advance_to(&control, close.context.challenge_deadline() + 1).await;
+        assert_eq!(status(&control).await.last_finalized, Some(0));
+        drop(agent);
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let release = agent
+            .recover_hard_fault(&context, &mut chain)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.released_custody, INITIAL_BALANCE - 7);
+        assert_eq!(release.residual, INITIAL_BALANCE - 7);
+        assert_eq!(release.withdrawal, None);
+        let Some(Record::Fault(FaultRecord::Settling(settlement))) =
+            control.record(fault_key(&deployment())).await
+        else {
+            panic!("terminal settlement began");
+        };
+        assert_eq!(settlement.frozen_state_root, close.roots.successor);
+        assert_eq!(
+            native(&context, &mut chain, agent.account()).await,
+            before + INITIAL_BALANCE - 7
+        );
+        assert_eq!(agent.pending_payments.len(), 1);
+        assert_eq!(
+            agent
+                .recover_hard_fault(&context, &mut chain)
+                .await
+                .unwrap(),
+            Some(release)
+        );
+        assert_eq!(
+            native(&context, &mut chain, agent.account()).await,
+            before + INITIAL_BALANCE - 7
+        );
+    });
+}
+
+/// A payer's unresolved send in an invalidated close stays in its frozen balance.
+///
+/// The operator carries Alice's send in epoch 0 and drops the reply. A proven challenge against
+/// epoch 0 faults the deployment, and epoch 0 never finalizes, even past its challenge window.
+/// The reopened wallet recovers its whole genesis balance.
+#[test]
+fn pending_send_in_invalidated_close_recovers_unsettled_balance() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let genesis = status(&control).await.state_root;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let payment = register(&control, &mut operator).await;
+        let mut listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+
+        // The operator accepts the send in epoch 0 and drops the reply.
+        let staging = context.child("staging").spawn(move |_| async move {
+            relay(&mut listener, &mut operator).await;
+            accept_and_drop(&mut listener, &mut operator).await;
+            operator
+        });
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        assert!(
+            agent
+                .pay(&context, &mut chain, address, &[(1, 7)])
+                .await
+                .is_err()
+        );
+        assert_eq!(agent.pending_payments.len(), 1);
+        let mut operator = staging.await.unwrap();
+
+        // Epoch 0 is admitted carrying the send, and a proven challenge faults the deployment.
+        operator.pay(1, operator.wallet_count(), 7).unwrap();
+        let close = complete_chain_close(&control, &mut operator, 34).await;
+        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
+        convict(&control, &operator, &close, &payment).await;
+        drop(operator);
+
+        // Epoch 0 never finalizes, even past its challenge window.
+        advance_to(&control, close.context.challenge_deadline() + 1).await;
+        assert_eq!(status(&control).await.last_finalized, None);
+        let custody = status(&control).await.custody;
+        let before = native(&context, &mut chain, agent.account()).await;
+
+        // The reopened wallet recovers its whole genesis balance.
+        drop(agent);
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let release = agent
+            .recover_hard_fault(&context, &mut chain)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.released_custody, INITIAL_BALANCE);
+        assert_eq!(release.residual, INITIAL_BALANCE);
+        let Some(Record::Fault(FaultRecord::Settling(settlement))) =
+            control.record(fault_key(&deployment())).await
+        else {
+            panic!("terminal settlement began");
+        };
+        assert_eq!(
+            settlement.invalid_from,
+            Some(close.header.batch_id::<Sha256>())
+        );
+        assert_eq!(settlement.frozen_state_root, genesis);
+        assert_eq!(
+            native(&context, &mut chain, agent.account()).await,
+            before + INITIAL_BALANCE
+        );
+        assert_eq!(status(&control).await.custody, custody - INITIAL_BALANCE);
+    });
+}
+
+/// A recipient's credit in an admitted close that finalizes after the fault is part of its frozen
+/// balance.
+///
+/// Alice pays Bob in epoch 0, which is admitted, and epoch 1 expires inside epoch 0's challenge
+/// window. Recovery cannot begin until epoch 0 finalizes. Epoch 0 then finalizes without the
+/// operator, and Bob and Alice recover their balances at its root.
+#[test]
+fn admitted_prefix_credit_recovers_after_fault() {
+    deterministic::Runner::default().start(|context| async move {
+        let (control, mut chain) = chain_with(
+            &context,
+            crate::protocol::Timing {
+                admission_offset: 200,
+                challenge_duration: 100,
+            },
+        )
+        .await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        register(&control, &mut operator).await;
+        operator.pay(0, 1, 7).unwrap();
+        let close = complete_chain_close(&control, &mut operator, 826).await;
+        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
+        register(&control, &mut operator).await;
+        drop(operator);
+        let mut alice = Agent::new(0).unwrap();
+        let mut bob = Agent::new(1).unwrap();
+        let paid = native(&context, &mut chain, alice.account()).await;
+        let received = native(&context, &mut chain, bob.account()).await;
+
+        // Epoch 1 expires inside epoch 0's challenge window.
+        let (admission, _) = registration_record_at(&control, 1).await.deadlines.unwrap();
+        advance_to(&control, admission + 1).await;
+        let faulted = status(&control).await;
+        assert!(faulted.hard_faulted);
+        assert_eq!(faulted.last_finalized, None);
+        assert!(matches!(
+            control.record(admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(record)) if !record.finalized
+        ));
+
+        // Recovery cannot begin while epoch 0 awaits finalization.
+        let error = bob
+            .recover_hard_fault(&context, &mut chain)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("terminal settlement never certifiably began"),
+            "{error:#}"
+        );
+        assert!(matches!(
+            control.record(fault_key(&deployment())).await,
+            Some(Record::Fault(FaultRecord::Faulted(_)))
+        ));
+
+        // Epoch 0 finalizes without the operator.
+        advance_to(&control, close.context.challenge_deadline() + 1).await;
+        let finalized = status(&control).await;
+        assert_eq!(finalized.last_finalized, Some(0));
+        assert_eq!(finalized.state_root, close.roots.successor);
+
+        // Bob recovers his balance with the credit, frozen at epoch 0's root.
+        let release = bob
+            .recover_hard_fault(&context, &mut chain)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.released_custody, INITIAL_BALANCE + 7);
+        assert_eq!(release.residual, INITIAL_BALANCE + 7);
+        assert_eq!(release.withdrawal, None);
+        let Some(Record::Fault(FaultRecord::Settling(settlement))) =
+            control.record(fault_key(&deployment())).await
+        else {
+            panic!("terminal settlement began");
+        };
+        assert_eq!(settlement.frozen_state_root, close.roots.successor);
+        assert_eq!(settlement.invalid_from, None);
+        assert_eq!(
+            native(&context, &mut chain, bob.account()).await,
+            received + INITIAL_BALANCE + 7
+        );
+
+        // Alice recovers her balance after the payment.
+        let release = alice
+            .recover_hard_fault(&context, &mut chain)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.released_custody, INITIAL_BALANCE - 7);
+        assert_eq!(
+            native(&context, &mut chain, alice.account()).await,
+            paid + INITIAL_BALANCE - 7
+        );
+    });
+}
+
 #[test]
 fn admitted_withdrawal_boundary_replaces_the_older_balance_floor() {
     deterministic::Runner::default().start(|context| async move {
@@ -8606,6 +10441,7 @@ fn frozen_recovery_preserves_finalized_withdrawals_without_history() {
             }
             assert_eq!(chain.status(&context).await.unwrap().custody, 0);
             if carried {
+                let before = native(&context, &mut chain, alice.account()).await;
                 assert_eq!(
                     alice
                         .claim_withdrawal(&context, &mut chain, UNREACHABLE)
@@ -8614,10 +10450,320 @@ fn frozen_recovery_preserves_finalized_withdrawals_without_history() {
                         .amount,
                     INITIAL_BALANCE
                 );
+                assert_eq!(
+                    native(&context, &mut chain, alice.account()).await,
+                    before + INITIAL_BALANCE
+                );
             }
             assert!(alice.pending_withdrawal_claim.is_none());
         });
     }
+}
+
+/// Where a signed withdrawal stands when the deployment faults.
+#[derive(Clone, Copy, Debug)]
+enum Carriage {
+    /// Chain-queued and carried by a registration the fault drops.
+    Queued,
+    /// Operator-carried in a registration the fault drops.
+    Dropped,
+    /// Carried by an admitted close that a proven challenge convicts.
+    Challenged,
+    /// Carried by an admitted close behind the convicted one.
+    Invalidated,
+    /// Carried by a close that finalizes before the fault.
+    Finalized,
+}
+
+/// Advances past `epoch`'s admission deadline and checks the expiry fault.
+async fn expire(control: &harness::Control, epoch: u64) {
+    let (admission, _) = registration_record_at(control, epoch)
+        .await
+        .deadlines
+        .unwrap();
+    advance_to(control, admission + 1).await;
+    assert!(matches!(
+        control.record(fault_key(&deployment())).await,
+        Some(Record::Fault(FaultRecord::Faulted(
+            HardFaultReasonResponse::ExpiredRegistration { epoch: expired, .. }
+        ))) if expired == epoch
+    ));
+}
+
+/// A signed withdrawal pays out wherever its carriage stands when the deployment faults.
+///
+/// Alice signs her own account as destination. Hard-fault recovery routes a chain-queued request
+/// whose registration the fault drops, and a request that a convicted or invalidated admitted
+/// close carried. An operator-carried request in a dropped registration routes nothing, and a
+/// close that finalized before the fault pays through the claim. In every case Alice's native
+/// balance rises by exactly her genesis balance, and a replay pays nothing more.
+#[test]
+fn faulted_carriage_returns_the_withdrawal() {
+    for carriage in [
+        Carriage::Queued,
+        Carriage::Dropped,
+        Carriage::Challenged,
+        Carriage::Invalidated,
+        Carriage::Finalized,
+    ] {
+        for action in [
+            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            WithdrawalAction::Close,
+        ] {
+            deterministic::Runner::default().start(move |context| async move {
+                let (control, mut chain) = chain(&context).await;
+                let mut operator =
+                    Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+                let mut alice = Agent::new(0).unwrap();
+                let before = native(&context, &mut chain, alice.account()).await;
+                let routed = match action {
+                    WithdrawalAction::Amount(amount) => amount.get(),
+                    WithdrawalAction::Close => INITIAL_BALANCE,
+                };
+
+                // Alice signs the request with the operator unreachable.
+                let WithdrawalOutcome::Signed { request, .. } = alice
+                    .withdraw(&context, &mut chain, UNREACHABLE, action)
+                    .await
+                    .unwrap()
+                else {
+                    panic!("the unreachable operator applied the withdrawal");
+                };
+
+                // The request is carried, and the deployment faults.
+                match carriage {
+                    Carriage::Queued => {
+                        assert_eq!(
+                            alice
+                                .escalate_withdrawal(&context, &mut chain)
+                                .await
+                                .unwrap(),
+                            request
+                        );
+                        operator.apply_withdrawal(request, true).unwrap();
+                        register(&control, &mut operator).await;
+                        assert!(matches!(
+                            control.record(carried_key(&deployment(), &alice.account())).await,
+                            Some(Record::Carried(carried)) if carried.epoch == 0
+                        ));
+                        expire(&control, 0).await;
+                    }
+                    Carriage::Dropped => {
+                        operator.apply_withdrawal(request, false).unwrap();
+                        register(&control, &mut operator).await;
+                        expire(&control, 0).await;
+                    }
+                    Carriage::Challenged => {
+                        operator.apply_withdrawal(request, false).unwrap();
+                        let payment = register(&control, &mut operator).await;
+                        operator.pay(1, operator.wallet_count(), 7).unwrap();
+                        let close = complete_chain_close(&control, &mut operator, 1).await;
+                        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&close))).await;
+                        convict(&control, &operator, &close, &payment).await;
+                    }
+                    Carriage::Invalidated => {
+                        let payment = register(&control, &mut operator).await;
+                        operator.apply_withdrawal(request, false).unwrap();
+                        operator.pay(1, operator.wallet_count(), 7).unwrap();
+                        let first = complete_chain_close(&control, &mut operator, 1).await;
+                        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&first))).await;
+                        register(&control, &mut operator).await;
+                        let second = complete_chain_close(&control, &mut operator, 2).await;
+                        applied(&control, &SettlementTx::Admit(AdmitRequest::from(&second))).await;
+                        convict(&control, &operator, &first, &payment).await;
+                    }
+                    Carriage::Finalized => {
+                        operator.apply_withdrawal(request, false).unwrap();
+                        register(&control, &mut operator).await;
+                        let close = complete_chain_close(&control, &mut operator, 1).await;
+                        finalize(&control, &close).await;
+                        expire(&control, 1).await;
+                    }
+                }
+                drop(operator);
+
+                // Recovery routes the request, or the claim pays the finalized payout, and the
+                // rest reaches Alice's native balance.
+                let release = alice
+                    .recover_hard_fault(&context, &mut chain)
+                    .await
+                    .unwrap();
+                match carriage {
+                    Carriage::Queued | Carriage::Challenged | Carriage::Invalidated => {
+                        let release = release.as_ref().unwrap();
+                        assert_eq!(release.released_custody, INITIAL_BALANCE);
+                        let output = release.withdrawal.as_ref().unwrap();
+                        assert_eq!(output.destination().as_ref(), alice.account().as_ref());
+                        assert_eq!(output.amount(), routed);
+                        assert_eq!(release.residual, INITIAL_BALANCE - routed);
+                    }
+                    Carriage::Dropped => {
+                        let release = release.as_ref().unwrap();
+                        assert_eq!(release.released_custody, INITIAL_BALANCE);
+                        assert_eq!(release.withdrawal, None);
+                        assert_eq!(release.residual, INITIAL_BALANCE);
+                    }
+                    Carriage::Finalized => {
+                        assert_eq!(
+                            release.as_ref().map(|release| release.residual),
+                            (routed < INITIAL_BALANCE).then_some(INITIAL_BALANCE - routed)
+                        );
+                        let payout = alice
+                            .claim_withdrawal(&context, &mut chain, UNREACHABLE)
+                            .await
+                            .unwrap();
+                        assert_eq!(payout.amount, routed);
+                    }
+                }
+
+                // A replay pays nothing more.
+                assert_eq!(
+                    alice
+                        .recover_hard_fault(&context, &mut chain)
+                        .await
+                        .unwrap(),
+                    release
+                );
+                assert_eq!(
+                    native(&context, &mut chain, alice.account()).await,
+                    before + INITIAL_BALANCE
+                );
+            });
+        }
+    }
+}
+
+/// A payout cached at an older head claims to the native balance after the operator vanishes and
+/// the deployment settles.
+///
+/// Alice's withdrawal finalizes in epoch 0, and she caches its payout at that head. Epoch 1
+/// finalizes and moves the head. The operator vanishes, epoch 2 expires, and every account's
+/// frozen balance leaves through hard-fault recovery while the payout reserve stays claimable.
+/// Alice then claims the payout with the operator unreachable, and a replayed claim pays nothing
+/// more.
+#[test]
+fn cached_payout_claims_to_native_balance_after_the_operator_faults() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let account = wallets()[0].public_key();
+
+        // Alice's withdrawal finalizes in epoch 0.
+        operator
+            .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
+            .unwrap();
+        register(&control, &mut operator).await;
+        let withdrawals = operator.live_registration_boundary().unwrap().1;
+        let first = complete_chain_close(&control, &mut operator, 31).await;
+        finalize(&control, &first).await;
+        let (request, position, claim) =
+            settlement_withdrawal(&operator, &first, &withdrawals, &account);
+
+        // Alice caches the payout at that head.
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        stage_withdrawal_intent(&mut agent, &request);
+        agent
+            .store
+            .cache_withdrawal_claim(&PendingWithdrawalClaim {
+                head: first.roots.withdrawal_outputs,
+                claim,
+            })
+            .unwrap();
+        drop(agent);
+
+        // Epoch 1 finalizes and moves the payout head.
+        register(&control, &mut operator).await;
+        let second = complete_chain_close(&control, &mut operator, 32).await;
+        finalize(&control, &second).await;
+        assert_ne!(
+            second.roots.withdrawal_outputs,
+            first.roots.withdrawal_outputs
+        );
+        assert!(
+            chain
+                .payout_status(&context, position)
+                .await
+                .unwrap()
+                .claimed
+                .is_none()
+        );
+
+        // The operator vanishes, and epoch 2 expires.
+        drop(operator);
+        expire(&control, 2).await;
+        let faulted = status(&control).await;
+        assert_eq!(faulted.state_root, second.roots.successor);
+        assert_eq!(faulted.claimable, 25);
+
+        // Every account's frozen balance leaves, and the payout reserve survives settlement.
+        for index in 0..wallets().len() {
+            assert!(
+                Agent::new(index)
+                    .unwrap()
+                    .recover_hard_fault(&context, &mut chain)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        let settled = status(&control).await;
+        assert_eq!(settled.custody, 0);
+        assert_eq!(settled.claimable, 25);
+
+        // Alice claims the payout with the operator unreachable.
+        let before = native(&context, &mut chain, account.clone()).await;
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let payout = agent
+            .claim_withdrawal(&context, &mut chain, UNREACHABLE)
+            .await
+            .unwrap();
+        assert_eq!(payout.amount, 25);
+        assert_eq!(payout.destination.as_ref(), account.as_ref());
+        assert_eq!(
+            native(&context, &mut chain, account.clone()).await,
+            before + 25
+        );
+        assert_eq!(status(&control).await.claimable, 0);
+        let claimed = chain
+            .payout_status(&context, position)
+            .await
+            .unwrap()
+            .claimed
+            .unwrap();
+        assert!(claimed.start <= position && position < claimed.end);
+        assert!(agent.pending_withdrawal_claim.is_none());
+        drop(agent);
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        assert!(agent.pending_withdrawal_claim.is_none());
+
+        // A replayed claim pays nothing more.
+        let current = chain.payout_status(&context, position).await.unwrap();
+        let proof = chain
+            .payout_proof(&context, current.head, position)
+            .await
+            .unwrap();
+        chain
+            .deliver(
+                &context,
+                &SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
+                    deployment: deployment(),
+                    claim: proof,
+                }),
+            )
+            .await
+            .unwrap();
+        let error = agent
+            .claim_withdrawal(&context, &mut chain, UNREACHABLE)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("no unspent wallet-owned payout"),
+            "{error:#}"
+        );
+        assert_eq!(native(&context, &mut chain, account).await, before + 25);
+        assert_eq!(status(&control).await.claimable, 0);
+    });
 }
 
 #[test]
@@ -9588,7 +11734,17 @@ fn accepted_reply_cannot_complete_faulted_work_before_finalized_coverage() {
     for (admitted, invalidated) in [(false, false), (true, false), (true, true)] {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let database = TempDatabase::new();
-            let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 200, challenge_duration: 100 }).await;
+            let control = harness::start_with_native(
+                &context,
+                CHAIN,
+                "chain",
+                harness::native(crate::protocol::deployments()),
+                crate::protocol::Timing {
+                    admission_offset: 200,
+                    challenge_duration: 100,
+                },
+            )
+            .await;
             let mut chain = client_with_holders(&context, &control, CHAIN);
             let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
             let challenged = if invalidated {
@@ -9958,7 +12114,17 @@ fn receipt_challenge(
 fn accepted_activity_is_reclassified_after_its_evidence_await() {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
         let database = TempDatabase::new();
-        let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 200, challenge_duration: 100 }).await;
+        let control = harness::start_with_native(
+            &context,
+            CHAIN,
+            "chain",
+            harness::native(crate::protocol::deployments()),
+            crate::protocol::Timing {
+                admission_offset: 200,
+                challenge_duration: 100,
+            },
+        )
+        .await;
         let mut chain = client_with_holders(&context, &control, CHAIN);
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         let first = register(&control, &mut operator).await;
@@ -10039,7 +12205,17 @@ fn hidden_later_challenge_defers_receipts_until_terminal_settlement() {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
         let payer_database = TempDatabase::new();
         let receiver_database = TempDatabase::new();
-        let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 200, challenge_duration: 100 }).await;
+        let control = harness::start_with_native(
+            &context,
+            CHAIN,
+            "chain",
+            harness::native(crate::protocol::deployments()),
+            crate::protocol::Timing {
+                admission_offset: 200,
+                challenge_duration: 100,
+            },
+        )
+        .await;
         let mut chain = client_with_holders(&context, &control, CHAIN);
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         let payment = register(&control, &mut operator).await;
@@ -10293,7 +12469,17 @@ fn live_incoming_credit_is_durable_before_the_next_evidence_await() {
 fn clean_prefix_finalizing_during_fault_read_remains_creditable() {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
         let database = TempDatabase::new();
-        let control = harness::start_with_native(&context, CHAIN, "chain", harness::native(crate::protocol::deployments()), crate::protocol::Timing { admission_offset: 200, challenge_duration: 100 }).await;
+        let control = harness::start_with_native(
+            &context,
+            CHAIN,
+            "chain",
+            harness::native(crate::protocol::deployments()),
+            crate::protocol::Timing {
+                admission_offset: 200,
+                challenge_duration: 100,
+            },
+        )
+        .await;
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         let payment = register(&control, &mut operator).await;
         let receipt = issued_receipt(&payment, &wallets()[0], &wallets()[1].public_key(), 7);
@@ -10403,6 +12589,7 @@ fn payment_head_floor_lies_between_finality_and_its_context() {
             2,
             &DepositBatch::empty(),
             &WithdrawalBatch::empty(),
+            crate::protocol::committee().unwrap().commitment::<Sha256>(),
         )
         .unwrap();
         unadmitted.floor_epoch = 2;
@@ -10567,7 +12754,7 @@ fn retired_withdrawal_forces_the_floor_past_its_carrying_close() {
         // The authorization retires once the chain reaches its deadline.
         advance_with_closes(&control, &mut operator, request.body().deadline()).await;
         agent
-            .observe_withdrawal_expiry(&context, &mut chain)
+            .observe_withdrawal(&context, &mut chain)
             .await
             .unwrap();
         assert!(agent.pending_withdrawal.is_none());

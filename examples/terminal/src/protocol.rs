@@ -48,7 +48,7 @@ use commonware_utils::{Faults as _, N3f1, NZU64, NZUsize, Participant, sync::Mut
 use rand_core::CryptoRng;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
-    ops::Range,
+    ops::{Range, RangeInclusive},
     sync::Arc,
     time::Instant,
 };
@@ -100,8 +100,8 @@ pub(crate) fn deployment_of(operator: &Key) -> Digest {
     Sha256::hash(&[DEPLOYMENT_NAMESPACE, &operator.encode()])
 }
 
-/// Namespace for chain registrations. The signed payload is the boundary
-/// material and native fee (epoch, deposit root, withdrawal batch):
+/// Namespace for chain registrations. The signed payload is the deployment,
+/// epoch, inbox end, deposit root, withdrawal batch, and native fee:
 /// settlement binds the predecessor and assigns the absolute block-height
 /// deadlines when the epoch becomes the admission frontier, so the operator
 /// commits nothing about either.
@@ -156,6 +156,12 @@ const EPOCH_STRIDE: u64 = CHALLENGE_OFFSET + 1;
 // blocks pass in seconds at live cadence.
 const GENESIS_ADMISSION_OFFSET: u64 = 300;
 
+// The challenge window setup writes into a new chain's genesis. A recipient
+// learns of an admitted close only from finalized blocks, then fetches its
+// evidence and waits for the challenge to be included, all at live cadence.
+// The window therefore matches the admission runway.
+const GENESIS_CHALLENGE_DURATION: u64 = 300;
+
 // Blocks a deposit's inclusion deadline allows beyond one admission offset.
 const DEPOSIT_INCLUSION_SLACK: u64 = 100;
 
@@ -193,11 +199,11 @@ impl Timing {
         challenge_duration: CHALLENGE_DURATION,
     };
 
-    /// The defaults setup writes into a new chain's genesis: the fixture
-    /// challenge duration under the wall-clock admission runway.
+    /// The defaults setup writes into a new chain's genesis: the wall-clock
+    /// admission runway and a challenge window of the same length.
     pub(crate) const GENESIS: Self = Self {
         admission_offset: GENESIS_ADMISSION_OFFSET,
-        challenge_duration: CHALLENGE_DURATION,
+        challenge_duration: GENESIS_CHALLENGE_DURATION,
     };
 }
 
@@ -1233,6 +1239,10 @@ pub(crate) fn settlement_config(timing: &Timing) -> Result<SettlementConfig> {
         NonZeroU64::new(timing.admission_offset).context("admission offset must be positive")?;
     let challenge = NonZeroU64::new(timing.challenge_duration)
         .context("challenge duration must be positive")?;
+
+    // A close window runs from an epoch's promotion to the admission frontier
+    // through its challenge deadline and the block after it, where the close
+    // can first finalize.
     let window = timing
         .admission_offset
         .checked_add(timing.challenge_duration)
@@ -1245,6 +1255,9 @@ pub(crate) fn settlement_config(timing: &Timing) -> Result<SettlementConfig> {
         .checked_add(2)
         .and_then(|notice| notice.checked_add(window.saturating_sub(3)))
         .context("withdrawal notice exceeds the epoch clock")?;
+
+    // The 100-block difference is the window in which an authorization signed
+    // at maximum notice can enter settlement.
     let maximum_notice = minimum_notice
         .checked_add(100)
         .context("withdrawal horizon exceeds the epoch clock")?;
@@ -1254,7 +1267,8 @@ pub(crate) fn settlement_config(timing: &Timing) -> Result<SettlementConfig> {
     // that boundary within one dwell. Once pulled, no timer applies, and the
     // deposit follows its epoch to admission, or to a refund if the deployment
     // faults first, however many registrations wait ahead. Registration never
-    // waits for earlier closes, and the operator cuts the live epoch within
+    // waits for earlier closes or their challenge windows, so the timeout
+    // omits the challenge duration. The operator cuts the live epoch within
     // its dwell, which never exceeds one admission offset. That offset is also
     // the runway that covers an operator relaunch. The slack covers
     // observation and inclusion. Pulls are prefixes and a registration carries
@@ -1277,16 +1291,40 @@ pub(crate) fn settlement_config(timing: &Timing) -> Result<SettlementConfig> {
     ))
 }
 
+/// Returns the deadlines a withdrawal authorization included at `height + 1` may carry.
+///
+/// Settlement admits an authorization only while its deadline lies in the notice window of the
+/// accepting block. Heights only grow, so a deadline below this window can never enter.
+pub(crate) fn withdrawal_notice(timing: &Timing, height: u64) -> Result<RangeInclusive<u64>> {
+    let config = settlement_config(timing)?;
+    let inclusion = height
+        .checked_add(1)
+        .context("withdrawal inclusion height overflow")?;
+    let minimum = inclusion
+        .checked_add(config.minimum_withdrawal_notice.get())
+        .context("withdrawal notice overflow")?;
+    let maximum = inclusion.saturating_add(config.maximum_withdrawal_notice.get());
+    Ok(minimum..=maximum)
+}
+
 #[cfg(test)]
 pub(crate) fn epoch_context(
     epoch: u64,
     deposits: &DepositBatch<Key>,
     withdrawals: &WithdrawalBatch<Key, Digest>,
 ) -> Result<EpochContext<Key, Digest>> {
-    epoch_context_at(deployment(), operator_key(), epoch, deposits, withdrawals)
+    epoch_context_at(
+        deployment(),
+        operator_key(),
+        epoch,
+        deposits,
+        withdrawals,
+        committee()?.commitment::<Sha256>(),
+    )
 }
 
-/// Builds the epoch context one deployment's operator registers for `epoch`.
+/// Builds the epoch context one deployment's operator registers for `epoch`
+/// under the clearing `committee` commitment.
 ///
 /// The context commits nothing about the predecessor or about timing, so
 /// the chain and the operator derive the same anchor from the same boundary.
@@ -1296,6 +1334,7 @@ pub(crate) fn epoch_context_at(
     epoch: u64,
     deposits: &DepositBatch<Key>,
     withdrawals: &WithdrawalBatch<Key, Digest>,
+    committee: Digest,
 ) -> Result<EpochContext<Key, Digest>> {
     EpochContext::new::<Sha256>(
         deployment,
@@ -1304,7 +1343,7 @@ pub(crate) fn epoch_context_at(
         deposits,
         withdrawals,
         limits(),
-        committee()?.commitment::<Sha256>(),
+        committee,
     )
     .context("construct epoch context")
 }
@@ -1317,6 +1356,7 @@ pub(crate) struct Protocol {
     operator_ack: Private,
     operator_ack_key: OperatorKey,
     validators: Validators,
+    committee: Digest,
     strategy: Rayon,
 }
 
@@ -1339,12 +1379,14 @@ impl Protocol {
         operator: SigningKey,
         operator_ack: Private,
     ) -> Result<Self> {
+        let validators = Validators::new()?;
         Ok(Self {
             deployment,
             operator,
             operator_ack_key: compute_public::<OperatorVariant>(&operator_ack),
             operator_ack,
-            validators: Validators::new()?,
+            committee: validators.committee.commitment::<Sha256>(),
+            validators,
             strategy: Rayon::new(workers).context("create clearing worker pool")?,
         })
     }
@@ -1418,11 +1460,11 @@ impl Protocol {
             epoch,
             &deposits,
             &withdrawals,
+            self.committee,
         )?;
         ensure!(
             context.deployment() == &self.deployment
-                && context.payment().operator() == &self.operator.public_key()
-                && context.committee() == &self.validators.committee.commitment::<Sha256>(),
+                && context.payment().operator() == &self.operator.public_key(),
             "operator protocol configuration drifted"
         );
         Ok(EpochRegistration {
@@ -1705,8 +1747,7 @@ where
         ensure!(
             result.context.deployment() == &protocol.deployment
                 && result.context.payment().operator() == &protocol.operator.public_key()
-                && result.context.committee()
-                    == &protocol.validators.committee.commitment::<Sha256>()
+                && result.context.committee() == &protocol.committee
                 && result.context.predecessor_root() == &state.state().root(),
             "fixture validator history has the wrong predecessor or deployment"
         );
@@ -1950,6 +1991,24 @@ mod tests {
         }
     }
 
+    /// The genesis timing yields the windows the README's Deadlines table lists.
+    #[test]
+    fn genesis_timing_yields_the_documented_windows() {
+        let timing = Timing::GENESIS;
+        assert_eq!(timing.admission_offset, 300);
+        assert_eq!(timing.challenge_duration, 300);
+
+        // A close whose deadlines start at `H` first finalizes at `H + 601`.
+        assert_eq!(timing.admission_offset + timing.challenge_duration + 1, 601);
+
+        // Deposits must be pulled within 400 blocks, and a withdrawal deadline lies 1,201 to
+        // 1,301 blocks after the block that queues it.
+        let config = settlement_config(&timing).unwrap();
+        assert_eq!(config.deposit_inclusion_timeout.get(), 400);
+        assert_eq!(config.minimum_withdrawal_notice.get(), 1_201);
+        assert_eq!(config.maximum_withdrawal_notice.get(), 1_301);
+    }
+
     #[test]
     fn fixture_replay_uses_certified_successor_root() {
         let protocol = Protocol::new(NonZeroUsize::new(2).unwrap()).unwrap();
@@ -1963,7 +2022,6 @@ mod tests {
             .unwrap();
         let request = SignedWithdrawal::sign(
             deployment(),
-            genesis.root().digest,
             wallet.public_key().encode(),
             WithdrawalAction::Amount(NonZeroU64::MIN),
             50,
@@ -2021,7 +2079,6 @@ mod tests {
             .unwrap();
             let request = SignedWithdrawal::sign(
                 deployment(),
-                state.state().root().digest,
                 wallet.public_key().encode(),
                 WithdrawalAction::Amount(NonZeroU64::new(10).unwrap()),
                 50,

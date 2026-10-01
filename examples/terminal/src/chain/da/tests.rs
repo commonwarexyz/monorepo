@@ -141,7 +141,6 @@ impl Fixture {
                 .map(|position| {
                     SignedWithdrawal::sign(
                         *self.lane.deployment.digest(),
-                        replica.state().root().digest,
                         Bytes::from(vec![position as u8; 16]),
                         WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
                         100 + epoch * 20,

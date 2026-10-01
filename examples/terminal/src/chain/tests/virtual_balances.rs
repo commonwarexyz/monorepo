@@ -100,7 +100,7 @@ fn first_credit(invalidated: bool) {
             .unwrap()
             .minimum_withdrawal_notice
             .get();
-        let queues = |root: StateRoot<Digest>, opening: StateOpening<Key, Digest>, height: u64| {
+        let queues = |opening: StateOpening<Key, Digest>, height: u64| {
             [
                 WithdrawalAction::Amount(NonZeroU64::MIN),
                 WithdrawalAction::Close,
@@ -110,7 +110,6 @@ fn first_credit(invalidated: bool) {
                 SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
                     request: SignedWithdrawal::sign(
                         deployment(),
-                        root.digest,
                         recipient.public_key().encode(),
                         action,
                         height + notice,
@@ -143,11 +142,7 @@ fn first_credit(invalidated: bool) {
             &db,
             1,
             &native,
-            &queues(
-                genesis.root(),
-                genesis.opening(&payer.public_key()).unwrap(),
-                1,
-            ),
+            &queues(genesis.opening(&payer.public_key()).unwrap(), 1),
         )
         .await;
         assert_eq!(read(&db, &queue_key).await, None);
@@ -221,7 +216,6 @@ fn first_credit(invalidated: bool) {
             balances = balances.apply(candidate).await.unwrap();
             let mut transactions = if epoch == 0 {
                 queues(
-                    genesis.root(),
                     balances
                         .state()
                         .opening(recipient.public_key())
@@ -307,7 +301,6 @@ fn first_credit(invalidated: bool) {
             .unwrap();
         let request = SignedWithdrawal::sign(
             deployment(),
-            balances.state().head().root().digest,
             recipient.public_key().encode(),
             WithdrawalAction::Close,
             height + notice,
@@ -373,7 +366,7 @@ fn first_credit(invalidated: bool) {
         assert_eq!(status(&db).await.claimable, total);
         let finalized_claims = claimed(&db, payout_position).await;
         height += 13;
-        let mut transactions = queues(result.roots.successor, opening, height);
+        let mut transactions = queues(opening, height);
         transactions.push(register(3, WithdrawalBatch::empty()));
         seal_native(&db, height, &native, &transactions).await;
         assert_eq!(read(&db, &queue_key).await, None);

@@ -15,10 +15,8 @@ fn certifier_quorum_with_withdrawal_needs_no_proof_holder() {
         let quorum = N3f1::quorum(committee.members().len()) as usize;
         let accounts = accounts();
         let wallet = wallets().remove(0);
-        let genesis = protocol.fixture_genesis(&accounts).unwrap();
         let request = SignedWithdrawal::sign(
             deployment(),
-            genesis.root().digest,
             wallet.public_key().encode(),
             WithdrawalAction::Amount(NonZeroU64::MIN),
             50,

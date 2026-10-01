@@ -114,15 +114,6 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
         SettlementAction::QueueWithdrawal(wrong_deployment),
     );
 
-    let mut wrong_context = valid;
-    wrong_context.request.context_root = Root::R1;
-    wrong_context.replay_key = wrong_context.request.replay_key();
-    rejected(
-        model,
-        &state,
-        SettlementAction::QueueWithdrawal(wrong_context),
-    );
-
     let mut oversized_destination = valid;
     oversized_destination.request.destination = Destination::TooLong;
     oversized_destination.replay_key = oversized_destination.request.replay_key();
@@ -622,12 +613,12 @@ fn amountless_close_sweeps_the_frozen_epoch_tail_after_operator_failure() {
     let model = SettlementModel::default();
     let mut state = SettlementState::default();
     queue_withdrawal(model, &mut state, WithdrawalId::CloseAfterFault);
-    step(model, &mut state, SettlementAction::Observe(11));
+    step(model, &mut state, SettlementAction::Observe(12));
     assert_eq!(
         state.fault,
         Fault::ExpiredWithdrawal {
             account: Account::Alice,
-            expired_at: 11,
+            expired_at: 12,
         }
     );
     drain_terminal(model, &mut state);

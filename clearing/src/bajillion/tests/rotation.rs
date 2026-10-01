@@ -53,7 +53,6 @@ async fn prepare_epoch(
     let withdrawals = WithdrawalBatch::new(if epoch == EPOCH {
         vec![SignedWithdrawal::sign(
             deployment,
-            state.state().root().digest,
             Bytes::from_static(b"rotation-withdrawal"),
             WithdrawalAction::Close,
             99,

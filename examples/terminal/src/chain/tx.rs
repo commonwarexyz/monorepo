@@ -25,14 +25,14 @@
 //! | `NativeTransfer` | debit owner | signature and native balance | (sender, transfer ID) |
 //! | `Deposit` | account holder | signature, native debit and clearing custody intake | consumed deposit ID |
 //! | `ClaimDeposit` | native credit recipient | finalized claim and signed destination deposit applied atomically | source claim position and destination deposit ID |
-//! | `QueueWithdrawal` | the account holder | the account signature inside [`SignedWithdrawal`], verified with its deployment and root context | account queue slot and withdrawal replay id (`WithdrawalConflict`) |
-//! | `RegisterEpoch` | the operator | the operator signature over exact boundary material and native fee | registration record and epoch sequence (`RegistrationConflict`, `EpochSequence`) |
+//! | `QueueWithdrawal` | the account holder | the account signature inside [`SignedWithdrawal`], verified with its deployment, a deadline within the notice window, no other unfinalized withdrawal for the account, and an opening of the signing account at the current finalized root whose balance covers an `Amount` and is positive for a `Close` | account queue slot and withdrawal replay id (`WithdrawalConflict`) |
+//! | `RegisterEpoch` | the operator | the operator signature and exact native fee, an inbox end within the parent's unpulled inbox (`IntakeRange`), the deposit root of the pulled entries (`BoundaryDivergence`), and every uncarried chain-queued withdrawal the pull reaches (`MissingQueuedWithdrawal`) | registration record and epoch sequence (`RegistrationConflict`, `EpochSequence`) |
 //! | `Admit` | anyone holding a genuine certificate | the committee certificate over the exact header (at least `2f + 1` signers, verified aggregate) against the epoch's own registration | registration admitted mark and admitted record (`AdmissionConflict`) |
 //! | `ClaimWithdrawal` | anyone holding bound evidence | the output opening against the current finalized payout head; funds go to the certified destination | insertion into the ordered claimed ranges |
 //! | `Challenge` | any holder of contradiction evidence (bearer, by design) | challenge adjudication over the admitted close | one proven challenge per batch (`ChallengeConflict`) |
-//! | `BeginHardFaultSettlement` | anyone, once a real deadline expired or a challenge proved | the chain's own hard-fault flag (block production observes every deadline) | idempotent snapshot, then `HardFaultAlreadySettled` |
-//! | `ClaimHardFault` | anyone holding the account's frozen-root opening; funds go to the opened account and its signed withdrawal | the state opening against the frozen root | consumed opening position and its release record (`PositionConflict`) |
-//! | `ClaimPendingDeposit` | anyone (the refund is fixed to the account) | the chain's own staged-deposit record after a fault | consumed staged deposit and its refund record |
+//! | `BeginHardFaultSettlement` | anyone, once a real deadline expired or a challenge proved | the chain's own hard-fault flag (block production observes every deadline) and no pre-fault close pending finalization | the `Settling` fault record (a replay returns `Unavailable`) |
+//! | `ClaimHardFault` | anyone holding the account's frozen-root opening; funds go to the opened account and its signed withdrawal | the state opening against the frozen root | one release per account and its release record (`PositionConflict`) |
+//! | `ClaimPendingDeposit` | anyone (the refund is fixed to the account) | a deployment fault, `terminal` matching the settlement phase, and the account's refundable total in that phase | consumed per-account total and its refund record per phase |
 
 use crate::{
     chain::native::{NativeGenesis, RegistryEntry},
@@ -410,14 +410,15 @@ impl Read for ClaimHardFaultRequest {
     }
 }
 
-/// Refunds one account's stranded deposits after a fault. The deployment is
-/// named explicitly: the account may hold staged deposits in several
+/// Refunds one account's pending deposits after a fault. The deployment is
+/// named explicitly: the account may hold refundable deposits in several
 /// deployments at once.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ClaimPendingDepositRequest {
     pub(crate) deployment: Digest,
     pub(crate) account: Key,
-    /// Selects the refund set created when terminal settlement begins.
+    /// Whether terminal settlement has begun. Execution rejects a mismatch with the deployment's
+    /// phase.
     pub(crate) terminal: bool,
 }
 
@@ -549,8 +550,8 @@ impl Read for QueueWithdrawalRequest {
 /// legitimately chooses, covered by its signature.
 ///
 /// The deposit boundary travels as the signed root of the batch the operator built its
-/// context from. Execution derives the exact records from the chain's own custody state,
-/// so a diverging deposit view is rejected at registration and leaves the epoch unregistered.
+/// context from. Execution derives the deposit records from the inbox entries the registration
+/// pulls, so a diverging deposit view is rejected at registration.
 ///
 /// The registration carries neither the predecessor nor timing: settlement
 /// binds the predecessor's root, logs, account rows, and liability and assigns
@@ -1036,7 +1037,7 @@ mod tests {
 
     #[test]
     fn queue_withdrawal_request_codec_carries_one_bounded_opening() {
-        let (root, opening) = commonware_runtime::Runner::start(
+        let opening = commonware_runtime::Runner::start(
             commonware_runtime::deterministic::Runner::default(),
             |context| async move {
                 let deployment = deployments().remove(0);
@@ -1052,15 +1053,13 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let opening = state.opening(wallets()[0].public_key()).await.unwrap();
-                (state.root().digest, opening)
+                state.opening(wallets()[0].public_key()).await.unwrap()
             },
         );
         let wallet = wallets().remove(0);
         let request = QueueWithdrawalRequest {
             request: SignedWithdrawal::sign(
                 crate::protocol::deployment(),
-                root,
                 Bytes::from_static(b"destination"),
                 commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
                     std::num::NonZeroU64::MIN,
@@ -1231,10 +1230,8 @@ mod tests {
     fn request_codecs_enforce_their_nested_bounds() {
         // A withdrawal destination beyond the shared bound is refused at decode.
         let wallet = wallets().remove(0);
-        let root = Sha256::hash(&[b"request-bound-root"]);
         let oversized_destination = SignedWithdrawal::sign(
             Sha256::hash(&[b"request-bound-deployment"]),
-            root,
             Bytes::from(vec![0; MAX_DESTINATION_BYTES + 1]),
             commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
                 std::num::NonZeroU64::MIN,

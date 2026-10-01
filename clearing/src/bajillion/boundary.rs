@@ -286,13 +286,12 @@ impl Read for WithdrawalAction {
 
 /// Canonical withdrawal tuple signed by an account.
 ///
-/// The signed fields are exactly `(deployment, state_root, destination, action,
-/// absolute_deadline)`. The signing account is carried by [`SignedWithdrawal`] so the destination
-/// remains opaque adapter-defined bytes rather than a clearing account key.
+/// The signed fields are exactly `(deployment, destination, action, absolute_deadline)`. The
+/// signing account is carried by [`SignedWithdrawal`] so the destination remains opaque
+/// adapter-defined bytes rather than a clearing account key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawalBody<D: Digest> {
     deployment: D,
-    state_root: D,
     destination: Bytes,
     action: WithdrawalAction,
     deadline: Deadline,
@@ -302,14 +301,12 @@ impl<D: Digest> WithdrawalBody<D> {
     /// Creates a withdrawal body.
     pub const fn new(
         deployment: D,
-        state_root: D,
         destination: Bytes,
         action: WithdrawalAction,
         deadline: Deadline,
     ) -> Self {
         Self {
             deployment,
-            state_root,
             destination,
             action,
             deadline,
@@ -319,11 +316,6 @@ impl<D: Digest> WithdrawalBody<D> {
     /// Returns the deployment identifier.
     pub const fn deployment(&self) -> &D {
         &self.deployment
-    }
-
-    /// Returns the finalized state root authorizing the withdrawal.
-    pub const fn state_root(&self) -> &D {
-        &self.state_root
     }
 
     /// Returns the opaque asset-adapter destination bytes.
@@ -345,7 +337,6 @@ impl<D: Digest> WithdrawalBody<D> {
 impl<D: Digest> Write for WithdrawalBody<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.deployment.write(buf);
-        self.state_root.write(buf);
         self.destination.write(buf);
         self.action.write(buf);
         self.deadline.write(buf);
@@ -354,11 +345,11 @@ impl<D: Digest> Write for WithdrawalBody<D> {
 
 impl<D: Digest> EncodeSize for WithdrawalBody<D> {
     fn encode_size(&self) -> usize {
-        D::SIZE * 2 + self.destination.encode_size() + self.action.encode_size() + u64::SIZE
+        D::SIZE + self.destination.encode_size() + self.action.encode_size() + u64::SIZE
     }
 
     fn encode_inline_size(&self) -> usize {
-        D::SIZE * 2 + self.destination.encode_inline_size() + self.action.encode_size() + u64::SIZE
+        D::SIZE + self.destination.encode_inline_size() + self.action.encode_size() + u64::SIZE
     }
 }
 
@@ -368,7 +359,6 @@ impl<D: Digest> Read for WithdrawalBody<D> {
     fn read_cfg(buf: &mut impl Buf, destination_cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             deployment: D::read(buf)?,
-            state_root: D::read(buf)?,
             destination: Bytes::read_cfg(buf, destination_cfg)?,
             action: WithdrawalAction::read(buf)?,
             deadline: u64::read(buf)?,
@@ -377,6 +367,10 @@ impl<D: Digest> Read for WithdrawalBody<D> {
 }
 
 /// Account-attributed signature over a withdrawal tuple.
+///
+/// Settlement accepts the authorization only while its deadline lies within the notice window of
+/// the accepting block. Each authorization is valid on its own, so a signer that wants exactly one
+/// withdrawal holds one live authorization.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignedWithdrawal<P: PublicKey, D: Digest> {
     account: P,
@@ -388,13 +382,12 @@ impl<P: PublicKey, D: Digest> SignedWithdrawal<P, D> {
     /// Creates and signs a withdrawal authorization.
     pub fn sign<S: Signer<PublicKey = P, Signature = P::Signature>>(
         deployment: D,
-        state_root: D,
         destination: Bytes,
         action: WithdrawalAction,
         deadline: Deadline,
         account: &S,
     ) -> Self {
-        let body = WithdrawalBody::new(deployment, state_root, destination, action, deadline);
+        let body = WithdrawalBody::new(deployment, destination, action, deadline);
         Self::sign_body_by_authority(body, account)
     }
 
@@ -470,19 +463,8 @@ impl<P: PublicKey, D: Digest> SignedWithdrawal<P, D> {
     }
 
     /// Verifies the deployment and signature.
-    ///
-    /// The authorization root remains request-local: one sealed batch may contain
-    /// withdrawals queued against different finalized roots.
     pub fn verify_deployment(&self, deployment: &D) -> Result<(), BoundaryError> {
         if self.body.deployment != *deployment {
-            return Err(BoundaryError::WrongContext);
-        }
-        self.verify_signature()
-    }
-
-    /// Verifies the exact deployment and finalized state root plus the account signature.
-    pub fn verify_context(&self, deployment: &D, state_root: &D) -> Result<(), BoundaryError> {
-        if self.body.deployment != *deployment || self.body.state_root != *state_root {
             return Err(BoundaryError::WrongContext);
         }
         self.verify_signature()
@@ -578,10 +560,6 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
     }
 
     /// Verifies every request's deployment and signature.
-    ///
-    /// Authorization roots are deliberately checked when each request enters
-    /// settlement state, because requests in one later boundary may have been
-    /// queued against different finalized roots.
     pub fn verify_deployment(&self, deployment: &D) -> Result<(), BoundaryError> {
         for request in &self.requests {
             request.verify_deployment(deployment)?;
@@ -651,8 +629,8 @@ pub enum BoundaryError {
     /// Aggregate boundary arithmetic overflowed.
     #[error("checked boundary arithmetic overflowed")]
     ArithmeticOverflow,
-    /// A withdrawal binds another deployment or finalized state root.
-    #[error("withdrawal binds another deployment or finalized state root")]
+    /// A withdrawal binds another deployment.
+    #[error("withdrawal binds another deployment")]
     WrongContext,
     /// The attributed account did not sign the withdrawal tuple.
     #[error("withdrawal account signature is invalid")]
@@ -727,7 +705,6 @@ mod arbitrary_impls {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
             Ok(Self {
                 deployment: u.arbitrary()?,
-                state_root: u.arbitrary()?,
                 destination: bytes(u)?,
                 action: u.arbitrary()?,
                 deadline: u.arbitrary()?,
@@ -783,8 +760,8 @@ mod tests {
     type TestWithdrawal = SignedWithdrawal<VerifyingKey, ShaDigest>;
     type TestWithdrawals = WithdrawalBatch<VerifyingKey, ShaDigest>;
 
-    fn context() -> (ShaDigest, ShaDigest) {
-        (Sha256::hash(&[b"deployment"]), Sha256::hash(&[b"state"]))
+    fn deployment() -> ShaDigest {
+        Sha256::hash(&[b"deployment"])
     }
 
     fn amount(value: u64) -> WithdrawalAction {
@@ -796,10 +773,8 @@ mod tests {
         action: WithdrawalAction,
         destination: &'static [u8],
     ) -> TestWithdrawal {
-        let (deployment, state_root) = context();
         SignedWithdrawal::sign(
-            deployment,
-            state_root,
+            deployment(),
             Bytes::from_static(destination),
             action,
             99,
@@ -926,26 +901,24 @@ mod tests {
     fn withdrawal_action_is_signed_and_verifies_context() {
         let account = SigningKey::from_seed(4);
         let request = withdrawal(&account, amount(8), b"adapter-destination");
-        let (deployment, state_root) = context();
         assert_eq!(request.account(), &account.public_key());
-        assert_eq!(request.body().deployment(), &deployment);
-        assert_eq!(request.body().state_root(), &state_root);
+        assert_eq!(request.body().deployment(), &deployment());
         assert_eq!(
             request.body().destination(),
             b"adapter-destination".as_slice()
         );
         assert_eq!(request.body().action(), &amount(8));
         assert_eq!(request.body().deadline(), 99);
-        assert_eq!(request.verify_context(&deployment, &state_root), Ok(()));
+        assert_eq!(request.verify_deployment(&deployment()), Ok(()));
         assert_eq!(
-            request.verify_context(&Sha256::hash(&[b"other"]), &state_root),
+            request.verify_deployment(&Sha256::hash(&[b"other"])),
             Err(BoundaryError::WrongContext)
         );
 
         let mut wrong_action = request;
         wrong_action.body.action = WithdrawalAction::Close;
         assert_eq!(
-            wrong_action.verify_context(&deployment, &state_root),
+            wrong_action.verify_deployment(&deployment()),
             Err(BoundaryError::InvalidWithdrawalSignature)
         );
     }
@@ -1034,47 +1007,6 @@ mod tests {
                 withdrawal(&a, WithdrawalAction::Close, b"two"),
             ]),
             Err(BoundaryError::NonCanonicalWithdrawals)
-        );
-    }
-
-    #[test]
-    fn one_batch_accepts_valid_requests_from_distinct_authorization_roots() {
-        let deployment = Sha256::hash(&[b"deployment"]);
-        let first_root = Sha256::hash(&[b"first-root"]);
-        let second_root = Sha256::hash(&[b"second-root"]);
-        let first = SigningKey::from_seed(40);
-        let second = SigningKey::from_seed(41);
-        let requests = WithdrawalBatch::new(vec![
-            SignedWithdrawal::sign(
-                deployment,
-                first_root,
-                Bytes::from_static(b"first"),
-                amount(1),
-                50,
-                &first,
-            ),
-            SignedWithdrawal::sign(
-                deployment,
-                second_root,
-                Bytes::from_static(b"second"),
-                amount(2),
-                51,
-                &second,
-            ),
-        ])
-        .unwrap();
-
-        assert_eq!(requests.verify_deployment(&deployment), Ok(()));
-        assert_eq!(
-            requests
-                .request_for(&second.public_key())
-                .unwrap()
-                .verify_context(&deployment, &first_root),
-            Err(BoundaryError::WrongContext)
-        );
-        assert_eq!(
-            requests.verify_deployment(&Sha256::hash(&[b"other-deployment"])),
-            Err(BoundaryError::WrongContext)
         );
     }
 

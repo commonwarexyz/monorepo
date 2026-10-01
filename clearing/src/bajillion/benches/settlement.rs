@@ -395,14 +395,9 @@ fn admit_fixture(chain: &mut TestChain, admission: AdmissionFixture) {
         .expect("benchmark close can be admitted");
 }
 
-fn signed_withdrawal(
-    state: &TestState,
-    account: &Account,
-    deadline: u64,
-) -> SignedWithdrawal<VerifyingKey, Digest> {
+fn signed_withdrawal(account: &Account, deadline: u64) -> SignedWithdrawal<VerifyingKey, Digest> {
     SignedWithdrawal::sign(
         deployment(),
-        state.state().root().digest,
         Bytes::from_static(b"benchmark-destination"),
         WithdrawalAction::Amount(NonZeroU64::MIN),
         deadline,
@@ -431,7 +426,7 @@ async fn withdrawal_sources(
             OPENING_BALANCE
         );
         withdrawals.push(WithdrawalSource {
-            request: signed_withdrawal(state, account, deadline),
+            request: signed_withdrawal(account, deadline),
             opening,
         });
     }
@@ -449,7 +444,7 @@ fn queue_withdrawals(chain: &mut TestChain, withdrawals: &[WithdrawalSource]) {
 #[commonware_macros::boxed]
 async fn queue_source(runtime: deterministic::Context, depth: usize) -> QueueSource {
     let (chain, mut state, accounts) = ChainSource::new(runtime, LIVE_ACCOUNTS, 1).await;
-    let request = signed_withdrawal(&state, &accounts[0], WITHDRAWAL_DEADLINE);
+    let request = signed_withdrawal(&accounts[0], WITHDRAWAL_DEADLINE);
     let opening = state
         .state()
         .opening(accounts[0].public.clone())

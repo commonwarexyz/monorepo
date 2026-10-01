@@ -230,7 +230,6 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
 
     let withdrawal = SignedWithdrawal::sign(
         deployment(),
-        predecessor.digest,
         withdrawal_account.encode(),
         WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
         100,

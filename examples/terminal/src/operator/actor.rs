@@ -59,6 +59,7 @@ use std::sync::mpsc::SyncSender;
 #[cfg(test)]
 use std::time::Duration;
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
     path::Path,
@@ -257,6 +258,9 @@ pub(crate) struct Operator {
     epoch_fee: u64,
     genesis: commonware_clearing::bajillion::settlement::Genesis<Digest>,
     registration: EpochRegistration,
+    // Every read revalidates the cached successor plan against durable state before extending
+    // it over rows observed since.
+    projection: RefCell<Option<Box<Projection>>>,
     #[cfg(test)]
     initial_accounts: Vec<Account>,
     active_close: Option<ActiveClose>,
@@ -275,6 +279,30 @@ pub(crate) struct Operator {
     result_failure: Option<ResultFailure>,
     #[cfg(test)]
     registration_probe_failure: std::cell::Cell<Option<usize>>,
+}
+
+/// A boundary with the takes planned into it, in index order.
+struct Plan {
+    registration: EpochRegistration,
+    takes: Vec<Take>,
+    deposit_events: usize,
+}
+
+/// A successor plan and the withdrawals of the base it extends.
+struct Projection {
+    base: WithdrawalBatch<Key, Digest>,
+    plan: Plan,
+}
+
+/// How a boundary takes one chain-queued withdrawal row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class {
+    /// The request is already staged, so the take only links it to its row.
+    Link,
+    /// A registration carries another request for the account.
+    Superseded,
+    /// The take stages the request.
+    Fresh,
 }
 
 impl Operator {
@@ -442,6 +470,7 @@ impl Operator {
             pipeline,
             genesis: configured,
             registration,
+            projection: RefCell::new(None),
             #[cfg(test)]
             initial_accounts: initial_accounts.to_vec(),
             active_close: None,
@@ -817,17 +846,24 @@ impl Operator {
         );
         let skip = usize::try_from(observed - start).unwrap_or(usize::MAX);
         let fresh = records.get(skip..).unwrap_or_default();
-        let mut takes = Vec::new();
-        let mut registration = self.registration.clone();
+        let mut plan = Plan {
+            registration: self.registration.clone(),
+            takes: Vec::new(),
+            deposit_events: self.store.current_deposit_events()?,
+        };
         if self.close_fault.is_none() && !self.store.published()? {
             let rows = self
                 .store
                 .untaken()?
                 .into_iter()
                 .chain((observed..).zip(fresh.iter().cloned()));
-            (takes, registration) =
-                self.plan_takes(registration, self.store.current_deposit_events()?, rows)?;
+            plan = self.plan_takes(plan, rows)?;
         }
+        let Plan {
+            registration,
+            takes,
+            ..
+        } = plan;
         if fresh.is_empty() && takes.is_empty() {
             return Ok(Vec::new());
         }
@@ -839,52 +875,43 @@ impl Operator {
         Ok(staged)
     }
 
-    // Plans the takes of `rows` into `registration` in index order. Planning stops at the first
-    // row the close limits or the intake horizon do not admit, which waits for a later epoch.
+    // Extends `plan` with the takes of `rows` in index order. Planning stops at the first row the
+    // close limits or the intake horizon do not admit, which waits for a later epoch.
     fn plan_takes(
         &self,
-        mut registration: EpochRegistration,
-        mut deposit_events: usize,
+        mut plan: Plan,
         rows: impl IntoIterator<Item = (u64, Intake)>,
-    ) -> Result<(Vec<Take>, EpochRegistration)> {
-        let epoch = registration.context.payment().epoch();
-        let mut takes = Vec::new();
+    ) -> Result<Plan> {
+        let epoch = plan.registration.context.payment().epoch();
         for (index, record) in rows {
+            let registration = &plan.registration;
             ensure!(
                 index == registration.intake.end,
                 "the untaken inbox is not contiguous with the boundary"
             );
             let (kind, mut replacement) = match record {
                 Intake::Deposit(event) => {
-                    if deposit_events >= MAX_DEPOSIT_EVENTS
+                    if plan.deposit_events >= MAX_DEPOSIT_EVENTS
                         || ensure_balance_intake_horizon(epoch).is_err()
                     {
                         break;
                     }
                     let Ok(replacement) = registration_with_deposit(
                         &self.protocol,
-                        &registration,
+                        registration,
                         event.account.clone(),
                         event.amount,
                     ) else {
                         break;
                     };
-                    deposit_events += 1;
+                    plan.deposit_events += 1;
                     let identity = self.identity(&event.account);
                     (TakeKind::Deposit { identity, event }, replacement)
                 }
-                Intake::Withdrawal(request) => {
-                    if let Some(staged) = self.store.staged_withdrawal_request(&request)? {
-                        // The request is already staged in this epoch, or an earlier
-                        // registration carried it early. Either way it is carried once.
-                        ensure!(
-                            staged.epoch <= epoch,
-                            "a chain-queued withdrawal is staged in a later epoch"
-                        );
-                        (TakeKind::Link { request }, registration.clone())
-                    } else if self.store.superseded(&request, index)? {
-                        (TakeKind::Superseded { request }, registration.clone())
-                    } else {
+                Intake::Withdrawal(request) => match self.classify(epoch, index, &request)? {
+                    Class::Link => (TakeKind::Link { request }, registration.clone()),
+                    Class::Superseded => (TakeKind::Superseded { request }, registration.clone()),
+                    Class::Fresh => {
                         let horizon = match request.body().action() {
                             WithdrawalAction::Amount(_) => ensure_amount_withdrawal_horizon(epoch),
                             WithdrawalAction::Close => ensure_close_horizon(epoch),
@@ -898,7 +925,7 @@ impl Operator {
                             .cloned();
                         let Ok(replacement) = registration_replacing_withdrawal(
                             &self.protocol,
-                            &registration,
+                            registration,
                             replaced.as_ref(),
                             request.clone(),
                         ) else {
@@ -910,17 +937,39 @@ impl Operator {
                         };
                         (kind, replacement)
                     }
-                }
+                },
             };
             replacement.intake.end = index.checked_add(1).context("inbox index overflow")?;
-            takes.push(Take {
+            plan.takes.push(Take {
                 index,
                 kind,
                 replacement: replacement.context.payment().clone(),
             });
-            registration = replacement;
+            plan.registration = replacement;
         }
-        Ok((takes, registration))
+        Ok(plan)
+    }
+
+    // How the boundary of `epoch` takes the chain-queued `request` recorded at inbox `index`.
+    fn classify(
+        &self,
+        epoch: u64,
+        index: u64,
+        request: &SignedWithdrawal<Key, Digest>,
+    ) -> Result<Class> {
+        if let Some(staged) = self.store.staged_withdrawal_request(request)? {
+            // The request is already staged in this epoch, or an earlier registration carried it
+            // early. Either way it is carried once.
+            ensure!(
+                staged.epoch <= epoch,
+                "a chain-queued withdrawal is staged in a later epoch"
+            );
+            Ok(Class::Link)
+        } else if self.store.superseded(request, index)? {
+            Ok(Class::Superseded)
+        } else {
+            Ok(Class::Fresh)
+        }
     }
 
     // The display identity of `key`, or a generic one for an account outside the demo set.
@@ -953,10 +1002,6 @@ impl Operator {
         );
         let request = SignedWithdrawal::sign(
             self.protocol.deployment(),
-            self.store
-                .latest_finalized_root()?
-                .map_or(self.genesis.root(), |(_, root)| root)
-                .digest,
             destination,
             action,
             deadline,
@@ -970,7 +1015,7 @@ impl Operator {
         self.opening_snapshot(account)?.resolve()
     }
 
-    /// Captures the finalized checkpoint a withdrawal authorization signs.
+    /// Captures a finalized balance opening for withdrawal recovery and escalation.
     pub(crate) fn opening_snapshot(&self, account: &Key) -> Result<OpeningSnapshot> {
         self.ensure_operating()?;
         ensure_close_horizon(self.registration.context.payment().epoch())?;
@@ -995,8 +1040,11 @@ impl Operator {
         })
     }
 
+    // Intake stages into the successor only once the live epoch adopted its certified
+    // registration. An unadopted live boundary can still be unpublished, which would leave
+    // successor rows ahead of the intake it takes again.
     fn withdrawal_registration(&self) -> Result<EpochRegistration> {
-        if self.store.published()? {
+        if self.registration.floors.is_some() && self.store.published()? {
             self.successor().map(|(registration, _)| registration)
         } else {
             Ok(self.registration.clone())
@@ -1073,13 +1121,7 @@ impl Operator {
         if self.ensure_operating().is_err() {
             return Ok(None);
         }
-        let registration = if self.registration.floors.is_none()
-            && !self.registration.withdrawals.requests().is_empty()
-        {
-            self.registration.clone()
-        } else {
-            self.withdrawal_registration()?
-        };
+        let registration = self.withdrawal_registration()?;
         if registration.withdrawals.requests().is_empty() || registration.floors.is_some() {
             return Ok(None);
         }
@@ -1147,6 +1189,7 @@ impl Operator {
         let Some((stored, staged)) = self.store.staged_withdrawal(request.account())? else {
             return Ok(None);
         };
+
         // The observed inbox selects which request the successor carries for this account.
         if stored != *request
             && staged.epoch == self.next_openable_epoch()?
@@ -1190,14 +1233,7 @@ impl Operator {
             self.store.successor_end()?.is_some(),
             "successor publication has not begun"
         );
-        let (mut successor, takes) = self.successor()?;
-        validate_registration(&successor, record)?;
-        ensure!(
-            record.admitted.is_none(),
-            "the successor has already closed"
-        );
-        successor.floors = Some(record.floors);
-        successor.deadlines = record.deadlines;
+        let (successor, takes) = self.certified_successor(record)?;
         let next_epoch = successor.context.payment().epoch();
         let cutover = self.store.rotate_epoch(
             epoch,
@@ -1245,28 +1281,78 @@ impl Operator {
         Ok(CloseStarted { epoch, queued })
     }
 
+    // The planned successor bound to its certified registration `record`.
+    fn certified_successor(
+        &self,
+        record: &RegistrationRecord,
+    ) -> Result<(EpochRegistration, Vec<Take>)> {
+        let (mut successor, takes) = self.successor()?;
+        validate_registration(&successor, record)?;
+        ensure!(
+            record.admitted.is_none(),
+            "the successor has already closed"
+        );
+        successor.floors = Some(record.floors);
+        successor.deadlines = record.deadlines;
+        Ok((successor, takes))
+    }
+
     // Publication fixes only the boundary. Liability and withdrawal reservations are projected
     // from the latest predecessor tail when the cut installs this successor.
     fn successor(&self) -> Result<(EpochRegistration, Vec<Take>)> {
-        let mut successor = self.protocol.registration(
-            self.next_openable_epoch()?,
-            DepositBatch::empty(),
-            self.store.successor_withdrawals()?,
-            self.store.successor_liability()?,
-        )?;
-        let end = self.registration.intake.end;
-        successor.intake = end..end;
+        let epoch = self.next_openable_epoch()?;
+        let start = self.registration.intake.end;
+        let withdrawals = self.store.successor_withdrawals()?;
         let published = self.store.successor_end()?;
         let rows = self
             .store
             .untaken()?
             .into_iter()
-            .take_while(|(index, _)| published.is_none_or(|end| *index < end));
-        let (takes, successor) = self.plan_takes(successor, 0, rows)?;
+            .take_while(|(index, _)| published.is_none_or(|end| *index < end))
+            .collect::<Vec<_>>();
+        // Inbox rows never change once observed, and a withdrawal row's class depends only on the
+        // successor's withdrawals and the boundary it extends, which key the cached plan.
+        let mut projection = self.projection.borrow_mut();
+        let cached = match projection.take().map(|boxed| *boxed) {
+            Some(Projection { base, plan })
+                if base == withdrawals
+                    && plan.registration.context.payment().epoch() == epoch
+                    && plan.registration.intake.start == start =>
+            {
+                Some(plan)
+            }
+            _ => None,
+        };
+        let plan = match cached {
+            Some(plan) => plan,
+            None => {
+                let mut registration = self.protocol.registration(
+                    epoch,
+                    DepositBatch::empty(),
+                    withdrawals.clone(),
+                    0,
+                )?;
+                registration.intake = start..start;
+                Plan {
+                    registration,
+                    takes: Vec::new(),
+                    deposit_events: 0,
+                }
+            }
+        };
+        let taken = plan.takes.len();
+        let plan = self.plan_takes(plan, rows.into_iter().skip(taken))?;
         ensure!(
-            published.is_none_or(|end| successor.intake.end == end),
+            published.is_none_or(|end| plan.registration.intake.end == end),
             "published successor boundary cannot be reconstructed"
         );
+        let mut successor = plan.registration.clone();
+        successor.liability = self.store.successor_liability()?;
+        let takes = plan.takes.clone();
+        *projection = Some(Box::new(Projection {
+            base: withdrawals,
+            plan,
+        }));
         Ok((successor, takes))
     }
 
@@ -2173,12 +2259,9 @@ impl Operator {
         let epoch = self.registration.context.payment().epoch();
         let data = self.store.load_current()?;
         let prepared = self.prepare_epoch(data, self.registration.clone())?;
-        let (mut successor, takes) = self.successor()?;
-        validate_registration(&successor, record)?;
+        let (successor, takes) = self.certified_successor(record)?;
         self.store
             .begin_successor(self.registration.context.payment(), successor.intake.end)?;
-        successor.floors = Some(record.floors);
-        successor.deadlines = record.deadlines;
         self.store.rotate_epoch(
             epoch,
             self.registration.context.payment(),

@@ -333,10 +333,6 @@ impl RefinementDriver {
             spec::Deployment::Current => self.fixture.deployment,
             spec::Deployment::Other => Sha256::hash(&[b"other-deployment"]),
         };
-        let root = self
-            .available_cache(request.context_root)
-            .map(TestCache::root)
-            .unwrap_or_else(|| self.canonical_cache(request.context_root).root());
         let action = match request.action {
             spec::WithdrawalAction::Amount(amount) => {
                 WithdrawalAction::Amount(NonZeroU64::new(u64::from(amount)).unwrap())
@@ -346,7 +342,6 @@ impl RefinementDriver {
         let signer = self.signer(request.account);
         let signed = SignedWithdrawal::sign(
             deployment,
-            root.digest,
             Self::destination(request.destination),
             action,
             u64::from(request.deadline),
@@ -1795,7 +1790,7 @@ fn deposit_fault_refund_and_terminal_state_recovery_refine_production() {
 fn amountless_close_profile() -> RefinementDriver {
     let mut driver = RefinementDriver::new();
     queue_refined(&mut driver, spec::WithdrawalId::CloseAfterFault);
-    driver.step(spec::SettlementAction::Observe(11));
+    driver.step(spec::SettlementAction::Observe(12));
     driver.step(spec::SettlementAction::BeginTerminal);
     driver.step(spec::SettlementAction::ClaimState(spec::Account::Alice));
     driver.step(spec::SettlementAction::ClaimState(spec::Account::Bob));

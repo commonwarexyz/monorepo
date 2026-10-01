@@ -9,18 +9,24 @@ use super::{
 use crate::{
     chain::{
         client::{Chain, Client, Env},
-        state::{AdmittedRootsResponse, FaultRecord, HardFaultReasonResponse, StatusRecord},
+        query::Lookup,
+        state::{
+            AdmittedRootsResponse, FaultRecord, HardFaultReasonResponse, Record, StatusRecord,
+        },
     },
     operator::rpc as operator_rpc,
-    protocol::{AccountIdentity, Key, Wallet, eve_identity, eve_wallet, identities, wallets},
+    protocol::{
+        AccountIdentity, Key, Wallet, eve_identity, eve_wallet, identities, wallets,
+        withdrawal_notice,
+    },
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use commonware_clearing::bajillion::{
     boundary::SignedWithdrawal,
     payment::{PaymentContext, SendAuthorization},
     qmdb::StateOpening,
 };
-use commonware_cryptography::sha256::Digest;
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_runtime::{Clock, Network};
 use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 
@@ -225,9 +231,14 @@ impl Agent {
         Ok(())
     }
 
-    /// Retires an expired authorization from a healthy certified view without creating a
-    /// replacement. Its archived discovery hint and any independent payout candidate survive.
-    pub(crate) async fn observe_withdrawal_expiry<E: Env>(
+    /// Resolves the active authorization from a healthy certified view.
+    ///
+    /// A request that entered settlement retires at its deadline. One whose notice window closed
+    /// without entering is discarded and leaves the signing floor in place. Queueing and
+    /// registration each record the request in the block that accepts it, and only a later
+    /// request from this account overwrites either record. A retired request keeps its archived
+    /// discovery hint, and any independent payout candidate survives.
+    pub(crate) async fn observe_withdrawal<E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,
@@ -240,15 +251,55 @@ impl Agent {
             status.deployment == self.deployment,
             "withdrawal status has an unexpected deployment"
         );
-        if status.height < request.body().deadline() {
-            return Ok(());
-        }
         if status.hard_faulted {
             return Ok(());
         }
-        self.store
-            .retire_withdrawal(&request)
-            .context("retire expired withdrawal authorization")?;
+        let deadline = request.body().deadline();
+        let timing = chain.genesis().timing();
+        if withdrawal_notice(&timing, status.height).is_ok_and(|window| *window.start() <= deadline)
+        {
+            return Ok(());
+        }
+
+        // Both records must be at least as recent as the status, since a registration can carry
+        // the request at any height before its window closed.
+        let account = self.account();
+        let queued = chain
+            .recent(
+                ctx,
+                &chain.request(Lookup::Withdrawal {
+                    account: account.clone(),
+                }),
+            )
+            .await?;
+        let carried = chain
+            .recent(ctx, &chain.request(Lookup::Carried { account }))
+            .await?;
+        if queued.height < status.height || carried.height < status.height {
+            return Ok(());
+        }
+        let queued = match queued.record {
+            Some(Record::Withdrawal(effect)) => effect.request == request,
+            None => false,
+            Some(_) => bail!("certified withdrawal read returned a foreign record"),
+        };
+        let carried = match carried.record {
+            Some(Record::Carried(record)) => record.id == request.id::<Sha256>(),
+            None => false,
+            Some(_) => bail!("certified carriage read returned a foreign record"),
+        };
+        if queued || carried {
+            if status.height < deadline {
+                return Ok(());
+            }
+            self.store
+                .retire_withdrawal(&request)
+                .context("retire expired withdrawal authorization")?;
+        } else {
+            self.store
+                .discard_withdrawal(&request)
+                .context("discard unentered withdrawal authorization")?;
+        }
         self.pending_withdrawal = None;
         self.cache = None;
         Ok(())
@@ -321,7 +372,7 @@ impl Agent {
         chain: &mut Client,
         operator: SocketAddr,
     ) -> Result<u64> {
-        self.observe_withdrawal_expiry(ctx, chain).await?;
+        self.observe_withdrawal(ctx, chain).await?;
         let operator_error =
             match operator_head(ctx, operator, self.account(), &self.operator).await {
                 Ok(head) => {

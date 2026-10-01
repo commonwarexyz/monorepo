@@ -118,7 +118,7 @@ impl Agent {
         operator: SocketAddr,
         sends: &[Vec<(usize, u64)>],
     ) -> Result<Vec<PaymentOutcome>> {
-        self.observe_withdrawal_expiry(ctx, chain).await?;
+        self.observe_withdrawal(ctx, chain).await?;
         ensure!(
             !sends.is_empty() && sends.len() <= MAX_SENDS_PER_BATCH,
             "payment batch exceeds its send bound"
@@ -882,7 +882,8 @@ impl Agent {
     /// The bodies at or below the reported endpoint conclude with their receipts. The rest are
     /// signed again under the successor's verified context, bound to the reported root, and
     /// their originals stay durable as undecided superseded copies. An unusable report, or a
-    /// head that names another epoch than the successor, leaves the exact bytes staged.
+    /// head that names another epoch than the successor, leaves the exact bytes staged. An active
+    /// withdrawal authorization refuses a re-sign and leaves them staged as well.
     async fn resign<E: Env>(
         &mut self,
         ctx: &E,
@@ -897,6 +898,10 @@ impl Agent {
         if included == self.pending_payments.len() {
             return self.conclude_staged_prefix(included, false);
         }
+        ensure!(
+            self.pending_withdrawal.is_none(),
+            "a withdrawal authorization is still active"
+        );
         let requested = self.pending_payments[included..]
             .iter()
             .map(|payment| Ok((payment.entries.clone(), entry_total(&payment.entries)?)))
