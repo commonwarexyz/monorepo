@@ -433,7 +433,7 @@ impl<I: PartialEq, F: Ring> Interpolator<I, F> {
     }
 }
 
-impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
+impl<I: Ord, F: Field> Interpolator<I, F> {
     /// Create a new interpolator, given an association from indices to evaluation points.
     ///
     /// If an index appears multiple times, the implementation is free to use

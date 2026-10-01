@@ -14,7 +14,7 @@ use std::{collections::HashSet, hash::Hash};
 
 const HASHSET_TYPE: &str = "HashSet";
 
-impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
+impl<K: Ord + Write, S> Write for HashSet<K, S> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
 
@@ -38,7 +38,7 @@ impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
     }
 }
 
-impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
+impl<K: EncodeSize, S> EncodeSize for HashSet<K, S> {
     fn encode_size(&self) -> usize {
         let mut size = self.len().encode_size();
 

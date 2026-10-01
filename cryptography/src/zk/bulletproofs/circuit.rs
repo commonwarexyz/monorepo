@@ -1058,10 +1058,7 @@ impl<G: EncodeSize> EncodeSize for Setup<G> {
     }
 }
 
-impl<G: Read> Read for Setup<G>
-where
-    G::Cfg: Clone,
-{
+impl<G: Read> Read for Setup<G> {
     type Cfg = (usize, G::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, (max_len, cfg): &Self::Cfg) -> Result<Self, Error> {
@@ -1219,11 +1216,7 @@ impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
     }
 }
 
-impl<F: Read, G: Read> Read for Proof<F, G>
-where
-    F::Cfg: Clone,
-    G::Cfg: Clone,
-{
+impl<F: Read, G: Read> Read for Proof<F, G> {
     /// `(max_len, (g_cfg, f_cfg))` where `max_len` bounds the IPA round count.
     type Cfg = (usize, (G::Cfg, F::Cfg));
 

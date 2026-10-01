@@ -25,7 +25,6 @@ use futures::{
     future::{self, Either},
 };
 use rand_core::Rng;
-use std::marker::PhantomData;
 use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
@@ -37,7 +36,7 @@ struct Serve<P: PublicKey> {
 }
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
-pub struct Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
+pub struct Engine<E, P, D, B, Key, Con, Pro>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
@@ -46,8 +45,6 @@ where
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes>,
     Pro: Producer<Key = Key>,
-    NetS: Sender<PublicKey = P>,
-    NetR: Receiver<PublicKey = P>,
     Con::Subscriber: Eq,
 {
     /// Context used to spawn tasks, manage time, etc.
@@ -69,7 +66,7 @@ where
     mailbox: mailbox::Receiver<Message<Key, P, Con::Subscriber>>,
 
     /// Manages outgoing fetch requests
-    fetcher: Fetcher<E, P, Key, NetS>,
+    fetcher: Fetcher<E, P, Key>,
 
     /// Tracks all in-flight fetch state
     inflight: Inflight<Con, P>,
@@ -88,12 +85,9 @@ where
 
     /// Metrics for the peer actor
     metrics: metrics::Metrics,
-
-    /// Phantom data for networking types
-    _r: PhantomData<NetR>,
 }
 
-impl<E, P, D, B, Key, Con, Pro, NetS, NetR> Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
+impl<E, P, D, B, Key, Con, Pro> Engine<E, P, D, B, Key, Con, Pro>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
@@ -102,8 +96,6 @@ where
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes>,
     Pro: Producer<Key = Key>,
-    NetS: Sender<PublicKey = P>,
-    NetR: Receiver<PublicKey = P>,
     Con::Subscriber: Clone + Ord + Send + 'static,
 {
     /// Creates a new `Actor` with the given configuration.
@@ -139,7 +131,6 @@ where
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
-                _r: PhantomData,
             },
             Mailbox::new(sender),
         )
@@ -150,12 +141,18 @@ where
     /// The actor will handle:
     /// - Fetching data from other peers and notifying the `Consumer`
     /// - Serving data to other peers by requesting it from the `Producer`
-    pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
+    pub fn start<NetS: Sender<PublicKey = P>, NetR: Receiver<PublicKey = P>>(
+        mut self,
+        network: (NetS, NetR),
+    ) -> Handle<()> {
         spawn_cell!(self.context, self.run(network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (NetS, NetR)) {
+    async fn run<NetS: Sender<PublicKey = P>, NetR: Receiver<PublicKey = P>>(
+        mut self,
+        network: (NetS, NetR),
+    ) {
         // Wrap channel
         let (mut sender, mut receiver) = wrap(
             (),
@@ -374,7 +371,7 @@ where
     }
 
     /// Handles the case where the application responds to a request from an external peer.
-    fn handle_serve(
+    fn handle_serve<NetS: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         peer: P,

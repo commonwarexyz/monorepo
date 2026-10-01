@@ -16,7 +16,7 @@ const HASHMAP_TYPE: &str = "HashMap";
 
 // ---------- HashMap ----------
 
-impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
+impl<K: Ord + Write, V: Write, S> Write for HashMap<K, V, S> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
 
@@ -42,7 +42,7 @@ impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
     }
 }
 
-impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V> {
+impl<K: EncodeSize, V: EncodeSize, S> EncodeSize for HashMap<K, V, S> {
     fn encode_size(&self) -> usize {
         // Start with the size of the length prefix
         let mut size = self.len().encode_size();

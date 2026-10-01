@@ -18,7 +18,7 @@ const BTREEMAP_TYPE: &str = "BTreeMap";
 
 // ---------- BTreeMap ----------
 
-impl<K: Ord + Eq + Write, V: Write> Write for BTreeMap<K, V> {
+impl<K: Write, V: Write> Write for BTreeMap<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
 
@@ -40,7 +40,7 @@ impl<K: Ord + Eq + Write, V: Write> Write for BTreeMap<K, V> {
     }
 }
 
-impl<K: Ord + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
+impl<K: EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
     fn encode_size(&self) -> usize {
         // Start with the size of the length prefix
         let mut size = self.len().encode_size();
