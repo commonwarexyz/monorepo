@@ -4,8 +4,8 @@
 //! inside `bench_function` so criterion's name filter can skip them entirely.
 
 use crate::common::{
-    Digest, define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value,
-    make_var_value,
+    Digest, StoreDb, define_fixed_variants, define_vec_variants, gen_random_kv,
+    gen_store_random_kv, make_fixed_value, make_var_value, open_store_db, store_cfg,
 };
 use commonware_macros::boxed;
 use commonware_runtime::{
@@ -191,8 +191,77 @@ fn bench_var_value_init(c: &mut Criterion) {
     }
 }
 
+// -- Unauthenticated store --
+
+fn bench_store_init(c: &mut Criterion) {
+    let cfg = Config::default();
+    for (elements, operations) in CASES {
+        // Populated lazily on the first sample of the first matched cache size, then reused by
+        // every cache size (all read the same on-disk database).
+        let mut initialized = false;
+        for &cache_size in &CACHE_SIZES {
+            let cache = cache_size.map_or(0, NonZeroUsize::get);
+            let runner = tokio::Runner::new(cfg.clone());
+            c.bench_function(
+                &format!(
+                    "{}/variant=store::variable cache={cache} elements={elements}",
+                    module_path!(),
+                ),
+                |b| {
+                    // Setup: populate database (once, on first matched sample).
+                    if !initialized {
+                        commonware_runtime::tokio::Runner::new(cfg.clone()).start(
+                            |ctx| async move {
+                                let db = open_store_db(ctx.child("storage")).await;
+                                let db = gen_store_random_kv(
+                                    db,
+                                    elements,
+                                    operations,
+                                    COMMIT_FREQUENCY,
+                                    make_var_value,
+                                )
+                                .await;
+                                let floor = db.inactivity_floor_loc();
+                                let db = db.prune(floor).await.unwrap();
+                                db.sync().await.unwrap();
+                            },
+                        );
+                        initialized = true;
+                    }
+
+                    // Benchmark: measure init time at this cache size.
+                    b.to_async(&runner).iter_custom(move |iters| async move {
+                        let ctx = context::get::<Context>();
+                        let mut store_cfg = store_cfg(&ctx);
+                        store_cfg.init_cache = cache_size;
+                        let start = std::time::Instant::now();
+                        for _ in 0..iters {
+                            let db = StoreDb::init(ctx.child("storage"), store_cfg.clone(), None)
+                                .await
+                                .unwrap();
+                            assert_ne!(db.bounds().end, 0);
+                        }
+                        start.elapsed()
+                    });
+                },
+            );
+        }
+
+        // Cleanup: destroy database.
+        if initialized {
+            commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
+                open_store_db(ctx.child("storage"))
+                    .await
+                    .destroy()
+                    .await
+                    .unwrap();
+            });
+        }
+    }
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_fixed_value_init, bench_var_value_init
+    targets = bench_fixed_value_init, bench_var_value_init, bench_store_init
 }

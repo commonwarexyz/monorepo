@@ -30,6 +30,7 @@ use commonware_storage::{
         },
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
+        store::db::{Config as StoreConfig, Db as Store},
     },
     translator::EightCap,
 };
@@ -105,12 +106,23 @@ pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
     KeylessDb::<F>::init(ctx, cfg, None).await.unwrap()
 }
 
+// -- Unauthenticated store --
+
+pub type StoreDb = Store<Context, Digest, Vec<u8>, EightCap>;
+
+/// Open an unauthenticated store benchmark database using the shared benchmark configuration.
+pub async fn open_store_db(ctx: Context) -> StoreDb {
+    let cfg = store_cfg(&ctx);
+    StoreDb::init(ctx, cfg, None).await.unwrap()
+}
+
 // -- Config builders --
 
 const PARTITION_FIX: &str = "bench-fixed";
 const PARTITION_VAR: &str = "bench-variable";
 const PARTITION_KEYLESS: &str = "bench-keyless";
 const PARTITION_IMM: &str = "bench-immutable";
+const PARTITION_STORE: &str = "bench-store";
 
 fn merkle_cfg(
     suffix: &str,
@@ -337,6 +349,21 @@ pub fn keyless_cfg_with(
             ((0..=10000).into(), ()),
             items_per_blob,
         ),
+    }
+}
+
+pub fn store_cfg(ctx: &impl BufferPooler) -> StoreConfig<EightCap, VarVecCfg> {
+    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    StoreConfig {
+        log: var_log_cfg(
+            PARTITION_STORE,
+            page_cache,
+            ((), ((0..=10000).into(), ())),
+            ITEMS_PER_BLOB,
+        ),
+        translator: EightCap,
+        init_cache: INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
     }
 }
 
@@ -712,6 +739,48 @@ where
     }
 
     db
+}
+
+/// Seed an unauthenticated store with `num_elements` entries in one batch, then perform
+/// `num_operations` random updates/deletes, committing periodically. Draws the same key, value,
+/// and commit sequence as [gen_random_kv] with uniform churn over the seeded keys.
+pub async fn gen_store_random_kv(
+    mut db: StoreDb,
+    num_elements: u64,
+    num_operations: u64,
+    commit_frequency: u32,
+    make_value: impl Fn(&mut TestRng) -> Vec<u8>,
+) -> StoreDb {
+    let mut rng = TestRng::new(42);
+
+    // Seed the db with `num_elements` entries.
+    let mut changes = Vec::with_capacity(num_elements as usize);
+    for i in 0u64..num_elements {
+        let key = Sha256::hash(&[&i.to_be_bytes()]);
+        changes.push((key, Some(make_value(&mut rng))));
+    }
+    (db, _) = db.apply_batch(changes.into_iter().collect()).await.unwrap();
+    db = db.commit().await.unwrap();
+
+    // Perform `num_operations` random updates/deletes, committing periodically.
+    let mut changes = Vec::new();
+    for _ in 0u64..num_operations {
+        let rand_key = Sha256::hash(&[&(rng.next_u64() % num_elements).to_be_bytes()]);
+        if rng.next_u32().is_multiple_of(DELETE_FREQUENCY) {
+            changes.push((rand_key, None));
+            continue;
+        }
+        changes.push((rand_key, Some(make_value(&mut rng))));
+        if rng.next_u32().is_multiple_of(commit_frequency) {
+            (db, _) = db
+                .apply_batch(std::mem::take(&mut changes).into_iter().collect())
+                .await
+                .unwrap();
+            db = db.commit().await.unwrap();
+        }
+    }
+    (db, _) = db.apply_batch(changes.into_iter().collect()).await.unwrap();
+    db.commit().await.unwrap()
 }
 
 /// Generate a fixed-size digest value.
