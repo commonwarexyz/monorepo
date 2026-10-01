@@ -56,7 +56,7 @@ use crate::{
             LeaderBlock, Lqc, LqcProof, PoolSummary, Vote, VoteBody, Vqc,
         },
     },
-    types::{Attributable, Height, Participant, Round, View},
+    types::{Attributable, Participant, Round, View},
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{Faults as _, N5f1};
@@ -235,15 +235,6 @@ pub(super) enum FinalityUpdate<S: Scheme, D: Digest> {
     Certified(FinalityFact<D>, LqcProof<S, D>),
 }
 
-impl<S: Scheme, D: Digest> FinalityUpdate<S, D> {
-    /// Returns the finality fact of the update.
-    const fn fact(&self) -> &FinalityFact<D> {
-        match self {
-            Self::Finalized(fact) | Self::Advanced(fact) | Self::Certified(fact, _) => fact,
-        }
-    }
-}
-
 /// Everything retained for one leader's finality pool.
 ///
 /// The entry is removed once every part is empty. The direct pool and certified fact are boxed,
@@ -296,8 +287,6 @@ pub(crate) struct FinalityState<S: Scheme, D: Digest> {
     /// The leaders of the pools whose finality fact changed since they were last taken, which
     /// may now report their history record.
     histories: Vec<LeaderHistory<D>>,
-    /// The highest final block height a finality update reported, by chain index.
-    finalized: Vec<Height>,
     /// Views at or below this one are retired; zero before any retirement, since no finality
     /// artifact has the genesis view.
     retired_through: View,
@@ -1248,7 +1237,6 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
             capabilities: Vec::new(),
             updates: Vec::new(),
             histories: Vec::new(),
-            finalized: Vec::new(),
             retired_through: View::zero(),
             proof: None,
         }
@@ -2406,7 +2394,6 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
             ready_lqcs,
             updates,
             histories,
-            finalized,
             ..
         } = self;
         let Some(PoolEntry {
@@ -2465,13 +2452,6 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
                 Inserted::Quorum => {
                     capacity.pin(key);
                     if let Some(update) = pool.finalize::<H>(key.leader, *config)? {
-                        for block in update.fact().blocks() {
-                            let index = block.chain().index();
-                            if finalized.len() <= index {
-                                finalized.resize(index + 1, Height::zero());
-                            }
-                            finalized[index] = finalized[index].max(block.height());
-                        }
                         histories.push(LeaderHistory::new(&pool.leader, key.leader));
                         updates.push(update);
                     }
@@ -2483,13 +2463,6 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
             }
         }
         Ok(())
-    }
-
-    /// Returns the highest final block height a finality update reported, by chain index.
-    ///
-    /// Chains no update reported are absent from the end.
-    pub(crate) fn finalized(&self) -> &[Height] {
-        &self.finalized
     }
 
     /// Takes the finality updates recorded since the last drain.
