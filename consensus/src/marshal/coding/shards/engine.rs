@@ -371,10 +371,7 @@ where
     /// [`commonware_codec::Read`] configuration for decoding blocks.
     pub block_codec_cfg: B::Cfg,
 
-    /// The strategy used for parallel computation.
-    ///
-    /// Reconstruction jobs are submitted to this strategy, which may run a job inline on the
-    /// engine task.
+    /// The strategy that runs reconstruction jobs.
     pub strategy: T,
 
     /// The size of the mailbox buffer.
