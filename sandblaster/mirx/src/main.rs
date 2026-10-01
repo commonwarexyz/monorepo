@@ -13,13 +13,18 @@
 //!    types named by `SBMIR_EXCLUDE`; a parameter bounded by the host
 //!    buffer traits (`Buf`, `BufMut`) is instantiated at `&[u8]` /
 //!    `&mut [u8]` (the reader never looks at that type: it reads the calls
-//!    of the buffer traits as the buffer model, whatever the receiver);
+//!    of the buffer traits as the buffer model, whatever the receiver); a
+//!    parameter bounded by an open trait is instantiated at its declared
+//!    instance (`SBMIR_INSTANCE`), the trait's provided methods are
+//!    extracted at that instance, and `SBMIR_ITEMS`/`SBMIR_SKIP_FNS` keep
+//!    only the items the lift lifts;
 //! 2. takes each instance's MIR from rustc (`Instance::body`: rustc's
 //!    optimized MIR, monomorphized, constants evaluated), and follows its
 //!    calls: an instance of the module, a closure, or a library function
 //!    with a body is extracted too (to a depth bound); the calls the reader
 //!    treats as leaves (the buffer traits, indexing of arrays and slices,
-//!    intrinsics, functions returning `!`) are recorded, not followed;
+//!    `Vec::push`, an open trait's methods at a library instance, intrinsics,
+//!    functions returning `!`) are recorded, not followed;
 //! 3. prints everything as S-expressions (`.sbmir`), with the source
 //!    files' SHA-256 and the compiler's version, so a stale extraction is
 //!    refused by the reader.
@@ -40,7 +45,8 @@ extern crate rustc_interface;
 extern crate rustc_middle;
 extern crate rustc_span;
 extern crate rustc_hir;
-#[macro_use]
+extern crate rustc_session;
+extern crate rustc_abi;
 extern crate rustc_public;
 extern crate sha2;
 extern crate rustc_public_bridge;
@@ -93,16 +99,97 @@ fn main() {
     }
     let mut dargs = vec![rustc.clone()];
     dargs.extend(rest.iter().cloned());
-    if let Err(e) = run_with_tcx!(&dargs, extract) {
-        eprintln!("sandblaster-mirx: {e:?}");
+    // lints change no MIR: a denied lint (a round-trip copy's non-snake-case
+    // names) must not stop the extraction
+    if !rest.iter().any(|a| a.starts_with("--cap-lints")) {
+        dargs.extend(["--cap-lints".to_string(), "warn".to_string()]);
+    }
+    let mut cb = Driver { done: false };
+    let ran = rustc_driver::catch_fatal_errors(|| rustc_driver::run_compiler(&dargs, &mut cb));
+    if ran.is_err() || !cb.done {
+        eprintln!("sandblaster-mirx: the compilation failed before the extraction");
         std::process::exit(1);
     }
 }
 
+/// The driver's callbacks: the substituted sources (`SBMIR_INJECT`,
+/// `SBMIR_REPLACE`) and the extraction after analysis.
+struct Driver {
+    done: bool,
+}
+
+impl rustc_driver::Callbacks for Driver {
+    fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        let root = match &config.input {
+            rustc_session::config::Input::File(p) => Some(p.clone()),
+            _ => None,
+        };
+        config.file_loader = Some(Box::new(Sources { root }));
+    }
+
+    fn after_analysis<'tcx>(&mut self, _c: &rustc_interface::interface::Compiler, tcx: rustc_middle::ty::TyCtxt<'tcx>) -> rustc_driver::Compilation {
+        rustc_public::rustc_internal::run(tcx, || {
+            let _ = extract(tcx);
+        })
+        .expect("rustc_public");
+        self.done = true;
+        rustc_driver::Compilation::Continue
+    }
+}
+
+/// `SBMIR_REPLACE="path=text,.."` (absolute paths): the extraction compiles
+/// `path` as if its text were `text`'s (the lifted round trip's copy of a
+/// file, DESIGN.md §2.1); the build-script stubs and the recorded SHA-256
+/// use the same text. `SBMIR_INJECT="name=path,.."`: the crate root gets
+/// `mod name;` of the file `path` (a DSL module compiled in the crate's
+/// context: `#[lift(opt)]` alternatives). Nothing else is changed.
+fn replacements() -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+    let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
+    std::env::var("SBMIR_REPLACE").unwrap_or_default().split(',').filter_map(|e| e.split_once('=')).map(|(a, b)| (canon(a), canon(b))).collect()
+}
+
+/// The text the extraction compiles for `path` (its replacement, if any).
+fn source_path(path: &std::path::Path) -> std::path::PathBuf {
+    let c = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    replacements().into_iter().find(|(a, _)| *a == c).map(|(_, b)| b).unwrap_or_else(|| path.to_path_buf())
+}
+
+struct Sources {
+    root: Option<std::path::PathBuf>,
+}
+
+impl rustc_span::source_map::FileLoader for Sources {
+    fn file_exists(&self, path: &std::path::Path) -> bool {
+        path.exists()
+    }
+
+    fn read_file(&self, path: &std::path::Path) -> std::io::Result<String> {
+        let mut text = std::fs::read_to_string(source_path(path))?;
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+        if self.root.as_deref().and_then(canon).is_some_and(|r| Some(r) == canon(path)) {
+            for e in std::env::var("SBMIR_INJECT").unwrap_or_default().split(',').filter(|e| !e.is_empty()) {
+                let (name, file) = e.split_once('=').expect("SBMIR_INJECT: name=path");
+                let _ = write!(text, "\n#[path = {file:?}]\n#[allow(dead_code, unused)]\npub(crate) mod {name};\n");
+            }
+        }
+        Ok(text)
+    }
+
+    fn read_binary_file(&self, path: &std::path::Path) -> std::io::Result<std::sync::Arc<[u8]>> {
+        std::fs::read(source_path(path)).map(Into::into)
+    }
+
+    fn current_directory(&self) -> std::io::Result<std::path::PathBuf> {
+        std::env::current_dir()
+    }
+}
+
 fn stub_build_script(rustc: &str, rest: &[String], stub: &str) -> ! {
-    let mut body = String::from("#![allow(warnings)]\nfn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n");
+    // (the real build script declares the IDE twin's `cfg(rust_analyzer)`, DESIGN.md §2.1)
+    let mut body = String::from("#![allow(warnings)]\nfn main() {\n    println!(\"cargo::rustc-check-cfg=cfg(rust_analyzer)\");\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n");
     for pair in stub.split(',').filter(|p| !p.is_empty()) {
         let (o, src) = pair.split_once('=').expect("SBMIR_STUB: out.rs=src.rs");
+        let src = source_path(std::path::Path::new(src)).display().to_string();
         let _ = writeln!(
             body,
             "    {{ let t = std::fs::read_to_string({src:?}).unwrap(); let t: String = t.lines().skip_while(|l| l.starts_with(\"//!\")).map(|l| format!(\"{{l}}\\n\")).collect(); std::fs::write(std::path::Path::new(&out).join({o:?}), t).unwrap(); }}"
@@ -135,7 +222,7 @@ impl SpanMap {
         let mut stubs = Vec::new();
         for pair in std::env::var("SBMIR_STUB").unwrap_or_default().split(',').filter(|p| !p.is_empty()) {
             if let Some((o, src)) = pair.split_once('=') {
-                let text = std::fs::read_to_string(src).unwrap_or_default();
+                let text = std::fs::read_to_string(source_path(std::path::Path::new(src))).unwrap_or_default();
                 let skipped = text.lines().take_while(|l| l.starts_with("//!")).count();
                 stubs.push((o.to_string(), src.to_string(), skipped));
             }
@@ -147,7 +234,13 @@ impl SpanMap {
     /// `None` outside the crate's own files.
     fn loc(&mut self, sp: rustc_public::ty::Span) -> Option<(String, usize, usize)> {
         let f = sp.get_filename();
+        // rustc names the package's files relative to the workspace root (cargo's cwd)
+        let f = if std::path::Path::new(&f).is_relative() { std::env::current_dir().map(|d| d.join(&f).display().to_string()).unwrap_or(f) } else { f };
         let li = sp.get_lines();
+        // a dummy span (compiler-made code) has no source position
+        if li.start_line == 0 {
+            return None;
+        }
         let (path, line) = match self.stubs.iter().find(|(o, _, _)| f.ends_with(&format!("/out/{o}"))) {
             Some((_, src, skipped)) => (src.clone(), li.start_line + skipped),
             None if !self.manifest.is_empty() && f.starts_with(&format!("{}/", self.manifest)) => (f.clone(), li.start_line),
@@ -155,7 +248,7 @@ impl SpanMap {
         };
         let rel = path.strip_prefix(&format!("{}/", self.manifest)).unwrap_or(&path).to_string();
         if !self.files.contains_key(&rel) {
-            let text = std::fs::read(&path).unwrap_or_default();
+            let text = std::fs::read(source_path(std::path::Path::new(&path))).unwrap_or_default();
             use sha2::Digest;
             let h = sha2::Sha256::digest(&text);
             let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
@@ -179,6 +272,13 @@ struct Ex<'tcx> {
     seen: BTreeSet<String>,
     adts: BTreeMap<String, (AdtDef, GenericArgs)>,
     notes: Vec<String>,
+    /// The constant items of the body being printed, by span ([`Ex::provenance`]).
+    prov: HashMap<rustc_span::Span, Option<(String, String, bool)>>,
+    /// Open traits declared at a library type (`SBMIR_INSTANCE`): a host
+    /// model (`commonware_cryptography::Hasher` at `Sha256`) or a model of
+    /// core (`Iterator` at `Copied<slice::Iter<&[u8]>>`). Their methods
+    /// called at that type are leaves, read by the reader's model.
+    models: Vec<(String, Ty)>,
 }
 
 fn inst_key(i: &Instance) -> String {
@@ -203,11 +303,16 @@ fn stable_names(s: &str) -> String {
     out
 }
 
-fn extract(tcx: rustc_middle::ty::TyCtxt<'_>) -> ControlFlow<(), ()> {
+fn extract<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> ControlFlow<(), ()> {
     use rustc_middle::ty::{self as mty, TypingEnv};
     let module = std::env::var("SBMIR_MODULE").expect("SBMIR_MODULE");
     let exclude: Vec<String> = std::env::var("SBMIR_EXCLUDE").unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     let out_path = std::env::var("SBMIR_OUT").expect("SBMIR_OUT");
+    // `SBMIR_ITEMS="merkle::proof=Subtree,ReconstructionError;.."`: in that
+    // module only these items (structs, enums, traits, functions) and the
+    // impls whose self type is one of them; `SBMIR_SKIP_FNS="Type::m,.."`
+    let items: Vec<(String, Vec<String>)> = std::env::var("SBMIR_ITEMS").unwrap_or_default().split(';').filter_map(|e| e.split_once('=')).map(|(m, l)| (format!("{}::{}", rustc_public::local_crate().name, m.trim()), l.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())).collect();
+    let skip_fns: Vec<String> = std::env::var("SBMIR_SKIP_FNS").unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     let skip_traits: Vec<String> = std::env::var("SBMIR_SKIP_TRAITS").unwrap_or_else(|_| "Debug,Display,Hash,PartialOrd,Ord".into()).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     let krate = rustc_public::local_crate();
     // one module, or several (`a,b::c`): calls between them are calls by name
@@ -218,17 +323,35 @@ fn extract(tcx: rustc_middle::ty::TyCtxt<'_>) -> ControlFlow<(), ()> {
         pfxs.iter().any(|pfx| p == pfx || p.starts_with(&format!("{pfx}::")) || p.starts_with(&format!("<{pfx}::")) || p.contains(&format!(" as {pfx}::")) || p.contains(&format!(" for {pfx}::")))
     };
     // open traits read at one declared instance (SEMANTICS.md §19.6):
-    // `SBMIR_INSTANCE="Family=merkle::mmr::Family,.."` (paths in the crate)
+    // `SBMIR_INSTANCE="Family=merkle::mmr::Family,.."` (paths in the crate).
+    // A trait named by one word matches by its last segment, a path by the
+    // trait's whole path; the instance is a struct, an enum or a type alias
+    // of the crate (an alias names a concrete instance: a generic struct at
+    // its arguments, or a library type)
     let instances: Vec<(String, String)> = std::env::var("SBMIR_INSTANCE").unwrap_or_default().split(',').filter_map(|p| p.split_once('=').map(|(a, b)| (a.trim().to_string(), format!("{}::{}", krate.name, b.trim())))).collect();
+    let mut inst_tys: Vec<(String, mty::Ty<'_>)> = Vec::new();
+    let mut early_notes: Vec<String> = Vec::new();
+    for (t, inst) in &instances {
+        let local = inst.trim_start_matches(&format!("{}::", krate.name));
+        let found = tcx.hir_crate_items(()).definitions().map(|d| d.to_def_id()).find(|d| tcx.def_path_str(*d) == local && matches!(tcx.def_kind(*d), rustc_hir::def::DefKind::Struct | rustc_hir::def::DefKind::Enum | rustc_hir::def::DefKind::TyAlias));
+        match found {
+            Some(d) => inst_tys.push((t.clone(), tcx.type_of(d).instantiate_identity().skip_norm_wip())),
+            None => early_notes.push(format!("SBMIR_INSTANCE: no struct, enum or type alias `{inst}` for `{t}`")),
+        }
+    }
+    let inst_of = |tpath: &str| inst_tys.iter().find(|(t, _)| trait_matches(t, tpath)).map(|(_, ty)| *ty);
 
     // sealed traits: traits of the module whose impls are all local, with
-    // their impl self types
+    // their impl self types (a trait read at a declared instance is not)
     let mut sealed: HashMap<rustc_span::def_id::DefId, Vec<mty::Ty<'_>>> = HashMap::new();
     for t in krate.trait_decls() {
         if !in_module(&t.name()) {
             continue;
         }
         let tid = rustc_public::rustc_internal::internal(tcx, t.def_id());
+        if inst_of(&tcx.def_path_str(tid)).is_some() {
+            continue;
+        }
         let mut tys = Vec::new();
         let mut all_local = true;
         for imp in tcx.all_impls(tid) {
@@ -245,7 +368,8 @@ fn extract(tcx: rustc_middle::ty::TyCtxt<'_>) -> ControlFlow<(), ()> {
     let buf = mty::Ty::new_imm_ref(tcx, tcx.lifetimes.re_erased, slice_u8);
     let bufmut = mty::Ty::new_mut_ref(tcx, tcx.lifetimes.re_erased, slice_u8);
 
-    let mut ex = Ex { tcx, cur_locals: Vec::new(), spans: SpanMap::new(), queue: VecDeque::new(), seen: BTreeSet::new(), adts: BTreeMap::new(), notes: Vec::new() };
+    let models: Vec<(String, Ty)> = inst_tys.iter().filter(|(_, ty)| !ty.ty_adt_def().is_some_and(|d| d.did().is_local())).map(|(t, ty)| (t.clone(), rustc_public::rustc_internal::stable(*ty))).collect();
+    let mut ex = Ex { tcx, cur_locals: Vec::new(), spans: SpanMap::new(), queue: VecDeque::new(), seen: BTreeSet::new(), adts: BTreeMap::new(), notes: early_notes, prov: HashMap::new(), models };
     let mut roots: Vec<String> = Vec::new();
     for f in krate.fn_defs() {
         let name = f.name();
@@ -269,6 +393,12 @@ fn extract(tcx: rustc_middle::ty::TyCtxt<'_>) -> ControlFlow<(), ()> {
         if mentions_excluded(&name, &exclude) {
             continue;
         }
+        // the items asked for (`SBMIR_ITEMS`) minus the functions left to the
+        // host (`SBMIR_SKIP_FNS`), as the lift's `items`/`unverified_fns`
+        if let Some(why) = left_out(tcx, did, &items, &skip_fns) {
+            ex.notes.push(format!("{name}: not extracted: {why}"));
+            continue;
+        }
         let g = tcx.generics_of(did);
         let preds = tcx.predicates_of(did).instantiate_identity(tcx);
         let mut choices: Vec<Vec<mty::GenericArg<'_>>> = Vec::new();
@@ -279,8 +409,19 @@ fn extract(tcx: rustc_middle::ty::TyCtxt<'_>) -> ControlFlow<(), ()> {
                 mty::GenericParamDefKind::Lifetime => choices.push(vec![tcx.lifetimes.re_erased.into()]),
                 mty::GenericParamDefKind::Type { .. } => {
                     if p.name == rustc_span::symbol::kw::SelfUpper {
-                        skip = Some("a trait's own method (its impls are extracted)".into());
-                        break;
+                        // a provided method of an open trait read at its
+                        // declared instance: at that instance
+                        let inst = tcx.trait_of_assoc(did).and_then(|tr| inst_of(&tcx.def_path_str(tr)));
+                        match inst {
+                            Some(ty) if tcx.defaultness(did).has_value() => {
+                                choices.push(vec![ty.into()]);
+                                continue;
+                            }
+                            _ => {
+                                skip = Some("a trait's own method (its impls are extracted)".into());
+                                break;
+                            }
+                        }
                     }
                     let pty = mty::Ty::new_param(tcx, p.index, p.name);
                     let mut opts: Option<Vec<mty::Ty<'_>>> = None;
@@ -295,13 +436,9 @@ fn extract(tcx: rustc_middle::ty::TyCtxt<'_>) -> ControlFlow<(), ()> {
                             opts = Some(tys.iter().copied().filter(|t| !exclude.contains(&t.to_string())).collect());
                             break;
                         }
-                        if let Some((_, inst)) = instances.iter().find(|(t, _)| tpath.rsplit("::").next() == Some(t.as_str())) {
-                            // the instance: the ADT whose path is `inst`
-                            let found = tcx.hir_crate_items(()).definitions().map(|d| d.to_def_id()).find(|d| tcx.def_path_str(*d) == inst.trim_start_matches(&format!("{}::", krate.name)) && matches!(tcx.def_kind(*d), rustc_hir::def::DefKind::Struct | rustc_hir::def::DefKind::Enum));
-                            if let Some(d) = found {
-                                opts = Some(vec![tcx.type_of(d).instantiate_identity().skip_norm_wip()]);
-                                break;
-                            }
+                        if let Some(ty) = inst_of(&tpath) {
+                            opts = Some(vec![ty]);
+                            break;
                         }
                         if tpath.ends_with("BufMut") {
                             opts = Some(vec![bufmut]);
@@ -342,8 +479,23 @@ fn extract(tcx: rustc_middle::ty::TyCtxt<'_>) -> ControlFlow<(), ()> {
             }
             combos = next;
         }
+        // an impl of a local open trait for another type than its declared
+        // instance (a reference, a blanket impl, another type) is another
+        // instance: host code (SEMANTICS.md §19.6, §19.10)
+        let other_instance = |args: rustc_middle::ty::GenericArgsRef<'tcx>| -> bool {
+            let Some(imp) = tcx.impl_of_assoc(did) else { return false };
+            let Some(tr) = tcx.impl_opt_trait_ref(imp) else { return false };
+            let tid = tr.skip_binder().def_id;
+            let Some(ity) = (if tid.is_local() { inst_of(&tcx.def_path_str(tid)) } else { None }) else { return false };
+            let st = tcx.type_of(imp).instantiate(tcx, args).skip_norm_wip();
+            tcx.erase_and_anonymize_regions(st) != tcx.erase_and_anonymize_regions(ity)
+        };
         for args in combos {
             let args = tcx.mk_args(&args);
+            if other_instance(args) {
+                ex.notes.push(format!("{name}: not extracted: an impl of an open trait for another type than its declared instance"));
+                continue;
+            }
             match mty::Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), did, args) {
                 Ok(Some(inst)) => {
                     let si: Instance = rustc_public::rustc_internal::stable(inst);
@@ -404,6 +556,40 @@ fn extract(tcx: rustc_middle::ty::TyCtxt<'_>) -> ControlFlow<(), ()> {
     ControlFlow::Continue(())
 }
 
+/// Whether a trait at path `tpath` is the one `SBMIR_INSTANCE` names by
+/// `key`: one word is the trait's last segment, a path its whole path.
+fn trait_matches(key: &str, tpath: &str) -> bool {
+    if key.contains("::") { tpath == key || tpath.ends_with(&format!("::{key}")) } else { tpath.rsplit("::").next() == Some(key) }
+}
+
+/// Why the function `did` is left out by `SBMIR_ITEMS` / `SBMIR_SKIP_FNS`
+/// (`None`: extracted). Its item is the self type of its impl (an ADT; an
+/// impl for any other type is no item), the trait it is declared in, or
+/// itself.
+fn left_out(tcx: rustc_middle::ty::TyCtxt<'_>, did: rustc_span::def_id::DefId, items: &[(String, Vec<String>)], skip_fns: &[String]) -> Option<String> {
+    let item = match (tcx.impl_of_assoc(did), tcx.trait_of_assoc(did)) {
+        (Some(imp), _) => match tcx.type_of(imp).instantiate_identity().skip_norm_wip().kind() {
+            rustc_middle::ty::TyKind::Adt(d, _) => Some(d.did()),
+            _ => None,
+        },
+        (None, Some(tr)) => Some(tr),
+        (None, None) => Some(did),
+    };
+    let item_name = item.map(|d| tcx.item_name(d).to_string());
+    if let Some(n) = &item_name
+        && item != Some(did)
+        && skip_fns.iter().any(|s| *s == format!("{n}::{}", tcx.item_name(did)))
+    {
+        return Some("a host function (SBMIR_SKIP_FNS)".into());
+    }
+    let module = format!("{}::{}", tcx.crate_name(rustc_span::def_id::LOCAL_CRATE), tcx.def_path_str(tcx.parent_module_from_def_id(did.as_local()?).to_def_id()));
+    let (_, list) = items.iter().find(|(m, _)| *m == module)?;
+    match item_name {
+        Some(n) if list.contains(&n) => None,
+        _ => Some("not among the items asked for (SBMIR_ITEMS)".into()),
+    }
+}
+
 /// Whether a path names an excluded type as a whole word (`u128` in
 /// `<u128 as Tr>::m`, `UInt<u128>`).
 fn mentions_excluded(path: &str, exclude: &[String]) -> bool {
@@ -421,7 +607,7 @@ impl<'tcx> Ex<'tcx> {
         let _ = writeln!(s, "(fn {}", q(&key));
         let a = if key.contains("{closure") { "()".to_string() } else { self.args(&inst.args()) };
         let _ = writeln!(s, "  (kind {why}) (def {}) (args {a})", q(&inst.def.name()));
-        let item = self.item(inst);
+        let item = self.item(inst, in_module);
         let _ = writeln!(s, "  {item}");
         if let Some((f, l, c)) = self.spans.loc(inst.def.span()) {
             let _ = writeln!(s, "  (span {} {l} {c})", q(&f));
@@ -431,6 +617,7 @@ impl<'tcx> Ex<'tcx> {
             return s;
         };
         self.cur_locals = body.locals().to_vec();
+        self.provenance(inst);
         let _ = writeln!(s, "  (argc {})", body.arg_locals().len());
         if let Some(sa) = body.spread_arg() {
             let _ = writeln!(s, "  (spread-arg {sa})");
@@ -469,7 +656,7 @@ impl<'tcx> Ex<'tcx> {
     /// What the instance is in the source: a free function, an inherent
     /// method (with its self type), a trait-impl method (self type, trait,
     /// trait arguments), a closure or a compiler shim.
-    fn item(&mut self, inst: &Instance) -> String {
+    fn item(&mut self, inst: &Instance, in_module: &dyn Fn(&str) -> bool) -> String {
         let tcx = self.tcx;
         if matches!(inst.kind, InstanceKind::Shim) {
             return "(item shim)".into();
@@ -501,7 +688,22 @@ impl<'tcx> Ex<'tcx> {
                     None => format!("(item inherent {sty} {})", q(&name)),
                 }
             }
-            None => format!("(item fn {})", q(&name)),
+            None => match tcx.trait_of_assoc(did) {
+                // a provided method of a trait of the module at its instance
+                Some(tr) if in_module(&tcx.def_path_str(tr)) || in_module(&format!("{}::{}", tcx.crate_name(rustc_span::def_id::LOCAL_CRATE), tcx.def_path_str(tr))) => {
+                    let st: Ty = rustc_public::rustc_internal::stable(ii.args.type_at(0));
+                    let sty = self.ty(st);
+                    let mut targs = Vec::new();
+                    for a in ii.args.iter().skip(1).take(tcx.generics_of(tr).count() - 1) {
+                        if let Some(t) = a.as_type() {
+                            let t: Ty = rustc_public::rustc_internal::stable(t);
+                            targs.push(self.ty(t));
+                        }
+                    }
+                    format!("(item provided {sty} {} ({}) {})", q(&tcx.item_name(tr).to_string()), targs.join(" "), q(&name))
+                }
+                _ => format!("(item fn {})", q(&name)),
+            },
         }
     }
 
@@ -608,12 +810,23 @@ impl<'tcx> Ex<'tcx> {
         };
         let a = self.args(args);
         let _ = write!(s, "(adt-def {} (path {}) (kind {kind}) (args {a})", q(key), q(&def.name()));
+        // whether dropping a value of the variant runs code (a `Drop` impl of
+        // the type, or a field with drop glue): `(no-glue)` when it does not
+        let tcx = self.tcx;
+        let idef = rustc_public::rustc_internal::internal(tcx, def);
+        let iargs = rustc_public::rustc_internal::internal(tcx, args.clone());
+        let dtor = idef.has_dtor(tcx);
         for v in def.variants_iter() {
             let d = if matches!(def.kind(), AdtKind::Enum) { def.discriminant_for_variant(v.idx()).val } else { 0 };
             let _ = write!(s, "\n  (variant {} {} {d}", v.idx().to_index(), q(&v.name()));
             for f in v.fields() {
                 let t = self.ty(f.ty_with_args(args));
                 let _ = write!(s, " (field {} {t})", q(&f.name));
+            }
+            let iv = idef.variant(rustc_abi::VariantIdx::from_usize(v.idx().to_index()));
+            let glue = dtor || iv.fields.iter().any(|f| f.ty(tcx, iargs).skip_norm_wip().needs_drop(tcx, rustc_middle::ty::TypingEnv::fully_monomorphized()));
+            if !glue {
+                s.push_str(" (no-glue)");
             }
             s.push(')');
         }
@@ -649,6 +862,113 @@ impl<'tcx> Ex<'tcx> {
         }
         s.push(')');
         s
+    }
+
+    /// A constant operand; a named constant item keeps its name (see
+    /// [`Ex::provenance`]).
+    fn const_operand(&mut self, c: &ConstOperand) -> String {
+        let v = self.mirconst(&c.const_);
+        let sp = rustc_public::rustc_internal::internal(self.tcx, c.span);
+        match self.prov.get(&sp) {
+            Some(Some((owner, name, false))) => format!("(const-item {owner} {} {v})", q(name)),
+            Some(Some((owner, name, true))) if v.starts_with("(const-ref ") && v.ends_with(')') => {
+                format!("(const-ref (const-item {owner} {} {}))", q(name), &v["(const-ref ".len()..v.len() - 1])
+            }
+            _ => v,
+        }
+    }
+
+    /// rustc_public evaluates every constant of an instance's body; the
+    /// constant items they came from (`Family::MAX_NODES`, `u64::MAX`) are in
+    /// rustc's own MIR of the instance, at the operand's span: span →
+    /// `(self type of the defining impl or none, name, a promoted reference
+    /// to it)`, `None` where a span carries any other constant operand too
+    /// (another item, an evaluated constant, a constant that is not an
+    /// item), so a name is only ever given to the one operand it came from.
+    fn provenance(&mut self, inst: &Instance) {
+        use rustc_middle::mir::visit::Visitor;
+        use rustc_middle::ty as mty;
+        self.prov.clear();
+        let tcx = self.tcx;
+        let ii = rustc_public::rustc_internal::internal(tcx, inst.clone());
+        let mty::InstanceKind::Item(did) = ii.def else { return };
+        if !tcx.is_mir_available(did) {
+            return;
+        }
+        // every constant operand with its span (`None`: not an unevaluated item)
+        struct V<'tcx> {
+            out: Vec<(rustc_span::Span, Option<rustc_middle::mir::UnevaluatedConst<'tcx>>)>,
+        }
+        impl<'tcx> Visitor<'tcx> for V<'tcx> {
+            fn visit_const_operand(&mut self, c: &rustc_middle::mir::ConstOperand<'tcx>, _l: rustc_middle::mir::Location) {
+                let uc = match c.const_ {
+                    rustc_middle::mir::Const::Unevaluated(uc, _) => Some(uc),
+                    _ => None,
+                };
+                self.out.push((c.span, uc));
+            }
+        }
+        // the operands of the blocks' statements and terminators only (not
+        // `required_consts` or debug info, which `visit_body` also visits)
+        fn operands<'tcx>(b: &rustc_middle::mir::Body<'tcx>) -> V<'tcx> {
+            let mut v = V { out: Vec::new() };
+            for (bb, data) in b.basic_blocks.iter_enumerated() {
+                v.visit_basic_block_data(bb, data);
+            }
+            v
+        }
+        let v = operands(tcx.instance_mir(ii.def));
+        let env = mty::TypingEnv::fully_monomorphized();
+        let mut found: Vec<(rustc_span::Span, Option<(String, String, bool)>)> = Vec::new();
+        for (sp, uc) in v.out {
+            let Some(uc) = uc else {
+                found.push((sp, None));
+                continue;
+            };
+            // a promoted `&C`: its body reads one named constant
+            let (uc, is_ref) = match uc.promoted {
+                None => (uc, false),
+                Some(p) => {
+                    let pb = &tcx.promoted_mir(uc.def)[p];
+                    let pv = operands(pb);
+                    match pv.out.as_slice() {
+                        [(_, Some(inner))] if inner.promoted.is_none() && pb.local_decls.len() == 2 => (*inner, true),
+                        _ => {
+                            found.push((sp, None));
+                            continue;
+                        }
+                    }
+                }
+            };
+            let args = ii.instantiate_mir_and_normalize_erasing_regions(tcx, env, mty::EarlyBinder::bind(uc.args));
+            let (d2, a2) = match mty::Instance::try_resolve(tcx, env, uc.def, args) {
+                Ok(Some(i)) => (i.def_id(), i.args),
+                _ => (uc.def, args),
+            };
+            if !matches!(tcx.def_kind(d2), rustc_hir::def::DefKind::AssocConst { .. } | rustc_hir::def::DefKind::Const { .. }) {
+                found.push((sp, None));
+                continue;
+            }
+            let owner = match tcx.impl_of_assoc(d2) {
+                Some(imp) => {
+                    let st = tcx.type_of(imp).instantiate(tcx, a2).skip_norm_wip();
+                    let sts: Ty = rustc_public::rustc_internal::stable(st);
+                    self.ty(sts)
+                }
+                None => "none".to_string(),
+            };
+            found.push((sp, Some((owner, tcx.item_name(d2).to_string(), is_ref))));
+        }
+        for (sp, x) in found {
+            match self.prov.get(&sp) {
+                Some(y) if *y != x => {
+                    self.prov.insert(sp, None);
+                }
+                _ => {
+                    self.prov.insert(sp, x);
+                }
+            }
+        }
     }
 
     fn mirconst(&mut self, c: &MirConst) -> String {
@@ -740,7 +1060,7 @@ impl<'tcx> Ex<'tcx> {
         match o {
             Operand::Copy(p) => format!("(copy {})", self.place(p)),
             Operand::Move(p) => format!("(move {})", self.place(p)),
-            Operand::Constant(c) => self.mirconst(&c.const_),
+            Operand::Constant(c) => self.const_operand(c),
             Operand::RuntimeChecks(r) => format!(
                 "(runtime-checks {})",
                 match r {
@@ -938,7 +1258,7 @@ impl<'tcx> Ex<'tcx> {
         };
         let dname = def.name();
         let a = self.args(args);
-        if is_leaf_trait_method(&dname) {
+        if is_leaf_trait_method(&dname) || self.is_model_call(def, args) {
             return format!("(leaf {} {a})", q(&dname));
         }
         let inst = match Instance::resolve(def, args) {
@@ -980,6 +1300,20 @@ impl<'tcx> Ex<'tcx> {
     }
 }
 
+impl Ex<'_> {
+    /// A call of a method of an open trait declared at a library type, at
+    /// that type ([`Ex::models`]).
+    fn is_model_call(&self, def: rustc_public::ty::FnDef, args: &GenericArgs) -> bool {
+        let tcx = self.tcx;
+        let did = rustc_public::rustc_internal::internal(tcx, def.def_id());
+        let Some(tr) = tcx.trait_of_assoc(did) else { return false };
+        let tpath = tcx.def_path_str(tr);
+        let Some(GenericArgKind::Type(st)) = args.0.first() else { return false };
+        let erase = |t: &Ty| tcx.erase_and_anonymize_regions(rustc_public::rustc_internal::internal(tcx, *t));
+        self.models.iter().any(|(k, ty)| trait_matches(k, &tpath) && erase(ty) == erase(st))
+    }
+}
+
 /// Trait methods the reader treats as leaves whatever the receiver: the
 /// host buffer traits (the buffer model).
 fn is_leaf_trait_method(d: &str) -> bool {
@@ -989,5 +1323,8 @@ fn is_leaf_trait_method(d: &str) -> bool {
 /// Library functions the reader treats as leaves (their bodies use raw
 /// pointers): indexing of arrays and slices.
 fn is_leaf_fn(d: &str, key: &str) -> bool {
-    (d.ends_with("::index") || d.ends_with("::index_mut")) && key.contains('[') && key.contains("Index")
+    ((d.ends_with("::index") || d.ends_with("::index_mut")) && key.contains('[') && key.contains("Index"))
+        // `Vec::push` (the reader's `vec_push` model of a `Vec` state)
+        || d == "std::vec::Vec::<T, A>::push"
+        || d == "alloc::vec::Vec::<T, A>::push"
 }

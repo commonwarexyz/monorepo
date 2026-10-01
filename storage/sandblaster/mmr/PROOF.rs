@@ -3709,10 +3709,18 @@ fn ptl_cand(p: u64, n: u64, v: u64) {
 #[lemma]
 fn ptl_pick(p: u64, n: u64, m: u64, loc: Location) {
     requires((n as Int) <= pow2(62) && (p as Int) == mmr_size(n as Int) && (n as Int) - 1 <= (m as Int) && (m as Int) <= (n as Int) + 1 && loc.0 == n);
+    // (the tests as rustc's MIR has them: `m > 0 && ..` branches first, the
+    // last test on both sides)
     ensures((if 2u64 * m - (m.count_ones() as u64) == p {
         Some(Location::new(m))
-    } else if m > 0u64 && 2u64 * (m - 1u64) - ((m - 1u64).count_ones() as u64) == p {
-        Some(Location::new(m - 1u64))
+    } else if m > 0u64 {
+        if 2u64 * (m - 1u64) - ((m - 1u64).count_ones() as u64) == p {
+            Some(Location::new(m - 1u64))
+        } else if 2u64 * (m + 1u64) - ((m + 1u64).count_ones() as u64) == p {
+            Some(Location::new(m + 1u64))
+        } else {
+            None
+        }
     } else if 2u64 * (m + 1u64) - ((m + 1u64).count_ones() as u64) == p {
         Some(Location::new(m + 1u64))
     } else {

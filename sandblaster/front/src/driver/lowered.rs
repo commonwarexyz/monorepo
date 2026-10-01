@@ -166,6 +166,12 @@ pub struct LoweredModule {
     /// its round trip (set by the build; `*-timing.json` only).
     pub optimizer_ms: u128,
     pub lowering_ms: u128,
+    /// A module whose bodies are read from rustc's MIR: the lifted round
+    /// trip's copy of the file (the text whose MIR the round trip reads,
+    /// extracted into `<stem>.roundtrip__<module>.sbmir`) and that file's
+    /// name; the build writes it to `OUT_DIR/<name>-roundtrip__<module>.rs`
+    /// for the extraction (`sandblaster/mirx/extract.sh --replace`).
+    pub roundtrip_copy: Option<(String, String)>,
 }
 
 impl LoweredModule {
@@ -1075,7 +1081,11 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
     // the lifted round trip, then once more on the functions that passed
     let mut compared = 0;
     let mut note = None;
+    let mut rt_copy: Option<(String, String)> = None;
     for round in 0..2 {
+        if info.mir.is_some() {
+            rt_copy = Some((mpath.trim_start_matches("crate::").replace("::", "__"), assemble(&text, &cands, true)));
+        }
         match round_trip(c, root, out, &text, &mpath, info, &cands) {
             Err(e) => {
                 note = Some(format!("lifted round trip: {e}"));
@@ -1112,7 +1122,7 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
         }
     }
     if cands.is_empty() {
-        return LoweredModule { compared: 0, ..as_is(note, sorted(records)) };
+        return LoweredModule { compared: 0, roundtrip_copy: rt_copy, ..as_is(note, sorted(records)) };
     }
     let body = assemble(&text, &cands, false);
     for cd in &cands {
@@ -1127,7 +1137,7 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
             },
         });
     }
-    LoweredModule { file: file.clone(), body: body[docs_len..].to_string(), docs: docs.clone(), records: sorted(records), compared, note, unused_rewrites: unused.borrow().clone(), ..Default::default() }
+    LoweredModule { file: file.clone(), body: body[docs_len..].to_string(), docs: docs.clone(), records: sorted(records), compared, note, unused_rewrites: unused.borrow().clone(), roundtrip_copy: rt_copy, ..Default::default() }
 }
 
 /// The residual of lifted item `id` lowered: its entry helper `name` and
@@ -1568,6 +1578,17 @@ fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &st
     let mut fs = MemFs::new();
     for (_, f) in c.sm.files() {
         fs.insert(&f.path, f.text.clone());
+    }
+    // a module read from rustc's MIR: the copy's bodies are rustc's MIR of
+    // the copy (extracted from this text; the load checks its SHA-256), which
+    // every module sharing the MIR file then reads
+    if let Some(mir) = &info.mir {
+        let want = crate::lift::roundtrip_mir_path(mir, mpath);
+        let found = info.mir_roundtrip.as_ref().and_then(|p| c.sm.files().find(|(_, f)| f.path == *p).map(|(_, f)| f.text.clone()));
+        let Some(rt) = found else {
+            return Err(format!("no MIR of the round trip's copy: extract `{}` from this build's copy `OUT_DIR/<name>-roundtrip__{}.rs` (`sandblaster/mirx/extract.sh .. --replace <the source>=<that file>`, docs/mir-lift.md §20.1)", want.display(), mpath.trim_start_matches("crate::").replace("::", "__")));
+        };
+        fs.insert(mir, rt);
     }
     fs.insert(&lifted_path, check_text);
     let krate = c.krate.as_ref().ok_or("no crate")?;

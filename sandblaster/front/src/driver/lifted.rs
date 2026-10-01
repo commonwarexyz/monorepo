@@ -286,7 +286,7 @@ mod tests {
     use crate::span::FileId;
 
     fn info(name: &str, ghost: bool, host: bool) -> LiftedInfo {
-        LiftedInfo { name: name.into(), file: FileId::default(), ghost, host, unverified: vec![], in_place: false, opt: false, lowered_include: None }
+        LiftedInfo { name: name.into(), file: FileId::default(), ghost, host, unverified: vec![], in_place: false, opt: false, lowered_include: None, mir: None, mir_roundtrip: None }
     }
 
     #[test]

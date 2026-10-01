@@ -71,6 +71,28 @@ pub struct ModuleNames {
     pub dsl_modules: Vec<String>,
     /// The DSL module whose function is being read (set by the lift).
     pub current: std::cell::RefCell<String>,
+    /// The lifted associated constants of open-trait impls: `(self type,
+    /// constant)` → whether it is a constant function (`Family__MAX_NODES()`)
+    /// rather than a constant (SEMANTICS.md §19.6).
+    pub consts: BTreeMap<(String, String), bool>,
+    /// Module structs with an invariant (their lifted names).
+    pub invariant_types: BTreeSet<String>,
+    /// The host models of `#[lift(host)]` modules other than enums
+    /// (SEMANTICS.md §19.10).
+    pub host: HostModels,
+}
+
+/// Host models a library type of rustc's MIR is read as (SEMANTICS.md
+/// §19.10, `docs/mir-lift.md` §20.2): matched by the type's own name.
+#[derive(Debug, Default, Clone)]
+pub struct HostModels {
+    /// `pub type T = <exec type>;`: name → (DSL path, the exec type's
+    /// tokens). A library struct `T` with exactly one field, of that exec
+    /// type, is read as that type (a newtype read as its field).
+    pub types: BTreeMap<String, (String, String)>,
+    /// Unit structs whose impls are models: name → DSL path. A leaf call of
+    /// a method at a library type `T` is the model's method `path::m`.
+    pub structs: BTreeMap<String, String>,
 }
 
 fn sanitize(s: &str) -> String {
@@ -130,11 +152,65 @@ impl ModuleNames {
         }
     }
 
+    /// A host model's DSL path: its crate path with the crate named
+    /// `crate` (the DSL root mirrors the host crate's modules;
+    /// `commonware_storage::merkle::Error` → `crate::merkle::Error`).
+    fn host_path(&self, path: &str) -> Result<syn::Path, String> {
+        let rest = path.split_once("::").map(|(_, r)| r).unwrap_or(path);
+        syn::parse_str(&format!("crate::{rest}")).map_err(|e| e.to_string())
+    }
+
     /// Whether `t` is the declared instance of an open trait.
     fn is_instance(&self, m: &Sbmir, t: &Ty) -> bool {
         let Ty::Adt(k) = t else { return false };
         let Some(d) = m.adts.get(k) else { return false };
-        self.open.values().any(|inst| d.path.ends_with(&format!("::{inst}")))
+        self.open.values().any(|inst| d.path.ends_with(&format!("::{inst}"))) || self.host_instance(m, k).is_some()
+    }
+
+    /// A library type that is the declared instance of an open trait whose
+    /// instance is a host model (`CHasher: crate::merkle::host::Sha256`, the
+    /// MIR's `commonware_cryptography::Sha256`): the model's DSL path, when
+    /// the type has the model's name.
+    fn host_instance(&self, m: &Sbmir, k: &str) -> Option<String> {
+        let d = m.adts.get(k)?;
+        if self.local(&d.path) {
+            return None;
+        }
+        let base = self.adt_base(&d.path);
+        let dsl = self.host.structs.get(&base).or_else(|| self.host.types.get(&base).map(|t| &t.0))?;
+        self.open.values().any(|inst| format!("crate::{inst}") == *dsl).then(|| dsl.clone())
+    }
+
+    /// The library types of `m` that stand for host models: `(the model's
+    /// DSL path, the type's Rust path, the field a newtype is read as)`
+    /// (for the conformance harness, which calls the original code with
+    /// the real types).
+    pub fn host_types(&self, m: &Sbmir) -> Vec<(String, String, Option<String>)> {
+        let mut out = Vec::new();
+        for (k, d) in &m.adts {
+            if let Some(p) = self.transparent_path(m, k) {
+                out.push((p, format!("::{}", d.path), d.variants[0].fields.first().map(|f| f.0.clone())));
+            } else if let Some(p) = self.host_instance(m, k)
+                && d.args.is_empty()
+            {
+                out.push((p, format!("::{}", d.path), None));
+            }
+        }
+        out
+    }
+
+    /// A library newtype read as its one field (a host model `pub type T =
+    /// ..;` of the field's type): the model's DSL path.
+    fn transparent_path(&self, m: &Sbmir, k: &str) -> Option<String> {
+        let d = m.adts.get(k)?;
+        if self.local(&d.path) || d.is_enum || d.variants.len() != 1 || d.variants[0].fields.len() != 1 {
+            return None;
+        }
+        let (dsl, target) = self.host.types.get(&self.adt_base(&d.path))?;
+        let ft = self.ty(m, &d.variants[0].fields[0].1).ok()?;
+        // (an array length is printed `32usize` here, `32` in the model)
+        let norm = |s: String| s.replace(' ', "").replace("usize]", "]");
+        (norm(quote::ToTokens::to_token_stream(&ft).to_string()) == norm(target.clone())).then(|| dsl.clone())
     }
 
     /// The lifted name of a module ADT instance: `Decoder<u16>` →
@@ -166,13 +242,17 @@ impl ModuleNames {
     /// The lifted name of a module function instance (`write__u16`,
     /// `Decoder__u16::feed`, `UPrim__u16__as_u8`, `u16__from__UInt__u16`).
     pub fn lifted_name(&self, m: &Sbmir, f: &Fn) -> Option<String> {
-        if !self.local(&f.def) && !self.module.split(", ").any(|m| f.key.starts_with(&format!("<{m}::"))) && !matches!(&f.item, Item::Impl(t, ..) if prim_name(t).is_some()) {
+        // (the impl itself must be the module's: core's blanket `impl<T>
+        // From<T> for T` at a module type is library code, inlined)
+        if !self.local(&f.def) && !self.module.split(", ").any(|m| f.def.starts_with(&format!("<{m}::"))) && !matches!(&f.item, Item::Impl(t, ..) if prim_name(t).is_some()) {
             return None;
         }
         match &f.item {
             Item::Fn(name) => {
-                // a tuple-struct constructor is not a function of the source
-                if m.adts.values().any(|d| d.path == f.def) {
+                // a tuple-struct constructor is not a function of the source;
+                // a library trait's provided method at a module type
+                // (`<Position as PartialOrd>::lt`) is library code: inlined
+                if m.adts.values().any(|d| d.path == f.def) || !self.local(&f.def) {
                     return None;
                 }
                 let mut s = name.clone();
@@ -259,8 +339,28 @@ impl Names for ModuleNames {
             },
             Ty::Adt(k) => {
                 let d = m.adts.get(k).ok_or_else(|| format!("no ADT `{k}`"))?;
+                if let Some(p) = self.transparent_path(m, k) {
+                    let p: syn::Path = syn::parse_str(&p).map_err(|e| e.to_string())?;
+                    return Ok(syn::parse_quote!(#p));
+                }
+                if bytes_iter_model(m, t) {
+                    // the byte strings not yet yielded (SEMANTICS.md §19.10)
+                    return Ok(syn::parse_quote!(&[&[u8]]));
+                }
+                // `Option<&mut T>` (a state): the optional place's value
+                if d.path.ends_with("option::Option")
+                    && let [Ty::Ref(true, inner)] = d.args.as_slice()
+                {
+                    let it = self.ty(m, inner)?;
+                    return Ok(syn::parse_quote!(Option<#it>));
+                }
                 let args: Vec<syn::Type> = d.args.iter().map(|a| self.ty(m, a)).collect::<Result<_, _>>()?;
                 let base = self.adt_base(&d.path);
+                if d.path.ends_with("vec::Vec") && d.args.len() == 2 && m.adts.get(match &d.args[1] { Ty::Adt(a) => a.as_str(), _ => "" }).is_some_and(|a| a.path.ends_with("alloc::Global")) {
+                    // `Vec<T>` is `Seq<T>` (SEMANTICS.md §19.10)
+                    let e = &args[0];
+                    return Ok(syn::parse_quote!(Seq<#e>));
+                }
                 if d.path.ends_with("result::Result") {
                     syn::parse_quote!(Result<#(#args),*>)
                 } else if d.path.ends_with("option::Option") {
@@ -282,7 +382,8 @@ impl Names for ModuleNames {
                     // a range as a value (its fields; SEMANTICS.md §19.10)
                     syn::parse_quote!(crate::__lift::Range<#(#args),*>)
                 } else if self.host_enums.contains_key(&base) {
-                    let n = syn::Ident::new(&base, proc_macro2::Span::call_site());
+                    // (a generic host enum's model is erased at the instance)
+                    let n = self.host_path(&d.path)?;
                     syn::parse_quote!(#n)
                 } else {
                     return Err(format!("the type `{}` (neither a module type, a host model, nor `Result`/`Option`)", d.path));
@@ -323,12 +424,41 @@ impl Names for ModuleNames {
             if !vars.contains(&v.name) {
                 return Err(format!("`{base}::{}` is not in the host model of `{base}`", v.name));
             }
-            let (n, vn) = (id(&base), id(&v.name));
+            let (n, vn) = (self.host_path(&d.path)?, id(&v.name));
             syn::parse_quote!(#n::#vn)
         } else {
             return Err(format!("a constructor of `{}`", d.path));
         };
         Ok(Ctor { path, fields, named })
+    }
+
+    fn const_item(&self, m: &Sbmir, owner: Option<&Ty>, name: &str) -> Option<syn::Expr> {
+        let Some(Ty::Adt(k)) = owner else { return None };
+        let d = m.adts.get(k)?;
+        if !self.local(&d.path) {
+            return None;
+        }
+        let owner_name = self.local_adt_name(m, d).ok()?;
+        let is_fn = *self.consts.get(&(owner_name.clone(), name.to_string()))?;
+        let p = self.qualify(&d.path, &format!("{owner_name}__{name}"));
+        syn::parse_str(&if is_fn { format!("{p}()") } else { p }).ok()
+    }
+
+    fn transparent(&self, m: &Sbmir, adt: &str) -> bool {
+        self.transparent_path(m, adt).is_some()
+    }
+
+    fn host_method(&self, m: &Sbmir, self_ty: &Ty, method: &str) -> Option<syn::Expr> {
+        let Ty::Adt(k) = self_ty else { return None };
+        let p = self.host_instance(m, k)?;
+        if !self.host.structs.values().any(|s| *s == p) {
+            return None;
+        }
+        syn::parse_str(&format!("{p}::{method}")).ok()
+    }
+
+    fn has_invariant(&self, m: &Sbmir, adt: &str) -> bool {
+        m.adts.get(adt).is_some_and(|d| self.local(&d.path) && self.local_adt_name(m, d).is_ok_and(|n| self.invariant_types.contains(&n)))
     }
 
     fn lifted(&self, m: &Sbmir, f: &Fn) -> Option<LiftedCallee> {
@@ -339,7 +469,7 @@ impl Names for ModuleNames {
             _ => f.def.clone(),
         };
         let path: syn::Expr = syn::parse_str(&self.qualify(&item_path, &name)).ok()?;
-        let states: Vec<usize> = (0..f.argc).filter(|i| matches!(f.locals.get(i + 1), Some((Ty::Ref(true, _), _)))).collect();
+        let states: Vec<usize> = (0..f.argc).filter(|i| f.locals.get(i + 1).is_some_and(|(t, _)| matches!(t, Ty::Ref(true, _)) || read::opt_mut(m, t).is_some())).collect();
         let has_ret = !matches!(f.locals.first(), Some((Ty::Unit, _)));
         // the source name its attachments use
         let orig = match &f.item {
@@ -348,7 +478,10 @@ impl Names for ModuleNames {
             Item::Impl(_, _, _, mname) => mname.clone(),
             _ => String::new(),
         };
-        let total = !self.requires.contains(&orig);
+        // (a lowered copy `__sandblaster_opt_g` of `g`, the lifted round
+        // trip's, is bound where `g` is: binding is always a faithful order)
+        let copy_of = orig.strip_prefix(crate::driver::lowered::HELPER_PREFIX);
+        let total = !self.requires.contains(&orig) && !copy_of.is_some_and(|g| self.requires.contains(g));
         // a `&self` receiver: the lift takes `self` by value
         let by_value: Vec<usize> = if f.argc >= 1 && f.debug.iter().any(|(n, l)| n == "self" && *l == 1) && matches!(f.locals.get(1), Some((Ty::Ref(false, _), _))) { vec![0] } else { vec![] };
         Some(LiftedCallee { path, states, has_ret, total, by_value })
@@ -359,6 +492,21 @@ impl Names for ModuleNames {
 /// `next`, transcribed; SEMANTICS.md §19.9): `RangeInclusive<u32/u64>`,
 /// `Once<T>`. They are built and stepped only through the leaves of
 /// `read::builtin_leaf` (never field by field).
+/// `Copied<slice::Iter<&[u8]>>`: the byte-string iterator model's type
+/// (the extraction's instance of `E: Iterator<Item: AsRef<[u8]>>`).
+pub fn bytes_iter_model(m: &Sbmir, t: &Ty) -> bool {
+    let adt = |t: &Ty| match t {
+        Ty::Adt(k) => m.adts.get(k),
+        _ => None,
+    };
+    let byte_slice = Ty::Ref(false, Box::new(Ty::Slice(Box::new(Ty::Int(false, 8)))));
+    adt(t).is_some_and(|d| {
+        matches!(d.path.as_str(), "std::iter::Copied" | "core::iter::Copied")
+            && d.args.len() == 1
+            && adt(&d.args[0]).is_some_and(|i| matches!(i.path.as_str(), "std::slice::Iter" | "core::slice::Iter") && i.args == [byte_slice.clone()])
+    })
+}
+
 fn prelude_iter_ty(d: &ir::AdtDef) -> Option<syn::Type> {
     let base = d.path.rsplit("::").next()?;
     Some(match (base, d.args.first()) {
@@ -426,7 +574,14 @@ pub fn load(text: &str, sources: &dyn std::ops::Fn(&str) -> Option<Vec<u8>>, mut
         if let Some(f) = m.fns.get(k)
             && let Some(n) = names.lifted_name(&m, f)
         {
-            by_lifted.insert(n, k.clone());
+            // an inherent method and an open trait's method of the same name
+            // at the instance are one lifted function: the inherent one
+            // (the lift requires the trait's to be a pure delegation to it,
+            // or the same body, SEMANTICS.md §19.10)
+            let inherent = matches!(f.item, Item::Inherent(..));
+            if inherent || !by_lifted.contains_key(&n) {
+                by_lifted.insert(n, k.clone());
+            }
         }
     }
     Ok(Loaded { m, names, by_lifted })

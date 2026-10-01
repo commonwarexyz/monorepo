@@ -20,6 +20,66 @@ sandblaster/mirx/extract.sh commonware-codec varint codec/sandblaster/varint/var
   `OUT_DIR/out.rs` (what `compile_module` emits in module mode); spans in
   that file are mapped back to `src.rs`.
 
+An in-place crate (storage's MMR) is extracted as a whole, with its
+lowered copies stubbed by the sources, the verifying build scripts of its
+dependencies stubbed, its open traits at their instance and its
+`#[lift(opt)]` alternatives compiled in the crate's context:
+
+```text
+sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr,opt \
+    storage/sandblaster/mmr/mmr.sbmir \
+    --stub mmr-lowered__merkle__mmr__iterator.rs=storage/src/merkle/mmr/iterator.rs \
+    --stubs 'commonware_codec:varint.rs=codec/sandblaster/varint/varint.rs' \
+    --instance Family=merkle::mmr::Family,Graftable=merkle::mmr::Family \
+    --skip-traits Debug,Display,Hash --inject opt=storage/sandblaster/mmr/opt.rs
+```
+
+* `--stubs crate:out.rs=src.rs;..` stubs the build scripts of workspace
+  crates the package depends on that verify with sandblaster;
+* `--instance Trait=path::Type,..` reads open traits at one instance;
+* `--skip-traits T,..` leaves out the impls of these traits (default
+  `Debug,Display,Hash,PartialOrd,Ord`);
+* `--inject name=file.rs` compiles a DSL file as `mod name;` of the crate root;
+* `--replace src.rs=text.rs` compiles `src.rs` as if its text were
+  `text.rs`'s (its recorded SHA-256 is that text's).
+
+Storage's Merkle proof verifier (set 1, `storage/sandblaster/verifier`) is
+extracted at the instances `merkle.rs` declares, named by the type aliases
+of `storage/sandblaster/verifier/instances.rs` (compiled into the crate for
+the extraction only), with only the lifted items:
+
+```text
+sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr,merkle::hasher,merkle::proof \
+    storage/sandblaster/verifier/verifier.sbmir \
+    --stub mmr-lowered__merkle__mmr__iterator.rs=storage/src/merkle/mmr/iterator.rs \
+    --stubs 'commonware_codec:varint.rs=codec/sandblaster/varint/varint.rs' \
+    --instance 'Family=merkle::mmr::Family,Graftable=merkle::mmr::Family,merkle::hasher::Hasher=instances::Hasher,commonware_cryptography::Hasher=instances::Sha256,Digest=instances::Digest,Iterator=instances::Elements' \
+    --skip-traits Debug,Display,Hash --inject instances=storage/sandblaster/verifier/instances.rs \
+    --items 'merkle::hasher=Hasher,Standard;merkle::proof=ReconstructionError,Subtree;merkle::mmr::iterator=' \
+    --skip-fns 'Position::is_valid_size,Location::try_from,Family::position_to_location,Family::to_nearest_size,Family::peaks,Family::parent_heights,Family::pos_to_height,Family::is_valid_size,Family::chunk_peaks,Family::subtree_root_position,Family::leftmost_leaf,Hasher::root,Hasher::root_with_folded_peaks,Standard::node_digest_pair,Subtree::collect_siblings,Subtree::collect_prefix_siblings,Subtree::reconstruct_from_pins'
+```
+
+* `--instance T=path`: a trait named by one word matches by its last
+  segment, by a path (`commonware_cryptography::Hasher`) exactly; `path`
+  is a struct, an enum or a type alias of the crate (an alias names a
+  concrete instance: a generic struct at its arguments, or a library type).
+  A trait read at an instance is not sealed; its provided methods are
+  extracted at the instance, and impls of a local such trait for other types
+  are not. Calls of a trait's methods at an instance that is a library type
+  (a host model, `Sha256`; core's `Copied<slice::Iter<&[u8]>>`) are leaves,
+  read by the reader's models.
+* `--items 'mod=Item,..;..'`: in those modules only the functions of the
+  named items (the lift's `items`); `--skip-fns T::m,..`: functions left to
+  the host (the lift's `unverified_fns`).
+
+**The lifted round trip** of a rewritten in-place file reads the MIR of its
+copy (DESIGN.md §2.1): when the build says `no MIR of the round trip's copy`
+(or the round-trip MIR is stale), extract it with the same command plus
+`--replace storage/src/merkle/mmr/iterator.rs=<OUT_DIR>/mmr-roundtrip__merkle__mmr__iterator.rs`
+into `storage/sandblaster/mmr/mmr.roundtrip__merkle__mmr__iterator.sbmir`,
+and build again. (When the source changes, extract the source first, build,
+then the round trip's copy.)
+
 Re-run it whenever the module's source changes (the build refuses a stale
 extraction by the sources' SHA-256) or when the workspace moves to another
 stable release (the build refuses MIR of another release; bump the channel

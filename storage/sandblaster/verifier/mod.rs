@@ -8,6 +8,12 @@
 //! `mmr/iterator.rs`, as in `sandblaster/mmr`). SHA-256 is the standard
 //! library's FIPS 180-4 specification. `LAWS.rs` states what the lifted
 //! code guarantees; `PROOF.rs` proves it.
+//!
+//! The function bodies are read from rustc's MIR, `verifier.sbmir`
+//! (`sandblaster/docs/mir-lift.md` §20; extracted by
+//! `sandblaster/mirx/extract.sh` at the instances of `instances.rs`, see its
+//! README), not from the surface syntax. A changed source refuses the stale
+//! MIR until it is extracted again.
 #![forbid(unsafe_code)]
 
 mod merkle;

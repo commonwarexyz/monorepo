@@ -618,7 +618,8 @@ impl Loader<'_> {
     ) -> usize {
         let c = self.modules.len();
         self.modules.push(LoadedModule { name: name.clone(), parent: Some(parent), file: cfile, ghost, vis, decl_span: span, decl_attrs, inner_attrs: cast.attrs.clone(), items: vec![], cfg: cfg.clone(), data_files: HashMap::new(), lifted: true });
-        self.lifted_info.push(crate::lift::LiftedInfo { name: name.clone(), file: cfile, ghost, host: opts.host, unverified: opts.unverified.clone(), in_place: opts.in_place, opt: opts.opt, lowered_include: None });
+        self.lifted_info.push(crate::lift::LiftedInfo { name: name.clone(), file: cfile, ghost, host: opts.host, unverified: opts.unverified.clone(), in_place: opts.in_place, opt: opts.opt, lowered_include: None, mir: None, mir_roundtrip: None });
+        let info_index = self.lifted_info.len() - 1;
         // the children to lift with this module
         let dir = if mod_rs_like {
             path.parent().map(Path::to_path_buf).unwrap_or_default()
@@ -730,6 +731,13 @@ impl Loader<'_> {
             match self.fs.read(&full) {
                 Ok(t) => {
                     self.sm.add(full.clone(), t.clone());
+                    // the MIR of the lifted round trip's copy of this file, if extracted
+                    let rt = crate::lift::roundtrip_mir_path(&full, &module_path);
+                    if let Ok(rtt) = self.fs.read(&rt) {
+                        self.sm.add(rt.clone(), rtt);
+                        self.lifted_info[info_index].mir_roundtrip = Some(rt);
+                    }
+                    self.lifted_info[info_index].mir = Some(full.clone());
                     Some(t)
                 }
                 Err(e) => {

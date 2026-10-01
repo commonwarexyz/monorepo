@@ -284,15 +284,22 @@ green, speed of the result and the human review load.
    own monomorphized MIR (macros expanded, `?`, closures, operators,
    iterators and constants already lowered by the compiler) is read by a
    translation over a fixed set of MIR constructs that does not grow with
-   surface features — `mir/read.rs` and the names in `mir/mod.rs` (≈ 2.2k
-   code lines) plus the printer `sandblaster/mirx` (≈ 0.9k: a rustc driver
+   surface features — `mir/read.rs` and the names in `mir/mod.rs` (≈ 2.8k
+   code lines) plus the printer `sandblaster/mirx` (≈ 1.1k: a rustc driver
    on the pinned nightly of the stable release, whose output is checked in
    with the sources' SHA-256). For such a module the source lift keeps only
    the item skeleton (names, signatures and state passing, sealed
    families, attachments) and the ghost language; its body rewrites are not
    used. commonware-codec's varint is verified this way with its laws and
-   proofs unchanged. The plan to retire the source lift's body reading is
-   in `docs/mir-lift.md`.
+   proofs unchanged, and commonware-storage's MMR in place (with its
+   `#[rewrite]` alternatives and the lifted round trip of its lowered copy,
+   whose bodies are rustc's MIR of the copy) with its laws unchanged, and
+   the first set of its Merkle proof verifier (`hasher.rs` at
+   `Standard<Sha256>`, `Subtree::reconstruct_digest`) with its laws and
+   proofs unchanged. Every exec module of the repository now reads its
+   bodies from MIR; the plan to retire the source lift's body reading, with
+   the list of its readings no module uses any more, is in
+   `docs/mir-lift.md` §6.
    **Mitigation: the lift conformance check** (`sandblaster/front/src/conform.rs`;
    its module docs are the full description), which every module-mode build of a lifted module
    (and every `compile_lifted` build of an in-place one, §2.1)
@@ -534,7 +541,17 @@ host/
   a file extracted without overflow checks, and MIR of another rustc
   release. The emitted file (still the source byte for byte) says so in
   its header. The lift conformance check compares the read functions with
-  the build's rustc exactly as for the source lift.
+  the build's rustc exactly as for the source lift. An in-place crate is
+  extracted as a whole (its `#[lift(opt)]` alternatives compiled in the
+  crate's context); the lifted round trip of a rewritten file reads rustc's
+  MIR of the copy it checks (`<stem>.roundtrip__<module>.sbmir`, extracted
+  from the copy the build writes to `OUT_DIR/<name>-roundtrip__<module>.rs`;
+  a stale one fails the round trip, so a host compiling that lowered copy
+  fails its build until it is extracted again; `docs/mir-lift.md` §20.1).
+  Open traits are extracted at the instances the declarations name, given as
+  type aliases rustc resolves (`storage/sandblaster/verifier/instances.rs`:
+  `Standard<Sha256>`, SHA-256's `Digest`, the element iterator), and only
+  the items the lift lifts are extracted (`--items`, `--skip-fns`).
 * **The optimizer on lifted modules** (`driver::lowered`, `crate::lower`).
   The optimizer is always on here too: it runs on the lifted meaning like on
   any crate (summaries, Σ2 loop summaries, facts from proven laws, the
@@ -697,12 +714,15 @@ host/
   `cfg(rust_analyzer)` to rustc's cfg check and warns if a build sets it
   (that build compiles the source as written: verified, not optimized).
   Panic locations and `line!`-style debugging in the compiled module
-  point into the copy. **The conformance harness
-  does not support in-place modules yet** (it compiles one lifted file on
-  its own, and an in-place file names its host crate's other modules and
-  dependencies), nor open traits at declared instances: the check fails
-  with that reason, so `compile_lifted` issues no verdict for such a crate
-  until it does. commonware-storage's MMR position arithmetic is the first
+  point into the copy. **The conformance harness of in-place modules**
+  compiles a copy of the host crate (without its build script) with the
+  harness added to each in-place file, and drives every function at the
+  declared instances (open traits included) against the kernel's
+  evaluation (`crate::conform::check_in_place`, `docs/mir-lift.md` §5):
+  the MMR passes (0 mismatches); the verifier's set 1 has no value
+  mismatch but 16 `reconstruct_digest` inputs exhaust the kernel's step
+  budget, so the check does not pass for it yet and `compile_lifted`
+  would issue no verdict for that crate until it does. commonware-storage's MMR position arithmetic is the first
   in-place crate (`storage/sandblaster/mmr`); the first set of its Merkle
   proof verifier (`hasher.rs` at `Standard<Sha256>`, `proof.rs`'s subtree
   reconstruction; SEMANTICS.md §19.10) is the second

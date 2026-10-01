@@ -37,8 +37,12 @@
 //!    put so far, `Buf` a `&[u8]` of the bytes not yet read); a child
 //!    module appended to the copy calls each original (private items
 //!    included) and prints the states and the result.
-//! 4. **Comparison.** Every state (`&mut self`, each buffer) and the result
-//!    must be equal; a panic in `rustc`'s build, a kernel evaluation that
+//! 4. **Comparison.** Every state (`&mut self`, each buffer, and §19.10's
+//!    states: a `&mut` value, a `&mut Vec<T>`, an `Option<&mut Vec<T>>`, and
+//!    the byte strings a byte-string iterator has not yielded, driven by a
+//!    slice iterator) and the result must be equal; an in-place harness
+//!    passes a library newtype the lift reads as its field (a host model,
+//!    SEMANTICS.md §19.10: SHA-256's `Digest`) through `__cv`; a panic in `rustc`'s build, a kernel evaluation that
 //!    does not finish, or a harness that does not compile is a failure.
 //!    Any failure fails the build and names the function, the input and
 //!    both outputs.
@@ -622,6 +626,11 @@ impl<'a> Gen<'a> {
                         comps.push(t.peel_refs().clone());
                         state_of.push(i);
                     }
+                    // (the lifted parameter is the state's value)
+                    ParamPass::StateMut | ParamPass::VecMut | ParamPass::OptVec | ParamPass::BytesIter => {
+                        comps.push(t.clone());
+                        state_of.push(i);
+                    }
                     _ => {}
                 }
             }
@@ -804,7 +813,7 @@ impl<'a> Gen<'a> {
             Ty::Array(e, n) => format!("[{}; {n}]", self.rust_ty(e)?),
             Ty::Ref(x) => self.rust_ty(x)?,
             Ty::Option(e) => format!("::core::option::Option<{}>", self.rust_ty(e)?),
-            Ty::Seq(e) if **e == Ty::Uint(UintTy::U8) => "::std::vec::Vec<u8>".into(),
+            Ty::Seq(e) | Ty::Slice(e) => format!("::std::vec::Vec<{}>", self.rust_ty(e)?),
             Ty::Adt(id, _) if self.signed_bits(*id).is_some() => format!("i{}", self.signed_bits(*id).unwrap_or(0)),
             Ty::Adt(id, args) => self.adt_paths(*id, args)?.0,
             other => return Err(format!("the type `{other:?}` has no Rust counterpart in the harness")),
@@ -1478,7 +1487,7 @@ impl Emit<'_, '_> {
                 let r = self.reader(e)?;
                 format!("{{ let mut v = ::std::vec::Vec::new(); for _ in 0..{n}usize {{ v.push({r}(t)); }} match <{rt}>::try_from(v) {{ ::core::result::Result::Ok(a) => a, ::core::result::Result::Err(_) => ::core::unreachable!() }} }}")
             }
-            Ty::Seq(e) => {
+            Ty::Seq(e) | Ty::Slice(e) => {
                 let r = self.reader(e)?;
                 format!("{{ let n = t.n() as usize; let mut v = ::std::vec::Vec::with_capacity(n); for _ in 0..n {{ v.push({r}(t)); }} v }}")
             }
@@ -1541,7 +1550,7 @@ impl Emit<'_, '_> {
                 }
                 ts.iter().try_for_each(|x| self.writer(x))
             }
-            Ty::Array(e, _) | Ty::Seq(e) | Ty::Option(e) => self.writer(e),
+            Ty::Array(e, _) | Ty::Seq(e) | Ty::Slice(e) | Ty::Option(e) => self.writer(e),
             Ty::Adt(id, _) if self.g.signed_bits(*id).is_some() => Ok(()),
             // (the in-place prelude writes every `PhantomData`)
             Ty::Adt(..) if self.g.ip.is_some() && self.g.is_phantom(t) => Ok(()),
@@ -1637,7 +1646,7 @@ fn tokens(g: &Gen<'_>, t: &Ty, j: &J, out: &mut Vec<String>) -> Result<(), Strin
                 tokens(g, e, x, out)?;
             }
         }
-        (Ty::Seq(e), J::Arr(xs)) => {
+        (Ty::Seq(e) | Ty::Slice(e), J::Arr(xs)) => {
             out.push(xs.len().to_string());
             for x in xs {
                 tokens(g, e, x, out)?;
@@ -1688,14 +1697,41 @@ fn entry_fn(em: &mut Emit<'_, '_>, g: &Gen<'_>, pi: usize, p: &Plan<'_>, vis: &s
     for (i, (pass, t)) in p.e.params.iter().zip(&p.params).enumerate() {
         let r = em.reader(t)?;
         let rt = g.rust_ty(t)?;
+        // (a library newtype the lift reads as its field: converted)
+        let cv = |a: String| match g.ip_cv(t) {
+            Some(f) => cv_expr(&f, t, &a),
+            None => a,
+        };
         match pass {
             ParamPass::Value => {
                 s.push_str(&format!("        let a{i}: {rt} = {r}(t);\n"));
-                call_args.push(format!("a{i}"));
+                call_args.push(cv(format!("a{i}")));
+            }
+            // (a slice is passed as the whole of the vector read; a slice of
+            // slices as the slices of its vectors)
+            ParamPass::Ref if matches!(t, Ty::Ref(x) if matches!(**x, Ty::Slice(_))) => {
+                let of_slices = matches!(t, Ty::Ref(x) if matches!(&**x, Ty::Slice(e) if matches!(&**e, Ty::Ref(y) if matches!(**y, Ty::Slice(_)))));
+                let b = if of_slices { format!("a{i}.iter().map(|x| &x[..]).collect()") } else { cv(format!("a{i}")) };
+                s.push_str(&format!("        let a{i}: {rt} = {r}(t);\n        let b{i}: ::std::vec::Vec<_> = {b};\n"));
+                call_args.push(format!("&b{i}[..]"));
             }
             ParamPass::Ref => {
                 s.push_str(&format!("        let a{i}: {rt} = {r}(t);\n"));
-                call_args.push(format!("&a{i}"));
+                call_args.push(format!("&{}", cv(format!("a{i}"))));
+            }
+            ParamPass::StateMut | ParamPass::VecMut => {
+                s.push_str(&format!("        let mut a{i} = {};\n", cv(format!("{r}(t)"))));
+                call_args.push(format!("&mut a{i}"));
+            }
+            ParamPass::OptVec => {
+                s.push_str(&format!("        let mut a{i}: ::core::option::Option<::std::vec::Vec<_>> = {};\n", cv(format!("{r}(t)"))));
+                call_args.push(format!("a{i}.as_mut()"));
+            }
+            // the byte strings, iterated by a slice iterator (its `as_slice`
+            // is what it has not yielded)
+            ParamPass::BytesIter => {
+                s.push_str(&format!("        let v{i}: {rt} = {r}(t);\n        let s{i}: ::std::vec::Vec<&[u8]> = v{i}.iter().map(|x| &x[..]).collect();\n        let mut a{i} = s{i}.iter();\n"));
+                call_args.push(format!("&mut a{i}"));
             }
             ParamPass::MutRef | ParamPass::BufMut => {
                 s.push_str(&format!("        let mut a{i}: {rt} = {r}(t);\n"));
@@ -1719,6 +1755,7 @@ fn entry_fn(em: &mut Emit<'_, '_>, g: &Gen<'_>, pi: usize, p: &Plan<'_>, vis: &s
         first = false;
         match p.e.params[i] {
             ParamPass::Buf => s.push_str(&format!("        __W::w(&a{i}.to_vec(), &mut o);\n")),
+            ParamPass::BytesIter => s.push_str(&format!("        __W::w(&a{i}.as_slice().iter().map(|x| x.to_vec()).collect::<::std::vec::Vec<::std::vec::Vec<u8>>>(), &mut o);\n")),
             _ => s.push_str(&format!("        __W::w(&a{i}, &mut o);\n")),
         }
     }
@@ -1732,6 +1769,35 @@ fn entry_fn(em: &mut Emit<'_, '_>, g: &Gen<'_>, pi: usize, p: &Plan<'_>, vis: &s
     }
     s.push_str("        o.push(']');\n        o\n    }\n");
     Ok(s)
+}
+
+/// `a` (a value of the lifted type `t`) converted by the harness's `__cv`
+/// (`cv`, its path) wherever `t` holds an array: the identity, or the
+/// library newtype the original takes there (inferred from the call).
+fn cv_expr(cv: &str, t: &Ty, a: &str) -> String {
+    fn holds_array(t: &Ty) -> bool {
+        match t {
+            Ty::Array(..) => true,
+            Ty::Ref(x) | Ty::Option(x) | Ty::Seq(x) | Ty::Slice(x) => holds_array(x),
+            Ty::Tuple(ts) => ts.iter().any(holds_array),
+            _ => false,
+        }
+    }
+    if !holds_array(t) {
+        return a.to_string();
+    }
+    match t {
+        Ty::Array(..) => format!("{cv}({a})"),
+        Ty::Ref(x) => cv_expr(cv, x, a),
+        Ty::Option(x) => format!("{a}.map(|x| {})", cv_expr(cv, x, "x")),
+        Ty::Seq(x) | Ty::Slice(x) => format!("{a}.into_iter().map(|x| {}).collect::<::std::vec::Vec<_>>()", cv_expr(cv, x, "x")),
+        Ty::Tuple(ts) => {
+            let xs: Vec<String> = (0..ts.len()).map(|i| format!("x{i}")).collect();
+            let cs: Vec<String> = ts.iter().zip(&xs).map(|(t, x)| cv_expr(cv, t, x)).collect();
+            format!("{{ let ({},) = {a}; ({},) }}", xs.join(", "), cs.join(", "))
+        }
+        _ => a.to_string(),
+    }
 }
 
 /// Writes, compiles and runs the harness; returns its output line by case.

@@ -7,11 +7,11 @@
 // are verified at the MMR (`mmr::Family`); at the MMB they stay unchecked
 // host code. Formatting, hashing and the codec impls (which delegate to
 // commonware-codec's varint) stay host code, listed.
-#[lift(in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_instances = "Family: crate::merkle::mmb::Family, Graftable: crate::merkle::mmb::Family", unverified_impls = "commonware_codec::Write, commonware_codec::EncodeSize, commonware_codec::Read", unverified_fns = "Position::is_valid_size")]
+#[lift(mir = "verifier.sbmir", in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_instances = "Family: crate::merkle::mmb::Family, Graftable: crate::merkle::mmb::Family", unverified_impls = "commonware_codec::Write, commonware_codec::EncodeSize, commonware_codec::Read", unverified_fns = "Position::is_valid_size")]
 #[path = "../../src/merkle/position.rs"]
 pub mod position;
 
-#[lift(in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_impls = "commonware_codec::Write, commonware_codec::EncodeSize, commonware_codec::Read, LocationRangeExt", unverified_fns = "Location::try_from")]
+#[lift(mir = "verifier.sbmir", in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_impls = "commonware_codec::Write, commonware_codec::EncodeSize, commonware_codec::Read, LocationRangeExt", unverified_fns = "Location::try_from")]
 #[path = "../../src/merkle/location.rs"]
 pub mod location;
 
@@ -19,7 +19,7 @@ pub mod location;
 // conversions (`location.rs` calls them). The peak iterator and the rest of
 // the family are verified by `sandblaster/mmr`; here they stay host code
 // (listed), until the verifier's next set needs them.
-#[lift(in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_fns = "Family::position_to_location, Family::to_nearest_size, Family::peaks, Family::parent_heights, Family::pos_to_height, Family::is_valid_size, Family::chunk_peaks, Family::subtree_root_position, Family::leftmost_leaf")]
+#[lift(mir = "verifier.sbmir", in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_fns = "Family::position_to_location, Family::to_nearest_size, Family::peaks, Family::parent_heights, Family::pos_to_height, Family::is_valid_size, Family::chunk_peaks, Family::subtree_root_position, Family::leftmost_leaf")]
 #[path = "../../src/merkle/mmr/mod.rs"]
 pub mod mmr;
 
@@ -29,7 +29,7 @@ pub mod mmr;
 // `root_with_folded_peaks`: generic iterators, the next set) and the SIMD
 // pair hash (`node_digest_pair`) stay host code, as does the blanket impl for
 // `&T` (another instance).
-#[lift(in_place, items = "Hasher, Standard", instance = "Hasher: crate::merkle::hasher::Standard, CHasher: crate::merkle::host::Sha256", unverified_fns = "Hasher::root, Hasher::root_with_folded_peaks, Standard::node_digest_pair")]
+#[lift(mir = "verifier.sbmir", in_place, items = "Hasher, Standard", instance = "Hasher: crate::merkle::hasher::Standard, CHasher: crate::merkle::host::Sha256", unverified_fns = "Hasher::root, Hasher::root_with_folded_peaks, Standard::node_digest_pair")]
 #[path = "../../src/merkle/hasher.rs"]
 pub mod hasher;
 
@@ -40,7 +40,7 @@ pub mod hasher;
 // host model `host::Digest`). The rest of the file (the `Proof` type, its
 // codec and entry points, `Blueprint`, pinned-node reconstruction) is the
 // next set: host code, listed.
-#[lift(in_place, items = "ReconstructionError, Subtree", instance = "Digest: crate::merkle::host::Digest", unverified_fns = "Subtree::collect_siblings, Subtree::collect_prefix_siblings, Subtree::reconstruct_from_pins")]
+#[lift(mir = "verifier.sbmir", in_place, items = "ReconstructionError, Subtree", instance = "Digest: crate::merkle::host::Digest", unverified_fns = "Subtree::collect_siblings, Subtree::collect_prefix_siblings, Subtree::reconstruct_from_pins")]
 #[path = "../../src/merkle/proof.rs"]
 pub mod proof;
 

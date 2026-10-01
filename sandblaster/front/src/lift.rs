@@ -128,6 +128,21 @@ pub struct LiftedInfo {
     /// the declaration as `mod a;`; the build checks `F` and writes the copy
     /// (`driver::in_place`).
     pub lowered_include: Option<String>,
+    /// `#[lift(mir = ..)]`: the `.sbmir` file (absolute).
+    pub mir: Option<std::path::PathBuf>,
+    /// The MIR of the lifted round trip's copy of this file (the source with
+    /// its rewritten functions' copies and helpers, DESIGN.md §2.1):
+    /// `<stem>.roundtrip__<module path>.sbmir` next to `mir`, when present.
+    pub mir_roundtrip: Option<std::path::PathBuf>,
+}
+
+/// The file name of the round-trip MIR of the lifted module `module_path`
+/// (`crate::merkle::mmr::iterator`) next to the `.sbmir` file `mir`:
+/// `mmr.roundtrip__merkle__mmr__iterator.sbmir`.
+pub fn roundtrip_mir_path(mir: &std::path::Path, module_path: &str) -> std::path::PathBuf {
+    let stem = mir.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let flat = module_path.trim_start_matches("crate::").replace("::", "__");
+    mir.with_file_name(format!("{stem}.roundtrip__{flat}.sbmir"))
 }
 
 /// Host facts the lift's reading assumed and what it left out, for the
@@ -177,6 +192,11 @@ pub struct LiftFacts {
     pub mir_read: Vec<(String, String, Vec<(usize, String)>)>,
     /// The compiler the MIR was extracted with (`rustc 1.98.0-nightly (..)`).
     pub mir_rustc: Option<String>,
+    /// The library types rustc's MIR has for host models
+    /// (`crate::mir::HostModels`): `(model's DSL path, the type's Rust path,
+    /// the field a newtype is read as)`. The in-place conformance harness
+    /// spells and converts host-model values with them.
+    pub mir_host_types: Vec<(String, String, Option<String>)>,
 }
 
 /// How the original function takes one parameter (receiver included), for
@@ -193,6 +213,15 @@ pub enum ParamPass {
     BufMut,
     /// `&mut impl Buf`: the bytes not yet read.
     Buf,
+    /// `&mut T` of a value (an integer, `bool`, a named type, a tuple or an
+    /// array; SEMANTICS.md §19.10): the state `T`.
+    StateMut,
+    /// `&mut Vec<T>`: the state `Seq<T>`.
+    VecMut,
+    /// `Option<&mut Vec<T>>`: the state `Option<Seq<T>>`.
+    OptVec,
+    /// `&mut E` of a byte-string iterator: the byte strings not yet yielded.
+    BytesIter,
 }
 
 /// The original item a lifted function stands for, as the conformance
@@ -407,9 +436,24 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
             mir_texts.push((s.name.clone(), s.module_path.trim_start_matches("crate::").to_string(), t.clone(), s.decl_span));
         }
     }
+    // host models other than enums, for the MIR reading (`crate::mir::HostModels`)
+    let mut mir_host = crate::mir::HostModels::default();
     for s in sources {
         cx.file = s.file;
         cx.pre_ghost = s.ghost || s.host;
+        if s.host {
+            for it in &s.ast.items {
+                match it {
+                    syn::Item::Type(t) => {
+                        mir_host.types.insert(t.ident.to_string(), (format!("{}::{}", s.module_path, t.ident), t.ty.to_token_stream().to_string()));
+                    }
+                    syn::Item::Struct(st) if matches!(st.fields, syn::Fields::Unit) => {
+                        mir_host.structs.insert(st.ident.to_string(), format!("{}::{}", s.module_path, st.ident));
+                    }
+                    _ => {}
+                }
+            }
+        }
         let items = cx.preprocess(s.ast.items, 0);
         let children: Vec<String> = s.children.iter().map(|(n, _)| n.clone()).collect();
         let mut items = cx.host_filter(items, &s.opts, &children);
@@ -454,11 +498,17 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
         for (modname, suffix, text, span) in &mir_texts {
             let requires: std::collections::BTreeSet<String> = cx.attach_fn.iter().filter(|(_, a)| a.stmts.iter().any(|st| attach_call(st, "requires").is_some())).map(|(n, _)| n.clone()).collect();
             let open: BTreeMap<String, String> = cx.open.instances.iter().map(|(t, p)| (t.clone(), path_key(p).trim_start_matches("crate::").to_string())).collect();
-            let names = crate::mir::ModuleNames { module: String::new(), sealed: sealed.clone(), host_enums: host_enums.clone(), requires, open, dsl_modules: dsl_modules.clone(), current: Default::default() };
+            let consts: BTreeMap<(String, String), bool> = cx.open.assoc_consts.iter().map(|(t, c)| ((t.clone(), c.clone()), cx.open.const_fns.contains(&open::const_name(t, c)))).collect();
+            let names = crate::mir::ModuleNames { module: String::new(), sealed: sealed.clone(), host_enums: host_enums.clone(), requires, open, dsl_modules: dsl_modules.clone(), current: Default::default(), consts, invariant_types: cx.attach_ty.keys().cloned().collect(), host: mir_host.clone() };
             let lookup = |p: &str| -> Option<Vec<u8>> { files.iter().find(|(f, _)| f.ends_with(&format!("/{p}")) || f == p).map(|(_, b)| b.clone()) };
             match crate::mir::load(text, &lookup, names, suffix) {
                 Ok(l) => {
                     facts.mir_rustc = Some(l.m.rustc.clone());
+                    for t in l.names.host_types(&l.m) {
+                        if !facts.mir_host_types.contains(&t) {
+                            facts.mir_host_types.push(t);
+                        }
+                    }
                     cx.mir_modules.insert(modname.clone(), std::rc::Rc::new(l));
                 }
                 Err(e) => diags.push(Diagnostic::error(DiagKind::Unsupported, *span, format!("lift: `mir = ..`: {e}"))),
@@ -471,10 +521,13 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
         cx.file = file;
         cx.open.cur_in_place = in_place.contains(&idx);
         cx.cur_mir = if ghost { None } else { cx.mir_modules.get(&modname).cloned() };
+        let mir_module = cx.cur_mir.is_some();
         let mut lifted = cx.emit_module(&modname, ghost, items);
         cx.cur_mir = None;
         cx.open.cur_in_place = false;
-        if in_place.contains(&idx) {
+        // (a MIR module's bodies need none of its imports: `use Trait as _`
+        // only steered rustc's method resolution)
+        if in_place.contains(&idx) || mir_module {
             cx.prune_unused(&mut lifted);
         }
         out.push(LiftResult { module_index: idx, items: lifted });
@@ -1612,12 +1665,14 @@ impl Ctx {
         f.sig.generics = syn::Generics::default();
         // `const fn`: the same function (constness only allows compile-time calls)
         f.sig.constness = None;
-        // `-> impl Trait`: the concrete type of the body's result
+        // `-> impl Trait`: the concrete type of the body's result (a MIR
+        // module: rustc's, the type of the instance's return place)
         if let syn::ReturnType::Type(_, t) = &f.sig.output
             && matches!(&**t, syn::Type::ImplTrait(_))
         {
             let t = (**t).clone();
-            if let Some(ct) = self.impl_trait_concrete(&t, &mut f.block, self_ty.as_ref()) {
+            let ct = if !ghost && self.cur_mir.is_some() { self.mir_ret_ty(&f.sig.ident.to_string(), self_ty.as_ref()) } else { self.impl_trait_concrete(&t, &mut f.block, self_ty.as_ref()) };
+            if let Some(ct) = ct {
                 f.sig.output = syn::parse_quote!(-> #ct);
             }
         }
@@ -1863,6 +1918,20 @@ impl Ctx {
         self.open.module_paths.get(&self.cur_module).cloned().unwrap_or_else(|| format!("crate::{}", self.cur_module))
     }
 
+    /// The return type of a lifted function of a `#[lift(mir = ..)]` module
+    /// as rustc has it (the instance's return place: the concrete type of an
+    /// `impl Trait` result).
+    fn mir_ret_ty(&self, ident: &str, self_ty: Option<&syn::Type>) -> Option<syn::Type> {
+        let ld = self.cur_mir.clone()?;
+        let lifted = match self_ty.and_then(type_name) {
+            Some(st) if !is_prim(&st) => format!("{st}::{ident}"),
+            _ => ident.to_string(),
+        };
+        let f = ld.m.fns.get(ld.by_lifted.get(&lifted)?)?;
+        ld.names.current.replace(self.conform_module_path());
+        crate::mir::read::Names::ty(&ld.names, &ld.m, &f.locals.first()?.0).ok()
+    }
+
     /// The body of a lifted function of a `#[lift(mir = ..)]` module, read
     /// from rustc's MIR ([`crate::mir::read`]), with its loop helpers. `f` has
     /// the lifted signature; parameters bound by `_` get a name.
@@ -1924,9 +1993,15 @@ impl Ctx {
         };
         let mut loops: HashMap<usize, crate::mir::read::LoopAttach> = HashMap::new();
         let keys: Vec<usize> = self.attach_loop.keys().filter(|(fnm, _)| fnm == orig_name).map(|(_, k)| *k).collect();
+        // a source name in a loop attachment denotes the variable in scope
+        // at the loop (`let size = *size;` shadows the parameter)
+        let scopes = crate::mir::read::loop_scopes(&ld.m, &key, &params).unwrap_or_default();
         for k in keys {
-            let at = self.attach_loop[&(orig_name.to_string(), k)].clone();
+            let mut at = self.attach_loop[&(orig_name.to_string(), k)].clone();
             self.attach_used.insert(format!("loop {orig_name}#{k}"));
+            if let Some(map) = scopes.get(k).filter(|m| !m.is_empty()) {
+                at.stmts = at.stmts.iter().map(|st| rename_vars(st, map)).collect();
+            }
             let la = self.mir_loop_attach(&at, &locals, self_ty, state_tys);
             loops.insert(k, la);
         }
@@ -2042,13 +2117,23 @@ impl Ctx {
             self.conform_skipped.push(ConformSkip { module: self.cur_module.clone(), lifted, why: "it returns `impl Trait` (an opaque value the harness cannot compare: compared through its callers)".into() });
             return;
         }
-        // state parameters the harness does not drive yet (a byte-string
-        // iterator, `&mut` of a value, `Option<&mut Vec<T>>`, `&mut Vec<T>`)
+        // the state parameters of §19.10's table (`open::state_param`)
         let iters = open::byte_iter_params(&f.sig.generics);
-        if f.sig.inputs.iter().any(|i| matches!(i, syn::FnArg::Typed(pt) if state_kind(&pt.ty).is_none() && open::state_param(&pt.ty, &iters).is_some())) {
-            self.conform_skipped.push(ConformSkip { module: self.cur_module.clone(), lifted, why: "a state parameter the harness does not drive yet (`&mut` of a value, a byte-string iterator, `Vec` states)".into() });
-            return;
-        }
+        let state_pass = |t: &syn::Type| -> Option<ParamPass> {
+            if state_kind(t).is_some() {
+                return None;
+            }
+            let (st, _, marker) = open::state_param(t, &iters)?;
+            Some(if marker {
+                ParamPass::BytesIter
+            } else if matches!(t, syn::Type::Path(_)) {
+                ParamPass::OptVec
+            } else if matches!(&st, syn::Type::Path(p) if p.path.segments.last().is_some_and(|x| x.ident == "Seq")) {
+                ParamPass::VecMut
+            } else {
+                ParamPass::StateMut
+            })
+        };
         let params = f.sig.inputs.iter().map(|i| match i {
             syn::FnArg::Receiver(r) => match (&r.reference, r.mutability) {
                 (Some(_), Some(_)) => ParamPass::MutRef,
@@ -2058,6 +2143,7 @@ impl Ctx {
             syn::FnArg::Typed(pt) => match state_kind(&pt.ty).as_ref().and_then(type_name).as_deref() {
                 Some("__Buf") => ParamPass::Buf,
                 Some("__BufMut") => ParamPass::BufMut,
+                _ if state_pass(&pt.ty).is_some() => state_pass(&pt.ty).unwrap_or(ParamPass::StateMut),
                 _ if matches!(&*pt.ty, syn::Type::Reference(r) if r.mutability.is_some()) => ParamPass::MutRef,
                 _ if matches!(&*pt.ty, syn::Type::Reference(_)) => ParamPass::Ref,
                 _ => ParamPass::Value,
@@ -5121,4 +5207,30 @@ fn lit_usize(e: &syn::Expr) -> Option<(u64, String)> {
         syn::Expr::Group(g) => lit_usize(&g.expr),
         _ => None,
     }
+}
+
+/// `st` with the variables of `map` renamed (identifiers that are not a
+/// field, a method or a path segment after `.`/`::`), inside macro bodies
+/// too (`at_start! { .. }`).
+fn rename_vars(st: &syn::Stmt, map: &HashMap<String, String>) -> syn::Stmt {
+    fn walk(ts: proc_macro2::TokenStream, map: &HashMap<String, String>) -> proc_macro2::TokenStream {
+        let mut out = Vec::new();
+        let mut prev_sep = false;
+        for t in ts {
+            let sep = matches!(&t, proc_macro2::TokenTree::Punct(p) if p.as_char() == '.' || p.as_char() == ':');
+            let t2 = match t {
+                proc_macro2::TokenTree::Ident(i) if !prev_sep && map.contains_key(&i.to_string()) => proc_macro2::TokenTree::Ident(syn::Ident::new(&map[&i.to_string()], i.span())),
+                proc_macro2::TokenTree::Group(g) => {
+                    let mut g2 = proc_macro2::Group::new(g.delimiter(), walk(g.stream(), map));
+                    g2.set_span(g.span());
+                    proc_macro2::TokenTree::Group(g2)
+                }
+                other => other,
+            };
+            prev_sep = sep;
+            out.push(t2);
+        }
+        out.into_iter().collect()
+    }
+    syn::parse2(walk(st.to_token_stream(), map)).unwrap_or_else(|_| st.clone())
 }

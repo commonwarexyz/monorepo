@@ -53,6 +53,9 @@ pub struct Variant {
     pub name: String,
     pub discr: i128,
     pub fields: Vec<(String, Ty)>,
+    /// Dropping a value of this variant runs no code (the printer's
+    /// `(no-glue)`: no `Drop` impl of the type, no field with drop glue).
+    pub no_glue: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -87,7 +90,20 @@ pub enum Const {
     Agg(Ty, usize, Vec<Const>),
     /// A shared reference to a constant: the pointee.
     Ref(Box<Const>),
+    /// A named constant item: the self type of the impl defining it (`None`:
+    /// a free item), its name, and its value as rustc evaluated it.
+    Item(Option<Ty>, String, Box<Const>),
     Unsupported(String),
+}
+
+impl Const {
+    /// The value (a named constant item's value; other constants as they are).
+    pub fn value(&self) -> &Const {
+        match self {
+            Const::Item(_, _, v) => v.value(),
+            c => c,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -295,6 +311,7 @@ fn konst(e: &Sx) -> Result<Const, String> {
         }
         Some("zst") => Const::Zst(ty(&t[0])?),
         Some("const-ref") => Const::Ref(Box::new(konst(&t[0])?)),
+        Some("const-item") => Const::Item(if t[0].atom() == Some("none") { None } else { Some(ty(&t[0])?) }, t[1].str().ok_or_else(|| err("constant item", e))?.to_string(), Box::new(konst(&t[2])?)),
         Some("const-agg") => Const::Agg(ty(&t[0])?, t[1].num().ok_or_else(|| err("variant", e))? as usize, t[2..].iter().map(konst).collect::<Result<_, _>>()?),
         Some("bytes") => Const::Unsupported(format!("constant bytes of {}", t[0])),
         Some("unsupported") => Const::Unsupported(t.first().and_then(Sx::str).unwrap_or("?").to_string()),
@@ -403,7 +420,9 @@ fn item(e: &Sx) -> Result<Item, String> {
     Ok(match t.first().and_then(Sx::atom) {
         Some("fn") => Item::Fn(t[1].str().unwrap_or("").to_string()),
         Some("inherent") => Item::Inherent(ty(&t[1])?, t[2].str().unwrap_or("").to_string()),
-        Some("impl") => Item::Impl(ty(&t[1])?, t[2].str().unwrap_or("").to_string(), t[3].tail_all().iter().map(ty).collect::<Result<_, _>>()?, t[4].str().unwrap_or("").to_string()),
+        // a trait's provided method at a self type reads like that type's
+        // impl of the method (the lift names both `Self::m`)
+        Some("impl") | Some("provided") => Item::Impl(ty(&t[1])?, t[2].str().unwrap_or("").to_string(), t[3].tail_all().iter().map(ty).collect::<Result<_, _>>()?, t[4].str().unwrap_or("").to_string()),
         Some("closure") => Item::Closure,
         _ => Item::Shim,
     })
@@ -486,9 +505,13 @@ pub fn parse(text: &str) -> Result<Sbmir, String> {
                         Some("args") => d.args = x.tail().first().map(|a| a.tail_all().iter().map(ty).collect::<Result<Vec<_>, _>>()).transpose()?.unwrap_or_default(),
                         Some("variant") => {
                             let v = x.tail();
-                            let mut var = Variant { idx: v[0].num().unwrap_or(0) as usize, name: v[1].str().unwrap_or("").to_string(), discr: v[2].atom().and_then(|a| a.parse().ok()).unwrap_or(0), fields: vec![] };
+                            let mut var = Variant { idx: v[0].num().unwrap_or(0) as usize, name: v[1].str().unwrap_or("").to_string(), discr: v[2].atom().and_then(|a| a.parse().ok()).unwrap_or(0), fields: vec![], no_glue: false };
                             for f in &v[3..] {
-                                var.fields.push((f.tail()[0].str().unwrap_or("").to_string(), ty(&f.tail()[1])?));
+                                match f.head() {
+                                    Some("field") => var.fields.push((f.tail()[0].str().unwrap_or("").to_string(), ty(&f.tail()[1])?)),
+                                    Some("no-glue") => var.no_glue = true,
+                                    _ => return Err(err("variant", f)),
+                                }
                             }
                             d.variants.push(var);
                         }

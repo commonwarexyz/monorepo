@@ -6,11 +6,11 @@
 // are verified at the MMR (`mmr::Family`); at the MMB they stay unchecked
 // host code. Formatting, hashing and the codec impls (which delegate to
 // commonware-codec's varint) stay host code, listed.
-#[lift(in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_instances = "Family: crate::merkle::mmb::Family, Graftable: crate::merkle::mmb::Family", unverified_impls = "commonware_codec::Write, commonware_codec::EncodeSize, commonware_codec::Read")]
+#[lift(mir = "mmr.sbmir", in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_instances = "Family: crate::merkle::mmb::Family, Graftable: crate::merkle::mmb::Family", unverified_impls = "commonware_codec::Write, commonware_codec::EncodeSize, commonware_codec::Read")]
 #[path = "../../src/merkle/position.rs"]
 pub mod position;
 
-#[lift(in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_impls = "commonware_codec::Write, commonware_codec::EncodeSize, commonware_codec::Read, LocationRangeExt")]
+#[lift(mir = "mmr.sbmir", in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_impls = "commonware_codec::Write, commonware_codec::EncodeSize, commonware_codec::Read, LocationRangeExt")]
 #[path = "../../src/merkle/location.rs"]
 pub mod location;
 
@@ -19,7 +19,7 @@ pub mod location;
 // close their `checked_shl(..).expect(..)` and
 // `checked_add(..).and_then(..).expect(..)` chains (`leftmost_leaf`'s final
 // `expect` is what `position_to_location_is_complete` justifies).
-#[lift(in_place, children = "iterator", instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_fns = "Family::subtree_root_position, Family::leftmost_leaf")]
+#[lift(mir = "mmr.sbmir", in_place, children = "iterator", instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_fns = "Family::subtree_root_position, Family::leftmost_leaf")]
 #[path = "../../src/merkle/mmr/mod.rs"]
 pub mod mmr;
 

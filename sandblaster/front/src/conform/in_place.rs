@@ -137,6 +137,31 @@ impl Spell {
     }
 }
 
+/// `written` (a type) with every host model's DSL path replaced by the
+/// library type rustc's MIR has for it (`LiftFacts::mir_host_types`).
+fn real_paths(written: &str, host_types: &[(String, String, Option<String>)]) -> String {
+    let Ok(mut t) = syn::parse_str::<syn::Type>(written) else { return written.to_string() };
+    struct R<'a>(&'a [(String, String, Option<String>)]);
+    impl syn::visit_mut::VisitMut for R<'_> {
+        fn visit_type_mut(&mut self, t: &mut syn::Type) {
+            if let syn::Type::Path(p) = t
+                && p.qself.is_none()
+            {
+                let s = quote::ToTokens::to_token_stream(&p.path).to_string().replace(' ', "");
+                if let Some((_, r, _)) = self.0.iter().find(|(d, _, _)| *d == s)
+                    && let Ok(n) = syn::parse_str::<syn::Type>(r)
+                {
+                    *t = n;
+                    return;
+                }
+            }
+            syn::visit_mut::visit_type_mut(self, t);
+        }
+    }
+    syn::visit_mut::VisitMut::visit_type_mut(&mut R(host_types), &mut t);
+    quote::ToTokens::to_token_stream(&t).to_string().replace(' ', "")
+}
+
 /// The module path of a host source file (relative to `src/`):
 /// `a/b.rs` and `a/b/mod.rs` are `a::b`, `lib.rs` the crate root.
 fn module_segments(rel: &Path) -> Option<Vec<String>> {
@@ -214,6 +239,9 @@ fn instance_args(text: &str, inst: &[(String, String)], out: &mut Vec<(String, V
         match item {
             syn::Item::Struct(s) => visit(Some(&s.ident), &s.generics, params),
             syn::Item::Enum(e) => visit(Some(&e.ident), &e.generics, params),
+            // a trait generic over an open trait (`Hasher<F: Family>`):
+            // `<S as Hasher>::m` is called at the instance (`Hasher<mmr::Family>`)
+            syn::Item::Trait(t) => visit(Some(&t.ident), &t.generics, params),
             syn::Item::Impl(i) => visit(None, &i.generics, params),
             syn::Item::Fn(f) => visit(None, &f.sig.generics, params),
             _ => {}
@@ -284,6 +312,14 @@ impl Gen<'_> {
         if path == "crate::__lift::Ordering" {
             return Some(Ok(("::core::cmp::Ordering".into(), "::core::cmp::Ordering".into())));
         }
+        // the lift prelude's `Range<T>` is core's (its `start`/`end` fields, §19.10)
+        if path == "crate::__lift::Range" {
+            let targs = match args.iter().map(|a| self.rust_ty(a)).collect::<Result<Vec<_>, _>>() {
+                Ok(a) => a,
+                Err(e) => return Some(Err(e)),
+            };
+            return Some(Ok((format!("::core::ops::Range<{}>", targs.join(", ")), format!("::core::ops::Range::<{}>", targs.join(", ")))));
+        }
         let module = path.strip_prefix("crate::")?.rsplit_once("::").map(|(m, _)| m.to_string()).unwrap_or_default();
         let generic = |host: &str| -> Result<(String, String), String> {
             let targs: Vec<String> = match ip.type_args.get(host) {
@@ -328,6 +364,23 @@ impl Gen<'_> {
             }
         }
         ip.common()
+    }
+
+    /// The harness's conversion `__cv` (an in-place harness with library
+    /// newtypes of host models, [`newtype_code`]): an argument of a type
+    /// holding an array is passed through it (the identity, or the newtype's
+    /// constructor where the original takes the library type).
+    pub(super) fn ip_cv(&self, t: &Ty) -> Option<String> {
+        let ip = self.ip.as_ref()?;
+        fn has_array(t: &Ty) -> bool {
+            match t {
+                Ty::Array(..) => true,
+                Ty::Ref(x) | Ty::Option(x) | Ty::Seq(x) | Ty::Slice(x) => has_array(x),
+                Ty::Tuple(ts) => ts.iter().any(has_array),
+                _ => false,
+            }
+        }
+        (has_array(t) && self.c.lift_facts.mir_host_types.iter().any(|x| x.2.is_some())).then(|| format!("{}::__cv", ip.common()))
     }
 
     /// Whether `t` is the lift prelude's `PhantomData`.
@@ -448,6 +501,17 @@ pub fn check_in_place(out: &elab::Output, krate: &Crate, c: &Checked, infos: &[&
             }
         }
     }
+    // a host model's path is the library type rustc's MIR has for it
+    // (`crate::merkle::host::Sha256` → `::commonware_cryptography::Sha256`)
+    let host_types = &c.lift_facts.mir_host_types;
+    for (_, a) in targs.iter_mut() {
+        for x in a.iter_mut() {
+            *x = real_paths(x, host_types);
+        }
+    }
+    for v in ip.params.values_mut() {
+        *v = real_paths(v, host_types);
+    }
     ip.type_args = targs.into_iter().collect();
     // the entries
     let names: HashSet<&str> = infos.iter().map(|i| i.name.as_str()).collect();
@@ -534,7 +598,68 @@ pub fn check_in_place(out: &elab::Output, krate: &Crate, c: &Checked, infos: &[&
     rep
 }
 
+/// The harness code of the library newtypes rustc's MIR has for host
+/// models read as their field (`LiftFacts::mir_host_types`: SHA-256's
+/// `Digest([u8; 32])` for `host::Digest = [u8; 32]`): `__cv`, the identity
+/// or the newtype's constructor (the original takes the library type where
+/// the lifted function takes the field's), and each newtype's writer (its
+/// field's).
+fn newtype_code(g: &Gen<'_>) -> String {
+    let news: Vec<&(String, String, Option<String>)> = g.c.lift_facts.mir_host_types.iter().filter(|t| t.2.is_some()).collect();
+    if news.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("    pub trait __Cv<A> { fn cv(a: A) -> Self; }
+    impl<A> __Cv<A> for A { fn cv(a: A) -> A { a } }
+    pub fn __cv<A, B: __Cv<A>>(a: A) -> B { B::cv(a) }
+");
+    for (dsl, rust, field) in news {
+        let Some(id) = g.krate.items.iter().find(|i| i.path.to_string() == *dsl).map(|i| i.id) else { continue };
+        let ItemKind::TypeAlias(ta) = &g.krate.item(id).kind else { continue };
+        let Ok(ft) = g.rust_ty(&ta.ty) else { continue };
+        let f = field.clone().unwrap_or_default();
+        let (build, get) = if f.chars().all(|c| c.is_ascii_digit()) { (format!("{rust}(a)"), format!("self.{f}")) } else { (format!("{rust} {{ {f}: a }}"), format!("self.{f}")) };
+        s.push_str(&format!("    impl __Cv<{ft}> for {rust} {{ fn cv(a: {ft}) -> Self {{ {build} }} }}
+    impl __W for {rust} {{ fn w(&self, o: &mut ::std::string::String) {{ __W::w(&{get}, o); }} }}
+"));
+    }
+    s
+}
+
 /// Every file under `dir` (relative path, bytes), sorted.
+/// The host file `text` with each **lowered declaration** (`mod m {
+/// include!(concat!(env!("OUT_DIR"), "/<copy>")); }`,
+/// `lift::open::lowered_include`) made `mod m;` (`None`: it has none). The
+/// lift reads that declaration as `mod m;` and verifies `m`'s own file; the
+/// harness compiles what the lift read (the copy is the build's, checked by
+/// the lifted round trip, and the harness has no build script).
+fn read_lowered_as_plain(text: &str) -> Option<String> {
+    fn walk(items: &[syn::Item], out: &mut Vec<std::ops::Range<usize>>) {
+        for it in items {
+            if let syn::Item::Mod(m) = it
+                && let Some((brace, inner)) = &m.content
+            {
+                if matches!(crate::lift::open::lowered_include(m), Some(Ok(_))) {
+                    out.push(brace.span.join().byte_range());
+                } else {
+                    walk(inner, out);
+                }
+            }
+        }
+    }
+    let f = syn::parse_file(text).ok()?;
+    let mut ranges = Vec::new();
+    walk(&f.items, &mut ranges);
+    if ranges.is_empty() {
+        return None;
+    }
+    let mut t = text.to_string();
+    for r in ranges.into_iter().rev() {
+        t.replace_range(r, ";");
+    }
+    Some(t)
+}
+
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) -> Result<(), String> {
     let mut ents: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?.filter_map(Result::ok).collect();
     ents.sort_by_key(|e| e.file_name());
@@ -714,6 +839,7 @@ fn harness_in_place(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], files: &[(V
     let prelude = PRELUDE.replace("    impl __W for ::bytes::TryGetError {\n        fn w(&self, o: &mut ::std::string::String) { o.push_str(\"null\"); }\n    }\n", "");
     let mut shared = format!("\n#[doc(hidden)]\n#[allow(warnings, missing_docs, clippy::all)]\npub mod {COMMON} {{{prelude}");
     shared.push_str("    impl<A: ?Sized> __W for ::core::marker::PhantomData<A> {\n        fn w(&self, o: &mut ::std::string::String) { o.push_str(\"null\"); }\n    }\n");
+    shared.push_str(&newtype_code(g));
     shared.push_str(code.get(&common).map(String::as_str).unwrap_or(""));
     shared.push_str(&format!(
         r#"    pub fn run() {{
@@ -770,6 +896,11 @@ pub use self::{COMMON}::run as {RUN};
     for i in (0..ip.lca.len()).rev() {
         let parent = &ip.lca[..i];
         append(parent, &format!("\n#[doc(hidden)]\n#[allow(warnings, missing_docs, clippy::all)]\npub use self::{}::{RUN};\n", ip.lca[i]))?;
+    }
+    for (_, bytes) in &mut texts {
+        if let Some(t) = std::str::from_utf8(bytes).ok().and_then(read_lowered_as_plain) {
+            *bytes = t.into_bytes();
+        }
     }
     for (rel, bytes) in &texts {
         let p = src.join(rel);
@@ -841,6 +972,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_lowered_declaration_is_compiled_as_the_file_the_lift_read() {
+        let text = "pub mod a;\n#[cfg(rust_analyzer)]\npub mod it;\n#[cfg(not(rust_analyzer))]\npub mod it {\n    //! docs\n    include!(concat!(env!(\"OUT_DIR\"), \"/m-lowered__x__it.rs\"));\n}\npub fn f() {}\n";
+        assert_eq!(read_lowered_as_plain(text).as_deref(), Some("pub mod a;\n#[cfg(rust_analyzer)]\npub mod it;\n#[cfg(not(rust_analyzer))]\npub mod it ;\npub fn f() {}\n"));
+        // negative twins: a file without one is left alone, and so is an
+        // inline module that includes anything but a lowered copy
+        assert_eq!(read_lowered_as_plain("pub mod a;\nmod b { fn g() {} }\n"), None);
+        assert_eq!(read_lowered_as_plain("mod b { include!(\"x.rs\"); }\n"), None);
+    }
+
+    #[test]
     fn module_paths_of_host_files() {
         let s = |p: &str| module_segments(Path::new(p)).map(|v| v.join("::"));
         assert_eq!(s("lib.rs"), Some(String::new()));
@@ -883,5 +1024,34 @@ mod tests {
         assert_eq!(ip.subst("TryFrom<Position>"), "TryFrom<Position<crate::mmr::Family>>");
         assert_eq!(ip.subst("Position<u8>"), "Position<u8>");
         assert_eq!(ip.subst("Other"), "Other");
+    }
+
+    #[test]
+    fn a_trait_generic_over_an_open_trait_gets_its_instance() {
+        let inst = vec![("crate::merkle::Family".to_string(), "crate::merkle::mmr::Family".to_string())];
+        let mut out = Vec::new();
+        instance_args("pub trait Hasher<F: Family>: Clone { fn h(&self); }\npub trait Plain { fn p(&self); }\n", &inst, &mut out, &mut HashMap::new());
+        assert_eq!(out, vec![("Hasher".to_string(), vec!["crate::merkle::mmr::Family".to_string()])]);
+    }
+
+    #[test]
+    fn host_models_are_spelled_as_the_library_types_mir_has_for_them() {
+        let map = vec![("crate::merkle::host::Sha256".to_string(), "::commonware_cryptography::Sha256".to_string(), None), ("crate::merkle::host::Digest".to_string(), "::commonware_cryptography::sha256::Digest".to_string(), Some("0".to_string()))];
+        assert_eq!(real_paths("crate::merkle::hasher::Standard<crate::merkle::host::Sha256>", &map), "crate::merkle::hasher::Standard<::commonware_cryptography::Sha256>");
+        assert_eq!(real_paths("crate::merkle::host::Digest", &map), "::commonware_cryptography::sha256::Digest");
+        // negative twins: another path, or one that only starts like a model's, stays
+        assert_eq!(real_paths("crate::merkle::host::Sha256x", &map), "crate::merkle::host::Sha256x");
+        assert_eq!(real_paths("crate::merkle::Bagging", &map), "crate::merkle::Bagging");
+    }
+
+    #[test]
+    fn arguments_holding_arrays_are_converted_element_by_element() {
+        let d = Ty::Array(Box::new(Ty::Uint(UintTy::U8)), 32);
+        assert_eq!(cv_expr("cv", &d, "a"), "cv(a)");
+        let pair = Ty::Tuple(vec![Ty::Uint(UintTy::U64), d.clone()]);
+        assert_eq!(cv_expr("cv", &Ty::Option(Box::new(Ty::Seq(Box::new(pair)))), "a"), "a.map(|x| x.into_iter().map(|x| { let (x0, x1,) = x; (x0, cv(x1),) }).collect::<::std::vec::Vec<_>>())");
+        assert_eq!(cv_expr("cv", &Ty::Ref(Box::new(Ty::Slice(Box::new(d)))), "a"), "a.into_iter().map(|x| cv(x)).collect::<::std::vec::Vec<_>>()");
+        // negative twin: a value without arrays is passed as it is
+        assert_eq!(cv_expr("cv", &Ty::Seq(Box::new(Ty::Uint(UintTy::U8))), "a"), "a");
     }
 }

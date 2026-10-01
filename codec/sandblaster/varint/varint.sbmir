@@ -105,135 +105,135 @@
 (note "<commonware_codec::varint::UInt<U> as std::hash::Hash>::hash: not extracted: an impl of `Hash` (SBMIR_SKIP_TRAITS)")
 (note "<commonware_codec::varint::Decoder<U> as std::fmt::Debug>::fmt: not extracted: an impl of `Debug` (SBMIR_SKIP_TRAITS)")
 (adt-def "bytes::TryGetError" (path "bytes::TryGetError") (kind struct) (args ())
-  (variant 0 "TryGetError" 0 (field "requested" usize) (field "available" usize)))
+  (variant 0 "TryGetError" 0 (field "requested" usize) (field "available" usize) (no-glue)))
 (adt-def "error::Error" (path "commonware_codec::error::Error") (kind enum) (args ())
-  (variant 0 "EndOfBuffer" 0)
-  (variant 1 "ExtraData" 1 (field "0" usize))
-  (variant 2 "InvalidVarint" 2 (field "0" usize))
-  (variant 3 "InvalidUsize" 3)
-  (variant 4 "InvalidBool" 4)
-  (variant 5 "InvalidEnum" 5 (field "0" u8))
-  (variant 6 "InvalidLength" 6 (field "0" usize))
-  (variant 7 "Invalid" 7 (field "0" (ref shared str)) (field "1" (ref shared str)))
+  (variant 0 "EndOfBuffer" 0 (no-glue))
+  (variant 1 "ExtraData" 1 (field "0" usize) (no-glue))
+  (variant 2 "InvalidVarint" 2 (field "0" usize) (no-glue))
+  (variant 3 "InvalidUsize" 3 (no-glue))
+  (variant 4 "InvalidBool" 4 (no-glue))
+  (variant 5 "InvalidEnum" 5 (field "0" u8) (no-glue))
+  (variant 6 "InvalidLength" 6 (field "0" usize) (no-glue))
+  (variant 7 "Invalid" 7 (field "0" (ref shared str)) (field "1" (ref shared str)) (no-glue))
   (variant 8 "Wrapped" 8 (field "0" (ref shared str)) (field "1" (adt "std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>"))))
 (adt-def "std::ops::ControlFlow<std::result::Result<std::convert::Infallible, error::Error>, std::option::Option<u16>>" (path "std::ops::ControlFlow") (kind enum) (args ((adt "std::result::Result<std::convert::Infallible, error::Error>") (adt "std::option::Option<u16>")))
-  (variant 0 "Continue" 0 (field "0" (adt "std::option::Option<u16>")))
+  (variant 0 "Continue" 0 (field "0" (adt "std::option::Option<u16>")) (no-glue))
   (variant 1 "Break" 1 (field "0" (adt "std::result::Result<std::convert::Infallible, error::Error>"))))
 (adt-def "std::ops::ControlFlow<std::result::Result<std::convert::Infallible, error::Error>, std::option::Option<u32>>" (path "std::ops::ControlFlow") (kind enum) (args ((adt "std::result::Result<std::convert::Infallible, error::Error>") (adt "std::option::Option<u32>")))
-  (variant 0 "Continue" 0 (field "0" (adt "std::option::Option<u32>")))
+  (variant 0 "Continue" 0 (field "0" (adt "std::option::Option<u32>")) (no-glue))
   (variant 1 "Break" 1 (field "0" (adt "std::result::Result<std::convert::Infallible, error::Error>"))))
 (adt-def "std::ops::ControlFlow<std::result::Result<std::convert::Infallible, error::Error>, std::option::Option<u64>>" (path "std::ops::ControlFlow") (kind enum) (args ((adt "std::result::Result<std::convert::Infallible, error::Error>") (adt "std::option::Option<u64>")))
-  (variant 0 "Continue" 0 (field "0" (adt "std::option::Option<u64>")))
+  (variant 0 "Continue" 0 (field "0" (adt "std::option::Option<u64>")) (no-glue))
   (variant 1 "Break" 1 (field "0" (adt "std::result::Result<std::convert::Infallible, error::Error>"))))
 (adt-def "std::ops::ControlFlow<std::result::Result<std::convert::Infallible, error::Error>, u16>" (path "std::ops::ControlFlow") (kind enum) (args ((adt "std::result::Result<std::convert::Infallible, error::Error>") u16))
-  (variant 0 "Continue" 0 (field "0" u16))
+  (variant 0 "Continue" 0 (field "0" u16) (no-glue))
   (variant 1 "Break" 1 (field "0" (adt "std::result::Result<std::convert::Infallible, error::Error>"))))
 (adt-def "std::ops::ControlFlow<std::result::Result<std::convert::Infallible, error::Error>, u32>" (path "std::ops::ControlFlow") (kind enum) (args ((adt "std::result::Result<std::convert::Infallible, error::Error>") u32))
-  (variant 0 "Continue" 0 (field "0" u32))
+  (variant 0 "Continue" 0 (field "0" u32) (no-glue))
   (variant 1 "Break" 1 (field "0" (adt "std::result::Result<std::convert::Infallible, error::Error>"))))
 (adt-def "std::ops::ControlFlow<std::result::Result<std::convert::Infallible, error::Error>, u64>" (path "std::ops::ControlFlow") (kind enum) (args ((adt "std::result::Result<std::convert::Infallible, error::Error>") u64))
-  (variant 0 "Continue" 0 (field "0" u64))
+  (variant 0 "Continue" 0 (field "0" u64) (no-glue))
   (variant 1 "Break" 1 (field "0" (adt "std::result::Result<std::convert::Infallible, error::Error>"))))
 (adt-def "std::ops::ControlFlow<std::result::Result<std::convert::Infallible, error::Error>, u8>" (path "std::ops::ControlFlow") (kind enum) (args ((adt "std::result::Result<std::convert::Infallible, error::Error>") u8))
-  (variant 0 "Continue" 0 (field "0" u8))
+  (variant 0 "Continue" 0 (field "0" u8) (no-glue))
   (variant 1 "Break" 1 (field "0" (adt "std::result::Result<std::convert::Infallible, error::Error>"))))
 (adt-def "std::ops::RangeToInclusive<usize>" (path "std::ops::RangeToInclusive") (kind struct) (args (usize))
-  (variant 0 "RangeToInclusive" 0 (field "end" usize)))
+  (variant 0 "RangeToInclusive" 0 (field "end" usize) (no-glue)))
 (adt-def "std::option::Option<u16>" (path "std::option::Option") (kind enum) (args (u16))
-  (variant 0 "None" 0)
-  (variant 1 "Some" 1 (field "0" u16)))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" u16) (no-glue)))
 (adt-def "std::option::Option<u32>" (path "std::option::Option") (kind enum) (args (u32))
-  (variant 0 "None" 0)
-  (variant 1 "Some" 1 (field "0" u32)))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" u32) (no-glue)))
 (adt-def "std::option::Option<u64>" (path "std::option::Option") (kind enum) (args (u64))
-  (variant 0 "None" 0)
-  (variant 1 "Some" 1 (field "0" u64)))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" u64) (no-glue)))
 (adt-def "std::option::Option<usize>" (path "std::option::Option") (kind enum) (args (usize))
-  (variant 0 "None" 0)
-  (variant 1 "Some" 1 (field "0" usize)))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" usize) (no-glue)))
 (adt-def "std::result::Result<i16, error::Error>" (path "std::result::Result") (kind enum) (args (i16 (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" i16))
+  (variant 0 "Ok" 0 (field "0" i16) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<i32, error::Error>" (path "std::result::Result") (kind enum) (args (i32 (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" i32))
+  (variant 0 "Ok" 0 (field "0" i32) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<i64, error::Error>" (path "std::result::Result") (kind enum) (args (i64 (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" i64))
+  (variant 0 "Ok" 0 (field "0" i64) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<std::convert::Infallible, error::Error>" (path "std::result::Result") (kind enum) (args ((adt "std::convert::Infallible") (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" (adt "std::convert::Infallible")))
+  (variant 0 "Ok" 0 (field "0" (adt "std::convert::Infallible")) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<std::option::Option<u16>, error::Error>" (path "std::result::Result") (kind enum) (args ((adt "std::option::Option<u16>") (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" (adt "std::option::Option<u16>")))
+  (variant 0 "Ok" 0 (field "0" (adt "std::option::Option<u16>")) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<std::option::Option<u32>, error::Error>" (path "std::result::Result") (kind enum) (args ((adt "std::option::Option<u32>") (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" (adt "std::option::Option<u32>")))
+  (variant 0 "Ok" 0 (field "0" (adt "std::option::Option<u32>")) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<std::option::Option<u64>, error::Error>" (path "std::result::Result") (kind enum) (args ((adt "std::option::Option<u64>") (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" (adt "std::option::Option<u64>")))
+  (variant 0 "Ok" 0 (field "0" (adt "std::option::Option<u64>")) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<u16, error::Error>" (path "std::result::Result") (kind enum) (args (u16 (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" u16))
+  (variant 0 "Ok" 0 (field "0" u16) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<u32, error::Error>" (path "std::result::Result") (kind enum) (args (u32 (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" u32))
+  (variant 0 "Ok" 0 (field "0" u32) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<u64, error::Error>" (path "std::result::Result") (kind enum) (args (u64 (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" u64))
+  (variant 0 "Ok" 0 (field "0" u64) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<u8, bytes::TryGetError>" (path "std::result::Result") (kind enum) (args (u8 (adt "bytes::TryGetError")))
-  (variant 0 "Ok" 0 (field "0" u8))
-  (variant 1 "Err" 1 (field "0" (adt "bytes::TryGetError"))))
+  (variant 0 "Ok" 0 (field "0" u8) (no-glue))
+  (variant 1 "Err" 1 (field "0" (adt "bytes::TryGetError")) (no-glue)))
 (adt-def "std::result::Result<u8, error::Error>" (path "std::result::Result") (kind enum) (args (u8 (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" u8))
+  (variant 0 "Ok" 0 (field "0" u8) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<varint::SInt<i16>, error::Error>" (path "std::result::Result") (kind enum) (args ((adt "varint::SInt<i16>") (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" (adt "varint::SInt<i16>")))
+  (variant 0 "Ok" 0 (field "0" (adt "varint::SInt<i16>")) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<varint::SInt<i32>, error::Error>" (path "std::result::Result") (kind enum) (args ((adt "varint::SInt<i32>") (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" (adt "varint::SInt<i32>")))
+  (variant 0 "Ok" 0 (field "0" (adt "varint::SInt<i32>")) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<varint::SInt<i64>, error::Error>" (path "std::result::Result") (kind enum) (args ((adt "varint::SInt<i64>") (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" (adt "varint::SInt<i64>")))
+  (variant 0 "Ok" 0 (field "0" (adt "varint::SInt<i64>")) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<varint::UInt<u16>, error::Error>" (path "std::result::Result") (kind enum) (args ((adt "varint::UInt<u16>") (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" (adt "varint::UInt<u16>")))
+  (variant 0 "Ok" 0 (field "0" (adt "varint::UInt<u16>")) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<varint::UInt<u32>, error::Error>" (path "std::result::Result") (kind enum) (args ((adt "varint::UInt<u32>") (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" (adt "varint::UInt<u32>")))
+  (variant 0 "Ok" 0 (field "0" (adt "varint::UInt<u32>")) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "std::result::Result<varint::UInt<u64>, error::Error>" (path "std::result::Result") (kind enum) (args ((adt "varint::UInt<u64>") (adt "error::Error")))
-  (variant 0 "Ok" 0 (field "0" (adt "varint::UInt<u64>")))
+  (variant 0 "Ok" 0 (field "0" (adt "varint::UInt<u64>")) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "error::Error"))))
 (adt-def "varint::Decoder<u16>" (path "commonware_codec::varint::Decoder") (kind struct) (args (u16))
-  (variant 0 "Decoder" 0 (field "result" u16) (field "bits_read" usize)))
+  (variant 0 "Decoder" 0 (field "result" u16) (field "bits_read" usize) (no-glue)))
 (adt-def "varint::Decoder<u32>" (path "commonware_codec::varint::Decoder") (kind struct) (args (u32))
-  (variant 0 "Decoder" 0 (field "result" u32) (field "bits_read" usize)))
+  (variant 0 "Decoder" 0 (field "result" u32) (field "bits_read" usize) (no-glue)))
 (adt-def "varint::Decoder<u64>" (path "commonware_codec::varint::Decoder") (kind struct) (args (u64))
-  (variant 0 "Decoder" 0 (field "result" u64) (field "bits_read" usize)))
+  (variant 0 "Decoder" 0 (field "result" u64) (field "bits_read" usize) (no-glue)))
 (adt-def "varint::SInt<i16>" (path "commonware_codec::varint::SInt") (kind struct) (args (i16))
-  (variant 0 "SInt" 0 (field "0" i16)))
+  (variant 0 "SInt" 0 (field "0" i16) (no-glue)))
 (adt-def "varint::SInt<i32>" (path "commonware_codec::varint::SInt") (kind struct) (args (i32))
-  (variant 0 "SInt" 0 (field "0" i32)))
+  (variant 0 "SInt" 0 (field "0" i32) (no-glue)))
 (adt-def "varint::SInt<i64>" (path "commonware_codec::varint::SInt") (kind struct) (args (i64))
-  (variant 0 "SInt" 0 (field "0" i64)))
+  (variant 0 "SInt" 0 (field "0" i64) (no-glue)))
 (adt-def "varint::UInt<u16>" (path "commonware_codec::varint::UInt") (kind struct) (args (u16))
-  (variant 0 "UInt" 0 (field "0" u16)))
+  (variant 0 "UInt" 0 (field "0" u16) (no-glue)))
 (adt-def "varint::UInt<u32>" (path "commonware_codec::varint::UInt") (kind struct) (args (u32))
-  (variant 0 "UInt" 0 (field "0" u32)))
+  (variant 0 "UInt" 0 (field "0" u32) (no-glue)))
 (adt-def "varint::UInt<u64>" (path "commonware_codec::varint::UInt") (kind struct) (args (u64))
-  (variant 0 "UInt" 0 (field "0" u64)))
+  (variant 0 "UInt" 0 (field "0" u64) (no-glue)))
 (adt-def "std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>" (path "std::boxed::Box") (kind struct) (args ((unsupported "type Dynamic([Binder { value: Trait(ExistentialTraitRef { def_id: TraitDef(DefId { id: 528, name: \"std::error::Error\" }), generic_args: GenericArgs([]) }), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 529, name: \"std::marker::Sync\" })), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 530, name: \"std::marker::Send\" })), bound_vars: [] }], Region { kind: ReErased })") (adt "std::alloc::Global")))
   (variant 0 "Box" 0 (field "0" (adt "std::ptr::Unique<dyn std::error::Error + std::marker::Send + std::marker::Sync>")) (field "1" (adt "std::alloc::Global"))))
 (adt-def "std::convert::Infallible" (path "std::convert::Infallible") (kind enum) (args ()))
 (adt-def "std::alloc::Global" (path "std::alloc::Global") (kind struct) (args ())
-  (variant 0 "Global" 0))
+  (variant 0 "Global" 0 (no-glue)))
 (adt-def "std::ptr::Unique<dyn std::error::Error + std::marker::Send + std::marker::Sync>" (path "std::ptr::Unique") (kind struct) (args ((unsupported "type Dynamic([Binder { value: Trait(ExistentialTraitRef { def_id: TraitDef(DefId { id: 528, name: \"std::error::Error\" }), generic_args: GenericArgs([]) }), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 529, name: \"std::marker::Sync\" })), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 530, name: \"std::marker::Send\" })), bound_vars: [] }], Region { kind: ReErased })")))
-  (variant 0 "Unique" 0 (field "pointer" (adt "std::ptr::NonNull<dyn std::error::Error + std::marker::Send + std::marker::Sync>")) (field "_marker" (adt "std::marker::PhantomData<dyn std::error::Error + std::marker::Send + std::marker::Sync>"))))
+  (variant 0 "Unique" 0 (field "pointer" (adt "std::ptr::NonNull<dyn std::error::Error + std::marker::Send + std::marker::Sync>")) (field "_marker" (adt "std::marker::PhantomData<dyn std::error::Error + std::marker::Send + std::marker::Sync>")) (no-glue)))
 (adt-def "std::marker::PhantomData<dyn std::error::Error + std::marker::Send + std::marker::Sync>" (path "std::marker::PhantomData") (kind struct) (args ((unsupported "type Dynamic([Binder { value: Trait(ExistentialTraitRef { def_id: TraitDef(DefId { id: 528, name: \"std::error::Error\" }), generic_args: GenericArgs([]) }), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 529, name: \"std::marker::Sync\" })), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 530, name: \"std::marker::Send\" })), bound_vars: [] }], Region { kind: ReErased })")))
-  (variant 0 "PhantomData" 0))
+  (variant 0 "PhantomData" 0 (no-glue)))
 (adt-def "std::ptr::NonNull<dyn std::error::Error + std::marker::Send + std::marker::Sync>" (path "std::ptr::NonNull") (kind struct) (args ((unsupported "type Dynamic([Binder { value: Trait(ExistentialTraitRef { def_id: TraitDef(DefId { id: 528, name: \"std::error::Error\" }), generic_args: GenericArgs([]) }), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 529, name: \"std::marker::Sync\" })), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 530, name: \"std::marker::Send\" })), bound_vars: [] }], Region { kind: ReErased })")))
-  (variant 0 "NonNull" 0 (field "pointer" (unsupported "type Pat(Ty { id: 389, kind: RigidTy(RawPtr(Ty { id: 383, kind: RigidTy(Dynamic([Binder { value: Trait(ExistentialTraitRef { def_id: TraitDef(DefId { id: 528, name: \"std::error::Error\" }), generic_args: GenericArgs([]) }), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 529, name: \"std::marker::Sync\" })), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 530, name: \"std::marker::Send\" })), bound_vars: [] }], Region { kind: ReErased })) }, Not)) }, NotNull)"))))
+  (variant 0 "NonNull" 0 (field "pointer" (unsupported "type Pat(Ty { id: 389, kind: RigidTy(RawPtr(Ty { id: 383, kind: RigidTy(Dynamic([Binder { value: Trait(ExistentialTraitRef { def_id: TraitDef(DefId { id: 528, name: \"std::error::Error\" }), generic_args: GenericArgs([]) }), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 529, name: \"std::marker::Sync\" })), bound_vars: [] }, Binder { value: AutoTrait(TraitDef(DefId { id: 530, name: \"std::marker::Send\" })), bound_vars: [] }], Region { kind: ReErased })) }, Not)) }, NotNull)")) (no-glue)))
 (fn "<commonware_codec::varint::Decoder<u16> as std::default::Default>::default"
   (kind root) (def "<commonware_codec::varint::Decoder<U> as std::default::Default>::default") (args (u16))
   (item impl (adt "varint::Decoder<u16>") "Default" () "default")
@@ -355,7 +355,7 @@
   (debug "remaining_bits" (p 9))
   (debug "relevant_bits" (p 13))
   (bb 0
-    (assign (p 4) (checked mul (int usize 2) (int usize 8)) (at "sandblaster/varint/varint.rs" 119 24))
+    (assign (p 4) (checked mul (const-item u16 "SIZE" (int usize 2)) (const-item none "BITS_PER_BYTE" (int usize 8))) (at "sandblaster/varint/varint.rs" 119 24))
     (assert (move (p 4 (field 1 bool))) false overflow 1 (at "sandblaster/varint/varint.rs" 119 24)))
   (bb 1
     (assign (p 3) (use (move (p 4 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 119 24))
@@ -366,7 +366,7 @@
     (assign (p 6) (bin gt (move (p 7)) (int usize 0)) (at "sandblaster/varint/varint.rs" 125 25))
     (switch (move (p 6)) (0 4) (otherwise 3) (at "sandblaster/varint/varint.rs" 125 25)))
   (bb 3
-    (assign (p 8) (agg (adt (adt "error::Error") 2) (int usize 2)) (at "sandblaster/varint/varint.rs" 126 24))
+    (assign (p 8) (agg (adt (adt "error::Error") 2) (const-item u16 "SIZE" (int usize 2))) (at "sandblaster/varint/varint.rs" 126 24))
     (assign (p 0) (agg (adt (adt "std::result::Result<std::option::Option<u16>, error::Error>") 1) (move (p 8))) (at "sandblaster/varint/varint.rs" 126 20))
     (goto 18))
   (bb 4
@@ -375,25 +375,25 @@
   (bb 5
     (call (fn "std::option::Option::<usize>::unwrap") (args (move (p 10))) (p 9) 6 (at "sandblaster/varint/varint.rs" 136 30)))
   (bb 6
-    (assign (p 12) (bin le (copy (p 9)) (int usize 7)) (at "sandblaster/varint/varint.rs" 137 12))
+    (assign (p 12) (bin le (copy (p 9)) (const-item none "DATA_BITS_PER_BYTE" (int usize 7))) (at "sandblaster/varint/varint.rs" 137 12))
     (switch (move (p 12)) (0 11) (otherwise 7) (at "sandblaster/varint/varint.rs" 137 12)))
   (bb 7
     (call (fn "core::num::<impl u8>::leading_zeros") (args (copy (p 2))) (p 15) 8 (at "sandblaster/varint/varint.rs" 138 49)))
   (bb 8
     (assign (p 14) (cast int-to-int (move (p 15)) usize) (at "sandblaster/varint/varint.rs" 138 49))
-    (assign (p 16) (checked sub (int usize 8) (copy (p 14))) (at "sandblaster/varint/varint.rs" 138 33))
+    (assign (p 16) (checked sub (const-item none "BITS_PER_BYTE" (int usize 8)) (copy (p 14))) (at "sandblaster/varint/varint.rs" 138 33))
     (assert (move (p 16 (field 1 bool))) false overflow 9 (at "sandblaster/varint/varint.rs" 138 33)))
   (bb 9
     (assign (p 13) (use (move (p 16 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 138 33))
     (assign (p 17) (bin gt (copy (p 13)) (copy (p 9))) (at "sandblaster/varint/varint.rs" 139 16))
     (switch (move (p 17)) (0 11) (otherwise 10) (at "sandblaster/varint/varint.rs" 139 16)))
   (bb 10
-    (assign (p 18) (agg (adt (adt "error::Error") 2) (int usize 2)) (at "sandblaster/varint/varint.rs" 140 28))
+    (assign (p 18) (agg (adt (adt "error::Error") 2) (const-item u16 "SIZE" (int usize 2))) (at "sandblaster/varint/varint.rs" 140 28))
     (assign (p 0) (agg (adt (adt "std::result::Result<std::option::Option<u16>, error::Error>") 1) (move (p 18))) (at "sandblaster/varint/varint.rs" 140 24))
     (goto 18))
   (bb 11
     (assign (p 20) (ref mut (p 1 deref (field 0 u16))) (at "sandblaster/varint/varint.rs" 145 9))
-    (assign (p 23) (bin and (copy (p 2)) (int u8 127)) (at "sandblaster/varint/varint.rs" 145 32))
+    (assign (p 23) (bin and (copy (p 2)) (const-item none "DATA_BITS_MASK" (int u8 127))) (at "sandblaster/varint/varint.rs" 145 32))
     (call (fn "std::convert::num::<impl std::convert::From<u8> for u16>::from") (args (move (p 23))) (p 22) 12 (at "sandblaster/varint/varint.rs" 145 24)))
   (bb 12
     (assign (p 24) (use (copy (p 1 deref (field 1 usize)))) (at "sandblaster/varint/varint.rs" 145 58))
@@ -401,7 +401,7 @@
   (bb 13
     (call (fn "<u16 as std::ops::BitOrAssign>::bitor_assign") (args (move (p 20)) (move (p 21))) (p 19) 14 (at "sandblaster/varint/varint.rs" 145 9)))
   (bb 14
-    (assign (p 26) (bin and (copy (p 2)) (int u8 128)) (at "sandblaster/varint/varint.rs" 148 12))
+    (assign (p 26) (bin and (copy (p 2)) (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (at "sandblaster/varint/varint.rs" 148 12))
     (assign (p 25) (bin eq (move (p 26)) (int u8 0)) (at "sandblaster/varint/varint.rs" 148 12))
     (switch (move (p 25)) (0 16) (otherwise 15) (at "sandblaster/varint/varint.rs" 148 12)))
   (bb 15
@@ -410,7 +410,7 @@
     (assign (p 0) (agg (adt (adt "std::result::Result<std::option::Option<u16>, error::Error>") 0) (move (p 27))) (at "sandblaster/varint/varint.rs" 149 20))
     (goto 18))
   (bb 16
-    (assign (p 29) (checked add (copy (p 1 deref (field 1 usize))) (int usize 7)) (at "sandblaster/varint/varint.rs" 152 9))
+    (assign (p 29) (checked add (copy (p 1 deref (field 1 usize))) (const-item none "DATA_BITS_PER_BYTE" (int usize 7))) (at "sandblaster/varint/varint.rs" 152 9))
     (assert (move (p 29 (field 1 bool))) false overflow 17 (at "sandblaster/varint/varint.rs" 152 9)))
   (bb 17
     (assign (p 1 deref (field 1 usize)) (use (move (p 29 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 152 9))
@@ -463,7 +463,7 @@
   (debug "remaining_bits" (p 9))
   (debug "relevant_bits" (p 13))
   (bb 0
-    (assign (p 4) (checked mul (int usize 4) (int usize 8)) (at "sandblaster/varint/varint.rs" 119 24))
+    (assign (p 4) (checked mul (const-item u32 "SIZE" (int usize 4)) (const-item none "BITS_PER_BYTE" (int usize 8))) (at "sandblaster/varint/varint.rs" 119 24))
     (assert (move (p 4 (field 1 bool))) false overflow 1 (at "sandblaster/varint/varint.rs" 119 24)))
   (bb 1
     (assign (p 3) (use (move (p 4 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 119 24))
@@ -474,7 +474,7 @@
     (assign (p 6) (bin gt (move (p 7)) (int usize 0)) (at "sandblaster/varint/varint.rs" 125 25))
     (switch (move (p 6)) (0 4) (otherwise 3) (at "sandblaster/varint/varint.rs" 125 25)))
   (bb 3
-    (assign (p 8) (agg (adt (adt "error::Error") 2) (int usize 4)) (at "sandblaster/varint/varint.rs" 126 24))
+    (assign (p 8) (agg (adt (adt "error::Error") 2) (const-item u32 "SIZE" (int usize 4))) (at "sandblaster/varint/varint.rs" 126 24))
     (assign (p 0) (agg (adt (adt "std::result::Result<std::option::Option<u32>, error::Error>") 1) (move (p 8))) (at "sandblaster/varint/varint.rs" 126 20))
     (goto 18))
   (bb 4
@@ -483,25 +483,25 @@
   (bb 5
     (call (fn "std::option::Option::<usize>::unwrap") (args (move (p 10))) (p 9) 6 (at "sandblaster/varint/varint.rs" 136 30)))
   (bb 6
-    (assign (p 12) (bin le (copy (p 9)) (int usize 7)) (at "sandblaster/varint/varint.rs" 137 12))
+    (assign (p 12) (bin le (copy (p 9)) (const-item none "DATA_BITS_PER_BYTE" (int usize 7))) (at "sandblaster/varint/varint.rs" 137 12))
     (switch (move (p 12)) (0 11) (otherwise 7) (at "sandblaster/varint/varint.rs" 137 12)))
   (bb 7
     (call (fn "core::num::<impl u8>::leading_zeros") (args (copy (p 2))) (p 15) 8 (at "sandblaster/varint/varint.rs" 138 49)))
   (bb 8
     (assign (p 14) (cast int-to-int (move (p 15)) usize) (at "sandblaster/varint/varint.rs" 138 49))
-    (assign (p 16) (checked sub (int usize 8) (copy (p 14))) (at "sandblaster/varint/varint.rs" 138 33))
+    (assign (p 16) (checked sub (const-item none "BITS_PER_BYTE" (int usize 8)) (copy (p 14))) (at "sandblaster/varint/varint.rs" 138 33))
     (assert (move (p 16 (field 1 bool))) false overflow 9 (at "sandblaster/varint/varint.rs" 138 33)))
   (bb 9
     (assign (p 13) (use (move (p 16 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 138 33))
     (assign (p 17) (bin gt (copy (p 13)) (copy (p 9))) (at "sandblaster/varint/varint.rs" 139 16))
     (switch (move (p 17)) (0 11) (otherwise 10) (at "sandblaster/varint/varint.rs" 139 16)))
   (bb 10
-    (assign (p 18) (agg (adt (adt "error::Error") 2) (int usize 4)) (at "sandblaster/varint/varint.rs" 140 28))
+    (assign (p 18) (agg (adt (adt "error::Error") 2) (const-item u32 "SIZE" (int usize 4))) (at "sandblaster/varint/varint.rs" 140 28))
     (assign (p 0) (agg (adt (adt "std::result::Result<std::option::Option<u32>, error::Error>") 1) (move (p 18))) (at "sandblaster/varint/varint.rs" 140 24))
     (goto 18))
   (bb 11
     (assign (p 20) (ref mut (p 1 deref (field 0 u32))) (at "sandblaster/varint/varint.rs" 145 9))
-    (assign (p 23) (bin and (copy (p 2)) (int u8 127)) (at "sandblaster/varint/varint.rs" 145 32))
+    (assign (p 23) (bin and (copy (p 2)) (const-item none "DATA_BITS_MASK" (int u8 127))) (at "sandblaster/varint/varint.rs" 145 32))
     (call (fn "std::convert::num::<impl std::convert::From<u8> for u32>::from") (args (move (p 23))) (p 22) 12 (at "sandblaster/varint/varint.rs" 145 24)))
   (bb 12
     (assign (p 24) (use (copy (p 1 deref (field 1 usize)))) (at "sandblaster/varint/varint.rs" 145 58))
@@ -509,7 +509,7 @@
   (bb 13
     (call (fn "<u32 as std::ops::BitOrAssign>::bitor_assign") (args (move (p 20)) (move (p 21))) (p 19) 14 (at "sandblaster/varint/varint.rs" 145 9)))
   (bb 14
-    (assign (p 26) (bin and (copy (p 2)) (int u8 128)) (at "sandblaster/varint/varint.rs" 148 12))
+    (assign (p 26) (bin and (copy (p 2)) (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (at "sandblaster/varint/varint.rs" 148 12))
     (assign (p 25) (bin eq (move (p 26)) (int u8 0)) (at "sandblaster/varint/varint.rs" 148 12))
     (switch (move (p 25)) (0 16) (otherwise 15) (at "sandblaster/varint/varint.rs" 148 12)))
   (bb 15
@@ -518,7 +518,7 @@
     (assign (p 0) (agg (adt (adt "std::result::Result<std::option::Option<u32>, error::Error>") 0) (move (p 27))) (at "sandblaster/varint/varint.rs" 149 20))
     (goto 18))
   (bb 16
-    (assign (p 29) (checked add (copy (p 1 deref (field 1 usize))) (int usize 7)) (at "sandblaster/varint/varint.rs" 152 9))
+    (assign (p 29) (checked add (copy (p 1 deref (field 1 usize))) (const-item none "DATA_BITS_PER_BYTE" (int usize 7))) (at "sandblaster/varint/varint.rs" 152 9))
     (assert (move (p 29 (field 1 bool))) false overflow 17 (at "sandblaster/varint/varint.rs" 152 9)))
   (bb 17
     (assign (p 1 deref (field 1 usize)) (use (move (p 29 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 152 9))
@@ -571,7 +571,7 @@
   (debug "remaining_bits" (p 9))
   (debug "relevant_bits" (p 13))
   (bb 0
-    (assign (p 4) (checked mul (int usize 8) (int usize 8)) (at "sandblaster/varint/varint.rs" 119 24))
+    (assign (p 4) (checked mul (const-item u64 "SIZE" (int usize 8)) (const-item none "BITS_PER_BYTE" (int usize 8))) (at "sandblaster/varint/varint.rs" 119 24))
     (assert (move (p 4 (field 1 bool))) false overflow 1 (at "sandblaster/varint/varint.rs" 119 24)))
   (bb 1
     (assign (p 3) (use (move (p 4 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 119 24))
@@ -582,7 +582,7 @@
     (assign (p 6) (bin gt (move (p 7)) (int usize 0)) (at "sandblaster/varint/varint.rs" 125 25))
     (switch (move (p 6)) (0 4) (otherwise 3) (at "sandblaster/varint/varint.rs" 125 25)))
   (bb 3
-    (assign (p 8) (agg (adt (adt "error::Error") 2) (int usize 8)) (at "sandblaster/varint/varint.rs" 126 24))
+    (assign (p 8) (agg (adt (adt "error::Error") 2) (const-item u64 "SIZE" (int usize 8))) (at "sandblaster/varint/varint.rs" 126 24))
     (assign (p 0) (agg (adt (adt "std::result::Result<std::option::Option<u64>, error::Error>") 1) (move (p 8))) (at "sandblaster/varint/varint.rs" 126 20))
     (goto 18))
   (bb 4
@@ -591,25 +591,25 @@
   (bb 5
     (call (fn "std::option::Option::<usize>::unwrap") (args (move (p 10))) (p 9) 6 (at "sandblaster/varint/varint.rs" 136 30)))
   (bb 6
-    (assign (p 12) (bin le (copy (p 9)) (int usize 7)) (at "sandblaster/varint/varint.rs" 137 12))
+    (assign (p 12) (bin le (copy (p 9)) (const-item none "DATA_BITS_PER_BYTE" (int usize 7))) (at "sandblaster/varint/varint.rs" 137 12))
     (switch (move (p 12)) (0 11) (otherwise 7) (at "sandblaster/varint/varint.rs" 137 12)))
   (bb 7
     (call (fn "core::num::<impl u8>::leading_zeros") (args (copy (p 2))) (p 15) 8 (at "sandblaster/varint/varint.rs" 138 49)))
   (bb 8
     (assign (p 14) (cast int-to-int (move (p 15)) usize) (at "sandblaster/varint/varint.rs" 138 49))
-    (assign (p 16) (checked sub (int usize 8) (copy (p 14))) (at "sandblaster/varint/varint.rs" 138 33))
+    (assign (p 16) (checked sub (const-item none "BITS_PER_BYTE" (int usize 8)) (copy (p 14))) (at "sandblaster/varint/varint.rs" 138 33))
     (assert (move (p 16 (field 1 bool))) false overflow 9 (at "sandblaster/varint/varint.rs" 138 33)))
   (bb 9
     (assign (p 13) (use (move (p 16 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 138 33))
     (assign (p 17) (bin gt (copy (p 13)) (copy (p 9))) (at "sandblaster/varint/varint.rs" 139 16))
     (switch (move (p 17)) (0 11) (otherwise 10) (at "sandblaster/varint/varint.rs" 139 16)))
   (bb 10
-    (assign (p 18) (agg (adt (adt "error::Error") 2) (int usize 8)) (at "sandblaster/varint/varint.rs" 140 28))
+    (assign (p 18) (agg (adt (adt "error::Error") 2) (const-item u64 "SIZE" (int usize 8))) (at "sandblaster/varint/varint.rs" 140 28))
     (assign (p 0) (agg (adt (adt "std::result::Result<std::option::Option<u64>, error::Error>") 1) (move (p 18))) (at "sandblaster/varint/varint.rs" 140 24))
     (goto 18))
   (bb 11
     (assign (p 20) (ref mut (p 1 deref (field 0 u64))) (at "sandblaster/varint/varint.rs" 145 9))
-    (assign (p 23) (bin and (copy (p 2)) (int u8 127)) (at "sandblaster/varint/varint.rs" 145 32))
+    (assign (p 23) (bin and (copy (p 2)) (const-item none "DATA_BITS_MASK" (int u8 127))) (at "sandblaster/varint/varint.rs" 145 32))
     (call (fn "std::convert::num::<impl std::convert::From<u8> for u64>::from") (args (move (p 23))) (p 22) 12 (at "sandblaster/varint/varint.rs" 145 24)))
   (bb 12
     (assign (p 24) (use (copy (p 1 deref (field 1 usize)))) (at "sandblaster/varint/varint.rs" 145 58))
@@ -617,7 +617,7 @@
   (bb 13
     (call (fn "<u64 as std::ops::BitOrAssign>::bitor_assign") (args (move (p 20)) (move (p 21))) (p 19) 14 (at "sandblaster/varint/varint.rs" 145 9)))
   (bb 14
-    (assign (p 26) (bin and (copy (p 2)) (int u8 128)) (at "sandblaster/varint/varint.rs" 148 12))
+    (assign (p 26) (bin and (copy (p 2)) (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (at "sandblaster/varint/varint.rs" 148 12))
     (assign (p 25) (bin eq (move (p 26)) (int u8 0)) (at "sandblaster/varint/varint.rs" 148 12))
     (switch (move (p 25)) (0 16) (otherwise 15) (at "sandblaster/varint/varint.rs" 148 12)))
   (bb 15
@@ -626,7 +626,7 @@
     (assign (p 0) (agg (adt (adt "std::result::Result<std::option::Option<u64>, error::Error>") 0) (move (p 27))) (at "sandblaster/varint/varint.rs" 149 20))
     (goto 18))
   (bb 16
-    (assign (p 29) (checked add (copy (p 1 deref (field 1 usize))) (int usize 7)) (at "sandblaster/varint/varint.rs" 152 9))
+    (assign (p 29) (checked add (copy (p 1 deref (field 1 usize))) (const-item none "DATA_BITS_PER_BYTE" (int usize 7))) (at "sandblaster/varint/varint.rs" 152 9))
     (assert (move (p 29 (field 1 bool))) false overflow 17 (at "sandblaster/varint/varint.rs" 152 9)))
   (bb 17
     (assign (p 1 deref (field 1 usize)) (use (move (p 29 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 152 9))
@@ -999,7 +999,7 @@
   (debug "len" (p 11))
   (debug "val" (p 12))
   (bb 0
-    (call (fn "std::convert::num::<impl std::convert::From<u8> for u16>::from") (args (int u8 128)) (p 3) 1 (at "sandblaster/varint/varint.rs" 371 34)))
+    (call (fn "std::convert::num::<impl std::convert::From<u8> for u16>::from") (args (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (p 3) 1 (at "sandblaster/varint/varint.rs" 371 34)))
   (bb 1
     (assign (p 5) (ref shared (p 1)) (at "sandblaster/varint/varint.rs" 372 8))
     (assign (p 6) (ref shared (p 3)) (at "sandblaster/varint/varint.rs" 372 16))
@@ -1030,7 +1030,7 @@
     (assign (p 19) (bin lt (copy (p 18)) (int usize 19)) (at "sandblaster/varint/varint.rs" 384 9))
     (assert (move (p 19)) true bounds 10 (at "sandblaster/varint/varint.rs" 384 9)))
   (bb 10
-    (assign (p 10 (index 18)) (bin or (move (p 16)) (int u8 128)) (at "sandblaster/varint/varint.rs" 384 9))
+    (assign (p 10 (index 18)) (bin or (move (p 16)) (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (at "sandblaster/varint/varint.rs" 384 9))
     (assign (p 20) (checked add (copy (p 11)) (int usize 1)) (at "sandblaster/varint/varint.rs" 385 9))
     (assert (move (p 20 (field 1 bool))) false overflow 11 (at "sandblaster/varint/varint.rs" 385 9)))
   (bb 11
@@ -1100,7 +1100,7 @@
   (debug "len" (p 11))
   (debug "val" (p 12))
   (bb 0
-    (call (fn "std::convert::num::<impl std::convert::From<u8> for u32>::from") (args (int u8 128)) (p 3) 1 (at "sandblaster/varint/varint.rs" 371 34)))
+    (call (fn "std::convert::num::<impl std::convert::From<u8> for u32>::from") (args (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (p 3) 1 (at "sandblaster/varint/varint.rs" 371 34)))
   (bb 1
     (assign (p 5) (ref shared (p 1)) (at "sandblaster/varint/varint.rs" 372 8))
     (assign (p 6) (ref shared (p 3)) (at "sandblaster/varint/varint.rs" 372 16))
@@ -1131,7 +1131,7 @@
     (assign (p 19) (bin lt (copy (p 18)) (int usize 19)) (at "sandblaster/varint/varint.rs" 384 9))
     (assert (move (p 19)) true bounds 10 (at "sandblaster/varint/varint.rs" 384 9)))
   (bb 10
-    (assign (p 10 (index 18)) (bin or (move (p 16)) (int u8 128)) (at "sandblaster/varint/varint.rs" 384 9))
+    (assign (p 10 (index 18)) (bin or (move (p 16)) (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (at "sandblaster/varint/varint.rs" 384 9))
     (assign (p 20) (checked add (copy (p 11)) (int usize 1)) (at "sandblaster/varint/varint.rs" 385 9))
     (assert (move (p 20 (field 1 bool))) false overflow 11 (at "sandblaster/varint/varint.rs" 385 9)))
   (bb 11
@@ -1201,7 +1201,7 @@
   (debug "len" (p 11))
   (debug "val" (p 12))
   (bb 0
-    (call (fn "std::convert::num::<impl std::convert::From<u8> for u64>::from") (args (int u8 128)) (p 3) 1 (at "sandblaster/varint/varint.rs" 371 34)))
+    (call (fn "std::convert::num::<impl std::convert::From<u8> for u64>::from") (args (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (p 3) 1 (at "sandblaster/varint/varint.rs" 371 34)))
   (bb 1
     (assign (p 5) (ref shared (p 1)) (at "sandblaster/varint/varint.rs" 372 8))
     (assign (p 6) (ref shared (p 3)) (at "sandblaster/varint/varint.rs" 372 16))
@@ -1232,7 +1232,7 @@
     (assign (p 19) (bin lt (copy (p 18)) (int usize 19)) (at "sandblaster/varint/varint.rs" 384 9))
     (assert (move (p 19)) true bounds 10 (at "sandblaster/varint/varint.rs" 384 9)))
   (bb 10
-    (assign (p 10 (index 18)) (bin or (move (p 16)) (int u8 128)) (at "sandblaster/varint/varint.rs" 384 9))
+    (assign (p 10 (index 18)) (bin or (move (p 16)) (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (at "sandblaster/varint/varint.rs" 384 9))
     (assign (p 20) (checked add (copy (p 11)) (int usize 1)) (at "sandblaster/varint/varint.rs" 385 9))
     (assert (move (p 20 (field 1 bool))) false overflow 11 (at "sandblaster/varint/varint.rs" 385 9)))
   (bb 11
@@ -1318,7 +1318,7 @@
     (assign (p 8) (use (copy (p 3 (downcast 0) (field 0 u8)))) (at "sandblaster/varint/varint.rs" 399 20))
     (assign (p 2) (use (copy (p 8))) (at "sandblaster/varint/varint.rs" 399 20))
     (assign (p 11) (use (copy (p 2))) (at "sandblaster/varint/varint.rs" 400 8))
-    (assign (p 10) (bin and (move (p 11)) (int u8 128)) (at "sandblaster/varint/varint.rs" 400 8))
+    (assign (p 10) (bin and (move (p 11)) (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (at "sandblaster/varint/varint.rs" 400 8))
     (assign (p 9) (bin eq (move (p 10)) (int u8 0)) (at "sandblaster/varint/varint.rs" 400 8))
     (switch (move (p 9)) (0 9) (otherwise 7) (at "sandblaster/varint/varint.rs" 400 8)))
   (bb 6
@@ -1432,7 +1432,7 @@
     (assign (p 8) (use (copy (p 3 (downcast 0) (field 0 u8)))) (at "sandblaster/varint/varint.rs" 399 20))
     (assign (p 2) (use (copy (p 8))) (at "sandblaster/varint/varint.rs" 399 20))
     (assign (p 11) (use (copy (p 2))) (at "sandblaster/varint/varint.rs" 400 8))
-    (assign (p 10) (bin and (move (p 11)) (int u8 128)) (at "sandblaster/varint/varint.rs" 400 8))
+    (assign (p 10) (bin and (move (p 11)) (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (at "sandblaster/varint/varint.rs" 400 8))
     (assign (p 9) (bin eq (move (p 10)) (int u8 0)) (at "sandblaster/varint/varint.rs" 400 8))
     (switch (move (p 9)) (0 9) (otherwise 7) (at "sandblaster/varint/varint.rs" 400 8)))
   (bb 6
@@ -1546,7 +1546,7 @@
     (assign (p 8) (use (copy (p 3 (downcast 0) (field 0 u8)))) (at "sandblaster/varint/varint.rs" 399 20))
     (assign (p 2) (use (copy (p 8))) (at "sandblaster/varint/varint.rs" 399 20))
     (assign (p 11) (use (copy (p 2))) (at "sandblaster/varint/varint.rs" 400 8))
-    (assign (p 10) (bin and (move (p 11)) (int u8 128)) (at "sandblaster/varint/varint.rs" 400 8))
+    (assign (p 10) (bin and (move (p 11)) (const-item none "CONTINUATION_BIT_MASK" (int u8 128))) (at "sandblaster/varint/varint.rs" 400 8))
     (assign (p 9) (bin eq (move (p 10)) (int u8 0)) (at "sandblaster/varint/varint.rs" 400 8))
     (switch (move (p 9)) (0 9) (otherwise 7) (at "sandblaster/varint/varint.rs" 400 8)))
   (bb 6
@@ -1633,7 +1633,7 @@
     (assert (move (p 8 (field 1 bool))) false overflow 4 (at "sandblaster/varint/varint.rs" 419 21)))
   (bb 4
     (assign (p 7) (use (move (p 8 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 419 21))
-    (call (fn "core::num::<impl usize>::div_ceil") (args (copy (p 7)) (int usize 7)) (p 9) 5 (at "sandblaster/varint/varint.rs" 420 19)))
+    (call (fn "core::num::<impl usize>::div_ceil") (args (copy (p 7)) (const-item none "DATA_BITS_PER_BYTE" (int usize 7))) (p 9) 5 (at "sandblaster/varint/varint.rs" 420 19)))
   (bb 5
     (call (fn "<usize as std::cmp::Ord>::max") (args (int usize 1) (move (p 9))) (p 0) 6 (at "sandblaster/varint/varint.rs" 420 5)))
   (bb 6
@@ -1673,7 +1673,7 @@
     (assert (move (p 8 (field 1 bool))) false overflow 4 (at "sandblaster/varint/varint.rs" 419 21)))
   (bb 4
     (assign (p 7) (use (move (p 8 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 419 21))
-    (call (fn "core::num::<impl usize>::div_ceil") (args (copy (p 7)) (int usize 7)) (p 9) 5 (at "sandblaster/varint/varint.rs" 420 19)))
+    (call (fn "core::num::<impl usize>::div_ceil") (args (copy (p 7)) (const-item none "DATA_BITS_PER_BYTE" (int usize 7))) (p 9) 5 (at "sandblaster/varint/varint.rs" 420 19)))
   (bb 5
     (call (fn "<usize as std::cmp::Ord>::max") (args (int usize 1) (move (p 9))) (p 0) 6 (at "sandblaster/varint/varint.rs" 420 5)))
   (bb 6
@@ -1713,7 +1713,7 @@
     (assert (move (p 8 (field 1 bool))) false overflow 4 (at "sandblaster/varint/varint.rs" 419 21)))
   (bb 4
     (assign (p 7) (use (move (p 8 (field 0 usize)))) (at "sandblaster/varint/varint.rs" 419 21))
-    (call (fn "core::num::<impl usize>::div_ceil") (args (copy (p 7)) (int usize 7)) (p 9) 5 (at "sandblaster/varint/varint.rs" 420 19)))
+    (call (fn "core::num::<impl usize>::div_ceil") (args (copy (p 7)) (const-item none "DATA_BITS_PER_BYTE" (int usize 7))) (p 9) 5 (at "sandblaster/varint/varint.rs" 420 19)))
   (bb 5
     (call (fn "<usize as std::cmp::Ord>::max") (args (int usize 1) (move (p 9))) (p 0) 6 (at "sandblaster/varint/varint.rs" 420 5)))
   (bb 6
@@ -3549,7 +3549,7 @@
   (locals
     (0 usize mut))
   (bb 0
-    (assign (p 0) (use (int usize 2)))
+    (assign (p 0) (use (const-item none "SIZE" (int usize 2))))
     (return))
 )
 (fn "core::num::<impl usize>::div_ceil"
@@ -3633,7 +3633,7 @@
   (locals
     (0 usize mut))
   (bb 0
-    (assign (p 0) (use (int usize 4)))
+    (assign (p 0) (use (const-item none "SIZE" (int usize 4))))
     (return))
 )
 (fn "std::mem::size_of::<u64>"
@@ -3643,7 +3643,7 @@
   (locals
     (0 usize mut))
   (bb 0
-    (assign (p 0) (use (int usize 8)))
+    (assign (p 0) (use (const-item none "SIZE" (int usize 8))))
     (return))
 )
 (fn "<std::result::Result<u16, commonware_codec::error::Error> as std::ops::Try>::branch"

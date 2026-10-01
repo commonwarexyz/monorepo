@@ -77,6 +77,36 @@ pub trait Names {
     fn ctor(&self, m: &Sbmir, adt: &str, variant: usize) -> Result<Ctor, String>;
     /// A module function's lifted callee (`None`: not a lifted function).
     fn lifted(&self, m: &Sbmir, f: &Fn) -> Option<LiftedCallee>;
+    /// The lifted constant a named constant item stands for (the constant
+    /// function `Family__MAX_NODES()` of an impl's associated constant),
+    /// `None`: read its value.
+    fn const_item(&self, _m: &Sbmir, _owner: Option<&Ty>, _name: &str) -> Option<syn::Expr> {
+        None
+    }
+    /// Whether a module struct carries an invariant (SEMANTICS.md §15.3).
+    fn has_invariant(&self, _m: &Sbmir, _adt: &str) -> bool {
+        false
+    }
+    /// Whether a library newtype is read as its one field (a host model
+    /// `pub type T = ..;`, SEMANTICS.md §19.10).
+    fn transparent(&self, _m: &Sbmir, _adt: &str) -> bool {
+        false
+    }
+    /// The host model's method `m` at a library type (the instance of an
+    /// open trait whose instance is a host model): `crate::..::Sha256::hash`.
+    fn host_method(&self, _m: &Sbmir, _self_ty: &Ty, _method: &str) -> Option<syn::Expr> {
+        None
+    }
+}
+
+/// `Option<&mut T>` (a state of §19.10's table): `T`.
+pub fn opt_mut(m: &Sbmir, t: &Ty) -> Option<Ty> {
+    let Ty::Adt(k) = t else { return None };
+    let d = m.adts.get(k)?;
+    match d.args.as_slice() {
+        [Ty::Ref(true, inner)] if d.path.ends_with("option::Option") => Some((**inner).clone()),
+        _ => None,
+    }
 }
 
 /// A processed loop attachment (the lift's ghost reading of it).
@@ -124,6 +154,42 @@ pub fn root_locals(m: &Sbmir, nm: &dyn Names, key: &str, params: &[String]) -> R
     let f = m.fns.get(key).ok_or_else(|| format!("no MIR for `{key}`"))?;
     let names = local_names(f, params, true);
     Ok(names.iter().enumerate().map(|(i, n)| (n.clone(), value_ty(&f.locals[i].0).and_then(|t| nm.ty(m, &t).ok()))).collect())
+}
+
+/// For each loop (in source order), the reading's name of the variable that
+/// a source name denotes at the loop's header, where a user variable
+/// shadows a parameter or another variable of the same name (`let size =
+/// *size;`: `size` → `size_2`): loop attachments are written against the
+/// source's scopes. The variable of that name live at the header is the one
+/// in scope there. (Attachments are proof steps and checked contracts of the
+/// helper, so this choice cannot change what is proven about the code.)
+pub fn loop_scopes(m: &Sbmir, key: &str, params: &[String]) -> Result<Vec<HashMap<String, String>>, String> {
+    let f = m.fns.get(key).ok_or_else(|| format!("no MIR for `{key}`"))?;
+    let names = local_names(f, params, true);
+    let cfg = Cfg::new(f);
+    let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, p) in params.iter().enumerate().take(f.argc) {
+        by_name.entry(p.clone()).or_default().push(i + 1);
+    }
+    for (n, l) in &f.debug {
+        if *l > f.argc && !by_name.get(n).is_some_and(|v| v.contains(l)) {
+            by_name.entry(n.clone()).or_default().push(*l);
+        }
+    }
+    Ok(cfg
+        .headers
+        .iter()
+        .map(|h| {
+            let mut map = HashMap::new();
+            for (n, ls) in &by_name {
+                let live: Vec<usize> = ls.iter().copied().filter(|l| cfg.live_in[*h].contains(l)).collect();
+                if ls.len() > 1 && live.len() == 1 && names[live[0]] != *n {
+                    map.insert(n.clone(), names[live[0]].clone());
+                }
+            }
+            map
+        })
+        .collect())
 }
 
 /// The value type of a local (`&T` is `T`).
@@ -186,6 +252,16 @@ enum Val {
 struct LRef {
     lv: syn::Expr,
     buf: Option<&'static str>,
+    /// A state of a struct type with an invariant, held field by field in
+    /// variables while the body runs (`__self_two_h`): its field writes
+    /// break the invariant between them, so the value is only built whole
+    /// where it leaves (a return, a call, a loop helper's call), as the
+    /// source lift does. `(struct ADT key, field variables)`.
+    fields: Option<(String, Vec<String>)>,
+    /// The place is a field of type `&mut T` of an optional state, held as
+    /// the `T` it points to ([`Env::writeback`]): `*r` of a reference to it
+    /// is that same `T`.
+    inner: bool,
 }
 
 #[derive(Clone, Default)]
@@ -194,6 +270,11 @@ struct Env {
     refs: HashMap<Key, LRef>,
     discr: HashMap<Key, (usize, Place)>,
     declared: BTreeSet<String>,
+    /// Root variables whose known constructor has a field held in its own
+    /// mutable variable (a `&mut` into the field of a matched enum, `if let
+    /// Some(ref mut v) = o`): the variable is assigned the rebuilt value
+    /// where the path leaves the arm.
+    writeback: BTreeSet<Key>,
 }
 
 enum Flow {
@@ -239,7 +320,8 @@ fn kdepth(k: &K) -> usize {
 #[derive(Clone)]
 enum LoopForm {
     While,
-    Helper(syn::Ident, Vec<usize>),
+    /// The helper as called (`f__loop0`, `Self::m__loop0`) and its parameters.
+    Helper(syn::Expr, Vec<usize>),
 }
 
 #[derive(Clone)]
@@ -419,13 +501,27 @@ impl<'m> Reader<'m> {
     fn op_ty(&self, fr: usize, o: &Operand) -> Result<Ty, String> {
         match o {
             Operand::Copy(p) | Operand::Move(p) => self.place_ty(fr, p),
-            Operand::Const(Const::Int(t, _)) | Operand::Const(Const::Zst(t)) | Operand::Const(Const::Agg(t, _, _)) => Ok(t.clone()),
-            Operand::Const(Const::Ref(inner)) => {
-                let it = self.op_ty(fr, &Operand::Const((**inner).clone()))?;
-                Ok(Ty::Ref(false, Box::new(it)))
-            }
-            Operand::Const(Const::Unsupported(s)) => Err(format!("constant: {s}")),
+            Operand::Const(c) => match c.value() {
+                Const::Int(t, _) | Const::Zst(t) | Const::Agg(t, _, _) => Ok(t.clone()),
+                Const::Ref(inner) => {
+                    let it = self.op_ty(fr, &Operand::Const((**inner).clone()))?;
+                    Ok(Ty::Ref(false, Box::new(it)))
+                }
+                Const::Unsupported(s) => Err(format!("constant: {s}")),
+                Const::Item(..) => unreachable!("`value` strips items"),
+            },
             Operand::RuntimeChecks(_) => Ok(Ty::Bool),
+        }
+    }
+
+    /// An integer constant operand's type and value (a named item's value).
+    fn int_const<'o>(o: &'o Operand) -> Option<(&'o Ty, i128)> {
+        match o {
+            Operand::Const(c) => match c.value() {
+                Const::Int(t, v) => Some((t, *v)),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -445,8 +541,15 @@ impl<'m> Reader<'m> {
             Const::Int(Ty::Int(..), v) => Val::K(*v),
             Const::Zst(t) => Val::Z(t.clone()),
             Const::Agg(t, v, fs) => Val::C(t.clone(), *v, fs.iter().map(|f| self.konst(fr, f)).collect::<Result<_, _>>()?),
-            // `&c`: the value of `c` (references are values)
-            Const::Ref(inner) => self.konst(fr, inner)?,
+            // `&c`: a shared reference to the value of `c`
+            Const::Ref(inner) => Val::R(Box::new(self.konst(fr, inner)?)),
+            // a named constant: the lifted constant it stands for (the same
+            // item's lifted reading), else its value as rustc evaluated it
+            Const::Item(owner, name, v) => match self.nm.const_item(self.m, owner.as_ref(), name) {
+                Some(e) if matches!(**v, Const::Ref(_)) => Val::R(Box::new(Val::E(e))),
+                Some(e) => Val::E(e),
+                None => self.konst(fr, v)?,
+            },
             Const::Unsupported(what) => Val::Opaque(what.clone()),
             other => return self.err(fr, format!("constant {other:?}")),
         })
@@ -482,6 +585,7 @@ impl<'m> Reader<'m> {
                     syn::parse_quote!((#(#es),*))
                 }
             }
+            Val::C(Ty::Adt(key), 0, fs) if fs.len() == 1 && self.nm.transparent(self.m, key) => self.materialize(fr, &fs[0])?,
             Val::C(Ty::Adt(key), var_idx, fs) => {
                 let c = self.nm.ctor(self.m, key, *var_idx)?;
                 let es: Vec<syn::Expr> = fs.iter().map(|f| self.materialize(fr, f)).collect::<Result<_, _>>()?;
@@ -511,6 +615,8 @@ impl<'m> Reader<'m> {
                 let idx = syn::Index::from(i);
                 Ok(syn::parse_quote!(#e.#idx))
             }
+            // a newtype read as its field (a host model, SEMANTICS.md §19.10)
+            Ty::Adt(key) if i == 0 && self.nm.transparent(self.m, key) => Ok(e),
             Ty::Adt(key) => {
                 let adt = self.m.adts.get(key).ok_or_else(|| format!("no ADT `{key}`"))?;
                 if adt.is_enum {
@@ -542,7 +648,17 @@ impl<'m> Reader<'m> {
                     if let Ty::Ref(_, inner) = t {
                         t = *inner;
                     }
-                    Val::E(r.lv.clone())
+                    match (&r.fields, projs.peek()) {
+                        // a field of an exploded state: its variable
+                        (Some((_, fs)), Some(Proj::Field(i, ft))) => {
+                            let v = Val::E(var(fs.get(*i).ok_or("field out of range")?));
+                            t = ft.clone();
+                            projs.next();
+                            v
+                        }
+                        (Some(_), _) => Val::E(self.state_value(r)?),
+                        (None, _) => Val::E(r.lv.clone()),
+                    }
                 }
                 _ => return self.err(fr, format!("the `&mut` local `_{}` used as a value", p.local)),
             }
@@ -553,7 +669,7 @@ impl<'m> Reader<'m> {
             let (sv, _) = self.read(sf, &sp, env, out)?;
             let st = self.place_ty(sf, &sp)?;
             match (&sv, &st) {
-                (Val::C(_, v, _), Ty::Adt(k)) => Val::K(self.m.adts.get(k).and_then(|d| d.variants.get(*v)).map(|x| x.discr).unwrap_or(0)),
+                (Val::C(_, v, _), Ty::Adt(k)) => Val::K(discr_value(self.m.adts.get(k).and_then(|d| d.variants.get(*v)).map(|x| x.discr).unwrap_or(0), &self.frames[fr].f.locals[p.local].0)),
                 _ => return self.err(fr, "a discriminant used as a value of a constructor not known here"),
             }
         } else if self.frames[fr].f.locals[p.local].0 == Ty::Unit || (self.frames[fr].names[p.local] == "_" && matches!(&self.frames[fr].f.locals[p.local].0, Ty::Ref(false, t) if **t == Ty::Unit)) {
@@ -645,8 +761,73 @@ impl<'m> Reader<'m> {
         Ok((self.materialize(fr, &v)?, p))
     }
 
+    /// A comparison of the discriminant of an enum value whose variant is
+    /// not known here with a constant (`<Ordering as ..>::le` compares
+    /// `discriminant(x) <= 0`): per variant the comparison is a known
+    /// boolean, so it is the `match` of the value yielding them.
+    fn discr_compare(&mut self, fr: usize, op: &str, a: &Operand, b: &Operand, env: &Env, out: &mut Vec<syn::Stmt>) -> Result<Option<(syn::Expr, bool)>, String> {
+        let dl = |o: &Operand| match o {
+            Operand::Copy(p) | Operand::Move(p) if p.proj.is_empty() => env.discr.get(&(fr, p.local)).cloned().map(|d| (d, p.local)),
+            _ => None,
+        };
+        let ((sf, sp), dlocal, c, flip) = match (dl(a), Self::int_const(b), dl(b), Self::int_const(a)) {
+            (Some((d, l)), Some((_, c)), _, _) => (d, l, c, false),
+            (_, _, Some((d, l)), Some((_, c))) => (d, l, c, true),
+            _ => return Ok(None),
+        };
+        let (cur, pure) = self.read(sf, &sp, env, out)?;
+        if matches!(cur, Val::C(..)) {
+            return Ok(None);
+        }
+        let Ty::Adt(key) = self.place_ty(sf, &sp)? else { return Ok(None) };
+        let Some(adt) = self.m.adts.get(&key).cloned() else { return Ok(None) };
+        if !adt.is_enum {
+            return Ok(None);
+        }
+        let dty = self.frames[fr].f.locals[dlocal].0.clone();
+        let cmp = |x: i128, y: i128| -> Option<bool> {
+            Some(match op {
+                "eq" => x == y,
+                "ne" => x != y,
+                "lt" => x < y,
+                "le" => x <= y,
+                "gt" => x > y,
+                "ge" => x >= y,
+                _ => return None,
+            })
+        };
+        let scrut = self.materialize(sf, &cur)?;
+        let mut arms: Vec<TokenStream> = Vec::new();
+        let mut results: Vec<bool> = Vec::new();
+        for v in &adt.variants {
+            let d = discr_value(v.discr, &dty);
+            let Some(r) = (if flip { cmp(c, d) } else { cmp(d, c) }) else { return self.err(fr, format!("`{op}` on a discriminant")) };
+            let ctor = self.nm.ctor(self.m, &key, v.idx)?;
+            let p = &ctor.path;
+            let pat: syn::Pat = if v.fields.is_empty() {
+                syn::parse_quote!(#p)
+            } else if ctor.named {
+                let fs: Vec<syn::Ident> = ctor.fields.iter().map(|f| ident(f)).collect();
+                syn::parse_quote!(#p { #(#fs: _),* })
+            } else {
+                let us: Vec<TokenStream> = v.fields.iter().map(|_| quote!(_)).collect();
+                syn::parse_quote!(#p(#(#us),*))
+            };
+            let rl: syn::Expr = if r { syn::parse_quote!(true) } else { syn::parse_quote!(false) };
+            arms.push(quote!(#pat => #rl,));
+            results.push(r);
+        }
+        if results.iter().all(|r| *r == results[0]) && !results.is_empty() {
+            return Ok(Some((if results[0] { syn::parse_quote!(true) } else { syn::parse_quote!(false) }, true)));
+        }
+        Ok(Some((syn::parse_quote!(match #scrut { #(#arms)* }), pure)))
+    }
+
     /// A binary operation on integers or booleans: `(expr, pure)`.
     fn binop(&mut self, fr: usize, op: &str, a: &Operand, b: &Operand, env: &Env, out: &mut Vec<syn::Stmt>) -> Result<(syn::Expr, bool), String> {
+        if let Some(r) = self.discr_compare(fr, op, a, b, env, out)? {
+            return Ok(r);
+        }
         // comparisons of known integers (discriminants) fold
         {
             let (va, _) = self.operand(fr, a, env, out)?;
@@ -689,6 +870,24 @@ impl<'m> Reader<'m> {
             tb = Ty::Int(false, 32);
         }
         let pure_ops = pa && pb;
+        // a comparison of two unsigned literals (a shift's constant amount
+        // against the width): its value
+        if !ta.signed()
+            && !tb.signed()
+            && ta.is_int()
+            && let (Some(x), Some(y)) = (lit_value(&ea), lit_value(&eb))
+            && let Some(r) = match op {
+                "eq" => Some(x == y),
+                "ne" => Some(x != y),
+                "lt" => Some(x < y),
+                "le" => Some(x <= y),
+                "gt" => Some(x > y),
+                "ge" => Some(x >= y),
+                _ => None,
+            }
+        {
+            return Ok((if r { syn::parse_quote!(true) } else { syn::parse_quote!(false) }, true));
+        }
         if ta == Ty::Bool {
             let e: syn::Expr = match op {
                 "and" => syn::parse_quote!(#ea & #eb),
@@ -778,13 +977,13 @@ impl<'m> Reader<'m> {
         }
         let from = self.op_ty(fr, a)?;
         // a constant: Rust's `as` on the value (two's complement truncation)
-        if let Operand::Const(Const::Int(_, v)) = a
+        if let Some((_, v)) = Self::int_const(a)
             && let (Some(tb), false) = (to.bits(), to.signed())
             && from.is_int()
         {
             let mask: u128 = if tb >= 128 { u128::MAX } else { (1u128 << tb) - 1 };
             let tn = int_ty_name(to).ok_or_else(|| format!("cast to {to:?}"))?;
-            return Ok((lit_uint((*v as u128) & mask, &tn), true));
+            return Ok((lit_uint((v as u128) & mask, &tn), true));
         }
         let (e, pu) = self.operand_expr(fr, a, env, out)?;
         if let (Some(v), Some(tb), false) = (lit_value(&e), to.bits(), to.signed())
@@ -834,7 +1033,9 @@ impl<'m> Reader<'m> {
     fn invalidate(&mut self, fr: usize, name: &str, except: Option<Key>, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
         // a variable's own entry (its value is itself) stays: it still is
         let own = |k: &Key, v: &Val| -> bool { matches!(v, Val::E(syn::Expr::Path(pp)) if pp.path.is_ident(&self.frames[k.0].names[k.1])) };
-        let keys: Vec<Key> = env.vals.iter().filter(|(k, v)| Some(**k) != except && !own(k, v) && val_mentions(v, name)).map(|(k, _)| *k).collect();
+        // (a variable of `Env::writeback` holds its field variable as a place,
+        // not as a value: it is rebuilt from the field's current value)
+        let keys: Vec<Key> = env.vals.iter().filter(|(k, v)| Some(**k) != except && !own(k, v) && !env.writeback.contains(*k) && val_mentions(v, name)).map(|(k, _)| *k).collect();
         for k in keys {
             let v = env.vals[&k].clone();
             let e = self.materialize(fr, &v)?;
@@ -858,8 +1059,19 @@ impl<'m> Reader<'m> {
             if let Ty::Ref(_, inner) = t {
                 t = *inner;
             }
-            let base = r.lv.to_token_stream().into_iter().next().map(|t| t.to_string()).unwrap_or_default();
-            (r.lv.clone(), base)
+            match (&r.fields, projs.peek()) {
+                (Some((_, fs)), Some(Proj::Field(i, ft))) => {
+                    let fv = fs.get(*i).ok_or("field out of range")?.clone();
+                    t = ft.clone();
+                    projs.next();
+                    (var(&fv), fv)
+                }
+                (Some(_), _) => return self.err(fr, "a write of a whole exploded state through a projection"),
+                (None, _) => {
+                    let base = r.lv.to_token_stream().into_iter().next().map(|t| t.to_string()).unwrap_or_default();
+                    (r.lv.clone(), base)
+                }
+            }
         } else {
             // a carried value becomes a variable before a part of it changes
             let name = self.frames[fr].names[p.local].clone();
@@ -955,11 +1167,68 @@ impl<'m> Reader<'m> {
             env.vals.insert(key, if known { v } else { Val::E(var(&name)) });
             return Ok(());
         }
+        // `*s = v` of an exploded state: every field variable
+        if p.proj == [Proj::Deref]
+            && let Some(r) = env.refs.get(&key).cloned()
+            && r.fields.is_some()
+        {
+            let e = self.materialize(fr, &v)?;
+            return self.state_store(fr, &r, e, env, out);
+        }
         let e = self.materialize(fr, &v)?;
         let (lv, base) = self.lvalue(fr, p, env, out)?;
         self.invalidate(fr, &base, None, env, out)?;
         out.push(syn::parse_quote!(#lv = #e;));
         Ok(())
+    }
+
+    /// A state's whole value: its place, or the constructor of an exploded
+    /// state's field variables.
+    fn state_value(&self, r: &LRef) -> Result<syn::Expr, String> {
+        let Some((k, fs)) = &r.fields else { return Ok(r.lv.clone()) };
+        let c = self.nm.ctor(self.m, k, 0)?;
+        let p = &c.path;
+        let es: Vec<syn::Expr> = fs.iter().map(|f| var(f)).collect();
+        Ok(if c.named {
+            let names: Vec<syn::Ident> = c.fields.iter().map(|f| ident(f)).collect();
+            syn::parse_quote!(#p { #(#names: #es),* })
+        } else {
+            syn::parse_quote!(#p(#(#es),*))
+        })
+    }
+
+    /// Stores a whole value into a state: its place, or each field variable
+    /// of an exploded state.
+    fn state_store(&mut self, fr: usize, r: &LRef, e: syn::Expr, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
+        let Some((k, fs)) = r.fields.clone() else {
+            let lv = r.lv.clone();
+            let base = lv.to_token_stream().into_iter().next().map(|t| t.to_string()).unwrap_or_default();
+            self.invalidate(fr, &base, None, env, out)?;
+            out.push(syn::parse_quote!(#lv = #e;));
+            return Ok(());
+        };
+        let tmp = ident(&self.fresh("w"));
+        out.push(syn::parse_quote!(let #tmp = #e;));
+        for (i, f) in fs.iter().enumerate() {
+            self.invalidate(fr, f, None, env, out)?;
+            let fe = self.field_expr(fr, syn::parse_quote!(#tmp), &Ty::Adt(k.clone()), 0, i)?;
+            let id = ident(f);
+            out.push(syn::parse_quote!(#id = #fe;));
+        }
+        Ok(())
+    }
+
+    /// Whether the state parameter at local `l` (named `name`) is exploded:
+    /// a `&mut` of a struct with an invariant.
+    fn explode(&self, l: usize, name: &str) -> Option<(String, Vec<String>)> {
+        let Ty::Ref(true, inner) = &self.frames[0].f.locals[l].0 else { return None };
+        let Ty::Adt(k) = &**inner else { return None };
+        let d = self.m.adts.get(k)?;
+        if d.is_enum || d.variants.len() != 1 || !self.nm.has_invariant(self.m, k) {
+            return None;
+        }
+        let base = name.trim_start_matches('_');
+        Some((k.clone(), d.variants[0].fields.iter().map(|(f, _)| format!("__{base}_{f}")).collect()))
     }
 
     // ----- statements ------------------------------------------------------
@@ -992,6 +1261,21 @@ impl<'m> Reader<'m> {
                         return Ok(());
                     }
                     Rvalue::Ref(k, _) if k == "fake" => return Ok(()),
+                    // a `&mut` copied or moved out of a `&mut` local, or out
+                    // of the place one points to (`copy (*r)` of a `&mut &mut
+                    // T` whose inner reference is held in a state's field):
+                    // the same place
+                    Rvalue::Use(Operand::Copy(q) | Operand::Move(q))
+                        if p.proj.is_empty()
+                            && matches!(self.frames[fr].f.locals[p.local].0, Ty::Ref(true, _))
+                            && env.refs.get(&(fr, q.local)).is_some_and(|r| q.proj.is_empty() || (q.proj == [Proj::Deref] && r.inner)) =>
+                    {
+                        let mut r = env.refs[&(fr, q.local)].clone();
+                        // (`*r` points to the `T` itself)
+                        r.inner &= q.proj.is_empty();
+                        env.refs.insert(key, r);
+                        return Ok(());
+                    }
                     Rvalue::Discr(q) => {
                         if !p.proj.is_empty() {
                             return self.err(fr, "a discriminant stored into a place");
@@ -1003,10 +1287,60 @@ impl<'m> Reader<'m> {
                     _ => {}
                 }
                 let dest_ty = self.place_ty(fr, p)?;
+                // checked arithmetic whose overflow flag is tested, not
+                // asserted (core's `checked_add`): the pair (wrapped result,
+                // overflowed), exactly
+                if let Rvalue::Checked(op, a, b) = r
+                    && !self.flag_asserted(fr, s, p)
+                {
+                    let v = self.checked_pair(fr, op, a, b, &dest_ty, env, out)?;
+                    return self.assign(fr, p, v, env, out);
+                }
                 let v = self.rvalue(fr, r, &dest_ty, env, out)?;
                 self.assign(fr, p, v, env, out)
             }
         }
+    }
+
+    /// Whether the overflow flag of the checked operation `s` (into `p`) is
+    /// asserted false by its block's terminator (`a + b` with overflow
+    /// checks): the operator reading, whose obligation is that assertion.
+    fn flag_asserted(&self, fr: usize, s: &Stmt, p: &Place) -> bool {
+        let f = self.frames[fr].f;
+        let Some(bl) = f.blocks.iter().find(|bl| bl.stmts.iter().any(|x| std::ptr::eq(x, s))) else { return false };
+        let later = bl.stmts.iter().skip_while(|x| !std::ptr::eq(*x, s)).skip(1);
+        // nothing after it in the block reads or changes the pair
+        let mut touched = false;
+        for x in later {
+            if let Stmt::Assign(q, r, _) = x {
+                let mut u = Vec::new();
+                rv_locals(r, &mut u);
+                touched |= q.local == p.local || u.contains(&p.local);
+            }
+        }
+        let flag = Place { local: p.local, proj: vec![Proj::Field(1, Ty::Bool)] };
+        !touched && p.proj.is_empty() && matches!(&bl.term, Term::Assert(Operand::Move(q) | Operand::Copy(q), false, k, _) if *q == flag && k == "overflow")
+    }
+
+    /// `(a op b, overflowed)` of unsigned `a`, `b`: `wrapping_op` and
+    /// `checked_op(..).is_none()` (both total).
+    #[allow(clippy::too_many_arguments)]
+    fn checked_pair(&mut self, fr: usize, op: &str, a: &Operand, b: &Operand, dest_ty: &Ty, env: &Env, out: &mut Vec<syn::Stmt>) -> Result<Val, String> {
+        if self.op_ty(fr, a)?.signed() || !self.op_ty(fr, a)?.is_int() {
+            return self.err(fr, format!("checked `{op}` of a signed or non-integer type with a tested flag"));
+        }
+        let (ea, pa) = self.operand_expr(fr, a, env, out)?;
+        let (eb, pb) = self.operand_expr(fr, b, env, out)?;
+        let (ea, eb) = (paren(ea), paren(eb));
+        let (w, c): (syn::Expr, syn::Expr) = match op {
+            "add" => (syn::parse_quote!(#ea.wrapping_add(#eb)), syn::parse_quote!(#ea.checked_add(#eb).is_none())),
+            "sub" => (syn::parse_quote!(#ea.wrapping_sub(#eb)), syn::parse_quote!(#ea.checked_sub(#eb).is_none())),
+            "mul" => (syn::parse_quote!(#ea.wrapping_mul(#eb)), syn::parse_quote!(#ea.checked_mul(#eb).is_none())),
+            _ => return self.err(fr, format!("checked `{op}`")),
+        };
+        let wv = self.bind(w, pa && pb, None, out);
+        let cv = self.bind(c, pa && pb, None, out);
+        Ok(Val::C(dest_ty.clone(), 0, vec![wv, cv]))
     }
 
     fn mut_ref(&mut self, fr: usize, q: &Place, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<LRef, String> {
@@ -1017,6 +1351,27 @@ impl<'m> Reader<'m> {
                 return Ok(r);
             }
         }
+        // `&mut (x as V).i` of a variable whose constructor is known here (a
+        // matched arm): the field in its own mutable variable, assigned back
+        // into `x` where the path leaves the arm (`Env::writeback`)
+        if let [Proj::Downcast(v), Proj::Field(i, _)] = q.proj.as_slice()
+            && self.frames[fr].root
+            && let Some(Val::C(t, cv, fs)) = env.vals.get(&key).cloned()
+            && cv == *v
+            && (self.is_param(fr, q.local) || env.declared.contains(&self.frames[fr].names[q.local]))
+        {
+            let cur = fs.get(*i).cloned().ok_or("field out of range")?;
+            let n = self.fresh("m");
+            let e = self.materialize(fr, &cur)?;
+            let id = ident(&n);
+            out.push(syn::parse_quote!(let mut #id = #e;));
+            env.declared.insert(n.clone());
+            let mut fs2 = fs.clone();
+            fs2[*i] = Val::E(var(&n));
+            env.vals.insert(key, Val::C(t, cv, fs2));
+            env.writeback.insert(key);
+            return Ok(LRef { lv: var(&n), buf: None, fields: None, inner: true });
+        }
         let (lv, _) = self.lvalue(fr, q, env, out)?;
         let t = self.place_ty(fr, q)?;
         let buf = match &t {
@@ -1024,7 +1379,7 @@ impl<'m> Reader<'m> {
             Ty::Ref(false, inner) if matches!(**inner, Ty::Slice(ref e) if **e == Ty::Int(false, 8)) => Some("buf"),
             _ => None,
         };
-        Ok(LRef { lv, buf })
+        Ok(LRef { lv, buf, fields: None, inner: false })
     }
 
     fn rvalue(&mut self, fr: usize, r: &Rvalue, dest_ty: &Ty, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<Val, String> {
@@ -1133,6 +1488,24 @@ impl<'m> Reader<'m> {
 
     // ----- the walk --------------------------------------------------------
 
+    /// Assigns every variable of [`Env::writeback`] its rebuilt constructor
+    /// (where a path leaves the arm that matched it).
+    fn flush_writeback(&mut self, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
+        let keys: Vec<Key> = std::mem::take(&mut env.writeback).into_iter().collect();
+        for k in keys {
+            let Some(v) = env.vals.get(&k).cloned() else { continue };
+            let name = self.frames[k.0].names[k.1].clone();
+            let e = self.materialize(k.0, &v)?;
+            let id = ident(&name);
+            if self.is_param(k.0, k.1) {
+                self.assigned_params.insert(k.1 - 1);
+            }
+            out.push(syn::parse_quote!(#id = #e;));
+            env.vals.insert(k, Val::E(var(&name)));
+        }
+        Ok(())
+    }
+
     /// Every root local live at `b` is in its own variable (at joins, loop
     /// heads and recursive calls).
     fn normalize(&mut self, live: &BTreeSet<usize>, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
@@ -1181,7 +1554,10 @@ impl<'m> Reader<'m> {
         let mut parts: Vec<syn::Expr> = Vec::new();
         for &i in &self.spec.states {
             let key = (0, i + 1);
-            let lv = env.refs.get(&key).map(|r| r.lv.clone()).unwrap_or_else(|| var(&self.spec.params[i]));
+            let lv = match env.refs.get(&key) {
+                Some(r) => self.state_value(r)?,
+                None => var(&self.spec.params[i]),
+            };
             parts.push(lv);
         }
         if self.spec.has_ret {
@@ -1208,7 +1584,7 @@ impl<'m> Reader<'m> {
                     LoopForm::Helper(name, params) => {
                         let live = self.live_at(b);
                         self.normalize(&live, &mut env, out)?;
-                        let args: Vec<syn::Expr> = params.iter().map(|l| self.state_or_var(&env, *l)).collect();
+                        let args: Vec<syn::Expr> = params.iter().map(|l| self.state_or_var(&env, *l)).collect::<Result<_, _>>()?;
                         out.push(syn::parse_quote!(return #name(#(#args),*);));
                         return Ok(Flow::Diverge);
                     }
@@ -1227,6 +1603,10 @@ impl<'m> Reader<'m> {
         }
         let f = self.frames[fr].f;
         let bl = f.blocks.get(b).ok_or("block out of range")?;
+        if !cx.probe && must_diverge(f, b, &mut Vec::new()) {
+            out.push(syn::parse_quote!(unreachable!();));
+            return Ok(Flow::Diverge);
+        }
         for s in &bl.stmts {
             let before = out.len();
             self.stmt(fr, s, &mut env, out)?;
@@ -1241,6 +1621,7 @@ impl<'m> Reader<'m> {
                     if cx.probe {
                         return Err("probe: return".into());
                     }
+                    self.flush_writeback(&mut env, out)?;
                     let e = self.ret_expr(&env, out)?;
                     out.push(syn::parse_quote!(return #e;));
                     Ok(Flow::Diverge)
@@ -1272,9 +1653,18 @@ impl<'m> Reader<'m> {
                 out.push(syn::parse_quote!(unreachable!();));
                 Ok(Flow::Diverge)
             }
-            Term::Drop(_, glue, t) => {
+            Term::Drop(p, glue, t) => {
                 if *glue {
-                    return self.err(fr, "a drop with drop glue (only values without destructors are read)");
+                    // a value whose variant is known here and runs no code
+                    // when dropped (no `Drop` impl, no field with glue)
+                    let mut scratch = Vec::new();
+                    let known = match self.read(fr, p, &env, &mut scratch) {
+                        Ok((Val::C(Ty::Adt(k), v, _), _)) if scratch.is_empty() => self.m.adts.get(&k).and_then(|d| d.variants.get(v)).is_some_and(|x| x.no_glue),
+                        _ => false,
+                    };
+                    if !known {
+                        return self.err(fr, "a drop with drop glue (only values without destructors are read)");
+                    }
                 }
                 self.go(fr, *t, env, cx, out)
             }
@@ -1306,11 +1696,11 @@ impl<'m> Reader<'m> {
         }
     }
 
-    fn state_or_var(&self, env: &Env, l: usize) -> syn::Expr {
+    fn state_or_var(&self, env: &Env, l: usize) -> Result<syn::Expr, String> {
         if let Some(r) = env.refs.get(&(0, l)) {
-            return r.lv.clone();
+            return self.state_value(r);
         }
-        var(&self.frames[0].names[l])
+        Ok(var(&self.frames[0].names[l]))
     }
 
     /// An `Assert` whose condition is word for word the obligation of the
@@ -1347,11 +1737,11 @@ impl<'m> Reader<'m> {
         match (kind, expected, &def) {
             ("bounds", true, Rvalue::Bin(op, Operand::Copy(ip) | Operand::Move(ip), n)) if op == "lt" && ip.proj.is_empty() => {
                 // the target's first statement indexes an array of length `n` by `i`
-                let Operand::Const(Const::Int(_, nv)) = n else { return false };
+                let Some((_, nv)) = Self::int_const(n) else { return false };
                 let uses_index = |p: &Place| -> bool {
                     p.proj.iter().any(|pr| matches!(pr, Proj::Index(l) if *l == ip.local)) && {
                         let base = Place { local: p.local, proj: p.proj.iter().take_while(|pr| !matches!(pr, Proj::Index(_))).cloned().collect() };
-                        matches!(self.place_ty(fr, &base), Ok(Ty::Array(_, len)) if len as i128 == *nv)
+                        matches!(self.place_ty(fr, &base), Ok(Ty::Array(_, len)) if len as i128 == nv)
                     }
                 };
                 match first {
@@ -1362,13 +1752,13 @@ impl<'m> Reader<'m> {
                 }
             }
             ("overflow", true, Rvalue::Bin(op, s, w)) if op == "lt" => {
-                let Operand::Const(Const::Int(_, wv)) = w else { return false };
+                let Some((_, wv)) = Self::int_const(w) else { return false };
                 match first {
-                    Rvalue::Bin(sop, x, s2) if (sop == "shl" || sop == "shr") && same(s, s2) => self.op_ty(fr, x).ok().and_then(|t| t.bits()).is_some_and(|bits| bits as i128 == *wv),
+                    Rvalue::Bin(sop, x, s2) if (sop == "shl" || sop == "shr") && same(s, s2) => self.op_ty(fr, x).ok().and_then(|t| t.bits()).is_some_and(|bits| bits as i128 == wv),
                     _ => false,
                 }
             }
-            ("div-zero" | "rem-zero", false, Rvalue::Bin(op, d, z)) if op == "eq" && matches!(z, Operand::Const(Const::Int(_, 0))) => matches!(first, Rvalue::Bin(o, _, d2) if (o == "div" || o == "rem") && same(d, d2)),
+            ("div-zero" | "rem-zero", false, Rvalue::Bin(op, d, z)) if op == "eq" && Self::int_const(z).is_some_and(|(_, v)| v == 0) => matches!(first, Rvalue::Bin(o, _, d2) if (o == "div" || o == "rem") && same(d, d2)),
             ("overflow-neg", false, Rvalue::Bin(op, x, _)) if op == "eq" => matches!(first, Rvalue::Un(o, x2) if o == "neg" && same(x, x2)),
             _ => false,
         }
@@ -1427,16 +1817,29 @@ impl<'m> Reader<'m> {
                 cont(self, env, out)
             }
             Callee::Intrinsic(name, _) => self.err(fr, format!("the intrinsic `{name}`")),
-            Callee::Leaf(path, _) => {
+            Callee::Leaf(path, tys) => {
                 if cx.probe {
                     return Err("probe: leaf call".into());
                 }
-                self.leaf(fr, path, args, dest, &mut env, out)?;
+                self.leaf(fr, path, tys, args, dest, &mut env, out)?;
                 cont(self, env, out)
             }
             Callee::Unextracted(k) | Callee::Unsupported(k) => self.err(fr, format!("a call of `{k}` (not extracted)")),
             Callee::Fn(key) => {
                 let f2 = self.m.fns.get(key).ok_or_else(|| format!("no MIR for the callee `{key}`"))?;
+                // `o.as_deref_mut()` of an optional state `o: Option<&mut T>`
+                // (`&mut o`): the same optional place (§19.10's state table;
+                // rustc's borrow checker makes the reborrow exclusive)
+                if matches!(f2.def.as_str(), "std::option::Option::<T>::as_deref_mut" | "core::option::Option::<T>::as_deref_mut")
+                    && let [Operand::Copy(a) | Operand::Move(a)] = args
+                    && a.proj.is_empty()
+                    && let Some(r) = env.refs.get(&(fr, a.local)).cloned()
+                    && matches!(self.op_ty(fr, &args[0]), Ok(Ty::Ref(true, ref o)) if opt_mut(self.m, o).is_some())
+                    && dest.proj.is_empty()
+                {
+                    env.refs.insert((fr, dest.local), r);
+                    return cont(self, env, out);
+                }
                 if let Some(b) = builtin_leaf(f2) {
                     let mut es = Vec::new();
                     for a in args {
@@ -1452,6 +1855,35 @@ impl<'m> Reader<'m> {
                         return Err("probe: call".into());
                     }
                     return self.lifted_call(fr, &lc, args, dest, target, env, cx, out);
+                }
+                // `PartialOrd`'s provided comparison at a module type whose
+                // `partial_cmp` is lifted: `ord_lt(partial_cmp(a, b))`, core's
+                // definition (the lift prelude's `ord_*`, as the ghost
+                // language reads `<` over such a type)
+                if let Some((pred, lc)) = self.provided_cmp(f2) {
+                    if cx.probe {
+                        return Err("probe: call".into());
+                    }
+                    let call = self.lifted_expr(fr, &lc, args, &env, out)?;
+                    let v = self.bind(syn::parse_quote!(crate::__lift::#pred(#call)), lc.total, None, out);
+                    self.assign(fr, dest, v, &mut env, out)?;
+                    return cont(self, env, out);
+                }
+                // `Deref::deref` of a library newtype read as its field (a
+                // host model whose `Deref` is that field, SEMANTICS.md
+                // §19.10; its MIR is not exported): the field as a slice
+                if !f2.has_body
+                    && let Item::Impl(Ty::Adt(k), tr, _, mname) = &f2.item
+                    && tr == "Deref"
+                    && mname == "deref"
+                    && self.nm.transparent(self.m, k)
+                    && args.len() == 1
+                {
+                    let (e, _) = self.operand_expr(fr, &args[0], &env, out)?;
+                    let e = paren(e);
+                    let v = self.bind(syn::parse_quote!(&#e[..]), false, None, out);
+                    self.assign(fr, dest, v, &mut env, out)?;
+                    return cont(self, env, out);
                 }
                 // inline
                 if !f2.has_body {
@@ -1521,10 +1953,53 @@ impl<'m> Reader<'m> {
         }
     }
 
+    /// `PartialOrd::lt/le/gt/ge` as provided by core (not overridden) whose
+    /// body starts by calling a lifted `partial_cmp` on its own two
+    /// parameters: the prelude predicate and that callee.
+    fn provided_cmp(&self, f2: &Fn) -> Option<(syn::Ident, LiftedCallee)> {
+        let m = f2.def.strip_prefix("std::cmp::PartialOrd::").or_else(|| f2.def.strip_prefix("core::cmp::PartialOrd::"))?;
+        if !matches!(f2.item, Item::Fn(_)) || !matches!(m, "lt" | "le" | "gt" | "ge") || f2.argc != 2 {
+            return None;
+        }
+        let Term::Call(Callee::Fn(pc), a, _, _) = &f2.blocks.first()?.term else { return None };
+        let own = |o: &Operand, l: usize| matches!(o, Operand::Copy(p) | Operand::Move(p) if p.local == l && p.proj.is_empty());
+        if !f2.blocks[0].stmts.is_empty() || a.len() != 2 || !own(&a[0], 1) || !own(&a[1], 2) {
+            return None;
+        }
+        let pcf = self.m.fns.get(pc)?;
+        if !matches!(&pcf.item, Item::Impl(_, t, _, n) if t == "PartialOrd" && n == "partial_cmp") {
+            return None;
+        }
+        let lc = self.nm.lifted(self.m, pcf)?;
+        if !lc.states.is_empty() {
+            return None;
+        }
+        Some((format_ident!("ord_{}", m), lc))
+    }
+
+    /// The call expression of a lifted callee without states.
+    fn lifted_expr(&mut self, fr: usize, lc: &LiftedCallee, args: &[Operand], env: &Env, out: &mut Vec<syn::Stmt>) -> Result<syn::Expr, String> {
+        let mut es: Vec<syn::Expr> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let (v, _) = self.operand(fr, a, env, out)?;
+            let v = match v {
+                Val::R(inner) if lc.by_value.contains(&i) => *inner,
+                Val::E(e) if lc.by_value.contains(&i) => {
+                    let e = paren(e);
+                    Val::E(syn::parse_quote!(*#e))
+                }
+                other => other,
+            };
+            es.push(self.materialize(fr, &v)?);
+        }
+        let path = &lc.path;
+        Ok(syn::parse_quote!(#path(#(#es),*)))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn lifted_call(&mut self, fr: usize, lc: &LiftedCallee, args: &[Operand], dest: &Place, target: Option<usize>, mut env: Env, cx: &Cx, out: &mut Vec<syn::Stmt>) -> Result<Flow, String> {
         let mut es: Vec<syn::Expr> = Vec::new();
-        let mut state_lvs: Vec<syn::Expr> = Vec::new();
+        let mut state_lvs: Vec<LRef> = Vec::new();
         for (i, a) in args.iter().enumerate() {
             if lc.states.contains(&i) {
                 let (Operand::Copy(p) | Operand::Move(p)) = a else { return self.err(fr, "a state argument that is not a place") };
@@ -1533,8 +2008,8 @@ impl<'m> Reader<'m> {
                 } else {
                     return self.err(fr, "a state argument that is not a `&mut` place");
                 };
-                es.push(lr.lv.clone());
-                state_lvs.push(lr.lv.clone());
+                es.push(self.state_value(&lr)?);
+                state_lvs.push(lr);
                 continue;
             }
             let (v, _) = self.operand(fr, a, &env, out)?;
@@ -1565,10 +2040,8 @@ impl<'m> Reader<'m> {
             } else {
                 out.push(syn::parse_quote!(let (#(#sn),*) = #call;));
             }
-            for (lv, s) in state_lvs.iter().zip(sn.iter()) {
-                let base = lv.to_token_stream().into_iter().next().map(|t| t.to_string()).unwrap_or_default();
-                self.invalidate(fr, &base, None, &mut env, out)?;
-                out.push(syn::parse_quote!(#lv = #s;));
+            for (lr, s) in state_lvs.iter().zip(sn.iter()) {
+                self.state_store(fr, lr, syn::parse_quote!(#s), &mut env, out)?;
             }
             let v = if lc.has_ret { Val::E(syn::parse_quote!(#rn)) } else { Val::Z(Ty::Unit) };
             self.assign(fr, dest, v, &mut env, out)?;
@@ -1583,7 +2056,8 @@ impl<'m> Reader<'m> {
     }
 
     /// The leaves: the buffer model and array/slice indexing.
-    fn leaf(&mut self, fr: usize, path: &str, args: &[Operand], dest: &Place, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
+    #[allow(clippy::too_many_arguments)]
+    fn leaf(&mut self, fr: usize, path: &str, tys: &[Ty], args: &[Operand], dest: &Place, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
         let method = path.rsplit("::").next().unwrap_or("");
         let buf_ref = |me: &mut Self, env: &mut Env, o: &Operand, out: &mut Vec<syn::Stmt>| -> Result<LRef, String> {
             let (Operand::Copy(p) | Operand::Move(p)) = o else { return me.err(fr, "a buffer that is not a place") };
@@ -1665,6 +2139,43 @@ impl<'m> Reader<'m> {
                 other => return self.err(fr, format!("indexing by `{other}`")),
             };
             let v = self.bind(e, false, None, out);
+            return self.assign(fr, dest, v, env, out);
+        }
+        // `Vec::push(v, x)` of a `Vec` place: the model `vec_push` (§19.10)
+        if matches!(path, "std::vec::Vec::<T, A>::push" | "alloc::vec::Vec::<T, A>::push") && args.len() == 2 {
+            let r = buf_ref(self, env, &args[0], out)?;
+            let lv = r.lv.clone();
+            let (x, _) = self.operand_expr(fr, &args[1], env, out)?;
+            let base = lv.to_token_stream().into_iter().next().map(|t| t.to_string()).unwrap_or_default();
+            self.invalidate(fr, &base, None, env, out)?;
+            out.push(syn::parse_quote!(#lv = crate::__lift_model::vec_push(#lv, #x);));
+            return self.assign(fr, dest, Val::Z(Ty::Unit), env, out);
+        }
+        // a method of an open trait at its declared library instance
+        let self_ty = match tys.first() {
+            Some(t) => t.clone(),
+            None => return self.err(fr, format!("the leaf `{path}`")),
+        };
+        // `Iterator::next` of the byte-string iterator model: the lift
+        // prelude's `bytes_iter_next` on the byte strings not yet yielded
+        if matches!(path, "std::iter::Iterator::next" | "core::iter::Iterator::next") && args.len() == 1 && super::bytes_iter_model(self.m, &self_ty) {
+            let r = buf_ref(self, env, &args[0], out)?;
+            let lv = r.lv.clone();
+            let it = ident(&self.fresh("it"));
+            let rr = ident(&self.fresh("r"));
+            out.push(syn::parse_quote!(let (#it, #rr) = crate::__lift::bytes_iter_next(#lv);));
+            let base = lv.to_token_stream().into_iter().next().map(|t| t.to_string()).unwrap_or_default();
+            self.invalidate(fr, &base, None, env, out)?;
+            out.push(syn::parse_quote!(#lv = #it;));
+            return self.assign(fr, dest, Val::E(syn::parse_quote!(#rr)), env, out);
+        }
+        // a host model's method (`<Sha256 as Hasher>::hash(parts)`)
+        if let Some(callee) = self.nm.host_method(self.m, &self_ty, method) {
+            let mut es = Vec::new();
+            for a in args {
+                es.push(self.operand_expr(fr, a, env, out)?.0);
+            }
+            let v = self.bind(syn::parse_quote!(#callee(#(#es),*)), false, None, out);
             return self.assign(fr, dest, v, env, out);
         }
         self.err(fr, format!("the leaf `{path}`"))
@@ -1783,6 +2294,7 @@ impl<'m> Reader<'m> {
         let mut merged: Option<Env> = None;
         for (_, o, e) in arms_out.iter_mut() {
             let Some(e) = e else { continue };
+            self.flush_writeback(e, o)?;
             self.normalize(&live, e, o)?;
             for &l in &live {
                 let name = &self.frames[0].names[l];
@@ -1943,8 +2455,17 @@ impl<'m> Reader<'m> {
         }
         // a tail-recursive helper over the variables live at the header (and
         // those the attachment names)
-        let name = format_ident!("{}__loop{}", self.spec.lifted_name.replace("::", "__"), k);
+        // a method's loop over its receiver (`&mut self`, `self`): a method
+        // helper of the impl, `Self::m__loopK(self, ..)` (as the source lift's)
+        let receiver = self.spec.params.first().is_some_and(|p| p == "self");
         let mut params: Vec<usize> = live.iter().copied().filter(|l| *l != 0).collect();
+        let method = receiver && params.contains(&1);
+        let name = if method {
+            format_ident!("{}__loop{}", self.spec.lifted_name.rsplit("::").next().unwrap_or(""), k)
+        } else {
+            format_ident!("{}__loop{}", self.spec.lifted_name.replace("::", "__"), k)
+        };
+        let callee: syn::Expr = if method { syn::parse_quote!(Self::#name) } else { syn::parse_quote!(#name) };
         let mentioned = |e: &TokenStream, n: &str| -> bool { ts_mentions(e.clone(), n) };
         let mut attach_ts = TokenStream::new();
         for e in at.invariants.iter().chain(at.ensures.iter()).chain(at.decreases.iter()) {
@@ -2003,10 +2524,10 @@ impl<'m> Reader<'m> {
             direct.into_iter().chain(via_ref).min().unwrap_or(usize::MAX)
         };
         let is_state = |l: usize| self.spec.states.iter().any(|s| *s + 1 == l);
-        params.sort_by_key(|l| (is_state(*l), first_use(*l), *l));
+        params.sort_by_key(|l| (!(method && *l == 1), is_state(*l), first_use(*l), *l));
         self.loop_forms.push((k, "helper".into()));
-        let args: Vec<syn::Expr> = params.iter().map(|l| self.state_or_var(&env, *l)).collect();
-        out.push(syn::parse_quote!(return #name(#(#args),*);));
+        let args: Vec<syn::Expr> = params.iter().map(|l| self.state_or_var(&env, *l)).collect::<Result<_, _>>()?;
+        out.push(syn::parse_quote!(return #callee(#(#args),*);));
         // the helper
         let mut henv = Env::default();
         for &l in &params {
@@ -2019,6 +2540,10 @@ impl<'m> Reader<'m> {
         let mut inputs: Vec<TokenStream> = Vec::new();
         for &l in &params {
             let id = ident(&self.frames[0].names[l]);
+            if method && l == 1 {
+                inputs.push(quote!(mut self));
+                continue;
+            }
             let t = if self.spec.states.iter().any(|s| *s + 1 == l) {
                 self.state_ty(l)?
             } else {
@@ -2028,12 +2553,26 @@ impl<'m> Reader<'m> {
             inputs.push(quote!(mut #id: #t));
         }
         let mut hb: Vec<syn::Stmt> = Vec::new();
+        // an exploded state is whole in the helper's parameters: explode it again
+        for &l in &params {
+            if let Some(r) = env.refs.get(&(0, l))
+                && let Some((k, fs)) = &r.fields
+            {
+                let whole = r.lv.clone();
+                for (i, f) in fs.iter().enumerate() {
+                    let fe = self.field_expr(0, whole.clone(), &Ty::Adt(k.clone()), 0, i)?;
+                    let id = ident(f);
+                    hb.push(syn::parse_quote!(let mut #id = #fe;));
+                    henv.declared.insert(f.clone());
+                }
+            }
+        }
         if !at.at_start.is_empty() {
             let s = &at.at_start;
             hb.push(syn::parse_quote!(proof! { #(#s)* }));
         }
         let mut loops = cx.loops.clone();
-        loops.push((h, LoopForm::Helper(name.clone(), params.clone())));
+        loops.push((h, LoopForm::Helper(callee.clone(), params.clone())));
         // the header's own statements run first in each call
         let cx_h = Cx { k: K::Ret, stop: None, loops: loops.clone(), probe: false };
         let flow = self.go_header(h, henv, &cx_h, &mut hb)?;
@@ -2049,6 +2588,10 @@ impl<'m> Reader<'m> {
         }
         for e in &at.ensures {
             attrs.push(syn::parse_quote!(#[ensures(#e)]));
+        }
+        if method {
+            // the lift places it in the impl (`lift::Ctx`)
+            attrs.push(syn::parse_quote!(#[lift_method]));
         }
         let out_ty = &self.spec.out_ty;
         let item: syn::ItemFn = syn::parse_quote!(
@@ -2094,6 +2637,49 @@ impl<'m> Reader<'m> {
 }
 
 
+/// A discriminant as the value of its type: rustc prints the bits of a
+/// negative one (`Ordering::Less` is `-1i8`, printed `255`).
+fn discr_value(bits: i128, t: &Ty) -> i128 {
+    match t {
+        Ty::Int(true, w) => {
+            let w = if *w == 0 { 64 } else { *w };
+            if w >= 128 {
+                return bits;
+            }
+            let m = (bits as u128) & ((1u128 << w) - 1);
+            if m >> (w - 1) == 1 { (m as i128) - (1i128 << w) } else { m as i128 }
+        }
+        _ => bits,
+    }
+}
+
+/// Whether every path from block `b` ends in a panic or another end that
+/// never returns (a diverging call, `unreachable`, an abort) without
+/// returning or looping: such a path is one obligation, `unreachable!()`,
+/// whatever it computes on the way (a panic's message, `assert_eq!`'s
+/// operands and `AssertKind`, `fmt::Arguments`: none of it is observable,
+/// as the call never returns). Reading such a block as `unreachable!()` is
+/// never weaker than reading its statements: the obligation is that the
+/// path is not taken at all.
+fn must_diverge(f: &Fn, b: usize, visiting: &mut Vec<usize>) -> bool {
+    if visiting.contains(&b) {
+        return false;
+    }
+    let Some(bl) = f.blocks.get(b) else { return false };
+    match &bl.term {
+        Term::Unreachable | Term::Abort | Term::Resume => true,
+        Term::Call(Callee::Diverge(_), ..) | Term::Call(_, _, _, None) => true,
+        Term::Return | Term::Unsupported(_) => false,
+        t => {
+            visiting.push(b);
+            let ss = super::cfg::succs(t);
+            let r = !ss.is_empty() && ss.iter().all(|x| must_diverge(f, *x, visiting));
+            visiting.pop();
+            r
+        }
+    }
+}
+
 /// Integer methods read as the subset's builtins (their documented meaning
 /// is the builtin's; `tests/mir.rs` compares each with core natively).
 fn builtin_leaf(f: &Fn) -> Option<fn(&[syn::Expr]) -> (syn::Expr, bool)> {
@@ -2119,6 +2705,16 @@ fn builtin_leaf(f: &Fn) -> Option<fn(&[syn::Expr]) -> (syn::Expr, bool)> {
             let (x, y) = (&a[0], &a[1]);
             (syn::parse_quote!(crate::__lift::range_inclusive_u64(#x, #y)), true)
         }),
+        // `uN::to_be_bytes`: the builtin (its bytes, most significant first)
+        (Item::Inherent(Ty::Int(false, b), m), _) if m == "to_be_bytes" && *b != 0 => Some(|a| {
+            let x = &a[0];
+            (syn::parse_quote!(#x.to_be_bytes()), true)
+        }),
+        // `<[T]>::get(s, i)` by a `usize`: the subset's `get` (`None` past the end)
+        (Item::Inherent(Ty::Slice(_), m), _) if m == "get" && f.args.get(1) == Some(&Ty::Int(false, 0)) => Some(|a| {
+            let (s, i) = (&a[0], &a[1]);
+            (syn::parse_quote!(#s.get(#i)), true)
+        }),
         (_, "std::iter::once" | "core::iter::once") => Some(|a| {
             let x = &a[0];
             (syn::parse_quote!(crate::__lift::once(#x)), true)
@@ -2140,12 +2736,17 @@ pub fn read(m: &Sbmir, nm: &dyn Names, spec: &Spec<'_>) -> Result<ReadOut, Strin
     let mut r = Reader { m, nm, spec, frames: Vec::new(), cfg, fresh: 0, helpers: Vec::new(), loop_forms: Vec::new(), assigned_params: BTreeSet::new() };
     let fr = r.new_frame(f, true);
     let mut env = Env::default();
+    let mut out = Vec::new();
     // parameters: states are places, the rest values
     for i in 0..f.argc {
         let l = i + 1;
         let t = &f.locals[l].0;
         let name = spec.params[i].clone();
-        if spec.states.contains(&i) {
+        if spec.states.contains(&i) && opt_mut(m, t).is_some() {
+            // `Option<&mut T>`: the optional place's value, a variable of
+            // type `Option<T>` (its writes go through the matched field,
+            // `Env::writeback`; it is returned like any state)
+        } else if spec.states.contains(&i) {
             let buf = match t {
                 Ty::Ref(true, inner) => match &**inner {
                     Ty::Ref(true, s) if matches!(**s, Ty::Slice(_)) => Some("bufmut"),
@@ -2154,7 +2755,16 @@ pub fn read(m: &Sbmir, nm: &dyn Names, spec: &Spec<'_>) -> Result<ReadOut, Strin
                 },
                 _ => return Err(format!("`{}`: the lifted state parameter `{name}` is not `&mut` in rustc's MIR", spec.lifted_name)),
             };
-            env.refs.insert((fr, l), LRef { lv: var(&name), buf });
+            let fields = r.explode(l, &name);
+            if let Some((adt, fs)) = &fields {
+                for (k, fv) in fs.iter().enumerate() {
+                    let fe = r.field_expr(fr, var(&name), &Ty::Adt(adt.clone()), 0, k)?;
+                    let id = ident(fv);
+                    out.push(syn::parse_quote!(let mut #id = #fe;));
+                    env.declared.insert(fv.clone());
+                }
+            }
+            env.refs.insert((fr, l), LRef { lv: var(&name), buf, fields, inner: false });
         } else if matches!(t, Ty::Ref(true, _)) {
             return Err(format!("`{}`: rustc's MIR parameter `{name}` is `&mut` but the lift does not pass it as a state", spec.lifted_name));
         } else if matches!(t, Ty::Ref(false, _)) && !spec.ref_params.contains(&i) && name != "_" {
@@ -2163,7 +2773,6 @@ pub fn read(m: &Sbmir, nm: &dyn Names, spec: &Spec<'_>) -> Result<ReadOut, Strin
         }
         env.declared.insert(name);
     }
-    let mut out = Vec::new();
     let cx = Cx { k: K::Ret, stop: None, loops: vec![], probe: false };
     let flow = r.go(fr, 0, env, &cx, &mut out)?;
     if let Flow::Fall(_) = flow {

@@ -4,6 +4,13 @@
 //! written from the host's own files (SEMANTICS.md §19), at the one
 //! verified instance of the open `Family` traits (the MMR). `LAWS.rs`
 //! states what they guarantee; `PROOF.rs` proves it.
+//!
+//! The function bodies (of the host files and of `opt.rs`) are read from
+//! rustc's MIR, `mmr.sbmir` (`sandblaster/docs/mir-lift.md` §20; extracted
+//! by `sandblaster/mirx/extract.sh`, see its README), not from the surface
+//! syntax; the lifted round trip of the rewritten `mmr/iterator.rs` reads
+//! the MIR of its copy, `mmr.roundtrip__merkle__mmr__iterator.sbmir`. A
+//! changed source refuses the stale MIR until it is extracted again.
 #![forbid(unsafe_code)]
 
 mod merkle;
@@ -11,7 +18,7 @@ mod merkle;
 // optimization alternatives: faster code for source functions, each tied to
 // its function by a proven `#[rewrite]` lemma in PROOF.rs; lowered into the
 // host's files only where cheaper (DESIGN.md §2.1)
-#[lift(opt, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family")]
+#[lift(opt, mir = "mmr.sbmir", instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family")]
 mod opt;
 
 // the toolchain's domain-free proof library (its `bridges` are prover rules)

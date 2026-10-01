@@ -1,7 +1,12 @@
 # Lifting from rustc's MIR
 
-Status: prototype; commonware-codec's varint is verified through it with
-its laws and proofs unchanged. The appendix (§20) is the normative reading;
+Status: prototype; every exec module of the repository reads its bodies
+through it: commonware-codec's varint with its laws and proofs unchanged,
+commonware-storage's MMR position and peak arithmetic (in place, with its
+`#[rewrite]` alternatives) with its laws unchanged and one proof lemma
+restated in the MIR's shape, and the first set of storage's Merkle proof
+verifier (`hasher.rs` at `Standard<Sha256>`, `proof.rs`'s subtree
+reconstruction, in place) with its laws and proofs unchanged. The appendix (§20) is the normative reading;
 it joins SEMANTICS.md at the next acceptance of the specification locks
 (SEMANTICS.md is part of every `SPEC.lock`'s `semantics` hash). This note
 records the decision, the design, the measurements and the plan to retire
@@ -114,8 +119,23 @@ and lifted names, exactly as before.
 * `lift.rs`: `#[lift(mir = ..)]` loads the file; for every lifted exec
   function of the module it skips the source reading of the body, checks
   the signature against the MIR (parameter count, state parameters =
-  `&mut` parameters), reads the loop attachments with the MIR's locals
-  typed, and takes the body and helpers from `mir::read`.
+  `&mut` parameters), takes an `impl Trait` result's concrete type from
+  the MIR, reads the loop attachments with the MIR's locals typed (a name
+  shadowed at the loop is the variable in scope there), and takes the body
+  and helpers from `mir::read`.
+* **In place and the lifted round trip** (DESIGN.md §2.1). An in-place crate
+  is extracted as a whole (`merkle::position,merkle::location,merkle::mmr`,
+  its lowered copies stubbed by the sources, the dependencies' verifying
+  build scripts stubbed, `#[lift(opt)]` alternatives compiled in the
+  crate's context by `--inject`). The lifted round trip reads back a copy of
+  a rewritten file (the source, the rewritten functions' copies, the
+  helpers); its bodies must be rustc's too, so the round trip of a MIR
+  module reads `<stem>.roundtrip__<module>.sbmir`, the extraction of the
+  crate with that file replaced by the copy (`--replace`; the build writes
+  the copy to `OUT_DIR/<name>-roundtrip__<module>.rs`). The load checks the
+  copy's SHA-256 like any source, so a stale round-trip MIR fails the round
+  trip, and a host that compiles the file's lowered copy fails its build
+  (fail closed); re-extract and build again.
 
 ## 4. What works
 
@@ -130,9 +150,59 @@ and lifted names, exactly as before.
   ZigZag (signed shifts, negation with its overflow check as `iN_neg`'s
   precondition), the `Read`/`Write`/`EncodeSize` impls and `From` impls.
 * **LAWS.rs and PROOF.rs unchanged** (0 of 3,865 proof lines adapted):
-  48 laws, 21,247 obligations, 0 failed.
+  48 laws, 21,241 obligations, 0 failed (21,247 before the reader changes of the MMR's move: comparisons of literals fold, a panicking path is one obligation).
 * A misreading is caught: reading one constant of `write`'s MIR wrong
   (`len += 2` for `len += 1`) makes the laws fail (see §5).
+* commonware-storage's MMR (`storage/sandblaster/mmr`, in place): all 102
+  lifted exec functions of `position.rs`, `location.rs`, `mmr/mod.rs`,
+  `mmr/iterator.rs` and the `#[rewrite]` alternatives of `opt.rs`, read from
+  `mmr.sbmir`: 5,602 obligations and the 10 laws proven (the source lift:
+  5,589); the optimizer still rewrites `PeakIterator::to_nearest_size` to
+  `opt::to_nearest_size_fast`, the lifted round trip reads the copy from
+  `mmr.roundtrip__merkle__mmr__iterator.sbmir` and passes, and rustc
+  compiles the lowered copy. LAWS.rs is unchanged; PROOF.rs changes in one
+  place (below). The lift conformance check of the in-place modules passes
+  on the MIR-read bodies (§5). Its harness compiles a copy of the host crate
+  without a build script, so a lowered declaration (`mod m {
+  include!(concat!(env!("OUT_DIR"), ..)); }`) is compiled there as the lift
+  reads it, `mod m;` (`conform::in_place::read_lowered_as_plain`): the
+  harness compares the source the lift verified, and the copy rustc builds is
+  the lifted round trip's to check.
+* commonware-storage's Merkle proof verifier, first set
+  (`storage/sandblaster/verifier`, in place): every lifted function of
+  `hasher.rs` (`Standard`'s methods and the `Hasher` trait's provided ones at
+  `Standard<Sha256>`), of `proof.rs` (`Subtree::{leaf_end, is_before,
+  is_outside, is_inside, children, reconstruct_digest}`) and of the position
+  arithmetic it uses, read from `verifier.sbmir`: 1,647 obligations and the
+  5 laws proven (the source lift: 1,643), **LAWS.rs and PROOF.rs unchanged**,
+  the §15 gates with the same findings as the source lift's reading (the
+  module's lock is not accepted yet). The extraction names its instances by
+  type aliases (`instances.rs`: `Standard<Sha256>`, SHA-256's `Digest`, and
+  `Copied<slice::Iter<&[u8]>>` for the element iterator `E`) and keeps only
+  the lifted items. Moving it needed, generally: an open trait's provided
+  methods and impl methods named at the instance, with an inherent method of
+  the same name taking precedence; core's blanket `From<T> for T` read as
+  library code, not as a module impl; library newtypes of host-model types
+  (`Digest([u8; 32])`) read as their field, with their unexported `Deref`;
+  leaf calls of open traits at library instances read as the host models'
+  methods (`Sha256::hash`) or as the byte-string iterator model; `Vec` as
+  `Seq` with `Vec::push` as `vec_push`; `Option<&mut T>` states with
+  `as_deref_mut`; writes through `&mut` into a matched enum's field
+  (`if let Some(v) = &mut collected { v.push(..) }`); `to_be_bytes` and
+  slice `get` as builtins. One misreading was found while moving it, by
+  reading the lifted output after the proofs had passed on it: the field
+  write-back first snapshotted `collected` before the pushes, so the pushes
+  were lost (no law or proof speaks of `collected`); it is fixed, the test
+  `an_optional_mutable_borrow_is_a_state_written_through_its_matched_field`
+  pins the order, and the conformance harness now drives that state (§5:
+  4 compared inputs push into `collected` and agree with rustc). The
+  harness of in-place modules needed, for the verifier: the host models'
+  library types (`Sha256`, `Digest`, from the MIR: `LiftFacts::mir_host_types`)
+  in its spellings, with `__cv` converting a lifted `[u8; 32]` to SHA-256's
+  `Digest`; a trait generic over an open trait at its instance (`Hasher<mmr::Family>`);
+  `Range` as core's; slices; and §19.10's states (`&mut` values, `Vec`,
+  `Option<&mut Vec>`, the byte-string iterator through a slice iterator),
+  which it skipped before.
 * `tests/mir.rs`: each construct on hand-written MIR with negative twins
   (signed checked arithmetic, drop glue, calls not extracted, `Len`,
   unknown forms, a non-`&mut` state, another module or format version,
@@ -143,35 +213,77 @@ and lifted names, exactly as before.
 
 | | source lift | MIR path |
 | --- | --- | --- |
-| trusted reading (code lines, no comments/tests) | `lift.rs` 4,172 + `lift_open.rs` 2,622 + templates/prelude/model 335 = **7,129** (covers varint, MMR, verifier) | `mir/read.rs` 1,910 + `mir/mod.rs` 328 = **2,238**, printer `mirx` 871 → **3,109** (covers varint; 74 of 77 MMR function bodies) |
-| grows with | every surface feature (each port added ~2k) | new MIR constructs only (the MMR survey added intrinsics, `Cmp`, unsizing, reference constants, iterator models: ≈ 0.2k) |
-| untrusted support | — | `cfg.rs` 235, `ir.rs` 452, `sexp.rs` 131 |
+| trusted reading (code lines, no comments/tests) | `lift.rs` 4,172 + `lift_open.rs` 2,622 + templates/prelude/model 335 = **7,129** (covers varint, MMR, verifier) | `mir/read.rs` 2,397 + `mir/mod.rs` 430 = **2,827**, printer `mirx` 1,131 → **3,958** (covers varint, the MMR and the verifier's set 1; 3,656 before the verifier moved: +302; 3,109 before the MMR moved) |
+| grows with | every surface feature (each port added ~2k) | new MIR constructs only (the MMR survey added intrinsics, `Cmp`, unsizing, reference constants, iterator models: ≈ 0.2k; moving the MMR ≈ 0.5k; moving the verifier ≈ 0.3k: host models, open-trait instances and items in the printer, `Option<&mut T>` states, field write-back) |
+| untrusted support | — | `cfg.rs` 235, `ir.rs` 467, `sexp.rs` 131 |
+| MMR laws / proof lines adapted | 10 laws, PROOF.rs 4,074 lines | LAWS.rs unchanged; PROOF.rs: one lemma's `ensures` (`ptl_pick`, the candidate tests of `position_to_location`) restated in the MIR's shape, 9 lines replaced by 16 (+2 comment lines); `opt.rs`: the host file's imports (`use crate::merkle::Family as _`, 3 lines → 6 with a comment), so that rustc compiles it |
+| MMR obligations / definitions / laws | 5,589 / 724 / 10 | 5,602 / 724 / 10 (every obligation and law proven) |
+| MMR `sandblaster check` (proofs, gates up to the missing lock) | 226 s | 231 s |
+| verifier (set 1) laws / proof lines adapted | 5 laws, PROOF.rs 442 lines | **0** lines changed (LAWS.rs, PROOF.rs unchanged); `merkle.rs`: `mir = "verifier.sbmir"` on the five in-place declarations; new `instances.rs` (the extraction's instances) |
+| verifier obligations / definitions / laws | 1,643 / 409 / 5 | 1,647 / 409 / 5 (every obligation and law proven) |
+| verifier `sandblaster check` (proofs, gates up to the missing lock) | 6.0 s; examples 14, sections 56, lock 1 finding | 7.3 s; the same findings (examples 14, sections 56, lock 1) |
+| verifier extraction | — | 87 roots, 121 functions, 3,453 lines; byte-identical when re-extracted |
+| verifier lift conformance, in place (`sandblaster conform`, kernel vs rustc 1.98.1) | the harness did not build (host models spelled as DSL paths) | 25,623 inputs on 70 functions (2 skipped: the constants `MAX_NODES`, `MAX_LEAVES`), **0 value mismatches**; `reconstruct_digest`: 400 inputs, 161 with `collected = Some(..)`, 4 compared ones pushing into it; **16 inputs fail by running out of the kernel's step budget** (500M) on deep subtrees (heights 19–47): the reference evaluation of this state-passing non-tail recursion grows exponentially with depth (31M steps at height 4, 2.6G at height 8, measured), so the check fails on them — open (an evaluation that shares the recursive call's result, or bounded heights in the generated inputs) |
 | varint laws / proof lines adapted | 48 laws, 3,865 proof lines | **0** lines changed (LAWS.rs, PROOF.rs, SPEC.lock byte-identical) |
-| varint obligations / definitions | 21,079 / 611 | 21,247 / 611 |
+| varint obligations / definitions | 21,079 / 611 | 21,241 / 611 (21,247 before the MMR moved) |
 | varint proof checking (`proofs_only`, dev build, one thread) | 369 s | 451 s (+22%: explicit assertion obligations of shifts through signed constants, `if` nesting where the source had `&&`) |
 | codec build, module mode (proofs, every §15 gate, conformance) | — | 10 min 13 s cold (elaboration 546 s, mutation gate 432 s); `SPEC.lock` matches |
 | lift conformance (kernel vs the build's rustc 1.98.1) | — | 22,070 inputs on 63 functions, 0 mismatches |
+| MMR lift conformance, in place (`sandblaster conform`, kernel vs rustc 1.98.1) | — | 25,563 inputs on 68 functions (8 skipped: 3 loop helpers and 3 `impl Iterator` results, compared through their callers; 2 constants), 0 mismatches |
 | extraction | — | cold (fresh target directory, driver built in release): 1 min 21 s; after a source edit: 8 s; output byte-identical across target directories |
 | a misreading is caught | — | `len += 2` for `len += 1` in `write`'s MIR: 20 obligations fail (invariant preservation, index bounds, slice range, callee requires) |
 
 The MMR survey (`front/examples/mir_survey.rs` over the extraction of
-`merkle::{position, location, mmr}` at `Family = mmr::Family`): 74 of 85
-extracted roots read; of the 11 others, 6 are codec `Read`/`Write` impls the
-MMR declarations leave out (`unverified_impls`), 2 build the host model
-`Error<F>`, and 3 are real gaps (an `assert_eq!` payload, `fmt::Arguments`
-in an `assert!` message, one unsizing form). Run in place through the
-lift (dev copy, removed), the MMR front end stops at 23 errors in six
-kinds: attachments that name a local shadowing a parameter (`let size =
-*size;` reads as `size_2`), loop helpers of `&mut self` methods, the
-generic host model `Error<F>`, `PeakIterator`'s `Iterator` impl and
-fields, assertion messages, and comparisons in attachments over
-`Position`. The MMR proofs were not run through the MIR path.
+`merkle::{position, location, mmr}` at `Family = mmr::Family`) found 74 of
+85 extracted roots read before the move; run in place, the front end
+stopped at 23 errors in six kinds. Each was closed in the reader or the
+skeleton, generally:
+
+1. *Attachments naming a local that shadows a parameter* (`let size =
+   *size;`): in a loop's attachment a source name denotes the variable in
+   scope at the loop (`read::loop_scopes`: the one of that name live at
+   the header), so the attachment reads `size` as the shadow, as the source
+   lift did.
+2. *Loop helpers of `&mut self` methods*: a loop over the receiver is a
+   method helper `Self::m__loopK(self, ..)`; a state whose struct carries
+   an invariant (`PeakIterator`) is held field by field between writes and
+   built where it leaves, so the invariant is not demanded between the
+   field writes of one step.
+3. *The generic host model `Error<F>`*: a host model is named by its crate
+   path (`crate::merkle::Error`), its instance arguments erased; dropping a
+   value whose variant is known and runs no drop code is nothing (the
+   printer records drop glue per variant: `Option::ok_or` drops the unused
+   error).
+4. *`PeakIterator`'s `Iterator` impl and fields, `impl Iterator` returns*:
+   method helpers and held states (2.); an `impl Trait` result's type is
+   the instance's return place.
+5. *`assert!`/`assert_eq!` messages*: a block from which every path
+   panics is one obligation, `unreachable!()`, whatever it computes on the
+   way (`AssertKind`, the operands, `fmt::Arguments`, `expect`'s `&dyn
+   Debug` unsizing — the survey's three real gaps).
+6. *Comparisons over `Position`* (in code and attachments): core's
+   provided `lt/le/gt/ge` through a lifted `partial_cmp` are the prelude's
+   `ord_*`, as the ghost language reads `<` over such a type; a
+   discriminant compared with a constant is a `match` per variant, with a
+   negative discriminant at its value (`Ordering::Less` is `-1`; the bits
+   reading would have made `Less <= 0` false).
+
+Moving the MMR also found: core's `checked_add` tests the overflow flag of
+`CheckedAdd` (read now as the exact pair, no longer as `a + b` with its
+obligation), named constants (`Family::MAX_NODES`, a value of a type with
+private fields) are the lifted constants they name, references to
+constants are references, and comparisons of literals fold. After the
+move the survey reads 84 of 92 roots (7 new: `opt.rs`); the 8 others are
+the 6 codec impls the MMR leaves out (`unverified_impls`) and the 2
+`TryFrom` impls, which build the host model `Error<F>` the survey tool
+does not declare (the lift reads them).
 
 ## 6. Plan to replace the source lift
 
 1. **Now** (this prototype): bodies from MIR for module-mode crates;
    the source lift keeps the skeleton and the ghost language.
-2. **MMR and verifier** (in place): multi-module extraction (done in the
+2. **MMR** (done, in place, with its `#[rewrite]` alternatives and the
+   round trip's MIR) **and verifier** (set 1 done, in place; §4): multi-module extraction (done in the
    driver: `SBMIR_MODULE="a,b"`, open-trait instances `SBMIR_INSTANCE`),
    leaves for core's range iterators (the lift prelude's `RangeU64` model:
    `Range::next`'s MIR goes through `mem::replace` and `Step`), `for`
@@ -181,8 +293,38 @@ fields, assertion messages, and comparisons in attachments over
    concrete type is in the MIR), open-trait associated constants (already
    evaluated by rustc). Then the conformance check of in-place modules
    runs on MIR-read bodies like on module mode.
-3. **Delete the source lift's body reading** once every exec module reads
-   MIR, in this order (each deletion is dead code at that point):
+3. **Delete the source lift's body reading**: every exec module now reads
+   MIR (varint, the MMR, the verifier's set 1). Measured: the front end of
+   the three roots (`tests/mir.rs`, `*_bodies_are_read_from_rustc_mir`,
+   under `cargo llvm-cov`) never runs 1,064 of `lift.rs`'s 3,913
+   instrumented lines and 1,395 of `lift_open.rs`'s 2,442 (≈ 2.46k
+   lines). No module uses any more, wholly or almost wholly (uncovered /
+   instrumented lines): the loop and iterator desugaring (`while_helper`
+   134/134, `for_helper` 114/114, `loop_helper` 85/85, `next_fn`,
+   `range_iter`, `for_needs_helper`, `loop_attach_stmts`, `has_control`,
+   `ReplaceControl`, `has_break`, the loop helpers' receiver unpacking
+   `UnpackSelf`/`rebuild_self`/`self_fields`), `impl Iterator` returns
+   (`impl_trait_concrete` 60/60), the combinator templates and closures
+   (`instantiate_template` 72/72, `template_ret` 54/54, `closure_call`,
+   `inline_closure`, `closure_inlinable`, `bound_names`, `free_idents`,
+   `Rename`; all of `lift/combinators.rs`), operator and conversion
+   rewriting of exec bodies (`operator_rewrite` 66/77, `binop_trait`,
+   `cmp_op`, `conversion_call` 16/28, `op_param_is_ref`, `prim_fn_path`),
+   exec state passing (`state_rewrite` 58/66, `wrap_state_ret`,
+   `state_arg_place`, `is_place_state`, `is_state`, `pre_stmt`'s
+   visitors), the typing of unsuffixed literals (`demand`, `demand_block`,
+   `infer_from_uses` 118 lines, `untyped_int`, `suffix_untyped`,
+   `suffix_literal`, `pending_literal`, `shift_amount_ty`), assertion and
+   panic macros (`macro_rewrite`), `const` assertion blocks
+   (`const_block_holds`), `ty_of_range`, `signed_lit`, `variant_owner`.
+   Partly unused (the exec arms of functions the ghost language also runs):
+   `rewrite_method` 94/182, `expr` 87/160, `signed_rewrite` 81/136,
+   `rewrite_call` 44/169, `stmt` 42/83, `rewrite` 42/56, `ty_of_src`
+   40/215, `fn_body` 31/60, `match_in` 26/69, `call_family` 18/77. These
+   counts are of the front end (`driver::check`); the build's lifted round
+   trip re-reads the MMR's rewritten copy through MIR as well, which the
+   deletion must confirm with a storage build. Delete in this order (each
+   deletion is dead code at that point):
    `lift_open.rs`'s loop and iterator desugaring (`while_helper`,
    `for_helper`, range and `once` iterators, `impl Iterator` returns),
    closures and combinator templates (`combinators.rs`,
@@ -247,6 +389,55 @@ file is checked in; the build refuses it when a source's hash differs,
 when it was extracted without overflow checks, or when the build's rustc
 is of another release (`1.98.x` against `1.98.0-nightly`).
 
+Several modules of one crate are extracted together (`SBMIR_MODULE="a,b"`;
+calls between them are calls by name), open traits at their declared
+instance (`SBMIR_INSTANCE`, §19.6), and the impls of formatting and hashing
+traits are left out (`SBMIR_SKIP_TRAITS`). An instance is a struct, an enum
+or a **type alias** of the crate; an alias names a concrete instance (a
+generic struct at its arguments, `Standard<Sha256>`, or a library type,
+commonware's `Sha256`), and the aliases of an extraction are a file compiled
+into the crate for the extraction only (`--inject`;
+`storage/sandblaster/verifier/instances.rs`). A trait is named by one word
+(its last segment) or by its path (`commonware_cryptography::Hasher`, to
+tell it from the module's own `Hasher`). A trait with a declared instance is
+not sealed; its provided methods are extracted at the instance (printed
+`(item provided SELF "Trait" (args) "m")`); impls of such a trait declared
+in the crate for other types (a reference, a blanket impl, another type) are
+other instances and are not extracted (noted). A call of a trait's method at
+a declared instance that is a **library** type is recorded as a leaf, not
+followed (`(leaf "..::Iterator::next" (Copied<slice::Iter<&[u8]>>))`, `(leaf
+"commonware_cryptography::Hasher::hash" (Sha256))`): the reading gives it the
+meaning of a model (§20.2), and a method it has no model for is refused.
+`Vec::push` is a leaf too. `SBMIR_ITEMS="mod=A,B;.."` keeps, in those
+modules, only the functions of the named items (impls whose self type is
+one, a trait's provided methods, free functions), and `SBMIR_SKIP_FNS="T::m,.."`
+leaves functions to the host: the lift's `items` and `unverified_fns`, so
+that the extraction holds what the lift reads (a function not extracted
+that the lift lifts is a load error, "no instance for the lifted function"). The build scripts of the crate
+and of the workspace crates it depends on that verify with sandblaster are
+stubs that write the sources where the real ones write the verified or
+lowered copies (`--stub`, `--stubs`), and lints are capped at warnings (they
+change no MIR). Two substitutions change what rustc compiles, and only
+through the sources' own texts: `--inject name=file` adds `mod name;` of a
+DSL file to the crate root (a `#[lift(opt)]` module, whose names then
+resolve as in the host file its alternatives go into), and `--replace
+src=text` compiles a source as if it had another text (the lifted round
+trip's copy); in both cases the recorded path and SHA-256 are those of the
+text compiled. For every constant operand the printer also records the
+constant item it came from, `(const-item OWNER "NAME" value)` (rustc_public
+evaluates constants; the item is taken from rustc's own MIR of the instance
+at the operand's span, and omitted where that span carries any other
+constant operand: another item, an evaluated constant or a constant that is
+not an item), and for
+every variant of an ADT whether dropping it runs code (`(no-glue)`: no
+`Drop` impl, no field with drop glue).
+
+The lifted round trip of a MIR module (DESIGN.md §2.1) reads the copy of a
+rewritten file from `<stem>.roundtrip__<module>.sbmir`, extracted with that
+file replaced by the copy the build writes (`OUT_DIR/<name>-roundtrip__<module>.rs`);
+it is checked like the module's own file (every source's SHA-256), so a
+round-trip MIR of another copy fails the round trip.
+
 #### 20.2 The reading (`crate::mir::read`, trusted)
 
 The reading walks the control-flow graph from the entry block and follows
@@ -275,22 +466,52 @@ shape of the output.
 | `Ord::max/min` of unsigned integers, `uN::div_ceil` | the builtins `max`, `min`, `div_ceil` |
 | `ctlz` (`leading_zeros`) | the builtin `leading_zeros` |
 | a function returning `!` (`unwrap_failed`, panics) | `unreachable!()` |
-| `drop` of a value without drop glue | nothing; with drop glue refused |
+| `drop` of a value without drop glue | nothing; of a value whose variant is known on the path and marked `(no-glue)` | nothing; any other drop with drop glue refused |
+| a block from which every path ends in a call returning `!`, `unreachable`, an abort (a panic and its message: `assert_eq!`'s `AssertKind` and operands, `fmt::Arguments`, `Result::expect`'s `&dyn Debug`) | `unreachable!()` (nothing on such a path is observable; the obligation is that it is not taken) |
+| `CheckedAdd/Sub/Mul(a, b)` whose flag is tested rather than asserted (core's `checked_add`) | the pair `(a.wrapping_op(b), a.checked_op(b).is_none())` |
+| core's provided `PartialOrd::lt/le/gt/ge` at a module type whose body starts by calling a lifted `partial_cmp` on its two parameters | `crate::__lift::ord_lt(T::partial_cmp(a, b))` (…`ord_le`, `ord_gt`, `ord_ge`: core's definitions, the lift prelude's, and how the ghost language reads `<` over such a type) |
+| `discriminant(x)` compared with a constant, the variant of `x` not known | `match x { V(..) => b_V, .. }` with each `b_V` the comparison of `V`'s discriminant, computed; a discriminant is its value in its type (`Ordering::Less` is `-1i8`, printed as its bits `255`) |
+| a comparison of two unsigned literals | its value |
+| `(const-item T "C" v)` of an associated constant the lift lifts (`Family::MAX_NODES`) | the lifted constant `T__C` (`T__C()` for a constant function); any other constant item: its value `v` |
+| a constant `&v` | a shared reference to `v` |
+| a `&mut` state of a struct with an invariant (§15.3) | held field by field in variables `__s_f` from the entry of the function or loop helper; the struct is built only where the value leaves (the return, a call, a loop helper's call), so the invariant is an obligation there and not between field writes |
 | a loop whose header only computes a test and whose only exit is that test | `while test { .. }` with §19.9's attachment placement |
-| any other loop | a tail-recursive helper `f__loopK` over the variables live at its header (in their order of first use, states last) plus those its attachment names, with the attachment's `invariant`/`decreases`/`ensures`/`at_start!` |
+| any other loop | a tail-recursive helper `f__loopK` over the variables live at its header (in their order of first use, states last) plus those its attachment names, with the attachment's `invariant`/`decreases`/`ensures`/`at_start!`; when the receiver `self` is among them, a method helper `Self::m__loopK(self, ..)` of the impl |
+| a provided method of an open trait of the module at its instance; a method of the instance's impl | the instance's method `S::m`; an inherent method of `S` of the same name is the one function both stand for (the lift requires the trait's to delegate to it or to have its body, §19.10), and the reading takes the inherent one's MIR |
+| core's blanket `impl<T> From<T> for T` (any impl that is not the module's) at a module type | library code, inlined (`from(t)` is `t`); only the module's own impls are calls by name |
+| a library struct with one field, named like a host model `pub type T = X;` of the field's type `X` (commonware's SHA-256 `Digest([u8; 32])`, model `host::Digest = [u8; 32]`) | the model's type: building it is its field, its field is the value; its `Deref::deref(&x)`, whose MIR the library does not export, is `&x[..]` (the model's documented `Deref`, §19.10) |
+| a leaf call of an open trait's method at a library instance named like a host model unit struct that the trait's declared instance is (`<Sha256 as Hasher>::hash(parts)`, `instance = "CHasher: crate::merkle::host::Sha256"`) | the model's method: `crate::merkle::host::Sha256::hash(parts)` |
+| `Iterator::next(e)` at `Copied<slice::Iter<&[u8]>>` (the instance of `E: Iterator<Item: AsRef<[u8]>>`) | `let (it, r) = crate::__lift::bytes_iter_next(e); e = it;`: the state is the byte strings not yet yielded (§19.10's model; for this type it is core's behavior) |
+| `Vec<T>` (global allocator); `Vec::push(v, x)` of a `Vec` place | `Seq<T>`; `v = crate::__lift_model::vec_push(v, x)` |
+| an `Option<&mut T>` parameter the lift passes as a state (§19.10) | a variable of type `Option<T>`, returned like any state; `Option::as_deref_mut(&mut o)` is the same optional place (passed as the state `o` and assigned back) |
+| `&mut (x as V).i` of a variable whose variant is known on the path (a matched arm: `if let Some(v) = &mut o`) | `let mut m = <the field>;`, writes through the borrow assign `m`, reads of `x` see `V(.., m, ..)`, and `x = V(.., m, ..)` where the path leaves the arm (its end, a return); a `&mut` copied out of that borrow (`copy (*r)` of the field's `&mut &mut T`) is the same place |
+| `uN::to_be_bytes(x)`, `<[T]>::get(s, i)` by a `usize` | the builtins `x.to_be_bytes()`, `s.get(i)` |
 | signed operations | §19.3's two's complement reading |
 | everything else (raw pointers, function pointers, `Len`, `Transmute`, runtime checks other than overflow checks, a call rustc did not let the extractor follow, loops in library code) | refused |
 
 The lift's signature is checked against rustc's: the parameter count, and
-that exactly the lift's state parameters are `&mut` in the MIR. A
-parameter bound by `_` is read only when zero-sized. Loops are numbered in
-source order for attachments (`loop_nr = k`).
+that exactly the lift's state parameters are `&mut` in the MIR; an `impl
+Trait` result is the type of the instance's return place. A parameter
+bound by `_` is read only when zero-sized. Loops are numbered in source
+order for attachments (`loop_nr = k`); in a loop's attachment a source name
+denotes the variable in scope at the loop (the one of that name live at
+its header: `let size = *size;` shadows the parameter `size`). A module
+read from MIR keeps none of its `use` leaves that no lifted item names
+(`use Trait as _` only steered rustc's method resolution).
 
 #### 20.3 What is trusted
 
 The reading (`crate::mir::read`), the type and constructor names
-(`crate::mir::ModuleNames`), the three builtin leaves and the index leaves,
-and the printer `sandblaster-mirx` (it transcribes rustc's data). rustc is
+(`crate::mir::ModuleNames`, with the names of lifted constants and of
+host models: a host model is named by its crate path, `crate::merkle::Error`;
+a library type stands for the host model of its name, `crate::mir::HostModels`),
+the builtin leaves (`max`, `min`, `div_ceil`, `to_be_bytes`, slice `get`,
+core's range and `once` iterators, the provided `PartialOrd` comparisons),
+the index leaves, the models of leaf calls (the buffer model, `vec_push`, the
+byte-string iterator at `Copied<slice::Iter<&[u8]>>`, the host models'
+methods), and the printer `sandblaster-mirx` (it transcribes rustc's data,
+including the constant items and drop glue it records, and decides which
+calls are leaves). rustc is
 trusted as it already is (it compiles the code); the fidelity argument is
 that the MIR comes from the same release as the compiler that builds the
 crate, and the lift conformance check (§1.1 item 8) compares every read

@@ -6,10 +6,14 @@
 //! cost model finds it cheaper (DESIGN.md §2.1, "The optimizer on lifted
 //! modules").
 
-// (the host files these alternatives go into also import the `Family`
-// trait, `use crate::merkle::Family as _`, for `Family::MAX_NODES`; the
-// lift reads that constant without it)
-use crate::merkle::mmr::{Family, Position};
+// the imports of the host file these alternatives go into
+// (`mmr/iterator.rs`): rustc compiles this file in the crate's context for
+// its MIR (`sandblaster/mirx/extract.sh --inject`), so the names resolve as
+// they do there (`Family::MAX_NODES` through the `Family` trait)
+use crate::merkle::{
+    Family as _,
+    mmr::{Family, Position},
+};
 
 /// The number of nodes of an MMR with `n` leaves: `2n - popcount(n)`.
 #[inline(always)]

@@ -609,6 +609,14 @@ fn lowered_copies(b: &super::gates::CrateBuild, copies: &[LoweredCopy], out_dir:
         files.push((c.dst.clone(), text));
     }
     files.push((out_dir.join(format!("{name}-lowered.txt")), index.clone()));
+    // the lifted round trip's copy of each file read from rustc's MIR that
+    // had rewrites (whether or not its round trip passed): the text whose
+    // MIR the round trip reads (`extract.sh --replace`, docs/mir-lift.md §20.1)
+    for l in &b.lowered_in_place {
+        if let Some((flat, text)) = &l.roundtrip_copy {
+            files.push((out_dir.join(format!("{name}-roundtrip__{flat}.rs")), text.clone()));
+        }
+    }
     (files, index)
 }
 
