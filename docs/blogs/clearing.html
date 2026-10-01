@@ -101,7 +101,7 @@ years." />
 O’Grady</a></div>
                         <div class="date">August 19th, 2026</div>
         </div>
-        <p><em>Update (10/1/26): Restored continuous payments while the
+        <p><em>Update (10/1/26): Restores continuous payments while the
         previous epoch’s close is built, certified, and admitted. Each
         payment signature binds the payer’s final vector root from that
         epoch, preventing retries from settling twice.</em></p>
@@ -679,12 +679,11 @@ O’Grady</a></div>
         checking <span class="math inline">e+1</span>.</p>
         <p>After <span class="math inline">e</span> ends, the operator
         returns original receipts for accepted requests and rejects the
-        rest as stale, reporting the payer’s final state. If the payer
-        holds no receipt beyond that state and verifies receipts through
-        it, it signs the remaining payments in <span
-        class="math inline">e+1</span> against the reported root.
-        Otherwise, it waits for <span class="math inline">e</span>’s
-        admission.</p>
+        rest with a report of the payer’s final state. If that report
+        matches the payer’s verified receipt history, the payer signs
+        the remaining payments in <span class="math inline">e+1</span>
+        against the reported root. Otherwise, it waits for <span
+        class="math inline">e</span>’s admission.</p>
         <p>If the operator includes a rejected request in <span
         class="math inline">e</span>, the payer’s row has a different
         root and validators reject the retry. If the operator

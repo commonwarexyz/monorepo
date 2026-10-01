@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (10/1/26): Restored continuous payments while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice.*
+*Update (10/1/26): Restores continuous payments while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice.*
 
 *Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 
@@ -335,7 +335,7 @@ A request sent near the end of $e$ may arrive too late, or its acknowledgment ma
 
 The predecessor root binds the retry to the payer's final vector in $e$, including how its debit is split across recipients. The operator countersigns only if that root matches its record. Validators derive the root from $e$'s admitted account rows when checking $e+1$.
 
-After $e$ ends, the operator returns original receipts for accepted requests and rejects the rest as stale, reporting the payer's final state. If the payer holds no receipt beyond that state and verifies receipts through it, it signs the remaining payments in $e+1$ against the reported root. Otherwise, it waits for $e$'s admission.
+After $e$ ends, the operator returns original receipts for accepted requests and rejects the rest with a report of the payer's final state. If that report matches the payer's verified receipt history, the payer signs the remaining payments in $e+1$ against the reported root. Otherwise, it waits for $e$'s admission.
 
 If the operator includes a rejected request in $e$, the payer's row has a different root and validators reject the retry. If the operator countersigned that retry, its receipt and a public proof establish a debit mismatch against $e+1$'s admitted close.
 
