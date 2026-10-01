@@ -36,7 +36,7 @@
   </defs>
 
   <text class="title" x="36" y="46">At Most One Copy Settles</text>
-  <text class="note" x="36" y="78">r' signs predecessor root P, so e and e+1 never both pay.</text>
+  <text class="note" x="36" y="78">r' signs predecessor root P, so r and r' cannot both settle.</text>
 
   <rect class="panel" x="36" y="104" width="620" height="300" rx="6"/>
   <text class="heading" x="58" y="140">Epoch e</text>

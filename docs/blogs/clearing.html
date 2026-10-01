@@ -255,7 +255,8 @@ O’Grady</a></div>
         epoch, cumulative debit, vector root, and <strong>predecessor
         root</strong>. The predecessor root is the Merkle root of its
         final vector <span class="math inline">V_a^{e-1}</span> in the
-        previous epoch (empty if it made no payments). The operator
+        previous epoch. That vector is empty if <span
+        class="math inline">a</span> made no payments. The operator
         countersigns this state to issue receipt <span
         class="math inline">R</span>:</p>
         <p><span class="math display">
@@ -269,10 +270,9 @@ O’Grady</a></div>
         <span class="math inline">D_a=20</span>, and <span
         class="math inline">V_a=\{b:(20,1)\}</span>.</p>
         <p>The payer durably saves each request before sending it,
-        retries the same bytes within the epoch if the response is lost,
-        and retains the verified acknowledgment and
-        <strong>openings</strong> (Merkle proofs of the payment
-        entries).</p>
+        retries the same bytes if the response is lost, and retains the
+        verified acknowledgment and <strong>openings</strong> (Merkle
+        proofs of the payment entries).</p>
         <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
         Accounts</h2>
         <p>Bajillion defines each payment as an update to the payer’s
@@ -596,11 +596,11 @@ O’Grady</a></div>
         still finalize. Recovery then freezes the last finalized state
         root.</p>
         <p>The recovery rules keep finalized payouts independently
-        claimable, with no expiry, and refund unadmitted deposits.
-        Accounts recover their balances with QMDB proofs against the
-        frozen root, and each account can claim only once. A close that
-        was never admitted or was invalidated changes neither the
-        recoverable balances nor the finalized payouts.</p>
+        claimable, with no expiry, and refund deposits whose closes
+        never finalize. Accounts recover their balances with QMDB proofs
+        against the frozen root, and each account can claim only once. A
+        close that was never admitted or was invalidated changes neither
+        the recoverable balances nor the finalized payouts.</p>
         <p>Even if the operator disappears, recovery depends on a
         correct, live settlement chain and independently available
         balance and payout openings. The fault also freezes the last
@@ -615,13 +615,14 @@ O’Grady</a></div>
         <p>The operator can register <span
         class="math inline">e+1</span> while still accepting payments in
         <span class="math inline">e</span>. Once that registration is
-        included onchain, it can switch payments to <span
+        included onchain, the operator can switch payments to <span
         class="math inline">e+1</span> while <span
         class="math inline">e</span>’s close is built, certified, and
         admitted. Registration fixes deposits and signed withdrawal
         authorizations before the first payment in <span
-        class="math inline">e+1</span> is acknowledged. Its anchor is
-        independent of <span class="math inline">e</span>’s close.</p>
+        class="math inline">e+1</span> is acknowledged. The anchor <span
+        class="math inline">\mathcal A_{e+1}</span> is independent of
+        <span class="math inline">e</span>’s close.</p>
         <p>Once <span class="math inline">e</span>’s close is admitted
         and <span class="math inline">e+1</span> is registered, the
         settlement chain binds <span class="math inline">e+1</span> to
@@ -629,15 +630,15 @@ O’Grady</a></div>
         class="math inline">e+1</span>’s admission and challenge
         deadlines relative to that time. Closes are admitted and
         finalized in epoch order. Missing an admission deadline
-        permanently faults the deployment and discards all later
-        registrations.</p>
+        permanently faults the deployment and discards every
+        registration still awaiting admission.</p>
         <p>The operator can register further epochs without a fixed
         queue limit. Deposits and onchain withdrawal requests wait in an
         ordered inbox. Each registration fixes the next range of
         entries, so later arrivals cannot change it. A deposit must be
-        registered within a fixed time of arrival, then awaits its
-        epoch’s close. It is refundable during fault recovery if that
-        close never finalizes.</p>
+        registered within a fixed time of arrival. It then waits for its
+        epoch’s close with no further deadline. It is refundable during
+        fault recovery if that close never finalizes.</p>
         <p>Accounts without deposits or withdrawals can start paying in
         the new epoch while the operator is still adding incoming
         credits from the previous one. At the transition, the starting
@@ -677,8 +678,12 @@ O’Grady</a></div>
         begin in that epoch. A new account created by incoming credit
         must wait for the close that credits it to be admitted before
         spending. A payer with an outstanding withdrawal authorization
-        waits until its signed deadline before signing another
-        payment.</p>
+        waits until its signed deadline before signing another payment.
+        Settlement accepts an authorization only within a fixed window
+        before that deadline. Once that window closes, the payer may
+        discard it and resume paying if certified chain state proves
+        that neither a registration nor the onchain queue accepted
+        it.</p>
         <h3 id="retrying-across-the-boundary">Retrying Across the
         Boundary</h3>
         <p>A request sent near the end of <span
@@ -687,13 +692,12 @@ O’Grady</a></div>
         <span class="math inline">e</span> includes it. An unconditional
         retry in <span class="math inline">e+1</span> could pay
         twice.</p>
-        <p>The predecessor root binds the retry to the payer’s reported
-        final vector in <span class="math inline">e</span>, including
-        how its debit is split across recipients. The operator
-        countersigns only if that root matches its record. Validators
-        derive the root from <span class="math inline">e</span>’s
-        admitted account rows when checking <span
-        class="math inline">e+1</span>, so <span
+        <p>The predecessor root binds the retry to the payer’s final
+        vector in <span class="math inline">e</span>, including how its
+        debit is split across recipients. The operator countersigns only
+        if that root matches its record. Validators derive the root from
+        <span class="math inline">e</span>’s admitted account rows when
+        checking <span class="math inline">e+1</span>, so <span
         class="math inline">e+1</span>’s close need not repeat it.
         Receipts and challenges include it for signature
         verification.</p>
@@ -703,8 +707,10 @@ O’Grady</a></div>
         stale, reporting the payer’s final state. The payer verifies
         receipts through that state, then signs the remaining payments
         in <span class="math inline">e+1</span> against the reported
-        root. Without a usable report and any required receipts, it
-        waits for <span class="math inline">e</span>’s admission.</p>
+        root. It waits for <span class="math inline">e</span>’s
+        admission instead if it holds a receipt past the reported state,
+        or if the reported state is nonempty and it cannot obtain the
+        receipts up to it.</p>
         <p>If the operator includes a rejected request in <span
         class="math inline">e</span>, the payer’s row has a different
         root and validators reject the retry. If the operator
@@ -713,9 +719,9 @@ O’Grady</a></div>
         class="math inline">e+1</span>’s admitted close.</p>
         <p>The predecessor root binds only the previous epoch. If the
         retry also misses <span class="math inline">e+1</span>, the
-        payer waits for <span class="math inline">e</span>’s admission
-        to determine whether the original was included before signing
-        again.</p>
+        payer signs again only after <span
+        class="math inline">e</span>’s admission shows whether the
+        original was included.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-retry.svg" alt="Payer a reaches state n-1 with vector root P in epoch e. If e's close omits the late request r, the final vector root remains P, and retry r' can settle in e+1. If the close includes r with root P', validators reject r' because it signs predecessor root P. An operator receipt for r' and a public proof establish a debit mismatch. At most one copy can settle.">
         <div class="image-caption">
         <p>Figure 7: <span class="math inline">r&#39;</span> signs

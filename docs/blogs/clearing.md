@@ -105,7 +105,7 @@ Payments are grouped into settlement periods called **epochs**. Every signature 
 
 The payer tracks a balance $B_a$ and an epoch's total debit $D_a$, initially zero. It keeps a vector $V_a$ ordered by recipient, with one entry $(G,J)$ recording the cumulative amount and payment count for each. These entries form the leaves of a binary Merkle tree (BMT). Before the example payment, $B_a=100$, $D_a=0$, and $V_a$ is empty.
 
-To send $x>0$, $a$ updates $b$'s entry and signs its updated sequence number $n_a$ for the epoch, cumulative debit, vector root, and **predecessor root**. The predecessor root is the Merkle root of its final vector $V_a^{e-1}$ in the previous epoch (empty if it made no payments). The operator countersigns this state to issue receipt $R$:
+To send $x>0$, $a$ updates $b$'s entry and signs its updated sequence number $n_a$ for the epoch, cumulative debit, vector root, and **predecessor root**. The predecessor root is the Merkle root of its final vector $V_a^{e-1}$ in the previous epoch. That vector is empty if $a$ made no payments. The operator countersigns this state to issue receipt $R$:
 
 $$
 S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with }b:(G+x,\,J+1)),\;\mathsf{root}(V_a^{e-1})\bigr),
@@ -115,7 +115,7 @@ $$
 
 For this payment, $n_a=1$, $D_a=20$, and $V_a=\{b:(20,1)\}$.
 
-The payer durably saves each request before sending it, retries the same bytes within the epoch if the response is lost, and retains the verified acknowledgment and **openings** (Merkle proofs of the payment entries).
+The payer durably saves each request before sending it, retries the same bytes if the response is lost, and retains the verified acknowledgment and **openings** (Merkle proofs of the payment entries).
 
 ## Optimizing for Hot Accounts
 
@@ -293,7 +293,7 @@ Each claim checks only its neighboring ranges. The chain also includes log posit
 
 If the operator misses an admission, deposit, or withdrawal deadline, or a holder proves a fault, the deployment permanently stops new work. Earlier pending closes that are not disputed may still finalize. Recovery then freezes the last finalized state root.
 
-The recovery rules keep finalized payouts independently claimable, with no expiry, and refund unadmitted deposits. Accounts recover their balances with QMDB proofs against the frozen root, and each account can claim only once. A close that was never admitted or was invalidated changes neither the recoverable balances nor the finalized payouts.
+The recovery rules keep finalized payouts independently claimable, with no expiry, and refund deposits whose closes never finalize. Accounts recover their balances with QMDB proofs against the frozen root, and each account can claim only once. A close that was never admitted or was invalidated changes neither the recoverable balances nor the finalized payouts.
 
 Even if the operator disappears, recovery depends on a correct, live settlement chain and independently available balance and payout openings. The fault also freezes the last finalized payout root and count. Later claims must use proofs against them.
 
@@ -301,11 +301,11 @@ Even if the operator disappears, recovery depends on a correct, live settlement 
 
 A payment reaches finality through an admitted close, after that close's challenge deadline. Shorter epochs with earlier deadlines can reduce that wait, but require more frequent preparation and certification.
 
-The operator can register $e+1$ while still accepting payments in $e$. Once that registration is included onchain, it can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. Registration fixes deposits and signed withdrawal authorizations before the first payment in $e+1$ is acknowledged. Its anchor is independent of $e$'s close.
+The operator can register $e+1$ while still accepting payments in $e$. Once that registration is included onchain, the operator can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. Registration fixes deposits and signed withdrawal authorizations before the first payment in $e+1$ is acknowledged. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
 
-Once $e$'s close is admitted and $e+1$ is registered, the settlement chain binds $e+1$ to that close's state root and sets $e+1$'s admission and challenge deadlines relative to that time. Closes are admitted and finalized in epoch order. Missing an admission deadline permanently faults the deployment and discards all later registrations.
+Once $e$'s close is admitted and $e+1$ is registered, the settlement chain binds $e+1$ to that close's state root and sets $e+1$'s admission and challenge deadlines relative to that time. Closes are admitted and finalized in epoch order. Missing an admission deadline permanently faults the deployment and discards every registration still awaiting admission.
 
-The operator can register further epochs without a fixed queue limit. Deposits and onchain withdrawal requests wait in an ordered inbox. Each registration fixes the next range of entries, so later arrivals cannot change it. A deposit must be registered within a fixed time of arrival, then awaits its epoch's close. It is refundable during fault recovery if that close never finalizes.
+The operator can register further epochs without a fixed queue limit. Deposits and onchain withdrawal requests wait in an ordered inbox. Each registration fixes the next range of entries, so later arrivals cannot change it. A deposit must be registered within a fixed time of arrival. It then waits for its epoch's close with no further deadline. It is refundable during fault recovery if that close never finalizes.
 
 Accounts without deposits or withdrawals can start paying in the new epoch while the operator is still adding incoming credits from the previous one. At the transition, the starting spendable balance $\widetilde B_a$ is the previous epoch's starting balance minus accepted outgoing payments, plus incoming credits already added. Let $\rho_a$ be the remaining credit from that epoch:
 
@@ -331,19 +331,19 @@ $$
 Figure 6: Both calculations include the same incoming credit. Adding it to the spendable balance preserves payments already accepted in the new epoch.
 :::
 
-Deposits fixed at registration are available when payments begin in that epoch. A new account created by incoming credit must wait for the close that credits it to be admitted before spending. A payer with an outstanding withdrawal authorization waits until its signed deadline before signing another payment.
+Deposits fixed at registration are available when payments begin in that epoch. A new account created by incoming credit must wait for the close that credits it to be admitted before spending. A payer with an outstanding withdrawal authorization waits until its signed deadline before signing another payment. Settlement accepts an authorization only within a fixed window before that deadline. Once that window closes, the payer may discard it and resume paying if certified chain state proves that neither a registration nor the onchain queue accepted it.
 
 ### Retrying Across the Boundary
 
 A request sent near the end of $e$ may arrive too late, or its acknowledgment may be lost. The payer then cannot tell whether $e$ includes it. An unconditional retry in $e+1$ could pay twice.
 
-The predecessor root binds the retry to the payer's reported final vector in $e$, including how its debit is split across recipients. The operator countersigns only if that root matches its record. Validators derive the root from $e$'s admitted account rows when checking $e+1$, so $e+1$'s close need not repeat it. Receipts and challenges include it for signature verification.
+The predecessor root binds the retry to the payer's final vector in $e$, including how its debit is split across recipients. The operator countersigns only if that root matches its record. Validators derive the root from $e$'s admitted account rows when checking $e+1$, so $e+1$'s close need not repeat it. Receipts and challenges include it for signature verification.
 
-After $e$ ends, the operator returns original receipts for accepted requests from $e$ and rejects unaccepted ones as stale, reporting the payer's final state. The payer verifies receipts through that state, then signs the remaining payments in $e+1$ against the reported root. Without a usable report and any required receipts, it waits for $e$'s admission.
+After $e$ ends, the operator returns original receipts for accepted requests from $e$ and rejects unaccepted ones as stale, reporting the payer's final state. The payer verifies receipts through that state, then signs the remaining payments in $e+1$ against the reported root. It waits for $e$'s admission instead if it holds a receipt past the reported state, or if the reported state is nonempty and it cannot obtain the receipts up to it.
 
 If the operator includes a rejected request in $e$, the payer's row has a different root and validators reject the retry. If the operator countersigned that retry, its receipt and a public proof establish a debit mismatch against $e+1$'s admitted close.
 
-The predecessor root binds only the previous epoch. If the retry also misses $e+1$, the payer waits for $e$'s admission to determine whether the original was included before signing again.
+The predecessor root binds only the previous epoch. If the retry also misses $e+1$, the payer signs again only after $e$'s admission shows whether the original was included.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-retry.svg" alt="Payer a reaches state n-1 with vector root P in epoch e. If e's close omits the late request r, the final vector root remains P, and retry r' can settle in e+1. If the close includes r with root P', validators reject r' because it signs predecessor root P. An operator receipt for r' and a public proof establish a debit mismatch. At most one copy can settle.">
