@@ -101,7 +101,10 @@ Vamsi Policharla</a></div>
         <a href="https://eprint.iacr.org/2024/669">Batched Threshold
         Encryption</a> with the goal of building <em>practical</em>
         encrypted mempools. The area has come a long way since then.
-        Last I counted, there are over 20 papers on the topic!</p>
+        Last I counted, there are over 20 papers on the topic! And all
+        of the <em>practical</em> constructions are pairing based. In
+        this post, we’ll construct a pairing-free Batched Threshold
+        Encryption Scheme, which is faster by 5-10x.</p>
         <p>In case you’re wondering why you can’t just use threshold
         encryption: you can, but the communication to decrypt a block of
         transactions is much larger than the block itself. Specifically,
