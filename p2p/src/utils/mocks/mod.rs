@@ -1,12 +1,13 @@
 //! Mock implementations for testing.
 
-use crate::{CheckedSender, LimitedSender, Receiver, Recipients};
+use crate::{BlockedSubscription, Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     IoBuf, IoBufs, Metrics as RuntimeMetrics, Name, Supervisor,
     telemetry::metrics::{Metric, Registered, Registration},
 };
+use commonware_utils::{NZUsize, channel::ring};
 use core::future;
 use std::{convert::Infallible, marker::PhantomData, sync::Arc, time::SystemTime};
 
@@ -116,6 +117,33 @@ pub fn inert_channel<P: PublicKey>(peers: impl AsRef<[P]>) -> (InertSender<P>, I
             _phantom: PhantomData,
         },
     )
+}
+
+/// Blocker that accepts every request without blocking anyone.
+#[derive(Clone, Debug)]
+pub struct NoopBlocker<P> {
+    _phantom: PhantomData<P>,
+}
+
+impl<P> Default for NoopBlocker<P> {
+    fn default() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<P: PublicKey> Blocker for NoopBlocker<P> {
+    type PublicKey = P;
+
+    fn block(&mut self, _peer: P) -> Feedback {
+        Feedback::Ok
+    }
+
+    fn blocked(&mut self) -> BlockedSubscription<P> {
+        let (_, receiver) = ring::channel(NZUsize!(1));
+        receiver
+    }
 }
 
 #[cfg(test)]
