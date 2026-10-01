@@ -81,30 +81,30 @@
 
 use crate::{
     Context,
-    index::{Unordered as _, unordered::Index},
+    index::{Cursor as _, Unordered as _, unordered::Index},
     journal::{
         authenticated::{Backing as _, BackingRecovery as _},
         contiguous::{
-            Contiguous,
+            Contiguous, Many,
             variable::{Config as JournalConfig, Journal},
         },
     },
     merkle::mmr::Location,
     qmdb::{
-        FloorHelper,
         any::{
-            VariableValue,
+            BITMAP_CHUNK_BYTES, VariableValue,
             unordered::{Update, variable::Operation},
         },
-        build_snapshot_from_log, delete_key,
-        operation::{Committable as _, Floored as _, Key},
-        update_key,
+        bitmap::fill_from,
+        build_snapshot_serial,
+        operation::{Committable as _, Floored as _, Key, Operation as _},
     },
     translator::Translator,
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
+use commonware_utils::bitmap;
 use core::{num::NonZeroUsize, ops::Range};
 use std::collections::BTreeMap;
 use tracing::{debug, warn};
@@ -232,6 +232,15 @@ where
     /// The number of active keys in the store.
     active_keys: usize,
 
+    /// Activity status of each retained operation.
+    ///
+    /// # Invariants
+    ///
+    /// - `bitmap.len() == log.size()`.
+    /// - Bit `i` is set iff location `i` holds the current update of an active key, or is the
+    ///   last commit.
+    bitmap: bitmap::Prunable<BITMAP_CHUNK_BYTES>,
+
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     inactivity_floor_loc: Location,
@@ -351,6 +360,7 @@ where
         }
 
         let bounds = self.log.bounds();
+        self.bitmap.prune_to_bit(bounds.start);
         let log_size = Location::new(bounds.end);
         let oldest_retained_loc = Location::new(bounds.start);
         debug!(
@@ -425,25 +435,35 @@ where
         let cache_size = cfg.init_cache;
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
-        let (inactivity_floor_loc, active_keys) = {
-            let op = log.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
-            let active_keys = build_snapshot_from_log(
-                inactivity_floor_loc,
-                &log,
-                &mut snapshot,
-                init_buffer,
-                cache_size,
-                |_, _| {},
-            )
-            .await?;
-            (inactivity_floor_loc, active_keys)
-        };
+        let op = log.read(*last_commit_loc).await?;
+        let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
+        let (active_keys, activity) = build_snapshot_serial(
+            inactivity_floor_loc,
+            &log,
+            &mut snapshot,
+            init_buffer,
+            cache_size,
+        )
+        .await?;
+
+        // Seed the bitmap so its pruned prefix matches the retained log boundary. Operations
+        // below the inactivity floor are inactive.
+        let bounds = log.bounds();
+        let pruned_chunks =
+            (bounds.start / bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS) as usize;
+        let mut bitmap = bitmap::Prunable::new_with_pruned_chunks(pruned_chunks)
+            .expect("pruned chunk count fits in u64 bits");
+        bitmap.extend_to(*inactivity_floor_loc);
+        for is_active in activity.iter() {
+            bitmap.push(is_active);
+        }
+        assert_eq!(bitmap.len(), bounds.end);
 
         Ok(Self {
             log,
             snapshot,
             active_keys,
+            bitmap,
             inactivity_floor_loc,
         })
     }
@@ -477,72 +497,150 @@ where
         let start_loc = self.size();
         let Changeset { diff, metadata } = batch;
 
+        // Read every snapshot candidate of the batch's keys in one batched read.
+        let mut candidates: Vec<u64> = diff
+            .keys()
+            .flat_map(|key| self.snapshot.get(key).map(|loc| **loc))
+            .collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+        let candidate_ops = if candidates.is_empty() {
+            Vec::new()
+        } else {
+            self.log.read_many(&candidates).await?
+        };
+
+        // Generate the batch's operations in key order, resolving each key's current location
+        // against the candidates read above. A key colliding with an earlier key of this batch
+        // may also have candidates among the batch's own operations.
+        let mut ops: Vec<Operation<crate::mmr::Family, K, V>> = Vec::with_capacity(diff.len() + 1);
         let mut steps = 0u64;
         for (key, value) in diff {
-            if let Some(value) = value {
-                let updated = {
-                    let new_loc = self.log.bounds().end;
-                    update_key::<crate::mmr::Family, _, _>(
-                        &mut self.snapshot,
-                        &self.log,
-                        &key,
-                        Location::new(new_loc),
-                        None,
-                    )
-                    .await?
-                };
-                if updated.is_some() {
-                    steps += 1;
+            let old_loc = self.snapshot.get(&key).copied().find(|loc| {
+                let op = if *loc >= start_loc {
+                    &ops[(**loc - *start_loc) as usize]
                 } else {
+                    let idx = candidates
+                        .binary_search(loc)
+                        .expect("snapshot candidate was read");
+                    &candidate_ops[idx]
+                };
+                op.key().expect("operation without key") == &key
+            });
+            let new_loc = Location::new(*start_loc + ops.len() as u64);
+            match (value, old_loc) {
+                (Some(value), Some(old_loc)) => {
+                    let mut cursor = self.snapshot.get_mut(&key).expect("key has a location");
+                    assert!(cursor.find(|loc| *loc == old_loc));
+                    cursor.update(new_loc);
+                    self.bitmap.set_bit(*old_loc, false);
+                    self.bitmap.push(true);
+                    ops.push(Operation::Update(Update(key, value)));
+                    steps += 1;
+                }
+                (Some(value), None) => {
+                    self.snapshot.insert(&key, new_loc);
+                    self.bitmap.push(true);
+                    ops.push(Operation::Update(Update(key, value)));
                     self.active_keys += 1;
                 }
-                (self.log, _) = self
-                    .log
-                    .append(&Operation::Update(Update(key, value)))
-                    .await?;
-            } else {
-                let deleted = delete_key::<crate::mmr::Family, _, _>(
-                    &mut self.snapshot,
-                    &self.log,
-                    &key,
-                    None,
-                )
-                .await?;
-                if deleted.is_some() {
-                    (self.log, _) = self.log.append(&Operation::Delete(key)).await?;
+                (None, Some(old_loc)) => {
+                    let mut cursor = self.snapshot.get_mut(&key).expect("key has a location");
+                    assert!(cursor.find(|loc| *loc == old_loc));
+                    cursor.delete();
+                    self.bitmap.set_bit(*old_loc, false);
+                    self.bitmap.push(false);
+                    ops.push(Operation::Delete(key));
                     steps += 1;
                     self.active_keys -= 1;
                 }
+                (None, None) => {}
             }
         }
+
+        // The previous commit becomes inactive.
+        self.bitmap.set_bit(*start_loc - 1, false);
 
         // Raise the inactivity floor by `steps` steps, plus 1 to account for the previous
         // commit becoming inactive.
         if self.is_empty() {
-            self.inactivity_floor_loc = self.size();
+            self.inactivity_floor_loc = Location::new(*start_loc + ops.len() as u64);
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         } else {
-            let steps_to_take = steps + 1;
-            let mut helper = FloorHelper {
-                snapshot: &mut self.snapshot,
-                log: self.log,
-            };
-            let mut inactivity_floor_loc = self.inactivity_floor_loc;
-            for _ in 0..steps_to_take {
-                (helper, inactivity_floor_loc) = helper.raise_floor(inactivity_floor_loc).await?;
-            }
-            self.log = helper.log;
-            self.inactivity_floor_loc = inactivity_floor_loc;
+            self.raise_floor(steps + 1, &mut ops).await?;
         }
 
         // Append the commit operation with the new inactivity floor.
-        (self.log, _) = self
-            .log
-            .append(&Operation::CommitFloor(metadata, self.inactivity_floor_loc))
-            .await?;
+        self.bitmap.push(true);
+        ops.push(Operation::CommitFloor(metadata, self.inactivity_floor_loc));
+        (self.log, _) = self.log.append_many(Many::Flat(&ops)).await?;
 
         let end_loc = self.size();
         Ok((self, start_loc..end_loc))
+    }
+
+    /// Raise the inactivity floor by moving up to `steps` active operations in
+    /// `[floor, start + ops.len())` to the tip, appending the moved operations to `ops`, where
+    /// `start` is the location of the first operation in `ops`. The activity bitmap selects the
+    /// operations to move, so inactive operations are skipped without being read. Moved operations
+    /// are never moved again by the same raise.
+    async fn raise_floor(
+        &mut self,
+        steps: u64,
+        ops: &mut Vec<Operation<crate::mmr::Family, K, V>>,
+    ) -> Result<(), Error> {
+        let start = self.log.size();
+        let fixed_tip = start + ops.len() as u64;
+        let mut floor = self.inactivity_floor_loc;
+        let mut moved = 0u64;
+        let mut scan_from = *floor;
+        let mut candidates: Vec<u64> = Vec::new();
+        while moved < steps {
+            candidates.clear();
+            scan_from = fill_from(
+                &self.bitmap,
+                scan_from,
+                fixed_tip,
+                (steps - moved) as usize,
+                &mut candidates,
+            );
+            if candidates.is_empty() {
+                break;
+            }
+
+            // Read the committed candidates in one batched read. The rest are this batch's own
+            // operations.
+            let committed = candidates.partition_point(|&loc| loc < start);
+            let mut reads = if committed == 0 {
+                Vec::new()
+            } else {
+                self.log.read_many(&candidates[..committed]).await?
+            }
+            .into_iter();
+
+            // Every candidate is active, so each one moves.
+            for &old_loc in &candidates {
+                let op = if old_loc < start {
+                    reads.next().expect("one read per committed candidate")
+                } else {
+                    ops[(old_loc - start) as usize].clone()
+                };
+                let new_loc = Location::new(start + ops.len() as u64);
+                let key = op.key().expect("active operation without key");
+                let mut cursor = self.snapshot.get_mut(key).expect("active key in snapshot");
+                assert!(cursor.find(|loc| **loc == old_loc));
+                cursor.update(new_loc);
+                drop(cursor);
+                self.bitmap.set_bit(old_loc, false);
+                self.bitmap.push(true);
+                ops.push(op);
+                floor = Location::new(old_loc + 1);
+                moved += 1;
+            }
+        }
+        self.inactivity_floor_loc = floor;
+
+        Ok(())
     }
 
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
@@ -586,9 +684,10 @@ mod test {
         reschedule,
         telemetry::traces::collector::TraceStorage,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, test_rng};
     use core::future::Future;
     use futures::FutureExt as _;
+    use rand::RngExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
@@ -1204,11 +1303,12 @@ mod test {
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            // First apply_entries: Update + 1 move + CommitFloor = 3 ops. Subsequent 99: Update + 2
-            // moves + CommitFloor = 4 ops each. Total: 1 (init) + 3 + 99*4 = 400.
-            assert_eq!(*db.bounds().end, 400);
-            // Only the last Update and CommitFloor are active → floor = 398.
-            assert_eq!(*db.inactivity_floor_loc, 398);
+            // Each apply_entries appends Update + 1 move + CommitFloor = 3 ops. The floor raise
+            // moves the batch's Update and stops, since it is the only active op below the
+            // pre-raise tip. Total: 1 (init) + 100*3 = 301.
+            assert_eq!(*db.bounds().end, 301);
+            // Only the last moved Update and CommitFloor are active, so floor = 299.
+            assert_eq!(*db.inactivity_floor_loc, 299);
             let floor = db.inactivity_floor_loc;
 
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
@@ -1611,6 +1711,78 @@ mod test {
                     .unwrap();
             assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
             assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Assert the activity bitmap covers every retained location and marks exactly the current
+    /// update of each active key plus the last commit.
+    async fn assert_bitmap_consistent(db: &TestStore) {
+        let bounds = db.log.bounds();
+        assert_eq!(db.bitmap.len(), bounds.end);
+        let mut active_updates = 0;
+        for loc in bounds.start..bounds.end {
+            let expected = match db.log.read(loc).await.unwrap() {
+                Operation::Update(Update(key, _)) => db.snapshot.get(&key).any(|l| **l == loc),
+                _ => loc == bounds.end - 1,
+            };
+            assert_eq!(db.bitmap.get_bit(loc), expected, "bit {loc}");
+            if expected && loc != bounds.end - 1 {
+                active_updates += 1;
+            }
+        }
+        assert_eq!(active_updates, db.active_keys);
+    }
+
+    #[test_traced]
+    fn test_store_bitmap_tracks_activity() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut rng = test_rng();
+            let mut db = create_test_store(context.child("store").with_attribute("index", 0)).await;
+
+            // A small key universe whose keys share 3 translated prefixes, so batches routinely
+            // update, delete, and recreate colliding keys.
+            let keys: Vec<Digest> = (0u8..24)
+                .map(|i| {
+                    let mut key = Blake3::hash(&[&[i]]);
+                    key.0[0..2].copy_from_slice(&[0, i % 3]);
+                    key
+                })
+                .collect();
+            let mut expected = BTreeMap::new();
+            for round in 0..60u64 {
+                let mut changes = Vec::new();
+                for _ in 0..rng.random_range(0..12) {
+                    let key = keys[rng.random_range(0..keys.len())];
+                    if rng.random_bool(0.3) {
+                        changes.push((key, None));
+                        expected.remove(&key);
+                    } else {
+                        let value = round.to_be_bytes().to_vec();
+                        changes.push((key, Some(value.clone())));
+                        expected.insert(key, value);
+                    }
+                }
+                (db, _) = apply_entries(db, changes).await;
+                assert_bitmap_consistent(&db).await;
+
+                if round % 10 == 9 {
+                    let floor = db.inactivity_floor_loc();
+                    db = db.prune(floor).await.unwrap();
+                    assert_bitmap_consistent(&db).await;
+                }
+                if round % 20 == 19 {
+                    db.commit().await.unwrap().sync().await.unwrap();
+                    db = create_test_store(
+                        context.child("store").with_attribute("index", round + 1),
+                    )
+                    .await;
+                    assert_bitmap_consistent(&db).await;
+                }
+            }
+            for key in &keys {
+                assert_eq!(db.get(key).await.unwrap(), expected.get(key).cloned());
+            }
             db.destroy().await.unwrap();
         });
     }
