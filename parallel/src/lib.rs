@@ -130,16 +130,15 @@ commonware_macros::stability_scope!(BETA {
     /// ```
     #[derive(Debug)]
     pub struct Batches<'scope, S: Strategy> {
-        // `None` executes the batches in order on the calling thread.
-        strategy: Option<&'scope S>,
+        strategy: &'scope S,
         ranges: Vec<Range<usize>>,
     }
 
-    impl<S: Strategy> Batches<'_, S> {
+    impl<'scope, S: Strategy> Batches<'scope, S> {
         /// Returns the single batch `0..len`, executed on the calling thread.
-        fn whole(len: usize) -> Self {
+        fn whole(strategy: &'scope S, len: usize) -> Self {
             Self {
-                strategy: None,
+                strategy,
                 ranges: iter::once(0..len).collect(),
             }
         }
@@ -155,10 +154,10 @@ commonware_macros::stability_scope!(BETA {
             F: Fn(I::Item) -> R + Send + Sync,
             R: Send,
         {
-            let items = prepare(self.ranges);
-            match self.strategy {
-                Some(strategy) => strategy.map_collect_vec(items, map_op),
-                None => items.into_iter().map(map_op).collect(),
+            if self.ranges.len() == 1 {
+                prepare(self.ranges).into_iter().map(map_op).collect()
+            } else {
+                self.strategy.map_collect_vec(prepare(self.ranges), map_op)
             }
         }
 
@@ -178,10 +177,10 @@ commonware_macros::stability_scope!(BETA {
             R: Send,
             E: Send,
         {
-            let items = prepare(self.ranges);
-            match self.strategy {
-                Some(strategy) => strategy.try_map_collect_vec(items, map_op),
-                None => items.into_iter().map(map_op).collect(),
+            if self.ranges.len() == 1 {
+                prepare(self.ranges).into_iter().map(map_op).collect()
+            } else {
+                self.strategy.try_map_collect_vec(prepare(self.ranges), map_op)
             }
         }
     }
@@ -308,7 +307,7 @@ commonware_macros::stability_scope!(BETA {
             E: Send,
             F: for<'scope> FnOnce(Batches<'scope, Self>) -> Result<R, E> + Send,
         {
-            run(Batches::whole(len))
+            run(Batches::whole(self, len))
         }
 
         /// Reduces a collection to a single value with per-partition initialization.
@@ -810,7 +809,7 @@ commonware_macros::stability_scope!(BETA {
         {
             self.strategy.try_run_batches(len, minimum_batch_len, multiplier, |batches| {
                 run(Batches {
-                    strategy: batches.strategy.map(|_| self),
+                    strategy: self,
                     ranges: batches.ranges,
                 })
             })
@@ -1356,10 +1355,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let count = self.parallelism.min(len / minimum_batch_len.get());
             if count < 2 {
-                return run(Batches::whole(len));
+                return run(Batches::whole(self, len));
             }
             self.try_execute(len, multiplier, |execution| match execution {
-                policy::RunExecution::Serial => run(Batches::whole(len)),
+                policy::RunExecution::Serial => run(Batches::whole(self, len)),
                 policy::RunExecution::Parallel => {
                     let per_batch = len / count;
                     let extra = len % count;
@@ -1371,7 +1370,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         .collect();
                     let manual = self.manual();
                     run(Batches {
-                        strategy: Some(&manual.strategy),
+                        strategy: &manual.strategy,
                         ranges,
                     })
                 }
