@@ -10,8 +10,8 @@
 //!
 //! **Core Operations:**
 //! - [`run`](Strategy::run): Chooses between serial and parallel operation bodies
-//! - [`run_batches`](Strategy::run_batches): Runs a whole-input algorithm or supplies batches
-//!   for the caller to prepare and execute
+//! - [`run_batches`](Strategy::run_batches): Supplies batches of an input extent for the caller
+//!   to prepare and execute
 //! - [`fold`](Strategy::fold): Reduces a collection to a single value
 //! - [`try_fold`](Strategy::try_fold): Like `fold`, but stops applying the fold operation after
 //!   failures
@@ -71,7 +71,7 @@
 
 commonware_macros::stability_scope!(BETA {
     use cfg_if::cfg_if;
-    use core::{cmp::Ordering, convert::Infallible, fmt, num::NonZeroUsize, ops::Range};
+    use core::{cmp::Ordering, convert::Infallible, fmt, iter, num::NonZeroUsize, ops::Range};
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
@@ -118,7 +118,8 @@ commonware_macros::stability_scope!(BETA {
     /// Batches supplied for one invocation of [`Strategy::run_batches`].
     ///
     /// Consume this value to prepare and execute the batches. Preparation can borrow input
-    /// slices or split mutable output buffers into disjoint slices for each batch.
+    /// slices or split mutable output buffers into disjoint slices for each batch. A
+    /// whole-input run supplies one batch that executes on the calling thread.
     ///
     /// Batches cannot outlive the operation that receives them:
     ///
@@ -130,16 +131,26 @@ commonware_macros::stability_scope!(BETA {
     /// ```
     #[derive(Debug)]
     pub struct Batches<'scope, S: Strategy> {
-        strategy: &'scope S,
+        // `None` executes the batches in order on the calling thread.
+        strategy: Option<&'scope S>,
         ranges: Vec<Range<usize>>,
     }
 
     impl<S: Strategy> Batches<'_, S> {
+        /// Returns the single batch `0..len`, executed on the calling thread.
+        fn whole(len: usize) -> Self {
+            Self {
+                strategy: None,
+                ranges: iter::once(0..len).collect(),
+            }
+        }
+
         /// Prepare and map batches, collecting results in batch order.
         ///
-        /// `prepare` is called once with ordered, nonempty ranges that cover the operation's
-        /// input extent without overlap. It must produce one item per range in the same order.
-        /// The mapping operation may execute those items in any order.
+        /// `prepare` is called once with ordered ranges that cover the operation's input extent
+        /// without overlap. A range is empty only when the extent is empty. `prepare` must produce
+        /// one item per range in the same order. The mapping operation may execute those items
+        /// in any order.
         pub fn map_collect_vec<I, P, F, R>(self, prepare: P, map_op: F) -> Vec<R>
         where
             I: IntoIterator<IntoIter: Send, Item: Send> + Send,
@@ -147,7 +158,11 @@ commonware_macros::stability_scope!(BETA {
             F: Fn(I::Item) -> R + Send + Sync,
             R: Send,
         {
-            self.strategy.map_collect_vec(prepare(self.ranges), map_op)
+            let items = prepare(self.ranges);
+            match self.strategy {
+                Some(strategy) => strategy.map_collect_vec(items, map_op),
+                None => items.into_iter().map(map_op).collect(),
+            }
         }
 
         /// Like [`map_collect_vec`](Self::map_collect_vec), but for fallible mapping.
@@ -166,7 +181,11 @@ commonware_macros::stability_scope!(BETA {
             R: Send,
             E: Send,
         {
-            self.strategy.try_map_collect_vec(prepare(self.ranges), map_op)
+            let items = prepare(self.ranges);
+            match self.strategy {
+                Some(strategy) => strategy.try_map_collect_vec(items, map_op),
+                None => items.into_iter().map(map_op).collect(),
+            }
         }
     }
 
@@ -227,16 +246,18 @@ commonware_macros::stability_scope!(BETA {
             SEQ: FnOnce() -> Result<R, E> + Send,
             PAR: FnOnce() -> Result<R, E> + Send;
 
-        /// Run an operation on its whole input or on strategy-provided batches.
+        /// Run an operation on strategy-provided batches.
         ///
-        /// `run` is called once with `None` for the whole-input algorithm or `Some` for batches
-        /// covering `0..len`, each at least `minimum_batch_len` long. The strategy may choose
-        /// whole-input execution even when batching is possible. Empty extents and extents
-        /// that cannot form two such batches always use the whole-input algorithm.
+        /// `run` is called once with batches covering `0..len`. A whole-input run supplies the
+        /// single batch `0..len` and executes it on the calling thread. Otherwise the strategy
+        /// supplies at least two batches no shorter than `minimum_batch_len` and may execute
+        /// them in parallel. The strategy may run the whole input even when batching is
+        /// possible. Empty extents and extents that cannot form two batches of
+        /// `minimum_batch_len` always run whole.
         ///
         /// `multiplier` estimates work per input unit. Complete the operation, including
-        /// preparation and result assembly, inside `run`. Both execution paths must produce
-        /// equivalent results. The default implementation uses the whole-input algorithm.
+        /// preparation and result assembly, inside `run`. Both execution shapes must produce
+        /// equivalent results. The default implementation runs the whole input.
         ///
         /// # Examples
         ///
@@ -246,13 +267,13 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// let values = [1u64, 2, 3, 4];
         /// let total = Sequential.run_batches(values.len(), NonZeroUsize::MIN, 1, |batches| {
-        ///     match batches {
-        ///         None => values.iter().sum::<u64>(),
-        ///         Some(batches) => batches.map_collect_vec(
+        ///     batches
+        ///         .map_collect_vec(
         ///             |ranges| ranges.into_iter().map(|range| &values[range]).collect::<Vec<_>>(),
         ///             |batch| batch.iter().sum::<u64>(),
-        ///         ).into_iter().sum(),
-        ///     }
+        ///         )
+        ///         .into_iter()
+        ///         .sum::<u64>()
         /// });
         /// assert_eq!(total, 10);
         /// ```
@@ -266,7 +287,7 @@ commonware_macros::stability_scope!(BETA {
         ) -> R
         where
             R: Send,
-            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> R + Send,
+            F: for<'scope> FnOnce(Batches<'scope, Self>) -> R + Send,
         {
             match self.try_run_batches(len, minimum_batch_len, multiplier, |batches| {
                 Ok::<_, Infallible>(run(batches))
@@ -282,7 +303,7 @@ commonware_macros::stability_scope!(BETA {
         #[track_caller]
         fn try_run_batches<R, E, F>(
             &self,
-            _len: usize,
+            len: usize,
             _minimum_batch_len: NonZeroUsize,
             _multiplier: usize,
             run: F,
@@ -290,9 +311,9 @@ commonware_macros::stability_scope!(BETA {
         where
             R: Send,
             E: Send,
-            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> Result<R, E> + Send,
+            F: for<'scope> FnOnce(Batches<'scope, Self>) -> Result<R, E> + Send,
         {
-            run(None)
+            run(Batches::whole(len))
         }
 
         /// Reduces a collection to a single value with per-partition initialization.
@@ -790,13 +811,13 @@ commonware_macros::stability_scope!(BETA {
         where
             R: Send,
             E: Send,
-            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> Result<R, E> + Send,
+            F: for<'scope> FnOnce(Batches<'scope, Self>) -> Result<R, E> + Send,
         {
             self.strategy.try_run_batches(len, minimum_batch_len, multiplier, |batches| {
-                run(batches.map(|batches| Batches {
-                    strategy: self,
+                run(Batches {
+                    strategy: batches.strategy.map(|_| self),
                     ranges: batches.ranges,
-                }))
+                })
             })
         }
 
@@ -1336,14 +1357,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         where
             R: Send,
             E: Send,
-            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> Result<R, E> + Send,
+            F: for<'scope> FnOnce(Batches<'scope, Self>) -> Result<R, E> + Send,
         {
             let count = self.parallelism.min(len / minimum_batch_len.get());
             if count < 2 {
-                return run(None);
+                return run(Batches::whole(len));
             }
             self.try_execute(len, multiplier, |execution| match execution {
-                policy::RunExecution::Serial => run(None),
+                policy::RunExecution::Serial => run(Batches::whole(len)),
                 policy::RunExecution::Parallel => {
                     let per_batch = len / count;
                     let extra = len % count;
@@ -1354,10 +1375,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         })
                         .collect();
                     let manual = self.manual();
-                    run(Some(Batches {
-                        strategy: &manual.strategy,
+                    run(Batches {
+                        strategy: Some(&manual.strategy),
                         ranges,
-                    }))
+                    })
                 }
             })
         }
@@ -1648,17 +1669,26 @@ mod test {
         strategy.policy.as_ref().map_or(0, |policy| policy.len())
     }
 
+    /// A strategy that does not split runs the whole input once as the single range `0..len` on
+    /// the calling thread.
     #[test]
     fn run_batches_preserves_whole_input_without_splitting() {
         fn check(strategy: &impl Strategy, len: usize, minimum: NonZeroUsize) {
             let owned = Box::new(len);
             let calls = AtomicUsize::new(0);
-            let result = strategy.run_batches(len, minimum, usize::MAX, |batches| {
+            let caller = std::thread::current().id();
+            let (result, items) = strategy.run_batches(len, minimum, usize::MAX, |batches| {
                 calls.fetch_add(1, Ordering::Relaxed);
-                assert!(batches.is_none());
-                *owned
+                (
+                    *owned,
+                    batches.map_collect_vec(
+                        |ranges| ranges,
+                        |range| (range, std::thread::current().id()),
+                    ),
+                )
             });
             assert_eq!(result, len);
+            assert_eq!(items, [(0..len, caller)]);
             assert_eq!(calls.load(Ordering::Relaxed), 1);
         }
 
@@ -1676,6 +1706,45 @@ mod test {
         check(&parallel, usize::MAX, NonZeroUsize::MAX);
         assert_eq!(policy_len(&one_worker), 0);
         assert_eq!(policy_len(&parallel), 0);
+    }
+
+    /// A serial policy decision on a splittable extent runs the whole input as the single range
+    /// `0..len` on the calling thread. Caller tracking keys the recorded samples and the run to
+    /// the same policy entry.
+    #[test]
+    #[track_caller]
+    fn run_batches_runs_serial_decision_on_calling_thread() {
+        let strategy = parallel_strategy();
+        let policy = strategy.policy.as_ref().unwrap();
+        let caller = std::panic::Location::caller();
+
+        // Record samples that make serial the preferred path.
+        policy.record_run(
+            caller,
+            16,
+            16,
+            4,
+            crate::policy::RunExecution::Parallel,
+            std::time::Duration::from_micros(100),
+        );
+        policy.record_run(
+            caller,
+            16,
+            16,
+            4,
+            crate::policy::RunExecution::Serial,
+            std::time::Duration::from_micros(95),
+        );
+
+        // Run an extent that could form four batches.
+        let thread = std::thread::current().id();
+        let items = strategy.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+            batches.map_collect_vec(
+                |ranges| ranges,
+                |range| (range, std::thread::current().id()),
+            )
+        });
+        assert_eq!(items, [(0..16, thread)]);
     }
 
     #[test]
@@ -1700,11 +1769,7 @@ mod test {
                 len,
                 NonZeroUsize::new(minimum).unwrap(),
                 usize::MAX,
-                |batches| {
-                    batches
-                        .unwrap()
-                        .map_collect_vec(|ranges| ranges, |range| range)
-                },
+                |batches| batches.map_collect_vec(|ranges| ranges, |range| range),
             );
             assert_eq!(ranges.len(), 8.min(len / minimum));
             assert_eq!(ranges.first().unwrap().start, 0);
@@ -1726,7 +1791,7 @@ mod test {
         let preparations = AtomicUsize::new(0);
         let ranges = strategy.run_batches(input.len(), NonZeroUsize::MIN, 1, |batches| {
             let owned = Rc::new(42);
-            batches.unwrap().map_collect_vec(
+            batches.map_collect_vec(
                 |ranges| {
                     assert_eq!(*owned, 42);
                     drop(owned);
@@ -1764,23 +1829,19 @@ mod test {
         (
             std::panic::Location::caller(),
             strategy.try_run_batches(16, NonZeroUsize::MIN, usize::MAX, |batches| {
-                let total = match batches {
-                    None if fail_mapping => return Err(()),
-                    None => 16,
-                    Some(batches) => batches
-                        .try_map_collect_vec(
-                            |ranges| ranges,
-                            |range| {
-                                if fail_mapping {
-                                    Err(())
-                                } else {
-                                    Ok(range.len())
-                                }
-                            },
-                        )?
-                        .into_iter()
-                        .sum(),
-                };
+                let total = batches
+                    .try_map_collect_vec(
+                        |ranges| ranges,
+                        |range| {
+                            if fail_mapping {
+                                Err(())
+                            } else {
+                                Ok(range.len())
+                            }
+                        },
+                    )?
+                    .into_iter()
+                    .sum();
                 if fail_assembly { Err(()) } else { Ok(total) }
             }),
         )
@@ -1817,9 +1878,7 @@ mod test {
         let strategy = parallel_strategy();
         let run = |strategy: &Rayon| {
             strategy.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
-                batches
-                    .unwrap()
-                    .map_collect_vec(|ranges| ranges, |range| range.len())
+                batches.map_collect_vec(|ranges| ranges, |range| range.len())
             })
         };
         assert_eq!(run(&strategy).into_iter().sum::<usize>(), 16);
@@ -1829,7 +1888,6 @@ mod test {
         for _ in 0..3 {
             let on_pool = manual.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
                 batches
-                    .unwrap()
                     .map_collect_vec(|ranges| ranges, |_| rayon::current_thread_index().is_some())
             });
             assert!(on_pool.into_iter().all(|on_pool| on_pool));

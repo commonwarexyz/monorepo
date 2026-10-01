@@ -8,7 +8,7 @@ use commonware_cryptography::{
 use commonware_parallel::{Batches, Strategy};
 use commonware_storage::bmt::{self, Builder};
 use commonware_utils::{Cached, NZUsize, Widen};
-use std::{iter, marker::PhantomData, ops::Range};
+use std::{marker::PhantomData, ops::Range};
 use thiserror::Error;
 
 // Thread-local caches for reusing `Encoder` and `Decoder`
@@ -78,19 +78,14 @@ fn hash_shards<H: Hasher, M: AsRef<[u8]> + Sync>(
         NZUsize!(1),
         work.div_ceil(shards.len()),
         |batches| {
-            batches.map_or_else(
-                || H::hash_many(shards),
-                |batches| {
-                    batches
-                        .map_collect_vec(
-                            |ranges| ranges.into_iter().map(move |range| &shards[range]),
-                            H::hash_many,
-                        )
-                        .into_iter()
-                        .flatten()
-                        .collect()
-                },
-            )
+            batches
+                .map_collect_vec(
+                    |ranges| ranges.into_iter().map(move |range| &shards[range]),
+                    H::hash_many,
+                )
+                .into_iter()
+                .flatten()
+                .collect()
         },
     )
 }
@@ -418,10 +413,9 @@ fn encode<H: Hasher, S: Strategy>(
         |batches| {
             let original_shards = padded.chunks(shard_len).collect::<Vec<_>>();
             let mut buf = vec![0u8; m * shard_len];
-            striped::run(
-                batches,
-                shard_len,
+            batches.try_map_collect_vec(
                 |ranges| {
+                    let ranges = striped::byte_ranges(shard_len, ranges);
                     let groups = striped::stripe_columns(&mut buf, shard_len, &ranges);
                     ranges.into_iter().zip(groups)
                 },
@@ -474,8 +468,8 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
     strategy: &'a S,
 }
 
-/// Striped Reed-Solomon: split every shard by byte range and run independent
-/// Reed-Solomon operations over those ranges. Without batches, one stripe spans the whole shard.
+/// Striped Reed-Solomon: split every shard by byte range and run independent Reed-Solomon
+/// operations over those ranges. A whole-input run codes one stripe that spans the whole shard.
 ///
 /// ```text
 ///   originals:
@@ -587,33 +581,6 @@ mod striped {
         originals: &'a [(usize, &'a [u8])],
         recoveries: &'a [(usize, &'a [u8])],
         plan: &'a Plan,
-    }
-
-    /// Run `op` on each stripe of `shard_len`-byte shards.
-    ///
-    /// With `batches`, `prepare` receives one byte range per batch (see [`byte_ranges`]) and the
-    /// stripes may run in parallel. Without batches, `prepare` receives the single range
-    /// `0..shard_len` and its stripe runs inline.
-    pub(super) fn run<S, I, P, F>(
-        batches: Option<Batches<'_, S>>,
-        shard_len: usize,
-        prepare: P,
-        op: F,
-    ) -> Result<(), Error>
-    where
-        S: Strategy,
-        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-        P: FnOnce(Vec<Range<usize>>) -> I,
-        F: Fn(I::Item) -> Result<(), Error> + Send + Sync,
-    {
-        let Some(batches) = batches else {
-            return prepare(iter::once(0..shard_len).collect())
-                .into_iter()
-                .try_for_each(op);
-        };
-        batches
-            .try_map_collect_vec(|ranges| prepare(byte_ranges(shard_len, ranges)), op)
-            .map(drop)
     }
 
     /// Convert batches of complete symbol blocks into byte ranges, attaching any partial
@@ -753,7 +720,7 @@ mod striped {
     /// match the canonical re-encode, and verify the rebuilt commitment against `ctx.root`.
     pub(super) fn decode<'a, H: Hasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
-        batches: Option<Batches<'_, S>>,
+        batches: Batches<'_, S>,
         shard_digests: Vec<Option<H::Digest>>,
         provided_originals: Vec<(usize, &'a [u8])>,
         provided_recoveries: Vec<(usize, &'a [u8])>,
@@ -769,10 +736,9 @@ mod striped {
 
         // Re-encode all recovery shards from the originals, one stripe per task.
         let mut recovery_buf = vec![0u8; m * shard_len];
-        run(
-            batches,
-            shard_len,
+        batches.try_map_collect_vec(
             |ranges| {
+                let ranges = byte_ranges(shard_len, ranges);
                 let groups = stripe_columns(&mut recovery_buf, shard_len, &ranges);
                 ranges.into_iter().zip(groups)
             },
@@ -797,7 +763,7 @@ mod striped {
     /// output for the `k` inputs, and the root check alone binds it to the commitment.
     pub(super) fn decode_reveal<'a, H: Hasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
-        batches: Option<Batches<'_, S>>,
+        batches: Batches<'_, S>,
         shard_digests: Vec<Option<H::Digest>>,
         provided_originals: Vec<(usize, &'a [u8])>,
         provided_recoveries: Vec<(usize, &'a [u8])>,
@@ -840,10 +806,9 @@ mod striped {
             originals: &missing_originals,
             recoveries: &missing_recoveries,
         };
-        run(
-            batches,
-            shard_len,
+        batches.try_map_collect_vec(
             |ranges| {
+                let ranges = byte_ranges(shard_len, ranges);
                 let original_groups = stripe_columns(&mut restored_originals, shard_len, &ranges);
                 let recovery_groups = stripe_columns(&mut restored_recoveries, shard_len, &ranges);
                 ranges
@@ -2106,29 +2071,27 @@ mod tests {
                         NZUsize!(MIN_STRIPE_BYTES / SHARD_CHUNK_BYTES),
                         SHARD_CHUNK_BYTES * (k + m),
                         |batches| {
-                            batches
-                                .expect("must split into stripes")
-                                .try_map_collect_vec(
-                                    |ranges| {
-                                        let ranges = striped::byte_ranges(shard_len, ranges);
-                                        tiled |= ranges.iter().any(|range| {
-                                            striped::tiles(k, m, range.clone()).count() > 1
-                                        });
-                                        let groups = striped::stripe_columns(
-                                            &mut striped_recovery,
-                                            shard_len,
-                                            &ranges,
-                                        );
-                                        ranges.into_iter().zip(groups)
-                                    },
-                                    |(range, out)| {
-                                        striped::encode_recovery_into(k, m, range, &originals, out)
-                                    },
-                                )
+                            batches.try_map_collect_vec(
+                                |ranges| {
+                                    let ranges = striped::byte_ranges(shard_len, ranges);
+                                    tiled |= ranges.iter().any(|range| {
+                                        striped::tiles(k, m, range.clone()).count() > 1
+                                    });
+                                    let groups = striped::stripe_columns(
+                                        &mut striped_recovery,
+                                        shard_len,
+                                        &ranges,
+                                    );
+                                    ranges.into_iter().zip(groups)
+                                },
+                                |(range, out)| {
+                                    striped::encode_recovery_into(k, m, range, &originals, out)
+                                },
+                            )
                         },
                     )
                     .unwrap();
-                assert!(results.len() >= 2);
+                assert!(results.len() >= 2, "must split into stripes");
 
                 // A single full-width encode must produce the identical recovery buffer.
                 let mut encoder = Encoder::new(k, m, shard_len).unwrap();
@@ -2393,10 +2356,10 @@ mod tests {
         })
     }
 
-    /// Unbatched coding configures the thread-local coders for one tile at a time, so a wide
+    /// Single-stripe coding configures the thread-local coders for one tile at a time, so a wide
     /// shard never leaves full-width work cached, whether coding succeeds or fails.
     #[test]
-    fn test_unbatched_coding_caches_tile_width() {
+    fn test_single_stripe_coding_caches_tile_width() {
         let total = 96u16;
         let min = 32u16;
         let (k, m) = (min as usize, (total - min) as usize);
