@@ -1,4 +1,4 @@
-use crate::stateful::probe::{mailbox::Message, sample, wire};
+use crate::stateful::probe::{finalization::latest_finalization, mailbox::Message, wire};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Encode, ReadExt as _};
 use commonware_consensus::simplex::{
@@ -89,7 +89,7 @@ where
                 if tag != wire::Tag::Request {
                     continue;
                 }
-                let Some(finalization) = sample::latest_finalization(&self.marshal).await else {
+                let Some(finalization) = latest_finalization(&self.marshal).await else {
                     continue;
                 };
                 sender.send(
