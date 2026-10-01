@@ -502,32 +502,69 @@ async fn submit_actor_discharge_successor(node: &Node, successor: &ActorDischarg
     }
 }
 
+/// Returns whether `effect` publishes `successor`.
+fn publishes_successor(
+    effect: &DurableEffect<MinPk, Sha256Digest>,
+    successor: &ActorDischargeSuccessor,
+) -> bool {
+    match successor {
+        ActorDischargeSuccessor::DaCertificate(header) => {
+            matches!(effect.broadcast_one(), Some(artifact)
+                if matches!(artifact.as_ref(), Artifact::DaCertificate(certificate)
+                    if certificate.header() == header))
+        }
+        ActorDischargeSuccessor::Nullification(view) => {
+            matches!(effect.broadcast_one(), Some(artifact)
+                if matches!(artifact.as_ref(), Artifact::Nullification(certificate)
+                    if certificate.view() == *view))
+        }
+        ActorDischargeSuccessor::FinalityFloor(_) => false,
+    }
+}
+
+/// Returns whether `successor` is published before the barrier that records it is acknowledged.
+///
+/// A DA certificate is not: peers retire their DA-vote publications once they hold it, so it is
+/// published only once its record is durable.
+const fn published_before_ack(successor: &ActorDischargeSuccessor) -> bool {
+    !matches!(successor, ActorDischargeSuccessor::DaCertificate(_))
+}
+
 async fn wait_for_successor_publication(
     context: &DeterministicContext,
     hooks: &TestHooks<MinPk, Sha256Digest>,
     successor: &ActorDischargeSuccessor,
 ) -> Option<EffectId> {
-    match successor {
-        ActorDischargeSuccessor::DaCertificate(header) => Some(
-            wait_for_live_publication(context, hooks, |effect| {
-                matches!(effect.broadcast_one(), Some(artifact)
-                    if matches!(artifact.as_ref(), Artifact::DaCertificate(certificate)
-                        if certificate.header() == header))
-            })
-            .await
-            .0,
-        ),
-        ActorDischargeSuccessor::Nullification(view) => Some(
-            wait_for_live_publication(context, hooks, |effect| {
-                matches!(effect.broadcast_one(), Some(artifact)
-                    if matches!(artifact.as_ref(), Artifact::Nullification(certificate)
-                        if certificate.view() == *view))
-            })
-            .await
-            .0,
-        ),
-        ActorDischargeSuccessor::FinalityFloor(_) => None,
+    if matches!(successor, ActorDischargeSuccessor::FinalityFloor(_)) {
+        return None;
     }
+    Some(
+        wait_for_live_publication(context, hooks, |effect| {
+            publishes_successor(effect, successor)
+        })
+        .await
+        .0,
+    )
+}
+
+/// Asserts that `successor` stays unpublished while the barrier recording it is unacknowledged.
+async fn assert_successor_withheld(
+    context: &DeterministicContext,
+    hooks: &TestHooks<MinPk, Sha256Digest>,
+    successor: &ActorDischargeSuccessor,
+) {
+    // Give an early release the time it would take to reach egress.
+    context.sleep(Duration::from_millis(100)).await;
+    let live = hooks.live_publications();
+    assert!(
+        !hooks.durable_effects().iter().any(|(id, attempts)| {
+            live.contains(id)
+                && attempts
+                    .last()
+                    .is_some_and(|attempt| publishes_successor(&attempt.effect, successor))
+        }),
+        "a DA certificate was published before its record was durable"
+    );
 }
 
 fn assert_pre_ack_publications(
@@ -585,13 +622,21 @@ fn all_publication_discharge_families_wait_for_their_exact_barrier_ack() {
                     panic!("{family:?} did not reach its successor sync cut");
                 },
             }
-            let successor =
-                wait_for_successor_publication(&context, &hooks, &prepared.successor).await;
-            assert_pre_ack_publications(&hooks, prepared.predecessor, successor);
+            let early = if published_before_ack(&prepared.successor) {
+                wait_for_successor_publication(&context, &hooks, &prepared.successor).await
+            } else {
+                assert_successor_withheld(&context, &hooks, &prepared.successor).await;
+                None
+            };
+            assert_pre_ack_publications(&hooks, prepared.predecessor, early);
 
             gate.release();
             let ack = wait_for_retirement_ack(&context, &hooks, prepared.predecessor).await;
             let point = assert_exact_journal_ack(&gates, ack);
+            let successor = match early {
+                Some(successor) => Some(successor),
+                None => wait_for_successor_publication(&context, &hooks, &prepared.successor).await,
+            };
             if let Some(successor) = successor {
                 assert!(
                     point.previous.get() < successor.get() && successor.get() <= point.result.get(),
@@ -712,20 +757,20 @@ fn crash_after_successor_append_releases_only_recovered_successors() {
                         .await;
                 let mut gate = first_gates.arm_after_sync_retiring(prepared.predecessor);
                 submit_actor_discharge_successor(&node, &prepared.successor).await;
-                let successor = if matches!(
-                    &prepared.successor,
-                    ActorDischargeSuccessor::FinalityFloor(_)
-                ) {
-                    None
-                } else {
+                let successor = if published_before_ack(&prepared.successor) {
                     wait_for_successor_publication(&context, &first_hooks, &prepared.successor)
                         .await
+                } else {
+                    None
                 };
                 select! {
                     () = gate.wait_entered() => {},
                     () = context.sleep(Duration::from_secs(2)) => {
                         panic!("{family:?} did not reach its exact crash-after-sync cut");
                     },
+                }
+                if !published_before_ack(&prepared.successor) {
+                    assert_successor_withheld(&context, &first_hooks, &prepared.successor).await;
                 }
                 assert_pre_ack_publications(&first_hooks, prepared.predecessor, successor);
                 node.crash(&context).await;
@@ -805,15 +850,19 @@ fn crash_after_successor_append_releases_only_recovered_successors() {
                     .live_publications()
                     .contains(&prepared.predecessor)
             );
+            // A successor withheld until durability was never published before the crash, so its
+            // first attempt is the recovered one.
+            let recovered =
+                wait_for_successor_publication(&context, &recovered_hooks, &prepared.successor)
+                    .await;
             if let Some(successor) = successor {
-                let recovered =
-                    wait_for_successor_publication(&context, &recovered_hooks, &prepared.successor)
-                        .await;
                 assert_eq!(recovered, Some(successor));
+            }
+            if let Some(recovered) = recovered {
                 let attempts = recovered_hooks.durable_effects();
-                assert_eq!(attempts[&successor].len(), 1);
+                assert_eq!(attempts[&recovered].len(), 1);
                 assert_eq!(
-                    attempts[&successor][0].generation,
+                    attempts[&recovered][0].generation,
                     Generation::new(prepared.generation + 1)
                 );
             }
