@@ -129,11 +129,11 @@
 //! Peers found violating these rules are blocked via the [`Blocker`] trait.
 //! The width rule is enforced on receipt of every shard. The other rules are
 //! applied while a commitment is actively tracked in reconstruction state.
-//! Buffered shards are verified only as reconstruction needs them. Once a
-//! block is cached, its record retains no shards and verifies only a late
-//! assigned shard. Until the leader is known, shards whose index differs from
-//! their sender's stay in the per-peer queues. Other shards for that
-//! commitment are ignored.
+//! Buffered shards are verified only as reconstruction needs them. Until the
+//! leader is known, shards whose index differs from their sender's stay in the
+//! per-peer queues. Once a block is cached, its record retains no shards,
+//! verifies only a late assigned shard, and ignores other sender-indexed
+//! shards.
 //!
 //! _Before proposal context is known, shards are buffered in fixed-size per-peer
 //! queues until consensus signals the proposal via [`Mailbox::discovered`]
@@ -868,7 +868,7 @@ where
         {
             let round = record.round();
             let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
-                warn!(%commitment, "no scheme for epoch, ignoring shard");
+                debug!(%commitment, "no scheme for epoch, ignoring shard");
                 return;
             };
 
@@ -1863,10 +1863,10 @@ where
     ///   while awaiting quorum.
     /// - The index has already been marked as contributed (via the bitmap,
     ///   e.g. after batch validation).
-    /// - Shards other than the assigned shard that arrive after the state has
-    ///   transitioned to [`ReconstructionState::Ready`] (i.e., the block is
-    ///   cached), including shards that conflict with earlier ones. An
-    ///   assigned shard for our index is still verified in `Ready` state.
+    /// - Sender-indexed shards that arrive after the state has transitioned to
+    ///   [`ReconstructionState::Ready`] (i.e., the block is cached), including
+    ///   ones that conflict with earlier shards. An assigned shard for our
+    ///   index is still verified in `Ready` state.
     /// - Before a reconstruction state exists, shards are buffered at the
     ///   engine level in bounded per-peer queues until [`Mailbox::discovered`]
     ///   or [`Mailbox::notarized`] creates state for this commitment.
@@ -2001,6 +2001,7 @@ mod tests {
             atomic::{AtomicIsize, Ordering},
             mpsc,
         },
+        thread,
         time::Duration,
     };
 
@@ -2170,8 +2171,18 @@ mod tests {
         }
     }
 
-    /// Signals that [`Gated::decode`] started and waits for its release.
-    static GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = Mutex::new(None);
+    /// An armed [`GATE`].
+    struct Gate {
+        /// Signals that decode started.
+        started: mpsc::Sender<()>,
+        /// Releases the held decode.
+        release: mpsc::Receiver<()>,
+        /// The engine thread, which decode must not run on.
+        engine: thread::ThreadId,
+    }
+
+    /// Holds [`Gated::decode`] until released.
+    static GATE: Mutex<Option<Gate>> = Mutex::new(None);
 
     /// Reed-Solomon coding whose decode holds while [`GATE`] is armed.
     #[derive(Clone, Debug)]
@@ -2216,11 +2227,19 @@ mod tests {
             strategy: &impl Strategy,
         ) -> Result<Vec<u8>, Self::Error> {
             let gate = GATE.lock().take();
-            if let Some((started, release)) = gate {
+            if let Some(Gate {
+                started,
+                release,
+                engine,
+            }) = gate
+            {
+                assert_ne!(
+                    thread::current().id(),
+                    engine,
+                    "reconstruction ran on the engine task"
+                );
                 started.send(()).unwrap();
-                release
-                    .recv_timeout(Duration::from_secs(10))
-                    .expect("reconstruction ran on the engine task");
+                release.recv().unwrap();
             }
             C::decode(config, commitment, shards, strategy)
         }
@@ -6325,7 +6344,11 @@ mod tests {
             // starts a job whose decode holds.
             let (started_tx, started) = mpsc::channel();
             let (release, release_rx) = mpsc::channel();
-            *GATE.lock() = Some((started_tx, release_rx));
+            *GATE.lock() = Some(Gate {
+                started: started_tx,
+                release: release_rx,
+                engine: thread::current().id(),
+            });
             let a = make_block(1);
             mailbox.discovered(
                 a.commitment(),
