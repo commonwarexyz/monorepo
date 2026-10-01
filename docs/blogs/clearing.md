@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (10/1/26): Payments continue while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice.*
+*Update (10/1/26): Restored continuous payments while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice.*
 
 *Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 
@@ -328,8 +328,6 @@ $$
 ::: {.image-caption}
 Figure 6: Both calculations include the same incoming credit. Adding it to the spendable balance preserves payments already accepted in the new epoch.
 :::
-
-An epoch's registered deposits are available when payments begin, while an account created by incoming credit waits for the crediting close's admission. A payer authorizing a withdrawal waits until its signed deadline before signing more payments. The authorization's fixed acceptance window ends earlier, so the payer can resume once that window closes if certified chain state proves the request never entered settlement.
 
 ### Retrying Across the Boundary
 
