@@ -74,33 +74,34 @@
 //!
 //! ```text
 //!    +----------------------+
-//!    | AwaitingQuorum       | <-------------+
-//!    | - leader known       |               |
-//!    | - assigned shard     |               |
-//!    |   verified eagerly   |               |
-//!    | - other shards       |               |
-//!    |   buffered           |               | too few valid shards
-//!    +----------------------+               |
-//!               |                           |
-//!               | checked + pending shards  |
-//!               | >= minimum_shards         |
-//!               v                           |
-//!    +----------------------+               |
-//!    | Reconstruction Job   | --------------+
-//!    | - batch validation   |
-//!    | - decoding           |
-//!    +----------------------+
-//!               |         |
-//!       decoded |         | decode failed
-//!               v         +---------------> record removed
-//!    +----------------------+
-//!    | Ready                |
-//!    | - block cached       |
-//!    | - no new gossip      |
-//!    |   shards accepted    |
-//!    | - assigned shard may |
-//!    |   still arrive late  |
-//!    +----------------------+
+//!    | AwaitingQuorum       | <----------------+
+//!    | - leader discovered  |                  |
+//!    |   or notarized       |                  |
+//!    | - assigned shard     |                  |
+//!    |   verified eagerly   |                  |
+//!    | - other shards       |                  |
+//!    |   buffered           |                  |
+//!    +----------------------+                  |
+//!      |            |                          |
+//!      | own        | checked + pending shards | too few
+//!      | proposal   | >= minimum_shards        | valid shards
+//!      | cached     v                          |
+//!      |      +----------------------+         |
+//!      |      | Reconstruction Job   | --------+
+//!      |      | - batch validation   |
+//!      |      | - decoding           |
+//!      |      +----------------------+
+//!      |            |           |
+//!      |    decoded |           | decode failed
+//!      |            v           +-------------> record removed
+//!      |      +----------------------+
+//!      +----> | Ready                |
+//!             | - block cached       |
+//!             | - no new gossip      |
+//!             |   shards accepted    |
+//!             | - assigned shard may |
+//!             |   still arrive late  |
+//!             +----------------------+
 //! ```
 //!
 //! _Per-peer buffers are only kept for peers in `latest.primary`, matching [`commonware_broadcast::buffered`].
@@ -371,7 +372,8 @@ where
     /// [`commonware_codec::Read`] configuration for decoding blocks.
     pub block_codec_cfg: B::Cfg,
 
-    /// The strategy that runs reconstruction jobs.
+    /// The strategy that decodes received shards, encodes shards for broadcast, and runs
+    /// reconstruction jobs.
     pub strategy: T,
 
     /// The size of the mailbox buffer.
@@ -609,7 +611,8 @@ where
     /// [`commonware_codec::Read`] configuration for decoding [`CodedBlock`]s.
     block_codec_cfg: B::Cfg,
 
-    /// The strategy used for parallel shard verification.
+    /// The strategy that decodes received shards, encodes shards for broadcast, and runs
+    /// reconstruction jobs.
     strategy: T,
 
     /// The cache and reconstruction lifecycle for each observed [`Commitment`].
