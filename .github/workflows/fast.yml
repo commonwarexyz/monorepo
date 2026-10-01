@@ -180,18 +180,18 @@ jobs:
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             qemu: Broadwell
             cpu-features: "avx2 bmi2 adx !sha !avx512f"
-          # QEMU max has SHA-3 and SVE2 with 512-bit vectors.
+          # Neoverse N2 has SHA-3 and SVE2.
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
-            qemu: max,sve-default-vector-length=64
+            qemu: neoverse-n2
             cpu-features: "sha2 sha3 sve sve2"
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
             rustflags: "-C target-feature=+sha2,+sve2"
             static-features: "sha2 sve2 !sha3"
-            qemu: max,sve-default-vector-length=64
+            qemu: neoverse-n2
             cpu-features: "sha2 sha3 sve sve2"
           # A64FX has SVE without SHA-3 or SVE2.
           - os: ubuntu-24.04-arm
