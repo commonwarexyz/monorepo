@@ -51,11 +51,10 @@ enum Control<P: PublicKey> {
     },
 }
 
-/// Thread-safe routing table mapping each [Channel] to the [mpsc::Sender] for [`Message<P>`].
+/// Routing table mapping each [Channel] to the [mpsc::Sender] for [`Message<P>`].
 type Routes<P> = HashMap<Channel, mpsc::Sender<Message<P>>>;
 
-/// A backup channel response, with a [SubSender] to respond, the [Channel] that wasn't registered,
-/// and the [Message] received.
+/// A backup channel response with the [Channel] that wasn't registered and the [Message] received.
 type BackupResponse<P> = (Channel, Message<P>);
 
 /// A multiplexer of p2p channels into subchannels.
@@ -69,15 +68,10 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
     backup: Option<mpsc::Sender<BackupResponse<R::PublicKey>>>,
 }
 
-impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
+impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
     /// [MuxHandle]) pair that can be used to register routes dynamically.
-    pub fn new(
-        context: E,
-        sender: S,
-        receiver: R,
-        mailbox_size: usize,
-    ) -> (Self, MuxHandle<S, R::PublicKey>) {
+    pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S>) {
         Self::builder(context, sender, receiver, mailbox_size).build()
     }
 
@@ -193,20 +187,20 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 
 /// A clonable handle that allows registering routes at any time, even after the [Muxer] is running.
 #[derive(Clone)]
-pub struct MuxHandle<S: Sender, P: PublicKey> {
+pub struct MuxHandle<S: Sender> {
     sender: S,
-    control_tx: mpsc::UnboundedSender<Control<P>>,
+    control_tx: mpsc::UnboundedSender<Control<S::PublicKey>>,
 }
 
-impl<S: Sender, P: PublicKey> MuxHandle<S, P> {
+impl<S: Sender> MuxHandle<S> {
     /// Open a `subchannel`. Returns a ([SubSender], [SubReceiver]) pair that can be used to send
     /// and receive messages for that subchannel.
     ///
-    /// Panics if the subchannel is already registered at any point.
+    /// Returns [Error::AlreadyRegistered] if `subchannel` is already registered.
     pub async fn register(
         &mut self,
         subchannel: Channel,
-    ) -> Result<(SubSender<S>, SubReceiver<P>), Error> {
+    ) -> Result<(SubSender<S>, SubReceiver<S::PublicKey>), Error> {
         let (tx, rx) = oneshot::channel();
         self.control_tx
             .send(Control::Register {
@@ -373,11 +367,11 @@ pub trait Builder {
 /// A builder that constructs a [Muxer].
 pub struct MuxerBuilder<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
-    mux_handle: MuxHandle<S, R::PublicKey>,
+    mux_handle: MuxHandle<S>,
 }
 
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilder<E, S, R> {
-    type Output = (Muxer<E, S, R>, MuxHandle<S, R::PublicKey>);
+    type Output = (Muxer<E, S, R>, MuxHandle<S>);
 
     fn build(self) -> Self::Output {
         (self.mux, self.mux_handle)
@@ -412,7 +406,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilder<E, S, R> {
 /// A builder that constructs a [Muxer] with a backup channel.
 pub struct MuxerBuilderWithBackup<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
-    mux_handle: MuxHandle<S, R::PublicKey>,
+    mux_handle: MuxHandle<S>,
     backup_rx: mpsc::Receiver<BackupResponse<R::PublicKey>>,
 }
 
@@ -433,7 +427,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithBackup<E, S, R> {
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithBackup<E, S, R> {
     type Output = (
         Muxer<E, S, R>,
-        MuxHandle<S, R::PublicKey>,
+        MuxHandle<S>,
         mpsc::Receiver<BackupResponse<R::PublicKey>>,
     );
 
@@ -445,7 +439,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithBackup<E, S
 /// A builder that constructs a [Muxer] with a [GlobalSender].
 pub struct MuxerBuilderWithGlobalSender<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
-    mux_handle: MuxHandle<S, R::PublicKey>,
+    mux_handle: MuxHandle<S>,
     global_sender: GlobalSender<S>,
 }
 
@@ -465,7 +459,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithGlobalSender<E, S, R> {
 }
 
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithGlobalSender<E, S, R> {
-    type Output = (Muxer<E, S, R>, MuxHandle<S, R::PublicKey>, GlobalSender<S>);
+    type Output = (Muxer<E, S, R>, MuxHandle<S>, GlobalSender<S>);
 
     fn build(self) -> Self::Output {
         (self.mux, self.mux_handle, self.global_sender)
@@ -475,7 +469,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithGlobalSende
 /// A builder that constructs a [Muxer] with a [GlobalSender] and backup channel.
 pub struct MuxerBuilderAllOpts<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
-    mux_handle: MuxHandle<S, R::PublicKey>,
+    mux_handle: MuxHandle<S>,
     backup_rx: mpsc::Receiver<BackupResponse<R::PublicKey>>,
     global_sender: GlobalSender<S>,
 }
@@ -483,7 +477,7 @@ pub struct MuxerBuilderAllOpts<E: Spawner, S: Sender, R: Receiver> {
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderAllOpts<E, S, R> {
     type Output = (
         Muxer<E, S, R>,
-        MuxHandle<S, R::PublicKey>,
+        MuxHandle<S>,
         mpsc::Receiver<BackupResponse<R::PublicKey>>,
         GlobalSender<S>,
     );
@@ -570,7 +564,7 @@ mod tests {
         seed: u64,
     ) -> (
         PublicKey,
-        MuxHandle<impl Sender<PublicKey = PublicKey> + use<>, PublicKey>,
+        MuxHandle<impl Sender<PublicKey = PublicKey> + use<>>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
@@ -590,7 +584,7 @@ mod tests {
         seed: u64,
     ) -> (
         PublicKey,
-        MuxHandle<impl Sender<PublicKey = PublicKey> + use<>, PublicKey>,
+        MuxHandle<impl Sender<PublicKey = PublicKey> + use<>>,
         mpsc::Receiver<BackupResponse<PublicKey>>,
         GlobalSender<simulated::Sender<PublicKey, deterministic::Context>>,
     ) {

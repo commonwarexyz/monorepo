@@ -45,16 +45,12 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-struct Channels<C, S>
-where
-    C: Verifier,
-    S: Sender<PublicKey = C::PublicKey>,
-{
-    vote: MuxHandle<S, C::PublicKey>,
-    vote_backup: mpsc::Receiver<(Channel, P2pMessage<C::PublicKey>)>,
-    certificate: MuxHandle<S, C::PublicKey>,
-    certificate_backup: mpsc::Receiver<(Channel, P2pMessage<C::PublicKey>)>,
-    resolver: MuxHandle<S, C::PublicKey>,
+struct Channels<S: Sender> {
+    vote: MuxHandle<S>,
+    vote_backup: mpsc::Receiver<(Channel, P2pMessage<S::PublicKey>)>,
+    certificate: MuxHandle<S>,
+    certificate_backup: mpsc::Receiver<(Channel, P2pMessage<S::PublicKey>)>,
+    resolver: MuxHandle<S>,
 }
 
 struct ActiveEpoch {
@@ -519,7 +515,7 @@ where
         (vote_sender, vote_receiver): (S, R),
         (certificate_sender, certificate_receiver): (S, R),
         (resolver_sender, resolver_receiver): (S, R),
-    ) -> Channels<P::Scheme, S>
+    ) -> Channels<S>
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -606,7 +602,7 @@ where
         active: &mut ActiveEpoch,
         block: Arc<MV::ApplicationBlock>,
         acknowledgement: ACK,
-        channels: &mut Channels<P::Scheme, S>,
+        channels: &mut Channels<S>,
     ) -> bool
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -684,7 +680,7 @@ where
             <P::Scheme as Verifier>::PublicKey,
             <MV::ApplicationBlock as ReshareBlock>::Directory,
         >,
-        channels: &mut Channels<P::Scheme, S>,
+        channels: &mut Channels<S>,
     ) -> Result<ActiveEpoch, EnterEpochError<M::Error>>
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,

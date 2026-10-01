@@ -45,7 +45,7 @@ where
     pub(super) async fn run_dkg<SE>(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-        dealing_mux: &mut MuxHandle<SE, C::PublicKey>,
+        dealing_mux: &mut MuxHandle<SE>,
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
     {
