@@ -46,7 +46,7 @@ enum Step<M, P> {
 ///
 /// At most one barrier covers a captured prefix. Applied heights beyond that prefix remain queued
 /// for a successor barrier.
-struct Durability {
+pub(super) struct Durability {
     /// Highest applied height known to be durable.
     durable: Height,
     /// Applied heights whose marshal acknowledgements await durability, in nondecreasing order.
@@ -57,7 +57,7 @@ struct Durability {
 
 impl Durability {
     /// Initializes tracking at a height already known to be durable.
-    const fn new(height: Height) -> Self {
+    pub(super) const fn new(height: Height) -> Self {
         Self {
             durable: height,
             acknowledgements: VecDeque::new(),
@@ -66,7 +66,7 @@ impl Durability {
     }
 
     /// Returns the highest applied height (the durable height when no acknowledgement is pending).
-    fn applied(&self) -> Height {
+    pub(super) fn applied(&self) -> Height {
         self.acknowledgements
             .back()
             .map_or(self.durable, |(height, _)| *height)
@@ -75,7 +75,7 @@ impl Durability {
     /// Holds the acknowledgement for a newly applied `height` until it is durable.
     ///
     /// Panics unless `height` is above every applied height.
-    fn record(&mut self, height: Height, acknowledgement: Exact) {
+    pub(super) fn record(&mut self, height: Height, acknowledgement: Exact) {
         assert!(height > self.applied(), "finalized heights must increase");
         self.acknowledgements.push_back((height, acknowledgement));
     }
@@ -84,7 +84,7 @@ impl Durability {
     /// already is).
     ///
     /// Panics if `height` is neither durable nor applied.
-    fn record_duplicate(&mut self, height: Height, acknowledgement: Exact) {
+    pub(super) fn record_duplicate(&mut self, height: Height, acknowledgement: Exact) {
         if self.covers(height) {
             acknowledgement.acknowledge();
             return;
@@ -99,7 +99,7 @@ impl Durability {
     }
 
     /// Returns whether applied state is not yet durable and no barrier is active.
-    fn needs_barrier(&self) -> bool {
+    pub(super) fn needs_barrier(&self) -> bool {
         self.barrier.is_none() && self.durable < self.applied()
     }
 
@@ -107,7 +107,7 @@ impl Durability {
     ///
     /// Panics if a barrier is active or `height` is not above the durable height and at or below
     /// the applied height.
-    fn set_barrier(&mut self, height: Height, barrier: Barrier) {
+    pub(super) fn set_barrier(&mut self, height: Height, barrier: Barrier) {
         assert!(self.barrier.is_none(), "barrier already active");
         assert!(height > self.durable && height <= self.applied());
         self.barrier = Some(Handle::from_future(async move {
@@ -119,7 +119,7 @@ impl Durability {
     /// unconditionally.
     ///
     /// Resolves to the covered height, or `None` if shutdown interrupted the barrier.
-    async fn completion(&mut self) -> Option<Height> {
+    pub(super) async fn completion(&mut self) -> Option<Height> {
         let Some(barrier) = &mut self.barrier else {
             return pending().await;
         };
@@ -130,7 +130,7 @@ impl Durability {
     ///
     /// Returns `false` without advancing the durable height if `completion` is `None`. Panics if no
     /// barrier is active.
-    fn complete(&mut self, completion: Option<Height>) -> bool {
+    pub(super) fn complete(&mut self, completion: Option<Height>) -> bool {
         assert!(self.barrier.take().is_some(), "barrier not active");
         let Some(height) = completion else {
             return false;

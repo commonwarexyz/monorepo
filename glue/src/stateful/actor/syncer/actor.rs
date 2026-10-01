@@ -5,8 +5,8 @@ use super::{
 };
 use crate::stateful::{
     Application,
-    actor::BlockDigest,
-    db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
+    actor::{BlockDigest, SyncTargets},
+    db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig, TipUpdate},
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
 use commonware_consensus::{
@@ -20,11 +20,69 @@ use commonware_storage::Context;
 use commonware_utils::{
     NZUsize,
     channel::{fallible::OneshotExt, oneshot, ring},
-    futures::OptionFuture,
 };
-use futures::SinkExt;
+use futures::{SinkExt, future::pending};
 use rand_core::Rng;
+use std::{future::Future, mem, pin::Pin};
 use tracing::debug;
+
+/// State sync resources live until convergence, then only the artifact is retained for retries.
+enum Phase<E, A, F>
+where
+    E: Rng + Spawner + Context,
+    A: Application<E>,
+{
+    Syncing {
+        task: Pin<Box<F>>,
+        updates: ring::Sender<TipUpdate<BlockDigest<A, E>, SyncTargets<A, E>>>,
+        completion: oneshot::Sender<Artifact<E, A>>,
+    },
+    Complete(Artifact<E, A>),
+}
+
+impl<E, A, F> Phase<E, A, F>
+where
+    E: Rng + Spawner + Context,
+    A: Application<E>,
+    F: Future<Output = Artifact<E, A>>,
+{
+    /// Waits for convergence, staying pending after the artifact is published.
+    async fn completion(&mut self) -> Artifact<E, A> {
+        match self {
+            Self::Syncing { task, .. } => task.await,
+            Self::Complete(_) => pending().await,
+        }
+    }
+
+    /// Publishes once and drops the sync resources, including any unobserved target update.
+    fn publish(&mut self, artifact: Artifact<E, A>) {
+        let Self::Syncing { completion, .. } = mem::replace(self, Self::Complete(artifact.clone()))
+        else {
+            panic!("state sync artifact already published");
+        };
+        completion.send_lossy(artifact);
+    }
+
+    /// Forwards a target, or publishes and returns the artifact if convergence won the race.
+    async fn retarget(
+        &mut self,
+        update: TipUpdate<BlockDigest<A, E>, SyncTargets<A, E>>,
+    ) -> Option<Artifact<E, A>> {
+        match self {
+            Self::Complete(artifact) => return Some(artifact.clone()),
+            Self::Syncing { updates, .. } => {
+                if updates.send(update).await.is_ok() {
+                    return None;
+                }
+            }
+        }
+
+        // A closed target channel accepts no more targets. Wait for convergence.
+        let artifact = self.completion().await;
+        self.publish(artifact.clone());
+        Some(artifact)
+    }
+}
 
 /// Configuration for [`Syncer`].
 pub struct Config<E, A, R, S, V>
@@ -71,8 +129,6 @@ where
     context: ContextCell<E>,
     /// The mailbox.
     mailbox: Receiver<Message<E, A>>,
-    /// The produced state sync artifact, if complete.
-    artifact: Option<Artifact<E, A>>,
     /// Database configuration for the managed set.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     /// Per-database sync engine parameters.
@@ -83,7 +139,7 @@ where
     finalization: Finalization<S, V::Commitment>,
     /// Marshal mailbox and the durable floor returned during initialization.
     marshal: (MarshalMailbox<S, V>, Floor),
-    completion: Option<oneshot::Sender<Artifact<E, A>>>,
+    completion: oneshot::Sender<Artifact<E, A>>,
 }
 
 impl<E, A, R, S, V> Syncer<E, A, R, S, V>
@@ -102,13 +158,12 @@ where
             Self {
                 context: ContextCell::new(config.context),
                 mailbox: receiver,
-                artifact: None,
                 db_config: config.db_config,
                 sync_config: config.sync_config,
                 resolvers: config.resolvers,
                 finalization: config.finalization,
                 marshal: config.marshal,
-                completion: Some(config.completion),
+                completion: config.completion,
             },
             mailbox,
         )
@@ -122,9 +177,8 @@ where
         let (marshal, floor) = &self.marshal;
         let block = resolve(marshal, *floor, &self.finalization).await;
 
-        let (tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
-        let mut tip_updates_tx = Some(tip_updates_tx);
-        let mut task = OptionFuture::from(Some(Box::pin(A::Databases::sync(
+        let (updates, tip_updates_rx) = ring::channel(NZUsize!(1));
+        let task = A::Databases::sync(
             self.context.child("state_sync"),
             self.db_config,
             self.resolvers,
@@ -132,88 +186,41 @@ where
             A::sync_targets(block.as_ref()),
             tip_updates_rx,
             self.sync_config,
-        ))));
+        );
+        let mut phase = Phase::Syncing {
+            task: Box::pin(async move {
+                let (databases, anchor) = task
+                    .await
+                    .unwrap_or_else(|err| panic!("state sync task failed: {err:?}"));
+                Artifact { databases, anchor }
+            }),
+            updates,
+            completion: self.completion,
+        };
 
         select_loop! {
             self.context,
             on_stopped => {
                 debug!("syncer received stop signal, shutting down");
             },
-            result = &mut task => match result {
-                Ok((databases, anchor)) => {
-                    Self::publish(
-                        &mut self.artifact,
-                        &mut self.completion,
-                        databases,
-                        anchor,
-                    );
-                    task = None.into();
-
-                    // No coordinator remains to record a queued update. Dropping the sender
-                    // drops that update, so its caller retries and receives the artifact.
-                    tip_updates_tx = None;
-                }
-                Err(err) => {
-                    panic!("state sync task failed: {err:?}");
-                }
+            artifact = phase.completion() => {
+                phase.publish(artifact);
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down syncer");
                 break;
             } => match message {
                 Message::Retarget { update, response } => {
-                    if let Some(artifact) = self.artifact.clone() {
-                        response.send_lossy(Some(artifact));
-                        continue;
-                    }
-
-                    let tip_updates = tip_updates_tx
-                        .as_mut()
-                        .expect("ring sender lives until the artifact is published");
-                    if tip_updates.send(update).await.is_err() {
-                        // A closed target channel means state sync accepts no more targets. Wait
-                        // for its result instead of failing.
-                        match (&mut task).await {
-                            Ok((databases, anchor)) => {
-                                Self::publish(
-                                    &mut self.artifact,
-                                    &mut self.completion,
-                                    databases,
-                                    anchor,
-                                );
-                                task = None.into();
-                            }
-                            Err(err) => {
-                                panic!("state sync task failed: {err:?}");
-                            }
-                        }
-                        tip_updates_tx = None;
-                        response.send_lossy(self.artifact.clone());
-                        continue;
-                    }
-                    response.send_lossy(None);
+                    response.send_lossy(phase.retarget(update).await);
                 }
             },
-        }
-    }
-
-    fn publish(
-        artifact: &mut Option<Artifact<E, A>>,
-        completion: &mut Option<oneshot::Sender<Artifact<E, A>>>,
-        databases: A::Databases,
-        anchor: Anchor<BlockDigest<A, E>>,
-    ) {
-        let published = Artifact { databases, anchor };
-        *artifact = Some(published.clone());
-        if let Some(completion) = completion.take() {
-            completion.send_lossy(published);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Syncer, resolve};
+    use super::{Artifact, Config, Phase, Syncer, resolve};
     use crate::stateful::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful,
         actor::syncer::{SyncPlan, open},
@@ -246,6 +253,7 @@ mod tests {
         NZU64, NZUsize,
         channel::{oneshot, ring},
     };
+    use futures::poll;
     use std::{convert::Infallible, time::Duration};
 
     /// Database set whose sync holds the tip-update ring receiver without draining it, then
@@ -1040,6 +1048,51 @@ mod tests {
                 },
             };
             assert_eq!(Anchor::from(resolved.as_ref()), Anchor::from(&newer_block));
+        });
+    }
+
+    /// A closed update channel must wait for the artifact, publish it, and serve later retries.
+    #[test]
+    fn closed_tip_channel_waits_for_artifact() {
+        deterministic::Runner::default().start(|_| async move {
+            let (updates, receiver) = ring::channel(NZUsize!(1));
+            drop(receiver);
+            let (completion, mut published) = oneshot::channel();
+            let (release, ready) = oneshot::channel();
+            let mut phase = Phase::<deterministic::Context, WedgeApp, _>::Syncing {
+                task: Box::pin(async move { ready.await.expect("sync must finish") }),
+                updates,
+                completion,
+            };
+            let (update, observed) = TipUpdate::with_observation(anchor(1, 1), 1);
+            let mut retarget = Box::pin(phase.retarget(update));
+            assert!(poll!(&mut retarget).is_pending());
+            assert!(observed.await.is_err());
+            assert!(poll!(&mut published).is_pending());
+
+            assert!(
+                release
+                    .send(Artifact {
+                        databases: WedgeSet::default(),
+                        anchor: anchor(0, 0),
+                    })
+                    .is_ok(),
+            );
+            let artifact = retarget.await.expect("retarget must return the artifact");
+            assert_eq!(artifact.anchor, anchor(0, 0));
+            assert_eq!(
+                published.await.expect("artifact must publish").anchor,
+                artifact.anchor
+            );
+
+            let (update, observed) = TipUpdate::with_observation(anchor(2, 2), 2);
+            let retry = phase
+                .retarget(update)
+                .await
+                .expect("retry must return the artifact");
+            assert_eq!(retry.anchor, artifact.anchor);
+            assert!(observed.await.is_err());
+            assert!(poll!(Box::pin(phase.completion())).is_pending());
         });
     }
 

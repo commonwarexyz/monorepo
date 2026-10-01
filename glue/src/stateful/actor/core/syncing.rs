@@ -3,7 +3,9 @@ use crate::stateful::{
     actor::{
         SyncTargets,
         core::{
-            mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
+            mailbox::Message,
+            processing::{Durability, Processing},
+            verifications::Request as VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
         processor::{Applied, Processor, Pruning},
@@ -247,7 +249,7 @@ where
         artifact: Artifact<E, A>,
         handoffs: impl IntoIterator<Item = FinalizedHandoff<Arc<A::Block>>>,
     ) {
-        let mut completed_height = artifact.anchor.height;
+        let mut durability = Durability::new(artifact.anchor.height);
 
         let mut processor = Processor::new(
             self.application,
@@ -258,7 +260,6 @@ where
         );
 
         let mut pending_prune = None;
-        let mut pending_acknowledgements = Vec::new();
 
         for handoff in handoffs {
             match handoff {
@@ -267,37 +268,37 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    if !processor.redelivered(block.as_ref()) {
+                    if processor.redelivered(block.as_ref()) {
+                        durability.record_duplicate(block.height(), acknowledgement);
+                    } else {
                         let Applied { prune, .. } = processor
                             .finalize(self.context.as_present(), block.as_ref(), false)
                             .await;
                         pending_prune = prune.or(pending_prune);
-                        completed_height = block.height();
+                        durability.record(block.height(), acknowledgement);
                     }
-                    pending_acknowledgements.push(acknowledgement);
                 }
             }
         }
 
         // Acknowledge applied handoffs only after one barrier makes the whole applied suffix
         // durable.
-        if !pending_acknowledgements.is_empty() {
+        if durability.needs_barrier() {
             let barrier = processor.databases().finalize().await;
-            if !barrier.durable().await {
+            durability.set_barrier(durability.applied(), barrier);
+            let completion = durability.completion().await;
+            if !durability.complete(completion) {
                 return;
             }
-            for acknowledgement in pending_acknowledgements {
-                acknowledgement.acknowledge();
-            }
             debug!(
-                height = completed_height.get(),
+                height = durability.applied().get(),
                 "persisted finalized database batches during sync handoff"
             );
         }
 
         // Completion is an irreversible startup floor. Persist it only after every handoff through
-        // `completed_height` is durable and before pruning or exposing the databases.
-        self.plan = self.plan.set_completed(completed_height).await;
+        // the applied height is durable and before pruning or exposing the databases.
+        self.plan = self.plan.set_completed(durability.applied()).await;
         let _ = self.metrics.sync_done.try_set(1);
         if let Some(prune) = pending_prune {
             prune.run(processor.databases(), &self.marshal).await;

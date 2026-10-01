@@ -31,7 +31,7 @@ use commonware_consensus::{
     },
     types::{Height, Round},
 };
-use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::{
     Clock, Metrics, Spawner,
@@ -196,17 +196,35 @@ where
     verified: bool,
 }
 
-/// Finalized block being applied by an active finalization (the _winner_).
-struct Finalizing<A, E>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    anchor: Anchor<BlockDigest<A, E>>,
-    /// Winner batch retained while a clone is applied to the databases.
-    batch: Option<PendingBatches<A, E>>,
-    /// Winner and descendants allowed in pending state during finalization.
-    compatible: HashSet<BlockDigest<A, E>>,
+/// Finalized block being applied and the descendants compatible with it.
+struct Winner<D: Digest> {
+    anchor: Anchor<D>,
+    compatible: HashSet<D>,
+}
+
+/// Lifecycle of the winner's batch through reconstruction and the application hooks.
+enum Finalizing<D: Digest, B> {
+    Idle,
+    Preparing(Winner<D>),
+    Retained { winner: Winner<D>, batch: B },
+}
+
+impl<D: Digest, B> Finalizing<D, B> {
+    /// Returns the active winner, including while its batch is being reconstructed.
+    const fn winner(&self) -> Option<&Winner<D>> {
+        match self {
+            Self::Idle => None,
+            Self::Preparing(winner) | Self::Retained { winner, .. } => Some(winner),
+        }
+    }
+
+    /// Returns the winner's batch once it is available as a branch parent.
+    const fn retained(&self) -> Option<(&Winner<D>, &B)> {
+        match self {
+            Self::Retained { winner, batch } => Some((winner, batch)),
+            Self::Idle | Self::Preparing(_) => None,
+        }
+    }
 }
 
 /// Speculative state shared by the processor and its verifiers.
@@ -220,7 +238,7 @@ where
     /// Latest canonical anchor whose finalization hook has completed.
     processed: Anchor<BlockDigest<A, E>>,
     /// Winner currently being applied, if finalization is active.
-    finalizing: Option<Finalizing<A, E>>,
+    finalizing: Finalizing<BlockDigest<A, E>, PendingBatches<A, E>>,
 }
 
 impl<A, E> ExecutionState<A, E>
@@ -642,7 +660,7 @@ where
                 state: Arc::new(Mutex::new(ExecutionState {
                     pending: BTreeMap::new(),
                     processed,
-                    finalizing: None,
+                    finalizing: Finalizing::Idle,
                 })),
                 metrics,
             },
@@ -1004,16 +1022,10 @@ where
         let mut state = self.state.lock();
         let compatible = state.descendants(anchor.digest, anchor.round);
         assert!(
-            state
-                .finalizing
-                .replace(Finalizing {
-                    anchor,
-                    batch: None,
-                    compatible,
-                })
-                .is_none(),
+            matches!(state.finalizing, Finalizing::Idle),
             "finalization must be serialized",
         );
+        state.finalizing = Finalizing::Preparing(Winner { anchor, compatible });
     }
 
     /// Retains the winner's cached state, or `reconstructed` if it is not cached, as a branch
@@ -1031,20 +1043,27 @@ where
             finalizing,
             ..
         } = &mut *state;
-        let finalizing = finalizing.as_mut().expect("finalization must be active");
+        let Finalizing::Preparing(winner) = finalizing else {
+            panic!("finalization must be preparing its batch");
+        };
         assert_eq!(
-            finalizing.anchor.digest, digest,
+            winner.anchor.digest, digest,
             "retained batch must match active finalization",
         );
-        assert!(finalizing.batch.is_none());
         let batch = pending
             .remove(&digest)
             .map(|entry| entry.merkleized)
             .or(reconstructed)
             .expect("finalization must have a cached or reconstructed batch");
-        finalizing.batch = Some(batch.clone());
         let before = pending.len();
-        pending.retain(|candidate_digest, _| finalizing.compatible.contains(candidate_digest));
+        pending.retain(|candidate_digest, _| winner.compatible.contains(candidate_digest));
+        *finalizing = Finalizing::Retained {
+            winner: Winner {
+                anchor: winner.anchor,
+                compatible: std::mem::take(&mut winner.compatible),
+            },
+            batch: batch.clone(),
+        };
         let pruned = before - pending.len();
         let pending = pending.len();
         drop(state);
@@ -1059,12 +1078,11 @@ where
     /// Panics if `anchor` is not the winner or if its batch was not retained.
     fn set_processed(&self, anchor: Anchor<BlockDigest<A, E>>) {
         let mut state = self.state.lock();
-        let finalizing = state
-            .finalizing
-            .take()
-            .expect("finalization must be active");
-        assert_eq!(finalizing.anchor, anchor);
-        assert!(finalizing.batch.is_some());
+        let Finalizing::Retained { winner, .. } = &state.finalizing else {
+            panic!("finalization must have retained its batch");
+        };
+        assert_eq!(winner.anchor, anchor);
+        state.finalizing = Finalizing::Idle;
         state.processed = anchor;
     }
 
@@ -1118,10 +1136,8 @@ where
             return true;
         }
 
-        let retained = state.finalizing.as_ref().is_some_and(|finalizing| {
-            finalizing.batch.is_some()
-                && finalizing.anchor.digest == digest
-                && finalizing.anchor.round == round
+        let retained = state.finalizing.retained().is_some_and(|(winner, _)| {
+            winner.anchor.digest == digest && winner.anchor.round == round
         });
         if retained || (state.processed.digest == digest && state.processed.round == round) {
             return true;
@@ -1129,7 +1145,7 @@ where
 
         // The processed anchor advances only after the finalized hook returns. Until then, only the
         // winner and its descendants may be cached.
-        let compatible = state.finalizing.as_ref().map_or_else(
+        let compatible = state.finalizing.winner().map_or_else(
             || {
                 round > state.processed.round
                     && (parent == state.processed.digest || state.pending.contains_key(&parent))
@@ -1145,8 +1161,11 @@ where
             return false;
         }
         state.pending.insert(digest, entry);
-        if let Some(finalizing) = state.finalizing.as_mut() {
-            finalizing.compatible.insert(digest);
+        match &mut state.finalizing {
+            Finalizing::Preparing(winner) | Finalizing::Retained { winner, .. } => {
+                winner.compatible.insert(digest);
+            }
+            Finalizing::Idle => {}
         }
         true
     }
@@ -1186,9 +1205,10 @@ where
         let state = self.state.lock();
         if state.processed.digest == digest
             || state.pending.contains_key(&digest)
-            || state.finalizing.as_ref().is_some_and(|finalizing| {
-                finalizing.batch.is_some() && finalizing.anchor.digest == digest
-            })
+            || state
+                .finalizing
+                .retained()
+                .is_some_and(|(winner, _)| winner.anchor.digest == digest)
         {
             return ReplayClaim::Ready;
         }
@@ -1208,7 +1228,7 @@ where
         state.processed.digest == digest
             || state
                 .finalizing
-                .as_ref()
+                .winner()
                 .is_some_and(|finalizing| finalizing.anchor.digest == digest)
     }
 
@@ -1226,14 +1246,14 @@ where
             if let Some(entry) = state.pending.get(parent) {
                 return Ok(A::Databases::fork_batches(&entry.merkleized));
             }
-            if let Some(finalizing) = state
+            if state
                 .finalizing
-                .as_ref()
-                .filter(|finalizing| finalizing.anchor.digest == *parent)
+                .winner()
+                .is_some_and(|winner| winner.anchor.digest == *parent)
             {
-                let batch = finalizing
-                    .batch
-                    .as_ref()
+                let (_, batch) = state
+                    .finalizing
+                    .retained()
                     .ok_or(PrepareBatchesError::Invalid)?;
                 return Ok(A::Databases::fork_batches(batch));
             }
