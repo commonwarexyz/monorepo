@@ -2524,8 +2524,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// in-flight fsync). Dropping the handle does not cancel the sync or lose its failure. Flush
     /// errors are returned directly. A failed data sync fails the next commit, sync, or rollover,
     /// and any prune that changes the journal. A failed data tail sync also fails the next
-    /// start_sync, and the next append or snapshot that writes to that blob. A failed offsets or
-    /// recovery-watermark sync is not observed by commit and resurfaces on the next sync.
+    /// start_sync, and the next append or snapshot that writes to that blob. A failed offsets sync
+    /// is not observed by commit. It fails the next start_sync or sync, and the next append or
+    /// snapshot that writes to an offsets blob. A failed recovery-watermark sync is not observed by
+    /// commit and resurfaces on the next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
@@ -4338,6 +4340,56 @@ mod tests {
                 journal.append_many(Many::Flat(&[1, 2, 3])).await,
                 Err(Error::Runtime(_))
             ));
+        });
+    }
+
+    /// A failed offsets sync whose handle was dropped is not observed by commit, and fails the
+    /// next start_sync.
+    #[test_traced]
+    fn test_variable_dropped_failed_offsets_sync_fails_next_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "variable-dropped-failed-offsets-sync".into(),
+                items_per_section: NZU64!(3),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
+
+            // Buffer an item and drop the started sync's handle unobserved. Let the data tail
+            // sync land and fail the offsets sync.
+            (journal, _) = journal.append(&0).await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
+            next_pending_sync(&pending).release.send(Ok(())).unwrap();
+            next_pending_sync(&pending)
+                .release
+                .send(Err(commonware_runtime::Error::Io(
+                    std::io::Error::other("injected sync failure").into(),
+                )))
+                .unwrap();
+            release_pending_syncs(&pending);
+
+            // Commit syncs only data blobs, so it succeeds.
+            let journal = journal.commit().await.unwrap();
+
+            // The next start_sync observes the failed offsets sync before starting new syncs.
+            assert!(matches!(journal.start_sync().await, Err(Error::Runtime(_))));
         });
     }
 

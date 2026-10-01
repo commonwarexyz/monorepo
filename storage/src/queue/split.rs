@@ -555,6 +555,30 @@ mod tests {
         });
     }
 
+    /// `try_recv` alone drains every published item after the writer is dropped.
+    #[test_traced]
+    fn test_split_try_recv_after_writer_dropped() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Publish items and drop the writer before any read.
+            let cfg = test_config("test_split_try_recv_dropped", &context);
+            let (writer, mut reader) = init(context, cfg).await.unwrap();
+            let (writer, _) = writer
+                .enqueue_bulk((0..3u8).map(|i| vec![i]))
+                .await
+                .unwrap();
+            drop(writer);
+
+            // The closed channel still holds the final snapshot.
+            for i in 0..3 {
+                let (pos, item) = reader.try_recv().await.unwrap().unwrap();
+                assert_eq!(pos, i);
+                assert_eq!(item, vec![i as u8]);
+            }
+            assert!(reader.try_recv().await.unwrap().is_none());
+        });
+    }
+
     /// A writer mutation dropped mid-flight destroys the writer. The reader delivers every
     /// published item, then reports the end of the queue.
     #[test_traced]

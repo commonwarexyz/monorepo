@@ -143,7 +143,8 @@ enum JournalOperation {
     /// Begin a durable sync. Drop the handle unobserved, or hold it until the next durability
     /// operation observes it.
     StartSync { hold: bool },
-    /// Capture and drop a snapshot reader, flushing buffered data without a durability barrier.
+    /// Capture and drop a snapshot reader, writing buffered full pages without a durability
+    /// barrier.
     Snapshot,
     /// Commit the journal.
     Commit,
