@@ -7,6 +7,7 @@
 commonware_macros::stability_scope!(ALPHA {
     pub mod dkg;
     pub mod executor;
+    pub(crate) mod probe;
     pub mod stateful;
     pub mod transfers;
 

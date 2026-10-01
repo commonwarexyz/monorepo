@@ -1,5 +1,8 @@
 use super::service::Service;
-use crate::stateful::probe::{mailbox::Message, sample::Sample, wire};
+use crate::{
+    probe::sample::Sample,
+    stateful::probe::{mailbox::Message, wire},
+};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Buf, Decode, Encode, Error as CodecError, ReadExt};
 use commonware_consensus::{
@@ -20,7 +23,7 @@ use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{
-    NonZeroDuration,
+    N3f1, NonZeroDuration,
     channel::{fallible::OneshotExt, oneshot},
 };
 use futures::future::{self, Either};
@@ -48,7 +51,8 @@ where
     pub(super) strategy: T,
     pub(super) blocker: B,
     pub(super) retry_timeout: NonZeroDuration,
-    pub(super) sample: Sample<S, V::Commitment>,
+    pub(super) minimum_epoch: Epoch,
+    pub(super) sample: Sample<P, Finalization<S, V::Commitment>>,
     pub(super) subscribers: Vec<oneshot::Sender<Finalization<S, V::Commitment>>>,
 }
 
@@ -180,7 +184,7 @@ where
             return Ok(None);
         }
         let proposal = Proposal::<V::Commitment>::read(&mut message)?;
-        if proposal.epoch() < self.sample.minimum_epoch() {
+        if proposal.epoch() < self.minimum_epoch {
             return Ok(None);
         }
         let Some(scoped) = self.provider.scoped(proposal.epoch()) else {
@@ -204,7 +208,7 @@ where
         peer: &P,
         finalization: &Finalization<S, V::Commitment>,
     ) -> bool {
-        let Some(scheme) = self.provider.scheme(self.sample.minimum_epoch()) else {
+        let Some(scheme) = self.provider.scheme(self.minimum_epoch) else {
             return false;
         };
         if scheme.participants().position(peer).is_none() {
@@ -228,16 +232,15 @@ where
 
     /// Selects the floor once the sample resolves and delivers it to every waiting subscriber.
     fn select(&mut self) {
-        let Some(scheme) = self.provider.scheme(self.sample.minimum_epoch()) else {
+        let Some(scheme) = self.provider.scheme(self.minimum_epoch) else {
             return;
         };
         let provider = &self.provider;
-        let Some(floor) = self
-            .sample
-            .select(scheme.participants().len(), |finalization| {
-                provider.scoped(finalization.epoch()).is_some()
-            })
-        else {
+        let Some(floor) = self.sample.select::<N3f1, _>(
+            scheme.participants().len(),
+            |finalization| provider.scoped(finalization.epoch()).is_some(),
+            |finalization| finalization.round(),
+        ) else {
             return;
         };
 
@@ -250,7 +253,7 @@ where
     /// (nothing is sent if that epoch has no known scheme).
     fn request_latest(&mut self, sender: &mut impl Sender<PublicKey = P>) {
         self.sample.reset();
-        let Some(scheme) = self.provider.scheme(self.sample.minimum_epoch()) else {
+        let Some(scheme) = self.provider.scheme(self.minimum_epoch) else {
             return;
         };
         sender.send(
