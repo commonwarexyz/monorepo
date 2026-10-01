@@ -1128,7 +1128,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
                 chunk.len() / page_size
             })
             .sum::<usize>();
-        debug_assert!(pages > 0);
+        assert!(pages > 0);
         let page_size_u16 =
             u16::try_from(page_size).expect("page size must fit in u16 for CRC record");
 

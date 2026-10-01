@@ -359,7 +359,7 @@ impl<E: Context> Writable<E> {
         self.metrics.synced.inc();
         self.sealed.push(sealed);
         self.sealed_snapshot = None;
-        debug_assert!(self.tail_predecessor_sync.is_none());
+        assert!(self.tail_predecessor_sync.is_none());
         self.tail_predecessor_sync = Some(handle.boxed().shared());
         Ok(self)
     }
