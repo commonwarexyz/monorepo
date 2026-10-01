@@ -8,9 +8,9 @@
 #[cfg(target_arch = "x86_64")]
 fn detected(feature: &str) -> bool {
     match feature {
-        "ssse3" => std::arch::is_x86_feature_detected!("ssse3"),
-        "sse4.1" => std::arch::is_x86_feature_detected!("sse4.1"),
         "avx2" => std::arch::is_x86_feature_detected!("avx2"),
+        "bmi2" => std::arch::is_x86_feature_detected!("bmi2"),
+        "adx" => std::arch::is_x86_feature_detected!("adx"),
         "sha" => std::arch::is_x86_feature_detected!("sha"),
         "avx512f" => std::arch::is_x86_feature_detected!("avx512f"),
         "avx512bw" => std::arch::is_x86_feature_detected!("avx512bw"),

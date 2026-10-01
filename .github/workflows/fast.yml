@@ -149,8 +149,9 @@ jobs:
           - os: macos-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
-          # Emulated CPUs pin each SIMD tier of the crates with CPU-dispatched kernels. QEMU emulates every tier
-          # below AVX-512, and Intel SDE covers AVX-512, GFNI, VPCLMULQDQ, and IFMA, which QEMU does not implement.
+          # Emulated CPUs pin each SIMD tier of the crates with CPU-dispatched kernels. QEMU emulates every supported
+          # tier below AVX-512, and Intel SDE covers AVX-512, GFNI, VPCLMULQDQ, and IFMA, which QEMU does not implement.
+          # Every x86 tier has the AVX2, BMI2, and ADX that x86-64 builds require.
           # Tiers with static features run without std, so they select kernels from the compile-time target features.
           # Tiers with rustflags pass --target when the flags must stay off build scripts and proc-macros.
           #
@@ -159,33 +160,32 @@ jobs:
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             sde: icx
-            cpu-features: "avx2 sha avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
+            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
           # Skylake servers have AVX-512 without SHA-NI, IFMA, GFNI, or VPCLMULQDQ, so paths that need those fall back.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             sde: skx
-            cpu-features: "avx2 !sha avx512f avx512bw avx512vl !avx512ifma !gfni !vpclmulqdq"
+            cpu-features: "avx2 bmi2 adx !sha avx512f avx512bw avx512vl !avx512ifma !gfni !vpclmulqdq"
           # Zen 2 and Zen 3 have AVX2 and SHA-NI without AVX-512.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding"
             qemu: EPYC-Rome
-            cpu-features: "avx2 sha !avx512f"
+            cpu-features: "avx2 bmi2 adx sha !avx512f"
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib"
             rustflags: "-C target-feature=+avx2,+sha"
             static-features: "avx2 sha !avx512f"
             qemu: EPYC-Rome
-            cpu-features: "avx2 sha !avx512f"
-          # The baseline x86-64 CPU has none of the optional features, so every portable fallback runs. blst builds in
-          # portable mode, since its build script otherwise compiles in extensions the runner has and this model lacks.
+            cpu-features: "avx2 bmi2 adx sha !avx512f"
+          # Broadwell, the oldest supported Intel CPU, has AVX2, BMI2, and ADX without SHA-NI or AVX-512.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding --features blst/portable"
-            qemu: qemu64
-            cpu-features: "!ssse3 !sse4.1 !avx2 !sha"
+            flags: "--cargo-profile release -p commonware-coding"
+            qemu: Broadwell
+            cpu-features: "avx2 bmi2 adx !sha !avx512f"
           # SVE2 and SHA-3 as on Graviton4. A 512-bit vector length exercises the upper Z-register bits.
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
