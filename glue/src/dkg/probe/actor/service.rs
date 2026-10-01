@@ -3,7 +3,7 @@ use crate::{
         ReshareBlock,
         probe::{ActorArtifact, mailbox::Message, wire},
     },
-    stateful::probe::sample,
+    stateful::probe::finalization::latest_finalization,
 };
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::Encode as _;
@@ -102,7 +102,7 @@ where
                 };
                 match request {
                     wire::Request::Latest => {
-                        let Some(finalization) = sample::latest_finalization(&self.marshal).await
+                        let Some(finalization) = latest_finalization(&self.marshal).await
                         else {
                             continue;
                         };
