@@ -1001,5 +1001,315 @@ class PromptPaths(unittest.TestCase):
                     )
 
 
+class PlanClaims(unittest.TestCase):
+    """A plan's Status is a coverage claim, and the first campaign that wrote one
+    claimed `bound` for an invariant whose action is committed in a handler it never
+    instrumented. The lint reads the claim against the section's own ledger and
+    against the code."""
+
+    def setUp(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.plan = self.dir / "plan.md"
+
+    def write(self, body):
+        self.plan.write_text("# StateLens instrumentation plan\n\n## Invariants\n\n" + body)
+        return self.plan
+
+    SITES = (
+        "- Sites: `voter/state.rs` `State::construct_notarize`, signature - checked\n"
+        "- Assertions: `voter/state.rs` `State::construct_notarize`, `sl_implies!`\n"
+        "- Probes: none\n- Ghost state: none\n- Edited lines: none\n- Notes: none\n"
+    )
+    # What `subsystem_assertions` returns: (invariant, enclosing function) per site.
+    CODE = {
+        "consensus/src/simplex/actors/voter/state.rs": [
+            ("INV-0016", "try_propose"),
+            ("INV-0016", "construct_notarize"),
+        ],
+        "consensus/src/simplex/actors/voter/actor.rs": [],
+    }
+    EMPTY = {"consensus/src/simplex/actors/voter/state.rs": []}
+
+    def test_a_bound_status_with_an_unchecked_commit_site_is_reported(self):
+        path = self.write(
+            "### INV-0016: A proposal rejected by certification is never built upon\n"
+            "- Status: bound\n- Reading: pre and post\n"
+            "- Sites:\n"
+            "  - `voter/state.rs` `State::try_propose`, dispatch - checked\n"
+            "  - `voter/actor.rs` `Actor::process_proposed`, relay - not checked\n"
+            "- Assertions: `voter/state.rs` `State::try_propose`, `sl_implies!`\n"
+            "- Probes: none\n- Ghost state: none\n- Edited lines: none\n- Notes: none\n"
+        )
+        problems = sl.lint_plan_file(path, ["INV-0016"], self.CODE)
+        self.assertTrue(
+            any("not checked" in problem for problem in problems),
+            f"a bound status over an unchecked commit site must be reported: {problems}",
+        )
+
+    def test_the_same_ledger_is_accepted_for_a_partial_status(self):
+        path = self.write(
+            "### INV-0016: A proposal rejected by certification is never built upon\n"
+            "- Status: partial\n- Reading: pre and post\n"
+            "- Sites:\n"
+            "  - `voter/state.rs` `State::try_propose`, dispatch - checked\n"
+            "  - `voter/actor.rs` `Actor::process_proposed`, relay - not checked\n"
+            "- Assertions: `voter/state.rs` `State::try_propose`, `sl_implies!`\n"
+            "- Probes: none\n- Ghost state: none\n- Edited lines: none\n"
+            "- Notes: the relay is reached one iteration later\n"
+        )
+        self.assertEqual(sl.lint_plan_file(path, ["INV-0016"], self.CODE), [])
+
+    def test_a_claimed_binding_the_code_never_asserts_is_reported(self):
+        path = self.write("### INV-0016: title\n- Status: bound\n- Reading: r\n" + self.SITES)
+        problems = sl.lint_plan_file(path, ["INV-0016"], self.EMPTY)
+        self.assertTrue(
+            any("names it" in problem for problem in problems),
+            f"a Status with no assertion in the code must be reported: {problems}",
+        )
+
+    def test_an_unbound_section_needs_only_a_status_and_a_reason(self):
+        path = self.write("### INV-0016: title\n- Status: unbound\n- Notes: not reachable\n")
+        self.assertEqual(sl.lint_plan_file(path, ["INV-0016"], self.EMPTY), [])
+
+    def test_an_unbound_section_the_code_asserts_is_reported(self):
+        path = self.write("### INV-0016: title\n- Status: unbound\n- Notes: not reachable\n")
+        problems = sl.lint_plan_file(path, ["INV-0016"], self.CODE)
+        self.assertTrue(
+            any("unbound, but the code asserts it" in problem for problem in problems),
+            f"an unbound invariant with assertions must be reported: {problems}",
+        )
+
+    def test_a_site_called_checked_that_asserts_nothing_is_reported(self):
+        path = self.write(
+            "### INV-0016: A proposal rejected by certification is never built upon\n"
+            "- Status: bound\n- Reading: pre and post\n"
+            "- Sites:\n"
+            "  - `voter/state.rs` `State::try_propose`, dispatch - checked\n"
+            "  - `voter/actor.rs` `Actor::process_proposed`, the relay - checked\n"
+            "- Assertions: `voter/state.rs` `State::try_propose`, `sl_implies!`\n"
+            "- Probes: none\n- Ghost state: none\n- Edited lines: none\n- Notes: none\n"
+        )
+        problems = sl.lint_plan_file(path, ["INV-0016"], self.CODE)
+        self.assertTrue(
+            any("calls `voter/actor.rs` checked" in problem for problem in problems),
+            f"a ledger that certifies a site the code never asserts must be reported: {problems}",
+        )
+
+    def test_an_entry_wrapped_over_two_lines_keeps_its_not_checked(self):
+        path = self.write(
+            "### INV-0016: A proposal rejected by certification is never built upon\n"
+            "- Status: partial\n- Reading: pre and post\n"
+            "- Sites:\n"
+            "  - `voter/state.rs` `State::try_propose`, dispatch - checked\n"
+            "  - `voter/actor.rs` `Actor::process_proposed`, the relay of a local\n"
+            "    proposal - not checked (the parent can be rejected while the build runs)\n"
+            "- Assertions: `voter/state.rs` `State::try_propose`, `sl_implies!`\n"
+            "- Probes: none\n- Ghost state: none\n- Edited lines: none\n"
+            "- Notes: the relay is reached one iteration later\n"
+        )
+        self.assertEqual(sl.lint_plan_file(path, ["INV-0016"], self.CODE), [])
+
+    def test_a_ledger_that_claims_coverage_without_naming_a_source_is_reported(self):
+        for sites in ("- Sites: all of them, checked\n", "- Sites: checked\n"):
+            path = self.write(
+                "### INV-0016: title\n- Status: bound\n- Reading: r\n" + sites
+                + "- Assertions: `voter/state.rs` `State::construct_notarize`, `sl_implies!`\n"
+                "- Probes: none\n- Ghost state: none\n- Edited lines: none\n- Notes: none\n"
+            )
+            problems = sl.lint_plan_file(path, ["INV-0016"], self.CODE)
+            self.assertTrue(
+                any("names no source" in problem for problem in problems),
+                f"a ledger without a source must be reported: {sites!r} -> {problems}",
+            )
+
+    def test_an_entry_with_no_verdict_is_reported(self):
+        for verdict in ("unchecked", "deferred", "no site available"):
+            path = self.write(
+                "### INV-0016: title\n- Status: bound\n- Reading: r\n"
+                "- Sites:\n"
+                "  - `voter/state.rs` `State::construct_notarize`, signature - checked\n"
+                f"  - `voter/actor.rs` `Actor::process_proposed`, the relay - {verdict}\n"
+                "- Assertions: `voter/state.rs` `State::construct_notarize`, `sl_implies!`\n"
+                "- Probes: none\n- Ghost state: none\n- Edited lines: none\n- Notes: none\n"
+            )
+            problems = sl.lint_plan_file(path, ["INV-0016"], self.CODE)
+            self.assertTrue(
+                any("neither `checked` nor `not checked`" in problem for problem in problems),
+                f"an entry with no verdict must be reported: {verdict!r} -> {problems}",
+            )
+
+    def test_a_site_in_a_source_that_does_not_exist_is_reported(self):
+        path = self.write(
+            "### INV-0016: title\n- Status: bound\n- Reading: r\n"
+            "- Sites: `voter/sate.rs` `State::construct_notarize`, signature - checked\n"
+            "- Assertions: `voter/state.rs` `State::construct_notarize`, `sl_implies!`\n"
+            "- Probes: none\n- Ghost state: none\n- Edited lines: none\n- Notes: none\n"
+        )
+        problems = sl.lint_plan_file(path, ["INV-0016"], self.CODE)
+        self.assertTrue(
+            any("not an instrumented source" in problem for problem in problems),
+            f"a ledger naming a source that does not exist must be reported: {problems}",
+        )
+
+    def test_a_ledger_written_as_one_bullet_per_site_keeps_every_site(self):
+        path = self.write(
+            "### INV-0016: title\n- Status: bound\n- Reading: r\n"
+            "- Sites: `voter/state.rs` `State::try_propose`, dispatch - checked\n"
+            "- Sites: `voter/actor.rs` `Actor::process_proposed`, relay - not checked\n"
+            "- Assertions: `voter/state.rs` `State::try_propose`, `sl_implies!`\n"
+            "- Probes: none\n- Ghost state: none\n- Edited lines: none\n- Notes: none\n"
+        )
+        problems = sl.lint_plan_file(path, ["INV-0016"], self.CODE)
+        self.assertTrue(
+            any("not checked" in problem for problem in problems),
+            f"a repeated field must extend the ledger, not replace it: {problems}",
+        )
+        self.assertEqual(sl.Campaign.commit_sites(path.read_text()), (2, 1))
+
+    def test_an_assertion_elsewhere_in_the_file_does_not_certify_a_site(self):
+        path = self.write(
+            "### INV-0016: title\n- Status: bound\n- Reading: r\n"
+            "- Sites: `voter/state.rs` `State::proposed`, the completion - checked\n"
+            "- Assertions: `voter/state.rs` `State::try_propose`, `sl_implies!`\n"
+            "- Probes: none\n- Ghost state: none\n- Edited lines: none\n- Notes: none\n"
+        )
+        problems = sl.lint_plan_file(path, ["INV-0016"], self.CODE)
+        self.assertTrue(
+            any("elsewhere in that file" in problem for problem in problems),
+            f"a dispatch assertion must not certify the commit site beside it: {problems}",
+        )
+
+    def test_a_site_named_without_its_type_is_read_like_a_qualified_one(self):
+        path = self.write(
+            "### INV-0016: title\n- Status: bound\n- Reading: r\n"
+            "- Sites: `voter/state.rs` `try_propose`, dispatch - checked\n"
+            "- Assertions: `voter/state.rs` `State::try_propose`, `sl_implies!`\n"
+            "- Probes: none\n- Ghost state: none\n- Edited lines: none\n- Notes: none\n"
+        )
+        self.assertEqual(sl.lint_plan_file(path, ["INV-0016"], self.CODE), [])
+
+    def test_a_checked_site_with_no_function_is_reported(self):
+        path = self.write(
+            "### INV-0016: title\n- Status: bound\n- Reading: r\n"
+            "- Sites: `voter/state.rs`, the completion - checked\n"
+            "- Assertions: `voter/state.rs` `State::try_propose`, `sl_implies!`\n"
+            "- Probes: none\n- Ghost state: none\n- Edited lines: none\n- Notes: none\n"
+        )
+        problems = sl.lint_plan_file(path, ["INV-0016"], self.CODE)
+        self.assertTrue(
+            any("names no function" in problem for problem in problems),
+            f"a checked entry must not fall back to file-only coverage: {problems}",
+        )
+
+    def test_a_fenced_block_inside_a_section_is_not_read_as_fields(self):
+        body = (
+            "### INV-0016: title\n- Status: partial\n- Reading: r\n"
+            "- Sites: `voter/state.rs` `State::try_propose`, dispatch - checked\n"
+            "- Assertions: `voter/state.rs` `State::try_propose`, `sl_implies!`\n"
+            "- Probes: none\n- Ghost state: none\n"
+            "- Edited lines: the match arm below\n\n"
+            "```rust\n- Status: bound\n- Sites: nothing\n```\n\n"
+            "- Notes: the fence is quoted code\n"
+        )
+        path = self.write(body)
+        self.assertEqual(sl.lint_plan_file(path, ["INV-0016"], self.CODE), [])
+        self.assertEqual(sl.Campaign.parse_statuses(path.read_text()), {"INV-0016": "partial"})
+
+    def test_a_bold_or_quoted_status_is_read_like_the_campaign_reads_it(self):
+        path = self.write(
+            "### INV-0016: title\n- **Status**: `bound`\n- Reading: r\n" + self.SITES
+        )
+        self.assertEqual(sl.lint_plan_file(path, ["INV-0016"], self.CODE), [])
+
+    def test_a_missing_section_is_reported(self):
+        path = self.write("### INV-0016: title\n- Status: bound\n- Reading: r\n" + self.SITES)
+        problems = sl.lint_plan_file(path, ["INV-0016", "INV-0017"], self.CODE)
+        self.assertTrue(
+            any(problem.startswith("INV-0017: has no section") for problem in problems),
+            f"an invariant with no section must be reported: {problems}",
+        )
+
+    def test_a_repeated_section_is_reported(self):
+        body = "### INV-0016: title\n- Status: bound\n- Reading: r\n" + self.SITES
+        path = self.write(body + "\n" + body)
+        problems = sl.lint_plan_file(path, ["INV-0016"], self.CODE)
+        self.assertTrue(
+            any("more than one section" in problem for problem in problems),
+            f"a repeated section must be reported: {problems}",
+        )
+
+
+class PromptCopies(unittest.TestCase):
+    """Section 13 of the specification claims to reproduce every prompt verbatim.
+    Nothing enforced it, and two prompts had drifted from their copies, so the
+    specification described rules the agents were never given."""
+
+    SPEC = (
+        "# Spec\n\n## 13. Prompts (verbatim)\n\n"
+        "### 13.1 `prompts/one.md`\n\n~~~markdown\nfirst\n~~~\n\n"
+        "### 13.2 `prompts/two.md`\n\n~~~markdown\nsecond\n~~~\n\n## 14. Next\n"
+    )
+
+    def setUp(self):
+        self.repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        self.sl_dir = self.repo / sl.SL
+        (self.sl_dir / "prompts").mkdir(parents=True)
+        (self.sl_dir / "docs").mkdir(parents=True)
+        self.spec = self.repo / sl.SPEC_DOC
+        self.spec.write_text(self.SPEC)
+        (self.sl_dir / "prompts/one.md").write_text("first\n")
+        (self.sl_dir / "prompts/two.md").write_text("second\n")
+        self.saved = sl.say
+        sl.say = lambda *_args, **_kwargs: None
+        self.addCleanup(lambda: setattr(sl, "say", self.saved))
+
+    def test_matching_copies_are_clean(self):
+        self.assertEqual(sl.lint_prompts(self.repo), [])
+
+    def test_a_drifted_copy_is_reported(self):
+        (self.sl_dir / "prompts/two.md").write_text("second, with a new rule\n")
+        problems = sl.lint_prompts(self.repo)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("differs from its copy", problems[0][1])
+
+    def test_write_refreshes_the_copy_and_leaves_the_rest_alone(self):
+        (self.sl_dir / "prompts/one.md").write_text("first, with a new rule\n")
+        sl.lint_prompts(self.repo, write=True)
+        self.assertEqual(sl.lint_prompts(self.repo), [])
+        text = self.spec.read_text()
+        self.assertIn("first, with a new rule\n~~~", text)
+        self.assertIn("### 13.2 `prompts/two.md`\n\n~~~markdown\nsecond\n~~~", text)
+        self.assertTrue(text.endswith("## 14. Next\n"), "the rest of the document must survive")
+
+    def test_write_refreshes_several_stale_copies_at_once(self):
+        (self.sl_dir / "prompts/one.md").write_text("first, rewritten\n")
+        (self.sl_dir / "prompts/two.md").write_text("second, rewritten\n")
+        sl.lint_prompts(self.repo, write=True)
+        self.assertEqual(sl.lint_prompts(self.repo), [])
+        text = self.spec.read_text()
+        self.assertIn("~~~markdown\nfirst, rewritten\n~~~", text)
+        self.assertIn("~~~markdown\nsecond, rewritten\n~~~", text)
+
+    def test_a_prompt_that_quotes_a_fence_round_trips(self):
+        (self.sl_dir / "prompts/two.md").write_text("second\n\n~~~markdown\ninner\n~~~\n\ntail\n")
+        sl.lint_prompts(self.repo, write=True)
+        self.assertEqual(sl.lint_prompts(self.repo), [], "a quoted fence must not end the block")
+        self.assertTrue(self.spec.read_text().endswith("## 14. Next\n"))
+
+    def test_a_prompt_with_no_copy_is_reported(self):
+        (self.sl_dir / "prompts/three.md").write_text("third\n")
+        problems = sl.lint_prompts(self.repo)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("has no `### 13.N", problems[0][1])
+
+    def test_a_copy_with_no_prompt_is_reported(self):
+        (self.sl_dir / "prompts/two.md").unlink()
+        problems = sl.lint_prompts(self.repo)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("which does not exist", problems[0][1])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

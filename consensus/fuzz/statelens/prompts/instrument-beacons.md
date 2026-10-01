@@ -88,7 +88,11 @@ reject it.
    state before and after a transition, or the state and its context at a decision
    point. Use `disc` for enums, `flag` for booleans and options, `delta` and `bucket`
    for views and counts, and `pack` to put two small values on one side.
-5. Budget: 20 to 60 probes for this component. Avoid per-message hot loops unless the state
+5. Budget: 20 to 60 probes for this component, and at most about 64 `(a, b)` pairs each.
+   Count the pairs with the arithmetic of the discretization rules above before you write
+   the probe: three bucketed counts on one side is already 216, and two unrestricted
+   `delta`s are 121. Over budget, drop a dimension or coarsen one, rather than expecting
+   the reachable combinations to be fewer. Avoid per-message hot loops unless the state
    there is interesting.
 6. Add one row per probe to the "Beacon probes" table of the plan.
 

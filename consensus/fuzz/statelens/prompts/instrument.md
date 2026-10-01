@@ -82,7 +82,11 @@ probes that tell the fuzzer when an execution reached a new internal state.
    or indexing that can go out of bounds.
 6. Bounded cost: O(1) per site, or bounded by the number of views the replica tracks.
    Do not scan unbounded collections or allocate per message on hot paths unless an
-   invariant requires it.
+   invariant requires it. Ghost history is the trap: you keep it precisely because it
+   outlives the implementation's own pruning, so it is not bounded by the tracked views.
+   Index it for the question you will ask -- a second set holding only the entries you
+   query, or a field holding the last one -- and keep the index up to date where you write
+   the history. Never filter or walk the whole history at the assertion.
 7. The workspace denies all warnings: no unused variables, imports or functions. Prefer
    full paths (`crate::simplex::statelens::bucket(...)`) to new `use` lines.
 8. Byzantine peers are adversarial: a message an honest replica receives can contain
@@ -90,7 +94,10 @@ probes that tell the fuzzer when an execution reached a new internal state.
    peers send, unless the invariant is about how the replica handles bad input.
 9. Actors and components run concurrently and exchange messages through mailboxes. A
    check that compares components of one replica must hold for every delivery delay the
-   implementation allows, not only when they are in step.
+   implementation allows, not only when they are in step. The same split decides where a
+   check belongs: where the replica decides to act in one function and performs the act
+   in the handler of a reply, everything it learned in between is invisible at the first
+   site, so the check goes where the act becomes visible outside the replica.
 
 ## Runtime API (`crate::simplex::statelens`)
 
@@ -113,7 +120,11 @@ probes that tell the fuzzer when an execution reached a new internal state.
   return `None` without running the closure for a skipped replica. Never nest them. Add
   the fields you need to `Ghost` or `Global`, with `Default` types. Ghost state lives
   for one run: it is cleared when a new run starts (every fuzz input, every seed of a
-  test) and kept across a crash-restart within the run.
+  test) and kept across a crash-restart within the run. `Ghost` is keyed by participant
+  index, and a Twins run puts two engines behind one index, so history that must not
+  merge across engines belongs in a `// [statelens] ghost:` field of the struct that owns
+  it. To check it from another module, add a read-only accessor beside the field and tag
+  it like the field; do not move the field to reach it.
 - Assertion messages start with the invariant title and include the values involved,
   for example `"no finalize after nullify: view={} nullified={}"`.
 
@@ -122,23 +133,33 @@ probes that tell the fuzzer when an execution reached a new internal state.
 - Never feed raw views, heights, digests, keys, signatures, payloads or timestamps to a
   probe. Record views relative to another view the replica knows
   (`delta(view.get(), last_finalized.get())`), and counts through `bucket`.
-- Keep each probe's value space small: at most about 64 distinct `(a, b)` pairs.
+- Keep each probe's value space small: at most about 64 distinct `(a, b)` pairs. Count
+  them before you write the probe, rather than trusting the spread to stay small in
+  practice: `bucket` is 6 values, `delta` is 11 (it buckets the distance in each
+  direction), `flag` is 2, a mask of n bits is 2^n, `disc` is the number of variants, and
+  `pack` multiplies the two it packs. Multiply the two sides. Count fewer only where the
+  site itself bounds the input, and say in the plan what bounds it. Over budget, drop a
+  dimension or coarsen one into fewer categories.
 - Do not include the replica index in probe values.
 
 ## The plan
 
-Keep `{{PLAN}}` up to date. Add your sections and rows; do not rewrite other parts.
+Keep `{{PLAN}}` up to date, in plain ASCII. Add your sections and rows; do not rewrite
+other parts.
 
 For each invariant, add under `## Invariants`:
 
     ### INV-NNNN: <title>
     - Status: bound | partial | unbound
     - Reading: <pre and post, or the checked condition, in code terms>
+    - Sites: <one line per site that commits an action the Statement names: the action,
+      the file and the function in backticks, then `checked` or `not checked`, and for
+      `not checked` the reason>
     - Assertions: <file, function, macro and condition; one line each>
     - Probes: <extra probes such as margins, or "none">
     - Ghost state: <fields and where they are updated, or "none">
     - Edited lines: <existing lines wrapped in blocks, or "none">
-    - Notes: <why partial or unbound; limitations>
+    - Notes: <why partial or unbound; limitations, or "none">
 
 For each beacon probe, add a row to the table under `## Beacon probes`:
 

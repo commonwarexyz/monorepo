@@ -130,9 +130,12 @@ so a checkout can be reused. Note that in `consensus/fuzz/` and at the repositor
 `just fuzz` is a different, pre-existing recipe that runs a package's fuzz targets.
 
 A campaign adds the runtime module, the fuzz targets and the harness and runtime hooks to
-the tree, lets the agent bind every invariant of the profile's registries and add beacon
-probes, checks that only the profile's subsystems were edited, builds (with up to 3 agent
-repair attempts), and runs the test gate. It then ends with the result `READY` and prints
+the tree, lets the agent bind every invariant of the profile's registries, audits those
+bindings and adds beacon probes, checks that only the profile's subsystems were edited,
+builds (with up to 3 agent repair attempts), and runs the test gate. The audit pass re-reads
+each invariant against the sites that commit the actions it names, adds the checks that are
+missing, and corrects a plan section whose `Status` claims more coverage than it has;
+`STATELENS_AUDIT=0` skips it. It then ends with the result `READY` and prints
 the command that runs each target. **The campaign builds the fuzz targets and runs no
 fuzzer**, and passes no arguments to libFuzzer: that is Phase 3. `--stop-after` is for
 development and ends the campaign with `STOPPED after <step>`.
@@ -216,6 +219,8 @@ statelens: base       <base commit>
 statelens: agent      <agent>
 statelens: profile    simplex | marshal
 statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)
+statelens: audit      <ID> <before> -> <after>, ... | no status change
+statelens: plan       <n> commit site(s) listed, <u> not checked, <p> lint problem(s)
 statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
 statelens: result     READY | STOPPED after <step> | PANIC (tests) | BUILD FAILED | SETUP FAILED
 statelens: reason     <why the campaign stopped, for PANIC (tests), BUILD FAILED or SETUP FAILED>
@@ -243,6 +248,15 @@ summary of the campaign that instrumented the checkout is kept.
 (`instrumentation.diff`), the agent and test logs (`logs/`), the rendered prompts
 (`prompts/`), `meta.json` and `summary.txt`. A campaign that passes its preconditions
 recreates it.
+
+A plan section's `Status` is a claim about coverage: `bound` means every site that commits
+an action the invariant names carries the check, `partial` means a weaker condition or a
+site left out, and the `Sites` ledger says which is which, one entry per site. `just
+check-plan` re-checks those claims against the section and against the code, including that
+a site the ledger calls `checked` really carries an assertion naming the invariant; the
+campaign runs it too and reports the problems as warnings. It cannot see a commit site the
+ledger never names, so read the `Assertion sites by file` line of the plan summary as well:
+an instrumented layer with no assertions at all is the shape that gap takes.
 
 ## Investigating a panic
 
@@ -272,6 +286,7 @@ recreates it.
 |---|---|
 | `STATELENS_FALSE_INVARIANTS=1` | Set on `just campaign`. Also binds the deliberately false invariants in `false-invariants/<subsystem>/`: FALSE-0001 with the `simplex` profile, FALSE-0001 and FALSE-0002 with the `marshal` profile. A `simplex` campaign must end with `PANIC (tests)` and `[statelens][FALSE-0001]`, or, if it reports `READY`, a short run of its `run` command must panic with it. A `marshal` campaign must end with `PANIC (tests)`, and `campaign/logs/test.log` must contain both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. |
 | `STATELENS_BYZANTINE=panic` | Set on a `run` command. Panics when a compromised replica reaches an instrumented site, which shows the Byzantine guard is needed and wired: `simplex_cert_mock_twins_campaign_statelens`, `simplex_cert_mock_twins_mutator_statelens`, the four marshal Twins variants and the wedge-scenario variant must panic with `[statelens][BYZANTINE]`, and no other variant may; `[statelens] participant index mismatch` must never appear. `skip` is the default, `check` checks compromised replicas too. |
+| `STATELENS_AUDIT=0` | Set on `just campaign`. Skips the audit pass over the bindings, which costs one agent run per batch of 8 invariants. The campaign then prints no `audit` line, and a plan section keeps whatever `Status` the first pass gave it. |
 | `STATELENS_FEEDBACK=0` | Set on a `run` command. Leaves the StateLens counters unregistered. Run a target for the same time on two empty corpora, with and without it: `ft:` on the `DONE` line should be higher with feedback. Compare `ft:`, not `cov:`, which libFuzzer stops printing once the counters are registered. |
 
 Each false-invariant campaign in a fresh clone of its own:

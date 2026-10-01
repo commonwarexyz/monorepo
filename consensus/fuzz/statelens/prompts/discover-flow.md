@@ -82,7 +82,19 @@ code.
    the handler cannot tell them apart from the variant, which is exactly the kind of state
    worth separating.
 
-6. **Stop.** A thread is done when you can say what state matters, where it lives, where it
+6. **Follow a request to where it lands.** A decision and the act it leads to are often in
+   different functions, separated by an await on a reply. `Actor::try_propose`
+   (`voter/actor.rs:369`) asks `State::try_propose` for a context, sends it to the automaton
+   and keeps the receiver in `pending_propose`; the reply is awaited in the main `select!`,
+   and `Actor::process_proposed` (`voter/actor.rs:683`) records the proposal and hands it to
+   the broadcaster. In between, the replica handles everything else, including the results
+   that decide whether the act is still legal. So find the far end before calling a state
+   "decided here": `code callees` on the deciding function names the request method, `code
+   refs` on the field holding the receiver names where it is awaited, and `code callers` on
+   the recording method names the handler. Report the pair -- where it is decided, where it
+   is committed -- and name what the replica can learn between them.
+
+7. **Stop.** A thread is done when you can say what state matters, where it lives, where it
    is established, changed and read, why that matters, which locations support each claim,
    and what remains unproven. Abandon a thread earlier when the symbol only logs, when the
    relation is syntactic, when no behavior consumes the state, or when the evidence is

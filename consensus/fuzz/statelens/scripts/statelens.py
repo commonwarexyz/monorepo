@@ -90,6 +90,7 @@ CONFIG_KEYS = (
     "STATELENS_FUZZ_TOOLCHAIN",
     "STATELENS_KB",
     "STATELENS_BEACONS",
+    "STATELENS_AUDIT",
 )
 
 STOP_STEPS = ("materialize", "index", "instrument", "build")
@@ -118,6 +119,15 @@ PLAN = "consensus/fuzz/statelens/campaign/plan.md"
 # `lint-examples` checks those still exist; a document declares its non-code terms with a
 # `<!-- statelens-lint: not-code: a, b -->` line.
 EXAMPLES = "consensus/fuzz/statelens/examples"
+# Section 13 of the specification reproduces every prompt verbatim; `lint-prompts`
+# compares the two and `--write` refreshes the copies from the files.
+SPEC_DOC = "consensus/fuzz/statelens/docs/SPEC.md"
+# The closing fence is the one before the next heading or rule, so a prompt that quotes a
+# fence of its own does not end its block early and `--write` cannot append to it forever.
+SPEC_PROMPT = re.compile(
+    r"^### 13\.\d+ `(prompts/[^`]+)`\n\n~~~markdown\n(.*?)\n~~~\n(?=\n*(?:#|---\n|\Z))",
+    re.M | re.S,
+)
 NOT_CODE = re.compile(r"<!--\s*statelens-lint:\s*not-code:\s*(.*?)\s*-->", re.S)
 CODE_WORD = re.compile(r"`([a-z_][a-z0-9_]*_[a-z0-9_]+)`")
 # Everything a campaign creates (deleted by `clean`) or edits (restored by `clean`).
@@ -272,6 +282,36 @@ CAMPAIGN_TOOLS = ("cargo", "cargo-nextest", "cargo-fuzz", "just")
 PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
 PLAN_HEADING = re.compile(r"^###\s+((?:INV|FALSE)-\d+)\b")
 PLAN_STATUS = re.compile(r"^-\s*\**Status\**\s*:\s*\**\s*`?(bound|partial|unbound)\b")
+# The fields of an invariant's plan section (SPEC section 11). A section that binds
+# nothing carries only `Status` and `Notes`.
+PLAN_FIELD = re.compile(r"^-\s*\**([A-Z][A-Za-z ]*?)\**\s*:\s*(.*)$")
+PLAN_FIELDS = (
+    "Status",
+    "Reading",
+    "Sites",
+    "Assertions",
+    "Probes",
+    "Ghost state",
+    "Edited lines",
+    "Notes",
+)
+# The verdict of a `Sites` entry. Both are required words, so an entry that says neither
+# is reported rather than read as a claim: `unchecked` and `deferred` are not verdicts,
+# and a phrase that merely contains `checked` still has to survive the check against the
+# code below.
+PLAN_UNCHECKED = re.compile(r"\bnot\s+checked\b", re.IGNORECASE)
+PLAN_CHECKED = re.compile(r"(?<![A-Za-z0-9_])checked\b", re.IGNORECASE)
+# The source a `Sites` entry names. An entry starts where a path appears, so an entry
+# wrapped over several lines stays one entry and its `not checked` is not lost. The
+# function it names is checked too, because a dispatch and the commit it leads to are
+# often in one file.
+PLAN_SITE_PATH = re.compile(r"`([A-Za-z0-9_./-]+\.rs)`")
+PLAN_SITE_FN = re.compile(r"`(?:[A-Za-z0-9_]+::)?([a-z_][A-Za-z0-9_]*)`")
+PLAN_FUNCTION = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([a-z_][A-Za-z0-9_]*)", re.M)
+# An assertion macro naming an invariant. The id is a separate line of the call, so the
+# search spans the arguments, and stops at the first `;` so it cannot run into the next
+# statement.
+PLAN_ASSERTION = re.compile(r"\bsl_(?:assert|implies)!\s*\([^;]{0,400}?\"((?:INV|FALSE)-\d+)\"", re.S)
 
 Materialization = collections.namedtuple("Materialization", "create modify targets anchors")
 
@@ -2475,6 +2515,313 @@ def cmd_lint_examples(args):
     return 3 if count else 0
 
 
+def plan_sections(text):
+    """The invariant sections of a plan: id -> {field: value} (SPEC section 11).
+
+    A field's value carries its continuation lines, so a `Sites` ledger written as an
+    indented list reads the same as one written on the field's own line.
+    """
+    sections = {}
+    repeated = []
+    current = None
+    field = None
+    fenced = False
+    for line in text.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        heading = PLAN_HEADING.match(line)
+        if heading:
+            name = heading.group(1)
+            if name in sections:
+                repeated.append(name)
+            current = sections.setdefault(name, {})
+            field = None
+            continue
+        if line.startswith("#"):
+            current, field = None, None
+            continue
+        if current is None:
+            continue
+        match = PLAN_FIELD.match(line)
+        if match:
+            field = match.group(1).strip()
+            value = match.group(2).strip()
+            # A ledger written as one bullet per site repeats the field, so extend it
+            # rather than keeping the last bullet and losing the earlier sites.
+            current[field] = (current[field] + "\n" + value).strip() if field in current else value
+            continue
+        if field is not None and line.strip() and line[:1].isspace():
+            current[field] = (current[field] + "\n" + line.strip()).strip()
+            continue
+        field = None
+    return sections, repeated
+
+
+def plan_site_entries(value):
+    """The entries of a `Sites` ledger: one per commit site, with the sources it names.
+
+    An entry begins at a line that names a source, so an entry wrapped over several
+    lines stays one entry and a `not checked` on its second line still counts.
+    """
+    entries = []
+    for line in value.splitlines():
+        if PLAN_SITE_PATH.search(line):
+            entries.append(line)
+        elif entries:
+            entries[-1] += " " + line.strip()
+    return [
+        (text, PLAN_SITE_PATH.findall(text), PLAN_SITE_FN.findall(text)) for text in entries
+    ]
+
+
+def enclosing_function(text, position):
+    """The name of the `fn` a position sits in, or None."""
+    name = None
+    for match in PLAN_FUNCTION.finditer(text, 0, position):
+        name = match.group(1)
+    return name
+
+
+def subsystem_assertions(repo):
+    """The invariant each assertion site names, per instrumented source: path -> [ids].
+
+    One entry per call, not per invariant, so the same list says which invariants a file
+    asserts and how many sites it carries, and each carries the function it sits in, so a
+    check at one site cannot certify another site of the same file. A file with no
+    assertion is kept, because the question "which layer holds none at all" is answered by
+    the empty lists.
+    """
+    found = {}
+    for name in SUBSYSTEMS:
+        for path in sorted((repo / "consensus/src" / name).rglob("*.rs")):
+            relative = path.relative_to(repo).as_posix()
+            # The runtime module documents the macros it defines, and a documented call
+            # names an invariant without asserting it.
+            if relative == STATELENS_RS:
+                continue
+            try:
+                text = path.read_text(errors="replace")
+            except OSError as error:
+                say(f"warning: cannot read {path}: {error.strerror or error}; skipped")
+                continue
+            code = "\n".join(
+                line for line in text.splitlines() if not line.lstrip().startswith("//")
+            )
+            found[relative] = [
+                (match.group(1), enclosing_function(code, match.start()))
+                for match in PLAN_ASSERTION.finditer(code)
+            ]
+    return found
+
+
+def lint_plan_file(path, expected=(), assertions=None):
+    """Checks one instrumentation plan against SPEC section 11.
+
+    The status is a coverage claim and the ledger is the agent's own account of it, so
+    neither is taken on trust: `bound` needs a ledger with nothing left unchecked, a
+    bound or partial invariant needs an assertion in the code that names it, and a site
+    the ledger calls `checked` needs that assertion in the source it names.
+    """
+    problems = []
+    data = path.read_bytes()
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        problems.append("contains non-ASCII characters")
+        text = data.decode("utf-8", errors="replace")
+    sections, repeated = plan_sections(text)
+    if "## Invariants" not in text:
+        problems.append("has no `## Invariants` section")
+    for name in sorted(set(repeated)):
+        problems.append(f"{name}: has more than one section; the first one wins when parsed")
+    for name in sorted(Path(item).stem for item in expected):
+        if name not in sections:
+            problems.append(f"{name}: has no section; the campaign marks it unbound")
+    bound_ids = set()
+    for name, fields in sections.items():
+        # The status may be written back-quoted or bold; the campaign parser allows both.
+        status = fields.get("Status", "").strip("`* ").split(" ")[0]
+        fields["Status"] = status
+        if status not in ("bound", "partial", "unbound"):
+            problems.append(
+                f"{name}: Status is `{status or 'missing'}`; it must be bound, partial or unbound"
+            )
+            continue
+        required = PLAN_FIELDS if status != "unbound" else ("Status", "Notes")
+        for required_field in required:
+            if not fields.get(required_field):
+                problems.append(f"{name}: {required_field} is missing or empty")
+        for unknown in sorted(set(fields) - set(PLAN_FIELDS)):
+            problems.append(f"{name}: unknown field `{unknown}`")
+        entries = plan_site_entries(fields.get("Sites", ""))
+        uncovered = [entry for entry in entries if PLAN_UNCHECKED.search(entry[0])]
+        if status != "unbound" and fields.get("Sites") and not entries:
+            problems.append(
+                f"{name}: Sites names no source; one entry per commit site, each with the "
+                "action, the file, the function and `checked` or `not checked`"
+            )
+        if status == "bound" and uncovered:
+            problems.append(
+                f"{name}: Status is bound, but Sites leaves {len(uncovered)} commit site(s) "
+                "not checked; a binding that misses a commit site is partial"
+            )
+        if status != "unbound" and fields.get("Assertions", "").lower().startswith("none"):
+            problems.append(f"{name}: Status is {status}, but no assertion is listed")
+        if status != "unbound":
+            bound_ids.add(name)
+        if assertions is not None:
+            problems += plan_ledger_problems(name, entries, assertions)
+    if assertions is not None:
+        asserted = {found for sites in assertions.values() for found, _at in sites}
+        for name in sorted(bound_ids - asserted):
+            problems.append(
+                f"{name}: Status claims a binding, but no sl_assert! or sl_implies! call "
+                "in the instrumented code names it"
+            )
+        unbound = {key for key, values in sections.items() if values.get("Status") == "unbound"}
+        for name in sorted(asserted & unbound):
+            problems.append(f"{name}: Status is unbound, but the code asserts it")
+    return problems
+
+
+def plan_ledger_problems(name, entries, assertions):
+    """Checks the `checked` entries of one `Sites` ledger against the code.
+
+    The pass that writes the ledger is the pass that writes the status, so a ledger that
+    certifies itself certifies nothing. A site called `checked` must carry an assertion
+    that names the invariant, in the source the entry names.
+    """
+    problems = []
+    for text, paths, functions in entries:
+        if PLAN_UNCHECKED.search(text):
+            continue
+        if not PLAN_CHECKED.search(text):
+            problems.append(
+                f"{name}: the Sites entry for `{paths[0]}` says neither `checked` nor "
+                "`not checked`"
+            )
+            continue
+        for named in paths:
+            matches = [
+                source
+                for source in assertions
+                if source == named or source.endswith("/" + named.lstrip("./"))
+            ]
+            if not matches:
+                problems.append(
+                    f"{name}: Sites names `{named}`, which is not an instrumented source"
+                )
+                continue
+            sites = [site for source in matches for site in assertions[source]]
+            if not any(found == name for found, _function in sites):
+                problems.append(
+                    f"{name}: Sites calls `{named}` checked, but nothing there asserts "
+                    f"{name}; mark the site not checked, or add the assertion"
+                )
+                continue
+            # A dispatch and the commit it leads to often share a file, so the entry has
+            # to name the function, and the assertion has to be in it. Without that, one
+            # assertion certifies every site of its file.
+            if not functions:
+                problems.append(
+                    f"{name}: the Sites entry for `{named}` is checked but names no "
+                    "function; give it in backticks, as `Type::function` or `function`"
+                )
+                continue
+            if not any(found == name and at in functions for found, at in sites):
+                problems.append(
+                    f"{name}: Sites calls `{named}` `{functions[0]}` checked, but the "
+                    f"assertion naming {name} is elsewhere in that file"
+                )
+    return problems
+
+
+def spec_prompt_blocks(text):
+    """The verbatim prompt copies of SPEC section 13: path -> (content, span)."""
+    blocks = {}
+    for match in SPEC_PROMPT.finditer(text):
+        blocks[match.group(1)] = (match.group(2), match.span(2))
+    return blocks
+
+
+def lint_prompts(repo, write=False):
+    """SPEC section 13 reproduces every prompt verbatim; checks that it still does.
+
+    The claim is load-bearing: the prompts are what the agents actually read, and the
+    SPEC is what a person reads to learn what the agents were told.
+    """
+    problems = []
+    spec_path = repo / SPEC_DOC
+    text = spec_path.read_text()
+    blocks = spec_prompt_blocks(text)
+    sl_dir = repo / SL
+    stale = []
+    for path in sorted((sl_dir / "prompts").rglob("*.md")):
+        relative = path.relative_to(sl_dir).as_posix()
+        content = path.read_text().rstrip("\n")
+        if relative not in blocks:
+            problems.append(
+                (path, f"has no `### 13.N `{relative}`` block in {SPEC_DOC}; section 13 "
+                       "must reproduce every prompt")
+            )
+            continue
+        if blocks[relative][0] != content:
+            problems.append((path, f"differs from its copy in {SPEC_DOC} section 13"))
+            stale.append((relative, content))
+    for relative in sorted(set(blocks) - {
+        path.relative_to(sl_dir).as_posix() for path in (sl_dir / "prompts").rglob("*.md")
+    }):
+        problems.append((spec_path, f"section 13 copies `{relative}`, which does not exist"))
+    if write and stale:
+        # Back to front, so an earlier replacement does not move a later span.
+        for relative, content in sorted(stale, key=lambda item: blocks[item[0]][1][0], reverse=True):
+            start, end = blocks[relative][1]
+            text = text[:start] + content + text[end:]
+        spec_path.write_text(text)
+        say(f"lint-prompts: rewrote {len(stale)} block(s) in {SPEC_DOC}")
+    return problems
+
+
+def cmd_lint_prompts(args):
+    """SPEC section 13: the prompts and their copies in the specification must agree."""
+    repo = repo_root()
+    problems = lint_prompts(repo, args.write)
+    if args.write:
+        problems = lint_prompts(repo)
+    for path, problem in problems:
+        print(f"{path}: {problem}", flush=True)
+    say(f"lint-prompts: {len(problems)} problem(s)")
+    return 3 if problems else 0
+
+
+def cmd_lint_plan(args):
+    """SPEC section 11: the plan's claims must match its own sections and the code."""
+    repo = repo_root()
+    sl_dir = repo / SL
+    paths = [Path(path) for path in args.paths] if args.paths else [repo / PLAN]
+    registries = PROFILES[args.profile]["registries"]
+    expected = [
+        path
+        for path in registry_files(sl_dir)
+        if path.parent.name in registries and path.stem.startswith("INV-")
+    ]
+    assertions = subsystem_assertions(repo)
+    count = 0
+    for path in paths:
+        if not path.is_file():
+            print(f"{path}: not a file", flush=True)
+            count += 1
+            continue
+        for problem in lint_plan_file(path, expected, assertions):
+            print(f"{path}: {problem}", flush=True)
+            count += 1
+    say(f"lint-plan: {len(paths)} file(s), {count} problem(s)")
+    return 3 if count else 0
+
+
 def read_edit_file(repo, relative, hint="update the paths and anchors in scripts/statelens.py"):
     """Text of a file the materialize step reads; a missing file aborts with exit code 2."""
     try:
@@ -2786,6 +3133,11 @@ class Campaign:
         self.baseline = {}
         self.statuses = None
         self.sites = None
+        # The status changes the audit pass made, once it has run.
+        self.audited = None
+        # (commit sites listed, not checked) and the plan lint's problem count.
+        self.coverage = None
+        self.plan_problems = None
         self.reason = None
         self.panic = None
 
@@ -2870,6 +3222,18 @@ class Campaign:
                     "invariants",
                     f"{len(self.statuses)} (bound {counts['bound']}, "
                     f"partial {counts['partial']}, unbound {counts['unbound']})",
+                )
+            )
+        if self.audited is not None:
+            rows.append(("audit", ", ".join(self.audited) if self.audited else "no status change"))
+        if self.coverage is not None:
+            listed, unchecked = self.coverage
+            problems = self.plan_problems or 0
+            rows.append(
+                (
+                    "plan",
+                    f"{listed} commit site(s) listed, {unchecked} not checked, "
+                    f"{problems} lint problem(s)",
                 )
             )
         if self.sites is not None:
@@ -3062,7 +3426,7 @@ class Campaign:
                 2, f"{name}: the agent exited with code {code}; see {log.relative_to(self.repo)}"
             )
 
-    def invariant_prompts(self):
+    def batch_prompts(self, task, stem):
         """(step name, prompt) of every invariant batch, registry by registry (SPEC 7.3)."""
         prompts = []
         for registry in self.profile["registries"]:
@@ -3080,9 +3444,15 @@ class Campaign:
                     REGISTRY=registry,
                     SUBSYSTEM_RULES=subsystem_prompt(self.sl_dir, registry, "instrument"),
                 )
-                prompt = compose(self.sl_dir, "instrument.md", "instrument-invariants.md", values)
-                prompts.append((f"invariants-{registry}-{number}", prompt))
+                prompt = compose(self.sl_dir, "instrument.md", task, values)
+                prompts.append((f"{stem}-{registry}-{number}", prompt))
         return prompts
+
+    def invariant_prompts(self):
+        return self.batch_prompts("instrument-invariants.md", "invariants")
+
+    def audit_prompts(self):
+        return self.batch_prompts("instrument-audit.md", "audit")
 
     def beacon_prompts(self):
         """(step name, prompt) of every beacon component of the profile (SPEC 7.4)."""
@@ -3104,11 +3474,77 @@ class Campaign:
             say("warning: no invariants to bind; adding beacon probes only")
         for name, prompt in self.invariant_prompts():
             self.agent_step(name, prompt)
+        self.audit()
         for name, prompt in self.beacon_prompts():
             self.agent_step(name, prompt)
         self.complete_plan()
+        self.check_plan()
         self.check_scope()
         self.record()
+
+    def audit(self):
+        """Re-reviews the bindings before the beacon step (SPEC section 7.3, steps 6 and 7).
+
+        The first pass writes a binding and its own status; nothing there compares the
+        two. This pass does, against the Statement and the sites that commit the actions
+        it names, which is where a binding is silently incomplete rather than wrong.
+        """
+        if not self.invariants:
+            return
+        if self.config["STATELENS_AUDIT"] == "0":
+            say("audit: skipped (STATELENS_AUDIT=0)")
+            return
+        plan = self.dir / "plan.md"
+        before = self.parse_statuses(plan.read_text())
+        for name, prompt in self.audit_prompts():
+            self.agent_step(name, prompt)
+        after = self.parse_statuses(plan.read_text())
+        self.audited = [
+            f"{key} {before.get(key) or 'none'} -> {after.get(key) or 'none'}"
+            for key in sorted(set(before) | set(after))
+            if before.get(key) != after.get(key)
+        ]
+        say(
+            f"audit: {len(self.audited)} status change(s)"
+            + (f": {', '.join(self.audited)}" if self.audited else "")
+        )
+
+    def check_plan(self):
+        """Warns when the plan's claims do not match its own sections (SPEC section 7.5)."""
+        plan = self.dir / "plan.md"
+        expected = [path.stem for _, path in self.invariants]
+        problems = lint_plan_file(plan, expected, subsystem_assertions(self.repo))
+        for problem in problems:
+            say(f"warning: plan.md: {problem}")
+        self.plan_problems = len(problems)
+        # Set here, not only in `record`, so an abort in between still reports it.
+        self.coverage = self.commit_sites(plan.read_text())
+
+    @staticmethod
+    def commit_sites(text):
+        """(listed, not checked) over every `Sites` ledger of the plan (SPEC section 11)."""
+        listed = unchecked = 0
+        sections, _repeated = plan_sections(text)
+        for fields in sections.values():
+            for entry, _paths, _functions in plan_site_entries(fields.get("Sites", "")):
+                listed += 1
+                unchecked += 1 if PLAN_UNCHECKED.search(entry) else 0
+        return listed, unchecked
+
+    def assertion_files(self):
+        """Assertion sites per instrumented source, most first.
+
+        The distribution is the statistic that shows a whole layer going unchecked: the
+        campaign that prompted the audit pass put all of its invariant assertions in the
+        state machines and none in the actors that commit their decisions.
+        """
+        counts = [
+            (len(sites), source.replace("consensus/src/", ""))
+            for source, sites in subsystem_assertions(self.repo).items()
+            if sites
+        ]
+        counts.sort(key=lambda item: (-item[0], item[1]))
+        return ", ".join(f"{source} {count}" for count, source in counts) or "none"
 
     def complete_plan(self):
         """Adds an unbound entry for every invariant the agents left out of the plan."""
@@ -3135,13 +3571,19 @@ class Campaign:
     def parse_statuses(text):
         statuses = {}
         current = None
+        fenced = False
         for line in text.splitlines():
+            if line.lstrip().startswith(("```", "~~~")):
+                fenced = not fenced
+                continue
+            if fenced:
+                continue
             heading = PLAN_HEADING.match(line)
             if heading:
                 current = heading.group(1)
                 statuses.setdefault(current, None)
                 continue
-            if line.startswith("## "):
+            if line.startswith("#"):
                 current = None
                 continue
             status = PLAN_STATUS.match(line)
@@ -3198,18 +3640,22 @@ class Campaign:
             section = text.split("## Beacon probes", 1)[1].split("\n## ", 1)[0]
             rows = [line for line in section.splitlines() if line.startswith("|")]
             beacon_rows = max(len(rows) - 2, 0)
+        listed, unchecked = self.commit_sites(text)
         counts = collections.Counter(statuses.values())
         summary = (
             "## Summary\n\n"
             f"- Invariants: {len(statuses)} (bound {counts['bound']}, partial "
             f"{counts['partial']}, unbound {counts['unbound']})\n"
+            f"- Commit sites: {listed} listed, {unchecked} not checked\n"
             f"- Assertion call sites: {assertions}\n"
+            f"- Assertion sites by file: {self.assertion_files()}\n"
             f"- Probe call sites: {probes}\n"
             f"- Beacon table rows: {beacon_rows}\n"
             f"- Deleted lines under {', '.join(roots)}: {deleted}"
             + (" (must match the 'Edited lines' entries)" if deleted else "")
             + "\n"
         )
+        self.coverage = (listed, unchecked)
         text = re.sub(r"\n## Summary\n.*\Z", "\n", text, flags=re.S).rstrip("\n")
         plan.write_text(text + "\n\n" + summary)
         (self.dir / "instrumentation.diff").write_text(git(self.repo, "diff"))
@@ -3342,6 +3788,38 @@ def main(argv):
         ),
     )
     lint_examples.add_argument("paths", nargs="*", metavar="PATH", help="an example file")
+    lint_plan = commands.add_parser(
+        "lint-plan",
+        help="check an instrumentation plan against its own claims",
+        description=(
+            "Check campaign/plan.md (SPEC section 11): a section per registry invariant, a "
+            "Status of bound, partial or unbound, the fields that status needs, a commit-site "
+            "ledger that supports a `bound`, an assertion in the source and function of every "
+            "entry the ledger calls checked, and an assertion in the code for every invariant "
+            "the plan claims to bind. Exit code 0 when clean, 3 on problems."
+        ),
+    )
+    lint_plan.add_argument(
+        "--profile",
+        choices=tuple(PROFILES),
+        default="simplex",
+        help="profile whose registries the plan must cover (default: simplex)",
+    )
+    lint_plan.add_argument("paths", nargs="*", metavar="PATH", help="a plan file")
+    lint_prompts_parser = commands.add_parser(
+        "lint-prompts",
+        help="check that the specification still quotes the prompts verbatim",
+        description=(
+            "Compare every file in prompts/ with its copy in section 13 of the "
+            "specification, which claims to reproduce them verbatim (SPEC section 13). "
+            "Exit code 0 when clean, 3 on problems."
+        ),
+    )
+    lint_prompts_parser.add_argument(
+        "--write",
+        action="store_true",
+        help="rewrite the copies in the specification from the prompt files",
+    )
     clean = commands.add_parser(
         "clean",
         help="undo what a campaign wrote to this checkout",
@@ -3492,6 +3970,10 @@ def main(argv):
             return cmd_clean(args)
         if args.command == "lint-examples":
             return cmd_lint_examples(args)
+        if args.command == "lint-plan":
+            return cmd_lint_plan(args)
+        if args.command == "lint-prompts":
+            return cmd_lint_prompts(args)
         return Campaign(args).run()
     except Abort as error:
         say(f"error: {error}")

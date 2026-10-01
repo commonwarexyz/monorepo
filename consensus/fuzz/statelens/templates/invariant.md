@@ -20,5 +20,6 @@ scope: [<one or more of the registry's scope values, listed in the prompt contex
 Delete this section if unused.>
 
 ## Observation hints
-<Optional and non-binding. Where the concepts live in today's code. Delete this section
-if unused.>
+<Optional and non-binding. Where the concepts live in today's code. For an action the
+Statement constrains, name the site past which it is visible outside the replica, not only
+the one that decides it. Delete this section if unused.>

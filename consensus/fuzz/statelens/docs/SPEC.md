@@ -68,6 +68,14 @@ The knowledge base has not been exercised with a real agent: section 5.6, the `k
 5.4, and the knowledge-base part of the beacon step (7.4, prompt 13.9). AC-14 and AC-15
 cover it.
 
+The audit pass has not been exercised with a real agent either: steps 6 and 7 of section
+7.3 and prompt 13.15. It was added after a review of a `simplex` campaign found a binding
+labelled `bound` whose action is committed in a handler the instrumentation never
+observed (section 11, D48). The `lint-plan` and `lint-prompts` commands of section 5.4 are
+covered by the script tests of section 5.9, and `lint-plan` was run against that campaign's
+plan, where it reports the missing ledger. The rest of the new campaign wiring, the plan
+lint of section 7.5 step 3 and the `plan` line of section 7.9, is unexercised too.
+
 ---
 
 ## 2. Decisions
@@ -110,6 +118,7 @@ them; the last column names the PRD requirement.
 | D45 | Sites in test code are hidden unless asked for. Nearly three quarters of the crate is test code sharing files with the code it exercises, so the unfiltered answer is mostly noise. | R-AG-4 |
 | D46 | Read and write polarity comes from the syntax tree, not from a language server. The tree needs no project and costs a tenth of a second for a file, against a server's startup on every query, and it classifies a struct literal field as an initial value where the server calls it a read. | R-AG-5 |
 | D47 | A name inside a macro body is reported as `macro`, not silently dropped and not guessed. Parsing does not expand macros, so the body is an unstructured token tree; dropping such sites would hide much of this crate's concurrency, which lives inside `select!`. | R-AG-5 |
+| D48 | The invariant step ends with an audit pass over its own bindings, by the same agent and under the same rules, and the plan carries a `Sites` ledger the pass and `lint-plan` both read. A first pass writes a binding and its own status in one go, and nothing there compares the two, so a binding that watches where an action is decided rather than where it is committed passes as `bound`. | R-INS-8, R-P2-2 |
 
 D24 to D30 concern marshal only; they are in section 8.2.
 
@@ -147,7 +156,8 @@ consensus/fuzz/statelens/
     instrument.md                Phase 2, shared rules and API (section 13.7)
     instrument-invariants.md     Phase 2, bind invariants (section 13.8)
     instrument-beacons.md        Phase 2, beacon probes (section 13.9)
-    discover-flow.md             method for tracing state across functions (section 5.8)
+    instrument-audit.md          Phase 2, audit the bindings (section 13.15)
+    discover-flow.md             method for tracing state across functions (section 13.16)
     repair.md                    Phase 2, compile repair (section 13.10)
     subsystems/
       simplex-analyst.md         Phase 1, Simplex part (section 13.11)
@@ -157,7 +167,8 @@ consensus/fuzz/statelens/
   runtime/
     statelens.rs                 runtime support module (Appendix A)
   scripts/
-    statelens.py                 lint, extract, kb, code, ast, campaign (sections 5 to 7)
+    statelens.py                 lint, lint-examples, lint-plan, lint-prompts, extract,
+                                 kb, code, ast, targets, campaign, clean (sections 5 to 7)
     test_statelens.py            tests for the quiet failures (section 5.9)
 ```
 
@@ -215,7 +226,9 @@ Level-2 sections, in this order:
 3. `## Evidence` (required): what the source says. For `issue`, the violating
    scenario.
 4. `## Preconditions / assumptions` (optional).
-5. `## Observation hints` (optional, non-binding): where the concepts live in the code.
+5. `## Observation hints` (optional, non-binding): where the concepts live in the code,
+   including, for an action the Statement constrains, the site past which it is visible
+   outside the replica.
 
 ### 4.4 EARS statements and how they are checked
 
@@ -226,12 +239,18 @@ protocol".
 |---|---|---|
 | Ubiquitous | `The replica shall <response>.` | `sl_assert!(cond)` |
 | State-driven | `While <state>, the replica shall <response>.` | `sl_implies!(state, response)` |
-| Event-driven | `When <trigger>, the replica shall <response>.` | `sl_implies!(trigger, response)` at the trigger site |
+| Event-driven | `When <trigger>, the replica shall <response>.` | `sl_implies!(trigger, response)` where the response is committed |
 | Unwanted behavior | `If <condition>, then the replica shall <response>.` | `sl_implies!(condition, response)` |
 | Complex | `While <state>, when <trigger>, the replica shall <response>.` | `sl_implies!(state && trigger, response)` |
 
 Prohibitions use `shall not`. History ("after", "once", "never again") is kept in
 ghost state (section 9.4) and checked at the later action.
+
+A Statement about an action is checked where the action is committed, not where it is
+decided: the point past which it is visible outside the replica. Where the implementation
+splits the two across an await, a mailbox or a reply handler, the commit site carries the
+check, because the state the decision read is not the state the replica acted on. Section
+10 states the rule and section 11 the coverage it claims.
 
 ### 4.5 `templates/invariant.md` (verbatim)
 
@@ -258,8 +277,9 @@ scope: [<one or more of the registry's scope values, listed in the prompt contex
 Delete this section if unused.>
 
 ## Observation hints
-<Optional and non-binding. Where the concepts live in today's code. Delete this section
-if unused.>
+<Optional and non-binding. Where the concepts live in today's code. For an action the
+Statement constrains, name the site past which it is visible outside the replica, not only
+the one that decides it. Delete this section if unused.>
 ~~~
 
 ### 4.6 Lint rules
@@ -322,6 +342,10 @@ STATELENS_FUZZ_TOOLCHAIN=
 # Knowledge base roots for beacon extraction, separated by `:`. Empty disables
 # beacon extraction; nothing else depends on it.
 STATELENS_KB=
+
+# Audit pass over the bindings, after the invariant step: 0 skips it. It costs one
+# agent run per batch and is what keeps a plan's Status honest.
+STATELENS_AUDIT=1
 ~~~
 
 Parsing: `KEY=VALUE` lines; `#` starts a comment line; values are not shell-expanded.
@@ -523,6 +547,14 @@ check-scripts *args:
 # Check invariant files: just check-invariants [path...]
 check-invariants *args:
     python3 scripts/statelens.py lint "$@"
+
+# Check an instrumentation plan: just check-plan [--profile P] [path...]
+check-plan *args:
+    python3 scripts/statelens.py lint-plan "$@"
+
+# Check the prompt copies in the specification: just check-prompts [--write]
+check-prompts *args:
+    python3 scripts/statelens.py lint-prompts "$@"
 ~~~
 
 ### 5.4 `scripts/statelens.py`
@@ -537,6 +569,8 @@ prefixed with `statelens:`.
 | `extract` | `extract [--agent A] [--registry R] KIND SOURCE...`, where `R` is `simplex` (default) or `marshal` | 0 done (including zero files), 1 usage, 2 agent failed, 3 problems: a lint problem, an existing invariant modified, a write outside the registry, or a change anywhere else in the worktree |
 | `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, a section that is not state-bearing, or a section asked of a document, 2 no readable corpus root |
 | `lint-examples` | `lint-examples [PATH...]`; with no path it checks every `*.md` in `examples/` | 0 clean, 3 problems |
+| `lint-plan` | `lint-plan [--profile P] [PATH...]`; with no path it checks `SL/campaign/plan.md`. A section per registry invariant of the profile; a valid `Status`; the fields that status needs (section 11); a `Sites` ledger whose entries each name a source and say `checked` or `not checked`, and leave nothing unchecked when the status is `bound`; an assertion naming the invariant in the function of every entry marked `checked`; and, for every invariant the plan claims to bind, an `sl_assert!` or `sl_implies!` call in the instrumented code that names it. It judges the claims the plan makes; a commit site the ledger never names is what the audit pass (section 7.3) is for | 0 clean, 3 problems |
+| `lint-prompts` | `lint-prompts [--write]`; compares every file in `prompts/` with its copy in section 13. `--write` refreshes the copies from the files and reports what it could not fix | 0 clean, 3 problems |
 | `code` | `code build [--subsystem S]`, and `code defs|refs|callers|callees NAME [--tests] [--all]` (section 5.7) | 0 done, 1 usage, no index, or no symbol matching NAME |
 | `targets` | `targets [--profile P]`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary | 0 done |
 | `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]` (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
@@ -790,10 +824,11 @@ about orderings, races, recovery, and cases that cannot happen.
 tools that do fits: one cannot follow a value across a call at all, another answers whether a
 marked source reaches a marked sink from one chosen entry point, and none crosses an actor
 mailbox. The agent is therefore the simulator, and these two sections are what confirms or
-rejects each step it proposes. `prompts/discover-flow.md` is that method, and both
-instrumentation prompts point at it; it also carries the one bridge that does work across a
-mailbox, which is that the message variant names both the sending function and the handler
-arm.
+rejects each step it proposes. `prompts/discover-flow.md` (section 13.16) is that method,
+and the instrumentation prompts point at it; it also carries the two bridges that do work
+across a hop: the message variant names both the sending function and the handler arm, and
+a dispatched request is followed to the handler that completes it, which is where an action
+decided in one function becomes visible outside the replica.
 
 ### 5.9 Script tests
 
@@ -802,7 +837,10 @@ quietly rather than loudly: a result tuple compared against an exit code, a SCIP
 as four elements when a definition on one line has three, and an assignment classified from
 the wrong sub-expression. Each of these returned a plausible wrong answer, so each test is
 written to fail without its fix. The tests need no network and no campaign; the ones that
-read a syntax tree skip when rust-analyzer is absent.
+read a syntax tree skip when rust-analyzer is absent. Two classes cover claims rather than
+mechanics: `PlanClaims`, a plan whose `Status` promises more than its own `Sites` ledger or
+the instrumented code supports, and `PromptCopies`, a prompt that has drifted from its
+verbatim copy in section 13.
 
 ---
 
@@ -967,6 +1005,17 @@ allows `unexpected_cfgs` itself.
    `SL/campaign/prompts/invariants-<registry>-<n>.md` and the output to
    `SL/campaign/logs/invariants-<registry>-<n>.log`.
 5. A non-zero agent exit aborts the campaign with exit code 2.
+6. After the last batch, audit the bindings, unless `STATELENS_AUDIT` is `0`. For each
+   batch of step 2, render `prompts/instrument.md`, a blank line, then
+   `prompts/instrument-audit.md`, with the placeholders of step 3, and run the agent as in
+   step 4 with `audit-<registry>-<n>` as the file stem. The pass re-reads each Statement,
+   enumerates the sites that commit the actions it names, adds the checks that are missing
+   and can be added, and corrects the `Sites` ledger, the `Status` and the `Notes` of the
+   plan section. A first pass writes both the binding and its own status, and nothing
+   there compares the two; this is where a binding that is silently incomplete, rather
+   than wrong, is found.
+7. Record the statuses before and after the pass. The ones that changed go in the summary
+   (section 7.9) as `<ID> <before> -> <after>`.
 
 ### 7.4 Step 3: beacon probes
 
@@ -991,21 +1040,26 @@ empty and the step proceeds from the code alone.
 1. Parse `plan.md`: headings `### <ID>: <title>` and lines `- Status: bound|partial|unbound`.
 2. For every registry ID without a heading, append a section with `Status: unbound` and
    `Notes: not processed by the agent`.
-3. Take a new snapshot (section 7.2) and compare it with the baseline. Every path that is
+3. Run the plan lint of section 5.4 over `plan.md` and print each problem as a warning.
+   The plan is the agent's own account of what it bound, so a problem here is reported to
+   the operator rather than failing the campaign.
+4. Take a new snapshot (section 7.2) and compare it with the baseline. Every path that is
    new, changed or gone since the baseline:
    - outside the profile's editable roots (section 5.5) aborts the campaign with exit
      code 2 ("instrumentation edited <path>"), except `Cargo.lock`, which the first build
      updates for the new `sancov` dependency;
    - under a warn-only path of the profile produces a warning.
-4. Run `git add --intent-to-add` on every untracked file under the editable roots (files
+5. Run `git add --intent-to-add` on every untracked file under the editable roots (files
    the agents created; no content is staged), so that `git diff` and the counts include
    them. Then count the deleted lines under the editable roots (`git diff --numstat`),
    the added `sl_assert!`, `sl_implies!` and `sl_probe!` call sites, and the beacon table
    rows.
-5. Append a `## Summary` section to the plan with the status counts, call-site counts,
-   beacon-table row count and deleted-line count. Deleted lines are expected to be 0; any other
-   value must match the "Edited lines" entries of the plan.
-6. Write `SL/campaign/instrumentation.diff` with the output of `git diff`.
+6. Append a `## Summary` section to the plan with the status counts, the commit sites the
+   `Sites` ledgers list and how many of them are not checked, the call-site counts, the
+   assertion sites per instrumented source, the beacon-table row count and the deleted-line
+   count. Deleted lines are expected to be 0; any other value must match the "Edited lines"
+   entries of the plan.
+7. Write `SL/campaign/instrumentation.diff` with the output of `git diff`.
 
 ### 7.6 Step 5: build and repair
 
@@ -1057,6 +1111,8 @@ statelens: base       <base>
 statelens: agent      <agent>
 statelens: profile    <profile>
 statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)
+statelens: audit      <ID> <before> -> <after>, ... | no status change
+statelens: plan       <n> commit site(s) listed, <u> not checked, <p> lint problem(s)
 statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
 statelens: result     READY | STOPPED after <step> | PANIC (tests) | BUILD FAILED | SETUP FAILED
 statelens: reason     <why the campaign stopped, for any result other than READY>
@@ -1159,7 +1215,8 @@ invariants, 49 assertion sites, 146 probe sites), on 16 cores:
 
 Not verified: the script changes, the generated variants, the wedge hook, marshal
 instrumentation, and AC-9 to AC-13. The knowledge base and beacons (section 5.6
-and 6.4) have not been exercised with a real agent, so AC-14 to AC-17 are unverified too.
+and 6.4) have not been exercised with a real agent, so AC-14 to AC-17 are unverified too
+(AC-16 and AC-17 cover the audit pass and this subproject's own checks).
 
 ### 8.2 Decisions
 
@@ -1191,7 +1248,8 @@ before any edit is made. `git add --intent-to-add` also covers the variants.
 
 Step 2, bind invariants (section 7.3): the batches of the simplex registry come first,
 with the Simplex subsystem rules, then those of the marshal registry, with the marshal
-subsystem rules.
+subsystem rules. The audit pass of steps 6 and 7 covers the batches of both registries,
+each with its own subsystem rules.
 
 Step 3, beacon probes (section 7.4): one run for each of the six components of the profile
 (section 5.5).
@@ -1329,6 +1387,13 @@ All three evaluate `me` first and do nothing else when `should_check(me)` is `fa
 The panic message is `[statelens][<ID>] replica=<index|none> <message>`. The reported
 location is the macro call site (`#[track_caller]`).
 
+`sl_implies!` is feedback as well as an oracle, but only where its recorded pair can vary on
+a passing execution. A `post` of `false` records only `(false, false)`, because a true `pre`
+panics, and a site on the branch the replica takes only once it is about to violate the
+invariant records one pair as well. The binding then adds a probe where the state is
+classified, so that reaching the protected state is rewarded when the replica handles it
+correctly (R-FB-3). A constant `true` `post` is not that case: the pair follows `pre`.
+
 ### 9.3 Counter table
 
 - `sancov::Counters<65536>` in a static.
@@ -1388,11 +1453,12 @@ The prompts in section 13.7 are normative for the agent. In summary:
 | Replica index | Simplex: `self.scheme.me()`; otherwise a `// [statelens] me` field of type `Option<Participant>`. Marshal: section 8.5. Never `None` for an index that could not be obtained. |
 | Non-interference | Observe program state without changing the semantics or control logic of the protocol or its implementation. Write only StateLens state: ghost state, probe counters, added `me` fields. No writes to existing variables, fields or collections (directly, through `&mut` methods or interior mutability); no methods whose reads change state that any code, tests included, can observe; no added `return`, `break`, `continue` or `?` that leaves or skips original code; no channel endpoints, `Arc`s (such as blocks) or values with a `Drop` effect kept in ghost state; no block clones; no `await`, spawn, lock, runtime context, RNG, clock, network, storage, metrics or logging; no reordering or consuming of values. Exception: forcing a memoized decode (`Lazy::get`, `==` on a `Lazy`), even on original values, and keeping clones of decoded messages that hold `Bytes`, such as votes. |
 | Panics | Only through violations: saturating or checked arithmetic, no `unwrap` or `expect`, no out-of-bounds indexing. |
-| Cost | O(1) per site, or bounded by the number of tracked views. |
+| Cost | O(1) per site, or bounded by the number of tracked views. Ghost history outlives the implementation's pruning and is therefore not bounded by them: index it for the question the assertion asks, and maintain the index where the history is written, rather than walking it at the assertion. |
 | Warnings | Denied workspace-wide. Use full paths rather than new imports. |
-| Discretization | No raw views, heights, digests, commitments, keys, payloads or timestamps. Views and heights relative to another known view or height. At most about 64 `(a, b)` pairs per probe. No replica index in probe values. |
+| Discretization | No raw views, heights, digests, commitments, keys, payloads or timestamps. Views and heights relative to another known view or height. At most about 64 `(a, b)` pairs per probe, counted before the probe is written (`bucket` 6, `delta` 11, `flag` 2, an n-bit mask 2^n, `disc` the variant count, `pack` the product of what it packs), not estimated from the combinations a run is expected to reach; a smaller count only where the site bounds the input, with the bound in the plan. No replica index in probe values. |
 | Adversarial input | Assert what the honest replica does or keeps, not what peers send. |
 | Asynchrony | Checks across actors or components hold for every delivery delay the implementation allows. |
+| Commit sites | An invariant about an action is checked where the action becomes visible outside the replica (a signature exists, a message reaches a mailbox or the broadcaster, a record is appended, a certificate is accepted, the view moves), on every path that reaches it, including journal replay and retries. Where a decision and its commit are split across an await or a mailbox, the commit site carries the check; a check at the decision does not replace it. The plan lists every commit site and whether it is checked. |
 
 ---
 
@@ -1404,14 +1470,33 @@ Agents add sections under `## Invariants`:
 ### INV-0007: <title>
 - Status: bound | partial | unbound
 - Reading: <pre and post, or the checked condition, in code terms>
+- Sites: <one line per site that commits an action the Statement names: the action, the
+  file and the function in backticks, then `checked` or `not checked`, and for
+  `not checked` the reason>
 - Assertions: <file, function, macro and condition; one line each>
 - Probes: <extra probes such as margins, or "none">
 - Ghost state: <fields and where they are updated, or "none">
 - Edited lines: <existing lines wrapped in blocks, or "none">
-- Notes: <why partial or unbound; limitations>
+- Notes: <why partial or unbound; limitations, or "none">
 ~~~
 
-and rows to the beacon table:
+`Status` is a claim about coverage, and a campaign that never panics is read as evidence
+for it. `bound` means every commit site of every action the Statement names carries the
+check and the condition checked is the Statement itself. `partial` means anything less: a
+weaker condition, a site left out, a path left out, with the reason in `Notes`. `unbound`
+means nothing was added, and such a section needs only `Status` and `Notes`. A binding
+that watches the decision and not the commit is `partial`, however exact its condition.
+`statelens.py lint-plan` (section 5.4) checks a section against its own ledger and against
+the instrumented code, and that the plan is plain ASCII like the registry and the prompts.
+The ledger is not taken on trust either: each entry names its source and its function in
+backticks, which is how the lint reads it, and says `checked` or `not checked`; an entry
+that says `checked` must have an assertion naming the invariant in the function it names,
+so one assertion cannot certify every site of its file. What no lint can see is a commit site the ledger never
+names; that is what the audit pass of section 7.3 is for, and why the summary also reports
+the distribution of assertion sites over files, where a layer nobody checked shows up as a
+file with none.
+
+Agents also add rows to the beacon table:
 
 ~~~markdown
 | voter.certify.transition | actors/voter/round.rs Round::<fn> | disc(old) | disc(new) | CertifyState enum; comment at <line> |
@@ -1745,7 +1830,11 @@ probes that tell the fuzzer when an execution reached a new internal state.
    or indexing that can go out of bounds.
 6. Bounded cost: O(1) per site, or bounded by the number of views the replica tracks.
    Do not scan unbounded collections or allocate per message on hot paths unless an
-   invariant requires it.
+   invariant requires it. Ghost history is the trap: you keep it precisely because it
+   outlives the implementation's own pruning, so it is not bounded by the tracked views.
+   Index it for the question you will ask -- a second set holding only the entries you
+   query, or a field holding the last one -- and keep the index up to date where you write
+   the history. Never filter or walk the whole history at the assertion.
 7. The workspace denies all warnings: no unused variables, imports or functions. Prefer
    full paths (`crate::simplex::statelens::bucket(...)`) to new `use` lines.
 8. Byzantine peers are adversarial: a message an honest replica receives can contain
@@ -1753,7 +1842,10 @@ probes that tell the fuzzer when an execution reached a new internal state.
    peers send, unless the invariant is about how the replica handles bad input.
 9. Actors and components run concurrently and exchange messages through mailboxes. A
    check that compares components of one replica must hold for every delivery delay the
-   implementation allows, not only when they are in step.
+   implementation allows, not only when they are in step. The same split decides where a
+   check belongs: where the replica decides to act in one function and performs the act
+   in the handler of a reply, everything it learned in between is invisible at the first
+   site, so the check goes where the act becomes visible outside the replica.
 
 ## Runtime API (`crate::simplex::statelens`)
 
@@ -1776,7 +1868,11 @@ probes that tell the fuzzer when an execution reached a new internal state.
   return `None` without running the closure for a skipped replica. Never nest them. Add
   the fields you need to `Ghost` or `Global`, with `Default` types. Ghost state lives
   for one run: it is cleared when a new run starts (every fuzz input, every seed of a
-  test) and kept across a crash-restart within the run.
+  test) and kept across a crash-restart within the run. `Ghost` is keyed by participant
+  index, and a Twins run puts two engines behind one index, so history that must not
+  merge across engines belongs in a `// [statelens] ghost:` field of the struct that owns
+  it. To check it from another module, add a read-only accessor beside the field and tag
+  it like the field; do not move the field to reach it.
 - Assertion messages start with the invariant title and include the values involved,
   for example `"no finalize after nullify: view={} nullified={}"`.
 
@@ -1785,23 +1881,33 @@ probes that tell the fuzzer when an execution reached a new internal state.
 - Never feed raw views, heights, digests, keys, signatures, payloads or timestamps to a
   probe. Record views relative to another view the replica knows
   (`delta(view.get(), last_finalized.get())`), and counts through `bucket`.
-- Keep each probe's value space small: at most about 64 distinct `(a, b)` pairs.
+- Keep each probe's value space small: at most about 64 distinct `(a, b)` pairs. Count
+  them before you write the probe, rather than trusting the spread to stay small in
+  practice: `bucket` is 6 values, `delta` is 11 (it buckets the distance in each
+  direction), `flag` is 2, a mask of n bits is 2^n, `disc` is the number of variants, and
+  `pack` multiplies the two it packs. Multiply the two sides. Count fewer only where the
+  site itself bounds the input, and say in the plan what bounds it. Over budget, drop a
+  dimension or coarsen one into fewer categories.
 - Do not include the replica index in probe values.
 
 ## The plan
 
-Keep `{{PLAN}}` up to date. Add your sections and rows; do not rewrite other parts.
+Keep `{{PLAN}}` up to date, in plain ASCII. Add your sections and rows; do not rewrite
+other parts.
 
 For each invariant, add under `## Invariants`:
 
     ### INV-NNNN: <title>
     - Status: bound | partial | unbound
     - Reading: <pre and post, or the checked condition, in code terms>
+    - Sites: <one line per site that commits an action the Statement names: the action,
+      the file and the function in backticks, then `checked` or `not checked`, and for
+      `not checked` the reason>
     - Assertions: <file, function, macro and condition; one line each>
     - Probes: <extra probes such as margins, or "none">
     - Ghost state: <fields and where they are updated, or "none">
     - Edited lines: <existing lines wrapped in blocks, or "none">
-    - Notes: <why partial or unbound; limitations>
+    - Notes: <why partial or unbound; limitations, or "none">
 
 For each beacon probe, add a row to the table under `## Beacon probes`:
 
@@ -1831,28 +1937,75 @@ below:
 2. Find where the implementation establishes and uses the concepts. Trace with search,
    references and call hierarchy across the components the subsystem rules name,
    including the mailbox messages between them and the recovery path on restart.
-3. Choose assertion sites where a violation first becomes observable: just before the
-   replica acts (signs, broadcasts, persists, accepts a certificate, enters a view) or
-   just after it changes the relevant state. Cover every code path that performs the
-   action.
-4. Map the EARS pattern to a macro. Ubiquitous: `sl_assert!`. State-driven,
+   From the root of the repository, with
+   `SL=consensus/fuzz/statelens/scripts/statelens.py`, the command
+   `python3 $SL code refs|callers|callees <NAME>` gives references and call hierarchy
+   by symbol, which matters because names here collide: `proposal` is five different
+   methods. `python3 $SL ast sites <NAME>` says which of those sites write the state
+   and which only read it. Both hide test sites unless you pass `--tests`, and the
+   `callers` of a mailbox method name the actor that sends the message. The guide
+   `consensus/fuzz/statelens/prompts/discover-flow.md` is the method for the cases
+   where this is not enough.
+3. Name the actions the Statement constrains, and find the commit site of each one: the
+   point past which the action is visible outside the replica, and the first point at
+   which a violation is observable. A signature exists, a message is handed to a mailbox
+   or to the broadcaster, a record is appended to the journal, a certificate is accepted,
+   the view counter moves. List every site that reaches it, on every path: the live one,
+   the retry or rebroadcast, and journal replay.
+4. Assert at the commit sites, not where the action was decided. The replica usually
+   decides in one function and commits in another: it picks a parent and asks the
+   application to build on it, and the proposal reaches the network in the handler of the
+   reply, with every message the replica handled in between already applied. The state
+   your `pre` reads at the decision is not the state the replica acted on, so a check
+   there proves nothing about the action. Read the history inside the assertion, at the
+   commit; the act's own parameters come from the decision, as they must, but the state
+   you test against them is read here. Put the check after the last guard that can still
+   abandon the act and before the call that performs it: a response the handler drops for
+   a view the replica has left never reached the network, and asserting on it is a false
+   alarm. Keep a second check at the decision
+   site when it helps -- it names the cause, and its probe feeds the fuzzer -- but it
+   never stands in for the commit site. That a later site "only records what the
+   application returned" is not a reason to skip it: what the replica hands to the
+   network is the action.
+5. Map the EARS pattern to a macro. Ubiquitous: `sl_assert!`. State-driven,
    event-driven, unwanted behavior and complex: `sl_implies!(pre, post)`. For
    properties about history ("after", "once", "never again"), record the history in
    ghost state (`with_ghost` for one replica, `with_global` for scope `protocol`, or a
    `// [statelens] ghost:` field when the history belongs to one object) and assert at
    the later action.
-5. For a numeric invariant, also add a margin probe:
+6. Add the probe the assertion cannot give. `sl_implies!` records `(pre, pre && post)`,
+   which is what rewards the fuzzer for reaching a precondition -- unless that pair cannot
+   vary on an execution that passes. It cannot when `post` is `false` (the only passing
+   pair is `(false, false)`, since a true `pre` panics), and it cannot when the assertion
+   sits on the branch the replica takes only once it is about to do the forbidden thing.
+   Then the site teaches the fuzzer nothing: add a `sl_probe!` where the state is
+   classified, recording the classification, so that reaching the protected state is
+   rewarded even when the replica handles it correctly. A constant `true` `post` is not
+   this case: the pair follows `pre` and already carries the feedback. For a numeric
+   invariant, add a margin probe as well:
    `sl_probe!(me, "INV-NNNN/margin", crate::simplex::statelens::bucket(distance), 0u8)`,
    where `distance` is how far the state is from a violation.
-6. Be faithful: the code must check exactly the Statement. Never check something
+7. Be faithful: the code must check exactly the Statement. Never check something
    stronger, because that creates false alarms. If you can check only part of it, bind
    that part and set Status to `partial` with the reason. If you cannot bind it, add
-   nothing for it and set Status to `unbound` with the reason.
-7. Add the invariant's section to the plan.
+   nothing for it and set Status to `unbound` with the reason. The status is a claim
+   about coverage, and a campaign that never panics is read as evidence for whatever it
+   claims. `bound` means every commit site of every action the Statement names carries
+   the check, and the condition checked is the Statement itself. `partial` means
+   anything less: a weaker condition, a site left out, a path left out. `unbound` means
+   nothing was added. A binding that watches the decision and not the commit is
+   `partial`, however exact its condition.
+8. Add the invariant's section to the plan, with the `Sites` ledger: one line per commit
+   site of step 3, naming the action, then the file and the function in backticks
+   (`` `actors/voter/actor.rs` `Actor::process_proposed` ``), then `checked` or
+   `not checked` in those words, and for `not checked` the reason and the delivery order
+   that escapes it. `lint-plan` reads this ledger: it finds the entry by the file, and a
+   site you call `checked` has to carry an assertion naming this invariant in the function
+   you name.
 
 ### Readings that look right and are too strong
 
-Rule 6 is where bindings go wrong, and always in the same direction: a Statement is checked
+Rule 7 is where bindings go wrong, and always in the same direction: a Statement is checked
 more strictly than it is written, and the assertion fires on correct behavior. The patterns to
 watch for:
 
@@ -1869,6 +2022,30 @@ watch for:
   and the code happens to be ordered, do not assert the order.
 
 When you find only a weaker form is checkable, that is a `partial`, not a licence to round up.
+
+### Readings that look right and are too weak
+
+The section above guards one direction: a check stronger than the Statement, which fires on
+correct behavior and wastes a person's time. This is the other direction, and it is quieter.
+The condition is faithful, but it is evaluated where the forbidden state cannot appear, so the
+campaign stays silent and the silence is read as evidence. The patterns to watch for:
+
+- **The decision mistaken for the action.** The check sits where the work starts -- a request
+  issued, a candidate chosen, a handle stored -- rather than where it is performed. Everything
+  the replica learns while the work is outstanding is invisible to it. This is rule 4.
+- **One path of several.** The same vote is signed on the live path and restored by journal
+  replay; a certificate arrives from the batcher and from the resolver; a message is sent once
+  and rebroadcast on a timer. A check on one path is a check on one path.
+- **A value captured too early.** A local read before an `await`, before the implementation's
+  own update, or before a guard that can change the answer, is the old value. Read the state in
+  the assertion itself, in the same statement sequence as the action.
+- **A precondition the site cannot reach.** If a guard just above returns for exactly the state
+  the Statement forbids, your `pre` is false there forever: the assertion runs on every pass,
+  its probe records one pair, and nothing is ever checked. Find the site where the forbidden
+  state survives, or record the gap and set `partial`.
+
+A check you cannot imagine failing is either a theorem about the line above it or a check in
+the wrong place. Say which, in the Notes.
 
 Full worked analyses, one per subsystem, are in `consensus/fuzz/statelens/examples/`. They are
 reference material: they *derive* invariants, which is Phase 1 work, while your job is to bind
@@ -1889,7 +2066,8 @@ different internal states. Do not add assertions in this task.
 
 This is a loop, not a checklist. At each step you choose one action, look at what it
 returned, and choose again. Your actions are: read and search the code of this component;
-query the knowledge base with one of the commands below; add a probe.
+identify an entity with the code index; query the knowledge base with one of the commands
+below; add a probe.
 
 Reading the code leads, because that is where a candidate announces itself. Query the
 knowledge base when your hypothesis needs developer context the source does not carry.
@@ -1916,6 +2094,42 @@ A finding tells you which states have gone wrong before, so a state it describes
 probing even when the code looks unremarkable. It never tells you to add an assertion: a
 finding is evidence, not a property, and this task adds probes only.
 
+### The code index
+
+You run from the root of the repository, so bind the script once:
+
+    SL=consensus/fuzz/statelens/scripts/statelens.py
+
+    python3 $SL code defs|refs|callers|callees <NAME> [--tests]
+
+Names in this crate collide: `proposal` is five different methods, and `broadcast_notarize` is
+both a field and a method of the same type. So when a name turns up in more places than you
+expect, it is probably several entities, and `refs` separates them. Before you probe a field,
+ask `refs` for every place that touches it, because the site you would miss by reading one
+function is the one worth probing. To learn which actor sends a mailbox message, ask for the
+`callers` of the mailbox method. Nearly three quarters of this crate is test code and the index hides it
+unless you pass `--tests`.
+
+If the index is missing the campaign said so, and search and reading are the fallback.
+
+### The syntax tree
+
+    python3 $SL ast sites <NAME>    # written here, read there
+    python3 $SL ast notes [PATH]    # comments about races and recovery
+
+The index says a line mentions a field; it does not say whether the line changes it. Before
+you probe a transition, ask `ast sites` for the write sites, because those are the
+transitions and the rest are decisions. A site it marks `macro` sits inside a macro body,
+which the tree does not structure, so read that one yourself; much of this crate's
+concurrency is inside `select!`. `ast notes` is the fastest way to do step 1 below:
+it finds the comments about orderings, races, recovery and cases that cannot happen, and
+names the item each one documents.
+
+When a candidate needs state followed across functions, actors or a restart, work through
+`consensus/fuzz/statelens/prompts/discover-flow.md`. There is no data-flow tool here, so you are the one simulating
+the flow, and that method says how to propose a step and then make the tools confirm or
+reject it.
+
 ### Beacons in the code
 
 1. Inventory the semantic beacons in the non-test code of `{{ACTOR_DIR}}` and the types
@@ -1935,7 +2149,11 @@ finding is evidence, not a property, and this task adds probes only.
    state before and after a transition, or the state and its context at a decision
    point. Use `disc` for enums, `flag` for booleans and options, `delta` and `bucket`
    for views and counts, and `pack` to put two small values on one side.
-5. Budget: 20 to 60 probes for this component. Avoid per-message hot loops unless the state
+5. Budget: 20 to 60 probes for this component, and at most about 64 `(a, b)` pairs each.
+   Count the pairs with the arithmetic of the discretization rules above before you write
+   the probe: three bucketed counts on one side is already 216, and two unrestricted
+   `delta`s are 121. Over budget, drop a dimension or coarsen one, rather than expecting
+   the reachable combinations to be fewer. Avoid per-message hot loops unless the state
    there is interesting.
 6. Add one row per probe to the "Beacon probes" table of the plan.
 
@@ -2061,12 +2279,23 @@ Last lines of its output:
   `scheme/`.
 - Components: the voter, batcher and resolver actors in `consensus/src/simplex/actors/`,
   which exchange messages through mailboxes, and the journal replay path on restart.
-- Replica index: `self.scheme.me()` wherever a scheme is in scope (the voter, batcher and
-  resolver all hold one). Where it is not, add a `// [statelens] me` field of type
+- Replica index: `self.scheme.me()` wherever a scheme is in scope. The batcher and the
+  resolver actors hold one; the voter actor does not, because `Actor::new` moves the
+  scheme into `StateConfig`, so read the index from its `State` through a
+  `// [statelens] me` accessor rather than keeping a second copy. Where no scheme is
+  reachable at all, add a `// [statelens] me` field of type
   `Option<crate::simplex::statelens::Participant>`, set where the struct is created.
 - Asynchrony worth probing: the view advances while work is outstanding, a timeout races
   a certificate, a verification or certification result arrives after the state moved
   on, equivocation is detected after acceptance, state is rebuilt from the journal.
+- Where the voter decides and where it commits are different functions, separated by a
+  reply from the application: `State::try_propose` chooses the parent, and
+  `Actor::process_proposed` records the payload and hands it to the broadcaster;
+  `State::try_verify` chooses the candidate, and `Actor::process_verified` acts on the
+  answer; `State::certify_candidates` dispatches certification, and
+  `Actor::process_certified` turns the result into a finalize or a nullify. The replica
+  handles certificates, votes and timeouts in between, so a check on the first site of a
+  pair says nothing about what the second one does.
 ~~~
 
 ### 13.14 `prompts/subsystems/marshal-instrument.md`
@@ -2107,8 +2336,254 @@ Last lines of its output:
   - certification is requested before the block is available;
   - shards arrive out of order or after reconstruction;
   - state is rebuilt from the archives after a restart.
+- Decision and commit are different sites here too: a request to the application, to the
+  backfill resolver or to another component is issued in one place and its answer handled
+  in another, a mailbox hop later. Before binding an invariant about an act -- delivering
+  a block, acknowledging a height, certifying, repairing -- find the handler that performs
+  the act and assert there. The dispatching site has not learned what arrived in between.
 - Heights: record them relative to the processed floor, the last delivered height or the
   finalized tip, never raw. Never feed commitments or shard indices to a probe.
+~~~
+
+### 13.15 `prompts/instrument-audit.md`
+
+~~~markdown
+## Task: audit the bindings of invariants {{INVARIANT_IDS}} of the {{REGISTRY}} registry
+
+These invariants were bound earlier in this campaign, and `{{PLAN}}` records what was done.
+Your job is to find the bindings that claim more coverage than they have, and to close the
+gap where it can be closed. You are still the instrumenter: every rule above applies,
+including "add, never remove".
+
+A campaign that never panics is read as evidence that the bound invariants hold. That
+reading is worth exactly as much as the sites the checks sit on, and nothing more. A check
+in the wrong place is silent for the same reason a correct implementation is.
+
+For each invariant below:
+
+1. Read the Statement again, from the registry file printed below, not from the plan's
+   `Reading`. A binding goes wrong where the reading went wrong, so re-derive `pre` and
+   `post` before you look at what was instrumented.
+2. Name every action the Statement constrains, and find the commit site of each one: the
+   point past which the act is visible outside the replica (a signature exists, a message
+   is handed to a mailbox or to the broadcaster, a record is appended to the journal, a
+   certificate is accepted, the view counter moves). Find them with the code tools, from
+   the root of the repository and with `SL=consensus/fuzz/statelens/scripts/statelens.py`:
+   `python3 $SL code refs|callers|callees <NAME>` and `python3 $SL ast sites <NAME>`.
+   Include the paths that are easy to miss: journal replay, retries and rebroadcasts, and
+   the handler that acts on the reply to a request the replica sent earlier. The guide
+   `consensus/fuzz/statelens/prompts/discover-flow.md` is the method when this is not
+   enough; its step 6 is about following a request to where it lands.
+3. Compare that list with what is instrumented. `rg "\[statelens\] INV-NNNN" consensus/src`
+   gives the sites of one invariant. Mark each commit site `checked` or `not checked`. A
+   check that runs where the action is decided, while the act happens in a later handler,
+   leaves that site `not checked`: between the two the replica handles messages, and the
+   state the check read is not the state it acted on.
+4. Close each gap you can. Add the same condition the binding already checks, re-read at
+   that site, with the replica's own index, under the rules above. Ghost state in another
+   module is reachable: add a read-only accessor beside the field. If the commit site needs
+   a tolerance the first site did not -- a guard there made the condition safe, and here
+   there is none -- close the gap with that tolerance and name it in the Notes; that is a
+   close, not a strengthening. Where the site cannot carry the check at all -- no
+   participant identity anywhere in scope, or the site is outside the editable code -- add
+   nothing and record why.
+5. Check the other direction for each existing assertion: can its `pre` be true where it
+   stands? If a guard just above returns for exactly the state the Statement forbids, or
+   the condition restates the line above it, that assertion checks nothing. Add a check
+   where the forbidden state survives if there is such a site, and say so in the Notes
+   either way. Leave the original in place; you may add, never remove. Ask the same of the
+   feedback: an assertion whose recorded pair cannot vary on a passing execution -- a
+   `post` of `false`, or a site on the branch taken only once the replica is about to
+   violate the invariant -- gives the fuzzer nothing, so add the classification probe of
+   rule 6.
+6. Update the invariant's section of the plan: the `Sites` ledger, the `Assertions` you
+   added, a `Status` that matches the ledger under the rule of the binding task (`bound`
+   only when every commit site is checked and the condition is the Statement itself), and
+   Notes that name, for each unchecked site, the delivery order that escapes it. Downgrade
+   a status whose claim you could not support. Do not raise one without having added the
+   checks that justify it. Each entry gives the file and the function, and the ledger is
+   checked against the code: an entry you call `checked` must carry an assertion naming
+   this invariant in the file it names, so an unchecked site recorded as checked is a
+   false record, not a shortcut.
+7. Check what each binding costs where it runs. A check that filters or walks a ghost
+   history is unbounded, because that history outlives the implementation's pruning: add
+   the index the question needs, maintain it where the history is written, and use it.
+   This is one of the two things you may change in instrumentation an earlier pass added;
+   the other is an assertion that is wrong. "Add, never remove" is about the
+   implementation's own code, not about a previous pass's instrumentation.
+8. Change nothing else. Do not rewrite a faithful binding because you would have written it
+   differently, do not strengthen a condition to make a status look better, and do not
+   touch the sites of an invariant that is not in this batch. Beacon probes come in a
+   later step; leave the beacon table of the plan alone.
+
+Run the check command until it passes. Then run
+
+    python3 consensus/fuzz/statelens/scripts/statelens.py lint-plan
+
+and fix what it reports about the invariants of this batch. It reads the ledger against the
+code, so it catches a site recorded as checked that asserts nothing, an entry that gives no
+verdict, and a `bound` that the ledger does not support. What it cannot catch is a commit
+site the ledger never names, which is the part only you can do.
+
+Reply with one line per invariant: the id, the status before and after, the sites you added,
+and the gaps you left.
+
+Invariants:
+
+{{INVARIANTS}}
+~~~
+
+### 13.16 `prompts/discover-flow.md`
+
+~~~markdown
+## Method: semantic flow discovery
+
+This is the method to follow when a beacon or an invariant needs state traced across
+functions. It is not a task on its own: the beacon step adds probes, and Phase 1 writes
+invariants. What this method produces is the evidence either of those needs.
+
+StateLens has no data-flow tool. That is measured, not an oversight: the code index records
+that a line mentions an entity, not what it does to it; syntax trees give that, but carry no
+types; and the tools that do real information flow either cannot follow a value across a call
+at all, or answer a different question (does a marked source reach a marked sink) from one
+chosen entry point. Nothing crosses an actor mailbox.
+
+So you are the flow simulator. **You propose; the tools confirm or reject.** A flow you
+reasoned your way to and did not check is a guess, and must be labelled one.
+
+### Your tools
+
+You run from the root of the repository, so bind the script once:
+
+    SL=consensus/fuzz/statelens/scripts/statelens.py
+
+    python3 $SL code refs <NAME>      # every occurrence, by symbol
+    python3 $SL code callers <NAME>   # call sites, with the enclosing function
+    python3 $SL code callees <NAME>   # what a definition calls
+    python3 $SL code defs <NAME>      # definitions and their extents
+
+    python3 $SL ast sites <NAME>      # write / init / read, per site
+    python3 $SL ast notes [PATH]      # comments on races and recovery
+
+    python3 $SL kb find|cites|grep|show
+
+plus reading files and `rg`. All of `code` and `ast` hide test code unless given `--tests`,
+because nearly three quarters of this crate is test code sharing files with the code it exercises.
+
+The index knows identity, the tree knows shape, and they answer different halves of one
+question. `code refs broadcast_notarize` gives six sites and will not confuse the field with
+the method of that name; `ast sites broadcast_notarize` says which two of the six are writes.
+Neither knows types and shape at once, so use both.
+
+### Structural or semantic
+
+Classify the question before choosing a tool.
+
+Structural -- who calls this, where is this written, what does this read -- is what `code`
+and `ast` answer. Do not ask the knowledge base first; it does not know this implementation,
+it knows what has gone wrong in it.
+
+Semantic -- why does nullification preserve this where finalization clears it, why must these
+two rules agree, what property does this state implement -- is what `kb` is for. Reach for it
+when you can say exactly what you know and exactly what you cannot explain. The source
+establishes what the code does; a finding explains why it matters, and may be older than the
+code.
+
+### The loop
+
+1. **Name the beacon.** Its exact text, the symbol enclosing it, the concepts it mentions,
+   and one sentence of hypothesis. `ast notes` is the fastest way to find beacons, and it
+   names the item each comment documents. Do not turn a beacon into an invariant here.
+
+2. **Find the state in code.** List three to five candidate fields, predicates or helpers the
+   beacon might mean, most likely first. Check each with `code defs` and `code refs`. Drop
+   the ones with no support. A name is a hint, not a definition: read the body.
+
+3. **Establish, mutate, invalidate, consume.** For the confirmed state, use `ast sites` for
+   the writes and the reads, and `code callers` on each writer to learn who drives it. The
+   write you would miss by reading one function is the one worth having: `broadcast_notarize`
+   is written at `round.rs:697` when a vote is constructed and at `round.rs:746` when the
+   journal is replayed. Both are reached from `Actor::run`, but by different paths, and a
+   reading that found only the first would describe the latch as set once per view.
+
+4. **Simulate, then check.** When no tool answers the next step, reason it out: given this
+   write, which decisions plausibly depend on it; given this decision, which state plausibly
+   determines it. Produce a ranked short list, three to five, then validate each with `code`
+   or `ast`. Keep what survives. Report the rest as hypotheses or not at all.
+
+5. **Cross the mailbox by name.** No tool connects a send to a receive, because they are in
+   different spawned tasks. The message variant is in both, so: `code callers` on the mailbox
+   method names the sending function, and the variant name finds the handler arm. The voter's
+   `Mailbox::resolved` is called from `Actor::handle_resolver` at `resolver/actor.rs:595`, and
+   the `Message::Verified` it sends is handled at `voter/actor.rs:790`. Note that `recovered`
+   and `resolved` both send `Message::Verified`, differing only in a `from_resolver` flag --
+   the handler cannot tell them apart from the variant, which is exactly the kind of state
+   worth separating.
+
+6. **Follow a request to where it lands.** A decision and the act it leads to are often in
+   different functions, separated by an await on a reply. `Actor::try_propose`
+   (`voter/actor.rs:369`) asks `State::try_propose` for a context, sends it to the automaton
+   and keeps the receiver in `pending_propose`; the reply is awaited in the main `select!`,
+   and `Actor::process_proposed` (`voter/actor.rs:683`) records the proposal and hands it to
+   the broadcaster. In between, the replica handles everything else, including the results
+   that decide whether the act is still legal. So find the far end before calling a state
+   "decided here": `code callees` on the deciding function names the request method, `code
+   refs` on the field holding the receiver names where it is awaited, and `code callers` on
+   the recording method names the handler. Report the pair -- where it is decided, where it
+   is committed -- and name what the replica can learn between them.
+
+7. **Stop.** A thread is done when you can say what state matters, where it lives, where it
+   is established, changed and read, why that matters, which locations support each claim,
+   and what remains unproven. Abandon a thread earlier when the symbol only logs, when the
+   relation is syntactic, when no behavior consumes the state, or when the evidence is
+   already sufficient.
+
+Expand three to five candidates at a step, not every neighbor. A symbol two calls away can
+matter more than twenty direct callers.
+
+### Evidence status
+
+Label every relation you report:
+
+    HYPOTHESIS               your reasoning, no tool run
+    SOURCE_SUPPORTED         the source text or a comment says so
+    STRUCTURALLY_VALIDATED   `code` or `ast` confirms the symbol, call, write or read
+    RUNTIME_VALIDATED        a test reaches it, or a probe separated the states in a run
+
+Never present a hypothesis as a property. The last status is reachable here, unlike in most
+analysis: this subproject runs a fuzzer, so a state you cannot separate statically can be
+separated by a probe and observed.
+
+### What the findings become
+
+Two different things, and the difference is not negotiable.
+
+A **probe** is feedback. It cannot fail, so it needs only a state worth telling apart --
+including a state that is legal but rare. Prefer a dimension whose outcomes run the same
+code, because edge coverage already separates the ones that branch. Place it where the
+implementation already computes the value: adding an evaluation that did not happen before
+changes evaluation order, short-circuiting or side effects, and that is forbidden.
+
+An **invariant** is an oracle. It can panic, so it is written down, reviewed by a person, and
+only then bound to code. Propose one only after the relationship is understood, with its
+text, the source evidence, the rationale, the evidence status, and its known exceptions. Do
+not strengthen it past what the code claims: where the code documents an odd but tolerated
+state, that exception belongs in the invariant.
+
+When you are unsure which one a discovery deserves, it is a probe.
+
+### Report
+
+Give, in this order: the beacon and where it is; the state you found and its representation
+in code; the steps you took, each as question, tool, result, interpretation, status; any
+knowledge base query with why it was needed and what you rejected; the causal chain from
+establishment through change and propagation to consumption and consequence; candidate probe
+dimensions with the sites where the value is already computed; candidate invariants with
+evidence and exceptions; and last, the questions you could not answer with the tools
+available.
+
+Do not invent a field, a function or a tool that does not exist. Keep separate what the
+source proves, what the tools prove, what a finding explains, and what you are guessing.
 ~~~
 
 ---
@@ -2127,6 +2602,8 @@ Last lines of its output:
 | AC-8 | `just run simplex_cert_mock_twins_mutator_statelens <artifact>` in the checkout of a crashing Phase 3 run, with that run's `STATELENS_BYZANTINE` value. | The same `[statelens][...]` line as in that run. Verified for `BYZANTINE` (section 1.2). |
 | AC-14 | With `STATELENS_KB` set to a findings corpus, run the queries of section 5.6 by hand for each registry: `kb modules`, `kb find`, `kb cites <a component directory>`, `kb grep`, `kb show`. | Every command answers from the index; `find` and `cites` return only findings whose `module` is in that subsystem's filter; `cites` returns the findings that name files under the directory, with those files listed; `show` refuses a section that is not state-bearing and an identifier out of scope. |
 | AC-15 | `STATELENS_KB=` with a campaign. | The campaign warns that there is no knowledge base, renders the beacon step with no query commands, and still reaches `READY`. |
+| AC-16 | A campaign with an invariant whose action is committed in a handler, then the same campaign with `STATELENS_AUDIT=0`. | With the pass: the invariant's `Sites` ledger names the commit site, the `Status` matches the ledger, and the `audit` and `plan` lines report it. Without it: no `audit` line, and the campaign still reaches `READY`. |
+| AC-17 | `just check-plan` on a plan whose `bound` section leaves a commit site unchecked, and on a clean one; `just check-prompts` after editing a prompt, and after `--write`. | Exit 3 naming the section or the prompt, and exit 0 when clean. |
 | R-NF-3 | Same duration and flags: `simplex_cert_mock_twins_mutator_statelens` in an instrumented checkout, and `simplex_cert_mock_twins_mutator` in an uninstrumented checkout at the same commit. | exec/s from `-print_final_stats=1` are reported side by side; a slowdown above 2x is recorded as an instrumentation problem. |
 
 Section 8.6 gives the procedures for AC-9 to AC-13, and for R-NF-3 on the marshal
@@ -2147,7 +2624,7 @@ variants.
    `rustfmt +<pinned nightly> --edition 2024 --config-path rustfmt.toml --check consensus/fuzz/statelens/runtime/*.rs`.
 3. Implement `scripts/statelens.py` in this order: config and argument parsing, `lint`,
    prompt rendering, agent invocation, `extract`, the knowledge-base index and the `kb`
-   commands, then `campaign`. Implement `campaign`
+   commands, `lint-plan` and `lint-prompts`, then `campaign`. Implement `campaign`
    for the `simplex` profile first, starting with the materialize step and
    `--stop-after materialize`, and then for the `marshal` profile (chapter 8).
 4. Write `README.md` (Appendix D).
@@ -2157,7 +2634,9 @@ variants.
    - `STATELENS_FALSE_INVARIANTS=1 just campaign --profile marshal --stop-after build`, then
      AC-9 to AC-13;
    - with `STATELENS_KB` set to a findings corpus, the queries of section 5.6, then AC-14
-     and AC-15.
+     and AC-15;
+   - `just check-plan` and `just check-prompts` on the instrumented checkout, then AC-16
+     and AC-17.
 6. Change nothing outside `consensus/fuzz/statelens/`.
 
 ---
@@ -2171,6 +2650,12 @@ variants.
 - Agents are not deterministic: the same invariant can be bound differently in two
   campaigns. The plan and `instrumentation.diff` document each binding.
 - A campaign instruments the checkout in place, so every campaign needs a fresh clone.
+- The audit pass (section 7.3) is the same agent under the same rules as the pass it
+  reviews, so it can repeat its own blind spot, and the `Sites` ledger it writes is what
+  `lint-plan` judges: a commit site neither pass ever names escapes both. The campaign
+  therefore also reports the assertion sites per source, where a layer nobody checked shows
+  up as a source with none. The pass costs one agent run per batch of 8 invariants, and
+  `STATELENS_AUDIT=0` skips it.
   The script refuses a checkout that an earlier campaign instrumented.
 - The beacon components cover the Simplex actors and marshal's core, standard and coding
   (D28). Code outside them, such as `types.rs`, the backfill resolver or the application
@@ -2844,23 +3329,26 @@ Workflow test, see SPEC.md section 14.
    (D4) and instrument the checkout in place (D10). Clone the repository fresh on a
    dedicated machine or container, run the campaign and the fuzzers in that clone, and
    discard the clone afterwards. Never commit an instrumented checkout.
-3. Prerequisites (section 5.2) and `config.env`.
+3. Prerequisites (section 5.2) and `config.env`, including `STATELENS_AUDIT`.
 4. Phase 1a: `just extract [--registry simplex|marshal] <kind> <source>...` with one example
    per kind, then review: every file in a registry is used by the next campaign that binds
    it; edit or delete drafts; `just check-invariants`.
 5. The knowledge base: what `STATELENS_KB` points at, that a campaign's beacon step queries
    it while instrumenting, and the `kb` commands an operator can run by hand.
 6. Phase 2: `just campaign`, `just campaign --profile marshal`, `just campaign --agent codex`,
-   `--stop-after`. A campaign builds the StateLens targets and does not fuzz; `just fuzz
+   `--stop-after`. What the steps do, including the audit pass over the bindings and the
+   plan lint. A campaign builds the StateLens targets and does not fuzz; `just fuzz
    <target>` is the convenience that runs a campaign and then fuzzes one of its targets, and
    `just clean` undoes what a campaign wrote so a checkout can be reused.
 7. Phase 3: run the printed `run` commands, adding libFuzzer arguments such as `-fork=8`
    (section 7.10); which marshal variants have an adversary that runs Simplex or marshal code.
-8. Results: the summary lines, exit codes, and `campaign/` (plan, diff, logs, prompts).
+8. Results: the summary lines, exit codes, and `campaign/` (plan, diff, logs, prompts), and
+   what a plan section's `Status` and `Sites` ledger claim, which `just check-plan` rechecks.
 9. Investigating a panic (section 7.12).
 10. Testing the workflow itself: `STATELENS_FALSE_INVARIANTS=1` (the campaign must panic on
-   the deliberately false invariants), `STATELENS_BYZANTINE=panic` (guard test) and
-   `STATELENS_FEEDBACK=0` (feedback comparison).
+   the deliberately false invariants), `STATELENS_BYZANTINE=panic` (guard test),
+   `STATELENS_FEEDBACK=0` (feedback comparison) and `STATELENS_AUDIT=0` (skip the audit
+   pass).
 
 ---
 

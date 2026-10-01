@@ -33,5 +33,10 @@
   - certification is requested before the block is available;
   - shards arrive out of order or after reconstruction;
   - state is rebuilt from the archives after a restart.
+- Decision and commit are different sites here too: a request to the application, to the
+  backfill resolver or to another component is issued in one place and its answer handled
+  in another, a mailbox hop later. Before binding an invariant about an act -- delivering
+  a block, acknowledging a height, certifying, repairing -- find the handler that performs
+  the act and assert there. The dispatching site has not learned what arrived in between.
 - Heights: record them relative to the processed floor, the last delivered height or the
   finalized tip, never raw. Never feed commitments or shard indices to a probe.
