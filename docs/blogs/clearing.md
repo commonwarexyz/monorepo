@@ -3,7 +3,7 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-09-29T00:00:00Z"
+modified-time: "2026-10-01T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/29/26): Payments continue in epoch $e+1$ while epoch $e$'s close is built, certified, and admitted. Each payment signature also covers the root of the payer's final vector in the previous epoch, so a payment that arrives too late for $e$ can be retried in $e+1$ without being paid twice.*
+*Update (10/1/26): Payments continue while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice.*
 
 *Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 
@@ -305,7 +305,7 @@ The operator can register $e+1$ while still accepting payments in $e$. Once that
 
 Once $e$'s close is admitted and $e+1$ is registered, the settlement chain binds $e+1$ to that close's state root and sets $e+1$'s admission and challenge deadlines relative to that time. Closes are admitted and finalized in epoch order. Missing an admission deadline permanently faults the deployment and discards every registration still awaiting admission.
 
-The operator can register further epochs without a fixed queue limit. Deposits and onchain withdrawal requests wait in an ordered inbox. Each registration fixes the next range of entries, so later arrivals cannot change it. A deposit must be registered within a fixed time of arrival. It then waits for its epoch's close with no further deadline. It is refundable during fault recovery if that close never finalizes.
+The operator can register further epochs without a fixed queue limit. Deposits and onchain withdrawal requests wait in an ordered inbox. Each registration fixes the next range of entries, so later arrivals cannot change it. A deposit must be registered within a fixed time of arrival. It then waits for its epoch's close with no further deposit deadline.
 
 Accounts without deposits or withdrawals can start paying in the new epoch while the operator is still adding incoming credits from the previous one. At the transition, the starting spendable balance $\widetilde B_a$ is the previous epoch's starting balance minus accepted outgoing payments, plus incoming credits already added. Let $\rho_a$ be the remaining credit from that epoch:
 
@@ -331,15 +331,15 @@ $$
 Figure 6: Both calculations include the same incoming credit. Adding it to the spendable balance preserves payments already accepted in the new epoch.
 :::
 
-Deposits fixed at registration are available when payments begin in that epoch. A new account created by incoming credit must wait for the close that credits it to be admitted before spending. A payer with an outstanding withdrawal authorization waits until its signed deadline before signing another payment. Settlement accepts an authorization only within a fixed window before that deadline. Once that window closes, the payer may discard it and resume paying if certified chain state proves that neither a registration nor the onchain queue accepted it.
+Deposits fixed at registration are available when payments begin in that epoch. A new account created by incoming credit must wait for the close that credits it to be admitted before spending. Settlement accepts a withdrawal authorization only within a fixed window before its deadline. The payer signs no further payments until that deadline, unless the window has closed and certified chain state proves that neither a registration nor the onchain queue accepted it.
 
 ### Retrying Across the Boundary
 
 A request sent near the end of $e$ may arrive too late, or its acknowledgment may be lost. The payer then cannot tell whether $e$ includes it. An unconditional retry in $e+1$ could pay twice.
 
-The predecessor root binds the retry to the payer's final vector in $e$, including how its debit is split across recipients. The operator countersigns only if that root matches its record. Validators derive the root from $e$'s admitted account rows when checking $e+1$, so $e+1$'s close need not repeat it. Receipts and challenges include it for signature verification.
+The predecessor root binds the retry to the payer's final vector in $e$, including how its debit is split across recipients. The operator countersigns only if that root matches its record. Validators derive the root from $e$'s admitted account rows when checking $e+1$.
 
-After $e$ ends, the operator returns original receipts for accepted requests from $e$ and rejects unaccepted ones as stale, reporting the payer's final state. The payer verifies receipts through that state, then signs the remaining payments in $e+1$ against the reported root. It waits for $e$'s admission instead if it holds a receipt past the reported state, or if the reported state is nonempty and it cannot obtain the receipts up to it.
+After $e$ ends, the operator returns original receipts for accepted requests and rejects the rest as stale, reporting the payer's final state. If the payer holds no receipt beyond that state and verifies receipts through it, it signs the remaining payments in $e+1$ against the reported root. Otherwise, it waits for $e$'s admission.
 
 If the operator includes a rejected request in $e$, the payer's row has a different root and validators reject the retry. If the operator countersigned that retry, its receipt and a public proof establish a debit mismatch against $e+1$'s admitted close.
 
