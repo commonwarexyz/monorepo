@@ -86,6 +86,8 @@ CONFIG_KEYS = (
     "STATELENS_AGENT",
     "STATELENS_CLAUDE_MODEL",
     "STATELENS_CODEX_MODEL",
+    "STATELENS_CLAUDE_EFFORT",
+    "STATELENS_CODEX_EFFORT",
     "STATELENS_TEST_TOOLCHAIN",
     "STATELENS_FUZZ_TOOLCHAIN",
     "STATELENS_KB",
@@ -456,13 +458,26 @@ def agent_model(config, agent):
     return config[key]
 
 
+def agent_effort(config, agent):
+    """The reasoning effort to ask the agent CLI for; empty means its own default.
+
+    The value is passed through rather than checked here: each CLI owns its own
+    levels, and a wrong one is the CLI's to reject.
+    """
+    key = "STATELENS_CLAUDE_EFFORT" if agent == "claude" else "STATELENS_CODEX_EFFORT"
+    return config[key]
+
+
 def agent_command(config, agent, phase, repo):
     """Non-interactive agent invocation (SPEC section 12); the prompt goes to stdin."""
     model = agent_model(config, agent)
+    effort = agent_effort(config, agent)
     if agent == "claude":
         command = ["claude", "-p", "--output-format", "text"]
         if model:
             command += ["--model", model]
+        if effort:
+            command += ["--effort", effort]
         if phase in (1, "beacons"):
             command += ["--permission-mode", "acceptEdits", "--allowedTools"]
             command += ["Read", "Grep", "Glob", "Write", "Edit", "WebFetch"]
@@ -477,6 +492,8 @@ def agent_command(config, agent, phase, repo):
     command = ["codex", "exec", "-C", str(repo)]
     if model:
         command += ["-m", model]
+    if effort:
+        command += ["-c", f"model_reasoning_effort={effort}"]
     if phase == "beacons":
         # No per-tool allowlist: writes stay in the workspace and the network is off.
         command += ["-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=false"]
@@ -3563,6 +3580,7 @@ class Campaign:
             "base": self.base,
             "agent": self.agent,
             "model": agent_model(self.config, self.agent),
+            "effort": agent_effort(self.config, self.agent),
             "profile": self.profile_name,
             "test_toolchain": self.test_toolchain,
             "fuzz_toolchain": self.fuzz_toolchain,

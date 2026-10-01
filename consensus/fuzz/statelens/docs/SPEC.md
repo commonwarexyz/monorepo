@@ -333,6 +333,13 @@ STATELENS_AGENT=claude
 STATELENS_CLAUDE_MODEL=
 STATELENS_CODEX_MODEL=
 
+# Reasoning effort passed to the agent CLI; empty means the CLI default. Claude
+# takes low, medium, high, xhigh or max; codex takes its own
+# `model_reasoning_effort` levels. Pin both this and the model for a campaign you
+# want to be able to compare with another.
+STATELENS_CLAUDE_EFFORT=
+STATELENS_CODEX_EFFORT=
+
 # Toolchain for the test gate and the check command.
 STATELENS_TEST_TOOLCHAIN=stable
 
@@ -1552,8 +1559,8 @@ Both phases run with the repository root as the working directory.
 
 | Agent | Phase 1 | Phase 2 |
 |---|---|---|
-| `claude` | `claude -p --output-format text [--model M] --permission-mode acceptEdits --allowedTools Read Grep Glob Write Edit WebFetch "Bash(gh:*)" "Bash(curl:*)"` | `claude -p --output-format text [--model M] --dangerously-skip-permissions` |
-| `codex` | `codex exec -C <repo root> [-m M] -s workspace-write -c sandbox_workspace_write.network_access=true -` | `codex exec -C <repo root> [-m M] --dangerously-bypass-approvals-and-sandbox -` |
+| `claude` | `claude -p --output-format text [--model M] [--effort E] --permission-mode acceptEdits --allowedTools Read Grep Glob Write Edit WebFetch "Bash(gh:*)" "Bash(curl:*)"` | `claude -p --output-format text [--model M] [--effort E] --dangerously-skip-permissions` |
+| `codex` | `codex exec -C <repo root> [-m M] [-c model_reasoning_effort=E] -s workspace-write -c sandbox_workspace_write.network_access=true -` | `codex exec -C <repo root> [-m M] [-c model_reasoning_effort=E] --dangerously-bypass-approvals-and-sandbox -` |
 
 Notes:
 
@@ -1562,6 +1569,11 @@ Notes:
 - Phase 2 agents have unrestricted access to the host (D4). The README MUST say that
   campaigns run on a dedicated machine or container. Being unrestricted is also what lets
   the instrumenter run the `kb` commands of section 5.6; its prompt says when to.
+- The model `M` is `STATELENS_CLAUDE_MODEL` or `STATELENS_CODEX_MODEL` and the effort `E`
+  is `STATELENS_CLAUDE_EFFORT` or `STATELENS_CODEX_EFFORT` (section 5.1). An empty value
+  leaves the flag out, so the CLI's own default applies; a value is passed through
+  unchecked, because each CLI owns its levels and is the one to reject a wrong one. Both
+  go into `SL/campaign/meta.json`, so a campaign records what produced it.
 - The script checks that the chosen CLI is on `PATH` before any other work.
 
 ---
@@ -3364,7 +3376,8 @@ Workflow test, see SPEC.md section 14.
    (D4) and instrument the checkout in place (D10). Clone the repository fresh on a
    dedicated machine or container, run the campaign and the fuzzers in that clone, and
    discard the clone afterwards. Never commit an instrumented checkout.
-3. Prerequisites (section 5.2) and `config.env`, including `STATELENS_AUDIT`.
+3. Prerequisites (section 5.2) and `config.env`, including `STATELENS_AUDIT` and the
+   model and effort of the agent CLI, which are the CLI's own defaults unless pinned.
 4. Phase 1a: `just extract [--registry simplex|marshal] <kind> <source>...` with one example
    per kind, then review: every file in a registry is used by the next campaign that binds
    it; edit or delete drafts; `just check-invariants`.

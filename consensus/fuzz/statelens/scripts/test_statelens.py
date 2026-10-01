@@ -1001,6 +1001,54 @@ class PromptPaths(unittest.TestCase):
                     )
 
 
+class AgentInvocation(unittest.TestCase):
+    """A model or an effort that `config.env` sets has to reach the CLI. An option
+    that is silently dropped looks exactly like one the CLI honoured, and the
+    campaign would record a setting it never used."""
+
+    def config(self, **values):
+        base = {key: "" for key in sl.CONFIG_KEYS}
+        base.update(values)
+        return base
+
+    def command(self, agent, phase=2, **values):
+        return sl.agent_command(self.config(**values), agent, phase, pathlib.Path("/repo"))
+
+    def test_an_empty_value_leaves_the_flag_out(self):
+        for agent in ("claude", "codex"):
+            command = self.command(agent)
+            self.assertNotIn("--effort", command)
+            self.assertNotIn("--model", command)
+            self.assertFalse(
+                [word for word in command if word.startswith("model_reasoning_effort")],
+                f"{agent} must fall back to its own default",
+            )
+
+    def test_claude_takes_the_model_and_the_effort(self):
+        command = self.command(
+            "claude", STATELENS_CLAUDE_MODEL="claude-opus-5", STATELENS_CLAUDE_EFFORT="xhigh"
+        )
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-5")
+        self.assertEqual(command[command.index("--effort") + 1], "xhigh")
+
+    def test_codex_takes_the_effort_as_a_config_override(self):
+        command = self.command("codex", STATELENS_CODEX_EFFORT="high")
+        self.assertIn("model_reasoning_effort=high", command)
+        self.assertEqual(command[command.index("model_reasoning_effort=high") - 1], "-c")
+
+    def test_each_agent_reads_only_its_own_settings(self):
+        command = self.command(
+            "claude", STATELENS_CODEX_MODEL="gpt", STATELENS_CODEX_EFFORT="high"
+        )
+        self.assertNotIn("--model", command)
+        self.assertNotIn("--effort", command)
+
+    def test_the_effort_reaches_every_phase(self):
+        for phase in (1, 2, "beacons"):
+            command = self.command("claude", STATELENS_CLAUDE_EFFORT="max")
+            self.assertIn("--effort", command, f"phase {phase} must carry the effort")
+
+
 class CoverageSelection(unittest.TestCase):
     """`just coverage` takes the names `just fuzz` takes, so a marshal target must
     not be covered against the simplex profile's package, and a typo must name the
