@@ -30,8 +30,8 @@ type Snapshot<E, V> = Arc<variable::Reader<'static, E, V>>;
 /// Writer handle for enqueueing items.
 ///
 /// Storage-mutating functions consume the writer and return it only on success: an error (or a
-/// dropped future) destroys the handle.
-/// The reader then delivers every published item and returns `None`.
+/// dropped future) destroys the handle. The reader then delivers every published item and returns
+/// `None`.
 pub struct Writer<E: Context, V: CodecShared> {
     /// The underlying journal storing queue items.
     journal: variable::Journal<E, V>,
@@ -180,10 +180,12 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
                 return Ok(Some(item));
             }
 
-            // `try_recv` has seen the newest snapshot, so wait for the next one.
+            // `try_recv` has seen the newest snapshot, so wait for the next one. `changed` marks it
+            // seen, so move to it here.
             if self.snapshots.changed().await.is_err() {
                 return Ok(None);
             }
+            self.snapshot = self.snapshots.borrow_and_update().clone();
         }
     }
 
@@ -195,17 +197,11 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn try_recv(&mut self) -> Result<Option<(u64, V)>, Error> {
-        // Deliver from the current snapshot before switching to a newer view.
-        if let Some(item) = self.cursor.dequeue(&*self.snapshot).await? {
-            return Ok(Some(item));
+        // Move to the newest snapshot before reading, releasing blobs the writer has pruned. A
+        // closed channel still holds the writer's final snapshot.
+        if self.snapshots.has_changed().unwrap_or(true) {
+            self.snapshot = self.snapshots.borrow_and_update().clone();
         }
-
-        // Move to the newest snapshot if the writer published one.
-        let newest = self.snapshots.borrow_and_update().clone();
-        if Arc::ptr_eq(&newest, &self.snapshot) {
-            return Ok(None);
-        }
-        self.snapshot = newest;
         self.cursor.dequeue(&*self.snapshot).await
     }
 
@@ -326,6 +322,7 @@ mod tests {
         Queue::init(context, cfg).await?.split().await
     }
 
+    /// An enqueued item reaches the reader and can be acknowledged.
     #[test_traced]
     fn test_split_basic() {
         let executor = deterministic::Runner::default();
@@ -418,6 +415,7 @@ mod tests {
         });
     }
 
+    /// A bulk enqueue publishes its items, in order, with one commit.
     #[test_traced]
     fn test_split_enqueue_bulk() {
         let executor = deterministic::Runner::default();
@@ -444,6 +442,7 @@ mod tests {
         });
     }
 
+    /// Items enqueued by a writer task reach a concurrent reader in order.
     #[test_traced]
     fn test_split_concurrent() {
         let executor = deterministic::Runner::default();
@@ -479,6 +478,7 @@ mod tests {
         });
     }
 
+    /// `recv` completes inside `select!`.
     #[test_traced]
     fn test_split_select() {
         let executor = deterministic::Runner::default();
@@ -504,6 +504,8 @@ mod tests {
         });
     }
 
+    /// After the writer is dropped, the reader delivers the published items and then returns
+    /// `None`.
     #[test_traced]
     fn test_split_writer_dropped() {
         let executor = deterministic::Runner::default();
@@ -530,6 +532,7 @@ mod tests {
         });
     }
 
+    /// `try_recv` returns `None` until an item is published, then returns the item.
     #[test_traced]
     fn test_split_try_recv() {
         let executor = deterministic::Runner::default();
@@ -585,6 +588,52 @@ mod tests {
         });
     }
 
+    /// `Writer::sync` publishes appended items, like a commit.
+    #[test_traced]
+    fn test_split_sync_publishes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_split_sync_publishes", &context);
+            let (writer, mut reader) = init(context, cfg).await.unwrap();
+
+            // An appended item stays unpublished until the sync.
+            let (writer, _) = writer.append(vec![7]).await.unwrap();
+            assert!(reader.try_recv().await.unwrap().is_none());
+            let _writer = writer.sync().await.unwrap();
+
+            // The reader receives the synced item.
+            let (pos, item) = reader.try_recv().await.unwrap().unwrap();
+            assert_eq!(pos, 0);
+            assert_eq!(item, vec![7]);
+        });
+    }
+
+    /// `Reader::ack_up_to` shares its floor with the writer, so a sync prunes below it.
+    #[test_traced]
+    fn test_split_ack_up_to_prunes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Publish three sections, then acknowledge the first 15 items without reading them.
+            let cfg = test_config("test_split_ack_up_to", &context);
+            let (writer, mut reader) = init(context.child("first"), cfg.clone()).await.unwrap();
+            let (writer, _) = writer
+                .enqueue_bulk((0..25u8).map(|i| vec![i]))
+                .await
+                .unwrap();
+            reader.ack_up_to(15).unwrap();
+            assert_eq!(reader.ack_floor(), 15);
+
+            // Syncing prunes whole sections below the floor.
+            let writer = writer.sync().await.unwrap();
+            drop(writer);
+            drop(reader);
+
+            // A restart resumes delivery at the pruning boundary.
+            let (_writer, reader) = init(context.child("second"), cfg).await.unwrap();
+            assert_eq!(reader.ack_floor(), 10);
+        });
+    }
+
     /// The writer prunes below the reader's ack floor on sync, the reader keeps receiving
     /// across the prune, and a restart re-delivers from the pruning boundary.
     #[test_traced]
@@ -610,8 +659,11 @@ mod tests {
             let writer = writer.sync().await.unwrap();
             assert_eq!(writer.size(), 25);
 
-            // The reader receives the rest after the prune.
-            for i in 15..25 {
+            // The reader moves to the pruned snapshot before its next read and receives the rest.
+            let (pos, _) = reader.recv().await.unwrap().unwrap();
+            assert_eq!(pos, 15);
+            assert_eq!(reader.snapshot.bounds().start, 10);
+            for i in 16..25 {
                 let (pos, item) = reader.recv().await.unwrap().unwrap();
                 assert_eq!(pos, i);
                 assert_eq!(item, vec![i as u8]);

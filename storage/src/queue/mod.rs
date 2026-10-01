@@ -7,12 +7,11 @@
 //!
 //! # Ownership
 //!
-//! Methods that write to storage (`append`, `enqueue`, `commit`, `sync`) take the queue by
-//! value and return it on success. If one returns an error, or its future is dropped before
-//! it finishes, the queue is gone: state that was not yet durable is discarded, but
-//! everything already on disk stays recoverable. Reads and
-//! in-memory bookkeeping (`dequeue`, `ack`, `ack_up_to`, `reset`) borrow the queue; a failed
-//! `dequeue` read does not invalidate it.
+//! Methods that write to storage (`append`, `enqueue`, `commit`, `sync`) take the queue by value
+//! and return it on success. If one returns an error, or its future is dropped before it finishes,
+//! the queue is gone: state that was not yet durable is discarded, but everything already on disk
+//! stays recoverable. Reads and in-memory bookkeeping (`dequeue`, `ack`, `ack_up_to`, `reset`)
+//! borrow the queue. A failed `dequeue` read does not invalidate it.
 //!
 //! # Concurrent Access
 //!

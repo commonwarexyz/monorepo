@@ -281,14 +281,14 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 FuzzOperation::WriteResize { new_size } => {
-                    // A failed resize destroys the model's writer.
+                    // A failed resize drops the writer.
                     if let Some(writer) = write_buffer.take() {
                         write_buffer = writer.resize(new_size as u64).await.ok();
                     }
                 }
 
                 FuzzOperation::WriteSync => {
-                    // A failed durability barrier destroys the model's writer.
+                    // A failed durability barrier drops the writer.
                     if let Some(writer) = write_buffer.take() {
                         write_buffer = writer.sync().await.ok();
                     }

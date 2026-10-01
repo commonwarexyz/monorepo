@@ -2523,9 +2523,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// proceed while they fit in the write buffer (a buffer flush or rollover waits for the
     /// in-flight fsync). Dropping the handle does not cancel the sync or lose its failure. Flush
     /// errors are returned directly. A failed data sync fails the next commit, sync, or rollover,
-    /// and any prune that changes the journal. A failed data tail sync also fails the next append
-    /// or snapshot that writes to that blob. A failed offsets or recovery-watermark sync is not
-    /// observed by commit and resurfaces on the next sync.
+    /// and any prune that changes the journal. A failed data tail sync also fails the next
+    /// start_sync, and the next append or snapshot that writes to that blob. A failed offsets or
+    /// recovery-watermark sync is not observed by commit and resurfaces on the next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
