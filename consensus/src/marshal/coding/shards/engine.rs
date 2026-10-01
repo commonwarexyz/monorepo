@@ -229,7 +229,7 @@ pub enum Error<C: CodingScheme> {
 /// The outcome of a reconstruction job.
 enum Outcome<B, C: CodingScheme> {
     /// Fewer than the minimum shards passed verification. Holds every checked shard.
-    Insufficient(Vec<C::CheckedShard>),
+    Insufficient(Vec<SizedShard<C>>),
     /// Enough shards passed verification to decode the block.
     Decoded(Result<B, Error<C>>),
 }
@@ -250,7 +250,7 @@ struct Reconstructed<P, B, C: CodingScheme, H> {
 fn reconstruct<P, B, C, H>(
     commitment: Commitment<B, C, H>,
     start: SystemTime,
-    mut checked: Vec<C::CheckedShard>,
+    mut checked: Vec<SizedShard<C>>,
     pending: Vec<(P, IndexedShard<C>)>,
     cfg: &B::Cfg,
     max_block_size: NonZeroUsize,
@@ -271,9 +271,12 @@ where
             .map(|(_, shard)| (shard.index, &shard.data))
             .collect::<Vec<_>>();
         let results = C::check_many(&config, &commitment.root(), &shards, strategy);
-        for ((peer, _), result) in zip_eq(pending, results) {
+        for ((peer, indexed), result) in zip_eq(pending, results) {
             match result {
-                Ok(shard) => checked.push(shard),
+                Ok(shard) => checked.push(SizedShard {
+                    shard,
+                    size: indexed.data.encode_size(),
+                }),
                 Err(_) => invalid.push(peer),
             }
         }
@@ -294,7 +297,7 @@ where
 /// Decodes the block encoded by `checked` shards and validates it against `commitment`.
 fn decode<B, C, H>(
     commitment: Commitment<B, C, H>,
-    checked: &[C::CheckedShard],
+    checked: &[SizedShard<C>],
     cfg: &B::Cfg,
     max_block_size: NonZeroUsize,
     strategy: &impl Strategy,
@@ -307,7 +310,7 @@ where
     let blob = C::decode(
         &commitment.config(),
         &commitment.root(),
-        checked.iter(),
+        checked.iter().map(|sized| &sized.shard),
         strategy,
     )
     .map_err(Error::Coding)?;
@@ -762,7 +765,7 @@ where
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");
             },
-            // Removing or caching a record aborts its job.
+            // Removing or caching a record discards its job's result.
             Ok(reconstructed) = self.jobs.next_completed() else continue => {
                 self.complete(reconstructed);
             },
@@ -945,10 +948,12 @@ where
             .take(minimum.saturating_sub(checked))
             .collect::<Vec<_>>();
         let checked = mem::take(&mut state.checked_shards);
-        let len = state
-            .received_shards
-            .values()
-            .map(EncodeSize::encode_size)
+
+        // The spawn hint is the encoded size of the shards the job takes.
+        let len = checked
+            .iter()
+            .map(|sized| sized.size)
+            .chain(pending.iter().map(|(_, shard)| shard.data.encode_size()))
             .sum();
         let cfg = self.block_codec_cfg.clone();
         let max_block_size = self.max_block_size;
@@ -984,8 +989,8 @@ where
             commonware_p2p::block!(self.blocker, peer, "invalid shard received");
         }
 
-        // Removing or caching a record drops its job's aborter, and an aborted job never
-        // completes.
+        // Removing or caching a record drops its job's aborter, so only a job whose record awaits
+        // quorum yields its result.
         let record = self
             .records
             .get_mut(&commitment)
@@ -1316,7 +1321,7 @@ where
 
     /// Removes the record for `commitment` without closing any subscription.
     ///
-    /// Dropping the record aborts its reconstruction job.
+    /// Dropping the record discards its reconstruction job's result.
     fn evict(&mut self, commitment: Commitment<B, C, H>) {
         let Some(record) = self.records.remove(&commitment) else {
             return;
@@ -1637,6 +1642,12 @@ struct IndexedShard<C: CodingScheme> {
     data: C::Shard,
 }
 
+/// A checked coding shard paired with the encoded size of the shard it was checked from.
+struct SizedShard<C: CodingScheme> {
+    shard: C::CheckedShard,
+    size: usize,
+}
+
 /// State shared across all reconstruction phases.
 struct CommonState<P, B, C, H>
 where
@@ -1673,7 +1684,7 @@ where
     /// Raw shard data received per index, retained for equivocation detection.
     received_shards: BTreeMap<u16, C::Shard>,
     /// Shards that have been verified and are ready to contribute to reconstruction.
-    checked_shards: Vec<C::CheckedShard>,
+    checked_shards: Vec<SizedShard<C>>,
     /// Shards pending batch validation, keyed by sender.
     pending_shards: BTreeMap<P, IndexedShard<C>>,
     /// The in-flight reconstruction job. Dropping it discards the job's result.
@@ -1730,7 +1741,7 @@ where
     }
 
     /// Ends shard accumulation once the block is cached, dropping received, checked, and
-    /// pending shards and any in-flight job.
+    /// pending shards and discarding the result of any in-flight job.
     fn into_ready(self) -> Self {
         match self {
             Self::AwaitingQuorum(state) => Self::Ready(ReadyState {
@@ -1822,8 +1833,11 @@ where
             AssignedShardVerifiedAction::NotifyOnly
         });
         if let Self::AwaitingQuorum(state) = self {
+            state.checked_shards.push(SizedShard {
+                shard: checked,
+                size: shard.data.encode_size(),
+            });
             state.received_shards.insert(shard.index, shard.data);
-            state.checked_shards.push(checked);
         }
         true
     }
@@ -1985,7 +1999,7 @@ mod tests {
         Manager as _, TrackedPeers,
         simulated::{self, Control, Link, Oracle},
     };
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic, utils::reschedule};
     use commonware_utils::{
         N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
@@ -2119,7 +2133,7 @@ mod tests {
     type Prov = MultiEpochProvider;
     type NetworkSender = simulated::Sender<P, deterministic::Context>;
     type D = simulated::Manager<P, deterministic::Context>;
-    type ShardEngine<S> = Engine<deterministic::Context, Prov, X, D, S, H, B, P, Sequential>;
+    type ShardEngine<S, T = Sequential> = Engine<deterministic::Context, Prov, X, D, S, H, B, P, T>;
     type ChurningShardEngine<S> =
         Engine<deterministic::Context, ChurningProvider, X, D, S, H, B, P, Sequential>;
 
@@ -2242,6 +2256,103 @@ mod tests {
                 release.recv().unwrap();
             }
             C::decode(config, commitment, shards, strategy)
+        }
+    }
+
+    /// Sequential execution that records the `len` of each spawned job.
+    #[derive(Clone, Debug, Default)]
+    struct Recording {
+        lens: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl Strategy for Recording {
+        fn manual(&self) -> Manual<Self> {
+            unreachable!("the engine never partitions work manually")
+        }
+
+        fn spawn<F, T>(&self, len: usize, f: F) -> impl Future<Output = T> + Send + 'static
+        where
+            F: FnOnce(Self) -> T + Send + 'static,
+            T: Send + 'static,
+        {
+            self.lens.lock().push(len);
+            let strategy = self.clone();
+            Sequential.spawn(len, move |_| f(strategy))
+        }
+
+        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
+        where
+            R: Send,
+            SEQ: FnOnce() -> R + Send,
+            PAR: FnOnce() -> R + Send,
+        {
+            Sequential.run(len, serial, parallel)
+        }
+
+        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            Sequential.try_run(len, serial, parallel)
+        }
+
+        fn fold_init<I, INIT, T, R, ID, F, RD>(
+            &self,
+            iter: I,
+            init: INIT,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> R
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            R: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            Sequential.fold_init(iter, init, identity, fold_op, reduce_op)
+        }
+
+        fn try_fold<I, R, E, ID, F, RD>(
+            &self,
+            iter: I,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> Result<R, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            R: Send,
+            E: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            Sequential.try_fold(iter, identity, fold_op, reduce_op)
+        }
+
+        fn join<A, Z, RA, RZ>(&self, a: A, z: Z) -> (RA, RZ)
+        where
+            A: FnOnce() -> RA + Send,
+            Z: FnOnce() -> RZ + Send,
+            RA: Send,
+            RZ: Send,
+        {
+            Sequential.join(a, z)
+        }
+
+        fn sort_by<T, F>(&self, items: &mut [T], compare: F)
+        where
+            T: Send,
+            F: Fn(&T, &T) -> std::cmp::Ordering + Send + Sync,
+        {
+            Sequential.sort_by(items, compare)
         }
     }
 
@@ -2493,15 +2604,19 @@ mod tests {
         }
     }
 
-    /// Builds an unstarted engine for the participant at `index` and the sender its handlers
-    /// take. Every participant is in `latest.primary`.
-    async fn unstarted(
+    /// Builds an unstarted engine on `strategy` for the participant at `index` and the sender its
+    /// handlers take. Every participant is in `latest.primary`.
+    async fn unstarted<T: Strategy>(
         context: &deterministic::Context,
         oracle: &O,
         private_keys: &[PrivateKey],
         index: usize,
         records: NonZeroUsize,
-    ) -> (ShardEngine<C>, WrappedSender<NetworkSender, Shard<B, C, H>>) {
+        strategy: T,
+    ) -> (
+        ShardEngine<C, T>,
+        WrappedSender<NetworkSender, Shard<B, C, H>>,
+    ) {
         let participants: Set<P> =
             Set::from_iter_dedup(private_keys.iter().map(|key| key.public_key()));
         let control = oracle.control(private_keys[index].public_key());
@@ -2520,7 +2635,7 @@ mod tests {
             blocker: control,
             max_block_size: MAX_BLOCK_SIZE,
             block_codec_cfg: (),
-            strategy: STRATEGY,
+            strategy,
             mailbox_size: NZUsize!(16),
             peer_buffer_size: NZUsize!(4),
             records,
@@ -2541,6 +2656,17 @@ mod tests {
                 .filter(|shard| shard.commitment() == commitment)
                 .count()
         })
+    }
+
+    /// Waits for the next job of `engine` to finish and returns its result.
+    async fn finished<T: Strategy>(engine: &mut ShardEngine<C, T>) -> Reconstructed<P, B, C, H> {
+        assert!(!engine.jobs.is_empty(), "engine must hold a job");
+        loop {
+            if let Some(result) = engine.jobs.next_completed().now_or_never() {
+                return result.expect("job result must not be discarded");
+            }
+            reschedule().await;
+        }
     }
 
     /// Returns each engine's value of the gauge `name` from encoded metrics.
@@ -2934,7 +3060,7 @@ mod tests {
             let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
             let records = NZUsize!(4);
             let (mut engine, mut sender) =
-                unstarted(&context, &oracle, &private_keys, 3, records).await;
+                unstarted(&context, &oracle, &private_keys, 3, records, STRATEGY).await;
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
             let make_block = |id| {
                 CodedBlock::<B, C, H>::new(
@@ -3023,7 +3149,7 @@ mod tests {
             let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
             let records = NZUsize!(2);
             let (mut engine, mut sender) =
-                unstarted(&context, &oracle, &private_keys, 0, records).await;
+                unstarted(&context, &oracle, &private_keys, 0, records, STRATEGY).await;
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
             let make_block = |id| {
                 CodedBlock::<B, C, H>::new(
@@ -3305,7 +3431,7 @@ mod tests {
             private_keys.sort_by_key(|key| key.public_key());
             let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
             let (mut engine, mut sender) =
-                unstarted(&context, &oracle, &private_keys, 2, NZUsize!(4)).await;
+                unstarted(&context, &oracle, &private_keys, 2, NZUsize!(4), STRATEGY).await;
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
             let make_block = |id| {
                 CodedBlock::<B, C, H>::new(
@@ -3384,7 +3510,7 @@ mod tests {
             let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
             let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
             let (mut engine, mut sender) =
-                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16)).await;
+                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), STRATEGY).await;
 
             // Peer 1 observes the engine's gossip.
             let (_, mut observer) = oracle
@@ -3485,7 +3611,7 @@ mod tests {
             let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
             let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
             let (mut engine, mut sender) =
-                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16)).await;
+                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), STRATEGY).await;
 
             // Peer 1 observes the engine's gossip.
             let (_, mut observer) = oracle
@@ -3573,7 +3699,7 @@ mod tests {
             private_keys.sort_by_key(|key| key.public_key());
             let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
             let (mut engine, mut sender) =
-                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16)).await;
+                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), STRATEGY).await;
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
 
             // The commitment claims the digest of one block and the coding root of another.
@@ -4740,7 +4866,7 @@ mod tests {
             private_keys.sort_by_key(|key| key.public_key());
             let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
             let (mut engine, mut sender) =
-                unstarted(&context, &oracle, &private_keys, 2, NZUsize!(1)).await;
+                unstarted(&context, &oracle, &private_keys, 2, NZUsize!(1), STRATEGY).await;
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
             let make_block = |height, payload| {
                 CodedBlock::<B, C, H>::new(
@@ -6296,7 +6422,7 @@ mod tests {
             oracle.manager().track(0, participants.clone());
             context.sleep(Duration::from_millis(10)).await;
 
-            // Peer 2 runs its engine on a two-worker strategy.
+            // Peer 2 runs its engine on a two-worker strategy that hands off every job.
             let receiver_pk = peer_keys[2].clone();
             let (control, sender, receiver) = registrations
                 .remove(&receiver_pk)
@@ -6312,7 +6438,7 @@ mod tests {
                 blocker: control,
                 max_block_size: MAX_BLOCK_SIZE,
                 block_codec_cfg: (),
-                strategy: Rayon::new(NZUsize!(2)).unwrap(),
+                strategy: Rayon::new(NZUsize!(2)).unwrap().manual(),
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
@@ -6384,10 +6510,10 @@ mod tests {
         });
     }
 
-    /// Evicting or caching a record aborts its reconstruction job, so a stale result never
-    /// recreates, caches, or removes the record.
+    /// Evicting or caching a record discards its reconstruction job's result, so a stale result
+    /// never recreates, caches, or removes the record.
     #[test_traced]
-    fn test_reconstruction_job_aborted_with_its_record() {
+    fn test_reconstruction_result_discarded_with_its_record() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
@@ -6481,6 +6607,200 @@ mod tests {
                     assert!(record.is_none(), "{action}");
                 }
             }
+        });
+    }
+
+    /// While a job is in flight, the record still classifies shards. The assigned shard is
+    /// verified and joins the shards an insufficient job returns, an exact duplicate of a shard
+    /// the job took is ignored, and a conflicting copy blocks its sender.
+    #[test_traced]
+    fn test_mid_job_shards_merge_with_insufficient_result() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(4),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
+
+            // Every job hands off to the pool.
+            let strategy = Rayon::new(NZUsize!(2)).unwrap().manual();
+            let (mut engine, mut sender) =
+                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), strategy).await;
+            let coding_config = coding_config_for_participants(peer_keys.len() as u16);
+            let block = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                coding_config,
+                &STRATEGY,
+            );
+            let other = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(1), 200),
+                coding_config,
+                &STRATEGY,
+            );
+            let commitment = block.commitment();
+            let forged = |index| {
+                let mut shard = other.shard(index).expect("missing shard");
+                shard.commitment = commitment;
+                shard
+            };
+
+            // Discovery names peer 1 the leader. Peer 2's invalid shard and peer 3's valid shard
+            // reach the minimum and start a job.
+            engine.handle_external_proposal(
+                &mut sender,
+                commitment,
+                peer_keys[1].clone(),
+                Round::new(Epoch::zero(), View::new(1)),
+            );
+            engine.handle_network_shard(&mut sender, peer_keys[2].clone(), forged(2));
+            let valid = block.shard(3).expect("missing shard");
+            engine.handle_network_shard(&mut sender, peer_keys[3].clone(), valid.clone());
+            assert_eq!(engine.jobs.len(), 1);
+
+            // Before the job's result is applied, the leader delivers the assigned shard, which is
+            // verified. Peer 3 resends its shard, which is ignored, and then sends a conflicting
+            // shard, which blocks it.
+            let assigned = block.shard(0).expect("missing shard");
+            engine.handle_network_shard(&mut sender, peer_keys[1].clone(), assigned);
+            engine.handle_network_shard(&mut sender, peer_keys[3].clone(), valid);
+            assert!(oracle.blocked().await.unwrap().is_empty());
+            engine.handle_network_shard(&mut sender, peer_keys[3].clone(), forged(3));
+            assert_blocked(&oracle, &peer_keys[0], &peer_keys[3]).await;
+            let Some(ReconstructionState::AwaitingQuorum(state)) = engine
+                .records
+                .get(&commitment)
+                .and_then(CommitmentRecord::reconstruction)
+            else {
+                panic!("record must await quorum");
+            };
+            assert!(state.common.assigned_shard_verified);
+            assert_eq!(state.checked_shards.len(), 1);
+            assert!(state.pending_shards.is_empty());
+            assert!(state.job.is_some());
+
+            // The job finds peer 2's shard invalid and returns peer 3's checked shard, which joins
+            // the assigned shard. The two reach the minimum and start a job that rebuilds the
+            // block.
+            let reconstructed = finished(&mut engine).await;
+            assert!(matches!(reconstructed.outcome, Outcome::Insufficient(_)));
+            engine.complete(reconstructed);
+            assert_blocked(&oracle, &peer_keys[0], &peer_keys[2]).await;
+            assert_eq!(engine.jobs.len(), 1);
+            let reconstructed = finished(&mut engine).await;
+            engine.complete(reconstructed);
+            let record = engine.records.get(&commitment).expect("record must exist");
+            assert_eq!(
+                record.block().expect("block must be cached").commitment(),
+                commitment
+            );
+            assert_eq!(oracle.blocked().await.unwrap().len(), 2);
+        });
+    }
+
+    /// A job's spawn `len` is the encoded size of the checked shards and the pending shards it
+    /// takes. It excludes surplus pending shards and shards an earlier job found invalid.
+    #[test_traced]
+    fn test_job_len_counts_taken_shards() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(10),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut private_keys: Vec<PrivateKey> = (0..10).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
+            let strategy = Recording::default();
+            let (mut engine, mut sender) = unstarted(
+                &context,
+                &oracle,
+                &private_keys,
+                0,
+                NZUsize!(16),
+                strategy.clone(),
+            )
+            .await;
+            let coding_config = coding_config_for_participants(peer_keys.len() as u16);
+            let block = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                coding_config,
+                &STRATEGY,
+            );
+            let other = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(1), 200),
+                coding_config,
+                &STRATEGY,
+            );
+            let commitment = block.commitment();
+            let shard = |index| block.shard(index).expect("missing shard");
+            let mut invalid = other.shard(2).expect("missing shard");
+            invalid.commitment = commitment;
+            let size = |shard: &Shard<B, C, H>| shard.inner.encode_size();
+            let expected = [
+                size(&shard(0)) + size(&invalid) + size(&shard(3)) + size(&shard(4)),
+                size(&shard(0)) + size(&shard(3)) + size(&shard(4)) + size(&shard(5)),
+            ];
+
+            // Before discovery, the leader delivers the assigned shard, peer 2 sends an invalid
+            // shard, and peers 3 through 6 send their own shards.
+            engine.handle_network_shard(&mut sender, peer_keys[1].clone(), shard(0));
+            engine.handle_network_shard(&mut sender, peer_keys[2].clone(), invalid);
+            for index in 3..=6 {
+                engine.handle_network_shard(
+                    &mut sender,
+                    peer_keys[usize::from(index)].clone(),
+                    shard(index),
+                );
+            }
+
+            // Discovery verifies the assigned shard and starts a job that takes it and the
+            // shards of peers 2 through 4. The shards of peers 5 and 6 stay pending.
+            engine.handle_external_proposal(
+                &mut sender,
+                commitment,
+                peer_keys[1].clone(),
+                Round::new(Epoch::zero(), View::new(1)),
+            );
+            let Some(ReconstructionState::AwaitingQuorum(state)) = engine
+                .records
+                .get(&commitment)
+                .and_then(CommitmentRecord::reconstruction)
+            else {
+                panic!("record must await quorum");
+            };
+            assert_eq!(state.pending_shards.len(), 2);
+
+            // Peer 2's shard fails verification. The next job takes the three checked shards and
+            // peer 5's shard and rebuilds the block.
+            let reconstructed = finished(&mut engine).await;
+            engine.complete(reconstructed);
+            let reconstructed = finished(&mut engine).await;
+            engine.complete(reconstructed);
+            assert!(
+                engine
+                    .records
+                    .get(&commitment)
+                    .and_then(CommitmentRecord::block)
+                    .is_some()
+            );
+            assert_eq!(*strategy.lens.lock(), expected);
         });
     }
 

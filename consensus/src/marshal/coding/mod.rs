@@ -1401,14 +1401,12 @@ mod tests {
         });
     }
 
-    /// Finalizing a descendant must not height-prune the shard-engine buffer before
-    /// `try_repair_gaps` has consumed buffer-only ancestors.
+    /// Gap repair archives a finalized block's ancestor that only the shard engine holds.
     ///
-    /// Places parent (height 1) and descendant (height 2) in the shard engine's
-    /// reconstructed-block cache via `proposed()`, then reports a finalization
-    /// for the descendant only.
+    /// The parent (height 1) and descendant (height 2) are cached only in the shard engine, and
+    /// only the descendant has a finalization.
     #[test_traced("WARN")]
-    fn test_coding_store_finalization_does_not_prune_buffer_before_repair() {
+    fn test_coding_repair_reads_buffer_only_ancestor() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let Fixture {
@@ -1430,10 +1428,8 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
-            let mut handle = harness::ValidatorHandle::<CodingHarness> {
-                mailbox: setup.mailbox,
-                extra: setup.extra,
-            };
+            let mut marshal = setup.mailbox;
+            let shards = setup.extra;
 
             // Build a 2-block chain: parent at height 1, descendant at height 2.
             let parent_block = CodingHarness::make_test_block(
@@ -1455,24 +1451,15 @@ mod tests {
             );
             let descendant_commitment = CodingHarness::commitment(&descendant_block);
 
-            // Seed the shard engine's reconstructed-block cache with both blocks.
-            CodingHarness::propose(
-                &mut handle,
-                Round::new(Epoch::new(0), View::new(1)),
-                &parent_block,
-            )
-            .await;
-            CodingHarness::propose(
-                &mut handle,
-                Round::new(Epoch::new(0), View::new(2)),
-                &descendant_block,
-            )
-            .await;
+            // Cache both blocks in the shard engine only.
+            shards.proposed(Round::new(Epoch::new(0), View::new(1)), parent_block);
+            shards.proposed(Round::new(Epoch::new(0), View::new(2)), descendant_block);
+            assert!(shards.get(parent_commitment).await.is_some());
+            assert!(shards.get(descendant_commitment).await.is_some());
 
-            // Report finalization for the descendant only. The parent has no
-            // finalization certificate: it must be archived by walking the
-            // parent link from the descendant and sourcing the block from the
-            // shard-engine buffer.
+            // Report finalization for the descendant only. The parent has no finalization, so
+            // repair must walk the descendant's parent link and read the parent from the shard
+            // engine.
             let descendant_proposal = Proposal {
                 round: Round::new(Epoch::new(0), View::new(2)),
                 parent: View::new(1),
@@ -1480,19 +1467,17 @@ mod tests {
             };
             let descendant_finalization =
                 CodingHarness::make_finalization(descendant_proposal, &schemes, QUORUM);
-            CodingHarness::report_finalization(&mut handle.mailbox, descendant_finalization).await;
+            CodingHarness::report_finalization(&mut marshal, descendant_finalization).await;
 
-            // Wait until the descendant is archived: that proves finalization processing
-            // has completed, at which point the parent must already have been repaired
-            // from the shard buffer.
-            while handle.mailbox.get_block(Height::new(2)).await.is_none() {
-                context.sleep(Duration::from_millis(10)).await;
+            // Archiving the descendant runs repair, which archives the parent.
+            while marshal.get_block(Height::new(2)).await.is_none() {
+                reschedule().await;
             }
-
-            let parent = handle.mailbox.get_block(Height::new(1)).await;
-            assert!(
-                parent.is_some(),
-                "parent must be archived from shard buffer before height-prune evicts it"
+            let parent = marshal.get_block(Height::new(1)).await;
+            assert_eq!(
+                parent.map(|block| block.commitment()),
+                Some(parent_commitment),
+                "repair must archive the parent from the shard engine"
             );
         });
     }
@@ -2543,6 +2528,8 @@ mod tests {
         })
     }
 
+    /// A core commitment subscription closes when the shard engine fails to reconstruct the
+    /// commitment's block.
     #[test_traced("WARN")]
     fn test_core_subscription_closes_when_coding_reconstruction_fails() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -2580,6 +2567,7 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
+            // The commitment's shards verify, but the block they decode fails validation.
             let (missing_commitment, missing_shards) = undecodable(me.clone());
             let round = Round::new(Epoch::zero(), View::new(1));
 
@@ -2598,8 +2586,7 @@ mod tests {
                 sender.send(Recipients::One(me.clone()), shard.encode(), true);
             }
 
-            // The core actor must surface cancellation by closing the subscription,
-            // not by panicking or leaving the waiter parked indefinitely.
+            // The core actor closes the subscription.
             select! {
                 result = block_rx => {
                     assert!(
