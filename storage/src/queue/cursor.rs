@@ -1,4 +1,4 @@
-//! Delivery and acknowledgement state shared by [super::Queue] and [super::Reader].
+//! Delivery and acknowledgement state for [super::Reader].
 
 use super::Error;
 use crate::{journal::contiguous::Contiguous, rmap::RMap};
