@@ -1,6 +1,6 @@
 //! Queue storage implementation.
 
-use super::{Error, Reader, Writer, cursor::Cursor, metrics::Metrics, split};
+use super::{Error, cursor::Cursor, metrics::Metrics};
 use crate::{
     Context,
     journal::contiguous::{Contiguous as _, variable},
@@ -63,7 +63,6 @@ pub struct Config<C> {
 /// - [dequeue](Self::dequeue): Return the next unacked item in FIFO order.
 /// - [ack](Self::ack) / [ack_up_to](Self::ack_up_to): Mark items as processed (in-memory only).
 /// - [sync](Self::sync): Commit, then prune completed sections below the ack floor.
-/// - [split](Self::split): Hand out an exclusive [Writer] and a [Reader] for separate tasks.
 ///
 /// # Acknowledgment
 ///
@@ -96,6 +95,39 @@ pub struct Queue<E: Context, V: CodecShared> {
     tip: Gauge,
 }
 
+/// Recover the journal at `cfg` and a cursor at its pruning boundary, returning them with the
+/// tip metric.
+#[boxed]
+pub(super) async fn open<E: Context, V: CodecShared>(
+    context: E,
+    cfg: Config<V::Cfg>,
+) -> Result<(variable::Journal<E, V>, Cursor, Gauge), Error> {
+    // Initialize metrics before creating sub-contexts
+    let Metrics { tip, floor, next } = Metrics::init(&context);
+
+    // Recover the journal that backs the queue's retained items.
+    let journal = variable::Journal::init(
+        context.child("journal"),
+        variable::Config {
+            partition: cfg.partition,
+            items_per_section: cfg.items_per_section,
+            compression: cfg.compression,
+            codec_config: cfg.codec_config,
+            page_cache: cfg.page_cache,
+            write_buffer: cfg.write_buffer,
+            replay_buffer: cfg.replay_buffer,
+        },
+    )
+    .await?;
+
+    // On restart, ack_floor is the pruning boundary (items below are deleted).
+    // In-memory acknowledgements are lost on restart.
+    let bounds = journal.bounds();
+    debug!(floor = bounds.start, size = bounds.end, "queue initialized");
+    let _ = tip.try_set(bounds.end);
+    Ok((journal, Cursor::new(bounds.start, next, floor), tip))
+}
+
 impl<E: Context, V: CodecShared> Queue<E, V> {
     /// Initialize a queue from storage.
     ///
@@ -106,46 +138,13 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     /// # Errors
     ///
     /// Returns an error if the underlying journal cannot be initialized.
-    #[boxed]
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        // Initialize metrics before creating sub-contexts
-        let Metrics { tip, floor, next } = Metrics::init(&context);
-
-        // Recover the journal that backs the queue's retained items.
-        let journal = variable::Journal::init(
-            context.child("journal"),
-            variable::Config {
-                partition: cfg.partition,
-                items_per_section: cfg.items_per_section,
-                compression: cfg.compression,
-                codec_config: cfg.codec_config,
-                page_cache: cfg.page_cache,
-                write_buffer: cfg.write_buffer,
-                replay_buffer: cfg.replay_buffer,
-            },
-        )
-        .await?;
-
-        // On restart, ack_floor is the pruning boundary (items below are deleted).
-        // In-memory acknowledgements are lost on restart.
-        let bounds = journal.bounds();
-        debug!(floor = bounds.start, size = bounds.end, "queue initialized");
-        let _ = tip.try_set(bounds.end);
-
+        let (journal, cursor, tip) = open(context, cfg).await?;
         Ok(Self {
             journal,
-            cursor: Cursor::new(bounds.start, next, floor),
+            cursor,
             tip,
         })
-    }
-
-    /// Split the queue into an exclusive [Writer] and a [Reader] for separate tasks.
-    ///
-    /// The reader continues from the queue's read position and acknowledgements. It receives
-    /// every item appended before the split and every item the writer commits afterward. Both
-    /// handles must be dropped before the queue is reopened.
-    pub async fn split(self) -> Result<(Writer<E, V>, Reader<E, V>), Error> {
-        split::handles(self.journal, self.cursor, self.tip).await
     }
 
     /// Returns whether a specific position has been acknowledged.

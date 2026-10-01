@@ -287,6 +287,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Open only sections through `ceiling`. [Self::truncate_pending] or [Self::clear] removes the
     /// remaining sections and must run before the caller publishes the manager.
     pub async fn init_bounded(context: E, cfg: Config<F>, ceiling: u64) -> Result<Self, Error> {
+        // Open stored sections through the ceiling and record the rest for later removal.
         let mut blobs = BTreeMap::new();
         let mut discarded = Vec::new();
         for name in stored_names(&context, &cfg.partition).await? {
@@ -345,6 +346,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             "sections above the initialization ceiling must be truncated before creation"
         );
 
+        // Reuse the open writer, or open the section's blob and start tracking it.
         match self.blobs.entry(section) {
             Entry::Occupied(entry) => Ok(entry.into_mut()),
             Entry::Vacant(entry) => {
@@ -365,6 +367,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             section <= self.ceiling,
             "sections above the initialization ceiling must be truncated before creation"
         );
+
+        // Hand out the open writer, or open the section's blob and start tracking it.
         if let Some(buffer) = self.blobs.remove(&section) {
             return Ok(buffer);
         }
@@ -398,6 +402,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             .collect();
         let blobs = try_join_all(futures).await.map_err(Error::Runtime)?;
         self.blobs.extend(blobs);
+
+        // Count every selected section, including clean sections left in place.
         self.synced.inc_by(count);
         Ok(())
     }
@@ -473,7 +479,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
-        // Prune any blobs that are smaller than the minimum
+        // Remove sections below `min`, oldest first.
         let mut pruned = false;
         while let Some((&section, _)) = self.blobs.first_key_value() {
             // Stop pruning if we reach the minimum
@@ -497,6 +503,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             self.pruned.inc();
         }
 
+        // Reject pruned sections for the rest of this execution.
         if pruned {
             self.oldest_retained_section = min;
         }
@@ -545,6 +552,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn remove_section(mut self, section: u64) -> Result<(Self, bool), Error> {
         self.prune_guard(section)?;
 
+        // Settle any started sync before removing the section's blob.
         if let Some(blob) = self.blobs.remove(&section) {
             let blob = blob.wait_for_sync().await?;
             let size = blob.size();
@@ -562,6 +570,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
+        // Settle started syncs, then remove each section's blob.
         for (section, blob) in Self::wait_for_syncs(self.blobs).await? {
             let size = blob.size();
             debug!(section, size, "destroyed blob");
@@ -570,6 +579,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
                 .await?;
             drop(blob);
         }
+
+        // Remove the partition itself.
         match self.context.remove(&self.partition, None).await {
             Ok(()) => {}
             // Partition already removed or never existed.
@@ -583,6 +594,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     ///
     /// Unlike `destroy`, this keeps the manager alive so it can be reused.
     pub async fn clear(mut self) -> Result<Self, Error> {
+        // Remove unopened sections, then settle and remove every open section.
         self.remove_discarded().await?;
         for (section, blob) in Self::wait_for_syncs(take(&mut self.blobs)).await? {
             let size = blob.size();
@@ -592,6 +604,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
                 .await?;
             drop(blob);
         }
+
+        // Reset to an empty manager that accepts any section.
         let _ = self.tracked.try_set(0);
         self.oldest_retained_section = 0;
         Ok(self)
@@ -605,6 +619,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             section <= self.ceiling,
             "truncation must remove every section above the initialization ceiling"
         );
+
+        // Unopened sections are newer than every open section, so remove them first.
         self.remove_discarded().await?;
 
         // Remove sections in descending order (newest first) to maintain a contiguous record
@@ -626,6 +642,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             debug!(section = s, "removed blob during truncate");
         }
 
+        // Shorten the target section once every later section is gone.
         self.truncate_section(section, size).await?;
         Ok(self)
     }

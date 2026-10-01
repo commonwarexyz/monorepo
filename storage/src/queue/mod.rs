@@ -15,13 +15,13 @@
 //!
 //! # Concurrent Access
 //!
-//! For concurrent access from separate writer and reader tasks, use [Queue::split].
+//! For concurrent access from separate writer and reader tasks, use [init].
 //!
 //! ```rust,ignore
-//! use commonware_storage::queue::Queue;
+//! use commonware_storage::queue;
 //! use commonware_macros::select;
 //!
-//! let (writer, mut reader) = Queue::init(context, config).await?.split().await?;
+//! let (writer, mut reader) = queue::init(context, config).await?;
 //!
 //! // Writer task
 //! let (writer, position) = writer.enqueue(item).await?;
@@ -85,11 +85,11 @@
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 mod cursor;
+mod handles;
 mod metrics;
-mod split;
 mod storage;
 
-pub use split::{Reader, Writer};
+pub use handles::{Reader, Writer, init};
 pub use storage::{Config, Queue};
 use thiserror::Error;
 
