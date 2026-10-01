@@ -372,10 +372,12 @@ claims do not enter it.
    distinct shares it assembles the certificate on the shared strategy; a failed group check
    excludes the attributed signers and waits for a fresh quorum. The certificate returns to Core as
    `CryptoCompletion::DaCertificate`.
-8. Core admits the certificate durably (`Change::DaCertificateAdvanced`) and publishes it, advances
-   the certified anchor monotonically, retires covered block and share publications and obsolete
-   validation work, sends the new anchor and choices to the chain plane, and then re-evaluates the
-   next contiguous suffix.
+8. Core admits the certificate durably (`Change::DaCertificateAdvanced`), advances the certified
+   anchor monotonically, retires covered block and share publications and obsolete validation work,
+   sends the new anchor and choices to the chain plane, and then re-evaluates the next contiguous
+   suffix. It publishes the certificate only once that record is durable: peers retire their share
+   publications when they hold the certificate, so a producer that crashed after publishing it but
+   before its own record was durable could never collect the shares to rebuild it.
 
 These rules implement the specification's one-vote-per-height, contiguous-path, and depth-`d` DA
 conditions without moving signing authority into the chain plane.
@@ -519,7 +521,8 @@ sweep, dense output, and durable delivery.
    `start_sync`, but an acknowledgement always names the greatest contiguous durable cursor.
 3. A forwarded certificate is structurally paired with its persistence directive. The voter submits
    the directive, installs resolver custody, and only then releases that independently verifiable
-   publication; it does not wait for fsync.
+   publication; it does not wait for fsync. A DA certificate has no resolver custody and waits for
+   the acknowledgement of its own record, like a publication carrying a fresh local signature.
 4. Core accepts only an acknowledgement covering its next expected staged prefix. Old duplicates are
    no-ops; a gap, wrong generation, wrong range, or mismatched live completion is an invariant error.
 5. The acknowledgement (`Input::Persisted`) returns the signing releases, publication installations,
