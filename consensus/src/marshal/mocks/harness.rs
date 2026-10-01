@@ -151,6 +151,7 @@ pub const NUM_VALIDATORS: u32 = 4;
 pub const QUORUM: u32 = 3;
 pub const NUM_BLOCKS: u64 = 160;
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
+pub const RECORDS: NonZeroUsize = NZUsize!(16);
 pub const LINK: Link = Link {
     latency: Duration::from_millis(100),
     jitter: Duration::from_millis(1),
@@ -2788,6 +2789,7 @@ impl TestHarness for CodingHarness {
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
+            records: RECORDS,
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
@@ -2976,6 +2978,7 @@ impl TestHarness for CodingHarness {
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
+            records: RECORDS,
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };

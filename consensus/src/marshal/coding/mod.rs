@@ -41,9 +41,8 @@
 //! Notarized data and certificates live in prunable archives managed internally, while finalized
 //! blocks are migrated into immutable archives. Any gaps are filled by asking peers for specific
 //! commitments through the resolver pipeline. The shard engine keeps only ephemeral, in-memory
-//! caches. Reconstruction state without a block is evicted once consensus reports a
-//! finalization of another commitment covering its round, and cached blocks once marshal
-//! durably processes them.
+//! caches. Its commitment records are bounded by a window that evicts records with the lowest
+//! rounds first.
 //!
 //! # When to Use
 //!
@@ -71,7 +70,8 @@ mod tests {
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
                 types::{
-                    CodedBlock, StoredCodedBlock, coding_config_for_participants, hash_context,
+                    CodedBlock, Shard, StoredCodedBlock, coding_config_for_participants,
+                    hash_context,
                 },
             },
             config::{Config, Start},
@@ -123,6 +123,7 @@ mod tests {
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
     type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
+    type TestShard = Shard<CodingB, ReedSolomon<Sha256>, Sha256>;
     type CodingSendRecord = (Round, Arc<TestCodedBlock>, Recipients<K>);
 
     // Smallest valid coding config used to build trusted genesis commitments.
@@ -137,15 +138,30 @@ mod tests {
         assert_provider::<core::Mailbox<S, TestCodingVariant>>();
     }
 
-    /// A coding buffer that records subscriptions and never resolves them.
+    /// A coding buffer that serves inserted blocks and records subscriptions without resolving
+    /// them.
     #[derive(Clone, Default)]
     struct RecordingCodingBuffer {
+        blocks: Arc<Mutex<Vec<Arc<TestCodedBlock>>>>,
+        evict_on_next_hit: Arc<Mutex<bool>>,
         digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
         commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
         sends: Arc<Mutex<Vec<CodingSendRecord>>>,
     }
 
     impl RecordingCodingBuffer {
+        fn insert_transient(&self, block: TestCodedBlock) {
+            self.blocks.lock().push(Arc::new(block));
+            *self.evict_on_next_hit.lock() = true;
+        }
+
+        fn contains(&self, commitment: TestCommitment) -> bool {
+            self.blocks
+                .lock()
+                .iter()
+                .any(|block| block.commitment() == commitment)
+        }
+
         fn subscription_count(&self) -> usize {
             self.digest_subscriptions.lock().len() + self.commitment_subscriptions.lock().len()
         }
@@ -164,9 +180,16 @@ mod tests {
 
         async fn find_by_commitment(
             &self,
-            _commitment: TestCommitment,
+            commitment: TestCommitment,
         ) -> Option<Arc<TestCodedBlock>> {
-            None
+            let mut blocks = self.blocks.lock();
+            let index = blocks
+                .iter()
+                .position(|block| block.commitment() == commitment)?;
+            if std::mem::take(&mut *self.evict_on_next_hit.lock()) {
+                return Some(blocks.remove(index));
+            }
+            Some(Arc::clone(&blocks[index]))
         }
 
         fn subscribe_by_digest(
@@ -186,10 +209,6 @@ mod tests {
             self.commitment_subscriptions.lock().push(sender);
             Some(receiver)
         }
-
-        fn finalized(&self, _commitment: TestCommitment, _round: Round) {}
-
-        fn retire(&self, _update: core::Retirement<TestCommitment>) {}
 
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
@@ -551,6 +570,7 @@ mod tests {
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
+            records: harness::RECORDS,
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
@@ -596,6 +616,28 @@ mod tests {
         (candidate_ctx, coded_candidate)
     }
 
+    /// Rebinds the shards of [`missing_candidate`] to a commitment that claims another digest.
+    /// The shards verify against the commitment's coding root, but the decoded block fails
+    /// validation.
+    fn undecodable(me: K) -> (TestCommitment, Vec<TestShard>) {
+        let (_, candidate) = missing_candidate(me);
+        let real = candidate.commitment();
+        let commitment = TestCommitment::from((
+            Sha256::hash(&[b"undecodable"]),
+            real.root(),
+            real.context(),
+            real.config(),
+        ));
+        let shards = (0..NUM_VALIDATORS as u16)
+            .map(|index| {
+                let mut shard = candidate.shard(index).expect("missing shard");
+                shard.commitment = commitment;
+                shard
+            })
+            .collect();
+        (commitment, shards)
+    }
+
     /// Builds `length` coded blocks above genesis, each proposed at the view
     /// matching its height and naming the block below it as its parent.
     fn coding_chain(leader: K, length: u64) -> Vec<(Round, TestCodedBlock)> {
@@ -620,172 +662,6 @@ mod tests {
             chain.push((round, coded));
         }
         chain
-    }
-
-    #[test_traced("WARN")]
-    fn test_coding_batched_acks_retire_each_exact_commitment() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
-            )
-            .await;
-            let mut setup = CodingHarness::setup_validator_with(
-                context.child("validator"),
-                &mut oracle,
-                participants[0].clone(),
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(2),
-                Application::manual_ack(),
-            )
-            .await;
-            assert_eq!(setup.application.acknowledged().await, Height::zero());
-
-            let mut parent = Sha256::hash(&[b""]);
-            let mut parent_commitment =
-                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
-            let mut commitments = Vec::new();
-            for height in 1..=2 {
-                let round = Round::new(Epoch::zero(), View::new(height));
-                let block = CodingHarness::make_test_block(
-                    parent,
-                    parent_commitment,
-                    Height::new(height),
-                    height,
-                    NUM_VALIDATORS as u16,
-                );
-                let commitment = block.commitment();
-                parent = block.digest();
-                parent_commitment = commitment;
-                commitments.push(commitment);
-
-                setup.extra.proposed(
-                    Round::new(Epoch::zero(), View::new(height + 10)),
-                    block.clone(),
-                );
-                assert!(setup.extra.get(commitment).await.is_some());
-                assert!(setup.mailbox.verified(round, block).await);
-                CodingHarness::report_finalization(
-                    &mut setup.mailbox,
-                    CodingHarness::make_finalization(
-                        Proposal {
-                            round,
-                            parent: View::new(height - 1),
-                            payload: commitment,
-                        },
-                        &schemes,
-                        QUORUM,
-                    ),
-                )
-                .await;
-            }
-
-            while setup.application.pending_ack_heights() != vec![Height::new(1), Height::new(2)] {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            assert_eq!(setup.application.acknowledge_next(), Some(Height::new(1)));
-            assert_eq!(setup.application.acknowledge_next(), Some(Height::new(2)));
-
-            while setup.extra.get(commitments[1]).await.is_some() {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            assert!(setup.extra.get(commitments[0]).await.is_none());
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_coding_floor_retires_only_superseded_ack_commitments() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
-            )
-            .await;
-            let mut setup = CodingHarness::setup_validator_with(
-                context.child("validator"),
-                &mut oracle,
-                participants[0].clone(),
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(3),
-                Application::manual_ack(),
-            )
-            .await;
-            assert_eq!(setup.application.acknowledged().await, Height::zero());
-
-            let mut parent = Sha256::hash(&[b""]);
-            let mut parent_commitment =
-                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
-            let mut commitments = Vec::new();
-            let mut floor = None;
-            for height in 1..=3 {
-                let round = Round::new(Epoch::zero(), View::new(height));
-                let block = CodingHarness::make_test_block(
-                    parent,
-                    parent_commitment,
-                    Height::new(height),
-                    height * 100,
-                    NUM_VALIDATORS as u16,
-                );
-                let commitment = block.commitment();
-                parent = block.digest();
-                parent_commitment = commitment;
-                commitments.push(commitment);
-
-                // Every cache observation is newer than the floor, so only an exact
-                // commitment retirement can remove it.
-                setup.extra.proposed(
-                    Round::new(Epoch::zero(), View::new(height + 10)),
-                    block.clone(),
-                );
-                assert!(setup.mailbox.verified(round, block).await);
-                let finalization = CodingHarness::make_finalization(
-                    Proposal {
-                        round,
-                        parent: View::new(height - 1),
-                        payload: commitment,
-                    },
-                    &schemes,
-                    QUORUM,
-                );
-                if height == 2 {
-                    floor = Some(finalization.clone());
-                }
-                CodingHarness::report_finalization(&mut setup.mailbox, finalization).await;
-            }
-
-            while setup.application.pending_ack_heights()
-                != vec![Height::new(1), Height::new(2), Height::new(3)]
-            {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-
-            setup
-                .mailbox
-                .set_floor(floor.expect("height 2 floor missing"));
-
-            // The height-2 floor makes height 1 durable application progress. Heights 2 and 3
-            // are re-dispatched, so their coding-buffer commitments remain live.
-            while setup.mailbox.get_processed().await != Some(Processed::Block(Height::new(1))) {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            assert!(setup.extra.get(commitments[0]).await.is_none());
-            assert!(setup.extra.get(commitments[1]).await.is_some());
-            assert!(setup.extra.get(commitments[2]).await.is_some());
-        });
     }
 
     #[test_traced("WARN")]
@@ -1097,6 +973,69 @@ mod tests {
             assert!(
                 resolver.targeted().is_empty(),
                 "certify recovery must not issue targeted fetches"
+            );
+        });
+    }
+
+    /// Pending verification must own a transiently buffered block before certification waits
+    /// on its gate. Otherwise a cache hit can suppress the round-bound fetch before the
+    /// verifier installs its local subscription, and eviction leaves certification pending
+    /// indefinitely.
+    #[test_traced("WARN")]
+    fn test_coding_certify_retains_transient_buffer_hit_through_eviction() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let me = participants[0].clone();
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-certify-transient-buffer",
+                provider.clone(),
+                buffer.clone(),
+            )
+            .await;
+            let shards =
+                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
+                    .await;
+
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new(),
+                marshal: marshal.clone(),
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let (candidate_ctx, candidate) = missing_candidate(me);
+            let commitment = candidate.commitment();
+            let round = candidate_ctx.round;
+
+            // The next lookup returns ownership while removing the buffer entry, modeling
+            // shard engine eviction.
+            buffer.insert_transient(candidate);
+            let _verify_rx = marshaled.verify(candidate_ctx, commitment).await;
+            let certify_rx = marshaled.certify(round, commitment).await;
+
+            // This request is ordered after the verification wait and the certification hint
+            // in the marshal mailbox. Once it returns, the one-shot buffer hit and eviction have
+            // both occurred.
+            marshal.get_processed().await;
+            assert!(
+                !buffer.contains(commitment),
+                "the buffered block must be evicted before verification completes"
+            );
+
+            assert!(
+                certify_rx.await.expect("certify result missing"),
+                "certify should succeed via the shared verification gate"
             );
         });
     }
@@ -2052,12 +1991,12 @@ mod tests {
         })
     }
 
-    /// Exact commitment retirement (durable application progress) can occur on
-    /// either side of re-proposal verification. The re-proposal must remain live
-    /// through core marshal's verified cache, while a post-retirement `discovered`
-    /// announcement must recreate shard state needed before notarization.
+    /// The shard engine's window can evict a commitment's record on either side of
+    /// re-proposal verification. The re-proposal must remain live through core marshal's
+    /// verified cache, while a `discovered` announcement after eviction must recreate shard
+    /// state needed before notarization.
     #[test_traced("WARN")]
-    fn test_coding_reproposal_recreates_shard_state_after_retirement() {
+    fn test_coding_reproposal_recreates_shard_state_after_eviction() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -2100,6 +2039,23 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
+            // Discovers a window of commitments in the views starting at `first`.
+            let fill = |first: u64| {
+                for view in first..first + harness::RECORDS.get() as u64 {
+                    let commitment = TestCommitment::from((
+                        Sha256::hash(&[&view.to_be_bytes()]),
+                        Sha256::hash(&[b"filler_root"]),
+                        Sha256::hash(&[b"filler_context"]),
+                        coding_config,
+                    ));
+                    shards.discovered(
+                        commitment,
+                        participants[1].clone(),
+                        Round::new(Epoch::new(0), View::new(view)),
+                    );
+                }
+            };
+
             // Build the epoch boundary block, store it in core marshal (the durable
             // backstop), and cache it in the shard engine.
             let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
@@ -2125,21 +2081,16 @@ mod tests {
             );
             shards.discovered(boundary_commitment, me.clone(), boundary_round);
             shards.proposed(boundary_round, coded_boundary.clone());
-            context.sleep(Duration::from_millis(10)).await;
             assert!(shards.get(boundary_commitment).await.is_some());
 
-            // Exact retirement with a round floor below the commitment's observed
-            // round: only the exact commitment list can retire it.
-            shards.retire(core::Retirement {
-                round_floor: Round::new(Epoch::zero(), View::new(1)),
-                exact_retirements: vec![boundary_commitment],
-            });
-            context.sleep(Duration::from_millis(10)).await;
+            // Records for a window of later views evict the cached block.
+            fill(boundary_height.get() + 1);
             assert!(shards.get(boundary_commitment).await.is_none());
 
-            // Re-propose the boundary block in the same epoch. Verification must
-            // fetch the block from the core backstop and re-announce discovery.
-            let reproposal_round = Round::new(Epoch::new(0), View::new(20));
+            // Re-propose the boundary block above those views in the same epoch.
+            // Verification must fetch the block from the core backstop and re-announce
+            // discovery.
+            let reproposal_round = Round::new(Epoch::new(0), View::new(40));
             let reproposal_context = CodingCtx {
                 round: reproposal_round,
                 leader: participants[1].clone(),
@@ -2151,7 +2102,7 @@ mod tests {
                 .await;
             assert!(
                 verdict.expect("re-proposal verdict missing"),
-                "re-proposal should verify from the core backstop after exact retirement"
+                "re-proposal should verify from the core backstop after eviction"
             );
 
             // The recreated reconstruction state must accept this node's assigned
@@ -2169,21 +2120,22 @@ mod tests {
                 },
             }
 
-            // Retiring again after verification removes the newly recreated shard
-            // state, but not the block persisted in core marshal. Certification and
-            // caller-owned core subscriptions must remain live through that cache.
-            shards.retire(core::Retirement {
-                round_floor: Round::new(Epoch::zero(), View::new(1)),
-                exact_retirements: vec![boundary_commitment],
-            });
-            while shards.get(boundary_commitment).await.is_some() {
-                context.sleep(Duration::from_millis(10)).await;
-            }
+            // Records for a window of later views evict the recreated shard state, so a new
+            // assigned-shard subscription waits. The block persisted in core marshal remains,
+            // and certification and caller-owned core subscriptions stay live through that
+            // cache.
+            fill(reproposal_round.view().get() + 1);
+            let mut evicted = shards.subscribe_assigned_shard_verified(boundary_commitment);
+            assert!(shards.get(boundary_commitment).await.is_none());
+            assert!(matches!(
+                evicted.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
 
             let block = marshal
                 .subscribe_by_commitment(boundary_commitment, core::CommitmentFallback::Wait)
                 .await
-                .expect("core block subscription closed after shard retirement");
+                .expect("core block subscription closed after shard eviction");
             assert_eq!(block.commitment(), boundary_commitment);
 
             let certify = marshaled
@@ -2192,7 +2144,7 @@ mod tests {
                 .await;
             assert!(
                 certify.expect("certify result missing"),
-                "re-proposal should certify after exact retirement"
+                "re-proposal should certify after eviction"
             );
         })
     }
@@ -2511,7 +2463,6 @@ mod tests {
             .await;
 
             let me = participants[0].clone();
-            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
@@ -2520,6 +2471,16 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
+            let mut senders = Vec::new();
+            for peer in &participants[1..3] {
+                let (sender, _) = oracle
+                    .control(peer.clone())
+                    .register(2, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                senders.push(sender);
+            }
+            setup_network_links(&mut oracle, &participants[..3], LINK).await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
@@ -2534,30 +2495,25 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            // Re-proposal payload with valid coding config, but no block available.
-            let missing_payload = TestCommitment::from((
-                Sha256::hash(&[b"missing_block"]),
-                Sha256::hash(&[b"missing_root"]),
-                Sha256::hash(&[b"missing_context"]),
-                coding_config,
-            ));
+            // Re-proposal payload with valid coding config, but no decodable block.
+            let (missing_payload, missing_shards) = undecodable(me.clone());
             let round = Round::new(Epoch::zero(), View::new(1));
             let reproposal_context = CodingCtx {
                 round,
-                leader: me,
+                leader: me.clone(),
                 parent: (View::zero(), missing_payload),
             };
 
             // Verify must not synthesize `false` when the block cannot be fetched.
             let verify_rx = marshaled.verify(reproposal_context, missing_payload).await;
 
-            // Ensure the certification gate task has registered its subscription, then
-            // force cancellation by pruning the missing commitment.
-            context.sleep(Duration::from_millis(100)).await;
-            shards.retire(core::Retirement {
-                round_floor: round,
-                exact_retirements: vec![missing_payload],
-            });
+            // Once the certification gate task's subscription reaches the shard engine, a
+            // failed reconstruction of the payload closes it.
+            marshal.get_processed().await;
+            shards.notarized(missing_payload, round);
+            for (sender, shard) in senders.iter_mut().zip(&missing_shards[1..]) {
+                sender.send(Recipients::One(me.clone()), shard.encode(), true);
+            }
 
             select! {
                 result = verify_rx => {
@@ -2588,7 +2544,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_core_subscription_closes_when_coding_buffer_prunes_missing_commitment() {
+    fn test_core_subscription_closes_when_coding_reconstruction_fails() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -2603,23 +2559,28 @@ mod tests {
             )
             .await;
 
+            let me = participants[0].clone();
             let setup = CodingHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
                 &mut oracle,
-                participants[0].clone(),
+                me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
+            let mut senders = Vec::new();
+            for peer in &participants[1..3] {
+                let (sender, _) = oracle
+                    .control(peer.clone())
+                    .register(2, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                senders.push(sender);
+            }
+            setup_network_links(&mut oracle, &participants[..3], LINK).await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
-            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
-            let missing_commitment = TestCommitment::from((
-                Sha256::hash(&[b"missing_block"]),
-                Sha256::hash(&[b"missing_root"]),
-                Sha256::hash(&[b"missing_context"]),
-                coding_config,
-            ));
+            let (missing_commitment, missing_shards) = undecodable(me.clone());
             let round = Round::new(Epoch::zero(), View::new(1));
 
             // Subscribe through the core actor. This internally subscribes to the
@@ -2629,15 +2590,13 @@ mod tests {
                 core::CommitmentFallback::FetchByRound { round },
             );
 
-            // Allow core actor to register the underlying buffer subscription.
-            context.sleep(Duration::from_millis(100)).await;
-
-            // Prune the missing commitment in the shard engine, which should cancel
-            // the underlying buffer subscription.
-            shards.retire(core::Retirement {
-                round_floor: round,
-                exact_retirements: vec![missing_commitment],
-            });
+            // Once the underlying buffer subscription reaches the shard engine, a failed
+            // reconstruction of the commitment closes it.
+            marshal.get_processed().await;
+            shards.notarized(missing_commitment, round);
+            for (sender, shard) in senders.iter_mut().zip(&missing_shards[1..]) {
+                sender.send(Recipients::One(me.clone()), shard.encode(), true);
+            }
 
             // The core actor must surface cancellation by closing the subscription,
             // not by panicking or leaving the waiter parked indefinitely.
@@ -2649,7 +2608,7 @@ mod tests {
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("core subscription should resolve promptly after coding prune");
+                    panic!("core subscription should resolve promptly after failed reconstruction");
                 },
             }
         })
@@ -2732,112 +2691,6 @@ mod tests {
                 },
             }
         })
-    }
-
-    /// A reported finalization retires blockless reconstruction state at or below its round
-    /// before the application acknowledges any block, while cached blocks, later state, and
-    /// commitment subscriptions remain.
-    #[test_traced("WARN")]
-    fn test_coding_finalization_retires_reconstruction_state_before_ack() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
-            )
-            .await;
-            let mut setup = CodingHarness::setup_validator_with(
-                context.child("validator"),
-                &mut oracle,
-                participants[0].clone(),
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(2),
-                Application::manual_ack(),
-            )
-            .await;
-            let make_block = |height| {
-                CodingHarness::make_test_block(
-                    Sha256::hash(&[b""]),
-                    CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
-                    Height::new(height),
-                    height,
-                    NUM_VALIDATORS as u16,
-                )
-            };
-            let round = |view| Round::new(Epoch::zero(), View::new(view));
-
-            // Another participant leads views 1 through 8 with candidates whose shards never
-            // arrive.
-            let mut candidates = Vec::new();
-            for view in 1..=8 {
-                let commitment = make_block(view).commitment();
-                setup
-                    .extra
-                    .discovered(commitment, participants[1].clone(), round(view));
-                candidates.push((
-                    setup.extra.subscribe_assigned_shard_verified(commitment),
-                    setup
-                        .mailbox
-                        .subscribe_by_commitment(commitment, core::CommitmentFallback::Wait),
-                ));
-            }
-
-            // A block cached below the finalization and a candidate above it.
-            let cached = make_block(20);
-            let cached_commitment = cached.commitment();
-            setup.extra.proposed(round(2), cached);
-            let later = make_block(21).commitment();
-            setup
-                .extra
-                .discovered(later, participants[1].clone(), round(12));
-            let mut later_assigned = setup.extra.subscribe_assigned_shard_verified(later);
-
-            // Consensus finalizes an unavailable block at view 10.
-            CodingHarness::report_finalization(
-                &mut setup.mailbox,
-                CodingHarness::make_finalization(
-                    Proposal {
-                        round: round(10),
-                        parent: View::new(9),
-                        payload: make_block(10).commitment(),
-                    },
-                    &schemes,
-                    QUORUM,
-                ),
-            )
-            .await;
-
-            // Candidates at or below the finalization lose their reconstruction state, but
-            // their commitment subscriptions stay open.
-            for (assigned, _) in &mut candidates {
-                while !matches!(
-                    assigned.try_recv(),
-                    Err(oneshot::error::TryRecvError::Closed)
-                ) {
-                    context.sleep(Duration::from_millis(10)).await;
-                }
-            }
-            for (_, block) in &mut candidates {
-                assert!(matches!(
-                    block.try_recv(),
-                    Err(oneshot::error::TryRecvError::Empty)
-                ));
-            }
-
-            // The cached block and the later candidate remain, and nothing was acknowledged.
-            assert!(setup.extra.get(cached_commitment).await.is_some());
-            assert!(matches!(
-                later_assigned.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-            assert_eq!(setup.application.acknowledged().await, Height::zero());
-        });
     }
 
     #[test_traced("WARN")]

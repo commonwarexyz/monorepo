@@ -7,7 +7,7 @@ use crate::{
     Block,
     marshal::{
         ancestry::BlockProvider,
-        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Retirement, Variant},
+        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
     },
     simplex::scheme::Scheme as SimplexScheme,
     types::Round,
@@ -101,10 +101,6 @@ where
     fn subscribe_by_commitment(&self, commitment: B::Digest) -> Option<oneshot::Receiver<Arc<B>>> {
         self.subscribe_by_digest(commitment)
     }
-
-    fn finalized(&self, _commitment: B::Digest, _round: Round) {}
-
-    fn retire(&self, _update: Retirement<B::Digest>) {}
 
     fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
         self.broadcast_shared(recipients, block);

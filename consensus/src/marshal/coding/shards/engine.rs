@@ -65,8 +65,9 @@
 //!
 //! # Reconstruction State Machine
 //!
-//! For each [`Commitment`] that is either leader-discovered or notarized, nodes
-//! (both participants and non-participants) maintain a [`ReconstructionState`].
+//! For each [`Commitment`] that is either leader-discovered or notarized and
+//! admitted by the record window, nodes (both participants and non-participants)
+//! maintain a [`ReconstructionState`].
 //! Before either consensus signal is observed (a leader announcement or a
 //! notarization for the commitment), shards are buffered in bounded per-peer
 //! queues:
@@ -122,14 +123,16 @@
 //!   maximum block size under the shard's coding config.
 //! - Each shard index may only contribute ONE shard per commitment.
 //! - Sending a second shard for the same index with different data
-//!   (equivocation) results in blocking. Exact duplicates are silently
-//!   ignored.
+//!   (equivocation) while the commitment awaits quorum results in blocking.
+//!   Exact duplicates are silently ignored.
 //!
 //! Peers found violating these rules are blocked via the [`Blocker`] trait.
 //! The width rule is enforced on receipt of every shard. The other rules are
 //! applied while a commitment is actively tracked in reconstruction state.
 //! Buffered shards are verified only as reconstruction needs them. Once a
-//! block is already reconstructed and cached, additional shards for that
+//! block is cached, its record retains no shards and verifies only a late
+//! assigned shard. Until the leader is known, shards whose index differs from
+//! their sender's stay in the per-peer queues. Other shards for that
 //! commitment are ignored.
 //!
 //! _Before proposal context is known, shards are buffered in fixed-size per-peer
@@ -138,6 +141,15 @@
 //! reconstruction interest without a leader, so only sender-indexed gossip
 //! shards can be ingested. Other shards remain buffered until proposal
 //! discovery._
+//!
+//! # Record Window
+//!
+//! The engine retains at most [`Config::records`] commitment records. Only
+//! local signals ([`Mailbox::proposed`], [`Mailbox::discovered`], and
+//! [`Mailbox::notarized`]) create records. Once the window is full, records
+//! with the lowest rounds are evicted first, and a signal at or below the
+//! lowest retained round creates no record and leaves the commitment's shards
+//! in the per-peer queues. Eviction closes no subscription.
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -145,12 +157,9 @@ use super::{
 };
 use crate::{
     Block, CertifiableBlock, Heightable,
-    marshal::{
-        coding::{
-            types::{CodedBlock, Shard},
-            validation::{ReconstructionError as InvariantError, validate_reconstruction},
-        },
-        core::Retirement,
+    marshal::coding::{
+        types::{CodedBlock, Shard},
+        validation::{ReconstructionError as InvariantError, validate_reconstruction},
     },
     types::{Epoch, Round, coding::Commitment},
 };
@@ -386,6 +395,14 @@ where
     /// coding config the shard claims.
     pub peer_buffer_size: NonZeroUsize,
 
+    /// The maximum number of commitment records retained.
+    ///
+    /// Records with the lowest rounds are evicted first. Once the window is full, a consensus
+    /// signal at or below the lowest retained round creates no record. Must be at least
+    /// `2 * (max(1, optimistic_views) + 2)`, where `optimistic_views` is
+    /// [`crate::simplex::elector::Terms::optimistic_views`].
+    pub records: NonZeroUsize,
+
     /// Capacity of the channel between the background receiver and the engine.
     ///
     /// The background receiver decodes incoming network messages in a separate
@@ -411,8 +428,8 @@ where
 {
     /// Shards are still being accumulated or validated.
     Reconstructing(ReconstructionState<P, B, C, H>),
-    /// The block is cached. Reconstruction state remains only while shard-specific
-    /// evidence may still arrive.
+    /// The block is cached. Retained reconstruction state holds no shards and only
+    /// tracks verification of a late assigned shard.
     Cached {
         block: Arc<CodedBlock<B, C, H>>,
         reconstruction: Option<ReconstructionState<P, B, C, H>>,
@@ -421,9 +438,9 @@ where
 
 /// The single lifecycle owner for a consensus commitment.
 ///
-/// The observation round determines both retention and the epoch whose participant
-/// scheme classifies shards. Keeping it outside the phase prevents cached and
-/// reconstructing views of the same commitment from diverging.
+/// The observation round determines both the eviction order and the epoch whose
+/// participant scheme classifies shards. Keeping it outside the phase prevents
+/// cached and reconstructing views of the same commitment from diverging.
 struct CommitmentRecord<B, C, H, P>
 where
     B: Block,
@@ -449,16 +466,6 @@ enum CommitmentStatus {
     Reconstructing,
     /// The commitment has an available block.
     Cached,
-}
-
-/// Why a commitment is eligible for retirement.
-#[derive(Clone, Copy)]
-enum RetirementReason {
-    /// Durable progress explicitly retired the commitment.
-    Exact,
-    /// The commitment's last observation is covered by the durable round floor or, for state
-    /// without a cached block, by a finalization.
-    Floor,
 }
 
 impl<B, C, H, P> CommitmentRecord<B, C, H, P>
@@ -503,7 +510,7 @@ where
         Ok(())
     }
 
-    /// Records a same-epoch observation without moving the retention round backward.
+    /// Records a same-epoch observation without moving the eviction round backward.
     fn observe(&mut self, round: Round) -> Result<(), Epoch> {
         self.validate_epoch(round)?;
         self.round = self.round.max(round);
@@ -621,6 +628,9 @@ where
     /// Maximum buffered pre-leader shards per peer.
     peer_buffer_size: NonZeroUsize,
 
+    /// Maximum number of commitment records retained.
+    window: NonZeroUsize,
+
     /// Provider for peer set information.
     peer_provider: D,
 
@@ -690,6 +700,7 @@ where
                 records: BTreeMap::new(),
                 peer_buffers: BTreeMap::new(),
                 peer_buffer_size: config.peer_buffer_size,
+                window: config.records,
                 peer_provider: config.peer_provider,
                 aggregate_peers: Set::default(),
                 latest_primary_peers: Set::default(),
@@ -750,7 +761,7 @@ where
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");
             },
-            // Retiring or caching a record aborts its job.
+            // Removing or caching a record aborts its job.
             Ok(reconstructed) = self.jobs.next_completed() else continue => {
                 self.complete(reconstructed);
             },
@@ -783,9 +794,6 @@ where
                     }
                     Message::Notarized { commitment, round } => {
                         self.handle_notarized_commitment(&mut sender, commitment, round);
-                    }
-                    Message::Finalized { commitment, round } => {
-                        self.finalized(commitment, round);
                     }
                     Message::GetByCommitment {
                         commitment,
@@ -826,10 +834,10 @@ where
                             response,
                         );
                     }
-                    Message::Retire { update } => {
-                        self.retire(update);
-                    }
                 }
+
+                // A consensus signal may have admitted a record beyond the window.
+                self.trim();
             },
             Some((peer, shard)) = receiver.recv() else {
                 debug!("receiver closed, stopping shard engine");
@@ -926,7 +934,7 @@ where
             return;
         };
         let minimum = usize::from(commitment.config().minimum_shards.get());
-        let checked = state.common.checked_shards.len();
+        let checked = state.checked_shards.len();
         if state.job.is_some() || checked + state.pending_shards.len() < minimum {
             return;
         }
@@ -935,9 +943,8 @@ where
         let pending = iter::from_fn(|| state.pending_shards.pop_first())
             .take(minimum.saturating_sub(checked))
             .collect::<Vec<_>>();
-        let checked = mem::take(&mut state.common.checked_shards);
+        let checked = mem::take(&mut state.checked_shards);
         let len = state
-            .common
             .received_shards
             .values()
             .map(EncodeSize::encode_size)
@@ -961,10 +968,10 @@ where
 
     /// Applies a finished reconstruction job to the record that started it.
     ///
-    /// A successful reconstruction caches the block while retaining any shard state still
-    /// needed for assigned-shard readiness. A failed reconstruction retires the commitment and
-    /// its commitment-specific subscriptions. With too few valid shards, the checked shards
-    /// return to the record and another job starts once enough shards are available.
+    /// A successful reconstruction caches the block and drops the record's shards. A failed
+    /// reconstruction removes the record and closes its commitment-specific subscriptions. With
+    /// too few valid shards, the checked shards return to the record and another job starts once
+    /// enough shards are available.
     fn complete(&mut self, reconstructed: Reconstructed<P, B, C, H>) {
         let Reconstructed {
             commitment,
@@ -976,7 +983,7 @@ where
             commonware_p2p::block!(self.blocker, peer, "invalid shard received");
         }
 
-        // Retiring or caching a record drops its job's aborter, and an aborted job never
+        // Removing or caching a record drops its job's aborter, and an aborted job never
         // completes.
         let record = self
             .records
@@ -989,7 +996,7 @@ where
         state.job = None;
         match outcome {
             Outcome::Insufficient(checked) => {
-                state.common.checked_shards.extend(checked);
+                state.checked_shards.extend(checked);
                 self.try_reconstruct(commitment);
             }
             Outcome::Decoded(Ok(inner)) => {
@@ -1004,11 +1011,10 @@ where
                     .expect("reconstruction uses its commitment record's epoch");
                 self.metrics.blocks_reconstructed_total.inc();
 
-                // Do not prune other reconstruction state here. A Byzantine
-                // leader can equivocate by proposing multiple commitments in
-                // the same round, so more than one block may be reconstructed
-                // for a given round. Cached blocks retire only after durable
-                // application progress supplies both eligibility signals.
+                // Do not prune other records here. A Byzantine leader can
+                // equivocate by proposing multiple commitments in the same
+                // round, so more than one block may be reconstructed for a
+                // given round. Cached blocks leave only through window eviction.
                 debug!(
                     %commitment,
                     parent = %block.parent(),
@@ -1018,7 +1024,14 @@ where
             }
             Outcome::Decoded(Err(err)) => {
                 debug!(%commitment, ?err, "failed to reconstruct block from checked shards");
-                self.retire_commitment(commitment, RetirementReason::Exact);
+                self.evict(commitment);
+                self.assigned_shard_verified_subscriptions
+                    .remove(&commitment);
+
+                // Before marshal accepts a block, a candidate can claim a digest it cannot
+                // reconstruct. Removing it therefore does not prove the digest unavailable.
+                self.block_subscriptions
+                    .remove(&BlockSubscriptionKey::Commitment(commitment));
                 self.metrics.reconstruction_failures_total.inc();
             }
         }
@@ -1080,6 +1093,15 @@ where
                 .set_leader(leader)
                 .expect("leader was checked as absent");
         } else {
+            // Shards for a commitment the window declines stay in the peer buffers.
+            if !self.admits(round) {
+                debug!(
+                    %commitment,
+                    %round,
+                    "discovered commitment at or below the lowest retained round"
+                );
+                return;
+            }
             let participants_len = u64::try_from(participants.len())
                 .expect("participant count impossibly out of bounds");
             self.insert_reconstruction_record(
@@ -1122,6 +1144,16 @@ where
             warn!(%commitment, "no scheme for epoch, ignoring notarized commitment");
             return;
         };
+
+        // Shards for a commitment the window declines stay in the peer buffers.
+        if !self.admits(round) {
+            debug!(
+                %commitment,
+                %round,
+                "notarized commitment at or below the lowest retained round"
+            );
+            return;
+        }
         let participants_len = u64::try_from(scheme.participants().len())
             .expect("participant count impossibly out of bounds");
         self.insert_reconstruction_record(
@@ -1261,28 +1293,67 @@ where
         self.metrics.reconstruction_states_count.inc();
     }
 
-    /// Cache a block and notify all subscribers waiting on it.
+    /// Returns whether the window admits a new record observed at `round`.
+    fn admits(&self, round: Round) -> bool {
+        self.records.len() < self.window.get()
+            || self.records.values().any(|record| record.round() < round)
+    }
+
+    /// Evicts the lowest-round records while the window is over capacity.
+    ///
+    /// Ties are evicted in commitment order.
+    fn trim(&mut self) {
+        while self.records.len() > self.window.get() {
+            let (&commitment, _) = self
+                .records
+                .iter()
+                .min_by_key(|(_, record)| record.round())
+                .expect("an over-capacity window must hold a record");
+            self.evict(commitment);
+        }
+    }
+
+    /// Removes the record for `commitment` without closing any subscription.
+    ///
+    /// Dropping the record aborts its reconstruction job.
+    fn evict(&mut self, commitment: Commitment<B, C, H>) {
+        let Some(record) = self.records.remove(&commitment) else {
+            return;
+        };
+        if record.reconstruction().is_some() {
+            self.metrics.reconstruction_states_count.dec();
+        }
+        if record.block().is_some() {
+            self.metrics.reconstructed_blocks_cache_count.dec();
+        }
+    }
+
+    /// Caches a block and notifies all subscribers waiting on it.
+    ///
+    /// A block without a record is retained only if the window admits `round`.
     fn cache_block(
         &mut self,
         round: Round,
         block: Arc<CodedBlock<B, C, H>>,
     ) -> Result<Arc<CodedBlock<B, C, H>>, Epoch> {
         let commitment = block.commitment();
-        let cached = match self.records.entry(commitment) {
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().observe(round)?;
-                let newly_cached = entry.get().block().is_none();
-                let cached = entry.get_mut().install_block(block);
-                if newly_cached {
-                    self.metrics.reconstructed_blocks_cache_count.inc();
-                }
-                cached
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(CommitmentRecord::cached(round, Arc::clone(&block)));
+        let cached = if let Some(record) = self.records.get_mut(&commitment) {
+            record.observe(round)?;
+            let newly_cached = record.block().is_none();
+            let cached = record.install_block(block);
+            if newly_cached {
                 self.metrics.reconstructed_blocks_cache_count.inc();
-                block
             }
+            cached
+        } else {
+            if self.admits(round) {
+                self.records.insert(
+                    commitment,
+                    CommitmentRecord::cached(round, Arc::clone(&block)),
+                );
+                self.metrics.reconstructed_blocks_cache_count.inc();
+            }
+            block
         };
         self.notify_block_subscribers(Arc::clone(&cached));
         Ok(cached)
@@ -1381,13 +1452,13 @@ where
             let _ = sender.send(Recipients::Some(non_participants), leader_shard, true);
         }
 
-        // Cache the block so we don't have to reconstruct it again.
+        // Cache the block so we don't have to reconstruct it again. The window may decline a
+        // block from an old round.
         self.cache_block(round, block)
             .expect("local proposal epoch was validated before broadcast");
-        self.records
-            .get_mut(&commitment)
-            .expect("caching a local proposal must create a commitment record")
-            .mark_proposed();
+        if let Some(record) = self.records.get_mut(&commitment) {
+            record.mark_proposed();
+        }
 
         // Local proposals bypass reconstruction, so shard subscribers waiting
         // for "our valid shard arrived" still need a notification.
@@ -1530,83 +1601,6 @@ where
             }
         }
     }
-
-    /// Retires one commitment and applies the subscription policy for the cause.
-    fn retire_commitment(&mut self, commitment: Commitment<B, C, H>, reason: RetirementReason) {
-        let had_reconstruction = self.records.remove(&commitment).is_some_and(|record| {
-            let had_reconstruction = record.reconstruction().is_some();
-            if had_reconstruction {
-                self.metrics.reconstruction_states_count.dec();
-            }
-            if record.block().is_some() {
-                self.metrics.reconstructed_blocks_cache_count.dec();
-            }
-            had_reconstruction
-        });
-
-        if matches!(reason, RetirementReason::Exact) || had_reconstruction {
-            self.assigned_shard_verified_subscriptions
-                .remove(&commitment);
-        }
-        if matches!(reason, RetirementReason::Exact) {
-            // Before marshal accepts a block, a candidate can claim a digest it cannot
-            // reconstruct. Retiring it therefore does not prove the digest unavailable.
-            self.block_subscriptions
-                .remove(&BlockSubscriptionKey::Commitment(commitment));
-        }
-    }
-
-    /// Retires reconstruction state without a cached block for every commitment other than
-    /// `finalized` last observed at or before `round`, and closes its assigned-shard
-    /// subscriptions.
-    ///
-    /// Cached blocks remain until durable application progress, and block subscriptions remain
-    /// open.
-    fn finalized(&mut self, finalized: Commitment<B, C, H>, round: Round) {
-        // Consensus never verifies or certifies another commitment at or below a finalized
-        // round, and later blocks descend from the finalized commitment. Marshal obtains any
-        // ancestor as a whole block, so partial shards for these commitments are never used.
-        let retired = self
-            .records
-            .iter()
-            .filter_map(|(commitment, record)| {
-                (*commitment != finalized && record.block().is_none() && record.round() <= round)
-                    .then_some(*commitment)
-            })
-            .collect::<Vec<_>>();
-        for commitment in retired {
-            self.retire_commitment(commitment, RetirementReason::Floor);
-        }
-    }
-
-    /// Retires cached blocks and reconstruction state after durable application progress.
-    ///
-    /// Cached block retirement waits for durable progress because a Byzantine leader may produce
-    /// multiple valid commitments in one round.
-    fn retire(&mut self, update: Retirement<Commitment<B, C, H>>) {
-        let Retirement {
-            round_floor,
-            exact_retirements,
-        } = update;
-        // Durable processing makes existing exact-commitment and assigned-shard waits for these
-        // states obsolete. Digest waits are not commitment-specific.
-        for commitment in exact_retirements {
-            self.retire_commitment(commitment, RetirementReason::Exact);
-        }
-
-        // Entries observed in later rounds may still be needed for certification. Block
-        // subscriptions remain open because local ingress can still satisfy them after a floor.
-        let retired = self
-            .records
-            .iter()
-            .filter_map(|(commitment, record)| {
-                (record.round() <= round_floor).then_some(*commitment)
-            })
-            .collect::<Vec<_>>();
-        for commitment in retired {
-            self.retire_commitment(commitment, RetirementReason::Floor);
-        }
-    }
 }
 
 /// Erasure coded block reconstruction state machine.
@@ -1655,13 +1649,8 @@ where
     leader: Option<P>,
     /// Our validated shard and the action to take with it.
     pending_action: Option<AssignedShardVerifiedAction<B, C, H>>,
-    /// Shards that have been verified and are ready to contribute to reconstruction.
-    checked_shards: Vec<C::CheckedShard>,
     /// Bitmap tracking which participant indices have contributed a shard.
     contributed: BitMap,
-    /// Raw shard data received per index, retained for equivocation detection.
-    /// Keyed by shard index.
-    received_shards: BTreeMap<u16, C::Shard>,
     /// Whether the shard for our assigned index has been verified.
     assigned_shard_verified: bool,
 }
@@ -1680,6 +1669,10 @@ where
     H: Hasher,
 {
     common: CommonState<P, B, C, H>,
+    /// Raw shard data received per index, retained for equivocation detection.
+    received_shards: BTreeMap<u16, C::Shard>,
+    /// Shards that have been verified and are ready to contribute to reconstruction.
+    checked_shards: Vec<C::CheckedShard>,
     /// Shards pending batch validation, keyed by sender.
     pending_shards: BTreeMap<P, IndexedShard<C>>,
     /// The in-flight reconstruction job. Dropping it discards the job's result.
@@ -1688,7 +1681,7 @@ where
 
 /// Phase data for `ReconstructionState::Ready`.
 ///
-/// The block is cached. Only the assigned shard is still accepted.
+/// The block is cached and no shards are retained. Only the assigned shard is still accepted.
 struct ReadyState<P, B, C, H>
 where
     P: PublicKey,
@@ -1711,54 +1704,9 @@ where
         Self {
             leader,
             pending_action: None,
-            checked_shards: Vec::new(),
             contributed: BitMap::zeroes(participants_len),
-            received_shards: BTreeMap::new(),
             assigned_shard_verified: false,
         }
-    }
-
-    /// Verify the assigned shard and store it.
-    ///
-    /// When `is_participant` is true, the validated shard is stored for
-    /// broadcasting to peers. When false (non-participant), only subscriber
-    /// notification is scheduled.
-    ///
-    /// Returns `false` if verification fails (sender is blocked), `true` on
-    /// success.
-    fn verify_assigned_shard(
-        &mut self,
-        sender: P,
-        commitment: Commitment<B, C, H>,
-        shard: IndexedShard<C>,
-        is_participant: bool,
-        blocker: &mut impl Blocker<PublicKey = P>,
-    ) -> bool {
-        // Store data for equivocation detection first (move), then clone
-        // once for check. This avoids a second clone compared to cloning
-        // for both check and storage.
-        self.received_shards.insert(shard.index, shard.data);
-        let data = self.received_shards.get(&shard.index).unwrap();
-        let Ok(checked) = C::check(&commitment.config(), &commitment.root(), shard.index, data)
-        else {
-            self.received_shards.remove(&shard.index);
-            commonware_p2p::block!(blocker, sender, "invalid assigned shard received");
-            return false;
-        };
-
-        self.contributed.set(u64::from(shard.index), true);
-        self.checked_shards.push(checked);
-        self.assigned_shard_verified = true;
-        self.pending_action = Some(if is_participant {
-            AssignedShardVerifiedAction::Broadcast(Shard::new(
-                commitment,
-                shard.index,
-                data.clone(),
-            ))
-        } else {
-            AssignedShardVerifiedAction::NotifyOnly
-        });
-        true
     }
 }
 
@@ -1773,13 +1721,15 @@ where
     fn new(leader: Option<P>, participants_len: u64) -> Self {
         Self::AwaitingQuorum(AwaitingQuorumState {
             common: CommonState::new(leader, participants_len),
+            received_shards: BTreeMap::new(),
+            checked_shards: Vec::new(),
             pending_shards: BTreeMap::new(),
             job: None,
         })
     }
 
-    /// Ends shard accumulation once the block is cached, dropping pending shards and any
-    /// in-flight job.
+    /// Ends shard accumulation once the block is cached, dropping received, checked, and
+    /// pending shards and any in-flight job.
     fn into_ready(self) -> Self {
         match self {
             Self::AwaitingQuorum(state) => Self::Ready(ReadyState {
@@ -1831,6 +1781,52 @@ where
         self.common_mut().pending_action.take()
     }
 
+    /// Verify the assigned shard and schedule the action to take with it.
+    ///
+    /// When `is_participant` is true, the validated shard is stored for
+    /// broadcasting to peers. When false (non-participant), only subscriber
+    /// notification is scheduled. While awaiting quorum, the shard also
+    /// contributes to reconstruction.
+    ///
+    /// Returns `false` if verification fails (sender is blocked), `true` on
+    /// success.
+    fn verify_assigned_shard(
+        &mut self,
+        sender: P,
+        commitment: Commitment<B, C, H>,
+        shard: IndexedShard<C>,
+        is_participant: bool,
+        blocker: &mut impl Blocker<PublicKey = P>,
+    ) -> bool {
+        let Ok(checked) = C::check(
+            &commitment.config(),
+            &commitment.root(),
+            shard.index,
+            &shard.data,
+        ) else {
+            commonware_p2p::block!(blocker, sender, "invalid assigned shard received");
+            return false;
+        };
+
+        let common = self.common_mut();
+        common.contributed.set(u64::from(shard.index), true);
+        common.assigned_shard_verified = true;
+        common.pending_action = Some(if is_participant {
+            AssignedShardVerifiedAction::Broadcast(Shard::new(
+                commitment,
+                shard.index,
+                shard.data.clone(),
+            ))
+        } else {
+            AssignedShardVerifiedAction::NotifyOnly
+        });
+        if let Self::AwaitingQuorum(state) = self {
+            state.received_shards.insert(shard.index, shard.data);
+            state.checked_shards.push(checked);
+        }
+        true
+    }
+
     /// Handle an incoming network shard.
     ///
     /// Returns `true` only when the shard caused state progress (buffered or
@@ -1849,7 +1845,7 @@ where
     ///   blocking.
     /// - Each shard index may only contribute ONE shard per commitment.
     ///   Sending a second shard for the same index with different data
-    ///   (equivocation) results in blocking the sender.
+    ///   (equivocation) while awaiting quorum results in blocking the sender.
     /// - The assigned shard is verified eagerly via [`CodingScheme::check`].
     ///   If verification fails, the sender is blocked.
     /// - Own-index shards are buffered in `pending_shards`. Once enough shards
@@ -1862,13 +1858,14 @@ where
     /// The following conditions cause a shard to be silently ignored
     /// without blocking the sender:
     ///
-    /// - Exact duplicate of a previously received shard for the same index.
+    /// - Exact duplicate of a previously received shard for the same index
+    ///   while awaiting quorum.
     /// - The index has already been marked as contributed (via the bitmap,
     ///   e.g. after batch validation).
-    /// - Own-index shards that arrive after the state has transitioned to
-    ///   [`ReconstructionState::Ready`] (i.e., the block is cached). An
-    ///   assigned shard for our index is still accepted in `Ready` state to
-    ///   ensure we verify and re-broadcast it.
+    /// - Shards other than the assigned shard that arrive after the state has
+    ///   transitioned to [`ReconstructionState::Ready`] (i.e., the block is
+    ///   cached), including shards that conflict with earlier ones. An
+    ///   assigned shard for our index is still verified in `Ready` state.
     /// - Before a reconstruction state exists, shards are buffered at the
     ///   engine level in bounded per-peer queues until [`Mailbox::discovered`]
     ///   or [`Mailbox::notarized`] creates state for this commitment.
@@ -1923,8 +1920,10 @@ where
             return false;
         }
 
-        // Equivocation/duplicate check.
-        if let Some(existing) = self.common().received_shards.get(&indexed.index) {
+        // Equivocation/duplicate check while awaiting quorum.
+        if let Self::AwaitingQuorum(state) = self
+            && let Some(existing) = state.received_shards.get(&indexed.index)
+        {
             if existing != &indexed.data {
                 commonware_p2p::block!(blocker, sender, "shard equivocation");
             }
@@ -1939,7 +1938,7 @@ where
         // The assigned shard is always verified eagerly, even after transitioning
         // to Ready. This ensures we broadcast it to help slower peers reach quorum.
         if is_assigned_shard && !self.common().assigned_shard_verified {
-            return self.common_mut().verify_assigned_shard(
+            return self.verify_assigned_shard(
                 sender,
                 commitment,
                 indexed,
@@ -1955,7 +1954,6 @@ where
 
         // Buffer for batch validation.
         state
-            .common
             .received_shards
             .insert(indexed.index, indexed.data.clone());
         state.common.contributed.set(u64::from(indexed.index), true);
@@ -2272,6 +2270,8 @@ mod tests {
         link: Link,
         /// Per-peer capacity for shards received before leader discovery.
         peer_buffer_size: NonZeroUsize,
+        /// Maximum number of commitment records each engine retains.
+        records: NonZeroUsize,
         /// The maximum encoded size of a block.
         max_block_size: NonZeroUsize,
         /// Marker for the coding scheme type parameter.
@@ -2287,6 +2287,7 @@ mod tests {
                 additional_scheme_epochs: Vec::new(),
                 link: DEFAULT_LINK,
                 peer_buffer_size: NZUsize!(64),
+                records: NZUsize!(16),
                 max_block_size: MAX_BLOCK_SIZE,
                 _marker: PhantomData,
             }
@@ -2399,6 +2400,7 @@ mod tests {
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: self.peer_buffer_size,
+                        records: self.records,
                         background_channel_capacity: NZUsize!(1024),
                         peer_provider: oracle.manager(),
                     };
@@ -2442,6 +2444,7 @@ mod tests {
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: self.peer_buffer_size,
+                        records: self.records,
                         background_channel_capacity: NZUsize!(1024),
                         peer_provider: oracle.manager(),
                     };
@@ -2468,6 +2471,70 @@ mod tests {
                 .await;
             });
         }
+    }
+
+    /// Builds an unstarted engine for the participant at `index` and the sender its handlers
+    /// take. Every participant is in `latest.primary`.
+    async fn unstarted(
+        context: &deterministic::Context,
+        oracle: &O,
+        private_keys: &[PrivateKey],
+        index: usize,
+        records: NonZeroUsize,
+    ) -> (ShardEngine<C>, WrappedSender<NetworkSender, Shard<B, C, H>>) {
+        let participants: Set<P> =
+            Set::from_iter_dedup(private_keys.iter().map(|key| key.public_key()));
+        let control = oracle.control(private_keys[index].public_key());
+        let (sender, _) = control
+            .register(0, TEST_QUOTA)
+            .await
+            .expect("registration should succeed");
+        let scheme = Scheme::signer(
+            SCHEME_NAMESPACE,
+            participants.clone(),
+            private_keys[index].clone(),
+        )
+        .expect("signer scheme should be created");
+        let config: Config<_, _, _, _, _, _> = Config {
+            scheme_provider: MultiEpochProvider::single(scheme),
+            blocker: control,
+            max_block_size: MAX_BLOCK_SIZE,
+            block_codec_cfg: (),
+            strategy: STRATEGY,
+            mailbox_size: NZUsize!(16),
+            peer_buffer_size: NZUsize!(4),
+            records,
+            background_channel_capacity: NZUsize!(16),
+            peer_provider: oracle.manager(),
+        };
+        let (mut engine, _) = ShardEngine::new(context.child("engine"), config);
+        engine.update_latest_primary_peers(participants);
+        let sender = WrappedSender::new(context.network_buffer_pool().clone(), sender);
+        (engine, sender)
+    }
+
+    /// Returns the number of shards for `commitment` buffered from `peer`.
+    fn buffered(engine: &ShardEngine<C>, peer: &P, commitment: Commitment<B, C, H>) -> usize {
+        engine.peer_buffers.get(peer).map_or(0, |queue| {
+            queue
+                .iter()
+                .filter(|shard| shard.commitment() == commitment)
+                .count()
+        })
+    }
+
+    /// Returns each engine's value of the gauge `name` from encoded metrics.
+    fn gauges(metrics: &str, name: &str) -> Vec<i64> {
+        metrics
+            .lines()
+            .filter(|line| !line.starts_with('#') && line.contains(name))
+            .map(|line| {
+                line.rsplit(' ')
+                    .next()
+                    .and_then(|value| value.parse().ok())
+                    .expect("gauge value should parse")
+            })
+            .collect()
     }
 
     #[test_traced]
@@ -2683,104 +2750,15 @@ mod tests {
         );
     }
 
+    /// Local re-proposals raise the rounds of cached blocks, and the window evicts the blocks
+    /// last observed in the lowest rounds.
     #[test_traced]
-    fn test_retire_uses_inclusive_retirement_floor() {
-        let fixture = Fixture::<C>::default();
-        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
-            // The processed commitment was re-proposed above the retirement floor. A malicious
-            // candidate was observed below it.
-            let processed = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
-                coding_config,
-                &STRATEGY,
-            );
-            let malicious = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(u64::MAX), 100),
-                coding_config,
-                &STRATEGY,
-            );
-            let equal = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(3), 100),
-                coding_config,
-                &STRATEGY,
-            );
-            let later = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(2), 100),
-                coding_config,
-                &STRATEGY,
-            );
-            let processed_commitment = processed.commitment();
-            let malicious_commitment = malicious.commitment();
-            let equal_commitment = equal.commitment();
-            let later_commitment = later.commitment();
-
-            // Cache all blocks via `proposed`.
-            let peer = &mut peers[0];
-            peer.mailbox
-                .proposed(Round::new(Epoch::zero(), View::new(1)), processed.clone());
-            peer.mailbox
-                .proposed(Round::new(Epoch::zero(), View::new(2)), malicious);
-            peer.mailbox
-                .proposed(Round::new(Epoch::zero(), View::new(3)), equal);
-            peer.mailbox
-                .proposed(Round::new(Epoch::zero(), View::new(1)), later.clone());
-            // Re-proposals refresh ownership independently of the commitment's
-            // original context round.
-            peer.mailbox
-                .proposed(Round::new(Epoch::zero(), View::new(5)), processed);
-            peer.mailbox
-                .proposed(Round::new(Epoch::zero(), View::new(4)), later);
-            context.sleep(Duration::from_millis(10)).await;
-
-            // Verify all blocks are in the cache.
-            assert!(
-                peer.mailbox.get(processed_commitment).await.is_some(),
-                "processed block should be cached"
-            );
-            assert!(
-                peer.mailbox.get(malicious_commitment).await.is_some(),
-                "malicious block should be cached"
-            );
-            assert!(
-                peer.mailbox.get(equal_commitment).await.is_some(),
-                "equal-round block should be cached"
-            );
-            assert!(
-                peer.mailbox.get(later_commitment).await.is_some(),
-                "later block should be cached"
-            );
-
-            // The authoritative retirement floor removes every earlier candidate and the exact
-            // processed commitment, even when that commitment was observed above the floor.
-            peer.mailbox.retire(Retirement {
-                round_floor: Round::new(Epoch::zero(), View::new(3)),
-                exact_retirements: vec![processed_commitment],
-            });
-            context.sleep(Duration::from_millis(10)).await;
-
-            assert!(
-                peer.mailbox.get(processed_commitment).await.is_none(),
-                "exact processed block should be pruned above the floor"
-            );
-            assert!(
-                peer.mailbox.get(malicious_commitment).await.is_none(),
-                "earlier malicious block should be pruned"
-            );
-            assert!(
-                peer.mailbox.get(equal_commitment).await.is_none(),
-                "block observed at the retirement floor should be pruned"
-            );
-            assert!(
-                peer.mailbox.get(later_commitment).await.is_some(),
-                "non-target block observed above the floor should remain cached"
-            );
-        });
-    }
-
-    #[test_traced]
-    fn test_retire_unseen_commitment_applies_floor() {
-        let fixture = Fixture::<C>::default();
-        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
+    fn test_window_evicts_lowest_cached_rounds() {
+        let fixture = Fixture::<C> {
+            records: NZUsize!(4),
+            ..Default::default()
+        };
+        fixture.start(|_, _, _, peers, _, coding_config| async move {
             let make_block = |id| {
                 CodedBlock::<B, C, H>::new(
                     B::new(Sha256Digest::EMPTY, Height::new(id), id),
@@ -2788,296 +2766,913 @@ mod tests {
                     &STRATEGY,
                 )
             };
-            let cached_old = make_block(1);
-            let cached_equal = make_block(2);
-            let cached_later = make_block(3);
-            let state_old = make_block(4).commitment();
-            let state_equal = make_block(5).commitment();
-            let state_later = make_block(6).commitment();
-            let unseen = make_block(7).commitment();
-            let cached_old_commitment = cached_old.commitment();
-            let cached_equal_commitment = cached_equal.commitment();
-            let cached_later_commitment = cached_later.commitment();
-            let old_round = Round::new(Epoch::zero(), View::new(2));
-            let floor = Round::new(Epoch::zero(), View::new(3));
-            let later_round = Round::new(Epoch::zero(), View::new(4));
-            let leader = peers[1].public_key.clone();
-            let peer = &mut peers[0];
+            let round = |view| Round::new(Epoch::zero(), View::new(view));
+            let reproposed = make_block(1);
+            let low = make_block(2);
+            let middle = make_block(3);
+            let refreshed = make_block(4);
+            let later = [make_block(5), make_block(6)];
+            let reproposed_commitment = reproposed.commitment();
+            let low_commitment = low.commitment();
+            let middle_commitment = middle.commitment();
+            let refreshed_commitment = refreshed.commitment();
 
-            peer.mailbox.proposed(old_round, cached_old);
-            peer.mailbox.proposed(floor, cached_equal);
-            peer.mailbox.proposed(later_round, cached_later);
-            peer.mailbox
-                .discovered(state_old, leader.clone(), old_round);
-            peer.mailbox.discovered(state_equal, leader.clone(), floor);
-            peer.mailbox
-                .discovered(state_later, leader.clone(), old_round);
-            peer.mailbox.discovered(state_later, leader, later_round);
-            let mut state_old_sub = peer.mailbox.subscribe(state_old);
-            let mut state_equal_sub = peer.mailbox.subscribe(state_equal);
-            let mut state_later_sub = peer.mailbox.subscribe(state_later);
-            context.sleep(Duration::from_millis(10)).await;
+            // Cache four blocks via `proposed`. Re-proposals raise the first and fourth
+            // blocks above the other two, independently of their original context rounds.
+            let peer = &peers[0];
+            peer.mailbox.proposed(round(1), reproposed.clone());
+            peer.mailbox.proposed(round(2), low);
+            peer.mailbox.proposed(round(3), middle);
+            peer.mailbox.proposed(round(1), refreshed.clone());
+            peer.mailbox.proposed(round(5), reproposed);
+            peer.mailbox.proposed(round(4), refreshed);
+            for commitment in [
+                reproposed_commitment,
+                low_commitment,
+                middle_commitment,
+                refreshed_commitment,
+            ] {
+                assert!(
+                    peer.mailbox.get(commitment).await.is_some(),
+                    "a full window retains every block"
+                );
+            }
 
-            peer.mailbox.retire(Retirement {
-                round_floor: floor,
-                exact_retirements: vec![unseen],
-            });
-            context.sleep(Duration::from_millis(10)).await;
-
-            assert!(peer.mailbox.get(cached_old_commitment).await.is_none());
-            assert!(peer.mailbox.get(cached_equal_commitment).await.is_none());
-            assert!(peer.mailbox.get(cached_later_commitment).await.is_some());
-            assert!(matches!(state_old_sub.try_recv(), Err(TryRecvError::Empty)));
-            assert!(matches!(
-                state_equal_sub.try_recv(),
-                Err(TryRecvError::Empty)
-            ));
-            assert!(matches!(
-                state_later_sub.try_recv(),
-                Err(TryRecvError::Empty)
-            ));
+            // Two blocks proposed in later rounds evict the two lowest-round blocks.
+            for (block, view) in later.iter().zip([6, 7]) {
+                peer.mailbox.proposed(round(view), block.clone());
+            }
+            assert!(
+                peer.mailbox.get(low_commitment).await.is_none(),
+                "the lowest-round block should be evicted"
+            );
+            assert!(
+                peer.mailbox.get(middle_commitment).await.is_none(),
+                "the next lowest-round block should be evicted"
+            );
+            assert!(
+                peer.mailbox.get(reproposed_commitment).await.is_some(),
+                "a re-proposed block should remain cached"
+            );
+            assert!(
+                peer.mailbox.get(refreshed_commitment).await.is_some(),
+                "a re-proposed block should remain cached"
+            );
+            for block in &later {
+                assert!(peer.mailbox.get(block.commitment()).await.is_some());
+            }
         });
     }
 
-    /// A finalization retires subquorum reconstruction state at or below its round while the
-    /// finalized commitment, later state, cached blocks, and block subscriptions remain.
+    /// Evicting a record closes none of its subscriptions, and a record recreated after
+    /// eviction resolves them.
     #[test_traced]
-    fn test_finalization_retires_subquorum_reconstruction() {
-        let fixture: Fixture<C> = Fixture {
-            num_primary_peers: 10,
+    fn test_eviction_keeps_subscriptions_open() {
+        let fixture = Fixture::<C> {
+            records: NZUsize!(2),
+            ..Default::default()
+        };
+        fixture.start(|_, _, oracle, mut peers, _, coding_config| async move {
+            let make_block = |id| {
+                CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(id), id),
+                    coding_config,
+                    &STRATEGY,
+                )
+            };
+            let round = |view| Round::new(Epoch::zero(), View::new(view));
+            let leader = peers[0].public_key.clone();
+            let receiver_pk = peers[2].public_key.clone();
+            let block = make_block(1);
+            let commitment = block.commitment();
+            let cached = make_block(2);
+            let cached_commitment = cached.commitment();
+
+            // The receiver tracks the commitment at view 1 and caches its own proposal at
+            // view 2.
+            peers[2]
+                .mailbox
+                .discovered(commitment, leader.clone(), round(1));
+            let mut assigned = peers[2]
+                .mailbox
+                .subscribe_assigned_shard_verified(commitment);
+            let mut subscription = peers[2].mailbox.subscribe(commitment);
+            peers[2].mailbox.proposed(round(2), cached);
+            assert!(peers[2].mailbox.get(cached_commitment).await.is_some());
+
+            // Records at views 3 and 4 evict both, lowest round first. The commitment's
+            // subscriptions stay open.
+            for view in [3, 4] {
+                peers[2].mailbox.discovered(
+                    make_block(view).commitment(),
+                    leader.clone(),
+                    round(view),
+                );
+            }
+            assert!(peers[2].mailbox.get(cached_commitment).await.is_none());
+            assert!(matches!(assigned.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+
+            // Rediscovery at view 5 recreates the record. The assigned shard and one gossip
+            // shard reconstruct the block and resolve both subscriptions.
+            peers[2].mailbox.discovered(commitment, leader, round(5));
+            for (sender, index) in [(0, peers[2].index), (1, peers[1].index)] {
+                let shard = block.shard(index.get() as u16).expect("missing shard");
+                peers[sender].sender.send(
+                    Recipients::One(receiver_pk.clone()),
+                    shard.encode(),
+                    true,
+                );
+            }
+            assigned.await.expect("assigned shard should be verified");
+            let reconstructed = subscription.await.expect("block should be reconstructed");
+            assert_eq!(reconstructed.commitment(), commitment);
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// Subquorum reconstruction state survives records for `records - 1` later views and is
+    /// evicted by the next. Its block subscription stays open, and its last shard then enters
+    /// the sender's buffer without rebuilding the block.
+    #[test_traced]
+    fn test_subquorum_reconstruction_evicted_by_window() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(10),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut private_keys: Vec<PrivateKey> = (0..10).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
+            let records = NZUsize!(4);
+            let (mut engine, mut sender) =
+                unstarted(&context, &oracle, &private_keys, 3, records).await;
+            let coding_config = coding_config_for_participants(peer_keys.len() as u16);
+            let make_block = |id| {
+                CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(id), id),
+                    coding_config,
+                    &STRATEGY,
+                )
+            };
+            let round = |view| Round::new(Epoch::zero(), View::new(view));
+            let leader = peer_keys[0].clone();
+
+            // The candidate at view 10 receives three of the four shards needed.
+            let block = make_block(1);
+            let commitment = block.commitment();
+            engine.handle_external_proposal(&mut sender, commitment, leader.clone(), round(10));
+            let (response, mut subscription) = oneshot::channel();
+            engine
+                .handle_block_subscription(BlockSubscriptionKey::Commitment(commitment), response);
+            for index in [1, 2, 4] {
+                let shard = block.shard(index).expect("missing shard");
+                engine.handle_network_shard(
+                    &mut sender,
+                    peer_keys[usize::from(index)].clone(),
+                    shard,
+                );
+            }
+
+            // Records for three later views fill the window, and the candidate survives.
+            for view in 11..=13 {
+                engine.handle_external_proposal(
+                    &mut sender,
+                    make_block(view).commitment(),
+                    leader.clone(),
+                    round(view),
+                );
+                engine.trim();
+                assert!(engine.records.contains_key(&commitment), "view {view}");
+            }
+
+            // The record for the next view evicts the candidate. Its block subscription stays
+            // open.
+            engine.handle_external_proposal(
+                &mut sender,
+                make_block(14).commitment(),
+                leader,
+                round(14),
+            );
+            engine.trim();
+            assert!(!engine.records.contains_key(&commitment));
+            assert_eq!(engine.records.len(), records.get());
+            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+
+            // The last shard enters its sender's buffer and rebuilds nothing.
+            let sender_key = peer_keys[5].clone();
+            let shard = block.shard(5).expect("missing shard");
+            engine.handle_network_shard(&mut sender, sender_key.clone(), shard);
+            assert_eq!(buffered(&engine, &sender_key, commitment), 1);
+            assert!(!engine.records.contains_key(&commitment));
+            assert!(engine.jobs.is_empty());
+            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// Once the window is full, a notarization or discovery at or below its lowest round creates
+    /// no record and leaves the commitment's shards in their sender's buffer, and a block from
+    /// such a round still resolves its subscribers. A notarization above the lowest round creates
+    /// the record and drains the buffer.
+    #[test_traced]
+    fn test_full_window_declines_rounds_at_or_below_lowest() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(4),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
+            let records = NZUsize!(2);
+            let (mut engine, mut sender) =
+                unstarted(&context, &oracle, &private_keys, 0, records).await;
+            let coding_config = coding_config_for_participants(peer_keys.len() as u16);
+            let make_block = |id| {
+                CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(id), id),
+                    coding_config,
+                    &STRATEGY,
+                )
+            };
+            let round = |view| Round::new(Epoch::zero(), View::new(view));
+
+            // Notarizations at views 5 and 6 fill the window.
+            for view in [5, 6] {
+                engine.handle_notarized_commitment(
+                    &mut sender,
+                    make_block(view).commitment(),
+                    round(view),
+                );
+                engine.trim();
+            }
+            assert_eq!(engine.records.len(), records.get());
+
+            // A sender-indexed shard for a commitment without a record enters its sender's
+            // buffer.
+            let block = make_block(1);
+            let commitment = block.commitment();
+            let gossiper = peer_keys[1].clone();
+            let shard = block.shard(1).expect("missing shard");
+            engine.handle_network_shard(&mut sender, gossiper.clone(), shard);
+            assert_eq!(buffered(&engine, &gossiper, commitment), 1);
+
+            // Notarizations at and below the lowest retained view create no record, and the
+            // shard stays buffered.
+            for view in [5, 4] {
+                engine.handle_notarized_commitment(&mut sender, commitment, round(view));
+                engine.trim();
+                assert!(!engine.records.contains_key(&commitment), "view {view}");
+                assert_eq!(buffered(&engine, &gossiper, commitment), 1, "view {view}");
+            }
+
+            // A discovery at the lowest retained view creates no record either, so its known
+            // leader drains no buffered shard.
+            engine.handle_external_proposal(
+                &mut sender,
+                commitment,
+                peer_keys[2].clone(),
+                round(5),
+            );
+            engine.trim();
+            assert!(!engine.records.contains_key(&commitment));
+            assert_eq!(buffered(&engine, &gossiper, commitment), 1);
+
+            // A block from the lowest retained view resolves its subscriber without a record. Its
+            // commitment sorts above the commitment retained at that view, which the window
+            // would evict first if the block were retained.
+            let lowest = make_block(5).commitment();
+            let declined = (100..)
+                .map(make_block)
+                .find(|block| block.commitment() > lowest)
+                .expect("a commitment should sort above the lowest retained record");
+            let declined_commitment = declined.commitment();
+            let (response, mut subscription) = oneshot::channel();
+            engine.handle_block_subscription(
+                BlockSubscriptionKey::Commitment(declined_commitment),
+                response,
+            );
+            engine
+                .cache_block(round(5), Arc::new(declined))
+                .expect("a block without a record has no epoch conflict");
+            engine.trim();
+            let delivered = subscription
+                .try_recv()
+                .expect("declined block should resolve its subscriber");
+            assert_eq!(delivered.commitment(), declined_commitment);
+            assert!(!engine.records.contains_key(&declined_commitment));
+            assert!(engine.records.contains_key(&lowest));
+            assert_eq!(engine.records.len(), records.get());
+
+            // A notarization above the lowest retained view creates the record and drains the
+            // buffered shard. The window then evicts view 5.
+            engine.handle_notarized_commitment(&mut sender, commitment, round(7));
+            engine.trim();
+            assert!(engine.records.contains_key(&commitment));
+            assert_eq!(buffered(&engine, &gossiper, commitment), 0);
+            assert_eq!(engine.records.len(), records.get());
+            assert!(
+                engine
+                    .records
+                    .values()
+                    .all(|record| record.round() > round(5))
+            );
+        });
+    }
+
+    /// A local proposal from a round the full window declines still delivers each participant
+    /// its shard and resolves the proposer's subscriptions without retaining the block.
+    #[test_traced]
+    fn test_declined_proposal_still_broadcasts() {
+        let fixture = Fixture::<C> {
+            records: NZUsize!(2),
+            ..Default::default()
+        };
+        fixture.start(|_, _, oracle, peers, _, coding_config| async move {
+            let make_block = |id| {
+                CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(id), id),
+                    coding_config,
+                    &STRATEGY,
+                )
+            };
+            let round = |view| Round::new(Epoch::zero(), View::new(view));
+            let proposer = &peers[0];
+            let receiver = &peers[1];
+
+            // The proposer fills its window with proposals at views 5 and 6.
+            for view in [5, 6] {
+                proposer.mailbox.proposed(round(view), make_block(view));
+            }
+
+            // The receiver discovers a proposal at view 4, and both peers subscribe to it.
+            let block = make_block(4);
+            let commitment = block.commitment();
+            receiver
+                .mailbox
+                .discovered(commitment, proposer.public_key.clone(), round(4));
+            let verified = receiver
+                .mailbox
+                .subscribe_assigned_shard_verified(commitment);
+            let ready = proposer
+                .mailbox
+                .subscribe_assigned_shard_verified(commitment);
+            let subscription = proposer.mailbox.subscribe(commitment);
+
+            // The proposer broadcasts the declined proposal and resolves its subscriptions, but
+            // retains only the blocks at views 5 and 6.
+            proposer.mailbox.proposed(round(4), block);
+            verified.await.expect("receiver should verify its shard");
+            ready.await.expect("proposer should be ready");
+            let delivered = subscription
+                .await
+                .expect("proposer should receive its block");
+            assert_eq!(delivered.commitment(), commitment);
+            assert!(proposer.mailbox.get(commitment).await.is_none());
+            for view in [5, 6] {
+                let retained = make_block(view).commitment();
+                assert!(proposer.mailbox.get(retained).await.is_some());
+            }
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// Each engine holds at most `records` cached blocks and reconstruction states while blocks
+    /// are proposed and reconstructed for more than three windows of views.
+    #[test_traced]
+    fn test_records_bounded_over_many_views() {
+        let fixture = Fixture::<C> {
+            records: NZUsize!(4),
             ..Default::default()
         };
         fixture.start(
-            |config, context, oracle, mut peers, _, coding_config| async move {
-                let make_block = |id| {
-                    CodedBlock::<B, C, H>::new(
-                        B::new(Sha256Digest::EMPTY, Height::new(id), id),
+            |config, context, oracle, peers, _, coding_config| async move {
+                let records = config.records.get();
+                let leader = peers[0].public_key.clone();
+                let mut commitments = Vec::new();
+                for view in 1..=3 * records as u64 + 1 {
+                    // The leader proposes, and every other participant reconstructs the block.
+                    let block = CodedBlock::<B, C, H>::new(
+                        B::new(Sha256Digest::EMPTY, Height::new(view), view),
                         coding_config,
                         &STRATEGY,
-                    )
-                };
-                let round = |view| Round::new(Epoch::zero(), View::new(view));
-                let leader = peers[0].public_key.clone();
-                let receiver_pk = peers[3].public_key.clone();
-                let gossipers = [1, 2, 4];
-                let gossip = |peers: &mut [Peer], block: &CodedBlock<B, C, H>, sender: usize| {
-                    let shard = block
-                        .shard(peers[sender].index.get() as u16)
-                        .expect("missing shard");
-                    peers[sender].sender.send(
-                        Recipients::One(receiver_pk.clone()),
-                        shard.encode(),
-                        true,
                     );
-                };
-
-                // The leader's candidates at views 1 through 7, the commitment finalized later
-                // (observed at view 2), and a candidate above the finalization each receive
-                // three own-index shards, one short of the four needed to reconstruct.
-                let candidates = (1..=7).map(make_block).collect::<Vec<_>>();
-                let finalized = make_block(8);
-                let later = make_block(9);
-                let observed = candidates
-                    .iter()
-                    .zip(1..)
-                    .chain([(&finalized, 2), (&later, 8)]);
-                let mut subscriptions = Vec::new();
-                for (block, view) in observed {
                     let commitment = block.commitment();
-                    peers[3]
-                        .mailbox
-                        .discovered(commitment, leader.clone(), round(view));
-                    subscriptions.push((
-                        peers[3]
-                            .mailbox
-                            .subscribe_assigned_shard_verified(commitment),
-                        peers[3].mailbox.subscribe(commitment),
-                    ));
-                    for sender in gossipers {
-                        gossip(&mut peers, block, sender);
+                    let round = Round::new(Epoch::zero(), View::new(view));
+                    peers[0].mailbox.proposed(round, block);
+                    let mut subscriptions = Vec::new();
+                    for peer in &peers[1..] {
+                        peer.mailbox.discovered(commitment, leader.clone(), round);
+                        subscriptions.push(peer.mailbox.subscribe(commitment));
+                    }
+                    for subscription in subscriptions {
+                        subscription.await.expect("block should be reconstructed");
+                    }
+                    commitments.push(commitment);
+
+                    // No engine caches more blocks or holds more reconstruction states than the
+                    // window holds.
+                    let metrics = context.encode();
+                    for name in [
+                        "reconstructed_blocks_cache_count",
+                        "reconstruction_states_count",
+                    ] {
+                        let counts = gauges(&metrics, name);
+                        assert_eq!(counts.len(), peers.len());
+                        assert!(
+                            counts.iter().all(|count| *count <= records as i64),
+                            "view {view}: {name} {counts:?}"
+                        );
                     }
                 }
 
-                // A block is cached at view 1. Nothing reconstructs and no peer is blocked.
-                let cached = make_block(10);
-                let cached_commitment = cached.commitment();
-                peers[3].mailbox.proposed(round(1), cached);
-                context.sleep(config.link.latency * 2).await;
-                for block in candidates.iter().chain([&finalized, &later]) {
-                    assert!(peers[3].mailbox.get(block.commitment()).await.is_none());
+                // Each engine retains exactly the blocks of the last `records` views.
+                let (evicted, retained) = commitments.split_at(commitments.len() - records);
+                for peer in &peers {
+                    for commitment in evicted {
+                        assert!(peer.mailbox.get(*commitment).await.is_none());
+                    }
+                    for commitment in retained {
+                        assert!(peer.mailbox.get(*commitment).await.is_some());
+                    }
                 }
-                assert!(oracle.blocked().await.unwrap().is_empty());
-
-                // Finalize at view 7, where the leader also proposed a candidate.
-                peers[3].mailbox.finalized(finalized.commitment(), round(7));
-                context.sleep(Duration::from_millis(10)).await;
-
-                // Candidates at or below the finalization lose their reconstruction state, but
-                // their block subscriptions stay open. Everything else is retained.
-                let (retired, retained) = subscriptions.split_at_mut(candidates.len());
-                for (assigned, block) in retired {
-                    assert!(matches!(assigned.try_recv(), Err(TryRecvError::Closed)));
-                    assert!(matches!(block.try_recv(), Err(TryRecvError::Empty)));
-                }
-                for (assigned, block) in retained.iter_mut() {
-                    assert!(matches!(assigned.try_recv(), Err(TryRecvError::Empty)));
-                    assert!(matches!(block.try_recv(), Err(TryRecvError::Empty)));
-                }
-                assert!(peers[3].mailbox.get(cached_commitment).await.is_some());
-
-                // A fourth shard reconstructs the finalized and later commitments. A retired
-                // candidate no longer holds its three shards, so its fourth shard only enters
-                // the sender's buffer.
-                for block in [&finalized, &later, &candidates[0]] {
-                    gossip(&mut peers, block, 5);
-                }
-                context.sleep(config.link.latency * 2).await;
-                for (_, block) in retained {
-                    assert!(block.try_recv().is_ok());
-                }
-                assert!(
-                    peers[3]
-                        .mailbox
-                        .get(candidates[0].commitment())
-                        .await
-                        .is_none()
-                );
                 assert!(oracle.blocked().await.unwrap().is_empty());
             },
         );
     }
 
-    /// Subquorum reconstruction state survives any number of later views, a lower
-    /// finalization, and a lower retirement floor, then reconstructs once its last shard
-    /// arrives.
+    /// Records from a later epoch evict records from an earlier epoch, whatever their views.
     #[test_traced]
-    fn test_subquorum_reconstruction_survives_until_finalization() {
-        let fixture: Fixture<C> = Fixture {
-            num_primary_peers: 10,
+    fn test_later_epoch_evicts_earlier_epoch_records() {
+        let fixture = Fixture::<C> {
+            additional_scheme_epochs: vec![Epoch::new(1)],
+            records: NZUsize!(2),
             ..Default::default()
         };
-        fixture.start(
-            |config, context, _, mut peers, _, coding_config| async move {
-                let make_block = |id| {
-                    CodedBlock::<B, C, H>::new(
-                        B::new(Sha256Digest::EMPTY, Height::new(id), id),
-                        coding_config,
-                        &STRATEGY,
-                    )
-                };
-                let round = |view| Round::new(Epoch::zero(), View::new(view));
-                let leader = peers[0].public_key.clone();
-                let receiver_pk = peers[3].public_key.clone();
+        fixture.start(|_, _, _, peers, _, coding_config| async move {
+            let make_block = |id| {
+                CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(id), id),
+                    coding_config,
+                    &STRATEGY,
+                )
+            };
+            let receiver = &peers[2];
 
-                // The candidate at view 10 receives three of the four shards needed.
-                let block = make_block(1);
-                let commitment = block.commitment();
-                peers[3]
+            // The receiver caches its own proposals at high views of epoch 0.
+            let earlier = [make_block(1), make_block(2)];
+            for (block, view) in earlier.iter().zip([100, 101]) {
+                receiver
                     .mailbox
-                    .discovered(commitment, leader.clone(), round(10));
-                let mut subscription = peers[3].mailbox.subscribe(commitment);
-                for sender in [1, 2, 4] {
-                    let shard = block
-                        .shard(peers[sender].index.get() as u16)
-                        .expect("missing shard");
-                    peers[sender].sender.send(
-                        Recipients::One(receiver_pk.clone()),
-                        shard.encode(),
-                        true,
-                    );
-                }
-                context.sleep(config.link.latency * 2).await;
+                    .proposed(Round::new(Epoch::zero(), View::new(view)), block.clone());
+            }
+            for block in &earlier {
+                assert!(receiver.mailbox.get(block.commitment()).await.is_some());
+            }
 
-                // Thirty later views pass, and consensus finalizes and durably retires only
-                // rounds below the candidate.
-                for view in 11..=40 {
-                    peers[3].mailbox.discovered(
-                        make_block(view).commitment(),
-                        leader.clone(),
-                        round(view),
-                    );
-                }
-                peers[3]
+            // Proposals at the first views of epoch 1 evict both.
+            let later = [make_block(3), make_block(4)];
+            for (block, view) in later.iter().zip([1, 2]) {
+                receiver
                     .mailbox
-                    .finalized(make_block(100).commitment(), round(9));
-                peers[3].mailbox.retire(Retirement {
-                    round_floor: round(9),
-                    exact_retirements: Vec::new(),
-                });
-                context.sleep(Duration::from_millis(10)).await;
-                assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
-
-                // The last shard reconstructs the candidate.
-                let shard = block
-                    .shard(peers[5].index.get() as u16)
-                    .expect("missing shard");
-                peers[5]
-                    .sender
-                    .send(Recipients::One(receiver_pk), shard.encode(), true);
-                context.sleep(config.link.latency * 2).await;
-                let reconstructed = subscription.try_recv().expect("block reconstructed");
-                assert_eq!(reconstructed.commitment(), commitment);
-            },
-        );
+                    .proposed(Round::new(Epoch::new(1), View::new(view)), block.clone());
+            }
+            for block in &earlier {
+                assert!(receiver.mailbox.get(block.commitment()).await.is_none());
+            }
+            for block in &later {
+                assert!(receiver.mailbox.get(block.commitment()).await.is_some());
+            }
+        });
     }
 
+    /// Two commitments observed in one view evict only records from lower views. Later
+    /// commitments at or below that view create no record, and records tied at the lowest view
+    /// are evicted in commitment order.
     #[test_traced]
-    fn test_local_reproposal_refreshes_existing_reconstruction_state() {
-        let fixture = Fixture::<C>::default();
-        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
-            let live = CodedBlock::<B, C, H>::new(
+    fn test_same_view_records_never_evict_later_views() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(4),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
+            let (mut engine, mut sender) =
+                unstarted(&context, &oracle, &private_keys, 2, NZUsize!(4)).await;
+            let coding_config = coding_config_for_participants(peer_keys.len() as u16);
+            let make_block = |id| {
+                CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(id), id),
+                    coding_config,
+                    &STRATEGY,
+                )
+            };
+            let round = |view| Round::new(Epoch::zero(), View::new(view));
+            let leader = peer_keys[0].clone();
+
+            // The engine caches its own proposals at views 1, 2, 10, and 11.
+            let [first, second, tenth, eleventh] = [1, 2, 10, 11].map(|view| {
+                let block = make_block(view);
+                let commitment = block.commitment();
+                engine.broadcast_shards(&mut sender, round(view), Arc::new(block));
+                engine.trim();
+                commitment
+            });
+            assert_eq!(engine.records.len(), 4);
+
+            // The leader equivocates at view 5: the engine verifies one commitment and certifies
+            // the notarization of another. Both evict the records at views 1 and 2.
+            let tied = [make_block(20).commitment(), make_block(21).commitment()];
+            engine.handle_external_proposal(&mut sender, tied[0], leader.clone(), round(5));
+            engine.trim();
+            engine.handle_notarized_commitment(&mut sender, tied[1], round(5));
+            engine.trim();
+            assert!(!engine.records.contains_key(&first));
+            assert!(!engine.records.contains_key(&second));
+            for commitment in [tenth, eleventh, tied[0], tied[1]] {
+                assert!(engine.records.contains_key(&commitment));
+            }
+
+            // Further commitments at and below view 5 create no record.
+            let notarized = make_block(22).commitment();
+            engine.handle_notarized_commitment(&mut sender, notarized, round(5));
+            assert!(!engine.records.contains_key(&notarized));
+            let discovered = make_block(23).commitment();
+            engine.handle_external_proposal(&mut sender, discovered, leader, round(4));
+            assert!(!engine.records.contains_key(&discovered));
+            assert_eq!(engine.records.len(), 4);
+
+            // A record above view 5 evicts the lower commitment of the tied pair.
+            let (lower, higher) = (tied[0].min(tied[1]), tied[0].max(tied[1]));
+            engine.handle_notarized_commitment(&mut sender, make_block(24).commitment(), round(12));
+            engine.trim();
+            assert!(!engine.records.contains_key(&lower));
+            for commitment in [higher, tenth, eleventh] {
+                assert!(engine.records.contains_key(&commitment));
+            }
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// Caching a reconstructed block drops its record's shards. A conflicting shard is then
+    /// ignored without blocking its sender, and a late assigned shard is still verified and
+    /// gossiped.
+    #[test_traced]
+    fn test_cached_record_retains_no_shards() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(4),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+            let (mut engine, mut sender) =
+                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16)).await;
+
+            // Peer 1 observes the engine's gossip.
+            let (_, mut observer) = oracle
+                .control(peer_keys[1].clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+            oracle
+                .add_link(peer_keys[0].clone(), peer_keys[1].clone(), DEFAULT_LINK)
+                .await
+                .expect("link should be added");
+            oracle.manager().track(0, participants.clone());
+            context.sleep(Duration::from_millis(10)).await;
+
+            let coding_config = coding_config_for_participants(participants.len() as u16);
+            let block = CodedBlock::<B, C, H>::new(
                 B::new(Sha256Digest::EMPTY, Height::new(1), 100),
                 coding_config,
                 &STRATEGY,
             );
-            let unseen = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(2), 200),
-                coding_config,
-                &STRATEGY,
-            )
-            .commitment();
-            let state_first = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(3), 300),
+            let commitment = block.commitment();
+            let leader = peer_keys[1].clone();
+
+            // Gossip shards from peers 2 and 3 reconstruct the block before the assigned shard
+            // arrives.
+            engine.handle_external_proposal(
+                &mut sender,
+                commitment,
+                leader.clone(),
+                Round::new(Epoch::zero(), View::new(1)),
+            );
+            for index in [2, 3] {
+                let shard = block.shard(index).expect("missing shard");
+                engine.handle_network_shard(
+                    &mut sender,
+                    peer_keys[usize::from(index)].clone(),
+                    shard,
+                );
+            }
+            let reconstructed = engine
+                .jobs
+                .next_completed()
+                .await
+                .expect("reconstruction job should complete");
+            engine.complete(reconstructed);
+            let record = engine.records.get(&commitment).expect("record must exist");
+            assert!(record.block().is_some());
+            assert!(matches!(
+                record.reconstruction(),
+                Some(ReconstructionState::Ready(_))
+            ));
+
+            // A shard that conflicts with peer 2's contribution is ignored without blocking.
+            let other = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(1), 200),
                 coding_config,
                 &STRATEGY,
             );
+            let mut conflicting = other.shard(2).expect("missing shard");
+            conflicting.commitment = commitment;
+            engine.handle_network_shard(&mut sender, peer_keys[2].clone(), conflicting);
+            assert!(oracle.blocked().await.unwrap().is_empty());
+
+            // The leader's late assigned shard is verified, resolves readiness, and is gossiped.
+            let (response, mut verified) = oneshot::channel();
+            engine.handle_assigned_shard_verified_subscription(commitment, response);
+            assert!(matches!(verified.try_recv(), Err(TryRecvError::Empty)));
+            let assigned = block.shard(0).expect("missing shard");
+            engine.handle_network_shard(&mut sender, leader, assigned.clone());
+            assert!(matches!(verified.try_recv(), Ok(())));
+            let (from, gossip) = observer.recv().await.expect("gossip should arrive");
+            assert_eq!(from, peer_keys[0]);
+            assert_eq!(gossip.as_ref(), assigned.encode().as_ref());
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// A notarized record reconstructs its block from gossip while the leader's delivery of the
+    /// assigned shard waits in the leader's buffer. Discovery then verifies and gossips that
+    /// shard.
+    #[test_traced]
+    fn test_cached_leaderless_record_keeps_buffered_assigned_shard() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(4),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+            let (mut engine, mut sender) =
+                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16)).await;
+
+            // Peer 1 observes the engine's gossip.
+            let (_, mut observer) = oracle
+                .control(peer_keys[1].clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+            oracle
+                .add_link(peer_keys[0].clone(), peer_keys[1].clone(), DEFAULT_LINK)
+                .await
+                .expect("link should be added");
+            oracle.manager().track(0, participants.clone());
+            context.sleep(Duration::from_millis(10)).await;
+
+            let coding_config = coding_config_for_participants(participants.len() as u16);
+            let block = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                coding_config,
+                &STRATEGY,
+            );
+            let commitment = block.commitment();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let leader = peer_keys[1].clone();
+
+            // A notarization creates a leaderless record. The leader's delivery of the assigned
+            // shard cannot be classified and enters the leader's buffer.
+            engine.handle_notarized_commitment(&mut sender, commitment, round);
+            let (response, mut verified) = oneshot::channel();
+            engine.handle_assigned_shard_verified_subscription(commitment, response);
+            let assigned = block.shard(0).expect("missing shard");
+            engine.handle_network_shard(&mut sender, leader.clone(), assigned.clone());
+            assert_eq!(buffered(&engine, &leader, commitment), 1);
+
+            // Gossip shards from peers 2 and 3 reconstruct the block. The assigned shard stays
+            // buffered and readiness stays pending.
+            for index in [2, 3] {
+                let shard = block.shard(index).expect("missing shard");
+                engine.handle_network_shard(
+                    &mut sender,
+                    peer_keys[usize::from(index)].clone(),
+                    shard,
+                );
+            }
+            let reconstructed = engine
+                .jobs
+                .next_completed()
+                .await
+                .expect("reconstruction job should complete");
+            engine.complete(reconstructed);
+            let record = engine.records.get(&commitment).expect("record must exist");
+            assert!(record.block().is_some());
+            assert_eq!(buffered(&engine, &leader, commitment), 1);
+            assert!(matches!(verified.try_recv(), Err(TryRecvError::Empty)));
+
+            // Discovery drains the buffered assigned shard, which is verified, resolves readiness,
+            // and is gossiped.
+            engine.handle_external_proposal(&mut sender, commitment, leader.clone(), round);
+            assert_eq!(buffered(&engine, &leader, commitment), 0);
+            assert!(matches!(verified.try_recv(), Ok(())));
+            let (from, gossip) = observer.recv().await.expect("gossip should arrive");
+            assert_eq!(from, peer_keys[0]);
+            assert_eq!(gossip.as_ref(), assigned.encode().as_ref());
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// A failed reconstruction removes the record and closes the commitment's assigned-shard and
+    /// block subscriptions.
+    #[test_traced]
+    fn test_failed_reconstruction_closes_subscriptions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(4),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
+            let (mut engine, mut sender) =
+                unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16)).await;
+            let coding_config = coding_config_for_participants(peer_keys.len() as u16);
+
+            // The commitment claims the digest of one block and the coding root of another.
+            let claimed = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                coding_config,
+                &STRATEGY,
+            );
+            let actual = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(2), 200),
+                coding_config,
+                &STRATEGY,
+            );
+            let commitment = Commitment::from((
+                claimed.digest(),
+                actual.commitment().root(),
+                actual.commitment().context(),
+                coding_config,
+            ));
+
+            // The engine tracks the commitment and subscribes before any shard arrives.
+            engine.handle_external_proposal(
+                &mut sender,
+                commitment,
+                peer_keys[1].clone(),
+                Round::new(Epoch::zero(), View::new(1)),
+            );
+            let (response, mut assigned) = oneshot::channel();
+            engine.handle_assigned_shard_verified_subscription(commitment, response);
+            let (response, mut subscription) = oneshot::channel();
+            engine
+                .handle_block_subscription(BlockSubscriptionKey::Commitment(commitment), response);
+
+            // Gossip shards from peers 2 and 3 decode to a block that does not match the
+            // commitment's digest.
+            for index in [2, 3] {
+                let mut shard = actual.shard(index).expect("missing shard");
+                shard.commitment = commitment;
+                engine.handle_network_shard(
+                    &mut sender,
+                    peer_keys[usize::from(index)].clone(),
+                    shard,
+                );
+            }
+            assert!(matches!(assigned.try_recv(), Err(TryRecvError::Empty)));
+            let reconstructed = engine
+                .jobs
+                .next_completed()
+                .await
+                .expect("reconstruction job should complete");
+            engine.complete(reconstructed);
+
+            // The failure removes the record and closes both subscriptions without blocking
+            // anyone.
+            assert!(!engine.records.contains_key(&commitment));
+            assert!(matches!(assigned.try_recv(), Err(TryRecvError::Closed)));
+            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Closed)));
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// A local proposal of a tracked commitment resolves its assigned-shard subscriptions, and
+    /// its record keeps the highest observed round when the window evicts.
+    #[test_traced]
+    fn test_local_reproposal_refreshes_existing_reconstruction_state() {
+        let fixture = Fixture::<C> {
+            records: NZUsize!(3),
+            ..Default::default()
+        };
+        fixture.start(|_, _, _, mut peers, _, coding_config| async move {
+            let make_block = |id| {
+                CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(id), id * 100),
+                    coding_config,
+                    &STRATEGY,
+                )
+            };
+            let live = make_block(1);
+            let state_first = make_block(3);
+            let lower = make_block(4);
+            let later = make_block(5);
             let live_commitment = live.commitment();
             let state_first_commitment = state_first.commitment();
+            let lower_commitment = lower.commitment();
             let leader = peers[0].public_key.clone();
-            let original_round = Round::new(Epoch::zero(), View::new(1));
-            let floor = Round::new(Epoch::zero(), View::new(3));
-            let reproposal_round = Round::new(Epoch::zero(), View::new(4));
+            let round = |view| Round::new(Epoch::zero(), View::new(view));
+            let reproposal_round = round(8);
             let peer = &mut peers[0];
 
-            peer.mailbox
-                .discovered(live_commitment, leader, original_round);
+            // The peer discovers a commitment at view 1 and re-proposes it at view 8. It also
+            // notarizes another commitment at view 8 and then proposes it at view 5.
+            peer.mailbox.discovered(live_commitment, leader, round(1));
             peer.mailbox.proposed(reproposal_round, live);
             peer.mailbox
                 .notarized(state_first_commitment, reproposal_round);
-            peer.mailbox.proposed(floor, state_first);
+            peer.mailbox.proposed(round(5), state_first);
             assert!(peer.mailbox.get(live_commitment).await.is_some());
 
+            // A later assigned-shard subscription resolves from the local re-proposal.
             let mut shard_sub = peer
                 .mailbox
                 .subscribe_assigned_shard_verified(live_commitment);
-            context.sleep(Duration::from_millis(10)).await;
+            assert!(peer.mailbox.get(live_commitment).await.is_some());
             assert!(
                 matches!(shard_sub.try_recv(), Ok(())),
                 "late subscription should resolve after a local reproposal"
             );
 
-            peer.mailbox.retire(Retirement {
-                round_floor: floor,
-                exact_retirements: vec![unseen],
-            });
-            context.sleep(Duration::from_millis(10)).await;
-
+            // Caching blocks at views 6 and 9 exceeds the window by one record. Both earlier
+            // records were last observed at view 8, so the window evicts the block at view 6.
+            peer.mailbox.proposed(round(6), lower);
+            peer.mailbox.proposed(round(9), later);
+            assert!(peer.mailbox.get(lower_commitment).await.is_none());
             assert!(peer.mailbox.get(live_commitment).await.is_some());
             assert!(peer.mailbox.get(state_first_commitment).await.is_some());
             let mut retained_shard_sub = peer
                 .mailbox
                 .subscribe_assigned_shard_verified(live_commitment);
-            context.sleep(Duration::from_millis(10)).await;
+            assert!(peer.mailbox.get(live_commitment).await.is_some());
             assert!(
                 matches!(retained_shard_sub.try_recv(), Ok(())),
                 "retained local proposal should resolve a late subscription"
@@ -3383,86 +3978,84 @@ mod tests {
         );
     }
 
+    /// A rejected leader update does not raise a record's eviction round.
     #[test_traced]
-    fn test_rejected_leader_does_not_refresh_retirement_round() {
-        let fixture = Fixture::<C>::default();
-        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
-            let block = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
-                coding_config,
-                &STRATEGY,
-            );
-            let commitment = block.commitment();
-            let unrelated = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(2), 200),
-                coding_config,
-                &STRATEGY,
-            )
-            .commitment();
+    fn test_rejected_leader_does_not_refresh_eviction_round() {
+        let fixture = Fixture::<C> {
+            records: NZUsize!(2),
+            ..Default::default()
+        };
+        fixture.start(|_, _, _, peers, _, coding_config| async move {
+            let make_block = |id| {
+                CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(id), id * 100),
+                    coding_config,
+                    &STRATEGY,
+                )
+            };
+            let round = |view| Round::new(Epoch::zero(), View::new(view));
+            let commitment = make_block(1).commitment();
             let leader = peers[0].public_key.clone();
             let non_participant = PrivateKey::from_seed(10_000).public_key();
-            let receiver = &mut peers[2];
+            let receiver = &peers[2];
 
+            // The receiver tracks the commitment at view 1 and rejects a leader update at view
+            // 10 that names a non-participant.
             let mut subscription = receiver
                 .mailbox
                 .subscribe_assigned_shard_verified(commitment);
-            receiver.mailbox.discovered(
-                commitment,
-                leader,
-                Round::new(Epoch::zero(), View::new(1)),
-            );
-            receiver.mailbox.discovered(
-                commitment,
-                non_participant,
-                Round::new(Epoch::zero(), View::new(10)),
-            );
-            receiver.mailbox.retire(Retirement {
-                round_floor: Round::new(Epoch::zero(), View::new(5)),
-                exact_retirements: vec![unrelated],
-            });
-            context.sleep(Duration::from_millis(10)).await;
+            receiver.mailbox.discovered(commitment, leader, round(1));
+            receiver
+                .mailbox
+                .discovered(commitment, non_participant, round(10));
 
-            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Closed)));
+            // Blocks cached at views 2, 3, and 4 exceed the window by two records. The rejected
+            // leader update left the commitment at view 1, so the window evicts it and then
+            // the block at view 2.
+            let [first, second, third] = [2, 3, 4].map(|view| {
+                let block = make_block(view);
+                receiver.mailbox.proposed(round(view), block.clone());
+                block.commitment()
+            });
+            assert!(receiver.mailbox.get(first).await.is_none());
+            assert!(receiver.mailbox.get(second).await.is_some());
+            assert!(receiver.mailbox.get(third).await.is_some());
+            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
         });
     }
 
+    /// Observations from another epoch do not raise a record's eviction round.
     #[test_traced]
-    fn test_cross_epoch_observations_do_not_refresh_retirement_round() {
+    fn test_cross_epoch_observations_do_not_refresh_eviction_round() {
         let fixture = Fixture::<C> {
             additional_scheme_epochs: vec![Epoch::new(1)],
+            records: NZUsize!(2),
             ..Default::default()
         };
-        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
-            let cached = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
-                coding_config,
-                &STRATEGY,
-            );
-            let incomplete = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(2), 200),
-                coding_config,
-                &STRATEGY,
-            );
+        fixture.start(|_, _, _, peers, _, coding_config| async move {
+            let make_block = |id| {
+                CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(id), id * 100),
+                    coding_config,
+                    &STRATEGY,
+                )
+            };
+            let round = |view| Round::new(Epoch::zero(), View::new(view));
+            let cached = make_block(1);
+            let incomplete = make_block(2);
             let incomplete_commitment = incomplete.commitment();
-            let unrelated = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(3), 300),
-                coding_config,
-                &STRATEGY,
-            )
-            .commitment();
             let cached_commitment = cached.commitment();
             let leader = peers[0].public_key.clone();
-            let receiver = &mut peers[2];
-            let original_round = Round::new(Epoch::zero(), View::new(1));
+            let receiver = &peers[2];
 
-            receiver.mailbox.proposed(original_round, cached);
+            // The receiver caches its own proposal and tracks another commitment at view 1.
+            receiver.mailbox.proposed(round(1), cached);
             receiver
                 .mailbox
-                .discovered(incomplete_commitment, leader, original_round);
-            let mut subscription = receiver
-                .mailbox
-                .subscribe_assigned_shard_verified(incomplete_commitment);
+                .discovered(incomplete_commitment, leader, round(1));
 
+            // A proposal and notarizations from epoch 1 conflict with both records and are
+            // ignored.
             let conflicting_round = Round::new(Epoch::new(1), View::new(10));
             receiver.mailbox.proposed(conflicting_round, incomplete);
             receiver
@@ -3471,14 +4064,17 @@ mod tests {
             receiver
                 .mailbox
                 .notarized(incomplete_commitment, conflicting_round);
-            receiver.mailbox.retire(Retirement {
-                round_floor: Round::new(Epoch::zero(), View::new(5)),
-                exact_retirements: vec![unrelated],
-            });
-            context.sleep(Duration::from_millis(10)).await;
 
+            // Blocks cached at views 2 and 3 exceed the window by two records. The ignored
+            // observations left both records at view 1, so the window evicts them.
+            let later = [make_block(3), make_block(4)];
+            for (block, view) in later.iter().zip([2, 3]) {
+                receiver.mailbox.proposed(round(view), block.clone());
+            }
             assert!(receiver.mailbox.get(cached_commitment).await.is_none());
-            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Closed)));
+            for block in &later {
+                assert!(receiver.mailbox.get(block.commitment()).await.is_some());
+            }
         });
     }
 
@@ -3749,8 +4345,10 @@ mod tests {
         );
     }
 
+    /// Reconstructing a higher-view commitment leaves a lower-view record in place. An exact
+    /// duplicate for the lower-view record is ignored, and a conflicting shard blocks its sender.
     #[test_traced]
-    fn test_reconstruction_states_pruned_at_or_below_reconstructed_view() {
+    fn test_reconstruction_keeps_lower_view_records() {
         // Use 10 peers so minimum_shards=4.
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
@@ -3828,11 +4426,11 @@ mod tests {
                     .expect("block B should reconstruct");
                 assert_eq!(reconstructed.commitment(), commitment_b);
 
-                // A state should be pruned (at/below reconstructed view). Sending the same
-                // shard for A again should NOT be treated as duplicate.
+                // Reconstructing B leaves A's record in place. Resending A's shard is an exact
+                // duplicate and does not block peer 1.
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer2_pk), shard_a, true);
+                    .send(Recipients::One(peer2_pk.clone()), shard_a, true);
                 context.sleep(config.link.latency * 2).await;
 
                 let blocked = oracle.blocked().await.unwrap();
@@ -3841,61 +4439,86 @@ mod tests {
                     .any(|(a, b)| a == &peers[2].public_key && b == &peers[1].public_key);
                 assert!(
                     !blocked_peer1,
-                    "peer1 should not be blocked after lower-view state was pruned"
+                    "peer1 should not be blocked for an exact duplicate"
                 );
+
+                // A shard that conflicts with peer 1's contribution to A blocks peer 1.
+                let mut conflicting = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 300),
+                    coding_config,
+                    &STRATEGY,
+                )
+                .shard(peers[1].index.get() as u16)
+                .expect("missing shard");
+                conflicting.commitment = commitment_a;
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer2_pk), conflicting.encode(), true);
+                context.sleep(config.link.latency * 2).await;
+                assert_blocked(&oracle, &peers[2].public_key, &peers[1].public_key).await;
             },
         );
     }
 
+    /// A later notarization raises a reconstructing record's eviction round. The window then
+    /// evicts a lower-round block, and the record still reconstructs its block.
     #[test_traced]
     fn test_later_notarization_refreshes_reconstruction_state_round() {
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
+            records: NZUsize!(2),
             ..Default::default()
         };
 
         fixture.start(
             |config, context, _, mut peers, _, coding_config| async move {
-                let live = CodedBlock::<B, C, H>::new(
-                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
-                    coding_config,
-                    &STRATEGY,
-                );
-                let finalized = CodedBlock::<B, C, H>::new(
-                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
-                    coding_config,
-                    &STRATEGY,
-                );
+                let make_block = |id| {
+                    CodedBlock::<B, C, H>::new(
+                        B::new(Sha256Digest::EMPTY, Height::new(id), id * 100),
+                        coding_config,
+                        &STRATEGY,
+                    )
+                };
+                let round = |view| Round::new(Epoch::zero(), View::new(view));
+                let live = make_block(2);
                 let live_commitment = live.commitment();
-                let finalized_commitment = finalized.commitment();
                 let receiver_idx = 3usize;
                 let receiver_pk = peers[receiver_idx].public_key.clone();
                 let leader = peers[0].public_key.clone();
 
-                peers[receiver_idx].mailbox.discovered(
-                    live_commitment,
-                    leader,
-                    Round::new(Epoch::zero(), View::new(1)),
-                );
-                let mut live_sub = peers[receiver_idx].mailbox.subscribe(live_commitment);
-
-                // The same commitment becomes live in a later round while the application
-                // still has an older finalization to acknowledge.
+                // The receiver tracks the commitment at view 1 and subscribes to its block.
                 peers[receiver_idx]
                     .mailbox
-                    .notarized(live_commitment, Round::new(Epoch::zero(), View::new(4)));
-                context.sleep(Duration::from_millis(10)).await;
-                peers[receiver_idx].mailbox.retire(Retirement {
-                    round_floor: Round::new(Epoch::zero(), View::new(3)),
-                    exact_retirements: vec![finalized_commitment],
-                });
-                context.sleep(Duration::from_millis(10)).await;
+                    .discovered(live_commitment, leader, round(1));
+                let mut live_sub = peers[receiver_idx].mailbox.subscribe(live_commitment);
 
+                // The same commitment becomes live in a later round.
+                peers[receiver_idx]
+                    .mailbox
+                    .notarized(live_commitment, round(4));
+
+                // Blocks cached at views 2 and 5 exceed the window by one record. The
+                // notarization raised the commitment to view 4, so the window evicts the block at
+                // view 2.
+                let lower = make_block(3);
+                let lower_commitment = lower.commitment();
+                peers[receiver_idx].mailbox.proposed(round(2), lower);
+                peers[receiver_idx]
+                    .mailbox
+                    .proposed(round(5), make_block(4));
+                assert!(
+                    peers[receiver_idx]
+                        .mailbox
+                        .get(lower_commitment)
+                        .await
+                        .is_none()
+                );
                 assert!(
                     matches!(live_sub.try_recv(), Err(TryRecvError::Empty)),
                     "later-round reconstruction subscription should remain open"
                 );
 
+                // The assigned shard and three gossip shards reconstruct the block.
                 let leader_shard = live
                     .shard(peers[receiver_idx].index.get() as u16)
                     .expect("missing leader shard");
@@ -3929,40 +4552,41 @@ mod tests {
         );
     }
 
+    /// Notarizations and discoveries of a cached block raise its record's eviction round and
+    /// keep its assigned-shard verification pending.
     #[test_traced]
     fn test_cached_observations_refresh_reconstruction_state_round() {
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
+            records: NZUsize!(2),
             ..Default::default()
         };
 
         fixture.start(
             |config, context, _, mut peers, _, coding_config| async move {
-                let live = CodedBlock::<B, C, H>::new(
-                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
-                    coding_config,
-                    &STRATEGY,
-                );
-                let finalized = CodedBlock::<B, C, H>::new(
-                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
-                    coding_config,
-                    &STRATEGY,
-                );
+                let make_block = |id| {
+                    CodedBlock::<B, C, H>::new(
+                        B::new(Sha256Digest::EMPTY, Height::new(id), id * 100),
+                        coding_config,
+                        &STRATEGY,
+                    )
+                };
+                let round = |view| Round::new(Epoch::zero(), View::new(view));
+                let live = make_block(2);
                 let live_commitment = live.commitment();
-                let finalized_commitment = finalized.commitment();
                 let leader = peers[0].public_key.clone();
                 let receivers = [3usize, 6usize];
                 let receiver_keys = [
                     peers[receivers[0]].public_key.clone(),
                     peers[receivers[1]].public_key.clone(),
                 ];
-                let original_round = Round::new(Epoch::zero(), View::new(1));
 
+                // Both receivers track the commitment at view 1.
                 for &receiver_idx in &receivers {
                     peers[receiver_idx].mailbox.discovered(
                         live_commitment,
                         leader.clone(),
-                        original_round,
+                        round(1),
                     );
                 }
 
@@ -3993,31 +4617,36 @@ mod tests {
                     );
                 }
 
+                // One receiver observes a notarization and the other a discovery at view 4.
                 let mut notarized_sub = peers[receivers[0]]
                     .mailbox
                     .subscribe_assigned_shard_verified(live_commitment);
                 let mut discovered_sub = peers[receivers[1]]
                     .mailbox
                     .subscribe_assigned_shard_verified(live_commitment);
-                let later_round = Round::new(Epoch::zero(), View::new(4));
                 peers[receivers[0]]
                     .mailbox
-                    .notarized(live_commitment, later_round);
-                peers[receivers[1]].mailbox.discovered(
-                    live_commitment,
-                    leader,
-                    later_round,
-                );
-                context.sleep(Duration::from_millis(10)).await;
+                    .notarized(live_commitment, round(4));
+                peers[receivers[1]]
+                    .mailbox
+                    .discovered(live_commitment, leader, round(4));
 
-                let prune_round = Round::new(Epoch::zero(), View::new(3));
+                // Blocks cached at views 2 and 5 exceed each window by one record. The cached
+                // observations raised the commitment to view 4, so each window evicts the block
+                // at view 2.
+                let lower = make_block(3);
+                let higher = make_block(4);
                 for &receiver_idx in &receivers {
-                    peers[receiver_idx].mailbox.retire(Retirement {
-                        round_floor: prune_round,
-                        exact_retirements: vec![finalized_commitment],
-                    });
+                    peers[receiver_idx].mailbox.proposed(round(2), lower.clone());
+                    peers[receiver_idx].mailbox.proposed(round(5), higher.clone());
+                    assert!(
+                        peers[receiver_idx]
+                            .mailbox
+                            .get(lower.commitment())
+                            .await
+                            .is_none()
+                    );
                 }
-                context.sleep(Duration::from_millis(10)).await;
 
                 assert!(
                     matches!(notarized_sub.try_recv(), Err(TryRecvError::Empty)),
@@ -4038,6 +4667,7 @@ mod tests {
                     );
                 }
 
+                // The leader's shards resolve both assigned-shard subscriptions.
                 for (&receiver_idx, receiver) in receivers.iter().zip(&receiver_keys) {
                     let leader_shard = live
                         .shard(peers[receiver_idx].index.get() as u16)
@@ -4069,79 +4699,75 @@ mod tests {
         );
     }
 
+    /// A local proposal in a one-record window evicts an older reconstruction state. A shard that
+    /// conflicts with the evicted state's shard then enters its sender's buffer without blocking.
     #[test_traced]
-    fn test_local_proposal_prune_clears_older_reconstruction_state() {
-        let fixture: Fixture<C> = Fixture {
-            num_primary_peers: 10,
-            ..Default::default()
-        };
+    fn test_local_proposal_evicts_older_reconstruction_state() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    max_peers_per_set: NZUsize!(4),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
 
-        fixture.start(
-            |config, context, oracle, mut peers, _, coding_config| async move {
-                let block_a = CodedBlock::<B, C, H>::new(
-                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
+            let (mut engine, mut sender) =
+                unstarted(&context, &oracle, &private_keys, 2, NZUsize!(1)).await;
+            let coding_config = coding_config_for_participants(peer_keys.len() as u16);
+            let make_block = |height, payload| {
+                CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(height), payload),
                     coding_config,
                     &STRATEGY,
-                );
-                let commitment_a = block_a.commitment();
+                )
+            };
+            let block_a = make_block(1, 100);
+            let commitment_a = block_a.commitment();
+            let block_b = make_block(2, 200);
+            let commitment_b = block_b.commitment();
+            let peer1 = peer_keys[1].clone();
 
-                let block_b = CodedBlock::<B, C, H>::new(
-                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
-                    coding_config,
-                    &STRATEGY,
-                );
-                let commitment_b = block_b.commitment();
+            // The engine tracks A at view 1, and peer 1 contributes its shard.
+            engine.handle_external_proposal(
+                &mut sender,
+                commitment_a,
+                peer_keys[0].clone(),
+                Round::new(Epoch::zero(), View::new(1)),
+            );
+            engine.trim();
+            let shard_a = block_a.shard(1).expect("missing shard");
+            engine.handle_network_shard(&mut sender, peer1.clone(), shard_a);
 
-                let peer2_pk = peers[2].public_key.clone();
-                let leader = peers[0].public_key.clone();
-                let round_a = Round::new(Epoch::zero(), View::new(1));
-                let round_b = Round::new(Epoch::zero(), View::new(2));
+            // The one-record window evicts A for the local proposal of B at view 2.
+            engine.broadcast_shards(
+                &mut sender,
+                Round::new(Epoch::zero(), View::new(2)),
+                Arc::new(block_b),
+            );
+            engine.trim();
+            let record = engine
+                .records
+                .get(&commitment_b)
+                .expect("record must exist");
+            assert!(record.block().is_some());
+            assert!(!engine.records.contains_key(&commitment_a));
 
-                peers[2].mailbox.discovered(commitment_a, leader, round_a);
-
-                let peer1_index = peers[1].index.get() as u16;
-                let shard_a = block_a.shard(peer1_index).expect("missing shard");
-
-                let block_a_equivocating = CodedBlock::<B, C, H>::new(
-                    B::new(Sha256Digest::EMPTY, Height::new(1), 300),
-                    coding_config,
-                    &STRATEGY,
-                );
-                let mut equivocating_shard = block_a_equivocating
-                    .shard(peer1_index)
-                    .expect("missing shard");
-                equivocating_shard.commitment = commitment_a;
-
-                peers[1]
-                    .sender
-                    .send(Recipients::One(peer2_pk.clone()), shard_a.encode(), true);
-                context.sleep(config.link.latency * 2).await;
-
-                peers[2].mailbox.proposed(round_b, block_b);
-                assert!(
-                    peers[2].mailbox.get(commitment_b).await.is_some(),
-                    "local proposal should be cached before pruning"
-                );
-                peers[2].mailbox.retire(Retirement {
-                    round_floor: round_b,
-                    exact_retirements: vec![commitment_b],
-                });
-
-                peers[1]
-                    .sender
-                    .send(Recipients::One(peer2_pk), equivocating_shard.encode(), true);
-                context.sleep(config.link.latency * 2).await;
-
-                let blocked = oracle.blocked().await.unwrap();
-                let blocked_peer1 = blocked
-                    .iter()
-                    .any(|(a, b)| a == &peers[2].public_key && b == &peers[1].public_key);
-                assert!(
-                    !blocked_peer1,
-                    "peer1 should not be blocked after older state was pruned"
-                );
-            },
-        );
+            // A shard that conflicts with peer 1's contribution to A enters peer 1's buffer
+            // without blocking.
+            let mut equivocating = make_block(1, 300).shard(1).expect("missing shard");
+            equivocating.commitment = commitment_a;
+            engine.handle_network_shard(&mut sender, peer1.clone(), equivocating);
+            assert_eq!(buffered(&engine, &peer1, commitment_a), 1);
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
     }
 
     #[test_traced]
@@ -4418,7 +5044,7 @@ mod tests {
                 let receiver_idx = 3usize;
                 let receiver = peers[receiver_idx].public_key.clone();
                 let initial_round = Round::new(Epoch::zero(), View::new(1));
-                let refreshed_round = Round::new(Epoch::zero(), View::new(4));
+                let later_round = Round::new(Epoch::zero(), View::new(4));
 
                 for sender_idx in [1usize, 2, 4, 5] {
                     let shard = target
@@ -4447,19 +5073,18 @@ mod tests {
                     },
                 }
 
-                // A later certification observation refreshes the cached record's retention
-                // round. The record owns the block independently of bounded pre-leader shard
-                // buffers.
+                // A later notarization leaves the target cached. The record owns the block
+                // independently of bounded pre-leader shard buffers.
                 peers[receiver_idx]
                     .mailbox
-                    .notarized(target_commitment, refreshed_round);
+                    .notarized(target_commitment, later_round);
                 assert!(
                     peers[receiver_idx]
                         .mailbox
                         .get(target_commitment)
                         .await
                         .is_some(),
-                    "target should be cached after its notarization is refreshed"
+                    "target should remain cached after a later notarization"
                 );
 
                 // The fixture retains one pre-leader shard per peer. One authenticated peer
@@ -4528,17 +5153,12 @@ mod tests {
                     }
                 }
 
-                peers[receiver_idx].mailbox.retire(Retirement {
-                    round_floor: Round::new(Epoch::zero(), View::new(3)),
-                    exact_retirements: Vec::new(),
-                });
-
                 // This is the subscription used by Coding's Marshal buffer. It is installed
-                // only after peer pressure and retirement, with no resolver in this fixture.
+                // only after peer pressure, with no resolver in this fixture.
                 let late_sub = peers[receiver_idx].mailbox.subscribe(target_commitment);
                 select! {
                     result = late_sub => {
-                        let block = result.expect("refreshed target should remain cached");
+                        let block = result.expect("target should remain cached");
                         assert_eq!(block.commitment(), target_commitment);
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -4767,7 +5387,7 @@ mod tests {
             }
             context.sleep(config.link.latency * 2).await;
 
-            // Reconstruction rejects the block and retires the commitment without blocking
+            // Reconstruction rejects the block and removes the commitment without blocking
             // anyone.
             assert!(matches!(subscription.try_recv(), Err(TryRecvError::Closed)));
             assert!(peers[3].mailbox.get(commitment).await.is_none());
@@ -5412,6 +6032,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
+                records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
@@ -5540,6 +6161,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
+                records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
@@ -5561,6 +6183,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
+                records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
@@ -5672,6 +6295,7 @@ mod tests {
                 strategy: Rayon::new(NZUsize!(2)).unwrap(),
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
+                records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
@@ -5736,8 +6360,8 @@ mod tests {
         });
     }
 
-    /// Retiring or caching a record aborts its reconstruction job, so a stale result never
-    /// recreates, caches, or retires the record.
+    /// Evicting or caching a record aborts its reconstruction job, so a stale result never
+    /// recreates, caches, or removes the record.
     #[test_traced]
     fn test_reconstruction_job_aborted_with_its_record() {
         let executor = deterministic::Runner::default();
@@ -5771,6 +6395,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(16),
                 peer_buffer_size: NZUsize!(4),
+                records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(16),
                 peer_provider: oracle.manager(),
             };
@@ -5778,7 +6403,7 @@ mod tests {
             let coding_config = coding_config_for_participants(participants.len() as u16);
             let round = Round::new(Epoch::zero(), View::new(1));
 
-            for (id, action) in ["finalized", "retired", "proposed"].into_iter().enumerate() {
+            for (id, action) in ["evicted", "proposed"].into_iter().enumerate() {
                 // Two own-index shards reach the minimum and start a job for the commitment.
                 let block = CodedBlock::<B, C, H>::new(
                     B::new(Sha256Digest::EMPTY, Height::new(1), id as u64),
@@ -5808,21 +6433,9 @@ mod tests {
                 engine.try_reconstruct(commitment);
                 assert_eq!(engine.jobs.len(), 1, "{action}");
 
-                // The record is retired or cached before the job's result is applied.
+                // The record is evicted or cached before the job's result is applied.
                 match action {
-                    "finalized" => {
-                        let other = CodedBlock::<B, C, H>::new(
-                            B::new(Sha256Digest::EMPTY, Height::new(2), id as u64),
-                            coding_config,
-                            &STRATEGY,
-                        );
-                        engine
-                            .finalized(other.commitment(), Round::new(Epoch::zero(), View::new(2)));
-                    }
-                    "retired" => engine.retire(Retirement {
-                        round_floor: Round::zero(),
-                        exact_retirements: vec![commitment],
-                    }),
+                    "evicted" => engine.evict(commitment),
                     "proposed" => {
                         engine
                             .cache_block(round, Arc::new(block))
@@ -6608,6 +7221,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
+                records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
@@ -6710,6 +7324,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(16),
                 peer_buffer_size: NZUsize!(4),
+                records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(16),
                 peer_provider: oracle.manager(),
             };
@@ -6820,6 +7435,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
+                records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
@@ -6974,6 +7590,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
+                records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };

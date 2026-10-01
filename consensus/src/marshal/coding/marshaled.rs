@@ -309,9 +309,9 @@ where
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result.
     ///
-    /// If `prefetched_block` is provided, it will be used directly instead of fetching from
-    /// the marshal. This is useful in `certify` when we've already fetched the block to
-    /// extract its embedded context.
+    /// If `prefetched_block` is provided, it is used directly. This is useful in `certify` when
+    /// we've already fetched the block to extract its embedded context. Otherwise, a local-only
+    /// wait for the block is sent to marshal before this method returns.
     fn deferred_verify(
         &mut self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
@@ -324,6 +324,15 @@ where
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+
+        // Verification needs the full block but waits only for local delivery. Certification starts
+        // recovery only when the block is not available locally. If the shard engine evicts a
+        // cached block before verification registers its wait, verification is left with neither
+        // the block nor an active fetch. Register the wait before the caller publishes the gate so
+        // it receives the cached block or is waiting when recovery delivers it.
+        let block_request = prefetched_block
+            .is_none()
+            .then(|| marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait));
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -359,7 +368,7 @@ where
                     block
                 } else {
                     let block_request =
-                        marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait);
+                        block_request.expect("a missing prefetched block registers a wait");
                     select! {
                         _ = tx.closed() => {
                             debug!(

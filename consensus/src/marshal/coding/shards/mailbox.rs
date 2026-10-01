@@ -2,7 +2,7 @@
 
 use crate::{
     CertifiableBlock,
-    marshal::{coding::types::CodedBlock, core::Retirement},
+    marshal::coding::types::CodedBlock,
     types::{Round, coding::Commitment},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
@@ -46,13 +46,6 @@ where
         /// The [`Commitment`] of the notarized block.
         commitment: Commitment<B, C, H>,
         /// The round in which the commitment was notarized.
-        round: Round,
-    },
-    /// A notification from consensus that a [`Commitment`] has been finalized.
-    Finalized {
-        /// The finalized [`Commitment`].
-        commitment: Commitment<B, C, H>,
-        /// The round in which the commitment was finalized.
         round: Round,
     },
     /// A request to get a reconstructed block, if available.
@@ -101,12 +94,6 @@ where
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
-    /// A request to retire cached blocks and reconstruction state after durable application
-    /// progress.
-    Retire {
-        /// The retirement to apply.
-        update: Retirement<Commitment<B, C, H>>,
-    },
 }
 
 impl<B, C, H, P> Message<B, C, H, P>
@@ -124,11 +111,7 @@ where
             Self::SubscribeAssignedShardVerified { response, .. } => response.is_closed(),
             Self::SubscribeByCommitment { response, .. }
             | Self::SubscribeByDigest { response, .. } => response.is_closed(),
-            Self::Proposed { .. }
-            | Self::Discovered { .. }
-            | Self::Notarized { .. }
-            | Self::Finalized { .. }
-            | Self::Retire { .. } => false,
+            Self::Proposed { .. } | Self::Discovered { .. } | Self::Notarized { .. } => false,
         }
     }
 }
@@ -276,19 +259,6 @@ where
             .enqueue(Message::Notarized { commitment, round });
     }
 
-    /// Inform the engine that consensus finalized a [`Commitment`].
-    ///
-    /// `round` MUST come from a verified finalization of `commitment`.
-    ///
-    /// Reconstruction state without a cached block is retired for every other commitment last
-    /// observed at or before `round`, and assigned-shard subscriptions for retired state are
-    /// closed. Cached blocks remain until [`Self::retire`], and block subscriptions remain open.
-    pub fn finalized(&self, commitment: Commitment<B, C, H>, round: Round) {
-        let _ = self
-            .sender
-            .enqueue(Message::Finalized { commitment, round });
-    }
-
     /// Request a reconstructed block by its [`Commitment`].
     pub async fn get(&self, commitment: Commitment<B, C, H>) -> Option<Arc<CodedBlock<B, C, H>>> {
         let (response, receiver) = oneshot::channel();
@@ -356,19 +326,6 @@ where
             response: responder,
         });
         receiver
-    }
-
-    /// Retire cached blocks and reconstruction state after durable application progress.
-    ///
-    /// Entries last observed at or before [`Retirement::round_floor`] are eligible for
-    /// retirement. Entries in [`Retirement::exact_retirements`] are eligible regardless of
-    /// observation round.
-    ///
-    /// Assigned-shard subscriptions for retired state are closed. Exact-commitment subscriptions
-    /// close only for exact retirements. Other block subscriptions remain open for local ingress.
-    /// Digest subscriptions remain open, and later consensus notifications may recreate state.
-    pub fn retire(&self, update: Retirement<Commitment<B, C, H>>) {
-        let _ = self.sender.enqueue(Message::Retire { update });
     }
 }
 
