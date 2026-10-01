@@ -149,13 +149,14 @@ jobs:
           - os: macos-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
-          # Emulated CPUs pin each SIMD tier of the crates with CPU-dispatched kernels. QEMU emulates every supported
-          # tier below AVX-512, and Intel SDE covers AVX-512, GFNI, VPCLMULQDQ, and IFMA, which QEMU does not implement.
-          # Every x86 tier has the AVX2, BMI2, and ADX that x86-64 builds require.
-          # Tiers with static features run without std, so they select kernels from the compile-time target features.
+          # Emulated CPUs pin each SIMD tier, and every tier tests each crate with CPU-specific kernels. QEMU emulates
+          # every supported tier below AVX-512, and Intel SDE covers AVX-512, GFNI, VPCLMULQDQ, and IFMA, which QEMU does
+          # not implement. Every x86 tier has the AVX2, BMI2, and ADX that x86-64 builds require.
+          # Tiers with static features test the no_std crates without std, so they select kernels from the compile-time
+          # target features.
           # Tiers with rustflags pass --target when the flags must stay off build scripts and proc-macros.
           #
-          # Run the crates with AVX-512 paths on an emulated Ice Lake server, which has every feature they use.
+          # An Ice Lake server has every x86 feature the kernels use.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
@@ -170,12 +171,12 @@ jobs:
           # Zen 2 and Zen 3 have AVX2 and SHA-NI without AVX-512.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             qemu: EPYC-Rome
             cpu-features: "avx2 bmi2 adx sha !avx512f"
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib"
+            flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
             rustflags: "-C target-feature=+avx2,+sha"
             static-features: "avx2 sha !avx512f"
             qemu: EPYC-Rome
@@ -183,18 +184,18 @@ jobs:
           # Broadwell, the oldest supported Intel CPU, has AVX2, BMI2, and ADX without SHA-NI or AVX-512.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             qemu: Broadwell
             cpu-features: "avx2 bmi2 adx !sha !avx512f"
           # SVE2 and SHA-3 as on Graviton4. A 512-bit vector length exercises the upper Z-register bits.
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
-            flags: "--cargo-profile release"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             qemu: max,sve-default-vector-length=64
             cpu-features: "sha2 sha3 sve sve2"
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
-            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
+            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
             rustflags: "-C target-feature=+sha2,+sve2"
             static-features: "sha2 sve2 !sha3"
             qemu: max,sve-default-vector-length=64
@@ -202,12 +203,12 @@ jobs:
           # A64FX has SVE without SVE2 or SHA-3. The build without target features has no SHA-2 either.
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
-            flags: "--cargo-profile release"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             qemu: a64fx
             cpu-features: "sha2 sve !sha3 !sve2"
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
-            flags: "--cargo-profile release --no-default-features --lib"
+            flags: "--cargo-profile release --no-default-features --lib -p commonware-cryptography-curve25519"
             static-features: "!sha2 !sha3 !sve2"
             qemu: a64fx
             cpu-features: "sha2 sve !sha3 !sve2"
