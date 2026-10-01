@@ -74,30 +74,25 @@
 //!
 //! ```text
 //!    +----------------------+
-//!    | AwaitingQuorum       |
-//!    | - leader known       |
-//!    | - assigned shard     |  <--- verified immediately on receipt
-//!    |   verified eagerly   |
-//!    | - other shards       |  <--- buffered in pending_shards
-//!    |   buffered           |
+//!    | AwaitingQuorum       | <-------------+
+//!    | - leader known       |               |
+//!    | - assigned shard     |               |
+//!    |   verified eagerly   |               |
+//!    | - other shards       |               |
+//!    |   buffered           |               | too few valid shards
+//!    +----------------------+               |
+//!               |                           |
+//!               | checked + pending shards  |
+//!               | >= minimum_shards         |
+//!               v                           |
+//!    +----------------------+               |
+//!    | Reconstruction Job   | --------------+
+//!    | - batch validation   |
+//!    | - decoding           |
 //!    +----------------------+
-//!               |
-//!               | checked + pending shards >= minimum_shards
-//!               v
-//!    +----------------------+
-//!    | Reconstruction Job   |  <--- one strategy job runs batch
-//!    |                      |       validation and decoding
-//!    +----------------------+
-//!               |
-//!      +--------+--------+
-//!      |        |        |
-//!      v        v        v
-//!   Success  Too few   Failure
-//!      |      valid      |
-//!      |        |        v
-//!      |        v      Remove
-//!      |   AwaitingQuorum  State
-//!      v
+//!               |         |
+//!       decoded |         | decode failed
+//!               v         +---------------> record removed
 //!    +----------------------+
 //!    | Ready                |
 //!    | - block cached       |
