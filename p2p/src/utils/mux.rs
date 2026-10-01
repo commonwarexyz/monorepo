@@ -11,6 +11,7 @@
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{Encode, Error as CodecError, ReadExt, varint::UInt};
+use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Spawner, spawn_cell};
 use commonware_utils::channel::{
@@ -40,10 +41,10 @@ pub fn parse(mut buf: IoBuf) -> Result<(Channel, IoBuf), CodecError> {
 }
 
 /// Control messages for the [Muxer].
-enum Control<R: Receiver> {
+enum Control<P: PublicKey> {
     Register {
         subchannel: Channel,
-        sender: oneshot::Sender<mpsc::Receiver<Message<R::PublicKey>>>,
+        sender: oneshot::Sender<mpsc::Receiver<Message<P>>>,
     },
     Deregister {
         subchannel: Channel,
@@ -63,7 +64,7 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
     sender: S,
     receiver: R,
     mailbox_size: usize,
-    control_rx: mpsc::UnboundedReceiver<Control<R>>,
+    control_rx: mpsc::UnboundedReceiver<Control<R::PublicKey>>,
     routes: Routes<R::PublicKey>,
     backup: Option<mpsc::Sender<BackupResponse<R::PublicKey>>>,
 }
@@ -71,7 +72,12 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
 impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
     /// [MuxHandle]) pair that can be used to register routes dynamically.
-    pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S, R>) {
+    pub fn new(
+        context: E,
+        sender: S,
+        receiver: R,
+        mailbox_size: usize,
+    ) -> (Self, MuxHandle<S, R::PublicKey>) {
         Self::builder(context, sender, receiver, mailbox_size).build()
     }
 
@@ -187,12 +193,12 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 
 /// A clonable handle that allows registering routes at any time, even after the [Muxer] is running.
 #[derive(Clone)]
-pub struct MuxHandle<S: Sender, R: Receiver> {
+pub struct MuxHandle<S: Sender, P: PublicKey> {
     sender: S,
-    control_tx: mpsc::UnboundedSender<Control<R>>,
+    control_tx: mpsc::UnboundedSender<Control<P>>,
 }
 
-impl<S: Sender, R: Receiver> MuxHandle<S, R> {
+impl<S: Sender, P: PublicKey> MuxHandle<S, P> {
     /// Open a `subchannel`. Returns a ([SubSender], [SubReceiver]) pair that can be used to send
     /// and receive messages for that subchannel.
     ///
@@ -200,7 +206,7 @@ impl<S: Sender, R: Receiver> MuxHandle<S, R> {
     pub async fn register(
         &mut self,
         subchannel: Channel,
-    ) -> Result<(SubSender<S>, SubReceiver<R>), Error> {
+    ) -> Result<(SubSender<S>, SubReceiver<P>), Error> {
         let (tx, rx) = oneshot::channel();
         self.control_tx
             .send(Control::Register {
@@ -246,28 +252,28 @@ impl<S: Sender> LimitedSender for SubSender<S> {
 }
 
 /// Receiver that yields messages for a specific subchannel.
-pub struct SubReceiver<R: Receiver> {
-    receiver: mpsc::Receiver<Message<R::PublicKey>>,
-    control_tx: Option<mpsc::UnboundedSender<Control<R>>>,
+pub struct SubReceiver<P: PublicKey> {
+    receiver: mpsc::Receiver<Message<P>>,
+    control_tx: Option<mpsc::UnboundedSender<Control<P>>>,
     subchannel: Channel,
 }
 
-impl<R: Receiver> Receiver for SubReceiver<R> {
+impl<P: PublicKey> Receiver for SubReceiver<P> {
     type Error = Error;
-    type PublicKey = R::PublicKey;
+    type PublicKey = P;
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         self.receiver.recv().await.ok_or(Error::RecvFailed)
     }
 }
 
-impl<R: Receiver> Debug for SubReceiver<R> {
+impl<P: PublicKey> Debug for SubReceiver<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "SubReceiver({})", self.subchannel)
     }
 }
 
-impl<R: Receiver> Drop for SubReceiver<R> {
+impl<P: PublicKey> Drop for SubReceiver<P> {
     fn drop(&mut self) {
         // Take the control channel to avoid cloning.
         let control_tx = self
@@ -367,11 +373,11 @@ pub trait Builder {
 /// A builder that constructs a [Muxer].
 pub struct MuxerBuilder<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
-    mux_handle: MuxHandle<S, R>,
+    mux_handle: MuxHandle<S, R::PublicKey>,
 }
 
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilder<E, S, R> {
-    type Output = (Muxer<E, S, R>, MuxHandle<S, R>);
+    type Output = (Muxer<E, S, R>, MuxHandle<S, R::PublicKey>);
 
     fn build(self) -> Self::Output {
         (self.mux, self.mux_handle)
@@ -406,7 +412,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilder<E, S, R> {
 /// A builder that constructs a [Muxer] with a backup channel.
 pub struct MuxerBuilderWithBackup<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
-    mux_handle: MuxHandle<S, R>,
+    mux_handle: MuxHandle<S, R::PublicKey>,
     backup_rx: mpsc::Receiver<BackupResponse<R::PublicKey>>,
 }
 
@@ -427,7 +433,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithBackup<E, S, R> {
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithBackup<E, S, R> {
     type Output = (
         Muxer<E, S, R>,
-        MuxHandle<S, R>,
+        MuxHandle<S, R::PublicKey>,
         mpsc::Receiver<BackupResponse<R::PublicKey>>,
     );
 
@@ -439,7 +445,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithBackup<E, S
 /// A builder that constructs a [Muxer] with a [GlobalSender].
 pub struct MuxerBuilderWithGlobalSender<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
-    mux_handle: MuxHandle<S, R>,
+    mux_handle: MuxHandle<S, R::PublicKey>,
     global_sender: GlobalSender<S>,
 }
 
@@ -459,7 +465,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithGlobalSender<E, S, R> {
 }
 
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithGlobalSender<E, S, R> {
-    type Output = (Muxer<E, S, R>, MuxHandle<S, R>, GlobalSender<S>);
+    type Output = (Muxer<E, S, R>, MuxHandle<S, R::PublicKey>, GlobalSender<S>);
 
     fn build(self) -> Self::Output {
         (self.mux, self.mux_handle, self.global_sender)
@@ -469,7 +475,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithGlobalSende
 /// A builder that constructs a [Muxer] with a [GlobalSender] and backup channel.
 pub struct MuxerBuilderAllOpts<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
-    mux_handle: MuxHandle<S, R>,
+    mux_handle: MuxHandle<S, R::PublicKey>,
     backup_rx: mpsc::Receiver<BackupResponse<R::PublicKey>>,
     global_sender: GlobalSender<S>,
 }
@@ -477,7 +483,7 @@ pub struct MuxerBuilderAllOpts<E: Spawner, S: Sender, R: Receiver> {
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderAllOpts<E, S, R> {
     type Output = (
         Muxer<E, S, R>,
-        MuxHandle<S, R>,
+        MuxHandle<S, R::PublicKey>,
         mpsc::Receiver<BackupResponse<R::PublicKey>>,
         GlobalSender<S>,
     );
@@ -564,10 +570,7 @@ mod tests {
         seed: u64,
     ) -> (
         PublicKey,
-        MuxHandle<
-            impl Sender<PublicKey = PublicKey> + use<>,
-            impl Receiver<PublicKey = PublicKey> + use<>,
-        >,
+        MuxHandle<impl Sender<PublicKey = PublicKey> + use<>, PublicKey>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle
@@ -587,10 +590,7 @@ mod tests {
         seed: u64,
     ) -> (
         PublicKey,
-        MuxHandle<
-            impl Sender<PublicKey = PublicKey> + use<>,
-            impl Receiver<PublicKey = PublicKey> + use<>,
-        >,
+        MuxHandle<impl Sender<PublicKey = PublicKey> + use<>, PublicKey>,
         mpsc::Receiver<BackupResponse<PublicKey>>,
         GlobalSender<simulated::Sender<PublicKey, deterministic::Context>>,
     ) {
@@ -620,10 +620,7 @@ mod tests {
     }
 
     /// Wait for `n` messages to be received on the receiver.
-    async fn expect_n_messages(
-        rx: &mut SubReceiver<impl Receiver<PublicKey = PublicKey>>,
-        n: usize,
-    ) {
+    async fn expect_n_messages(rx: &mut SubReceiver<PublicKey>, n: usize) {
         let mut count = 0;
         loop {
             select! {
@@ -642,7 +639,7 @@ mod tests {
 
     /// Wait for `n` messages to be received on the receiver + backup receiver.
     async fn expect_n_messages_with_backup(
-        rx: &mut SubReceiver<impl Receiver<PublicKey = PublicKey>>,
+        rx: &mut SubReceiver<PublicKey>,
         backup_rx: &mut mpsc::Receiver<BackupResponse<PublicKey>>,
         n: usize,
         n_backup: usize,
