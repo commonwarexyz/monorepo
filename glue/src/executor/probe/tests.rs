@@ -33,7 +33,8 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
+    Clock as _, Handle, Metrics as _, Quota, Runner as _, Spawner as _, Supervisor as _,
+    deterministic,
 };
 use commonware_utils::{
     NZDuration, NZU64, NZUsize, channel::fallible::OneshotExt as _, non_empty, probability,
@@ -62,7 +63,7 @@ const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_EXECUTOR_PROBE_TEST";
 /// An executed block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-struct Executed {
+pub(super) struct Executed {
     height: Height,
     value: u64,
 }
@@ -115,7 +116,7 @@ impl Block for Executed {
 /// largest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-struct Floor(u64);
+pub(super) struct Floor(u64);
 
 impl Write for Floor {
     fn write(&self, buf: &mut impl BufMut) {
@@ -154,7 +155,7 @@ type TestMailbox = Mailbox<ed25519::Scheme, Executed, Floor>;
 
 /// Serves whatever checkpoint the test sets, if any.
 #[derive(Clone, Default)]
-struct Fixed(Arc<Mutex<Option<TestCheckpoint>>>);
+pub(super) struct Fixed(Arc<Mutex<Option<TestCheckpoint>>>);
 
 impl Fixed {
     fn set(&self, checkpoint: TestCheckpoint) {
@@ -184,13 +185,14 @@ impl Source for Fixed {
 }
 
 /// Validators, each running a probe that serves its own [`Fixed`] checkpoint.
-struct Validators {
-    schemes: Vec<ed25519::Scheme>,
-    participants: Vec<PublicKey>,
+pub(super) struct Validators {
+    pub(super) schemes: Vec<ed25519::Scheme>,
+    pub(super) participants: Vec<PublicKey>,
     /// A peer of the network that is not a validator.
     outsider: PublicKey,
-    oracle: Oracle<PublicKey, deterministic::Context>,
-    sources: Vec<Fixed>,
+    pub(super) oracle: Oracle<PublicKey, deterministic::Context>,
+    pub(super) sources: Vec<Fixed>,
+    pub(super) senders: Vec<simulated::Sender<PublicKey, deterministic::Context>>,
     /// The first validator's probe. The others' mailboxes are dropped, as a node that only
     /// serves drops its own.
     sampler: TestMailbox,
@@ -198,7 +200,7 @@ struct Validators {
 }
 
 impl Validators {
-    async fn start(context: &mut deterministic::Context, n: u32) -> Self {
+    pub(super) async fn start(context: &mut deterministic::Context, n: u32) -> Self {
         Self::start_with(context, n, NZUsize!(1024 * 1024)).await
     }
 
@@ -239,12 +241,14 @@ impl Validators {
         }
 
         let mut sources = Vec::new();
+        let mut senders = Vec::new();
         let mut sampler = None;
         let mut probes = Vec::new();
         for (index, public_key) in participants.iter().enumerate() {
             let context = context.child("validator").with_attribute("index", index);
             let control = oracle.control(public_key.clone());
             let network = control.register(CHANNEL, QUOTA).await.unwrap();
+            senders.push(network.0.clone());
             let (probe, mailbox) = Probe::new(Config {
                 context: context.child("probe"),
                 scheme: schemes[index].clone(),
@@ -267,6 +271,7 @@ impl Validators {
             outsider,
             oracle,
             sources,
+            senders,
             sampler: sampler.unwrap(),
             _probes: probes,
         }
@@ -274,7 +279,12 @@ impl Validators {
 
     /// Returns checkpoint `checkpoint` of a block with `value`, certified by every validator, with
     /// a floor finalized at view `floor`.
-    fn checkpoint(&self, checkpoint: u64, value: u64, floor: Option<u64>) -> TestCheckpoint {
+    pub(super) fn checkpoint(
+        &self,
+        checkpoint: u64,
+        value: u64,
+        floor: Option<u64>,
+    ) -> TestCheckpoint {
         let block = Executed {
             height: Height::new((checkpoint + 1) * INTERVAL - 1),
             value,
@@ -310,6 +320,16 @@ impl Validators {
             .filter(|(blocker, _)| *blocker == self.participants[0])
             .map(|(_, blocked)| blocked)
             .collect()
+    }
+
+    fn metric(&self, context: &deterministic::Context, name: &str) -> u64 {
+        let metrics = context.encode();
+        let prefix = format!("validator_probe_{name}_total{{");
+        let line = metrics
+            .lines()
+            .find(|line| line.starts_with(&prefix) && line.contains("index=\"0\""))
+            .unwrap_or_else(|| panic!("missing {name}: {metrics}"));
+        line.split_whitespace().last().unwrap().parse().unwrap()
     }
 }
 
@@ -351,6 +371,103 @@ fn a_sample_waits_for_enough_validators() {
         let sampled = sampled.unwrap();
         assert_eq!(sampled.certificate.item.height, Height::new(1));
         assert!(sampled.floors.is_empty());
+    });
+}
+
+#[test]
+fn checkpoints_beyond_the_height_space_block_their_senders() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let validators = Validators::start(&mut context, 4).await;
+        let mut oversized = validators.checkpoint(1, 10, None);
+        oversized.certificate.item.height = Height::new(u64::MAX / INTERVAL);
+        validators.sources[1].set(oversized);
+        let sample = validators.sampler.sample();
+        let valid = async {
+            while validators.metric(&context, "peers_blocked") == 0 {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            validators.sources[2].set(validators.checkpoint(1, 10, None));
+            validators.sources[3].set(validators.checkpoint(1, 10, None));
+        };
+        let (sampled, ()) = futures::join!(sample, valid);
+        assert_eq!(sampled.unwrap().certificate.item.height, Height::new(1));
+        assert_eq!(
+            validators.blocked_by_first().await,
+            vec![validators.participants[1].clone()]
+        );
+        assert_eq!(validators.metric(&context, "peers_blocked"), 1);
+    });
+}
+
+#[test]
+fn a_second_reply_from_the_same_validator_is_ignored() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let validators = Validators::start(&mut context, 4).await;
+        validators.sources[1].set(validators.checkpoint(1, 10, Some(2)));
+        let mut sender = validators.senders[1].clone();
+        let sample = validators.sampler.sample();
+        let replies = async {
+            context.sleep(Duration::from_millis(150)).await;
+            assert_eq!(validators.metric(&context, "replies_recorded"), 1);
+            let duplicate = wire::Message::Response(validators.checkpoint(3, 30, Some(9))).encode();
+            sender.send(
+                Recipients::One(validators.participants[0].clone()),
+                duplicate,
+                false,
+            );
+            context.sleep(Duration::from_millis(50)).await;
+            assert_eq!(validators.metric(&context, "replies_recorded"), 1);
+            assert_eq!(validators.metric(&context, "replies_ignored"), 1);
+            validators.sources[2].set(validators.checkpoint(2, 20, Some(5)));
+        };
+        let (sampled, ()) = futures::join!(sample, replies);
+        let sampled = sampled.unwrap();
+        assert_eq!(sampled.certificate.item.height, Height::new(2));
+        assert_eq!(sampled.floors, vec![Floor(5), Floor(2)]);
+        assert!(validators.blocked_by_first().await.is_empty());
+        assert_eq!(validators.metric(&context, "samples_started"), 1);
+        assert_eq!(validators.metric(&context, "samples_completed"), 1);
+        assert_eq!(validators.metric(&context, "replies_recorded"), 2);
+    });
+}
+
+#[test]
+fn a_new_sample_discards_an_abandoned_samples_replies() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let validators = Validators::start(&mut context, 4).await;
+        validators.sources[1].set(validators.checkpoint(9, 90, Some(9)));
+        let abandoned = context.child("abandoned").spawn({
+            let sampler = validators.sampler.clone();
+            move |_| async move { sampler.sample().await }
+        });
+        context.sleep(Duration::from_millis(150)).await;
+        assert_eq!(validators.metric(&context, "replies_recorded"), 1);
+        abandoned.abort();
+        assert!(abandoned.await.is_err());
+        validators
+            .oracle
+            .remove_link(
+                validators.participants[1].clone(),
+                validators.participants[0].clone(),
+            )
+            .await
+            .unwrap();
+        validators.sources[2].set(validators.checkpoint(1, 10, Some(2)));
+
+        let sample = validators.sampler.sample();
+        let replies = async {
+            context.sleep(Duration::from_millis(150)).await;
+            assert_eq!(validators.metric(&context, "samples_started"), 2);
+            assert_eq!(validators.metric(&context, "samples_completed"), 0);
+            assert_eq!(validators.metric(&context, "replies_recorded"), 2);
+            validators.sources[3].set(validators.checkpoint(2, 20, Some(5)));
+        };
+        let (sampled, ()) = futures::join!(sample, replies);
+        let sampled = sampled.unwrap();
+        assert_eq!(sampled.certificate.item.height, Height::new(2));
+        assert_eq!(sampled.floors, vec![Floor(5), Floor(2)]);
+        assert_eq!(validators.metric(&context, "samples_started"), 2);
+        assert_eq!(validators.metric(&context, "samples_completed"), 1);
     });
 }
 
@@ -513,6 +630,7 @@ fn requests_are_answered_from_a_response_built_in_the_background() {
             Some(Height::new(2))
         );
         assert!(validators.blocked_by_first().await.is_empty());
+        assert_eq!(validators.metric(&context, "requests_served"), 3);
     });
 }
 
@@ -533,6 +651,8 @@ fn a_response_above_the_size_limit_is_not_served() {
                 None
             );
         }
+        assert_eq!(validators.metric(&context, "responses_too_large"), 1);
+        assert_eq!(validators.metric(&context, "requests_served"), 0);
     });
 }
 
@@ -851,7 +971,6 @@ mod conformance {
     use commonware_codec::conformance::CodecConformance;
 
     commonware_conformance::conformance_tests! {
-        CodecConformance<wire::Tag>,
         CodecConformance<wire::Message<ed25519::Scheme, Executed, Floor>> => 128,
     }
 }
