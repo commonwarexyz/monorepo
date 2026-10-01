@@ -382,7 +382,9 @@ toolchains, `cargo-nextest`, `cargo-fuzz`, and the chosen agent CLI (`claude` or
 `codex`), logged in. Phase 1 with `issue` sources also needs `gh` (logged in) or
 network access for `curl`. Phase 1 with PDF papers uses `pdftotext` or the Python
 `pypdf` module when available. Beacon extraction needs `STATELENS_KB` to name at least
-one readable corpus root.
+one readable corpus root. The code index (section 5.7) needs `rust-analyzer`; without it a
+campaign warns and continues. `just coverage` (section 7.13) needs the fuzz toolchain's
+`llvm-tools-preview` component.
 
 ### 5.3 `justfile` (verbatim)
 
@@ -743,7 +745,11 @@ it -- `defs`, `refs`, `callers`, `callees` -- and `just code-index` builds it.
 **Why an index and not a language server.** A server charges its startup on every invocation,
 where an index is paid for once, before the campaign instruments anything (D43). The campaign
 builds it in a step between materialize and instrument, and a failure there warns and
-continues, because the sweep worked without one before it existed.
+continues, because the sweep worked without one before it existed. rust-analyzer's output
+goes to `extract/code-index.log` and not to the console: it logs at `ERROR` level for
+conditions that do not stop the build, such as a definition inside a module a macro
+declared, which it cannot name, and minutes of those lines on a console read as a failure.
+The console shows the log's path, and the last lines of output when the build fails.
 
 **Staying correct while the tree is edited.** Instrumentation edits the files the index
 describes. Which function calls which survives that; line numbers do not, and a line number
@@ -3377,7 +3383,9 @@ Workflow test, see SPEC.md section 14.
    dedicated machine or container, run the campaign and the fuzzers in that clone, and
    discard the clone afterwards. Never commit an instrumented checkout.
 3. Prerequisites (section 5.2) and `config.env`, including `STATELENS_AUDIT` and the
-   model and effort of the agent CLI, which are the CLI's own defaults unless pinned.
+   model and effort of the agent CLI, which are the CLI's own defaults unless pinned;
+   rust-analyzer for the code index, and that its `ERROR` lines in
+   `extract/code-index.log` are expected (section 5.7).
 4. Phase 1a: `just extract [--registry simplex|marshal] <kind> <source>...` with one example
    per kind, then review: every file in a registry is used by the next campaign that binds
    it; edit or delete drafts; `just check-invariants`.

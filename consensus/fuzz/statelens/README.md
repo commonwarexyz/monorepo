@@ -28,11 +28,17 @@ with network access.
 - `cargo` with the `stable` toolchain and the nightly pinned in
   `.github/workflows/slow.yml`, `cargo-nextest` and `cargo-fuzz`.
 - The `claude` or `codex` CLI, logged in.
+- `rust-analyzer` (`rustup component add rust-analyzer`) for the code index a campaign
+  builds before instrumenting. It takes several minutes and writes its output to
+  `extract/code-index.log` rather than the console, because it logs `ERROR` lines it
+  recovers from, such as `Encountered enclosing definition with no name` for modules a
+  macro declares; they are expected, and the build carries on. Without rust-analyzer the
+  campaign warns and continues without an index.
 - For issues: `gh` (logged in) or network access for `curl`. For PDF papers: `pdftotext`
   or the Python `pypdf` module; without either, the agent gets the PDF as is.
 
-Defaults live in [config.env](config.env): the agent (`claude`), the model of each agent
-CLI (empty means the CLI default), the test toolchain (`stable`) and the fuzz toolchain
+Defaults live in [config.env](config.env): the agent (`claude`), the model and the
+reasoning effort of each agent CLI (empty means the CLI default), the test toolchain (`stable`) and the fuzz toolchain
 (empty means the pinned nightly). An environment variable with the same name overrides a
 value there, and `--agent` overrides `STATELENS_AGENT`. `CARGO_TARGET_DIR` is passed
 through; by default builds use the checkout's `target/`.

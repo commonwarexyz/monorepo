@@ -19,6 +19,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+import sys
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -43,9 +44,10 @@ class IndexBuildResult(unittest.TestCase):
     def tearDown(self):
         sl.shutil.which, sl.run_logged, sl.say = self._which, self._run, self._say
 
-    def stub(self, _command, _log, cwd=None, stdin_text=None):
+    def stub(self, _command, _log, cwd=None, stdin_text=None, echo=True):
         """A successful run that leaves a real index behind, so the snapshot
         step runs exactly as it does in a campaign."""
+        self.echoed = echo
         # SCIP paths are relative to the indexed crate, and index_load
         # prefixes them, so the file has to live under consensus/.
         (self.repo / "consensus/src").mkdir(parents=True, exist_ok=True)
@@ -67,7 +69,7 @@ class IndexBuildResult(unittest.TestCase):
 
     def test_unreadable_index_still_returns_the_path(self):
         # The index is queryable even when the snapshot cannot be taken.
-        def stub(_command, _log, cwd=None, stdin_text=None):
+        def stub(_command, _log, cwd=None, stdin_text=None, echo=True):
             self.index.write_bytes(b"\x1f\x8bnot protobuf")
             return 0, []
 
@@ -87,6 +89,21 @@ class IndexBuildResult(unittest.TestCase):
         sl.shutil.which = lambda _name: None
         self.assertIsNone(sl.index_build(self.repo, self.sl_dir, "simplex"))
 
+    def test_rust_analyzer_output_stays_off_the_console(self):
+        # rust-analyzer logs ERROR lines for definitions in macro-declared
+        # modules and keeps going; on a console they read as a failure, and an
+        # operator interrupted a campaign over them.
+        sl.run_logged = self.stub
+        sl.index_build(self.repo, self.sl_dir, "simplex")
+        self.assertFalse(self.echoed, "the index build must not echo rust-analyzer")
+
+    def test_a_failed_build_shows_why(self):
+        sl.run_logged = lambda *_a, **_kw: (1, ["error: could not load the workspace"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(sl.index_build(self.repo, self.sl_dir, "simplex"))
+        self.assertIn("could not load the workspace", out.getvalue())
+
 
 def packed(*values):
     """Encode ints as a protobuf packed repeated field."""
@@ -99,6 +116,34 @@ def packed(*values):
             if not value:
                 break
     return bytes(out)
+
+
+class LoggedRuns(unittest.TestCase):
+    """`run_logged` with `echo` off still has to keep the whole output in the log
+    and return the tail, or a quiet step would hide its own failure."""
+
+    def run_quiet(self, echo):
+        directory = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        log = directory / "run.log"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code, tail = sl.run_logged(
+                [sys.executable, "-c", "print('one'); print('two')"], log, directory, echo=echo
+            )
+        return code, tail, log.read_text(), out.getvalue()
+
+    def test_echo_off_writes_the_log_and_not_the_console(self):
+        code, tail, log, console = self.run_quiet(echo=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(tail, ["one", "two"])
+        self.assertIn("one\ntwo\n", log)
+        self.assertEqual(console, "")
+
+    def test_echo_on_writes_both(self):
+        _code, _tail, log, console = self.run_quiet(echo=True)
+        self.assertIn("one\ntwo\n", log)
+        self.assertEqual(console, "one\ntwo\n")
 
 
 class ScipRanges(unittest.TestCase):

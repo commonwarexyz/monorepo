@@ -504,10 +504,12 @@ def agent_command(config, agent, phase, repo):
     return command + ["-"]
 
 
-def run_logged(command, log_path, cwd, stdin_text=None):
+def run_logged(command, log_path, cwd, stdin_text=None, echo=True):
     """Runs a command, copying its output to the console and to `log_path`.
 
-    Returns the exit code and the last `ERROR_LINES` lines of output.
+    With `echo` false the output goes to the log only, for a tool whose own
+    logging is noise to an operator. Returns the exit code and the last
+    `ERROR_LINES` lines of output.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     tail = collections.deque(maxlen=ERROR_LINES)
@@ -539,10 +541,12 @@ def run_logged(command, log_path, cwd, stdin_text=None):
 
             threading.Thread(target=feed, daemon=True).start()
         for line in process.stdout:
-            sys.stdout.write(line)
-            sys.stdout.flush()
+            if echo:
+                sys.stdout.write(line)
+                sys.stdout.flush()
             log.write(line)
             tail.append(line.rstrip("\n"))
+        process.stdout.close()
         code = process.wait()
     return code, list(tail)
 
@@ -1525,8 +1529,15 @@ def index_build(repo, sl_dir, subsystem):
         "--exclude-vendored-libraries",
     ]
     log = sl_dir / "extract" / "code-index.log"
-    code, _tail = run_logged(command, log, cwd=repo)
+    # rust-analyzer logs at ERROR level for things that do not stop the build,
+    # such as a definition inside a module a macro declared, which it cannot
+    # name. On a console that reads as a failure scrolling past for minutes, so
+    # the output goes to the log only, and to the console when the build fails.
+    say(f"rust-analyzer output goes to {log.relative_to(repo)}")
+    code, tail = run_logged(command, log, cwd=repo, echo=False)
     if code != 0 or not out.exists():
+        for line in tail:
+            print(line, flush=True)
         say(f"the code index build failed; see {log.relative_to(repo)}")
         return None
     size = out.stat().st_size
