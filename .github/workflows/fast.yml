@@ -149,19 +149,19 @@ jobs:
           - os: macos-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
-          # Ice Lake servers have AVX-512 with SHA-NI, IFMA, GFNI, and VPCLMULQDQ.
+          # Ice Lake-SP has SHA-NI, AVX-512, IFMA, GFNI, and VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             sde: icx
             cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
-          # Skylake servers have AVX-512 without SHA-NI, IFMA, GFNI, or VPCLMULQDQ, so paths that need those fall back.
+          # Skylake-SP has AVX-512 without SHA-NI, IFMA, GFNI, or VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             sde: skx
             cpu-features: "avx2 bmi2 adx !sha avx512f avx512bw avx512vl !avx512ifma !gfni !vpclmulqdq"
-          # Zen 2 and Zen 3 have AVX2 and SHA-NI without AVX-512.
+          # Zen 2 has AVX2 and SHA-NI without AVX-512.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
@@ -174,13 +174,13 @@ jobs:
             static-features: "avx2 sha !avx512f"
             qemu: EPYC-Rome
             cpu-features: "avx2 bmi2 adx sha !avx512f"
-          # Broadwell, the oldest supported Intel CPU, has AVX2, BMI2, and ADX without SHA-NI or AVX-512.
+          # Broadwell has AVX2, BMI2, and ADX without SHA-NI or AVX-512.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             qemu: Broadwell
             cpu-features: "avx2 bmi2 adx !sha !avx512f"
-          # SVE2 and SHA-3 as on Graviton4. A 512-bit vector length exercises the upper Z-register bits.
+          # QEMU max has SHA-3 and SVE2 with 512-bit vectors.
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
@@ -193,7 +193,7 @@ jobs:
             static-features: "sha2 sve2 !sha3"
             qemu: max,sve-default-vector-length=64
             cpu-features: "sha2 sha3 sve sve2"
-          # A64FX has SVE without SVE2 or SHA-3. The build without target features has no SHA-2 either.
+          # A64FX has SVE without SHA-3 or SVE2.
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
