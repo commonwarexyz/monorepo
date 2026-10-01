@@ -146,10 +146,8 @@ commonware_macros::stability_scope!(BETA {
 
         /// Prepare and map batches, collecting results in batch order.
         ///
-        /// `prepare` is called once with ordered ranges that cover the operation's input extent
-        /// without overlap. A range is empty only when the extent is empty. `prepare` must produce
-        /// one item per range in the same order. The mapping operation may execute those items
-        /// in any order.
+        /// `prepare` receives ordered ranges that partition the input and must return one item per
+        /// range in the same order. `map_op` may run those items in any order.
         pub fn map_collect_vec<I, P, F, R>(self, prepare: P, map_op: F) -> Vec<R>
         where
             I: IntoIterator<IntoIter: Send, Item: Send> + Send,
@@ -247,12 +245,10 @@ commonware_macros::stability_scope!(BETA {
 
         /// Run an operation on strategy-provided batches.
         ///
-        /// `run` is called once with batches covering `0..len`. A whole-input run supplies the
-        /// single batch `0..len` and executes it on the calling thread. Otherwise the strategy
-        /// supplies at least two batches no shorter than `minimum_batch_len` and may execute
-        /// them in parallel. The strategy may run the whole input even when batching is
-        /// possible. Empty extents and extents that cannot form two batches of
-        /// `minimum_batch_len` always run whole.
+        /// `run` is called once with batches covering `0..len`. The strategy either supplies one
+        /// batch that executes on the calling thread or splits the input into two or more batches
+        /// no shorter than `minimum_batch_len` that may execute in parallel. An input too short to
+        /// split always gets one batch.
         ///
         /// `multiplier` estimates work per input unit. Complete the operation, including
         /// preparation and result assembly, inside `run`. Both execution shapes must produce
