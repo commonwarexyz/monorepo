@@ -102,7 +102,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{CodecShared, Read};
+use commonware_codec::Read;
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
 use core::{num::NonZeroUsize, ops::Range};
@@ -129,12 +129,12 @@ pub struct Config<T: Translator, C> {
 }
 
 /// A finalized batch of writes and deletes ready to be applied to the store.
-pub struct Changeset<K: Key, V: CodecShared + Clone> {
+pub struct Changeset<K, V> {
     diff: BTreeMap<K, Option<V>>,
     metadata: Option<V>,
 }
 
-impl<K: Key, V: CodecShared + Clone> FromIterator<(K, Option<V>)> for Changeset<K, V> {
+impl<K: Ord, V> FromIterator<(K, Option<V>)> for Changeset<K, V> {
     fn from_iter<TIter: IntoIterator<Item = (K, Option<V>)>>(iter: TIter) -> Self {
         Self {
             diff: iter.into_iter().collect(),
@@ -143,7 +143,7 @@ impl<K: Key, V: CodecShared + Clone> FromIterator<(K, Option<V>)> for Changeset<
     }
 }
 
-impl<K: Key, V: CodecShared + Clone, const N: usize> From<[(K, Option<V>); N]> for Changeset<K, V> {
+impl<K: Ord, V, const N: usize> From<[(K, Option<V>); N]> for Changeset<K, V> {
     fn from(items: [(K, Option<V>); N]) -> Self {
         items.into_iter().collect()
     }

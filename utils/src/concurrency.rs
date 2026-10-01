@@ -82,12 +82,12 @@ impl<K: Eq + Hash + Clone> KeyedLimiter<K> {
 }
 
 /// A reservation for a slot in the [KeyedLimiter].
-pub struct KeyedReservation<K: Eq + Hash + Clone> {
+pub struct KeyedReservation<K: Eq + Hash> {
     key: K,
     current: Arc<Mutex<HashSet<K>>>,
 }
 
-impl<K: Eq + Hash + Clone> Drop for KeyedReservation<K> {
+impl<K: Eq + Hash> Drop for KeyedReservation<K> {
     fn drop(&mut self) {
         self.current.lock().remove(&self.key);
     }

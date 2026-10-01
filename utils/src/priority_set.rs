@@ -6,12 +6,12 @@ use std::{
 
 /// An entry in the `PrioritySet`.
 #[derive(Eq, PartialEq)]
-struct Entry<I: Ord + Hash + Clone, P: Ord + Copy> {
+struct Entry<I, P> {
     item: I,
     priority: P,
 }
 
-impl<I: Ord + Hash + Clone, P: Ord + Copy> Ord for Entry<I, P> {
+impl<I: Ord, P: Ord> Ord for Entry<I, P> {
     fn cmp(&self, other: &Self) -> Ordering {
         match self.priority.cmp(&other.priority) {
             Ordering::Equal => self.item.cmp(&other.item),
@@ -20,7 +20,7 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> Ord for Entry<I, P> {
     }
 }
 
-impl<I: Ord + Hash + Clone, V: Ord + Copy> PartialOrd for Entry<I, V> {
+impl<I: Ord, V: Ord> PartialOrd for Entry<I, V> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
