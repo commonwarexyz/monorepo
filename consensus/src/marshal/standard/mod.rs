@@ -182,7 +182,7 @@ mod tests {
         fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
             let (scheme, remaining) = self.scopes.get(&epoch)?;
             remaining
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
                 .ok()?;
             Some(Scoped::scheme(Arc::clone(scheme)))
         }

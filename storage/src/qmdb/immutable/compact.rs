@@ -119,7 +119,6 @@ where
     pub(super) commit_metadata: Option<V::Value>,
     pub(super) parent: Option<Weak<Self>>,
     pub(super) bounds: chain::Bounds<F, D>,
-    pub(super) _key: PhantomData<K>,
 }
 
 impl<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, K, V, S>
@@ -356,7 +355,6 @@ where
                 ancestors,
                 inactivity_floor,
             },
-            _key: PhantomData,
         }))
     }
 }
@@ -511,7 +509,6 @@ where
             commit_metadata: self.last_commit_metadata.clone(),
             parent: None,
             bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
-            _key: PhantomData,
         })
     }
 

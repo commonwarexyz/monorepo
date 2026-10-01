@@ -127,3 +127,8 @@ required-features = ["analysis"]
 name = "rational"
 harness = false
 path = "src/rational/benches/bench.rs"
+
+[[bench]]
+name = "sequence"
+harness = false
+path = "src/sequence/benches/bench.rs"
