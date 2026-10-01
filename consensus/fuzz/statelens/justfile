@@ -139,6 +139,10 @@ fuzz target *args:
         exit 1
     fi
 
+# Coverage of the corpora the targets built: just coverage <simplex|marshal|target...>
+coverage *args:
+    python3 scripts/statelens.py coverage "$@"
+
 # Build the code index a campaign and the agents query: just code-index [--subsystem S]
 code-index *args:
     python3 scripts/statelens.py code build "$@"

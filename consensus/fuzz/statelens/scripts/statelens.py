@@ -121,6 +121,9 @@ PLAN = "consensus/fuzz/statelens/campaign/plan.md"
 EXAMPLES = "consensus/fuzz/statelens/examples"
 # Section 13 of the specification reproduces every prompt verbatim; `lint-prompts`
 # compares the two and `--write` refreshes the copies from the files.
+# Dependencies and the standard library are not what a campaign fuzzes, so the
+# workspace summary of `coverage` leaves them out.
+COVERAGE_DEPENDENCIES = r"(^|/)(\.cargo/registry|\.rustup|rustc/|library/std|/rustc)"
 SPEC_DOC = "consensus/fuzz/statelens/docs/SPEC.md"
 # The closing fence is the one before the next heading or rule, so a prompt that quotes a
 # fence of its own does not end its block early and `--write` cannot append to it forever.
@@ -2383,6 +2386,213 @@ def clean_plan(repo):
     return sorted(delete), sorted(restore), roots
 
 
+def llvm_tools(toolchain):
+    """The `llvm-cov` and `llvm-profdata` of a toolchain, from its own sysroot.
+
+    They must come from the toolchain that built the binaries: a coverage
+    mapping is only readable by the LLVM that wrote it, and the ones on PATH
+    belong to whatever else is installed.
+    """
+    rustc = ["rustc"] + ([f"+{toolchain}"] if toolchain else [])
+    try:
+        sysroot = subprocess.run(
+            rustc + ["--print", "sysroot"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        version = subprocess.run(rustc + ["-vV"], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise Abort(2, f"cannot ask {' '.join(rustc)} for its sysroot: {error}")
+    host = ""
+    for line in version.splitlines():
+        if line.startswith("host: "):
+            host = line[len("host: ") :].strip()
+    if not host:
+        raise Abort(2, f"{' '.join(rustc)} -vV did not report a host triple")
+    binaries = Path(sysroot) / "lib/rustlib" / host / "bin"
+    tools = (binaries / "llvm-cov", binaries / "llvm-profdata")
+    missing = [tool.name for tool in tools if not os.access(tool, os.X_OK)]
+    if missing:
+        raise Abort(
+            2,
+            f"{', '.join(missing)} not in {binaries}; install it with "
+            f"`rustup component add llvm-tools-preview --toolchain {toolchain or 'nightly'}`",
+        )
+    return tools + (host,)
+
+
+def coverage_binary(repo, package, host, target):
+    """The coverage build of `target`, wherever cargo-fuzz put it.
+
+    The fuzz packages are workspace members, so cargo builds into the workspace
+    target directory, and cargo-fuzz nests a host build under its own profile
+    directory. Both layouts are checked rather than assumed.
+    """
+    for candidate in (
+        repo / "target" / host / "coverage" / host / "release" / target,
+        repo / package / "target" / host / "coverage" / host / "release" / target,
+        repo / "target" / host / "coverage" / target,
+        repo / package / "target" / host / "coverage" / target,
+    ):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def coverage_scope(repo, profile):
+    """(sources the report covers, paths the campaign does not instrument).
+
+    llvm-cov reads a source argument as a path, so the roots are absolute and
+    lose their trailing slash: a directory written with one is read as a file
+    that does not exist, and the report widens to the whole binary with only a
+    warning. The uninstrumented paths keep theirs, because they are a regex.
+    """
+    settings = PROFILES[profile]
+    return [str(repo / root.rstrip("/")) for root in settings["roots"]], list(settings["warn"])
+
+
+def cmd_coverage(args):
+    """SPEC section 7.13: coverage of the corpora the StateLens targets built."""
+    repo = repo_root()
+    config = load_config(repo / SL)
+    toolchain = config["STATELENS_FUZZ_TOOLCHAIN"] or pinned_nightly(repo)
+    profile, targets = coverage_selection(repo, args)
+    package = PROFILES[profile]["package"]
+    coverage_dir = repo / package / "coverage"
+    out = coverage_dir / "html"
+    llvm_cov, llvm_profdata, host = llvm_tools(toolchain)
+
+    ready = []
+    for target in targets:
+        corpus = repo / package / "corpus" / target
+        if not corpus.is_dir() or not any(corpus.iterdir()):
+            say(f"warning: {target} has no corpus in {package}/corpus; skipped")
+            continue
+        ready.append(target)
+    if not ready:
+        raise Abort(2, f"no {profile} target has a corpus; run the targets before this")
+
+    out.mkdir(parents=True, exist_ok=True)
+    sources, uninstrumented = coverage_scope(repo, profile)
+    profiles, objects = [], []
+    for number, target in enumerate(ready, 1):
+        say(f"coverage: {target} ({number} of {len(ready)}); replaying its corpus")
+        command = cargo(toolchain) + ["fuzz", "coverage", "--fuzz-dir", package, target]
+        log = coverage_dir / target / "coverage.log"
+        code, tail = run_logged(command, log, repo)
+        if code != 0:
+            for line in tail:
+                print(line, flush=True)
+            raise Abort(2, f"coverage: {target} exited with code {code}; see {log}")
+        data = coverage_dir / target / "coverage.profdata"
+        binary = coverage_binary(repo, package, host, target)
+        if binary is None or not data.is_file():
+            raise Abort(2, f"coverage: {target} produced no profile or binary")
+        profiles.append(data)
+        objects.append(binary)
+        coverage_report(llvm_cov, out, target, [binary], data, sources, uninstrumented)
+
+    if len(objects) > 1:
+        say(f"coverage: merging {len(profiles)} profile(s)")
+        unified = coverage_dir / "unified.profdata"
+        merge = [str(llvm_profdata), "merge", "-sparse"] + [str(path) for path in profiles]
+        run_tool(merge + ["-o", str(unified)])
+        coverage_report(llvm_cov, out, "unified", objects, unified, sources, uninstrumented)
+    say(f"coverage: reports in {out.relative_to(repo)}")
+    return 0
+
+
+def coverage_selection(repo, args):
+    """(profile, targets) from the names given, as `just fuzz` reads them."""
+    profile, targets = args.profile, []
+    for name in args.targets:
+        if name in PROFILES:
+            profile = name
+            continue
+        owner = next((key for key in PROFILES if name.startswith(f"{key}_")), None)
+        if owner is None:
+            raise Abort(1, f"{name} is not a profile or a simplex_/marshal_ target")
+        if profile is not None and profile != owner:
+            raise Abort(1, f"{name} is a {owner} target, but the profile is {profile}")
+        profile = owner
+        targets.append(name)
+    if profile is None:
+        profile = "simplex"
+    known = profile_targets(repo, profile)
+    unknown = [name for name in targets if name not in known]
+    if unknown:
+        raise Abort(
+            1,
+            f"the {profile} profile builds no target called {', '.join(unknown)}; "
+            f"it builds {', '.join(known)}",
+        )
+    return profile, targets or known
+
+
+def run_tool(command, capture=False):
+    """Runs an llvm tool, turning a failure into an `Abort` rather than a traceback."""
+    try:
+        done = subprocess.run(command, capture_output=capture, text=True)
+    except OSError as error:
+        raise Abort(2, f"could not run {Path(command[0]).name}: {error}")
+    if done.returncode != 0:
+        detail = (done.stderr or "").strip().splitlines()
+        raise Abort(
+            2,
+            f"{Path(command[0]).name} exited with code {done.returncode}"
+            + (f": {detail[-1]}" if detail else ""),
+        )
+    return done.stdout
+
+
+def coverage_report(llvm_cov, out, name, objects, data, sources, uninstrumented):
+    """One HTML report and its summaries, for one target or for the merge."""
+    # llvm-cov reads the first positional as the main binary, so the rest take
+    # `-object`; otherwise a source path is read as a binary.
+    binaries = [str(objects[0])]
+    for extra in objects[1:]:
+        binaries += ["-object", str(extra)]
+    profile_flag = [f"-instr-profile={data}"]
+    # llvm-cov writes into the directory without clearing it, so a rerun over a
+    # narrower scope would leave the pages of the wider one behind.
+    shutil.rmtree(out / name, ignore_errors=True)
+    run_tool(
+        [str(llvm_cov), "show"]
+        + binaries
+        + profile_flag
+        + [
+            "-format=html",
+            f"-output-dir={out / name}",
+            "-show-line-counts-or-regions",
+            "-show-instantiation-summary",
+        ]
+        + sources
+    )
+    for root in sources:
+        subsystem = Path(root).name
+        text = run_tool(
+            [str(llvm_cov), "report"]
+            + binaries
+            + profile_flag
+            + [f"-ignore-filename-regex={'|'.join(uninstrumented)}", root],
+            capture=True,
+        )
+        (out / f"{name}.{subsystem}.txt").write_text(text)
+        total = [line for line in text.splitlines() if line.startswith("TOTAL")]
+        if total:
+            columns = total[0].split()
+            say(
+                f"coverage: {name} {subsystem} regions {columns[3]}, "
+                f"functions {columns[6]}, lines {columns[9]} (instrumented code)"
+            )
+    workspace = run_tool(
+        [str(llvm_cov), "report"]
+        + binaries
+        + profile_flag
+        + [f"-ignore-filename-regex={COVERAGE_DEPENDENCIES}"],
+        capture=True,
+    )
+    (out / f"{name}.workspace.txt").write_text(workspace)
+
+
 def cmd_targets(args):
     """The StateLens targets a profile builds, one per line (SPEC section 5.5).
 
@@ -3892,6 +4102,25 @@ def main(argv):
             action="store_true",
             help="for callees, include functions defined outside this crate",
         )
+    coverage = commands.add_parser(
+        "coverage",
+        help="coverage of the corpora the StateLens targets built",
+        description=(
+            "Replay each StateLens target's corpus under coverage instrumentation and "
+            "write an HTML report per target plus one merged over all of them (SPEC "
+            "section 7.13). Names a profile (`simplex`, `marshal`) or single targets; "
+            "with neither, every target of the default profile. A target with no corpus "
+            "is skipped."
+        ),
+    )
+    coverage.add_argument(
+        "--profile",
+        choices=tuple(PROFILES),
+        help="profile whose targets to cover (default: simplex, or the one a name implies)",
+    )
+    coverage.add_argument(
+        "targets", nargs="*", metavar="TARGET", help="a profile name or a StateLens target"
+    )
     targets = commands.add_parser(
         "targets",
         help="the StateLens targets a profile builds, one per line",
@@ -3962,6 +4191,8 @@ def main(argv):
             return cmd_kb(args)
         if args.command == "targets":
             return cmd_targets(args)
+        if args.command == "coverage":
+            return cmd_coverage(args)
         if args.command == "code":
             return cmd_code(args)
         if args.command == "ast":

@@ -248,7 +248,7 @@ consensus/fuzz/statelens/
     statelens.rs              guard, counter table, probe/assert macros, ghost state
   scripts/
     statelens.py              lint, lint-examples, lint-plan, lint-prompts, extract, kb,
-                              code, ast, targets, campaign, clean
+                              code, ast, targets, campaign, coverage, clean
     test_statelens.py         tests for the paths that fail quietly
 ```
 
@@ -377,7 +377,7 @@ R-P2-4. **Cryptography (decision).** StateLens fuzz targets use only the `cert_m
 
 R-P2-6. **Worked analyses.** `examples/` holds one worked analysis per subsystem, written against real code. The Phase 2 prompts carry the transferable craft themselves -- what makes a state worth probing, how a wide dimension becomes one probe pair, and the readings of a Statement that are too strong and the ones that are too weak -- and name the examples only as reference material an agent may open. A prompt does not inline them: each is tens of thousands of tokens, several times the prompt, and a worked analysis of one component should not decide what another component's states are. Because they name real functions and fields, `just check-examples` fails when a name they cite no longer exists.
 
-R-P2-5. **Recipes.** `just campaign` runs a campaign and no fuzzer, as R-P2-2 step 7 says. `just run <target>` fuzzes a target a campaign built, and `just fuzz <target>` is a convenience that does both in order, inferring the profile from the target's prefix and refusing a name that is neither profile's. Given a profile name instead of a target, `just fuzz` runs every target that profile builds: one after another by default, together with `--parallel`, or one tmux window each with `--tmux`. No time limit is imposed, so a target runs until it stops unless `-max_total_time` is passed; the sequential form says so, because there the first target would be the only one to run. `just check-plan` checks an instrumentation plan against its own claims and the instrumented code, and `just check-prompts` checks that the specification still quotes the prompts verbatim, with `--write` to refresh the copies. `just clean` undoes what a campaign wrote to a checkout: it deletes the files a campaign or an instrumenter added and restores the paths it edits to `HEAD`, printing what it would do and acting only with `--yes`, and afterwards it checks that nothing in scope still differs from `HEAD` rather than reporting success on trust. It leaves `campaign/` and `extract/` alone, and it restores whole paths, so an edit of the operator's own inside them is lost.
+R-P2-5. **Recipes.** `just campaign` runs a campaign and no fuzzer, as R-P2-2 step 7 says. `just run <target>` fuzzes a target a campaign built, and `just fuzz <target>` is a convenience that does both in order, inferring the profile from the target's prefix and refusing a name that is neither profile's. Given a profile name instead of a target, `just fuzz` runs every target that profile builds: one after another by default, together with `--parallel`, or one tmux window each with `--tmux`. No time limit is imposed, so a target runs until it stops unless `-max_total_time` is passed; the sequential form says so, because there the first target would be the only one to run. `just check-plan` checks an instrumentation plan against its own claims and the instrumented code, and `just check-prompts` checks that the specification still quotes the prompts verbatim, with `--write` to refresh the copies. `just coverage <profile|target...>` reports what the corpora a run built reach (R-P3-4). `just clean` undoes what a campaign wrote to a checkout: it deletes the files a campaign or an instrumenter added and restores the paths it edits to `HEAD`, printing what it would do and acting only with `--yes`, and afterwards it checks that nothing in scope still differs from `HEAD` rather than reporting success on trust. It leaves `campaign/` and `extract/` alone, and it restores whole paths, so an edit of the operator's own inside them is lost.
 
 ### 7.6 Phase 3: run fuzz targets
 
@@ -386,6 +386,8 @@ R-P3-1. The operator runs the StateLens fuzz targets in the instrumented checkou
 R-P3-2. A run ends when the target panics or the operator stops it; libFuzzer, including its fork mode, stops at the first crash. A panic is an oracle failure (7.10), and the operator investigates it with the crash artifacts (7.9).
 
 R-P3-3. After fuzzing and any investigation, the operator discards the checkout. It is never reused for another campaign (R-P2-1).
+
+R-P3-4. **Coverage.** `just coverage <profile|target...>` reports what the corpora a run built reach: it replays each StateLens target's corpus under coverage instrumentation and writes an HTML report per target, plus one merged over the profile's targets, under the fuzz package's `coverage/`. Each report is scoped to the code the profile instruments, and carries two summaries, one for that code and one for the whole workspace. A target with no corpus is skipped, so the command follows whatever the operator chose to run in Phase 3. The reports are read by a person; nothing in a campaign depends on them.
 
 ### 7.7 Instrumentation rules
 

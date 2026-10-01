@@ -1001,6 +1001,60 @@ class PromptPaths(unittest.TestCase):
                     )
 
 
+class CoverageSelection(unittest.TestCase):
+    """`just coverage` takes the names `just fuzz` takes, so a marshal target must
+    not be covered against the simplex profile's package, and a typo must name the
+    targets that exist rather than silently covering all of them."""
+
+    def select(self, *names, profile=None):
+        return sl.coverage_selection(
+            HERE.parents[3], argparse.Namespace(profile=profile, targets=list(names))
+        )
+
+    def test_no_name_covers_every_target_of_the_default_profile(self):
+        profile, targets = self.select()
+        self.assertEqual(profile, "simplex")
+        self.assertEqual(targets, sl.profile_targets(HERE.parents[3], "simplex"))
+
+    def test_a_profile_name_covers_that_profile(self):
+        profile, targets = self.select("marshal")
+        self.assertEqual(profile, "marshal")
+        self.assertEqual(targets, sl.profile_targets(HERE.parents[3], "marshal"))
+
+    def test_a_target_name_implies_its_profile(self):
+        profile, targets = self.select("marshal_scenario_standard_inline_cert_mock_statelens")
+        self.assertEqual(profile, "marshal")
+        self.assertEqual(targets, ["marshal_scenario_standard_inline_cert_mock_statelens"])
+
+    def test_a_name_of_neither_profile_is_refused(self):
+        with self.assertRaises(sl.Abort) as caught:
+            self.select("nonsense")
+        self.assertIn("not a profile", str(caught.exception))
+
+    def test_a_target_the_profile_does_not_build_is_refused(self):
+        with self.assertRaises(sl.Abort) as caught:
+            self.select("simplex_does_not_exist")
+        self.assertIn("builds no target", str(caught.exception))
+
+    def test_the_report_is_scoped_to_what_the_profile_instruments(self):
+        repo = HERE.parents[3]
+        for profile in ("simplex", "marshal"):
+            sources, uninstrumented = sl.coverage_scope(repo, profile)
+            self.assertEqual(
+                sources,
+                [str(repo / root.rstrip("/")) for root in sl.PROFILES[profile]["roots"]],
+                "llvm-cov reads a trailing slash as a file and widens the report",
+            )
+            for source in sources:
+                self.assertTrue(pathlib.Path(source).is_dir(), f"{source} must exist")
+            self.assertEqual(uninstrumented, list(sl.PROFILES[profile]["warn"]))
+            for path in uninstrumented:
+                self.assertTrue(
+                    any(str(repo / path).startswith(source) for source in sources),
+                    f"{path} is left out of a report that does not cover it",
+                )
+
+
 class PlanClaims(unittest.TestCase):
     """A plan's Status is a coverage claim, and the first campaign that wrote one
     claimed `bound` for an invariant whose action is committed in a handler it never

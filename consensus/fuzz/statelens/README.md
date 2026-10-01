@@ -209,6 +209,32 @@ adversary that runs Simplex or marshal code, and only they exercise the Byzantin
 In the other seven (Disrupter, poisoned backfill, block dissemination, scenario prefix
 and store), no adversary runs Simplex or marshal code, so every engine is checked.
 
+## Coverage
+
+When a run is over, `just coverage` says what its corpus actually reaches. It takes a
+profile, single targets, or neither (every target of the default profile), and a name
+beginning `simplex_` or `marshal_` picks its own profile, as `just fuzz` does:
+
+```
+just coverage simplex
+just coverage marshal
+just coverage simplex_cert_mock_twins_mutator_statelens
+```
+
+For each target that has a corpus it replays that corpus under coverage instrumentation
+(`cargo fuzz coverage`), then writes, under the fuzz package's `coverage/html/`:
+
+- `<target>/index.html`, one per target, and `unified/index.html` merged over all of them;
+- `<target>.<subsystem>.txt`, the summary of the code the campaign instruments, which
+  leaves out `mocks/` and `scheme/`;
+- `<target>.workspace.txt`, the same without dependencies or the standard library.
+
+A target with no corpus is skipped, so run this after the targets you care about, in the
+same instrumented checkout that produced them. Replaying a corpus costs about as much as
+the run did, so a profile with many targets takes a while; name a single target to keep it
+short. `llvm-cov` comes from the fuzz toolchain, so that toolchain needs
+`llvm-tools-preview` (`rustup component add llvm-tools-preview --toolchain <nightly>`).
+
 ## Results
 
 The campaign ends with these lines, leaving out those that do not apply:

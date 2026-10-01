@@ -168,7 +168,8 @@ consensus/fuzz/statelens/
     statelens.rs                 runtime support module (Appendix A)
   scripts/
     statelens.py                 lint, lint-examples, lint-plan, lint-prompts, extract,
-                                 kb, code, ast, targets, campaign, clean (sections 5 to 7)
+                                 kb, code, ast, targets, campaign, coverage, clean
+                                 (sections 5 to 7)
     test_statelens.py            tests for the quiet failures (section 5.9)
 ```
 
@@ -520,6 +521,10 @@ fuzz target *args:
         exit 1
     fi
 
+# Coverage of the corpora the targets built: just coverage <simplex|marshal|target...>
+coverage *args:
+    python3 scripts/statelens.py coverage "$@"
+
 # Build the code index a campaign and the agents query: just code-index [--subsystem S]
 code-index *args:
     python3 scripts/statelens.py code build "$@"
@@ -572,6 +577,7 @@ prefixed with `statelens:`.
 | `lint-plan` | `lint-plan [--profile P] [PATH...]`; with no path it checks `SL/campaign/plan.md`. A section per registry invariant of the profile; a valid `Status`; the fields that status needs (section 11); a `Sites` ledger whose entries each name a source and say `checked` or `not checked`, and leave nothing unchecked when the status is `bound`; an assertion naming the invariant in the function of every entry marked `checked`; and, for every invariant the plan claims to bind, an `sl_assert!` or `sl_implies!` call in the instrumented code that names it. It judges the claims the plan makes; a commit site the ledger never names is what the audit pass (section 7.3) is for | 0 clean, 3 problems |
 | `lint-prompts` | `lint-prompts [--write]`; compares every file in `prompts/` with its copy in section 13. `--write` refreshes the copies from the files and reports what it could not fix | 0 clean, 3 problems |
 | `code` | `code build [--subsystem S]`, and `code defs|refs|callers|callees NAME [--tests] [--all]` (section 5.7) | 0 done, 1 usage, no index, or no symbol matching NAME |
+| `coverage` | `coverage [--profile P] [TARGET...]`; replays the corpus of each StateLens target under coverage instrumentation and writes an HTML report per target plus a merged one (section 7.13). A positional name is a profile or a target, as `just fuzz` reads it. A target with no corpus is skipped | 0 done, 1 usage or an unknown target, 2 no corpus anywhere, no `llvm-tools-preview`, or a failed coverage run |
 | `targets` | `targets [--profile P]`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary | 0 done |
 | `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]` (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
 | `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing. Files a campaign or an instrumenter added are deleted and paths that exist in `HEAD` are restored from it, the two told apart by asking `git ls-tree` rather than by reading a status code. Status is asked with `--untracked-files=all`, so a wholly untracked directory is named as its files rather than collapsed to one entry that is not a file to delete, and a directory that is left empty is removed while nothing in it is deleted unseen. With `--yes` it checks afterwards that nothing in scope still differs from `HEAD` | 0 done, including a preview, which is not a failure; 1 something in scope still differs from `HEAD`, so the checkout is not reusable |
@@ -1177,6 +1183,35 @@ To locate the code for an invariant: `rg '\[statelens\] INV-0007' consensus/src`
 
 An instrumented checkout must not be committed or reused for another campaign; the next
 campaign starts from a fresh clone.
+
+### 7.13 Phase 3: coverage
+
+`statelens.py coverage [--profile P] [TARGET...]` (`just coverage`) answers what the
+corpora a run built actually reach. It takes a profile name, single StateLens targets, or
+neither, in which case it covers every target of the default profile; a name beginning
+`simplex_` or `marshal_` selects its own profile, as `just fuzz` reads it.
+
+For each target with a corpus, in the instrumented checkout:
+
+1. `cargo +<fuzz toolchain> fuzz coverage --fuzz-dir <profile package> <target>`, which
+   rebuilds the target with coverage instrumentation and replays its corpus. A target with
+   no corpus is skipped with a warning, and a profile where none has one stops the command
+   with exit code 2.
+2. `llvm-cov show` writes `<package>/coverage/html/<target>/index.html`, scoped to the
+   profile's editable roots (section 5.5), so the pages carry the code the campaign
+   instruments rather than every crate the harness links.
+3. `llvm-cov report` writes two summaries beside it: `<target>.<subsystem>.txt` for each
+   root, which leaves out the profile's warn-only paths and so reports the instrumented
+   code, and `<target>.workspace.txt`, which leaves out only dependencies and the standard
+   library.
+4. With more than one target, `llvm-profdata merge -sparse` combines the profiles and the
+   same reports are written again as `unified`, against every target's binary.
+
+`llvm-cov` and `llvm-profdata` come from the fuzz toolchain's own sysroot
+(`lib/rustlib/<host>/bin`), because a coverage mapping is only readable by the LLVM that
+wrote it; a missing `llvm-tools-preview` component stops the command with the `rustup`
+line that installs it. The coverage build and the reports live under the fuzz package's
+`coverage/`, which `.gitignore` already covers.
 
 ---
 
@@ -3344,8 +3379,11 @@ Workflow test, see SPEC.md section 14.
    (section 7.10); which marshal variants have an adversary that runs Simplex or marshal code.
 8. Results: the summary lines, exit codes, and `campaign/` (plan, diff, logs, prompts), and
    what a plan section's `Status` and `Sites` ledger claim, which `just check-plan` rechecks.
-9. Investigating a panic (section 7.12).
-10. Testing the workflow itself: `STATELENS_FALSE_INVARIANTS=1` (the campaign must panic on
+9. Coverage: `just coverage <profile|target...>` after a run, what it writes under the
+   fuzz package's `coverage/html/`, and that the fuzz toolchain needs `llvm-tools-preview`
+   (section 7.13).
+10. Investigating a panic (section 7.12).
+11. Testing the workflow itself: `STATELENS_FALSE_INVARIANTS=1` (the campaign must panic on
    the deliberately false invariants), `STATELENS_BYZANTINE=panic` (guard test),
    `STATELENS_FEEDBACK=0` (feedback comparison) and `STATELENS_AUDIT=0` (skip the audit
    pass).
