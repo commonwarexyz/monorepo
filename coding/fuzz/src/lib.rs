@@ -81,7 +81,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     let checked_shards = shards
         .into_iter()
         .take(to_use as usize)
-        .map(|(i, shard)| S::check(&config, &commitment, i, &shard).unwrap())
+        .map(|(i, shard)| S::check(&config, &commitment, i, &shard, &STRATEGY).unwrap())
         .collect::<Vec<_>>();
 
     let decoded = S::decode(&config, &commitment, checked_shards.iter(), &STRATEGY).unwrap();
@@ -110,15 +110,24 @@ pub fn fuzz_phased<S: PhasedScheme>(input: FuzzInput) {
     // This lets us move our strong shard out directly while keeping the rest for forwarding.
     let (my_i, my_shard) = shards.pop().unwrap();
     let (my_checking_data, my_checked_shard, _) =
-        S::weaken(b"", &config, &commitment, my_i, my_shard).unwrap();
+        S::weaken(b"", &config, &commitment, my_i, my_shard, &STRATEGY).unwrap();
 
     // Check `to_use - 1` forwarded shards, then include our own checked shard.
     let checked_shards = shards
         .into_iter()
         .take((to_use - 1) as usize)
         .map(|(i, shard)| {
-            let (_, _, weak_shard) = S::weaken(b"", &config, &commitment, i, shard).unwrap();
-            S::check(&config, &commitment, &my_checking_data, i, weak_shard).unwrap()
+            let (_, _, weak_shard) =
+                S::weaken(b"", &config, &commitment, i, shard, &STRATEGY).unwrap();
+            S::check(
+                &config,
+                &commitment,
+                &my_checking_data,
+                i,
+                weak_shard,
+                &STRATEGY,
+            )
+            .unwrap()
         })
         .chain(iter::once(my_checked_shard))
         .collect::<Vec<_>>();

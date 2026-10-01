@@ -4452,8 +4452,14 @@ mod tests {
                 // A leader can obtain notarize votes with valid assigned shards even
                 // though their root encodes different bytes from the named block.
                 for (index, shard) in other.shards(&Sequential).iter().enumerate() {
-                    ReedSolomon::<Sha256>::check(&config, &commitment.root(), index as u16, shard)
-                        .expect("assigned shard should verify against the advertised root");
+                    ReedSolomon::<Sha256>::check(
+                        &config,
+                        &commitment.root(),
+                        index as u16,
+                        shard,
+                        &Sequential,
+                    )
+                    .expect("assigned shard should verify against the advertised root");
                 }
 
                 let (value, fallback) = if notarized {

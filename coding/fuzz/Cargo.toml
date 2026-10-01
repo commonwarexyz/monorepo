@@ -17,8 +17,16 @@ libfuzzer-sys.workspace = true
 
 [dependencies.commonware-coding]
 path = ".."
+features = ["fuzz"]
 
 [lib]
+bench = false
+
+[[bin]]
+name = "ocelot"
+path = "fuzz_targets/ocelot.rs"
+test = false
+doc = false
 bench = false
 
 [[bin]]
