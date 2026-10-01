@@ -301,7 +301,7 @@ Even if the operator disappears, recovery depends on a correct, live settlement 
 
 More frequent closes can reduce the wait for admission, at the cost of more preparation and certification. Shorter challenge windows can reduce the wait for finality, but must leave receipt holders enough time to obtain public openings and get a challenge included.
 
-Whatever the epoch length, payments must continue across the boundary to avoid interrupting user flows. The operator can register $e+1$ while still accepting payments in $e$. Once that registration is included onchain, it can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
+Whatever the epoch length, payments must continue across the boundary to avoid interrupting user flows. The operator can register $e+1$'s payment anchor onchain while still accepting payments in $e$. Once that registration is included onchain, it can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
 
 Once $e+1$ is registered and $e$'s close is admitted, settlement binds $e+1$ to that close's state root and sets its admission and challenge deadlines from that time. Admission and finalization follow epoch order. A missed admission deadline discards every registration still awaiting admission.
 
@@ -340,8 +340,6 @@ The predecessor root binds the retry to the payer's final vector in $e$, includi
 After $e$ ends, the operator returns original receipts for accepted requests and rejects the rest as stale, reporting the payer's final state. If the payer holds no receipt beyond that state and verifies receipts through it, it signs the remaining payments in $e+1$ against the reported root. Otherwise, it waits for $e$'s admission.
 
 If the operator includes a rejected request in $e$, the payer's row has a different root and validators reject the retry. If the operator countersigned that retry, its receipt and a public proof establish a debit mismatch against $e+1$'s admitted close.
-
-The predecessor root binds only the previous epoch. If the retry also misses $e+1$, the payer signs again only after $e$'s admission shows whether the original was included.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-retry.svg" alt="Payer a reaches state n-1 with vector root P in epoch e. If e's close omits the late request r, the final vector root remains P, and retry r' can settle in e+1. If the close includes r with root P', validators reject r' because it signs predecessor root P. An operator receipt for r' and a public proof establish a debit mismatch. At most one copy can settle.">

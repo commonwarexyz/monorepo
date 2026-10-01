@@ -612,10 +612,11 @@ O’Grady</a></div>
         get a challenge included.</p>
         <p>Whatever the epoch length, payments must continue across the
         boundary to avoid interrupting user flows. The operator can
-        register <span class="math inline">e+1</span> while still
-        accepting payments in <span class="math inline">e</span>. Once
-        that registration is included onchain, it can switch payments to
-        <span class="math inline">e+1</span> while <span
+        register <span class="math inline">e+1</span>’s payment anchor
+        onchain while still accepting payments in <span
+        class="math inline">e</span>. Once that registration is included
+        onchain, it can switch payments to <span
+        class="math inline">e+1</span> while <span
         class="math inline">e</span>’s close is built, certified, and
         admitted. The anchor <span class="math inline">\mathcal
         A_{e+1}</span> is independent of <span
@@ -697,11 +698,6 @@ O’Grady</a></div>
         countersigned that retry, its receipt and a public proof
         establish a debit mismatch against <span
         class="math inline">e+1</span>’s admitted close.</p>
-        <p>The predecessor root binds only the previous epoch. If the
-        retry also misses <span class="math inline">e+1</span>, the
-        payer signs again only after <span
-        class="math inline">e</span>’s admission shows whether the
-        original was included.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-retry.svg" alt="Payer a reaches state n-1 with vector root P in epoch e. If e's close omits the late request r, the final vector root remains P, and retry r' can settle in e+1. If the close includes r with root P', validators reject r' because it signs predecessor root P. An operator receipt for r' and a public proof establish a debit mismatch. At most one copy can settle.">
         <div class="image-caption">
         <p>Figure 7: <span class="math inline">r&#39;</span> signs
