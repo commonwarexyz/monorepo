@@ -146,7 +146,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
 }
 
 /// A speculative batch whose root digest has been computed, in contrast to [`UnmerkleizedBatch`].
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync, S: Strategy> {
     /// The inner batch of Merkle leaf digests.
     pub(crate) inner: Arc<batch::MerkleizedBatch<F, D, S>>,
@@ -160,6 +160,21 @@ pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync, S: Strategy>
     pub(crate) ancestor_base_leaves: u64,
     /// Ancestor item batches collected at merkleize time (root-to-tip order).
     pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
+}
+
+impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> Clone
+    for MerkleizedBatch<F, D, Item, S>
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            bagging: self.bagging,
+            items: self.items.clone(),
+            parent: self.parent.clone(),
+            ancestor_base_leaves: self.ancestor_base_leaves,
+            ancestor_items: self.ancestor_items.clone(),
+        }
+    }
 }
 
 impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D, Item, S> {

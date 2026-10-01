@@ -29,11 +29,20 @@ pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
 pub type WrappedMessage<P, V> = (P, Result<V, Error>);
 
 /// Wrapper around a [Sender] that encodes messages using a [Codec].
-#[derive(Clone)]
 pub struct WrappedSender<S: Sender, V: Codec> {
     pool: BufferPool,
     sender: S,
     _phantom_v: std::marker::PhantomData<V>,
+}
+
+impl<S: Sender, V: Codec> Clone for WrappedSender<S, V> {
+    fn clone(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            sender: self.sender.clone(),
+            _phantom_v: std::marker::PhantomData,
+        }
+    }
 }
 
 impl<S: Sender, V: Codec> WrappedSender<S, V> {

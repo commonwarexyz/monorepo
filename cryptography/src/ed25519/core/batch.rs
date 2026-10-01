@@ -65,12 +65,19 @@ fn gen_u128<R: Rng + CryptoRng>(mut rng: R) -> u128 {
 }
 
 /// A batch verification context.
-#[derive(Default)]
 pub struct Verifier<P> {
     /// Signature data queued in insertion order. Payloads remain available for
     /// SHA-512 challenge computation under the caller's [`Strategy`] during
     /// [`Verifier::verify`].
     signatures: Vec<(VerificationKey, P, Signature)>,
+}
+
+impl<P> Default for Verifier<P> {
+    fn default() -> Self {
+        Self {
+            signatures: Vec::new(),
+        }
+    }
 }
 
 impl<P: AsRef<[u8]> + Sync> Verifier<P> {

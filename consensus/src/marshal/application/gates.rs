@@ -52,9 +52,16 @@ struct Inner<D: Digest, B> {
 /// [`crate::Relay::broadcast`] (or certification demands durability first),
 /// keeping marshal's mailbox free of any propose-time handshake. Stale entries
 /// are pruned after finalization via [`retain_after`](Self::retain_after).
-#[derive(Clone)]
 pub(crate) struct Gates<D: Digest, B> {
     inner: Arc<Mutex<Inner<D, B>>>,
+}
+
+impl<D: Digest, B> Clone for Gates<D, B> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<D: Digest, B> Default for Gates<D, B> {

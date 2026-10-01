@@ -26,10 +26,19 @@ pub(crate) struct Receivers<T> {
     pub(crate) high: mailbox::UnreliableReceiver<Message<T>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Relay<T> {
     low: mailbox::UnreliableSender<Message<T>>,
     high: mailbox::UnreliableSender<Message<T>>,
+}
+
+impl<T> Clone for Relay<T> {
+    fn clone(&self) -> Self {
+        Self {
+            low: self.low.clone(),
+            high: self.high.clone(),
+        }
+    }
 }
 
 impl<T> Relay<T> {

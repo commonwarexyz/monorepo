@@ -405,8 +405,22 @@ commonware_macros::stability_scope!(ALPHA {
     /// or to expose a [`PhasedScheme`] as a [`Scheme`] for that matter. However,
     /// it can be useful for testing or for usecases where the phased scheme
     /// cannot be used directly.
-    #[derive(Clone, Copy, Debug, Default)]
+    #[derive(Debug)]
     pub struct PhasedAsScheme<P>(core::marker::PhantomData<P>);
+
+    impl<P> Default for PhasedAsScheme<P> {
+        fn default() -> Self {
+            Self(core::marker::PhantomData)
+        }
+    }
+
+    impl<P> Clone for PhasedAsScheme<P> {
+        fn clone(&self) -> Self {
+            *self
+        }
+    }
+
+    impl<P> Copy for PhasedAsScheme<P> {}
 
     /// A checked shard produced by adapting a phased scheme into [`Scheme`].
     #[derive(Clone)]

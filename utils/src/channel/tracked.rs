@@ -176,10 +176,18 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
 }
 
 /// A sender that wraps `Sender` and tracks message delivery.
-#[derive(Clone)]
 pub struct Sender<T, B: Eq + Hash + Clone> {
     inner: mpsc::Sender<Message<T, B>>,
     tracker: Tracker<B>,
+}
+
+impl<T, B: Eq + Hash + Clone> Clone for Sender<T, B> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            tracker: self.tracker.clone(),
+        }
+    }
 }
 
 impl<T, B: Eq + Hash + Clone> Sender<T, B> {

@@ -22,8 +22,21 @@ use std::{future::Future, sync::Arc};
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
 /// This variant sends the entire block to all peers.
-#[derive(Default, Clone, Copy)]
 pub struct Standard<B: Block>(std::marker::PhantomData<B>);
+
+impl<B: Block> Default for Standard<B> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<B: Block> Clone for Standard<B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<B: Block> Copy for Standard<B> {}
 
 impl<B> Variant for Standard<B>
 where

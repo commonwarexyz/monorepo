@@ -47,9 +47,17 @@ impl RuntimeMetrics for Metrics {
 ///
 /// The sender retains a static peer set so that [`Recipients::All`] can be
 /// expanded consistently with the [`crate::Sender`] contract.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct InertSender<P> {
     peers: Arc<[P]>,
+}
+
+impl<P> Default for InertSender<P> {
+    fn default() -> Self {
+        Self {
+            peers: Arc::default(),
+        }
+    }
 }
 
 /// Checked sender returned by [`InertSender`].
@@ -59,9 +67,17 @@ pub struct InertCheckedSender<P> {
 }
 
 /// Receiver that never yields a message.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InertReceiver<P> {
     _phantom: PhantomData<P>,
+}
+
+impl<P> Default for InertReceiver<P> {
+    fn default() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<P: PublicKey> LimitedSender for InertSender<P> {

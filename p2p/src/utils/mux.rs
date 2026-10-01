@@ -186,10 +186,18 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 }
 
 /// A clonable handle that allows registering routes at any time, even after the [Muxer] is running.
-#[derive(Clone)]
 pub struct MuxHandle<S: Sender, R: Receiver> {
     sender: S,
     control_tx: mpsc::UnboundedSender<Control<R>>,
+}
+
+impl<S: Sender, R: Receiver> Clone for MuxHandle<S, R> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            control_tx: self.control_tx.clone(),
+        }
+    }
 }
 
 impl<S: Sender, R: Receiver> MuxHandle<S, R> {

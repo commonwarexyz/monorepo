@@ -621,10 +621,18 @@ pub(crate) mod tests {
     fn assert_serves<S: Source>() {}
 
     /// A source that offers a fixed response sequence for one request.
-    #[derive(Clone)]
     pub struct SequenceSource<F: Family, Op, D: Digest> {
         responses: Arc<Mutex<Vec<Response<F, Op, D>>>>,
         verdicts: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
+    }
+
+    impl<F: Family, Op, D: Digest> Clone for SequenceSource<F, Op, D> {
+        fn clone(&self) -> Self {
+            Self {
+                responses: self.responses.clone(),
+                verdicts: self.verdicts.clone(),
+            }
+        }
     }
 
     impl<F: Family, Op, D: Digest> SequenceSource<F, Op, D> {

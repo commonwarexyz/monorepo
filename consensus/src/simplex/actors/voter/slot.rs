@@ -37,7 +37,6 @@ where
 }
 
 /// Tracks proposal state, build/verify flags, and conflicts.
-#[derive(Default)]
 pub struct Slot<D>
 where
     D: Digest,
@@ -46,6 +45,12 @@ where
     status: Status,
     requested_build: bool,
     requested_verify: bool,
+}
+
+impl<D: Digest> Default for Slot<D> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<D> Slot<D>
