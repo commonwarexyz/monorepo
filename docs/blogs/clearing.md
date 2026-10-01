@@ -301,11 +301,11 @@ Even if the operator disappears, recovery depends on a correct, live settlement 
 
 More frequent closes can reduce the wait for admission, at the cost of more preparation and certification. Shorter challenge windows can reduce the wait for finality, but must leave receipt holders enough time to obtain public openings and get a challenge included.
 
-The operator can register $e+1$ while still accepting payments in $e$. Once that registration is included onchain, the operator can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. Registration fixes deposits and signed withdrawal authorizations before the first payment in $e+1$ is acknowledged. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
+The operator can register $e+1$ while still accepting payments in $e$. Once that registration is included onchain, it can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
 
-Once $e$'s close is admitted and $e+1$ is registered, the settlement chain binds $e+1$ to that close's state root and sets $e+1$'s admission and challenge deadlines relative to that time. Closes are admitted and finalized in epoch order. Missing an admission deadline permanently faults the deployment and discards every registration still awaiting admission.
+Registration fixes deposits and signed withdrawal authorizations before payments begin. Each registration takes the next range from an ordered inbox of deposits and onchain withdrawal requests, so later arrivals cannot change that boundary. A deposit must be registered within a fixed time of arrival, but has no further deposit deadline. Further epochs can register while earlier closes are pending.
 
-The operator can register further epochs without a fixed queue limit. Deposits and onchain withdrawal requests wait in an ordered inbox. Each registration fixes the next range of entries, so later arrivals cannot change it. A deposit must be registered within a fixed time of arrival. It then waits for its epoch's close with no further deposit deadline.
+Once $e+1$ is registered and $e$'s close is admitted, settlement binds $e+1$ to that close's state root and sets its admission and challenge deadlines from that time. Admission and finalization follow epoch order. A missed admission deadline discards every registration still awaiting admission.
 
 Accounts without deposits or withdrawals can start paying in the new epoch while the operator is still adding incoming credits from the previous one. At the transition, the starting spendable balance $\widetilde B_a$ is the previous epoch's starting balance minus accepted outgoing payments, plus incoming credits already added. Let $\rho_a$ be the remaining credit from that epoch:
 
@@ -331,7 +331,7 @@ $$
 Figure 6: Both calculations include the same incoming credit. Adding it to the spendable balance preserves payments already accepted in the new epoch.
 :::
 
-Deposits fixed at registration are available when payments begin in that epoch. A new account created by incoming credit must wait for the close that credits it to be admitted before spending. Settlement accepts a withdrawal authorization only within a fixed window before its deadline. The payer signs no further payments until that deadline, unless the window has closed and certified chain state proves that neither a registration nor the onchain queue accepted it.
+An epoch's registered deposits are available when payments begin, while an account created by incoming credit waits for the crediting close's admission. A payer authorizing a withdrawal waits until its signed deadline before signing more payments. The authorization's fixed acceptance window ends earlier, so the payer can resume once that window closes if certified chain state proves the request never entered settlement.
 
 ### Retrying Across the Boundary
 

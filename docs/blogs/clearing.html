@@ -612,29 +612,26 @@ O’Grady</a></div>
         <p>The operator can register <span
         class="math inline">e+1</span> while still accepting payments in
         <span class="math inline">e</span>. Once that registration is
-        included onchain, the operator can switch payments to <span
+        included onchain, it can switch payments to <span
         class="math inline">e+1</span> while <span
         class="math inline">e</span>’s close is built, certified, and
-        admitted. Registration fixes deposits and signed withdrawal
-        authorizations before the first payment in <span
-        class="math inline">e+1</span> is acknowledged. The anchor <span
-        class="math inline">\mathcal A_{e+1}</span> is independent of
-        <span class="math inline">e</span>’s close.</p>
-        <p>Once <span class="math inline">e</span>’s close is admitted
-        and <span class="math inline">e+1</span> is registered, the
-        settlement chain binds <span class="math inline">e+1</span> to
-        that close’s state root and sets <span
-        class="math inline">e+1</span>’s admission and challenge
-        deadlines relative to that time. Closes are admitted and
-        finalized in epoch order. Missing an admission deadline
-        permanently faults the deployment and discards every
+        admitted. The anchor <span class="math inline">\mathcal
+        A_{e+1}</span> is independent of <span
+        class="math inline">e</span>’s close.</p>
+        <p>Registration fixes deposits and signed withdrawal
+        authorizations before payments begin. Each registration takes
+        the next range from an ordered inbox of deposits and onchain
+        withdrawal requests, so later arrivals cannot change that
+        boundary. A deposit must be registered within a fixed time of
+        arrival, but has no further deposit deadline. Further epochs can
+        register while earlier closes are pending.</p>
+        <p>Once <span class="math inline">e+1</span> is registered and
+        <span class="math inline">e</span>’s close is admitted,
+        settlement binds <span class="math inline">e+1</span> to that
+        close’s state root and sets its admission and challenge
+        deadlines from that time. Admission and finalization follow
+        epoch order. A missed admission deadline discards every
         registration still awaiting admission.</p>
-        <p>The operator can register further epochs without a fixed
-        queue limit. Deposits and onchain withdrawal requests wait in an
-        ordered inbox. Each registration fixes the next range of
-        entries, so later arrivals cannot change it. A deposit must be
-        registered within a fixed time of arrival. It then waits for its
-        epoch’s close with no further deposit deadline.</p>
         <p>Accounts without deposits or withdrawals can start paying in
         the new epoch while the operator is still adding incoming
         credits from the previous one. At the transition, the starting
@@ -670,14 +667,13 @@ O’Grady</a></div>
         Adding it to the spendable balance preserves payments already
         accepted in the new epoch.</p>
         </div>
-        <p>Deposits fixed at registration are available when payments
-        begin in that epoch. A new account created by incoming credit
-        must wait for the close that credits it to be admitted before
-        spending. Settlement accepts a withdrawal authorization only
-        within a fixed window before its deadline. The payer signs no
-        further payments until that deadline, unless the window has
-        closed and certified chain state proves that neither a
-        registration nor the onchain queue accepted it.</p>
+        <p>An epoch’s registered deposits are available when payments
+        begin, while an account created by incoming credit waits for the
+        crediting close’s admission. A payer authorizing a withdrawal
+        waits until its signed deadline before signing more payments.
+        The authorization’s fixed acceptance window ends earlier, so the
+        payer can resume once that window closes if certified chain
+        state proves the request never entered settlement.</p>
         <h3 id="retrying-across-the-boundary">Retrying Across the
         Boundary</h3>
         <p>A request sent near the end of <span
