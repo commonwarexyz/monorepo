@@ -101,6 +101,9 @@ years." />
 O’Grady</a></div>
                         <div class="date">August 19th, 2026</div>
         </div>
+        <p><em>Update (10/1/26): Operators use their receipt key to sign the
+        final payer states once per close. Validator signatures still
+        aggregate into the close certificate.</em></p>
         <p><em>Update (10/1/26): Restores continuous payments while the
         previous epoch’s close is built, certified, and admitted. Each
         payment signature binds the payer’s final vector root from that
@@ -382,10 +385,12 @@ O’Grady</a></div>
         <p>At each close, the operator publishes a shared settlement
         record called the <strong>dealing</strong>. It contains active
         account keys, senders’ final signed payer states, and cumulative
-        payment entries. A CDN can cache this shared record for
+        payment entries. The operator signs one canonical batch of final
+        payer states, bound to the epoch, using the same key that signs
+        payment receipts. A CDN can cache this shared record for
         efficient distribution.</p>
         <p>Each validator checks the payer signatures and the operator’s
-        countersignatures, derives incoming credits, and combines them
+        batch signature, derives incoming credits, and combines them
         with its stored balances and the deposits and withdrawals fixed
         at epoch registration.</p>
         <p>From these results, every validator derives three roots:</p>
@@ -445,7 +450,7 @@ O’Grady</a></div>
         <p>The operator can then verify the certificate and check that
         the proposal hash matches, without rebuilding the validators’
         logs.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 34-of-100 certificate.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the canonical batch of final payer states for a, b, c, and d, which the operator signs once with its receipt key. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 34-of-100 certificate.">
         <div class="image-caption">
         <p>Figure 4: Every signer derives the same three QMDB roots
         before signing one close commitment. For 100 validators with at
