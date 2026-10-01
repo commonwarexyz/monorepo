@@ -14,7 +14,7 @@ use crate::{
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    Monitor, Viewable,
+    HandoffPublication, Monitor, Viewable,
     simplex::{
         Engine, Floor, ForwardPolicy, SkipBudget, SkipPolicy, config,
         mocks::{application, relay, reporter, twins},
@@ -126,6 +126,9 @@ pub struct FuzzInput {
     pub term_length: TermLength,
     pub optimistic_views: ViewDelta,
     pub heterogeneous_optimism: bool,
+    /// Publication permission honest applications grant for pipelined handoff
+    /// candidates, or `None` to defer every handoff.
+    pub handoff: Option<HandoffPublication>,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -159,6 +162,11 @@ impl Arbitrary<'_> for FuzzInput {
         let optimistic_views =
             ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
         let heterogeneous_optimism = u.arbitrary()?;
+        let handoff = match u.int_in_range(0..=2)? {
+            0 => None,
+            1 => Some(HandoffPublication::AfterCertification),
+            _ => Some(HandoffPublication::AllowBeforeCertification),
+        };
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -192,6 +200,7 @@ impl Arbitrary<'_> for FuzzInput {
             term_length,
             optimistic_views,
             heterogeneous_optimism,
+            handoff,
             strategy,
         })
     }
@@ -377,6 +386,7 @@ fn spawn_honest_validator<
     participants: &[Ed25519PublicKey],
     term_length: TermLength,
     optimistic_views: ViewDelta,
+    handoff: Option<HandoffPublication>,
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
@@ -411,7 +421,9 @@ where
         certify_latency: (10.0, 5.0),
         should_certify: application::Certifier::Always,
     };
-    let (actor, application) = application::Application::new(context.child("application"), app_cfg);
+    let (mut actor, application) =
+        application::Application::new(context.child("application"), app_cfg);
+    actor.set_handoff(handoff);
     actor.start();
 
     let blocker = oracle.control(validator.clone());
@@ -483,6 +495,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 &participants,
                 input.term_length,
                 validator_optimistic_views(&input, i),
+                input.handoff,
                 schemes[i].clone(),
                 validator.clone(),
                 relay.clone(),
@@ -656,8 +669,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 certify_latency: (10.0, 5.0),
                 should_certify: application::Certifier::Always,
             };
-            let (actor, application) =
+            let (mut actor, application) =
                 application::Application::new(primary_context.child("application"), app_cfg);
+            actor.set_handoff(input.handoff);
             actor.start();
 
             let blocker = oracle.control(validator.clone());
@@ -720,6 +734,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 participants.as_ref(),
                 input.term_length,
                 validator_optimistic_views(&input, idx),
+                input.handoff,
                 schemes[idx].clone(),
                 validator.clone(),
                 relay.clone(),

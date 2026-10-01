@@ -1,19 +1,22 @@
 use super::{
     Config, Mailbox,
     ingress::Message,
-    state::{CertificateFetch, Config as StateConfig, State, Verify},
+    state::{CertificateFetch, Config as StateConfig, ProposalRequest, State, Verify},
 };
 use crate::{
-    CertifiableAutomaton, LATENCY, Relay, Reporter, Viewable,
+    CertifiableAutomaton, HandoffProposal, HandoffPublication, LATENCY, Relay, Reporter, Viewable,
     simplex::{
         Floor, Plan,
         actors::{Kind, batcher, resolver},
         elector::Elector,
-        metrics::{self, Outbound, TimeoutReason},
+        metrics::{
+            self, HandoffAbandoned, HandoffAbandonedReason, HandoffEvent, HandoffEventKind,
+            Outbound, TimeoutReason,
+        },
         scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
-            Notarize, Nullification, Nullify, Proposal, Vote,
+            Notarize, Nullification, Nullify, Vote,
         },
     },
     types::{Round as Rnd, View},
@@ -74,26 +77,26 @@ struct Staged<S: Scheme<D>, D: Digest> {
 }
 
 /// An outstanding request to the automaton.
-struct Request<V: Viewable, R>(
+struct Request<V: Viewable, F>(
     /// Attached context for the pending item. Must yield a view.
     V,
     /// Span tracking the request from issuance to processed response.
     Span,
-    /// Oneshot receiver that the automaton is expected to respond over.
-    oneshot::Receiver<R>,
+    /// Pending response or retained result.
+    F,
 );
 
-impl<V: Viewable, R> Viewable for Request<V, R> {
+impl<V: Viewable, F> Viewable for Request<V, F> {
     fn view(&self) -> View {
         self.0.view()
     }
 }
 
-/// Adapter that polls an [Option<Request<V, R>>] in place.
-struct Waiter<'a, V: Viewable, R>(&'a mut Option<Request<V, R>>);
+/// Adapter that polls an [Option<Request<V, F>>] in place.
+struct Waiter<'a, V: Viewable, F>(&'a mut Option<Request<V, F>>);
 
-impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
-    type Output = (V, Span, Result<R, oneshot::error::RecvError>);
+impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
+    type Output = (V, Span, F::Output);
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         let Waiter(slot) = self.get_mut();
@@ -106,6 +109,52 @@ impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
         };
         let Request(v, span, _) = slot.take().expect("request must exist");
         Poll::Ready((v, span, res))
+    }
+}
+
+/// Unified response from a regular or handoff proposal request.
+enum ProposalResponse<D> {
+    /// An ordinary candidate or a held candidate released after parent certification.
+    Proposed(D),
+    /// A fresh response from a handoff request.
+    Handoff(HandoffProposal<D>),
+}
+
+/// Pending automaton response for a regular or handoff proposal request.
+enum ProposalReceiver<D> {
+    Regular(oneshot::Receiver<D>),
+    Handoff(oneshot::Receiver<HandoffProposal<D>>),
+}
+
+/// Lifecycle of the pending proposal slot.
+enum ProposalState<D> {
+    /// The automaton has not responded yet.
+    Awaiting(ProposalReceiver<D>),
+    /// A handoff the application declined until its parent certifies. An
+    /// ordinary request for the same context follows durable certification.
+    Deferred,
+    /// A volatile build result awaiting durable parent certification.
+    Held(D),
+    /// A held result whose parent has durably certified, awaiting proposal
+    /// eligibility checks.
+    Ready(D),
+}
+
+type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalState<D>>>;
+type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver<bool>>>;
+
+impl<D> Future for ProposalReceiver<D> {
+    type Output = Result<ProposalResponse<D>, oneshot::error::RecvError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        match self.get_mut() {
+            Self::Regular(receiver) => Pin::new(receiver)
+                .poll(cx)
+                .map(|result| result.map(ProposalResponse::Proposed)),
+            Self::Handoff(receiver) => Pin::new(receiver)
+                .poll(cx)
+                .map(|result| result.map(ProposalResponse::Handoff)),
+        }
     }
 }
 
@@ -139,8 +188,12 @@ pub struct Actor<
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
     outbound_messages: CounterFamily<Outbound>,
+    handoff_events: CounterFamily<HandoffEvent>,
+    handoff_abandoned: CounterFamily<HandoffAbandoned>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
+    notarization_latency_from_view_entry: Histogram,
+    finalization_latency_from_view_entry: Histogram,
 }
 
 impl<
@@ -157,10 +210,29 @@ impl<
     pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
         // Initialize metrics
         let outbound_messages = context.family("outbound_messages", "number of outbound messages");
+        let handoff_events = context.family(
+            "handoff_events",
+            "number of handoff lifecycle events; one request can count several",
+        );
+        let handoff_abandoned = context.family(
+            "handoff_abandoned",
+            "number of handoffs abandoned before publication",
+        );
         let notarization_latency =
             context.histogram("notarization_latency", "notarization latency", LATENCY);
         let finalization_latency =
             context.histogram("finalization_latency", "finalization latency", LATENCY);
+
+        let notarization_latency_from_view_entry = context.histogram(
+            "notarization_latency_from_view_entry",
+            "leader seconds from first local view entry to local notarization certificate readiness",
+            LATENCY,
+        );
+        let finalization_latency_from_view_entry = context.histogram(
+            "finalization_latency_from_view_entry",
+            "leader seconds from first local view entry to local finalization certificate readiness",
+            LATENCY,
+        );
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) =
@@ -201,8 +273,12 @@ impl<
                 mailbox_receiver,
 
                 outbound_messages,
+                handoff_events,
+                handoff_abandoned,
                 notarization_latency,
                 finalization_latency,
+                notarization_latency_from_view_entry,
+                finalization_latency_from_view_entry,
             },
             mailbox,
         )
@@ -356,11 +432,34 @@ impl<
         commonware_p2p::block!(self.blocker, equivocator, "blocking equivocator");
     }
 
+    /// Counts a handoff lifecycle event.
+    fn record_handoff_event(&self, event: HandoffEventKind) {
+        self.handoff_events
+            .get_or_create(&HandoffEvent { event })
+            .inc();
+    }
+
+    /// Counts a handoff abandoned before publication.
+    fn record_handoff_abandoned(&self, reason: HandoffAbandonedReason) {
+        self.handoff_abandoned
+            .get_or_create(&HandoffAbandoned { reason })
+            .inc();
+    }
+
     /// Attempt to propose a new block.
-    #[allow(clippy::async_yields_async)]
-    async fn try_propose(&mut self) -> Option<Request<Context<D, S::PublicKey>, D>> {
+    async fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
         // Check if we are ready to propose
-        let context = self.state.try_propose()?;
+        let request = self.state.try_propose()?;
+        Some(self.request_proposal(request).await)
+    }
+
+    /// Requests a proposal from the automaton for a claimed build opportunity.
+    #[allow(clippy::async_yields_async)]
+    async fn request_proposal(
+        &mut self,
+        request: ProposalRequest<D, S::PublicKey>,
+    ) -> Request<ProposalRequest<D, S::PublicKey>, ProposalState<D>> {
+        let context = request.context().clone();
 
         // Request proposal from application
         let span = info_span!(
@@ -370,12 +469,24 @@ impl<
             view = context.view().traced()
         );
         let receiver = async {
-            debug!(round = ?context.round, "requested proposal from automaton");
-            self.automaton.propose(context.clone()).await
+            debug!(
+                round = ?context.round,
+                handoff = matches!(&request, ProposalRequest::Handoff(_)),
+                "requested proposal from automaton"
+            );
+            match &request {
+                ProposalRequest::Handoff(_) => {
+                    self.record_handoff_event(HandoffEventKind::Requested);
+                    ProposalReceiver::Handoff(self.automaton.propose_handoff(context).await)
+                }
+                ProposalRequest::Regular(_) => {
+                    ProposalReceiver::Regular(self.automaton.propose(context).await)
+                }
+            }
         }
         .instrument(span.clone())
         .await;
-        Some(Request(context, span, receiver))
+        Request(request, span, ProposalState::Awaiting(receiver))
     }
 
     /// Attempt to verify a proposed block.
@@ -383,7 +494,7 @@ impl<
     async fn try_verify(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<Request<Context<D, S::PublicKey>, bool>> {
+    ) -> Option<Request<Context<D, S::PublicKey>, oneshot::Receiver<bool>>> {
         // Check if we are ready to verify
         let (context, proposal) = match self.state.try_verify() {
             Verify::Ready(context, proposal) => (context, proposal),
@@ -393,7 +504,7 @@ impl<
                 kind,
                 target,
             } => {
-                resolver.resolve(proposal, view, kind, Some(target));
+                resolver.resolve(proposal, view, kind, target);
                 return None;
             }
             Verify::Wait => return None,
@@ -417,23 +528,32 @@ impl<
         Some(Request(context, span, receiver))
     }
 
-    /// Drops pending application requests for exited views and dispatches
-    /// eligible new ones.
+    /// Drops obsolete pending application requests and dispatches eligible new ones.
     async fn reconcile_application_requests(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        pending_propose: &mut Option<Request<Context<D, S::PublicKey>, D>>,
-        pending_verify: &mut Option<Request<Context<D, S::PublicKey>, bool>>,
+        pending_propose: &mut PendingProposal<D, S::PublicKey>,
+        pending_verify: &mut PendingVerification<D, S::PublicKey>,
     ) {
-        // Keep requests for optimistic future views and clear requests for
-        // exited views. Certification for an exited view can continue after
-        // its verification receiver is dropped.
+        // Retain optimistic future-view requests unless their captured ancestry
+        // is invalid. Drop requests for exited views. Parent certification retains
+        // pending responses, deferred requests, and held results. Certification
+        // may continue after dropping an exited view's verification receiver.
         let current_view = self.state.current_view();
-        if pending_propose
-            .as_ref()
-            .is_some_and(|request| request.view() < current_view)
-        {
-            *pending_propose = None;
+        if let Some(request) = pending_propose.as_ref() {
+            let reason = if request.view() < current_view {
+                Some(HandoffAbandonedReason::ViewExit)
+            } else if self.state.supersede_proposal_request(request.0.context()) {
+                Some(HandoffAbandonedReason::AncestrySuperseded)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                if matches!(&request.0, ProposalRequest::Handoff(_)) {
+                    self.record_handoff_abandoned(reason);
+                }
+                *pending_propose = None;
+            }
         }
         if pending_verify
             .as_ref()
@@ -573,9 +693,13 @@ impl<
             return (self, None);
         };
 
-        // Only the leader sees an unbiased latency sample, so record it now.
+        // Record leader-local latency at certificate readiness.
         if let Some(elapsed) = self.leader_elapsed(view) {
             self.notarization_latency.observe(elapsed);
+            if let Some(since_entry) = self.state.elapsed_since_entry(view) {
+                self.notarization_latency_from_view_entry
+                    .observe(since_entry.as_secs_f64());
+            }
         }
 
         // Tell the resolver this view is complete so it can stop requesting it.
@@ -643,6 +767,10 @@ impl<
         // Only record latency if we are the current leader.
         if let Some(elapsed) = self.leader_elapsed(view) {
             self.finalization_latency.observe(elapsed);
+            if let Some(since_entry) = self.state.elapsed_since_entry(view) {
+                self.finalization_latency_from_view_entry
+                    .observe(since_entry.as_secs_f64());
+            }
         }
 
         // Tell the resolver this view is complete so it can stop requesting it.
@@ -660,13 +788,18 @@ impl<
     /// Returns the view to notify if the proposal was recorded.
     fn process_proposed(
         &mut self,
-        context: Context<D, S::PublicKey>,
+        request: ProposalRequest<D, S::PublicKey>,
         proposed: Result<D, oneshot::error::RecvError>,
     ) -> Option<View> {
         // Try to use result
+        let is_handoff = matches!(&request, ProposalRequest::Handoff(_));
+        let context = request.into_context();
         let proposed = match proposed {
             Ok(proposed) => proposed,
             Err(err) => {
+                if is_handoff {
+                    self.record_handoff_abandoned(HandoffAbandonedReason::ResponseClosed);
+                }
                 debug!(?err, round = ?context.round, "failed to propose container");
                 self.state
                     .trigger_timeout(context.view(), TimeoutReason::MissingProposal);
@@ -678,13 +811,19 @@ impl<
         // will not broadcast it. Proposals for the current or optimistic
         // future views are kept.
         if context.view() < self.state.current_view() {
+            if is_handoff {
+                self.record_handoff_abandoned(HandoffAbandonedReason::ViewExit);
+            }
             debug!(round = ?context.round, current = ?self.state.current_view(), "dropping requested proposal");
             return None;
         }
 
-        // Construct proposal
-        let proposal = Proposal::new(context.round, context.parent.0, proposed);
-        if !self.state.proposed(proposal) {
+        // Record the proposal only if the parent captured for the build is
+        // still valid.
+        if !self.state.proposed(&context, proposed) {
+            if is_handoff {
+                self.record_handoff_abandoned(HandoffAbandonedReason::IneligibleAtRecording);
+            }
             warn!(round = ?context.round, "dropped our proposal");
             return None;
         }
@@ -702,6 +841,14 @@ impl<
                 round: context.round,
             },
         );
+        if is_handoff {
+            let event = if self.state.proposal_parent_certified(&context) {
+                HandoffEventKind::PublishedAfterCertification
+            } else {
+                HandoffEventKind::PublishedBeforeCertification
+            };
+            self.record_handoff_event(event);
+        }
         Some(view)
     }
 
@@ -1099,8 +1246,8 @@ impl<
         batcher.update(span, observed_view, leader, finalized, None);
 
         // Process messages
-        let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
-        let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
+        let mut pending_propose: PendingProposal<D, S::PublicKey> = None;
+        let mut pending_verify: PendingVerification<D, S::PublicKey> = None;
         let mut certify_pool = AbortablePool::default();
         select_loop! {
             self.context,
@@ -1111,7 +1258,8 @@ impl<
                     &mut resolver,
                     &mut pending_propose,
                     &mut pending_verify,
-                ).await;
+                )
+                .await;
 
                 // Attempt to certify any views that we have notarizations for.
                 //
@@ -1148,8 +1296,35 @@ impl<
                 // delaying them.
                 self = self.prune_views().await;
 
+                // The prior iteration's sync_journal has completed. Promote held results
+                // here because reconcile_application_requests also runs before the sync.
+                // Replace a deferred handoff with an ordinary request for the same context.
+                if let Some(Request(request, _, state)) = pending_propose.as_mut()
+                    && matches!(state, ProposalState::Deferred | ProposalState::Held(_))
+                    && self.state.proposal_parent_certified(request.context())
+                {
+                    if let ProposalState::Held(payload) = state {
+                        *state = ProposalState::Ready(*payload);
+                    } else {
+                        let context = request.context().clone();
+                        pending_propose =
+                            Some(self.request_proposal(ProposalRequest::Regular(context)).await);
+                    }
+                }
+
                 // Prepare waiters
-                let propose_wait = Waiter(&mut pending_propose);
+                let propose_wait = async {
+                    let proposed = match pending_propose.as_mut() {
+                        Some(Request(_, _, ProposalState::Awaiting(receiver))) => receiver.await,
+                        Some(Request(_, _, ProposalState::Ready(payload))) => {
+                            Ok(ProposalResponse::Proposed(*payload))
+                        }
+                        _ => core::future::pending().await,
+                    };
+                    let Request(request, span, _) =
+                        pending_propose.take().expect("request must exist");
+                    (request, span, proposed)
+                };
                 let verify_wait = Waiter(&mut pending_verify);
                 let certify_wait = certify_pool.next_completed();
 
@@ -1177,13 +1352,37 @@ impl<
                 (self, nullify) = self.timeout(reason).instrument(span).await;
                 view = self.state.current_view();
             },
-            (context, span, proposed) = propose_wait => {
+            (request, span, proposed) = propose_wait => {
                 // Clear propose waiter
                 pending_propose = None;
 
+                // Retain a declined handoff or held build outside the round proposal
+                // slot until the parent certifies. The captured request and build latch
+                // remain active until promotion.
+                let proposed = match proposed {
+                    Ok(ProposalResponse::Proposed(payload)) => Ok(payload),
+                    Ok(ProposalResponse::Handoff(HandoffProposal::AwaitCertification)) => {
+                        self.record_handoff_event(HandoffEventKind::Deferred);
+                        pending_propose = Some(Request(request, span, ProposalState::Deferred));
+                        continue;
+                    }
+                    Ok(ProposalResponse::Handoff(HandoffProposal::Proposed { payload, publication })) => {
+                        self.record_handoff_event(HandoffEventKind::CandidateReturned);
+                        if publication == HandoffPublication::AfterCertification
+                            && !self.state.proposal_parent_certified(request.context())
+                        {
+                            self.record_handoff_event(HandoffEventKind::Held);
+                            pending_propose = Some(Request(request, span, ProposalState::Held(payload)));
+                            continue;
+                        }
+                        Ok(payload)
+                    }
+                    Err(err) => Err(err),
+                };
+
                 // Process the automaton's response
                 let Some(proposed_view) =
-                    span.in_scope(|| self.process_proposed(context, proposed))
+                    span.in_scope(|| self.process_proposed(request, proposed))
                 else {
                     continue;
                 };

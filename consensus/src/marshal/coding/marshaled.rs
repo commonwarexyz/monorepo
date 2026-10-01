@@ -80,8 +80,8 @@
 //! ```
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
-    Relay, Reporter,
+    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable,
+    HandoffProposal, Heightable, Relay, Reporter,
     marshal::{
         Update,
         application::{
@@ -760,10 +760,10 @@ where
                 // boundary block of the previous epoch is the genesis block of the
                 // current epoch.
                 //
-                // Proposal context carries the certified parent view/commitment but
-                // not the parent height. The parent may be certified above the
-                // finalized tip, so this must stay round-bound until the block is
-                // returned.
+                // Proposal context carries the parent view and commitment but not
+                // the parent height. The parent may sit above the finalized tip and
+                // may still be uncertified, so this must stay round-bound until the
+                // block is returned.
                 let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = marshal.subscribe_by_commitment(
                     parent_commitment,
@@ -1108,6 +1108,22 @@ where
     S: Strategy,
     ES: Epocher,
 {
+    #[allow(clippy::async_yields_async)]
+    #[tracing::instrument(name = "marshal.coding.propose_handoff", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn propose_handoff(
+        &mut self,
+        consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
+    ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
+        let policy = self.application.handoff_policy(&consensus_context);
+        gates::propose_handoff(
+            &*self.context,
+            self,
+            policy,
+            consensus_context.round,
+            consensus_context,
+        )
+    }
+
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {

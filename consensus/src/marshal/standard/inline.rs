@@ -43,10 +43,11 @@
 //! - You are willing to perform full application verification before casting a notarize vote.
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
+    Application, Automaton, Block, CertifiableAutomaton, Epochable, HandoffProposal, Relay,
+    Reporter,
     marshal::{
         Update,
-        application::gates::{GateOutcome, Gates},
+        application::gates::{self, GateOutcome, Gates},
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             Standard, relay,
@@ -295,10 +296,10 @@ where
                 // boundary block of the previous epoch is the genesis block of the
                 // current epoch.
                 //
-                // Proposal context carries the certified parent view/commitment but
-                // not the parent height. The parent may be certified above the
-                // finalized tip, so this must stay round-bound until the block is
-                // returned.
+                // Proposal context carries the parent view and commitment but not
+                // the parent height. The parent may sit above the finalized tip and
+                // may still be uncertified, so this must stay round-bound until the
+                // block is returned.
                 let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = marshal.subscribe_by_commitment(
                     parent_commitment,
@@ -589,6 +590,22 @@ where
     B: Block + Clone,
     ES: Epocher,
 {
+    #[allow(clippy::async_yields_async)]
+    #[tracing::instrument(name = "marshal.inline.propose_handoff", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn propose_handoff(
+        &mut self,
+        consensus_context: Context<Self::Digest, S::PublicKey>,
+    ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
+        let policy = self.application.handoff_policy(&consensus_context);
+        gates::propose_handoff(
+            &*self.context,
+            self,
+            policy,
+            consensus_context.round,
+            consensus_context,
+        )
+    }
+
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {

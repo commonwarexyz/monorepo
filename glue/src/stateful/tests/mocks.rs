@@ -4,7 +4,7 @@ use crate::stateful::{
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, CertifiableBlock, HandoffPolicy, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
@@ -275,9 +275,19 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct TestApp {
     finalization_hooks: Option<Arc<AtomicUsize>>,
+    handoff_policy: HandoffPolicy,
+}
+
+impl Default for TestApp {
+    fn default() -> Self {
+        Self {
+            finalization_hooks: None,
+            handoff_policy: HandoffPolicy::AwaitCertification,
+        }
+    }
 }
 
 impl TestApp {
@@ -286,9 +296,17 @@ impl TestApp {
         (
             Self {
                 finalization_hooks: Some(hooks.clone()),
+                ..Self::default()
             },
             hooks,
         )
+    }
+
+    pub(crate) fn with_handoff_policy(handoff_policy: HandoffPolicy) -> Self {
+        Self {
+            handoff_policy,
+            ..Self::default()
+        }
     }
 }
 
@@ -315,6 +333,10 @@ impl<
 
     async fn genesis(&mut self) -> Self::Block {
         TestBlock::new(0, 0)
+    }
+
+    fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
+        self.handoff_policy
     }
 
     async fn propose(

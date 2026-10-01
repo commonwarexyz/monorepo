@@ -362,9 +362,9 @@ where
                                         verifications.schedule(verifier.clone(), request);
                                     }
                                     Some(message) => {
-                                        // Only verifications overtake an active proposal. The
-                                        // first other message waits for it, and later messages
-                                        // wait behind that one.
+                                        // Only verification may overtake an active proposal. The
+                                        // first other message becomes a FIFO barrier for later
+                                        // mailbox work.
                                         deferred_message = Some(message);
                                         receive_messages = false;
                                     }
@@ -862,6 +862,7 @@ mod tests {
             StatefulMetrics::new(context),
             None,
         );
+        let policy_application = processor.application();
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
@@ -872,7 +873,11 @@ mod tests {
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), marshal.guards, actor)
+        (
+            Mailbox::new(sender, policy_application),
+            marshal.guards,
+            actor,
+        )
     }
 
     /// Spawn a [`Processing`] loop over a gated [`TestDb`], returning its
@@ -931,6 +936,7 @@ mod tests {
             StatefulMetrics::new(context),
             pruning,
         );
+        let policy_application = processor.application();
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
@@ -941,7 +947,12 @@ mod tests {
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), control, marshal.guards, actor)
+        (
+            Mailbox::new(sender, policy_application),
+            control,
+            marshal.guards,
+            actor,
+        )
     }
 
     async fn spawn_read_gated_processing(
@@ -983,6 +994,7 @@ mod tests {
             StatefulMetrics::new(context),
             pruning,
         );
+        let policy_application = processor.application();
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
@@ -993,7 +1005,12 @@ mod tests {
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), control, marshal.guards, actor)
+        (
+            Mailbox::new(sender, policy_application),
+            control,
+            marshal.guards,
+            actor,
+        )
     }
 
     #[test]
@@ -1271,7 +1288,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -1355,7 +1372,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -1876,7 +1893,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -1958,7 +1975,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2014,7 +2031,7 @@ mod tests {
             // Defer a verification as the syncing actor does before its
             // database set is ready.
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let genesis = TestBlock::new(0, 0);
             let block = TestBlock::child(&genesis, 1);
             let deferred = context.child("deferred").spawn(move |task_context| {
@@ -2101,7 +2118,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2201,7 +2218,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2296,7 +2313,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2404,7 +2421,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2531,7 +2548,7 @@ mod tests {
                 Some(pruning),
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2660,7 +2677,7 @@ mod tests {
                 Some(pruning),
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2899,7 +2916,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(2));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -3038,7 +3055,15 @@ mod tests {
                 .map(|block| block.height())
                 .collect();
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mailbox = Mailbox::<_, GatedApp>::new(sender);
+            let (verify_gate, verify_started, verify_release) = application_gate();
+            let observed_contexts = Arc::default();
+            let application = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
+                proposal_gate: Arc::default(),
+                verify_valid: true,
+                observed_contexts: Arc::clone(&observed_contexts),
+            };
+            let mailbox = Mailbox::new(sender, application.clone());
 
             // The fanout observer keeps Marshal behind the durable application anchor.
             let observer = fixtures::FixtureReporter::new(false);
@@ -3051,22 +3076,15 @@ mod tests {
             )
             .await;
 
-            // Gate every database flush and the first verification.
+            // Gate every database flush.
             let control = FlushControl::default();
-            let (verify_gate, verify_started, verify_release) = application_gate();
-            let observed_contexts = Arc::default();
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox.clone(),
                 processor: Processor::new(
-                    GatedApp {
-                        verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
-                        proposal_gate: Arc::default(),
-                        verify_valid: true,
-                        observed_contexts: Arc::clone(&observed_contexts),
-                    },
+                    application,
                     Shared::new("test", TestDb::gated(control.clone())),
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
@@ -3229,7 +3247,13 @@ mod tests {
 
             // Marshal delivers finalized blocks to processing anchored at genesis.
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mailbox = Mailbox::<_, GatedApp>::new(sender);
+            let application = GatedApp {
+                verify_gates: Arc::default(),
+                proposal_gate: Arc::default(),
+                verify_valid: true,
+                observed_contexts: Arc::default(),
+            };
+            let mailbox = Mailbox::new(sender, application.clone());
             let marshal = fixtures::marshal_fixture_with_reporter(
                 context.child("marshal"),
                 "live-floor-skip",
@@ -3244,12 +3268,7 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox.clone(),
                 processor: Processor::new(
-                    GatedApp {
-                        verify_gates: Arc::default(),
-                        proposal_gate: Arc::default(),
-                        verify_valid: true,
-                        observed_contexts: Arc::default(),
-                    },
+                    application,
                     test_databases(),
                     anchor(0, 0),
                     StatefulMetrics::new(&context),

@@ -4,7 +4,7 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{CertifiableBlock, Epochable, marshal::ancestry::Ancestry};
+use crate::{CertifiableBlock, Epochable, HandoffPolicy, marshal::ancestry::Ancestry};
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -23,25 +23,23 @@ pub struct MockVerifyingApp<B, S> {
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
+    /// Policy returned for handoff proposal builds.
+    handoff_policy: HandoffPolicy,
+    proposal_gate: Option<Arc<Mutex<Option<ProposalGate>>>>,
     _phantom: PhantomData<S>,
 }
 
 impl<B, S> MockVerifyingApp<B, S> {
     /// Create a new mock verifying application.
     pub fn new() -> Self {
-        Self {
-            propose_result: None,
-            verify_result: true,
-            _phantom: PhantomData,
-        }
+        Self::default()
     }
 
     /// Create a new mock verifying application with a fixed verify result.
     pub fn with_verify_result(verify_result: bool) -> Self {
         Self {
-            propose_result: None,
             verify_result,
-            _phantom: PhantomData,
+            ..Self::default()
         }
     }
 
@@ -50,6 +48,29 @@ impl<B, S> MockVerifyingApp<B, S> {
         self.propose_result = Some(block);
         self
     }
+
+    /// Configure the policy returned for handoff builds.
+    pub const fn with_handoff_policy(mut self, policy: HandoffPolicy) -> Self {
+        self.handoff_policy = policy;
+        self
+    }
+
+    /// Blocks the first proposal build until cancellation. Returns receivers that
+    /// signal when the build starts and that error when it is cancelled.
+    pub fn with_proposal_gate(mut self) -> (Self, oneshot::Receiver<()>, oneshot::Receiver<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (dropped, dropped_rx) = oneshot::channel();
+        self.proposal_gate = Some(Arc::new(Mutex::new(Some(ProposalGate {
+            started,
+            dropped,
+        }))));
+        (self, started_rx, dropped_rx)
+    }
+}
+
+struct ProposalGate {
+    started: oneshot::Sender<()>,
+    dropped: oneshot::Sender<()>,
 }
 
 impl<B, S> Default for MockVerifyingApp<B, S> {
@@ -57,6 +78,8 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result: true,
+            handoff_policy: HandoffPolicy::AwaitCertification,
+            proposal_gate: None,
             _phantom: PhantomData,
         }
     }
@@ -79,7 +102,21 @@ where
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Self::Block> {
+        let gate = self
+            .proposal_gate
+            .as_ref()
+            .and_then(|gate| gate.lock().take());
+        if let Some(gate) = gate {
+            // Cancelling this future drops the sender, which errors the receiver.
+            let _dropped = gate.dropped;
+            gate.started.send_lossy(());
+            std::future::pending::<()>().await;
+        }
         self.propose_result.clone()
+    }
+
+    fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
+        self.handoff_policy
     }
 
     async fn verify(
@@ -98,6 +135,7 @@ where
 pub struct GatedVerifyingApp<B, S> {
     started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    handoff_policy: HandoffPolicy,
     _phantom: PhantomData<(B, S)>,
 }
 
@@ -111,11 +149,18 @@ impl<B, S> GatedVerifyingApp<B, S> {
             Self {
                 started: Arc::new(Mutex::new(Some(started_tx))),
                 release: Arc::new(Mutex::new(Some(release_rx))),
+                handoff_policy: HandoffPolicy::AwaitCertification,
                 _phantom: PhantomData,
             },
             started_rx,
             release_tx,
         )
+    }
+
+    /// Configure the policy returned for handoff builds.
+    pub const fn with_handoff_policy(mut self, policy: HandoffPolicy) -> Self {
+        self.handoff_policy = policy;
+        self
     }
 }
 
@@ -137,6 +182,10 @@ where
         _input: Self::Input,
     ) -> Option<Self::Block> {
         None
+    }
+
+    fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
+        self.handoff_policy
     }
 
     async fn verify(

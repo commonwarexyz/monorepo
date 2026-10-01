@@ -146,6 +146,10 @@ where
     ) -> Participant {
         self.inner.elect(round, certificate)
     }
+
+    fn elect_without_certificate(&self, round: Round) -> Option<Participant> {
+        self.inner.elect_without_certificate(round)
+    }
 }
 
 impl<S> Verifier for Scheme<S>
