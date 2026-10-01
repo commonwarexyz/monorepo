@@ -610,12 +610,12 @@ O’Grady</a></div>
         challenge windows can reduce the wait for finality, but must
         leave receipt holders enough time to obtain public openings and
         get a challenge included.</p>
-        <p>Whatever the epoch length, payments should continue across
-        the boundary. The operator can register <span
-        class="math inline">e+1</span> while still accepting payments in
-        <span class="math inline">e</span>. Once that registration is
-        included onchain, it can switch payments to <span
-        class="math inline">e+1</span> while <span
+        <p>Whatever the epoch length, payments must continue across the
+        boundary to avoid interrupting user flows. The operator can
+        register <span class="math inline">e+1</span> while still
+        accepting payments in <span class="math inline">e</span>. Once
+        that registration is included onchain, it can switch payments to
+        <span class="math inline">e+1</span> while <span
         class="math inline">e</span>’s close is built, certified, and
         admitted. The anchor <span class="math inline">\mathcal
         A_{e+1}</span> is independent of <span

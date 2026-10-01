@@ -301,7 +301,7 @@ Even if the operator disappears, recovery depends on a correct, live settlement 
 
 More frequent closes can reduce the wait for admission, at the cost of more preparation and certification. Shorter challenge windows can reduce the wait for finality, but must leave receipt holders enough time to obtain public openings and get a challenge included.
 
-Whatever the epoch length, payments should continue across the boundary. The operator can register $e+1$ while still accepting payments in $e$. Once that registration is included onchain, it can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
+Whatever the epoch length, payments must continue across the boundary to avoid interrupting user flows. The operator can register $e+1$ while still accepting payments in $e$. Once that registration is included onchain, it can switch payments to $e+1$ while $e$'s close is built, certified, and admitted. The anchor $\mathcal A_{e+1}$ is independent of $e$'s close.
 
 Once $e+1$ is registered and $e$'s close is admitted, settlement binds $e+1$ to that close's state root and sets its admission and challenge deadlines from that time. Admission and finalization follow epoch order. A missed admission deadline discards every registration still awaiting admission.
 
