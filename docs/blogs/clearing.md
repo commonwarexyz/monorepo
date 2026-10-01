@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (10/1/26): Restores continuous payments while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice. Operators sign the final payer states once per close with their receipt key; validators aggregate their signatures into the close certificate.*
+*Update (10/1/26): Restores continuous payments while the previous epoch's close is built, certified, and admitted. Each payment signature binds the payer's final vector root from that epoch, preventing retries from settling twice. Operators sign the final payer states once per close with their receipt key. Validators aggregate their signatures into the close certificate.*
 
 *Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 
