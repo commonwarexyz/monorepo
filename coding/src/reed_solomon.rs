@@ -370,6 +370,18 @@ fn read_data_len(shards: &[&[u8]]) -> Result<usize, Error> {
 /// Type alias for the internal encoding result.
 type Encoding<D> = (D, Vec<Chunk<D>>);
 
+/// Rejects shard counts the Reed-Solomon backend does not support.
+fn validate_counts(k: usize, m: usize) -> Result<(), Error> {
+    if Encoder::supports(k, m) {
+        Ok(())
+    } else {
+        Err(Error::ReedSolomon(RsError::UnsupportedShardCount {
+            original_count: k,
+            recovery_count: m,
+        }))
+    }
+}
+
 /// Encode data using a Reed-Solomon coder and insert it into a [`bmt`].
 ///
 /// # Parameters
@@ -399,6 +411,10 @@ fn encode<H: Hasher, S: Strategy>(
     if data_len > Widen::widen(u32::MAX) {
         return Err(Error::InvalidDataLength(data_len));
     }
+
+    // Reject unsupported shard counts before allocating any buffer. The buffers below are then
+    // bounded by the shard counts and `data_len`.
+    validate_counts(k, m)?;
 
     // Prepare data as a contiguous buffer of k shards
     let (padded, shard_len) = prepare_data(data, k);
@@ -966,6 +982,9 @@ fn decode<'a, H: Hasher, S: Strategy>(
     let n = total as usize;
     let k = min as usize;
     let m = n - k;
+
+    // Reject unsupported shard counts before allocating any buffer.
+    validate_counts(k, m)?;
     let mut chunks = chunks.peekable();
     let Some(first) = chunks.peek() else {
         return Err(Error::NotEnoughChunks);
@@ -2914,6 +2933,23 @@ mod tests {
                 original_count: _,
                 recovery_count: _,
             }))
+        ));
+    }
+
+    /// Decoding rejects unsupported shard counts before inspecting any chunk.
+    #[test]
+    fn test_decode_rejects_unsupported_shard_counts() {
+        let data = vec![42u8; 1000];
+        let (root, chunks) = encode::<Sha256, _>(10, 4, data.as_slice(), &STRATEGY).unwrap();
+        let checked = chunks
+            .into_iter()
+            .map(|c| checked(root, c))
+            .collect::<Vec<_>>();
+        let result =
+            decode::<Sha256, _>(u16::MAX, u16::MAX / 2 - 1, &root, checked.iter(), &STRATEGY);
+        assert!(matches!(
+            result,
+            Err(Error::ReedSolomon(RsError::UnsupportedShardCount { .. }))
         ));
     }
 
