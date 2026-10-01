@@ -193,18 +193,18 @@ jobs:
             static-features: "sha2 sve2 !sha3"
             qemu: neoverse-n2
             cpu-features: "sha2 sha3 sve sve2"
-          # A64FX has SVE without SHA-3 or SVE2.
+          # Neoverse N1 has SHA-2 without SHA-3 or SVE.
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
-            qemu: a64fx
-            cpu-features: "sha2 sve !sha3 !sve2"
+            qemu: neoverse-n1
+            cpu-features: "sha2 !sha3 !sve !sve2"
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release --no-default-features --lib -p commonware-cryptography-curve25519"
             static-features: "!sha2 !sha3 !sve2"
-            qemu: a64fx
-            cpu-features: "sha2 sve !sha3 !sve2"
+            qemu: neoverse-n1
+            cpu-features: "sha2 !sha3 !sve !sve2"
           # Test each package with a std feature without std, one package at a time.
           - os: ubuntu-latest
             package: all
