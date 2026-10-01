@@ -249,9 +249,11 @@ not answer. If either persists, follow these steps.
 
 **Payments.** `w` refuses while a payment is pending, and `f` still signs. A
 payment that stays undecided blocks `p` on this wallet for good. `R` can
-conclude a payment from the chain only after its epoch finalizes and before two
-more epochs finalize. That window can last only a few blocks, and the wallet
-never checks on its own.
+conclude a payment from the chain. An admitted close that leaves the payment
+out resolves it at admission. A close that carries it without your receipt
+resolves it only after that close finalizes and before two more epochs
+finalize. That window can last only a few blocks, and the wallet never checks
+on its own.
 
 **Escalation.** `x` needs a finalized balance that covers an Amount or is
 positive for a Close. It changes nothing and logs "withdrawal escalation
@@ -289,7 +291,9 @@ permanently hard-faulted".
    and pays nothing more.
 3. `c` claims one finalized payout, including one finalized after the fault.
    After `h` succeeds, press `c` until it logs "claim rejected: no unspent
-   wallet-owned payout is available". Every payout is then claimed.
+   wallet-owned payout is available". The wallet logs the same message while
+   a payout's proof is unavailable, so retry later before treating every
+   payout as claimed.
 
 ### Deadlines
 
