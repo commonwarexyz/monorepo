@@ -5,7 +5,7 @@ use super::{
 };
 use crate::stateful::{
     Application, Config, Stateful, SyncPlan,
-    db::{DatabaseSet, Publisher, SyncEngineConfig},
+    db::{Publisher, SnapshotsOf, Subscriber, SyncEngineConfig},
 };
 use commonware_actor::Feedback;
 use commonware_consensus::{
@@ -19,10 +19,18 @@ use commonware_consensus::{
     simplex::{mocks::scheme as scheme_mocks, types::Activity},
     types::{FixedEpocher, Height, ViewDelta},
 };
-use commonware_cryptography::{Digestible as _, certificate::ConstantProvider};
+use commonware_cryptography::{Digestible as _, Sha256, certificate::ConstantProvider, sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
-use commonware_storage::archive::prunable;
+use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic, reschedule};
+use commonware_storage::{
+    archive::prunable,
+    mmr,
+    qmdb::{
+        self,
+        operation::Floored as _,
+        sync::{Request, Source as _, Target, source},
+    },
+};
 use commonware_utils::{NZU64, NZUsize, channel::ring};
 use std::{sync::Arc, time::Duration};
 
@@ -138,6 +146,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                 )
                 .await;
             let publication_context = context.child("publication");
+            let (publisher, subscriber) = Publisher::new(&publication_context);
             let (stateful, mut application) = Stateful::new(
                 context.child("stateful"),
                 Config {
@@ -148,7 +157,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     mailbox_size: NZUsize!(8),
                     plan,
                     resolvers: NoopQmdbResolver,
-                    snapshot_publisher: Publisher::new(&publication_context).0,
+                    snapshot_publisher: publisher,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
@@ -172,7 +181,9 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                 (resolver, fixtures::IgnoreResolver),
             );
             let _stateful_actor = stateful.start();
-            let databases = application.subscribe_databases().await;
+            while subscriber.latest().is_none() {
+                reschedule().await;
+            }
 
             // The first boot waits for genesis and finalizes blocks 1 through F.
             if boot == 0 {
@@ -199,11 +210,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     marshal.get_processed().await,
                     Some(Processed::Block(predecessor))
                 );
-                assert_eq!(
-                    SingleDatabaseSet::<deterministic::Context>::committed_targets(&databases)
-                        .await,
-                    predecessor_target,
-                );
+                assert_published_target(&subscriber, &predecessor_target).await;
                 if boot == 0 {
                     // Marshal persists the new floor and prunes its archives before
                     // replying to the queued height query. F remains held here.
@@ -230,11 +237,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     marshal.get_processed().await,
                     Some(Processed::Block(floor_height))
                 );
-                assert_eq!(
-                    SingleDatabaseSet::<deterministic::Context>::committed_targets(&databases)
-                        .await,
-                    floor_target,
-                );
+                assert_published_target(&subscriber, &floor_target).await;
             }
 
             (genesis, blocks, fixture)
@@ -242,4 +245,36 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
         state = Some(next_state);
         checkpoint = Some(recovered);
     }
+}
+
+/// Check the recovered prefix through exactly the snapshot a peer can fetch.
+async fn assert_published_target(
+    subscriber: &Subscriber<
+        SnapshotsOf<SingleDatabaseSet<deterministic::Context>, deterministic::Context>,
+    >,
+    target: &Target<mmr::Family, sha256::Digest>,
+) {
+    let snapshot = subscriber
+        .latest()
+        .expect("startup must publish recovered state");
+    assert_eq!(snapshot.size(), target.range.end());
+    let commit = target.range.end() - 1;
+    let (source::Response::Operations { proof, operations }, _) = snapshot
+        .serve(Request::Operations {
+            size: target.range.end(),
+            start: commit,
+            max_ops: NZU64!(1),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("snapshot must serve the requested operations")
+    };
+    assert_eq!(operations[0].has_floor(), Some(target.range.start()));
+    assert!(qmdb::verify_proof::<Sha256, _, _>(
+        &proof,
+        commit,
+        &operations,
+        &target.root
+    ));
 }

@@ -88,6 +88,12 @@ impl<T> TracedAsyncRwLock<T> {
     pub async fn write(&self) -> AsyncRwLockWriteGuard<'_, T> {
         self.inner.write().await
     }
+
+    /// Acquire an exclusive write guard without waiting, if no guard is held or granted to a
+    /// waiter. Records no lock-wait span, since it never waits.
+    pub fn try_write(&self) -> Option<AsyncRwLockWriteGuard<'_, T>> {
+        self.inner.try_write().ok()
+    }
 }
 
 /// A Tokio-based async rwlock with an upgradable read mode.
@@ -249,6 +255,24 @@ mod tests {
             *writer += 1;
 
             assert_eq!(*writer, 101);
+        });
+    }
+
+    #[test]
+    fn test_traced_async_rwlock_try_write() {
+        futures::executor::block_on(async {
+            let lock = TracedAsyncRwLock::new("test", 100u64);
+
+            let reader = lock.read().await;
+            assert!(lock.try_write().is_none());
+            drop(reader);
+
+            let mut writer = lock.try_write().expect("no guard is held");
+            *writer += 1;
+            assert!(lock.try_write().is_none());
+            drop(writer);
+
+            assert_eq!(*lock.read().await, 101);
         });
     }
 

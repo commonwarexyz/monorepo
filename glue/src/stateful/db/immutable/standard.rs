@@ -3,12 +3,12 @@
 //!
 //! Immutable databases accept new keyed values but no updates or deletions. Batch reads fall back
 //! to the database's applied state at the time of the read, not to a snapshot taken when the
-//! batch was created.
+//! batch was created. Keyed batch reads access the database through the batch's [`Reader`]
+//! because the immutable proof snapshot carries no keyed index.
 
 use crate::stateful::db::{
-    BatchContext, InitError, LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Shared,
-    StateSyncDb, SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
-    validate_initialization,
+    InitError, LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -36,10 +36,12 @@ use commonware_storage::{
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
-/// Shared handle to an immutable database.
-type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Immutable<F, E, K, V, C, H, T, S>>;
+/// Reader over the immutable database a wrapper batch reads through.
+type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Reader<Immutable<F, E, K, V, C, H, T, S>>;
 
-/// A speculative batch of new keyed values over a shared immutable database.
+/// A speculative batch of new keyed values that reads an immutable database through a
+/// [`Reader`]. Merkleizing it refuses with [`Error::StaleBatch`] once a batch
+/// that is not an ancestor of this one is finalized.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -97,12 +99,20 @@ where
 
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
     /// (inherited from the parent batch or database when unset).
+    ///
+    /// The floor must not fall below the inherited floor or pass this batch's commit location.
+    /// Otherwise merkleize fails with [`Error::FloorRegressed`] or [`Error::FloorBeyondSize`].
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self
     }
 
     /// Reads a value by key, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
@@ -111,6 +121,11 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
@@ -192,6 +207,11 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     /// Reads a value by key, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
@@ -200,6 +220,11 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await
@@ -320,13 +345,16 @@ where
         )
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
+        };
         ImmutableUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
+            batch,
+            db,
             metadata: None,
-            inactivity_floor: database.inactivity_floor_loc(),
+            inactivity_floor,
         }
     }
 
@@ -426,13 +454,16 @@ where
         )
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
+        };
         ImmutableUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
+            batch,
+            db,
             metadata: None,
-            inactivity_floor: database.inactivity_floor_loc(),
+            inactivity_floor,
         }
     }
 

@@ -23,7 +23,7 @@ mod actor;
 pub(crate) use actor::{Config, Syncer};
 
 pub(crate) mod mailbox;
-pub(crate) use mailbox::Mailbox;
+pub(crate) use mailbox::{Mailbox, UpdateOutcome};
 
 mod plan;
 pub use plan::SyncPlan;
@@ -112,23 +112,10 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// The database handle set.
+    /// The owned database set produced by sync.
     pub databases: A::Databases,
     /// Anchor of the block reflected by `databases`.
     pub anchor: Anchor<BlockDigest<A, E>>,
-}
-
-impl<E, A> Clone for Artifact<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    fn clone(&self) -> Self {
-        Self {
-            databases: self.databases.clone(),
-            anchor: self.anchor,
-        }
-    }
 }
 
 /// Returns the block state sync starts from.

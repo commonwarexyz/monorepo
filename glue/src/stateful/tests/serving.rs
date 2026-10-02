@@ -20,11 +20,12 @@ use crate::{
         tracker::ProgressTracker,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, ExecutionError, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, SnapshotsOf, StateSyncSet,
-            Subscriber, SyncEngineConfig, TipUpdate, Unmerkleized as _, p2p as qmdb_resolver,
+            Anchor, Barrier, DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Single,
+            SnapshotsOf, StateSyncSet, Subscriber, SyncEngineConfig, TipUpdate, Unmerkleized as _,
+            UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -151,8 +152,8 @@ pub(super) trait Layout: Clone + Send + Sync + 'static {
 
     fn execute(
         height: Height,
-        batches: <Self::Set as DatabaseSet<Ctx>>::Unmerkleized,
-    ) -> impl Future<Output = <Self::Set as DatabaseSet<Ctx>>::Merkleized> + Send;
+        batches: UnmerkleizedOf<Self::Set, Ctx>,
+    ) -> impl Future<Output = Result<MerkleizedOf<Self::Set, Ctx>, ExecutionError>> + Send;
 
     /// The block fields committing to `merkleized`: (root A, range A, root B, range B).
     fn header(merkleized: &<Self::Set as DatabaseSet<Ctx>>::Merkleized) -> Header;
@@ -193,8 +194,8 @@ impl Layout for Mixed {
 
     async fn execute(
         height: Height,
-        batches: <Self::Set as DatabaseSet<Ctx>>::Unmerkleized,
-    ) -> <Self::Set as DatabaseSet<Ctx>>::Merkleized {
+        batches: UnmerkleizedOf<Self::Set, Ctx>,
+    ) -> Result<MerkleizedOf<Self::Set, Ctx>, ExecutionError> {
         multi_db_app::App::execute::<Ctx>(height, batches).await
     }
 
@@ -228,7 +229,7 @@ impl Layout for Mixed {
 #[derive(Clone)]
 pub(super) struct AllCompact;
 
-type CompactPair = (Shared<QmdbB<Ctx>>, Shared<QmdbB<Ctx>>);
+type CompactPair = (Single<QmdbB<Ctx>>, Single<QmdbB<Ctx>>);
 
 fn compact_config(
     prefix: &str,
@@ -272,16 +273,13 @@ impl Layout for AllCompact {
 
     async fn execute(
         height: Height,
-        batches: <Self::Set as DatabaseSet<Ctx>>::Unmerkleized,
-    ) -> <Self::Set as DatabaseSet<Ctx>>::Merkleized {
+        batches: UnmerkleizedOf<Self::Set, Ctx>,
+    ) -> Result<MerkleizedOf<Self::Set, Ctx>, ExecutionError> {
         let (batch_a, batch_b) = batches;
         let key = Sha256::hash(&[&height.get().to_be_bytes()]);
         let batch_a = batch_a.set(key, u64_to_digest(height.get()));
         let batch_b = batch_b.set(key, u64_to_digest(height.get()));
-        (
-            batch_a.merkleize().await.unwrap(),
-            batch_b.merkleize().await.unwrap(),
-        )
+        Ok((batch_a.merkleize().await?, batch_b.merkleize().await?))
     }
 
     fn header(merkleized: &<Self::Set as DatabaseSet<Ctx>>::Merkleized) -> Header {
@@ -320,16 +318,6 @@ pub(super) struct SlowSet<L: Layout> {
     slow: Slow,
 }
 
-impl<L: Layout> Clone for SlowSet<L> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            clock: self.clock.clone(),
-            slow: self.slow.clone(),
-        }
-    }
-}
-
 impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
     type Unmerkleized = <L::Set as DatabaseSet<Ctx>>::Unmerkleized;
     type Merkleized = <L::Set as DatabaseSet<Ctx>>::Merkleized;
@@ -354,8 +342,12 @@ impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
         L::Set::initial_sync_targets()
     }
 
-    fn new_batches(&self) -> impl Future<Output = Self::Unmerkleized> + Send {
-        self.inner.new_batches()
+    fn readers(&self) -> Self::Readers {
+        self.inner.readers()
+    }
+
+    fn new_batches(readers: &Self::Readers) -> impl Future<Output = Self::Unmerkleized> + Send {
+        L::Set::new_batches(readers)
     }
 
     fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
@@ -366,21 +358,25 @@ impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
         L::Set::matches_sync_targets(batches, targets)
     }
 
-    fn readers(&self) -> Self::Readers {
-        self.inner.readers()
+    fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send {
+        self.inner.committed_targets()
     }
 
-    fn apply(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send {
-        self.inner.apply(batches)
+    async fn apply(self, batches: Self::Merkleized) -> Self {
+        let Self { inner, clock, slow } = self;
+        let inner = inner.apply(batches).await;
+        Self { inner, clock, slow }
     }
 
-    async fn finalize(&self) -> (Self::Snapshots, Barrier) {
-        let (snapshots, barrier) = self.inner.finalize().await;
-        if self.slow.delay.is_zero() {
-            return (snapshots, barrier);
+    async fn finalize(self) -> (Self, Self::Snapshots, Barrier) {
+        let Self { inner, clock, slow } = self;
+        let (inner, snapshots, barrier) = inner.finalize().await;
+        let set = Self { inner, clock, slow };
+        if set.slow.delay.is_zero() {
+            return (set, snapshots, barrier);
         }
-        let clock = self.clock.clone();
-        let delay = self.slow.delay;
+        let clock = set.clock.clone();
+        let delay = set.slow.delay;
         let slowed = Handle::from_future(async move {
             clock.sleep(delay).await;
             if !barrier.durable().await {
@@ -388,30 +384,29 @@ impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
             }
             Ok(())
         });
-        (snapshots, Barrier::from_handles::<Self>([slowed]))
+        (set, snapshots, Barrier::from_handles::<Self>([slowed]))
     }
 
-    fn snapshot(&self) -> impl Future<Output = Self::Snapshots> + Send {
-        self.inner.snapshot()
+    async fn snapshot(self) -> (Self, Self::Snapshots) {
+        let Self { inner, clock, slow } = self;
+        let (inner, snapshots) = inner.snapshot().await;
+        (Self { inner, clock, slow }, snapshots)
     }
 
-    fn refresh_cheap(
-        &self,
-        served: &Self::Snapshots,
-    ) -> impl Future<Output = Self::Snapshots> + Send {
-        self.inner.refresh_cheap(served)
+    async fn refresh_cheap(self, served: &Self::Snapshots) -> (Self, Self::Snapshots) {
+        let Self { inner, clock, slow } = self;
+        let (inner, snapshots) = inner.refresh_cheap(served).await;
+        (Self { inner, clock, slow }, snapshots)
     }
 
     fn merge_snapshots(served: &Self::Snapshots, fresh: Self::Snapshots) -> Self::Snapshots {
         L::Set::merge_snapshots(served, fresh)
     }
 
-    fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send {
-        self.inner.prune(targets)
-    }
-
-    fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send {
-        self.inner.committed_targets()
+    async fn prune(self, targets: &Self::SyncTargets) -> Self {
+        let Self { inner, clock, slow } = self;
+        let inner = inner.prune(targets).await;
+        Self { inner, clock, slow }
     }
 }
 
@@ -502,13 +497,15 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
         &mut self,
         context: (Ctx, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<Ctx>>::Unmerkleized,
+        batches: UnmerkleizedOf<Self::Databases, Ctx>,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, Ctx>> {
+    ) -> Result<Option<Proposed<Self, Ctx>>, ExecutionError> {
         let mut ancestry = Box::pin(ancestry);
-        let parent = ancestry.next().await?;
+        let Some(parent) = ancestry.next().await else {
+            return Ok(None);
+        };
         let height = parent.height().next();
-        let merkleized = L::execute(height, batches).await;
+        let merkleized = L::execute(height, batches).await?;
         let (root_a, range_a, root_b, range_b) = L::header(&merkleized);
         let block = Block {
             context: context.1.clone(),
@@ -519,42 +516,44 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
             root_b,
             range_b,
         };
-        Some(Proposed { block, merkleized })
+        Ok(Some(Proposed { block, merkleized }))
     }
 
     async fn verify(
         &mut self,
         _context: (Ctx, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<Ctx>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<Ctx>>::Merkleized> {
+        batches: UnmerkleizedOf<Self::Databases, Ctx>,
+    ) -> Result<Option<MerkleizedOf<Self::Databases, Ctx>>, ExecutionError> {
         let mut ancestry = Box::pin(ancestry);
-        let tip = ancestry.next().await?;
-        let merkleized = L::execute(tip.height(), batches).await;
+        let Some(tip) = ancestry.next().await else {
+            return Ok(None);
+        };
+        let merkleized = L::execute(tip.height(), batches).await?;
         let header = (
             tip.root_a,
             tip.range_a.clone(),
             tip.root_b,
             tip.range_b.clone(),
         );
-        (L::header(&merkleized) == header).then_some(merkleized)
+        Ok((L::header(&merkleized) == header).then_some(merkleized))
     }
 
     async fn apply(
         &mut self,
         _context: (Ctx, Self::Context),
         block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<Ctx>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<Ctx>>::Merkleized> {
-        Some(L::execute(block.height(), batches).await)
+        batches: UnmerkleizedOf<Self::Databases, Ctx>,
+    ) -> Result<Option<MerkleizedOf<Self::Databases, Ctx>>, ExecutionError> {
+        L::execute(block.height(), batches).await.map(Some)
     }
 
     async fn capture(
         &mut self,
         _context: (Ctx, Self::Context),
         block: &Self::Block,
-        _batches: &<Self::Databases as DatabaseSet<Ctx>>::Merkleized,
-        _readers: <Self::Databases as DatabaseSet<Ctx>>::Readers,
+        _batches: &MerkleizedOf<Self::Databases, Ctx>,
+        _readers: ReadersOf<Self::Databases, Ctx>,
     ) {
         let height = block.height().get();
         let mut events = self.log.0.lock();
@@ -568,7 +567,7 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
         _context: (Ctx, Self::Context),
         block: &Self::Block,
         _captured: Self::Captured,
-        _readers: <Self::Databases as DatabaseSet<Ctx>>::Readers,
+        _readers: ReadersOf<Self::Databases, Ctx>,
     ) {
         // Every block before this one was published before this block applied.
         let Some(snapshots) = self.served.latest() else {

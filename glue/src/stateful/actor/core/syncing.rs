@@ -1,3 +1,12 @@
+//! The state-sync phase of the stateful actor.
+//!
+//! Finalized blocks are retained with their acknowledgements while a sync runs.
+//! Each time marshal's ack window fills, the newest retained block becomes the
+//! live sync target and the whole window is acknowledged once the sync engines
+//! observe that target. When sync completes, retained blocks are classified
+//! against the artifact's anchor, applied durably, and the loop hands off to
+//! [`Processing`].
+
 use crate::stateful::{
     Application,
     actor::{
@@ -6,7 +15,7 @@ use crate::stateful::{
             mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
-        processor::{Applied, Processor, Pruning},
+        processor::{Processor, Pruning},
         syncer::{self, Artifact, SyncPlan},
     },
     db::{Anchor, Publisher, SnapshotsOf},
@@ -28,9 +37,10 @@ use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
 };
+use futures::FutureExt as _;
 use rand_core::Rng;
 use std::{collections::VecDeque, mem, sync::Arc};
-use tracing::{Instrument as _, debug, error, info_span};
+use tracing::{Instrument as _, debug, info_span, warn};
 
 /// A retained finalization classified against the converged sync anchor.
 ///
@@ -81,9 +91,6 @@ where
     /// Verification requests deferred until state sync completes.
     pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 
-    /// Database subscribers awaiting the handoff.
-    pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
-
     /// Publishes the latest snapshots.
     pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
@@ -108,28 +115,31 @@ where
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub async fn run(mut self) {
+        let mut converged = None;
         select_loop! {
             self.context,
             on_start => {
                 self.deferred_verifications
                     .retain(|request| !request.verification.is_cancelled());
-                self.database_subscribers
-                    .retain(|subscriber| !subscriber.is_closed());
             },
             on_stopped => {
-                debug!("processor received shutdown signal");
+                debug!("syncing loop received shutdown signal");
             },
             Ok(artifact) = &mut self.completion else {
-                error!("syncer stopped before publishing state sync artifact");
+                // The syncer stops only on shutdown, which can fire while this arm is polled.
+                assert!(
+                    (&mut shutdown).now_or_never().is_some(),
+                    "syncer stopped before publishing state sync artifact"
+                );
                 break;
             } => {
                 let handoffs =
                     classify(artifact.anchor, mem::take(&mut self.pending_finalizations));
-                self.transition(artifact, handoffs).await;
-                return;
+                converged = Some((artifact, handoffs));
+                break;
             },
             Some(message) = self.mailbox.recv() else {
-                debug!("mailbox closed, shutting down processor");
+                debug!("mailbox closed, shutting down syncing loop");
                 break;
             } => match message {
                 Message::Propose {
@@ -159,7 +169,6 @@ where
                     span,
                     block,
                     acknowledgement,
-                    ..
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
                     let handoff;
@@ -167,19 +176,17 @@ where
                         .finalized(block, acknowledgement)
                         .instrument(process)
                         .await;
-                    if let Some((artifact, handoffs)) = handoff {
-                        self.transition(artifact, handoffs).await;
-                        return;
-                    }
-                }
-                Message::SubscribeDatabases { response } => {
-                    self.database_subscribers
-                        .retain(|subscriber| !subscriber.is_closed());
-                    if !response.is_closed() {
-                        self.database_subscribers.push(response);
+                    if handoff.is_some() {
+                        converged = handoff;
+                        break;
                     }
                 }
             },
+        }
+
+        // Hand off after the loop, so its stop signal is not held for the node's lifetime.
+        if let Some((artifact, handoffs)) = converged {
+            self.transition(artifact, handoffs).await;
         }
     }
 
@@ -189,7 +196,8 @@ where
     /// A full window records its newest block as the sync target and then acknowledges every
     /// retained block. Returns the converged [`Artifact`] with the classified handoffs if state
     /// sync finished first, and no handoff otherwise (including when the actor stops while
-    /// retargeting). Panics if marshal delivers more blocks than its window.
+    /// retargeting). Panics if marshal delivers more blocks than its window, or if the syncer
+    /// stops while the actor is not stopping.
     async fn finalized(
         mut self,
         block: Arc<A::Block>,
@@ -219,14 +227,30 @@ where
             .block
             .clone();
 
-        let artifact = select! {
+        let outcome = select! {
             _ = self.context.stopped() => return (self, None),
-            artifact = self.syncer.retarget(
+            outcome = self.syncer.retarget(
                 Anchor::from(newest.as_ref()),
                 A::sync_targets(newest.as_ref()),
-            ) => artifact,
+            ) => outcome,
         };
-        if let Some(artifact) = artifact {
+        // The syncer exits only on shutdown, which can fire while `retarget` is polled.
+        let Some(outcome) = outcome else {
+            assert!(
+                self.context.stopped().now_or_never().is_some(),
+                "syncer stopped unexpectedly"
+            );
+            return (self, None);
+        };
+        if outcome == syncer::UpdateOutcome::SyncCompleted {
+            // The syncer sent the artifact on the completion channel. Collect it here so the
+            // retained finalizations are handed off under the newest recorded target.
+            let artifact = select! {
+                _ = self.context.stopped() => return (self, None),
+                artifact = &mut self.completion => {
+                    artifact.expect("syncer sends the artifact before reporting SyncCompleted")
+                },
+            };
             let handoffs = classify(artifact.anchor, mem::take(&mut self.pending_finalizations));
             return (self, Some((artifact, handoffs)));
         }
@@ -239,28 +263,58 @@ where
 
     /// Hands the converged state to [`Processing`].
     ///
-    /// Returns without recording completion if shutdown interrupts the handoff barrier.
+    /// Returns without recording completion if shutdown interrupts the handoff. Panics if its
+    /// barrier ends without durability while the actor runs.
     async fn transition(
-        mut self,
+        self,
         artifact: Artifact<E, A>,
         handoffs: impl IntoIterator<Item = FinalizedHandoff<Arc<A::Block>>>,
     ) {
-        let mut completed_height = artifact.anchor.height;
+        let Self {
+            context,
+            mailbox,
+            application,
+            provider,
+            marshal,
+            plan,
+            syncer,
+            deferred_verifications,
+            snapshot_publisher,
+            completion,
+            pending_finalizations,
+            pruning,
+            metrics,
+        } = self;
+        // Nothing retargets or awaits the syncer from here on. Dropping its mailbox lets it exit.
+        drop((syncer, completion, pending_finalizations));
+        let Artifact { databases, anchor } = artifact;
+        let mut completed_height = anchor.height;
 
         let mut processor = Processor::new(
-            self.application,
-            artifact.databases,
-            artifact.anchor,
-            self.metrics.clone(),
-            self.pruning,
-            self.snapshot_publisher,
+            application,
+            databases,
+            anchor,
+            metrics.clone(),
+            pruning,
+            snapshot_publisher,
         );
+
+        // One signal for the whole handoff. Re-creating it per block would
+        // record an extra auditor event on the deterministic runtime each time.
+        let mut shutdown = context.stopped();
 
         // Serving must not wait for the next finalization, so the synced state
         // alone publishes first.
-        processor.publish_snapshot().await;
+        let Some(driven) = until_stopped(&mut shutdown, || processor.publish_snapshot()).await
+        else {
+            warn!(
+                height = completed_height.get(),
+                "exiting mid-handoff on shutdown"
+            );
+            return;
+        };
+        processor = driven;
 
-        let mut pending_prune = None;
         let mut pending_acknowledgements = Vec::new();
 
         for handoff in handoffs {
@@ -271,16 +325,32 @@ where
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(block.as_ref()) {
-                        let Applied { barrier, prune } = processor
-                            .finalize(self.context.as_present(), block.as_ref(), false)
-                            .await;
+                        // Exiting on stop leaves the block unacknowledged, and
+                        // marshal redelivers it after a restart.
+                        let height = block.height();
+                        let present = context.as_present();
+                        let Some((driven, applied)) = until_stopped(&mut shutdown, || {
+                            processor.finalize(present, block.as_ref(), false)
+                        })
+                        .await
+                        else {
+                            warn!(height = height.get(), "exiting mid-handoff on shutdown");
+                            return;
+                        };
+                        processor = driven;
 
-                        assert!(
-                            barrier.is_none(),
+                        // Pruning schedules only once a full marshal window has been observed, and
+                        // the handoff applies at most one acknowledgement window, which is smaller.
+                        debug_assert!(
+                            applied.prune.is_none(),
+                            "no prune is due during the handoff"
+                        );
+
+                        debug_assert!(
+                            applied.barrier.is_none(),
                             "the handoff requests no barrier per block"
                         );
-                        pending_prune = prune.or(pending_prune);
-                        completed_height = block.height();
+                        completed_height = height;
                     }
                     pending_acknowledgements.push(acknowledgement);
                 }
@@ -290,8 +360,30 @@ where
         // Acknowledge applied handoffs only after one barrier makes the whole applied suffix
         // durable.
         if !pending_acknowledgements.is_empty() {
-            let barrier = processor.start_sync().await;
-            if !barrier.durable().await {
+            let Some((driven, barrier)) =
+                until_stopped(&mut shutdown, || processor.start_sync()).await
+            else {
+                warn!(
+                    height = completed_height.get(),
+                    "exiting mid-handoff on shutdown"
+                );
+                return;
+            };
+            processor = driven;
+
+            let Some(durable) = until_stopped(&mut shutdown, || barrier.durable()).await else {
+                warn!(
+                    height = completed_height.get(),
+                    "exiting mid-handoff on shutdown"
+                );
+                return;
+            };
+            if !durable {
+                // A barrier ends without durability only when shutdown tears it down.
+                assert!(
+                    shutdown.now_or_never().is_some(),
+                    "database barrier aborted without shutdown during the sync handoff"
+                );
                 return;
             }
             for acknowledgement in pending_acknowledgements {
@@ -304,31 +396,49 @@ where
         }
 
         // Completion is an irreversible startup floor. Persist it only after every handoff through
-        // `completed_height` is durable and before pruning or exposing the databases.
-        self.plan = self.plan.set_completed(completed_height).await;
-        let _ = self.metrics.sync_done.try_set(1);
-        if let Some(prune) = pending_prune {
-            prune.run(processor.databases(), &self.marshal).await;
-            // The published snapshots were captured before this prune. Republish
-            // so serving stops pinning the pruned state. Every handoff barrier
-            // was awaited above, so the republished state is already durable.
-            processor.publish_snapshot().await;
+        // `completed_height` is durable and before processing takes new work.
+        if until_stopped(&mut shutdown, || plan.set_completed(completed_height))
+            .await
+            .is_none()
+        {
+            warn!(
+                height = completed_height.get(),
+                "exiting mid-handoff on shutdown"
+            );
+            return;
         }
-
-        for subscriber in self.database_subscribers.drain(..) {
-            subscriber.send_lossy(processor.databases().clone());
-        }
+        let _ = metrics.sync_done.try_set(1);
+        drop(shutdown);
 
         Processing {
-            context: self.context,
-            mailbox: self.mailbox,
-            provider: self.provider,
-            marshal: self.marshal,
-            processor,
-            deferred_verifications: self.deferred_verifications,
+            context,
+            mailbox,
+            provider,
+            marshal,
         }
-        .run()
+        .run(processor, deferred_verifications)
         .await
+    }
+}
+
+/// Returns a future that awaits the operation `make` builds, or yields `None` once `shutdown`
+/// fires.
+///
+/// The operation is built and boxed before this returns, so no poll frame holds it by value (see
+/// [`Verifications::until_stopped`](super::verifications::Handler::until_stopped)).
+fn until_stopped<'a, F>(
+    shutdown: &'a mut (impl Future + Unpin),
+    make: impl FnOnce() -> F,
+) -> impl Future<Output = Option<F::Output>> + 'a
+where
+    F: Future + 'a,
+{
+    let operation = Box::pin(make());
+    async move {
+        select! {
+            _ = &mut *shutdown => None,
+            output = operation => Some(output),
+        }
     }
 }
 
@@ -398,13 +508,11 @@ mod tests {
         classify,
     };
     use crate::stateful::{
-        PruneConfig,
         actor::{
             metrics::Metrics as StatefulMetrics,
-            processor::Pruning,
             syncer::{self, Artifact, SyncPlan},
         },
-        db::{Anchor, Publisher, Shared},
+        db::{Anchor, Publisher, Single, Subscriber},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{
@@ -434,7 +542,7 @@ mod tests {
         reschedule,
     };
     use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
-    use futures::poll;
+    use futures::{FutureExt as _, poll};
     use std::{
         collections::VecDeque,
         sync::{Arc, atomic::Ordering},
@@ -454,6 +562,7 @@ mod tests {
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
         syncing: Syncing<E, TestApp, TestScheme, TestVariant>,
+        subscriber: Subscriber<u64>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -504,6 +613,7 @@ mod tests {
             }
 
             let (acknowledgement, mut newest_waiter) = Exact::handle();
+            let subscriber = self.subscriber.clone();
             let process = context.child("full_window").spawn(move |_| {
                 self.syncing
                     .finalized(Arc::new(TestBlock::new(10, 12)), acknowledgement)
@@ -517,7 +627,7 @@ mod tests {
                 assert!(poll!(waiter).is_pending());
             }
             assert!(poll!(&mut newest_waiter).is_pending());
-            assert!(response.send(None).is_ok());
+            assert!(response.send(syncer::UpdateOutcome::Observed).is_ok());
             for waiter in &mut waiters {
                 assert!(poll!(waiter).is_pending());
             }
@@ -534,7 +644,10 @@ mod tests {
             }
             assert!(newest_waiter.await.is_ok());
             assert!(syncing.pending_finalizations.is_empty());
-            Self { syncing }
+            Self {
+                syncing,
+                subscriber,
+            }
         }
     }
 
@@ -556,8 +669,8 @@ mod tests {
             let (syncer_sender, syncer_receiver) =
                 actor_mailbox::new(context.child("syncer"), NZUsize!(1));
             let (sender, completion) = oneshot::channel();
-
             let publication_context = context.child("publication");
+            let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&publication_context);
             let harness = Self {
                 syncing: Syncing {
                     context: ContextCell::new(context.child("syncing")),
@@ -568,13 +681,13 @@ mod tests {
                     plan: SyncPlan::init(context.child("plan"), "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
                     deferred_verifications: Vec::new(),
-                    database_subscribers: Vec::new(),
-                    snapshot_publisher: Publisher::new(&publication_context).0,
+                    snapshot_publisher,
                     completion,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
                 },
+                subscriber: snapshot_subscriber,
             };
             (
                 harness,
@@ -731,19 +844,14 @@ mod tests {
                 pending: pending.clone(),
             };
             let marshal = harness_marshal(context.child("marshal")).await;
-            let (mut harness, mut artifact) =
-                TestHarness::new_on(delayed, marshal, anchor(7, 9)).await;
-            harness.syncing.pruning = Some(Pruning::new(
-                PruneConfig {
-                    maintenance_interval: NZUsize!(1),
-                    retained_marshal_blocks: 0,
-                    retained_qmdb_blocks: 0,
-                },
-                harness.syncing.marshal.max_pending_acks(),
-                0,
-            ));
+            let (mut harness, stateful_mailbox, _syncer_receiver, _completion) =
+                TestHarness::new_syncing_on(delayed, marshal).await;
+            let mut artifact = Artifact {
+                databases: test_databases(),
+                anchor: anchor(7, 9),
+            };
             let control = FlushControl::default();
-            artifact.databases = Shared::new("test", TestDb::gated(control.clone()));
+            artifact.databases = Single::from(TestDb::gated(control.clone()));
             let (application, hooks) = TestApp::observe_finalization();
             harness.syncing.application = application;
 
@@ -756,6 +864,7 @@ mod tests {
             let first = TestBlock::child(&TestBlock::new(7, 9), 10);
             let second = TestBlock::child(&first, 11);
             let sync_done = harness.syncing.metrics.sync_done.clone();
+            let subscriber = harness.subscriber.clone();
             let transition = context.child("transition").spawn(move |_| {
                 harness.syncing.transition(
                     artifact,
@@ -780,6 +889,11 @@ mod tests {
                 pending.calls(),
                 0,
                 "completion metadata must not be written before the handoff is durable",
+            );
+            assert_eq!(
+                subscriber.latest(),
+                Some(2),
+                "the captured handoff suffix must serve ahead of its flush",
             );
             let first_flush = control.flushes.lock().remove(0);
             first_flush
@@ -807,12 +921,14 @@ mod tests {
                 .send(Ok(()))
                 .expect("transition must be waiting on the metadata flush");
 
+            while sync_done.get() == 0 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            drop(stateful_mailbox);
             transition.await.expect("transition failed");
-            assert_eq!(sync_done.get(), 1);
             assert!(reflected_waiter.await.is_ok());
             assert!(first_waiter.await.is_ok());
             assert!(second_waiter.await.is_ok());
-            assert_eq!(control.pruned.lock().as_slice(), &[8]);
             assert_eq!(
                 hooks.load(Ordering::SeqCst),
                 4,
@@ -829,36 +945,274 @@ mod tests {
 
     #[test]
     fn aborted_handoff_flush_cancels_ack_and_keeps_sync_incomplete() {
-        deterministic::Runner::default().start(|context| async move {
-            let (harness, mut artifact) =
-                TestHarness::new(context.child("harness"), anchor(7, 9)).await;
-            artifact.databases = Shared::new(
-                "test",
-                TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))),
-            );
+        deterministic::Runner::new(deterministic::Config::default().with_catch_panics(true)).start(
+            |context| async move {
+                let (harness, mut artifact) =
+                    TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+                artifact.databases =
+                    Single::from(TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))));
 
+                let (acknowledgement, waiter) = Exact::handle();
+                let sync_done = harness.syncing.metrics.sync_done.clone();
+                let syncing = harness.syncing;
+                let transition = context.child("transition").spawn(move |_| {
+                    syncing.transition(
+                        artifact,
+                        Some(FinalizedHandoff::Apply(
+                            Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
+                            acknowledgement,
+                        )),
+                    )
+                });
+
+                // A barrier that ends without durability while the actor is not stopping panics.
+                assert!(
+                    transition.await.is_err(),
+                    "an aborted handoff flush must panic"
+                );
+                assert!(
+                    waiter.await.is_err(),
+                    "an aborted handoff must cancel marshal's acknowledgement",
+                );
+                assert_eq!(
+                    sync_done.get(),
+                    0,
+                    "an aborted handoff must not report completion",
+                );
+                let reopened = SyncPlan::<_, TestScheme, TestVariant>::init(
+                    context.child("plan"),
+                    "syncing-test",
+                )
+                .await;
+                assert_eq!(reopened.completed(), None);
+            },
+        );
+    }
+
+    /// Losing the syncer without shutdown fails loudly once a full acknowledgement window
+    /// retargets. The harness marshal holds one pending acknowledgement.
+    #[test]
+    #[should_panic(expected = "syncer stopped unexpectedly")]
+    fn retarget_panics_when_syncer_stops_without_shutdown() {
+        deterministic::Runner::default().start(|context| async move {
+            let marshal = harness_marshal(context.child("marshal")).await;
+            let (harness, _mailbox, syncer_receiver, _completion) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+            drop(syncer_receiver);
+            assert_eq!(harness.syncing.marshal.max_pending_acks(), 1);
+            let (acknowledgement, _waiter) = Exact::handle();
+            let _ = harness
+                .syncing
+                .finalized(Arc::new(TestBlock::new(8, 10)), acknowledgement)
+                .await;
+        });
+    }
+
+    /// A syncer that loses its artifact without shutdown fails loudly instead of leaving the
+    /// actor stuck in state sync.
+    #[test]
+    #[should_panic(expected = "syncer stopped before publishing state sync artifact")]
+    fn syncing_panics_when_syncer_drops_its_artifact_without_shutdown() {
+        deterministic::Runner::default().start(|context| async move {
+            let marshal = harness_marshal(context.child("marshal")).await;
+            let (harness, _mailbox, _syncer_receiver, completion) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+            drop(completion);
+            harness.syncing.run().await;
+        });
+    }
+
+    /// A full acknowledgement window that arrives after shutdown ends quietly without
+    /// retargeting and acknowledges nothing. (A retarget that the syncer abandons because
+    /// shutdown fired mid-poll needs a multi-threaded runtime to reach.)
+    #[test]
+    fn full_window_after_shutdown_exits_without_retargeting() {
+        deterministic::Runner::default().start(|context| async move {
+            let marshal = harness_marshal(context.child("marshal")).await;
+            let (harness, _mailbox, syncer_receiver, _completion) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+            // Polling `stop` once fires the signal.
+            let _ = context.child("stopper").stop(0, None).now_or_never();
+            drop(syncer_receiver);
+            assert_eq!(harness.syncing.marshal.max_pending_acks(), 1);
+            let (acknowledgement, waiter) = Exact::handle();
+            let (syncing, handoff) = harness
+                .syncing
+                .finalized(Arc::new(TestBlock::new(8, 10)), acknowledgement)
+                .await;
+            assert!(handoff.is_none());
+            assert_eq!(syncing.pending_finalizations.len(), 1);
+            drop(syncing);
+            assert!(waiter.await.is_err());
+        });
+    }
+
+    /// A stop while the handoff starts its barrier exits within the stop deadline and leaves the
+    /// block unacknowledged.
+    #[test]
+    fn shutdown_interrupts_handoff_barrier_start() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (harness, artifact) =
+                TestHarness::new(context.child("harness"), anchor(7, 9)).await;
             let (acknowledgement, waiter) = Exact::handle();
             let sync_done = harness.syncing.metrics.sync_done.clone();
-            harness
-                .syncing
-                .transition(
+            let (started, _release) = TestDb::gate_next_finalize();
+            let transition = context.child("transition").spawn(move |_| {
+                harness.syncing.transition(
                     artifact,
                     Some(FinalizedHandoff::Apply(
                         Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
                         acknowledgement,
                     )),
                 )
-                .await;
+            });
+            started.await.expect("the handoff must start its barrier");
 
+            let stopper = context.child("stopper");
+            let stop = context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
             assert!(
-                waiter.await.is_err(),
-                "an aborted handoff must cancel marshal's acknowledgement",
+                stop.await.expect("stop task should finish").is_ok(),
+                "shutdown must interrupt the handoff's barrier start",
             );
+            transition.await.expect("transition should exit cleanly");
+            assert!(waiter.await.is_err());
+            assert_eq!(sync_done.get(), 0);
+        });
+    }
+
+    /// A stop while the handoff records its completion exits within the stop deadline without
+    /// recording it.
+    #[test]
+    fn shutdown_interrupts_handoff_completion_write() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            let marshal = harness_marshal(context.child("marshal")).await;
+            let (harness, _stateful_mailbox, _syncer_receiver, _completion) =
+                TestHarness::new_syncing_on(delayed, marshal).await;
+            let artifact = Artifact {
+                databases: test_databases(),
+                anchor: anchor(7, 9),
+            };
+            let sync_done = harness.syncing.metrics.sync_done.clone();
+
+            // Park the completion write.
+            pending.arm();
+            let gate = next_pending_sync(&pending);
+            let (acknowledgement, waiter) = Exact::handle();
+            let transition = context.child("transition").spawn(move |_| {
+                harness.syncing.transition(
+                    artifact,
+                    Some(FinalizedHandoff::Apply(
+                        Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
+                        acknowledgement,
+                    )),
+                )
+            });
+            gate.blocked
+                .await
+                .expect("the handoff must write its completion");
+            assert!(
+                waiter.await.is_ok(),
+                "the durable handoff block is acknowledged"
+            );
+
+            let stopper = context.child("stopper");
+            let stop = context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
+            assert!(
+                stop.await.expect("stop task should finish").is_ok(),
+                "shutdown must interrupt the completion write",
+            );
+            transition.await.expect("transition should exit cleanly");
             assert_eq!(
                 sync_done.get(),
                 0,
-                "an aborted handoff must not report completion",
+                "an interrupted handoff must not report completion"
             );
+        });
+    }
+
+    /// A stop while the handoff waits on its flush exits within the stop deadline and leaves the
+    /// block unacknowledged.
+    #[test]
+    fn shutdown_interrupts_parked_handoff_flush() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (harness, mut artifact) =
+                TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+            let control = FlushControl::default();
+            artifact.databases = Single::from(TestDb::gated(control.clone()));
+            let (acknowledgement, waiter) = Exact::handle();
+            let sync_done = harness.syncing.metrics.sync_done.clone();
+            let transition = context.child("transition").spawn(move |_| {
+                harness.syncing.transition(
+                    artifact,
+                    [FinalizedHandoff::Apply(
+                        Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
+                        acknowledgement,
+                    )],
+                )
+            });
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let stopper = context.child("stopper");
+            let stop = context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
+            assert!(
+                stop.await.expect("stop task should finish").is_ok(),
+                "shutdown must interrupt the parked handoff flush",
+            );
+            transition.await.expect("transition should exit cleanly");
+            assert!(waiter.await.is_err());
+            assert_eq!(sync_done.get(), 0);
+        });
+    }
+
+    /// A stop while the handoff's initial publish or its block replay is parked exits within the
+    /// stop deadline, leaves the block unacknowledged, and records no completion.
+    #[rstest::rstest]
+    #[case::initial_publish(TestDb::gate_next_snapshot as fn() -> _)]
+    #[case::finalize(TestDb::gate_next_new_batch as fn() -> _)]
+    fn shutdown_interrupts_parked_handoff(
+        #[case] gate: fn() -> (oneshot::Receiver<()>, oneshot::Sender<()>),
+    ) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (harness, artifact) =
+                TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+            let (started, _release) = gate();
+            let (acknowledgement, waiter) = Exact::handle();
+            let sync_done = harness.syncing.metrics.sync_done.clone();
+            let transition = context.child("transition").spawn(move |_| {
+                harness.syncing.transition(
+                    artifact,
+                    [FinalizedHandoff::Apply(
+                        Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
+                        acknowledgement,
+                    )],
+                )
+            });
+            started.await.expect("the handoff should reach the gate");
+
+            let stopper = context.child("stopper");
+            let stop = context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
+            assert!(
+                stop.await.expect("stop task should finish").is_ok(),
+                "shutdown must interrupt the parked handoff",
+            );
+            transition.await.expect("transition should exit cleanly");
+            assert!(waiter.await.is_err());
+            assert_eq!(sync_done.get(), 0);
             let reopened =
                 SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), "syncing-test")
                     .await;
@@ -872,7 +1226,12 @@ mod tests {
     #[case::success(true)]
     #[case::failure(false)]
     fn live_floor_reports_handoff_once_after_durability(#[case] succeeds: bool) {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_timeout(Some(Duration::from_secs(10)))
+                .with_catch_panics(true),
+        )
+        .start(|context| async move {
             let mut signing = context.child("signing");
             let fixture =
                 scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_SYNCING_LIVE_FLOOR", 1);
@@ -929,7 +1288,7 @@ mod tests {
             );
 
             // Start syncing from block 1.
-            let (mut harness, _mailbox, mut coordinator, _completion) =
+            let (mut harness, _mailbox, mut coordinator, complete) =
                 TestHarness::new_syncing(context.child("harness"), marshal.mailbox.clone()).await;
             harness.syncing.plan = harness.syncing.plan.set_floor(first_finalization).await;
             assert!(harness.syncing.plan.floor().is_some());
@@ -938,7 +1297,7 @@ mod tests {
             // Its coordinator can finish before a later target update is recorded.
             let control = FlushControl::default();
             let artifact = Artifact {
-                databases: Shared::new("test", TestDb::gated(control.clone())),
+                databases: Single::from(TestDb::gated(control.clone())),
                 anchor: anchor(1, 1),
             };
 
@@ -1009,7 +1368,8 @@ mod tests {
             else {
                 panic!("four actual receipts must fill the acknowledgement window");
             };
-            assert!(response.send(Some(artifact)).is_ok());
+            assert!(complete.send(artifact).is_ok());
+            assert!(response.send(syncer::UpdateOutcome::SyncCompleted).is_ok());
             drop(update);
             let (syncing, handoff) = process.await.unwrap();
             let (artifact, handoffs) = handoff.expect("completed artifact must hand off reports");
@@ -1030,10 +1390,10 @@ mod tests {
             );
             let release = control.flushes.lock().remove(0);
             if !succeeds {
-                // A failed flush stops the handoff. After restart, marshal is still at block 1
+                // A failed flush panics the handoff. After restart, marshal is still at block 1
                 // and state sync is still in progress.
                 drop(release);
-                transition.await.expect("failed durability stops handoff");
+                assert!(transition.await.is_err(), "failed durability must panic");
                 marshal.abort().await;
                 let restarted = fixtures::marshal_fixture_with_reporter(
                     context.child("restart"),
@@ -1060,7 +1420,9 @@ mod tests {
 
             // The flush releases every receipt, advancing marshal to block 3.
             release.send(Ok(())).unwrap();
-            drop(reporter.subscribe_databases().await);
+            while marshal.mailbox.get_processed().await != Some(Processed::Block(Height::new(3))) {
+                reschedule().await;
+            }
             assert_eq!(
                 marshal.mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(3)))
@@ -1092,7 +1454,7 @@ mod tests {
                 true,
             )
             .await;
-            let (harness, _mailbox, mut syncer_receiver, _completion) =
+            let (harness, _mailbox, mut syncer_receiver, sync_complete) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
 
             let (acknowledgement, mut waiter) = Exact::handle();
@@ -1106,12 +1468,16 @@ mod tests {
             };
             assert!(poll!(&mut waiter).is_pending());
             assert!(
-                response
-                    .send(Some(Artifact {
+                sync_complete
+                    .send(Artifact {
                         databases: test_databases(),
                         anchor: anchor(7, 9),
-                    }))
+                    })
                     .is_ok(),
+                "completion receiver must be alive",
+            );
+            assert!(
+                response.send(syncer::UpdateOutcome::SyncCompleted).is_ok(),
                 "target update must still await its response",
             );
             drop(update);
