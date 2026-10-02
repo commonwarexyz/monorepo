@@ -111,6 +111,19 @@ impl Buffer {
         end > self.capacity
     }
 
+    /// Appends borrowed bytes within the flush threshold and returns their logical offset.
+    ///
+    /// Returns `None` without changing the buffer if the bytes do not fit.
+    pub(super) fn try_append(&mut self, data: &[u8]) -> Option<u64> {
+        let end = self.len.checked_add(data.len())?;
+        if end > self.capacity {
+            return None;
+        }
+        let offset = self.size();
+        self.append(data);
+        Some(offset)
+    }
+
     /// Encodes a value within the flush threshold and returns its logical offset.
     ///
     /// Returns `None` without encoding or changing the buffer if the value does not fit.

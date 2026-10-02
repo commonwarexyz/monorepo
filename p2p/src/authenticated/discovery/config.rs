@@ -1,11 +1,15 @@
 use crate::Ingress;
 use commonware_cryptography::PublicKey;
 #[cfg(test)]
-use commonware_cryptography::Signer;
+use commonware_cryptography::{ChaCha20Poly1305, Signer};
 use commonware_runtime::Quota;
-use commonware_stream::Handshake;
+use commonware_stream::Upgrader;
 #[cfg(test)]
-use commonware_stream::encrypted::Handshake as StreamHandshake;
+use commonware_stream::{
+    SakeCups,
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -25,12 +29,12 @@ pub type Bootstrapper<P> = (P, Ingress);
 /// synchronized, connections could be unnecessarily dropped, messages could be parsed
 /// incorrectly, and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
-pub struct Config<H: Handshake>
+pub struct Config<U: Upgrader>
 where
-    H::PublicKey: PublicKey,
+    U::PublicKey: PublicKey,
 {
-    /// Handshake used to authenticate transport connections and sign discovery gossip.
-    pub handshake: H,
+    /// Authenticates peers, establishes their message streams, and signs discovery gossip.
+    pub handshake: U,
 
     /// Prefix for all signed messages to avoid replay attacks.
     pub namespace: Vec<u8>,
@@ -42,7 +46,7 @@ where
     pub dialable: Ingress,
 
     /// Peers dialed on startup.
-    pub bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
+    pub bootstrappers: Vec<Bootstrapper<U::PublicKey>>,
 
     /// Whether or not to allow DNS-based ingress addresses.
     ///
@@ -55,7 +59,7 @@ where
 
     /// Maximum size allowed for an application payload passed to a sender.
     ///
-    /// The largest supported value is [`crate::authenticated::max_size::<H>()`].
+    /// The largest supported value is [`crate::authenticated::max_size::<U>()`].
     ///
     /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
     /// part of the payload and counts toward this limit.
@@ -156,17 +160,17 @@ where
     pub block_duration: Duration,
 }
 
-impl<H: Handshake> Config<H>
+impl<U: Upgrader> Config<U>
 where
-    H::PublicKey: PublicKey,
+    U::PublicKey: PublicKey,
 {
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
-        handshake: H,
+        handshake: U,
         namespace: &[u8],
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
-        bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
+        bootstrappers: Vec<Bootstrapper<U::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
@@ -206,11 +210,11 @@ where
     ///
     /// It is not recommended to use this configuration in production.
     pub fn local(
-        handshake: H,
+        handshake: U,
         namespace: &[u8],
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
-        bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
+        bootstrappers: Vec<Bootstrapper<U::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
@@ -245,7 +249,7 @@ where
 }
 
 #[cfg(test)]
-impl<C: Signer> Config<StreamHandshake<C>> {
+impl<C: Signer> Config<SakeCups<C, ChaCha20Poly1305>> {
     pub fn test(
         signer: C,
         listen: SocketAddr,
@@ -253,7 +257,15 @@ impl<C: Signer> Config<StreamHandshake<C>> {
         max_message_size: u32,
     ) -> Self {
         let mut config = Self::local(
-            StreamHandshake::new(signer),
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer,
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            ),
             b"test_namespace",
             listen,
             listen,

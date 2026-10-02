@@ -1,5 +1,5 @@
 use super::{
-    Buffer, ExpectedCommitment, Retirement, Variant,
+    Buffer, ExpectedCommitment, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
     certified::Certified,
@@ -135,9 +135,7 @@ where
     // Application delivery cursor
     stream: Stream<E>,
     // Pending application acknowledgements
-    pending_acks: PendingAcks<V, A>,
-    // Acknowledgements cleared while a floor transition owns application progress
-    cleared_acks: Vec<(Height, V::Commitment)>,
+    pending_acks: PendingAcks<A>,
     // Highest known finalized height
     tip: Height,
     // Outstanding subscriptions for blocks
@@ -263,7 +261,6 @@ where
                 floor: floor_state,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
-                cleared_acks: Vec::new(),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
                 certified: Certified::new(),
@@ -386,10 +383,8 @@ where
         let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
 
         // Observe durable syncs that no consensus caller awaits (the
-        // notarization and finalization paths). A flush failure inside
-        // `start_sync` is reported only through the returned handle, so every
-        // handle must be observed to apply the fatal policy. This pool does
-        // so without blocking the actor on a sync.
+        // notarization and finalization paths), so a failure applies the fatal
+        // policy without waiting for a later archive call or blocking the actor.
         let mut syncs = Pool::<PooledSync>::default();
 
         // Anchor all startup work under a single root span. Tip recovery, floor
@@ -560,9 +555,8 @@ where
     {
         // Start with the ack that woke this `select_loop!` arm.
         let mut pending = Some(self.pending_acks.complete_current(result));
-        let mut processed_commitments = Vec::new();
-        let processed_round = loop {
-            let (height, commitment, result) = pending.take().expect("pending ack must exist");
+        loop {
+            let (height, result) = pending.take().expect("pending ack must exist");
             match result {
                 Ok(()) => {
                     // Apply in-memory progress updates for this acknowledged
@@ -575,15 +569,14 @@ where
                 }
                 Err(e) => return Err((height, e)),
             }
-            processed_commitments.push(commitment);
 
             // Opportunistically drain any additional already-ready acks so we
             // can persist one metadata sync for the whole batch below.
             match self.pending_acks.pop_ready() {
                 Some(next) => pending = Some(next),
-                None => break self.floor.round(),
+                None => break,
             }
-        };
+        }
 
         // Persist buffered progress updates once after draining all ready acks.
         self.stream = self
@@ -591,13 +584,6 @@ where
             .sync()
             .await
             .expect("failed to sync application progress");
-
-        // The round is an inclusive floor. Retire every exact commitment even if
-        // sparse certificates leave it above that floor.
-        buffer.retire(Retirement {
-            round_floor: processed_round,
-            exact_retirements: processed_commitments,
-        });
 
         // Refill the application dispatch pipeline.
         Ok(self.try_dispatch_blocks(application).await)
@@ -1248,9 +1234,8 @@ where
         }
 
         // The pending floor owns the next application sync point. Drop any
-        // in-flight acks before they can advance the processed height past it,
-        // but retain their heights and commitments until the anchor makes the floor active.
-        self.cleared_acks.extend(self.pending_acks.clear());
+        // in-flight acks before they can advance the processed height past it.
+        self.pending_acks.clear();
 
         // The pending floor holds the waiter, which is released when the floor is
         // replaced, applied, or superseded. Reporting a closed subscription as an
@@ -1364,11 +1349,6 @@ where
                     resolver,
                 )
                 .await;
-            let commitments = self.take_superseded_ack_commitments();
-            buffer.retire(Retirement {
-                round_floor: self.floor.round(),
-                exact_retirements: commitments,
-            });
             let repaired;
             (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
             if repaired {
@@ -1420,15 +1400,7 @@ where
 
         // Drop all pending acknowledgement waiters so any in-flight application
         // acks for blocks below the new floor cannot rewrite the processed floor.
-        self.cleared_acks.extend(self.pending_acks.clear());
-
-        // The active floor retires round-bound entries and every commitment whose
-        // acknowledgement it superseded.
-        let commitments = self.take_superseded_ack_commitments();
-        buffer.retire(Retirement {
-            round_floor: self.floor.round(),
-            exact_retirements: commitments,
-        });
+        self.pending_acks.clear();
 
         // Keep the processed block so the application can restart from it.
         self = self.prune_after_floor(dispatch_floor).await;
@@ -1444,20 +1416,10 @@ where
         self.try_dispatch_blocks(application).await
     }
 
-    /// Takes cleared acknowledgement commitments covered by the active processed-height floor.
-    ///
-    /// Cleared acknowledgements above the floor are re-dispatched and remain live.
-    fn take_superseded_ack_commitments(&mut self) -> Vec<V::Commitment> {
-        let processed_height = self.floor.processed_height();
-        std::mem::take(&mut self.cleared_acks)
-            .into_iter()
-            .filter_map(|(height, commitment)| (height <= processed_height).then_some(commitment))
-            .collect()
-    }
-
     /// Handle a deliver message from the resolver. Block delivers are handled
     /// immediately. Finalized/Notarized delivers are parsed and structurally
     /// validated, then collected into `delivers` for batch certificate verification.
+    /// A notarized delivery's block is decoded only after its certificate verifies.
     async fn handle_deliver<Buf: Buffer<V>>(
         mut self: Box<Self>,
         message: ResolverDelivery<V>,
@@ -1647,30 +1609,15 @@ where
                     return self;
                 }
 
-                // Notarization alone does not prove the commitment encodes the block,
-                // so decoding must recompute it
-                let commitment = notarization.proposal.payload;
-                if !V::check_payload(scheme.as_ref(), commitment) {
-                    response.send_lossy(false);
-                    return self;
-                }
-                let block_cfg = V::block_cfg(
-                    &self.block_codec_config,
-                    ExpectedCommitment::Untrusted(commitment),
-                );
-                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
-                    response.send_lossy(false);
-                    return self;
-                };
-
-                if V::commitment(&block) != notarization.proposal.payload {
+                // The payload must be valid under the epoch's scheme.
+                if !V::check_payload(scheme.as_ref(), notarization.proposal.payload) {
                     response.send_lossy(false);
                     return self;
                 }
                 delivers.push(PendingVerification::Notarized {
                     scoped: Scoped::scheme(scheme),
                     notarization,
-                    block,
+                    block: value,
                     response,
                 });
             }
@@ -1782,10 +1729,25 @@ where
                     response,
                     ..
                 } => {
+                    // Notarization alone does not prove the commitment encodes the block,
+                    // so decoding must recompute it.
+                    let commitment = notarization.proposal.payload;
+                    let block_cfg = V::block_cfg(
+                        &self.block_codec_config,
+                        ExpectedCommitment::Untrusted(commitment),
+                    );
+                    let Ok(block) = V::Block::decode_cfg(block, &block_cfg) else {
+                        response.send_lossy(false);
+                        continue;
+                    };
+                    if V::commitment(&block) != commitment {
+                        response.send_lossy(false);
+                        continue;
+                    }
+
                     // Valid notarization received.
                     response.send_lossy(true);
                     let round = notarization.round();
-                    let commitment = notarization.proposal.payload;
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");
 
@@ -1925,14 +1887,12 @@ where
                 },
             };
             let height = block.height();
-            let commitment = V::commitment(&block);
             assert_eq!(height, next_height, "finalized block height mismatch");
 
             let (ack, ack_waiter) = A::handle();
             application.report(Update::Block(V::into_shared(block), ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
-                commitment,
                 receiver: ack_waiter,
             });
             self.staged.retain(height.next());
@@ -2530,15 +2490,10 @@ where
         resolver.retain(handler::above_round_floor::<V::Commitment>(round));
 
         // A superseded anchor is an ancestor of a processed block, so the floor
-        // it announced is already active. Retire the acks it displaced and resume.
+        // it announced is already active. Resume repair and dispatch.
         if self.floor.take_superseded(round).is_none() {
             return self;
         }
-        let commitments = self.take_superseded_ack_commitments();
-        buffer.retire(Retirement {
-            round_floor: round,
-            exact_retirements: commitments,
-        });
         let repaired;
         (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
         if repaired {

@@ -16,7 +16,7 @@ impl SharedSecret {
     }
 }
 
-/// An ephemeral X25519 public key used during handshake.
+/// An ephemeral X25519 public key used during SAKE.
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct EphemeralPublicKey {
     inner: x25519_dalek::PublicKey,
@@ -54,7 +54,7 @@ impl<'a> arbitrary::Arbitrary<'a> for EphemeralPublicKey {
     }
 }
 
-/// An ephemeral X25519 secret key used during handshake.
+/// An ephemeral X25519 secret key used during SAKE.
 pub struct SecretKey {
     inner: Secret<x25519_dalek::EphemeralSecret>,
 }

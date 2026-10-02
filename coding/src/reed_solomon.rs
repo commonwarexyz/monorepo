@@ -7,7 +7,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::{Batches, Strategy};
 use commonware_storage::bmt::{self, Builder};
-use commonware_utils::{Cached, NZUsize};
+use commonware_utils::{Cached, NZUsize, Widen};
 use std::{marker::PhantomData, ops::Range};
 use thiserror::Error;
 
@@ -26,9 +26,10 @@ commonware_utils::thread_local_cache!(static CACHED_DECODER: Decoder);
 /// by available parallelism.
 const MIN_STRIPE_BYTES: usize = 8 * 1024;
 
-/// Target transform storage per tile within a scheduled stripe.
+/// Target transform storage per tile within a stripe.
 ///
-/// Only striped work is tiled. Unbatched coding runs one full-width instance.
+/// A tile's transform storage is at most twice this target. Every coder instance is configured
+/// for a single tile, which also bounds the work that each thread's cached coders retain.
 const MAX_TILE_WORK_BYTES: usize = 2 * 1024 * 1024;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
@@ -77,27 +78,29 @@ fn hash_shards<H: Hasher, M: AsRef<[u8]> + Sync>(
         NZUsize!(1),
         work.div_ceil(shards.len()),
         |batches| {
-            batches.map_or_else(
-                || H::hash_many(shards),
-                |batches| {
-                    batches
-                        .map_collect_vec(
-                            |ranges| ranges.into_iter().map(move |range| &shards[range]),
-                            H::hash_many,
-                        )
-                        .into_iter()
-                        .flatten()
-                        .collect()
-                },
-            )
+            batches
+                .map_collect_vec(
+                    |ranges| ranges.into_iter().map(move |range| &shards[range]),
+                    H::hash_many,
+                )
+                .into_iter()
+                .flatten()
+                .collect()
         },
     )
 }
 
-/// Validate the requested shard index, embedded index, and proof leaf count before hashing.
+/// Validate the requested shard index, embedded index, proof leaf count, and shard width before
+/// hashing.
+///
+/// Every codeword has a positive, even shard width. Decode relies on this for checked shards.
 fn check_metadata<D: Digest>(total: u16, index: u16, shard: &Chunk<D>) -> Result<(), Error> {
     if index >= total {
         return Err(Error::InvalidIndex(index));
+    }
+    let width = shard.shard.len();
+    if width == 0 || !width.is_multiple_of(2) {
+        return Err(RsError::InvalidShardSize { shard_bytes: width }.into());
     }
     if shard.proof.leaf_count != u32::from(total) {
         return Err(Error::InvalidProof);
@@ -198,11 +201,18 @@ impl<D: Digest> Write for Chunk<D> {
 }
 
 impl<D: Digest> Read for Chunk<D> {
-    /// The maximum size of the shard.
-    type Cfg = crate::CodecConfig;
+    /// The coding config and the maximum number of data bytes.
+    type Cfg = (Config, usize);
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let shard = Bytes::read_cfg(reader, &RangeCfg::new(..=cfg.maximum_shard_size))?;
+    fn read_cfg(
+        reader: &mut impl Buf,
+        (config, maximum): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let width = canonical_shard_len(
+            (*maximum).min(Widen::widen(u32::MAX)),
+            config.minimum_shards.widen(),
+        );
+        let shard = Bytes::read_cfg(reader, &RangeCfg::new(..=width))?;
         let index = u16::read(reader)?;
         let proof = bmt::Proof::<D>::read_cfg(reader, &1)?;
         Ok(Self {
@@ -271,12 +281,12 @@ fn prepare_data(mut data: impl bytes::Buf, k: usize) -> (Vec<u8>, usize) {
 /// Reed-Solomon implementation. Decode uses the same calculation to reject
 /// commitments that decode to the same payload with a non-canonical shard width.
 const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
-    let prefixed_len = u32::SIZE + data_len;
+    let prefixed_len = data_len.saturating_add(u32::SIZE);
     let mut shard_len = prefixed_len.div_ceil(k);
 
     // Ensure shard length is even, as required by the Reed-Solomon implementation.
     if !shard_len.is_multiple_of(2) {
-        shard_len += 1;
+        shard_len = shard_len.saturating_add(1);
     }
 
     shard_len
@@ -360,6 +370,18 @@ fn read_data_len(shards: &[&[u8]]) -> Result<usize, Error> {
 /// Type alias for the internal encoding result.
 type Encoding<D> = (D, Vec<Chunk<D>>);
 
+/// Rejects shard counts the Reed-Solomon backend does not support.
+fn validate_counts(k: usize, m: usize) -> Result<(), Error> {
+    if Encoder::supports(k, m) {
+        Ok(())
+    } else {
+        Err(Error::ReedSolomon(RsError::UnsupportedShardCount {
+            original_count: k,
+            recovery_count: m,
+        }))
+    }
+}
+
 /// Encode data using a Reed-Solomon coder and insert it into a [`bmt`].
 ///
 /// # Parameters
@@ -386,9 +408,13 @@ fn encode<H: Hasher, S: Strategy>(
     let k = min as usize;
     let m = n - k;
     let data_len = data.remaining();
-    if data_len > u32::MAX as usize {
+    if data_len > Widen::widen(u32::MAX) {
         return Err(Error::InvalidDataLength(data_len));
     }
+
+    // Reject unsupported shard counts before allocating any buffer. The buffers below are then
+    // bounded by the shard counts and `data_len`.
+    validate_counts(k, m)?;
 
     // Prepare data as a contiguous buffer of k shards
     let (padded, shard_len) = prepare_data(data, k);
@@ -398,43 +424,18 @@ fn encode<H: Hasher, S: Strategy>(
         shard_len / SHARD_CHUNK_BYTES,
         NZUsize!(MIN_STRIPE_BYTES / SHARD_CHUNK_BYTES),
         SHARD_CHUNK_BYTES * n,
-        |batches| match batches {
-            Some(batches) => {
-                let original_shards = padded.chunks(shard_len).collect::<Vec<_>>();
-                let mut buf = vec![0u8; m * shard_len];
-                batches.try_map_collect_vec(
-                    |ranges| {
-                        let ranges = striped::byte_ranges(shard_len, ranges);
-                        let groups = striped::stripe_columns(&mut buf, shard_len, &ranges);
-                        ranges.into_iter().zip(groups)
-                    },
-                    |(range, out)| {
-                        striped::encode_recovery_into(k, m, range, &original_shards, out)
-                    },
-                )?;
-                Ok::<_, Error>(buf)
-            }
-            None => {
-                let mut encoder = Cached::take(
-                    &CACHED_ENCODER,
-                    || Encoder::new(k, m, shard_len),
-                    |enc| enc.reset(k, m, shard_len),
-                )
-                .map_err(Error::ReedSolomon)?;
-                for shard in padded.chunks(shard_len) {
-                    encoder
-                        .add_original_shard(shard)
-                        .map_err(Error::ReedSolomon)?;
-                }
-
-                // Compute recovery shards and collect into a contiguous buffer
-                let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-                let mut buf = Vec::with_capacity(m * shard_len);
-                for shard in encoding.recovery_iter() {
-                    buf.extend_from_slice(shard);
-                }
-                Ok(buf)
-            }
+        |batches| {
+            let original_shards = padded.chunks(shard_len).collect::<Vec<_>>();
+            let mut buf = vec![0u8; m * shard_len];
+            batches.try_map_collect_vec(
+                |ranges| {
+                    let ranges = striped::byte_ranges(shard_len, ranges);
+                    let groups = striped::stripe_columns(&mut buf, shard_len, &ranges);
+                    ranges.into_iter().zip(groups)
+                },
+                |(range, out)| striped::encode_recovery_into(k, m, range, &original_shards, out),
+            )?;
+            Ok::<_, Error>(buf)
         },
     )?;
 
@@ -481,8 +482,8 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
     strategy: &'a S,
 }
 
-/// Striped Reed-Solomon: split every shard by byte range and run independent
-/// Reed-Solomon operations over those ranges.
+/// Striped Reed-Solomon: split every shard by byte range and run independent Reed-Solomon
+/// operations over those ranges. A whole-input run codes one stripe that spans the whole shard.
 ///
 /// ```text
 ///   originals:
@@ -953,118 +954,6 @@ fn verify_reencoded<H: Hasher, S: Strategy>(
     verify_root::<H, S>(ctx, shard_digests, originals, recoveries)
 }
 
-/// Sequential Reed-Solomon: reconstruct the codeword as a single Reed-Solomon instance (re-encode
-/// when all originals are present, decode-reveal when one is missing), used when striping would not
-/// help.
-mod sequential {
-    use super::*;
-
-    /// Decode the codeword as a single Reed-Solomon instance, reconstructing the
-    /// original data and verifying the rebuilt commitment against `ctx.root`.
-    pub(super) fn decode<'a, H: Hasher, S: Strategy>(
-        ctx: &DecodeCtx<'_, H, S>,
-        shard_digests: Vec<Option<H::Digest>>,
-        provided_originals: Vec<(usize, &'a [u8])>,
-        provided_recoveries: Vec<(usize, &'a [u8])>,
-    ) -> Result<Vec<u8>, Error> {
-        let &DecodeCtx {
-            k, m, shard_len, ..
-        } = ctx;
-        if provided_originals.len() == k {
-            // All originals are present, so skip the Reed-Solomon decode and re-encode the
-            // recovery shards to verify the rebuilt commitment.
-            let mut shards: Vec<&[u8]> = vec![&[]; k];
-            for &(idx, shard) in &provided_originals {
-                shards[idx] = shard;
-            }
-            return verify_codeword::<H, S>(ctx, shard_digests, &provided_recoveries, &shards);
-        }
-
-        // An original is missing: recover it and read the missing recovery shards straight out of
-        // one decode (decode-reveal), so no separate re-encode is needed. The caller feeds exactly
-        // `k` shards (surplus recoveries were trimmed and their digests cleared), so every
-        // reconstructed shard is the unique Reed-Solomon output for those `k` inputs and the root
-        // check binds it to the commitment, like in `striped::decode_reveal`.
-        let mut decoder = Cached::take(
-            &CACHED_DECODER,
-            || Decoder::new(k, m, shard_len),
-            |dec| dec.reset(k, m, shard_len),
-        )
-        .map_err(Error::ReedSolomon)?;
-        for (idx, shard) in &provided_originals {
-            decoder
-                .add_original_shard(*idx, shard)
-                .map_err(Error::ReedSolomon)?;
-        }
-        for (idx, shard) in &provided_recoveries {
-            decoder
-                .add_recovery_shard(*idx, shard)
-                .map_err(Error::ReedSolomon)?;
-        }
-        let decoding = decoder
-            .decode_with_recovery()
-            .map_err(Error::ReedSolomon)?
-            .expect("decode runs only when an original is missing");
-
-        let mut originals: Vec<&[u8]> = vec![&[]; k];
-        for &(idx, shard) in &provided_originals {
-            originals[idx] = shard;
-        }
-        for (idx, shard) in decoding.original_iter() {
-            originals[idx] = shard;
-        }
-        let mut recoveries: Vec<&[u8]> = vec![&[]; m];
-        for &(idx, shard) in &provided_recoveries {
-            recoveries[idx] = shard;
-        }
-        for (idx, shard) in decoding.recovery_iter() {
-            recoveries[idx] = shard;
-        }
-
-        verify_root::<H, S>(ctx, shard_digests, &originals, &recoveries)
-    }
-
-    /// Re-encode the recovery shards from the originals, then verify the commitment via
-    /// [`verify_reencoded`].
-    fn verify_codeword<H: Hasher, S: Strategy>(
-        ctx: &DecodeCtx<'_, H, S>,
-        shard_digests: Vec<Option<H::Digest>>,
-        provided_recoveries: &[(usize, &[u8])],
-        originals: &[&[u8]],
-    ) -> Result<Vec<u8>, Error> {
-        let &DecodeCtx {
-            k, m, shard_len, ..
-        } = ctx;
-        let mut encoder = Cached::take(
-            &CACHED_ENCODER,
-            || Encoder::new(k, m, shard_len),
-            |enc| enc.reset(k, m, shard_len),
-        )
-        .map_err(Error::ReedSolomon)?;
-        for shard in originals.iter().take(k) {
-            encoder
-                .add_original_shard(shard)
-                .map_err(Error::ReedSolomon)?;
-        }
-        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-        let recovery_refs: Vec<&[u8]> = (0..m)
-            .map(|i| {
-                encoding
-                    .recovery(i)
-                    .expect("recovery index must be in range")
-            })
-            .collect();
-
-        verify_reencoded::<H, S>(
-            ctx,
-            shard_digests,
-            originals,
-            &recovery_refs,
-            provided_recoveries,
-        )
-    }
-}
-
 /// Decode data from a set of [`CheckedChunk`]s.
 ///
 /// It is assumed that all chunks have already been verified against the given root using
@@ -1093,6 +982,9 @@ fn decode<'a, H: Hasher, S: Strategy>(
     let n = total as usize;
     let k = min as usize;
     let m = n - k;
+
+    // Reject unsupported shard counts before allocating any buffer.
+    validate_counts(k, m)?;
     let mut chunks = chunks.peekable();
     let Some(first) = chunks.peek() else {
         return Err(Error::NotEnoughChunks);
@@ -1168,20 +1060,14 @@ fn decode<'a, H: Hasher, S: Strategy>(
             shard_len / SHARD_CHUNK_BYTES,
             NZUsize!(MIN_STRIPE_BYTES / SHARD_CHUNK_BYTES),
             SHARD_CHUNK_BYTES * n,
-            |batches| match batches {
-                None => sequential::decode::<H, S>(
-                    &ctx,
-                    shard_digests,
-                    provided_originals,
-                    provided_recoveries,
-                ),
-                Some(batches) => striped::decode_reveal::<H, S>(
+            |batches| {
+                striped::decode_reveal::<H, S>(
                     &ctx,
                     batches,
                     shard_digests,
                     provided_originals,
                     provided_recoveries,
-                ),
+                )
             },
         )
     } else {
@@ -1189,20 +1075,14 @@ fn decode<'a, H: Hasher, S: Strategy>(
             shard_len / SHARD_CHUNK_BYTES,
             NZUsize!(MIN_STRIPE_BYTES / SHARD_CHUNK_BYTES),
             SHARD_CHUNK_BYTES * n,
-            |batches| match batches {
-                None => sequential::decode::<H, S>(
-                    &ctx,
-                    shard_digests,
-                    provided_originals,
-                    provided_recoveries,
-                ),
-                Some(batches) => striped::decode::<H, S>(
+            |batches| {
+                striped::decode::<H, S>(
                     &ctx,
                     batches,
                     shard_digests,
                     provided_originals,
                     provided_recoveries,
-                ),
+                )
             },
         )
     }
@@ -1397,7 +1277,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 mod tests {
     use super::*;
     use bytes::Buf as _;
-    use commonware_codec::Encode;
+    use commonware_codec::{Decode as _, Encode};
     use commonware_cryptography::Sha256;
     use commonware_invariants::minifuzz;
     use commonware_parallel::{Rayon, Sequential};
@@ -1713,7 +1593,7 @@ mod tests {
             extra_shards: NZU16!(32),
         };
         let payloads = (0..64)
-            .map(|i| vec![i as u8; if i < 8 { 8192 - i * 64 } else { 0 }])
+            .map(|i| vec![i as u8; if i < 8 { 8192 - i * 64 } else { 2 }])
             .collect::<Vec<_>>();
         let (root, chunks) = build_chunks(&payloads);
         let shards = chunks
@@ -2103,8 +1983,8 @@ mod tests {
         assert_eq!(decoded, data);
     }
 
-    /// Striped recovery decode must be byte-identical to the sequential (full-shard)
-    /// path. The striped path requires shards of at least
+    /// Multi-stripe recovery decode must be byte-identical to the single-stripe
+    /// path. The multi-stripe path requires shards of at least
     /// `2 * MIN_STRIPE_BYTES`, so this sweeps payload sizes and shard counts that land on
     /// several stripe-count boundaries under a parallel `Strategy`, decoding from a
     /// set with as many recoveries as possible and checking the result
@@ -2150,9 +2030,8 @@ mod tests {
         }
     }
 
-    /// All `k` originals provided under a parallel strategy must round-trip via the striped
-    /// re-encode-and-verify path (`striped::decode`), which other tests only reach in the rejection
-    /// direction.
+    /// All `k` originals provided under a parallel strategy must round-trip via the multi-stripe
+    /// re-encode-and-verify path (`striped::decode`).
     #[test]
     fn test_striped_all_originals_decode() {
         let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
@@ -2209,29 +2088,27 @@ mod tests {
                         NZUsize!(MIN_STRIPE_BYTES / SHARD_CHUNK_BYTES),
                         SHARD_CHUNK_BYTES * (k + m),
                         |batches| {
-                            batches
-                                .expect("must split into stripes")
-                                .try_map_collect_vec(
-                                    |ranges| {
-                                        let ranges = striped::byte_ranges(shard_len, ranges);
-                                        tiled |= ranges.iter().any(|range| {
-                                            striped::tiles(k, m, range.clone()).count() > 1
-                                        });
-                                        let groups = striped::stripe_columns(
-                                            &mut striped_recovery,
-                                            shard_len,
-                                            &ranges,
-                                        );
-                                        ranges.into_iter().zip(groups)
-                                    },
-                                    |(range, out)| {
-                                        striped::encode_recovery_into(k, m, range, &originals, out)
-                                    },
-                                )
+                            batches.try_map_collect_vec(
+                                |ranges| {
+                                    let ranges = striped::byte_ranges(shard_len, ranges);
+                                    tiled |= ranges.iter().any(|range| {
+                                        striped::tiles(k, m, range.clone()).count() > 1
+                                    });
+                                    let groups = striped::stripe_columns(
+                                        &mut striped_recovery,
+                                        shard_len,
+                                        &ranges,
+                                    );
+                                    ranges.into_iter().zip(groups)
+                                },
+                                |(range, out)| {
+                                    striped::encode_recovery_into(k, m, range, &originals, out)
+                                },
+                            )
                         },
                     )
                     .unwrap();
-                assert!(results.len() >= 2);
+                assert!(results.len() >= 2, "must split into stripes");
 
                 // A single full-width encode must produce the identical recovery buffer.
                 let mut encoder = Encoder::new(k, m, shard_len).unwrap();
@@ -2325,7 +2202,7 @@ mod tests {
 
     /// Encode `data` canonically, apply `tamper`, rebuild a (malicious) commitment over the
     /// tampered shards, and decode the `selected` shard indices with `strategy`. Generic over
-    /// [`Strategy`] so the same attack drives both the sequential and striped decode paths.
+    /// [`Strategy`] so the same attack drives both the single-stripe and multi-stripe decode paths.
     fn decode_tampered_codeword<S: Strategy>(
         total: u16,
         min: u16,
@@ -2398,20 +2275,20 @@ mod tests {
 
     #[test]
     fn test_adversarial_rejection_sequential_small() {
-        // Small payload: striping never engages, so this exercises the sequential path
+        // Small payload: striping never engages, so this exercises the single-stripe path
         // (matching the rest of the small-data adversarial tests).
         assert_adversarial_rejected(12, 4, &[0xCDu8; 30], &Sequential);
     }
 
-    /// The striped decode path re-implements every consensus-critical rejection check in a
-    /// separate code path from the sequential one. Drive each malicious scenario through both
-    /// paths on the same large payload and require identical (Inconsistent) verdicts.
+    /// Splitting a decode into stripes must not change any consensus-critical rejection. Drive
+    /// each malicious scenario through the single-stripe and multi-stripe paths on the same large
+    /// payload and require identical (Inconsistent) verdicts.
     #[test]
     fn test_adversarial_rejection_striped_matches_sequential() {
         let total = 12u16;
         let min = 4u16;
 
-        // Force the striped path with enough complete blocks for at least two stripes.
+        // Force the multi-stripe path with enough complete blocks for at least two stripes.
         let data = vec![0xABu8; 64 * 1024];
         let shard_len = canonical_shard_len(data.len(), min as usize);
         let rayon = Rayon::new(NZUsize!(4)).unwrap().manual();
@@ -2420,12 +2297,12 @@ mod tests {
             "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
-        // Same attacks, same data: the striped path must reject identically to sequential.
+        // Same attacks, same data: the multi-stripe path must reject identically to one stripe.
         assert_adversarial_rejected(total, min, &data, &Sequential);
         assert_adversarial_rejected(total, min, &data, &rayon);
 
         // Sanity: an untampered mixed (some originals + a recovery) set still decodes via the
-        // striped path, forcing striped::decode_reveal to reconstruct an original.
+        // multi-stripe path, forcing striped::decode_reveal to reconstruct an original.
         let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &Sequential).unwrap();
         let mixed = [0u16, 1, 2, 4]
             .into_iter()
@@ -2464,6 +2341,164 @@ mod tests {
             "vendored Reed-Solomon recovery output changed; re-verify the striping \
              assumption before updating this fixture"
         );
+    }
+
+    /// Returns the shard width this thread's cached decoder was last configured for.
+    fn cached_decoder_width() -> usize {
+        CACHED_DECODER.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let decoder = slot.1.as_mut().expect("decoder must be cached");
+            match decoder.add_original_shard(0, [0u8; 0]) {
+                Err(RsError::DifferentShardSize {
+                    shard_bytes,
+                    got: 0,
+                }) => shard_bytes,
+                other => panic!("unexpected decoder state: {other:?}"),
+            }
+        })
+    }
+
+    /// Returns the shard width this thread's cached encoder was last configured for.
+    fn cached_encoder_width() -> usize {
+        CACHED_ENCODER.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let encoder = slot.1.as_mut().expect("encoder must be cached");
+            match encoder.add_original_shard([0u8; 0]) {
+                Err(RsError::DifferentShardSize {
+                    shard_bytes,
+                    got: 0,
+                }) => shard_bytes,
+                other => panic!("unexpected encoder state: {other:?}"),
+            }
+        })
+    }
+
+    /// Single-stripe coding configures the thread-local coders for one tile at a time, so a wide
+    /// shard never leaves full-width work cached, whether coding succeeds or fails.
+    #[test]
+    fn test_single_stripe_coding_caches_tile_width() {
+        let total = 96u16;
+        let min = 32u16;
+        let (k, m) = (min as usize, (total - min) as usize);
+
+        // The shard spans several tiles, so its last tile is narrower than the shard.
+        let shard_len = 17 * MIN_STRIPE_BYTES + 2;
+        let tile = striped::tiles(k, m, 0..shard_len)
+            .last()
+            .expect("a nonempty shard has a tile")
+            .len();
+        assert!(striped::tiles(k, m, 0..shard_len).count() > 1);
+        assert!(tile < shard_len);
+        let data: Vec<u8> = (0..k * shard_len - u32::SIZE)
+            .map(|i| (i % 251) as u8)
+            .collect();
+
+        // Encoding leaves the encoder configured for the last tile.
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &Sequential).unwrap();
+        assert_eq!(chunks[0].shard.len(), shard_len);
+        assert_eq!(cached_encoder_width(), tile);
+
+        // Recovering every original leaves the decoder configured for the last tile.
+        let recoveries = chunks[k..2 * k]
+            .iter()
+            .map(|chunk| checked(root, chunk.clone()))
+            .collect::<Vec<_>>();
+        let decoded =
+            decode::<Sha256, _>(total, min, &root, recoveries.iter(), &Sequential).unwrap();
+        assert_eq!(decoded, data);
+        assert_eq!(cached_decoder_width(), tile);
+
+        // Re-encoding from every original leaves the encoder configured for the last tile.
+        let originals = chunks[..k]
+            .iter()
+            .map(|chunk| checked(root, chunk.clone()))
+            .collect::<Vec<_>>();
+        let decoded =
+            decode::<Sha256, _>(total, min, &root, originals.iter(), &Sequential).unwrap();
+        assert_eq!(decoded, data);
+        assert_eq!(cached_encoder_width(), tile);
+
+        // A recovery that fails the commitment check leaves the decoder configured for the
+        // last tile.
+        let selected = (min..2 * min).collect::<Vec<_>>();
+        let result = decode_tampered_codeword(
+            total,
+            min,
+            &data,
+            &selected,
+            tamper_flip_recovery,
+            &Sequential,
+        );
+        assert!(matches!(result, Err(Error::Inconsistent)), "{result:?}");
+        assert_eq!(cached_decoder_width(), tile);
+    }
+
+    /// A chunk decodes when it is no wider than the maximum data produces, and a wider chunk is
+    /// rejected.
+    #[test]
+    fn test_read_cfg_bounds_chunk_width() {
+        type TestChunk = Chunk<<Sha256 as Hasher>::Digest>;
+        for (min, extra) in [(1u16, 1u16), (2, 2), (4, 6), (34, 66)] {
+            let config = Config {
+                minimum_shards: NZU16!(min),
+                extra_shards: NZU16!(extra),
+            };
+            for data_len in [0, 1, 2 * usize::from(min), 1000, 4099] {
+                // Encoding exactly the maximum data produces a chunk that decodes.
+                let cfg = (config, data_len);
+                let (_, chunks) =
+                    RS::encode(&config, vec![0; data_len].as_slice(), &STRATEGY).unwrap();
+                assert!(TestChunk::decode_cfg(chunks[0].encode(), &cfg).is_ok());
+
+                // Enough extra data to widen the chunk is rejected.
+                let width = chunks[0].shard.len();
+                let wider = (data_len..)
+                    .find(|&len| canonical_shard_len(len, usize::from(min)) > width)
+                    .unwrap();
+                let (_, chunks) =
+                    RS::encode(&config, vec![0; wider].as_slice(), &STRATEGY).unwrap();
+                assert!(TestChunk::decode_cfg(chunks[0].encode(), &cfg).is_err());
+            }
+
+            // A maximum beyond what encoding accepts decodes without overflow.
+            let (_, chunks) = RS::encode(&config, [0u8; 8].as_slice(), &STRATEGY).unwrap();
+            assert!(TestChunk::decode_cfg(chunks[0].encode(), &(config, usize::MAX)).is_ok());
+        }
+    }
+
+    /// Shards of zero or odd width are rejected at admission, individually and in batches.
+    #[test]
+    fn test_check_rejects_invalid_shard_width() {
+        let config = Config {
+            minimum_shards: NZU16!(4),
+            extra_shards: NZU16!(8),
+        };
+        for width in [0, 3, 2 * MIN_STRIPE_BYTES + 1] {
+            let (root, chunks) = build_chunks(&vec![vec![0u8; width]; 12]);
+            let invalid = |result: &Result<_, Error>| {
+                matches!(
+                    result,
+                    Err(Error::ReedSolomon(RsError::InvalidShardSize { shard_bytes }))
+                        if *shard_bytes == width
+                )
+            };
+
+            // Each shard is rejected individually.
+            for chunk in &chunks {
+                assert!(invalid(&RS::check(&config, &root, chunk.index, chunk)));
+            }
+
+            // The same shards are rejected as a batch.
+            let batch = chunks
+                .iter()
+                .map(|chunk| (chunk.index, chunk))
+                .collect::<Vec<_>>();
+            assert!(
+                RS::check_many(&config, &root, &batch, &STRATEGY)
+                    .iter()
+                    .all(invalid)
+            );
+        }
     }
 
     #[test]
@@ -2831,7 +2866,7 @@ mod tests {
         let shard_len = canonical_shard_len(data.len(), min as usize);
         assert!(
             shard_len >= 2 * MIN_STRIPE_BYTES,
-            "test must exercise the striped path (shard_len={shard_len})"
+            "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
         // Provide originals 0,1 and recoveries 4,5,6 (5 > k=4, originals 2,3 missing). The
@@ -2898,6 +2933,23 @@ mod tests {
                 original_count: _,
                 recovery_count: _,
             }))
+        ));
+    }
+
+    /// Decoding rejects unsupported shard counts before inspecting any chunk.
+    #[test]
+    fn test_decode_rejects_unsupported_shard_counts() {
+        let data = vec![42u8; 1000];
+        let (root, chunks) = encode::<Sha256, _>(10, 4, data.as_slice(), &STRATEGY).unwrap();
+        let checked = chunks
+            .into_iter()
+            .map(|c| checked(root, c))
+            .collect::<Vec<_>>();
+        let result =
+            decode::<Sha256, _>(u16::MAX, u16::MAX / 2 - 1, &root, checked.iter(), &STRATEGY);
+        assert!(matches!(
+            result,
+            Err(Error::ReedSolomon(RsError::UnsupportedShardCount { .. }))
         ));
     }
 
