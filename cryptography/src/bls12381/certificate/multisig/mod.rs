@@ -294,16 +294,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Verifies a certificate.
-    pub fn verify_certificate<'a, S, R, D>(
+    pub fn verify_certificate<'a, S, D>(
         &self,
-        _rng: &mut R,
         subject: S::Subject<'a, D>,
         certificate: &Certificate<V>,
     ) -> bool
     where
         S: Scheme,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRng,
         D: Digest,
     {
         let Some((agg_public, signature)) = self.prepare_certificate::<S>(certificate) else {
@@ -339,7 +337,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let (first, rest) = certificates.into_parts();
         let mut rest = rest.peekable();
         if rest.peek().is_none() {
-            return self.verify_certificate::<S, _, _>(rng, first.0, first.1);
+            return self.verify_certificate::<S, _>(first.0, first.1);
         }
 
         let mut publics = Vec::new();
@@ -564,7 +562,7 @@ macro_rules! impl_certificate_bls12381_multisig {
 
             fn verify_certificate<R, D>(
                 &self,
-                rng: &mut R,
+                _rng: &mut R,
                 subject: Self::Subject<'_, D>,
                 certificate: &Self::Certificate,
                 _strategy: &impl commonware_parallel::Strategy,
@@ -574,7 +572,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 D: $crate::Digest,
             {
                 self.generic
-                    .verify_certificate::<Self, _, D>(rng, subject, certificate)
+                    .verify_certificate::<Self, D>(subject, certificate)
             }
 
             fn verify_certificates<'a, R, D, I>(
