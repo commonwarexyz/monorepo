@@ -9,10 +9,10 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-dylint_linting = "6.0.0"
+dylint_linting = "6.0.1"
 
 [dev-dependencies]
-dylint_testing = "6.0.0"
+dylint_testing = "6.0.1"
 
 [package.metadata.rust-analyzer]
 rustc_private = true
