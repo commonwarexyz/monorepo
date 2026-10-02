@@ -2352,8 +2352,8 @@ mod tests {
     /// while a higher same-term notarization survives in some journals. Nodes
     /// stuck below that view must be able to fetch the exact-view notarization
     /// (a higher-view floor cannot substitute for certification's per-view
-    /// parent requirement) or the cluster wedges permanently (see
-    /// [`resolver::State::get`]).
+    /// parent requirement) or the cluster wedges permanently (see the resolver's
+    /// `State::produce`).
     #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown_stable_leader_optimistic() {

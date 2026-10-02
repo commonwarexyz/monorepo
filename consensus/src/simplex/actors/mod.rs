@@ -8,7 +8,7 @@ pub mod voter;
 ///
 /// The wire key names only a view, so a responder cannot tell which certificate was
 /// asked for and may answer with one that does not settle the request. Keeping the
-/// ask local lets the requester recognize that case (see [resolver::Actor::settled]).
+/// ask local lets the requester recognize that case.
 ///
 /// Only three of the four combinations occur: background repair always wants a
 /// nullification, while proposal ancestry wants either kind.
