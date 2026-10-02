@@ -2672,9 +2672,11 @@ mod tests {
     /// Switching wrappers at an epoch boundary finalizes and delivers the chain across it.
     ///
     /// Each round is routed to a wrapper by its epoch: the old wrapper handles epoch 0 and the new
-    /// wrapper handles epoch 1, starting from the epoch 0 boundary block.
+    /// wrapper handles epoch 1. A Byzantine validator leads every fourth view with an
+    /// application-invalid block, which the wrapper for that epoch rejects.
     #[test_traced("WARN")]
     fn test_standard_switch_wrapper_at_epoch_boundary() {
+        const INVALID: u64 = u64::MAX;
         for (old, new) in [
             (WrapperKind::Inline, WrapperKind::Deferred),
             (WrapperKind::Deferred, WrapperKind::Inline),
@@ -2696,69 +2698,132 @@ mod tests {
                     participants.clone(),
                 )
                 .await;
-                let me = participants[0].clone();
                 let setup = StandardHarness::setup_validator(
                     context.child("validator"),
                     &mut oracle,
-                    me.clone(),
+                    participants[0].clone(),
                     ConstantProvider::new(schemes[0].clone()),
                 )
                 .await;
                 let app = setup.application;
                 let mut marshal = setup.mailbox;
+                let verifier =
+                    || MockVerifyingApp::new().with_reject(|block: &B| block.timestamp == INVALID);
                 let mut wrappers = [
-                    Wrapper::new(
-                        old,
-                        context.child("old"),
-                        MockVerifyingApp::new(),
-                        marshal.clone(),
-                    ),
-                    Wrapper::new(
-                        new,
-                        context.child("new"),
-                        MockVerifyingApp::new(),
-                        marshal.clone(),
-                    ),
+                    Wrapper::new(old, context.child("old"), verifier(), marshal.clone()),
+                    Wrapper::new(new, context.child("new"), verifier(), marshal.clone()),
                 ];
+                let leader =
+                    |view: View| participants[view.get() as usize % participants.len()].clone();
+                let byzantine = participants[1].clone();
 
                 // Verify, certify, and finalize every block of epoch 0 and the first blocks of
-                // epoch 1. Views restart in epoch 1, whose first block builds on the epoch 0
-                // boundary block.
+                // epoch 1, through its second Byzantine view.
                 let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
                 let boundary = epocher.last(Epoch::zero()).unwrap();
-                let tip = boundary.next().next();
+                let tip = Height::new(boundary.get() + 4);
                 let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let mut parent = (View::zero(), genesis.digest());
                 let mut epoch = Epoch::zero();
                 let mut view = View::zero();
+                let mut missed = false;
                 let mut chain = vec![genesis.digest()];
                 for height in (1..=tip.get()).map(Height::new) {
                     let next = epocher.containing(height).unwrap().epoch();
+
+                    // Views restart in epoch 1, whose first block builds on the epoch 0 boundary
+                    // block.
                     if next != epoch {
                         epoch = next;
                         view = View::zero();
                         parent.0 = View::zero();
                     }
+                    let kind = if epoch.is_zero() { old } else { new };
+                    let wrapper = &mut wrappers[usize::from(!epoch.is_zero())];
                     view = view.next();
+
+                    // The Byzantine leader's block carries the consensus context but fails
+                    // application verification.
+                    if leader(view) == byzantine {
+                        let round = Round::new(epoch, view);
+                        let block_context = Ctx {
+                            round,
+                            leader: byzantine.clone(),
+                            parent,
+                        };
+                        let block =
+                            B::new::<Sha256>(block_context.clone(), parent.1, height, INVALID);
+                        let digest = block.digest();
+                        assert!(marshal.verified(round, block).await);
+                        match kind {
+                            // Inline validators reject the block, so it is never notarized.
+                            WrapperKind::Inline => assert!(
+                                !wrapper
+                                    .verify(block_context, digest)
+                                    .await
+                                    .await
+                                    .expect("verify result missing"),
+                                "{kind:?}: Byzantine block at {round} should not verify"
+                            ),
+
+                            // Deferred validators vote to notarize without waiting for application
+                            // verification, and the block is notarized. The validator alternates
+                            // between verifying the proposal and skipping verification, and
+                            // certification returns the application's verdict either way.
+                            WrapperKind::Deferred => {
+                                if !missed {
+                                    assert!(
+                                        wrapper
+                                            .verify(block_context, digest)
+                                            .await
+                                            .await
+                                            .expect("verify result missing"),
+                                        "{kind:?}: Byzantine block at {round} should verify"
+                                    );
+                                }
+                                let notarization = StandardHarness::make_notarization(
+                                    Proposal {
+                                        round,
+                                        parent: parent.0,
+                                        payload: digest,
+                                    },
+                                    &schemes,
+                                    QUORUM,
+                                );
+                                StandardHarness::report_notarization(&mut marshal, notarization)
+                                    .await;
+                                assert!(
+                                    !wrapper
+                                        .certify(round, digest)
+                                        .await
+                                        .await
+                                        .expect("certify result missing"),
+                                    "{kind:?}: Byzantine block at {round} should not certify"
+                                );
+                                missed = !missed;
+                            }
+                        }
+                        view = view.next();
+                    }
+
+                    // The next leader builds on the last valid block, skipping any Byzantine view.
                     let round = Round::new(epoch, view);
                     let block_context = Ctx {
                         round,
-                        leader: me.clone(),
+                        leader: leader(view),
                         parent,
                     };
                     let block =
                         B::new::<Sha256>(block_context.clone(), parent.1, height, height.get());
                     let digest = block.digest();
                     assert!(marshal.verified(round, block).await);
-
-                    let wrapper = &mut wrappers[usize::from(!epoch.is_zero())];
                     assert!(
                         wrapper
                             .verify(block_context, digest)
                             .await
                             .await
                             .expect("verify result missing"),
-                        "{old:?} -> {new:?}: block at {height} should verify"
+                        "{kind:?}: block at {round} should verify"
                     );
                     assert!(
                         wrapper
@@ -2766,7 +2831,7 @@ mod tests {
                             .await
                             .await
                             .expect("certify result missing"),
-                        "{old:?} -> {new:?}: block at {height} should certify"
+                        "{kind:?}: block at {round} should certify"
                     );
                     let finalization = StandardHarness::make_finalization(
                         Proposal {
