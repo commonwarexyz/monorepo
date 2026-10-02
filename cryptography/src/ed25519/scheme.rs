@@ -330,7 +330,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 /// Verifies with the in-tree SIMD backend when the CPU has one and the batch is large enough to
 /// gain from it, and with dalek otherwise.
 pub struct Batch {
-    items: Vec<(ed_core::VerificationKey, [u8; SIGNATURE_LENGTH], Vec<u8>)>,
+    verifier: ed_core::batch::Verifier<Vec<u8>>,
 }
 
 impl Batch {
@@ -341,23 +341,14 @@ impl Batch {
         curve_batch::is_accelerated() && len >= if parallelism > 1 { 256 } else { 8 }
     }
 
-    /// Queues a signature over its already-framed payload.
-    fn add_payload(&mut self, payload: Vec<u8>, public_key: &PublicKey, signature: &Signature) {
-        self.items.push((public_key.key, signature.raw, payload));
-    }
-
     fn verify_dalek<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
-        let mut verifier = ed_core::batch::Verifier::new(self.items.len());
-        for (key, signature, payload) in self.items {
-            verifier.queue(key, ed_core::Signature::from(signature), payload);
-        }
-        verifier.verify(rng, strategy).is_ok()
+        self.verifier.verify(rng, strategy).is_ok()
     }
 
     fn verify_curve<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
-        let mut verifier = curve_batch::Verifier::new(self.items.len());
-        for (key, signature, payload) in self.items {
-            verifier.queue(*key.as_bytes(), signature, payload);
+        let mut verifier = curve_batch::Verifier::new(self.verifier.len());
+        for (key, signature, payload) in self.verifier.into_encoded() {
+            verifier.queue(key, signature, payload);
         }
         verifier.verify(rng, strategy)
     }
@@ -368,7 +359,7 @@ impl BatchVerifier for Batch {
 
     fn new(capacity: usize) -> Self {
         Self {
-            items: Vec::with_capacity(capacity),
+            verifier: ed_core::batch::Verifier::new(capacity),
         }
     }
 
@@ -379,12 +370,13 @@ impl BatchVerifier for Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        self.add_payload(union_unique(namespace, message), public_key, signature);
+        self.verifier
+            .add_payload(union_unique(namespace, message), public_key, signature);
         true
     }
 
     fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
-        if Self::uses_curve(self.items.len(), strategy.manual().parallelism()) {
+        if Self::uses_curve(self.verifier.len(), strategy.manual().parallelism()) {
             self.verify_curve(rng, strategy)
         } else {
             self.verify_dalek(rng, strategy)
@@ -743,8 +735,8 @@ mod tests {
         let v1 = vector_1();
         let v2 = vector_2();
         let mut batch = ed25519::Batch::new(2);
-        batch.add_payload(v1.2, &v1.1, &v1.3);
-        batch.add_payload(v2.2, &v2.1, &v2.3);
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
@@ -756,8 +748,10 @@ mod tests {
         bad_signature[3] = 0xff;
 
         let mut batch = Batch::new(2);
-        batch.add_payload(v1.2, &v1.1, &v1.3);
-        batch.add_payload(v2.2, &v2.1, &Signature::decode(bad_signature).unwrap());
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch
+            .verifier
+            .add_payload(v2.2, &v2.1, &Signature::decode(bad_signature).unwrap());
         assert!(!batch.verify(&mut test_rng(), &Sequential));
     }
 
@@ -773,8 +767,8 @@ mod tests {
         let v2 = vector_2();
         // The capacity is a hint: adding more items must still verify.
         let mut batch = Batch::new(1);
-        batch.add_payload(v1.2, &v1.1, &v1.3);
-        batch.add_payload(v2.2, &v2.1, &v2.3);
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 

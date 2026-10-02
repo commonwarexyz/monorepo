@@ -60,7 +60,7 @@ fn compare(items: &[Item], strategy: &impl Strategy) {
     let batch = || {
         let mut batch = Batch::new(items.len());
         for (key, sig, payload) in items {
-            batch.add_payload(payload.clone(), key, sig);
+            batch.verifier.add_payload(payload.clone(), key, sig);
         }
         batch
     };

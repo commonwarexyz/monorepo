@@ -86,6 +86,18 @@ impl<P: AsRef<[u8]> + Sync> Verifier<P> {
         self.signatures.push((vk, payload, sig));
     }
 
+    /// Returns the number of queued signatures.
+    pub(crate) const fn len(&self) -> usize {
+        self.signatures.len()
+    }
+
+    /// Returns the queued signatures as encoded keys, encoded signatures, and payloads.
+    pub(crate) fn into_encoded(self) -> impl Iterator<Item = ([u8; 32], [u8; 64], P)> {
+        self.signatures
+            .into_iter()
+            .map(|(vk, payload, sig)| (vk.to_bytes(), sig.to_bytes(), payload))
+    }
+
     /// Perform batch verification, returning `Ok(())` if all signatures were
     /// valid and `Err` if the batch is empty or any signature is invalid.
     ///
