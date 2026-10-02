@@ -729,6 +729,9 @@ impl<
                     return (self, None);
                 }
 
+                // Record the certificate, keeping a copy to report if it is new.
+                // This includes certificates the resolver delivered, which it
+                // accepts again (see `resolver::Mailbox::updated`).
                 let forward = certificate.clone();
                 let added;
                 match certificate {
@@ -745,12 +748,6 @@ impl<
                         (self, added) = self.handle_finalization(finalization).await;
                     }
                 }
-
-                // Tell the resolver about a new certificate so it can stop
-                // requesting the view. This update is enqueued before this
-                // iteration can emit any targeted ancestry repair the
-                // certificate exposes. The resolver's unrestricted backfill
-                // therefore cannot be narrowed by that later target.
                 if added {
                     resolver.updated(forward);
                 }

@@ -228,6 +228,9 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a certificate.
+    ///
+    /// A certificate may be sent more than once, including one the resolver
+    /// delivered. Sending it again opens no fetches.
     pub fn updated(&mut self, certificate: Certificate<S, D>) {
         let _ = self.sender.enqueue(MailboxMessage::Updated {
             span: info_span!(
