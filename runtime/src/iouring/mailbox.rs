@@ -15,7 +15,7 @@ use std::mem;
 
 /// Owned work delivered to the worker without borrowing its local state.
 pub enum Message {
-    /// Wake the root future or a task, including a spawned task's first poll.
+    /// Wake the root future or a task (including a spawned task's first poll).
     Wake(Target),
     /// Transfer observation of an operation or timer to a channel.
     Forward(Forward),
