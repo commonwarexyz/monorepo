@@ -524,7 +524,10 @@ pub mod tests {
                 test::{
                     Choice, Inspect, Script, assert_exact, build, colliding_digest, counter, keep,
                     live, test_any_activity_depths, test_any_policy_decisions_match_writes,
-                    test_any_policy_freed_ancestors, test_any_policy_matches_raise,
+                    test_any_policy_freed_ancestors, test_any_policy_hold,
+                    test_any_policy_keep_evict_and_recover, test_any_policy_limits,
+                    test_any_policy_limits_after_colliding_writes, test_any_policy_matches_raise,
+                    test_any_policy_stop,
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
@@ -548,6 +551,7 @@ pub mod tests {
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
         ops::Range,
+        pin::Pin,
         sync::Arc,
     };
     use tracing::warn;
@@ -5687,4 +5691,88 @@ pub mod tests {
     }
 
     test_for_all_variants!(test_current_policy_decisions_match_writes, "WARN");
+    /// [`test_any_policy_limits`] on a current database, whose policy draws candidates from the speculative
+    /// bitmap.
+    async fn test_current_policy_limits<M, C, F, Fut>(context: Context, open_db: F)
+    where
+        M: merkle::Graftable,
+        C: Inspect<M>,
+        Operation<M, C::Update>: Codec,
+        F: Fn(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        let db = open_db(context.child("db"), "limits".into()).await;
+        test_any_policy_limits(context, db, val).await;
+    }
+
+    test_for_all_variants!(test_current_policy_limits, "WARN");
+
+    /// [`test_any_policy_limits_after_colliding_writes`] on a current database, whose policy draws candidates from the speculative
+    /// bitmap.
+    async fn test_current_policy_limits_after_colliding_writes<M, C, F, Fut>(
+        context: Context,
+        open_db: F,
+    ) where
+        M: merkle::Graftable,
+        C: Inspect<M>,
+        Operation<M, C::Update>: Codec,
+        F: Fn(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        let db = open_db(context.child("db"), "colliding".into()).await;
+        test_any_policy_limits_after_colliding_writes(context, db, val).await;
+    }
+
+    test_for_all_variants!(test_current_policy_limits_after_colliding_writes, "WARN");
+
+    /// [`test_any_policy_hold`] on a current database, whose policy draws candidates from the speculative
+    /// bitmap.
+    async fn test_current_policy_hold<M, C, F, Fut>(context: Context, open_db: F)
+    where
+        M: merkle::Graftable,
+        C: Inspect<M>,
+        Operation<M, C::Update>: Codec,
+        F: Fn(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        let db = open_db(context.child("db"), "hold".into()).await;
+        test_any_policy_hold(context, db, val).await;
+    }
+
+    test_for_all_variants!(test_current_policy_hold, "WARN");
+
+    /// [`test_any_policy_stop`] on a current database, whose policy draws candidates from the speculative
+    /// bitmap.
+    async fn test_current_policy_stop<M, C, F, Fut>(context: Context, open_db: F)
+    where
+        M: merkle::Graftable,
+        C: Inspect<M>,
+        Operation<M, C::Update>: Codec,
+        F: Fn(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        let db = open_db(context.child("db"), "stop".into()).await;
+        test_any_policy_stop(context, db, val).await;
+    }
+
+    test_for_all_variants!(test_current_policy_stop, "WARN");
+
+    /// [`test_any_policy_keep_evict_and_recover`] on a current database, whose policy draws
+    /// candidates from the speculative bitmap.
+    async fn test_current_policy_keep_evict_and_recover<M, C, F, Fut>(context: Context, open_db: F)
+    where
+        M: merkle::Graftable,
+        C: Inspect<M>,
+        Operation<M, C::Update>: Codec,
+        F: Fn(Context, String) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = C> + Send + 'static,
+    {
+        let db = open_db(context.child("db"), "recover".into()).await;
+        let reopen = move |ctx: Context| -> Pin<Box<dyn Future<Output = C> + Send>> {
+            Box::pin(open_db(ctx, "recover".into()))
+        };
+        test_any_policy_keep_evict_and_recover(context, db, reopen, val).await;
+    }
+
+    test_for_all_variants!(test_current_policy_keep_evict_and_recover, "WARN");
 }
