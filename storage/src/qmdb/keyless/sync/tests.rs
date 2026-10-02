@@ -1259,22 +1259,18 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
 fn compact_engine_config<DB, S>(
     context: DB::Context,
     source: S,
-    target: sync::CompactTarget<DB::Family, DB::Digest>,
+    target: Target<DB::Family, DB::Digest>,
     db_config: DB::Config,
 ) -> sync::engine::Config<DB, S>
 where
     DB: sync::Database,
     S: sync::SourceFor<DB>,
-    DB::Op: Encode,
 {
     sync::engine::Config {
         context,
         db_config,
         fetch_batch_size: NZU64!(1),
-        target: sync::Target {
-            root: target.root,
-            range: non_empty_range!(target.size - 1, target.size),
-        },
+        target,
         source,
         apply_batch_size: NZU64!(1024),
         max_outstanding_requests: 1,
@@ -1352,9 +1348,9 @@ mod compact_variable_mmr {
         deterministic::Runner::default().start(|_context| async move {
             let source: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: sha256::Digest::from([0; 32]),
-                size: Location::new(1),
+                range: non_empty_range!(Location::new(0), Location::new(1)),
             };
 
             assert!(matches!(
@@ -1462,9 +1458,9 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix, &context);
@@ -1496,6 +1492,46 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
+    fn test_compact_rejects_target_wider_than_last_commit() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-keyless-wide-target-{}", context.next_u64());
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let batch = source
+                .new_batch()
+                .append(vec![1, 2, 3])
+                .merkleize(&source, None, Location::new(1))
+                .await
+                .unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
+
+            // A compact database holds only its last commit, so a target covering more is
+            // rejected before anything is fetched.
+            let wide = Target {
+                root: source.root(),
+                range: non_empty_range!(Location::new(0), source.bounds().end),
+            };
+            let result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+                context.child("client"),
+                Arc::new(source),
+                wide,
+                client_config(&suffix, &context),
+            ))
+            .await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
+            ));
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_compact_sync_recovers_after_invalid_proof() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-bad-proof-{}", context.next_u64());
@@ -1516,9 +1552,9 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -1567,9 +1603,9 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -1622,9 +1658,9 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -1672,9 +1708,9 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -1732,9 +1768,9 @@ mod compact_variable_mmr {
                 .unwrap();
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
-            let stale_target = sync::CompactTarget {
+            let stale_target = Target {
                 root: source.root(),
-                size: source.bounds().end,
+                range: non_empty_range!(source.bounds().end - 1, source.bounds().end),
             };
 
             let batch2 = source
@@ -1745,9 +1781,9 @@ mod compact_variable_mmr {
                 .unwrap();
             let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.commit().await.unwrap();
-            let current_target = sync::CompactTarget {
+            let current_target = Target {
                 root: source.root(),
-                size: source.bounds().end,
+                range: non_empty_range!(source.bounds().end - 1, source.bounds().end),
             };
             assert_ne!(stale_target, current_target);
 
@@ -1831,7 +1867,7 @@ mod compact_variable_mmr {
             let source = ClientDb::init(
                 context.child("cap_source"),
                 source_cfg.clone(),
-                Some(target1.size),
+                Some(target1.range.end()),
             )
             .await
             .unwrap();
@@ -1972,9 +2008,9 @@ mod compact_variable_mmr {
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
             let bounds = source.bounds();
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
 
             let synced: ClientDb = sync::sync(compact_engine_config(
@@ -2042,9 +2078,9 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
             let size = source.bounds().end;
             let last_commit_loc = size - 1;
-            let canonical_target = sync::CompactTarget {
+            let canonical_target = Target {
                 root: source.root(),
-                size,
+                range: non_empty_range!(size - 1, size),
             };
             let source = Arc::new(source);
             let response = fetch_compact_state(&source, canonical_target)
@@ -2078,9 +2114,9 @@ mod compact_variable_mmr {
                     op,
                     pinned_nodes,
                 }]),
-                sync::CompactTarget {
+                Target {
                     root: noncanonical_root,
-                    size,
+                    range: non_empty_range!(size - 1, size),
                 },
                 client_cfg.clone(),
             ))
@@ -2143,9 +2179,9 @@ mod compact_variable_mmr {
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
             let bounds = source.bounds();
-            let target_b = sync::CompactTarget {
+            let target_b = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             assert_ne!(target_b, target_a);
             let source = Arc::new(source);
@@ -2168,7 +2204,7 @@ mod compact_variable_mmr {
                 client_cfg.strategy.clone(),
                 journal,
                 client_cfg.commit_codec_config,
-                target_b.size - 1,
+                target_b.range.start(),
                 pinned_nodes,
                 op,
             )
@@ -2198,12 +2234,12 @@ mod compact_variable_mmr {
                 client_cfg.strategy.clone(),
                 journal,
                 client_cfg.commit_codec_config,
-                target_b.size - 1,
+                target_b.range.start(),
                 pinned_nodes,
                 op,
             )
             .unwrap();
-            assert!(imported.prune(target_b.size).await.is_err());
+            assert!(imported.prune(target_b.range.end()).await.is_err());
 
             // The dropped imports never touched the journal: state A is still there.
             let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
@@ -2285,9 +2321,9 @@ mod compact_variable_mmb {
         deterministic::Runner::default().start(|_context| async move {
             let source: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: sha256::Digest::from([0; 32]),
-                size: Location::new(1),
+                range: non_empty_range!(Location::new(0), Location::new(1)),
             };
 
             assert!(matches!(
@@ -2321,9 +2357,9 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix, &context);
@@ -2375,9 +2411,9 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -2426,9 +2462,9 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -2485,9 +2521,9 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -2542,9 +2578,9 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::CompactTarget {
+            let target = Target {
                 root: source.root(),
-                size: bounds.end,
+                range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -2589,9 +2625,9 @@ mod compact_variable_mmb {
                 .unwrap();
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
-            let stale_target = sync::CompactTarget {
+            let stale_target = Target {
                 root: source.root(),
-                size: source.bounds().end,
+                range: non_empty_range!(source.bounds().end - 1, source.bounds().end),
             };
 
             let batch2 = source
@@ -2602,9 +2638,9 @@ mod compact_variable_mmb {
                 .unwrap();
             let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.commit().await.unwrap();
-            let current_target = sync::CompactTarget {
+            let current_target = Target {
                 root: source.root(),
-                size: source.bounds().end,
+                range: non_empty_range!(source.bounds().end - 1, source.bounds().end),
             };
             assert_ne!(stale_target, current_target);
 
@@ -2688,7 +2724,7 @@ mod compact_variable_mmb {
             let source = ClientDb::init(
                 context.child("cap_source"),
                 source_cfg.clone(),
-                Some(target1.size),
+                Some(target1.range.end()),
             )
             .await
             .unwrap();

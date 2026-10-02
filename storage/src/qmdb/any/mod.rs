@@ -76,7 +76,7 @@ use crate::{
         any::operation::{Operation, Update},
         bitmap::Shared,
         metrics::Metrics,
-        single_operation_root,
+        operation::Committable,
     },
     translator::Translator,
 };
@@ -99,20 +99,6 @@ pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
-
-/// Compute the authenticated root of a newly initialized database without opening storage.
-///
-/// The initial commit never carries metadata, so this root always represents
-/// `CommitFloor(None, 0)`.
-pub fn initial_root<F, U, H>() -> H::Digest
-where
-    F: Family,
-    H: Hasher,
-    U: Update,
-    Operation<F, U>: Codec,
-{
-    single_operation_root::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
-}
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
@@ -228,7 +214,7 @@ where
 
     if log.size() == 0 {
         warn!("Authenticated log is empty, initializing new db");
-        let commit_floor = Operation::CommitFloor(None, Location::new(0));
+        let commit_floor = Operation::initial_commit();
         (log, _) = log.append(&commit_floor).await?;
         log = log.sync().await?;
     }
