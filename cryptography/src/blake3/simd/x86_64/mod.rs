@@ -1,8 +1,12 @@
 //! BLAKE3 kernels for x86_64 with AVX2 and AVX-512.
 
+use super::{Digest, batch};
 use crate::blake3::PAIR_LEN;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use blake3::{BLOCK_LEN, OUT_LEN};
 
+mod avx2;
 mod pair;
 mod row;
 
@@ -83,10 +87,101 @@ fn gather(parts: &[&[u8]], buffer: &mut [u8; PAIR_LEN]) -> Option<usize> {
     Some(len)
 }
 
+/// Hash independent messages in batches of 8 (AVX2).
+pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
+    if let [left, right] = messages
+        && supports_avx2()
+        && let Some(digests) = hash_two(left.as_ref(), right.as_ref())
+    {
+        return Some(digests);
+    }
+    if supports_avx2() {
+        return Some(batch(messages, |inputs, active| {
+            pair_batch(inputs, active).unwrap_or_else(|| {
+                // SAFETY: AVX2 availability was established above.
+                unsafe { avx2::hash_x8(inputs) }
+            })
+        }));
+    }
+    None
+}
+
+/// Keep the pair kernel's temporaries in a separate stack frame from the
+/// general batch dispatcher.
+#[inline(never)]
+fn hash_two(left: &[u8], right: &[u8]) -> Option<Vec<Digest>> {
+    let [left, right] = hash_pair(&[left], &[right])?;
+    Some(Vec::from([Digest(left), Digest(right)]))
+}
+
+/// Hash a batch whose only active lanes are the first two with the two-message
+/// kernel, when both messages fit it.
+///
+/// A pass of the batch kernel costs as much with idle lanes as with full ones,
+/// while the two-message kernel holds each message's state in one vector and
+/// does a fraction of that work. Spare outputs are zero.
+fn pair_batch<const L: usize>(inputs: [&[u8]; L], active: usize) -> Option<[[u8; OUT_LEN]; L]> {
+    if active != 2 {
+        return None;
+    }
+    let pair = hash_pair(&[inputs[0]], &[inputs[1]])?;
+    let mut outputs = [[0u8; OUT_LEN]; L];
+    outputs[..2].copy_from_slice(&pair);
+    Some(outputs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blake3::gather;
+    use crate::blake3::{gather, simd::tests::check_lanes};
+    use commonware_utils::{iter::zip_eq, test_rng};
+    use rand::Rng as _;
+
+    fn reference(parts: &[&[u8]]) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        for part in parts {
+            hasher.update(part);
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Return `count` exactly sized messages of `len` random bytes.
+    fn random(count: usize, len: usize) -> Vec<Box<[u8]>> {
+        let mut rng = test_rng();
+        (0..count)
+            .map(|_| {
+                let mut bytes = vec![0; len].into_boxed_slice();
+                rng.fill_bytes(&mut bytes);
+                bytes
+            })
+            .collect()
+    }
+
+    /// Check sixteen exactly sized messages that end in a partial block against
+    /// the reference.
+    #[test]
+    fn test_partial_blocks_match_reference() {
+        if !supports_avx2() {
+            return;
+        }
+        for len in [1, 63, 65, 129] {
+            let messages = random(16, len);
+            let actual = super::hash_many(&messages).unwrap();
+            for (digest, message) in zip_eq(&actual, &messages) {
+                assert_eq!(digest.as_ref(), reference(&[message]));
+            }
+        }
+    }
+
+    #[test]
+    fn test_avx2_lanes_match_reference() {
+        if !supports_avx2() {
+            return;
+        }
+
+        // SAFETY: AVX2 availability was checked above.
+        check_lanes::<8>(|inputs| unsafe { avx2::hash_x8(inputs) });
+    }
 
     #[test]
     fn test_masked_gather_matches_gather() {
