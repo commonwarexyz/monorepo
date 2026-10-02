@@ -17,6 +17,9 @@ pub(crate) struct Metrics {
     /// Whether the actor has finished startup state sync or recovery.
     pub sync_done: Registered<Gauge>,
 
+    /// Whether state sync refused a tip and finishes at the last recorded one.
+    pub sync_held: Registered<Gauge>,
+
     /// Unfinalized blocks with cached speculative state.
     pub pending_blocks: Registered<Gauge>,
 
@@ -49,6 +52,13 @@ impl Metrics {
             Gauge::default(),
         );
         let _ = sync_done.try_set(0);
+
+        let sync_held = context.register(
+            "sync_held",
+            "Whether state sync refused a tip and finishes at the last recorded one",
+            Gauge::default(),
+        );
+        let _ = sync_held.try_set(0);
 
         let pending_blocks = context.register(
             "pending_blocks",
@@ -94,6 +104,7 @@ impl Metrics {
 
         Self {
             sync_done,
+            sync_held,
             pending_blocks,
             pruned_forks,
             propose_duration: Timed::new(propose_hist),

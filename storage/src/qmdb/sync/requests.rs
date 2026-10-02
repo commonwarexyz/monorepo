@@ -38,8 +38,13 @@ pub(super) struct Requests<F: Family, Op, D: Digest, E> {
     /// which aborts and drops the request's future.
     tracked: HashMap<Id, TrackedRequest<F>>,
 
-    /// Reverse index from location to request ID, for gap detection.
-    by_location: BTreeMap<Location<F>, Id>,
+    /// Reverse index from start location and boundary flag to request ID, for gap detection.
+    by_location: BTreeMap<(Location<F>, bool), Id>,
+}
+
+/// Index key of a request: its start location and whether it is a boundary request.
+const fn key<F: Family>(request: &Request<F>) -> (Location<F>, bool) {
+    (request.start(), matches!(request, Request::Boundary { .. }))
 }
 
 impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
@@ -52,15 +57,15 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         }
     }
 
-    /// Register a request, returning its assigned ID. If a request already exists at the same
-    /// start location, the old one is superseded and aborted.
+    /// Register a request, returning its assigned ID. If a request of the same kind already
+    /// exists at the same start location, the old one is superseded and aborted.
     pub fn insert<Fut>(&mut self, request: Request<F>, make: impl FnOnce(Id) -> Fut) -> Id
     where
         Fut: Future<Output = IndexedFetchResult<F, Op, D, E>> + Send + 'static,
     {
         let id = Id(self.next_id);
         self.next_id += 1;
-        if let Some(old_id) = self.by_location.insert(request.start(), id) {
+        if let Some(old_id) = self.by_location.insert(key(&request), id) {
             self.tracked.remove(&old_id);
         }
         let aborter = self.futures.push(make(id));
@@ -81,7 +86,7 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
             _aborter: _,
         }) = self.tracked.remove(&id)
         {
-            self.by_location.remove(&request.start());
+            self.by_location.remove(&key(&request));
             Some(request)
         } else {
             None
@@ -106,7 +111,7 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
     }
 
     /// Iterate over the maximum operation ranges covered by outstanding requests, in ascending
-    /// order.
+    /// order of start location.
     pub fn ranges(&self) -> impl Iterator<Item = Range<Location<F>>> + '_ {
         self.by_location.values().map(|id| {
             let request = &self
@@ -119,9 +124,17 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         })
     }
 
-    /// Check if a location has an outstanding request.
-    pub fn contains(&self, loc: &Location<F>) -> bool {
-        self.by_location.contains_key(loc)
+    /// Check if a boundary request is outstanding at a location.
+    pub fn boundary(&self, loc: &Location<F>) -> bool {
+        self.by_location.contains_key(&(*loc, true))
+    }
+
+    /// Get the outstanding request of the given kind at a location.
+    #[cfg(test)]
+    pub fn get(&self, loc: &Location<F>, boundary: bool) -> Option<Request<F>> {
+        self.by_location
+            .get(&(*loc, boundary))
+            .map(|id| self.tracked[id].request)
     }
 
     /// Resolves to the next fetch result, or [`Aborted`] if the request was cancelled.

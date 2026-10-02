@@ -58,10 +58,14 @@ pub struct PruneConfig {
     /// Finalized blocks' worth of operations to retain in QMDB beyond marshal's
     /// acknowledgement window plus one.
     ///
-    /// This value is generally safe to set to 0, as QMDB operations below the active range are only
-    /// needed to serve state sync requests for lagging peers. Some network topologies may benefit from
-    /// a non-zero value here to provide a larger buffer for serving state sync requests during periods
-    /// of instability.
+    /// QMDB operations below the active range are only needed to serve state sync requests for
+    /// lagging peers. A peer keeps serving a block's state sync targets for at least about
+    /// `max_pending_acks + 1 + retained_qmdb_blocks` blocks after it. A syncing node is guaranteed
+    /// to converge when each database's tail round trip fits within that window. A database whose
+    /// tail starts below the next target's lower bound, such as a compact database, must also
+    /// finish its tail within about two acknowledgement windows. Some network topologies may
+    /// benefit from a non-zero value here to provide a larger buffer for serving state sync
+    /// requests during periods of instability.
     pub retained_qmdb_blocks: usize,
 }
 
@@ -245,6 +249,7 @@ where
             resolvers: self.resolvers,
             completion: receiver,
             pending_finalizations: Default::default(),
+            held: false,
             pruning: self.pruning,
             metrics,
         };
@@ -407,7 +412,6 @@ mod tests {
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
                     },
                     prune_config: None,
                 },
@@ -466,7 +470,6 @@ mod tests {
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
                     },
                     prune_config: None,
                 },

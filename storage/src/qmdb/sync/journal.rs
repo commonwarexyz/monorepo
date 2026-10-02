@@ -3,7 +3,7 @@ use crate::{
     merkle::{Family, Location},
 };
 use commonware_utils::range::NonEmptyRange;
-use std::future::Future;
+use std::{future::Future, ops::Range};
 
 /// Journal of operations used by a [super::Database]
 pub trait Journal<F: Family>: Sized + Send {
@@ -46,6 +46,12 @@ pub trait Journal<F: Family>: Sized + Send {
 
     /// Append a non-empty batch of operations.
     fn append(self, ops: Vec<Self::Op>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+
+    /// Read the operations in `range`, which must lie within the retained operations.
+    fn read_range(
+        &self,
+        range: Range<Location<F>>,
+    ) -> impl Future<Output = Result<Vec<Self::Op>, Self::Error>> + Send;
 }
 
 impl<F, E, V> Journal<F> for crate::journal::contiguous::variable::Journal<E, V>
@@ -88,6 +94,11 @@ where
     async fn append(self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
         let (journal, _) = self.append_many(Many::Flat(&ops)).await?;
         Ok(journal)
+    }
+
+    async fn read_range(&self, range: Range<Location<F>>) -> Result<Vec<Self::Op>, Self::Error> {
+        let positions = (*range.start..*range.end).collect::<Vec<_>>();
+        Contiguous::read_many(self, &positions).await
     }
 }
 
@@ -132,6 +143,11 @@ where
         let (journal, _) = self.append_many(Many::Flat(&ops)).await?;
         Ok(journal)
     }
+
+    async fn read_range(&self, range: Range<Location<F>>) -> Result<Vec<Self::Op>, Self::Error> {
+        let positions = (*range.start..*range.end).collect::<Vec<_>>();
+        Contiguous::read_many(self, &positions).await
+    }
 }
 
 /// An in-memory operation journal.
@@ -152,7 +168,7 @@ impl<F, E, Op> Journal<F> for Memory<F, E, Op>
 where
     F: Family,
     E: Send,
-    Op: Send + Sync,
+    Op: Clone + Send + Sync,
 {
     type Context = E;
     type Config = ();
@@ -193,6 +209,12 @@ where
     async fn append(mut self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
         self.ops.extend(ops);
         Ok(self)
+    }
+
+    async fn read_range(&self, range: Range<Location<F>>) -> Result<Vec<Self::Op>, Self::Error> {
+        let start = (*range.start - *self.start) as usize;
+        let end = (*range.end - *self.start) as usize;
+        Ok(self.ops[start..end].to_vec())
     }
 }
 

@@ -33,6 +33,7 @@ use commonware_utils::{
 use futures::{FutureExt, pin_mut};
 use rand::Rng as _;
 use std::{
+    collections::BTreeSet,
     num::NonZeroU64,
     sync::{
         Arc,
@@ -163,7 +164,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
 
         // Create the engine
@@ -207,7 +207,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
 
         let result: Result<H::Db, _> = sync::sync(engine_config).await;
@@ -256,7 +255,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
 
         // Perform sync
@@ -332,7 +330,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
 
         let synced_db: H::Db = sync::sync(config).await.unwrap();
@@ -407,7 +404,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -504,7 +500,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -574,7 +569,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -640,7 +634,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -720,7 +713,6 @@ where
                 update_rx: Some(update_receiver),
                 finish_rx: None,
                 reached_target_tx: None,
-                max_retained_roots: 1,
             };
 
             // Send target update with increased bounds
@@ -792,7 +784,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
 
         // Complete the sync
@@ -859,7 +850,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -927,7 +917,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
-            max_retained_roots: 0,
         };
 
         let sync_handle = sync::sync(config);
@@ -1058,7 +1047,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
 
         let sync_handle = sync::sync(config);
@@ -1164,7 +1152,6 @@ where
             update_rx: None,
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
-            max_retained_roots: 1,
         };
 
         let synced_db: H::Db = sync::sync(config)
@@ -1221,7 +1208,6 @@ where
             update_rx: None,
             finish_rx: Some(finish_receiver),
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
 
         let result: Result<H::Db, _> = sync::sync(config).await;
@@ -1271,7 +1257,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: Some(reached_sender),
-            max_retained_roots: 1,
         };
 
         let synced_db: H::Db = sync::sync(config)
@@ -1333,7 +1318,6 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 update_rx: Some(update_receiver),
                 finish_rx: None,
                 reached_target_tx: None,
-                max_retained_roots: 1,
             };
             let mut client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
             loop {
@@ -1450,7 +1434,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         })
         .await
         .unwrap();
@@ -1468,7 +1451,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         })
         .await
         .unwrap();
@@ -1530,7 +1512,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -1896,7 +1877,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
 
         let synced_db: H::Db = sync::sync(config).await.unwrap();
@@ -2061,7 +2041,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
-            max_retained_roots: 1,
         };
 
         let mut engine: Engine<H::Db, _> = Engine::new(config).await.unwrap();
@@ -2119,6 +2098,416 @@ where
             .destroy()
             .await
             .unwrap();
+    });
+}
+
+/// Requests seen by a [GatedSource].
+struct GateLog<F: merkle::Family> {
+    /// Whether new requests are served without waiting for release.
+    open: bool,
+    /// Every request, in arrival order.
+    requests: Vec<Request<F>>,
+    /// Requests waiting for release, with their release handles.
+    held: Vec<(Request<F>, oneshot::Sender<()>)>,
+    /// Requests the inner source answered.
+    served: Vec<Request<F>>,
+}
+
+impl<F: merkle::Family> GateLog<F> {
+    /// Held operation requests whose fetch is still tracked by the engine.
+    fn live_operations(&self) -> impl Iterator<Item = Request<F>> + '_ {
+        self.held
+            .iter()
+            .filter(|(request, tx)| {
+                matches!(request, Request::Operations { .. }) && !tx.is_closed()
+            })
+            .map(|(request, _)| *request)
+    }
+}
+
+/// A source wrapper that records every request and holds it until released before asking the
+/// inner source.
+#[derive(Clone)]
+struct GatedSource<R, F: merkle::Family> {
+    inner: R,
+    log: Arc<Mutex<GateLog<F>>>,
+}
+
+impl<R, F> Source for GatedSource<R, F>
+where
+    F: merkle::Family,
+    R: Source<Family = F, Digest = Digest>,
+    R::Op: Send,
+{
+    type Family = F;
+    type Digest = Digest;
+    type Op = R::Op;
+    type Error = R::Error;
+
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
+        let release = {
+            let mut log = self.log.lock();
+            log.requests.push(request);
+            if log.open {
+                None
+            } else {
+                let (tx, rx) = oneshot::channel();
+                log.held.push((request, tx));
+                Some(rx)
+            }
+        };
+        if let Some(release) = release
+            && release.await.is_err()
+        {
+            return std::future::pending().await;
+        }
+        let result = self.inner.serve(request).await;
+        if result.is_ok() {
+            self.log.lock().served.push(request);
+        }
+        result
+    }
+}
+
+/// Test that target updates keep verified work while the source prunes to each new floor.
+///
+/// Before each update, the source commits and prunes until an in-flight operation request starts
+/// below its retained operations and ends beyond the new floor. Each round first stores a fetched
+/// batch ahead of the held journal tip.
+pub(crate) fn test_target_updates_keep_verified_work_across_pruned_floors<H: SyncTestHarness>()
+where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    const OUTSTANDING: usize = 4;
+    const UPDATES: usize = 3;
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        // Build a source pruned to a floor above zero.
+        let mut db = H::init_db(context.child("source")).await;
+        db = H::apply_ops(db, H::create_ops(256)).await;
+        let floor = db.sync_boundary();
+        db = db.prune(floor).await.unwrap();
+        assert!(floor > Location::new(0));
+        let mut target = Target {
+            root: H::sync_target_root(&db),
+            range: non_empty_range!(floor, db.bounds().end),
+        };
+        let source_db = Arc::new(AsyncRwLock::new(Some(db)));
+        let log = Arc::new(Mutex::new(GateLog {
+            open: false,
+            requests: Vec::new(),
+            held: Vec::new(),
+            served: Vec::new(),
+        }));
+
+        // Start sync against the gated source.
+        let (update_tx, update_rx) = mpsc::channel(1);
+        let config = Config {
+            context: context.child("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            target: target.clone(),
+            source: GatedSource {
+                inner: source_db.clone(),
+                log: log.clone(),
+            },
+            fetch_batch_size: NZU64!(32),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: OUTSTANDING,
+            update_rx: Some(update_rx),
+            finish_rx: None,
+            reached_target_tx: None,
+        };
+
+        // Drive sync alongside the test. A sync error fails the test at once.
+        let sync = async {
+            sync::sync::<DbOf<H>, _>(config)
+                .await
+                .expect("sync must complete")
+        };
+        let drive = async {
+            // Wait for the boundary and operation requests of the first target.
+            while log.lock().held.len() < OUTSTANDING {
+                commonware_runtime::reschedule().await;
+            }
+
+            let mut seed = 1;
+            let mut stored = Vec::new();
+            let mut retained = Vec::new();
+            for _ in 0..UPDATES {
+                // Release the farthest in-flight operation request. The engine has stored its
+                // batch once it issues the next request.
+                let arrivals = {
+                    let mut log = log.lock();
+                    let farthest = log
+                        .live_operations()
+                        .max_by_key(|request| request.start())
+                        .expect("an operation request must be in flight");
+                    let index = log
+                        .held
+                        .iter()
+                        .position(|(request, _)| *request == farthest)
+                        .unwrap();
+                    let (request, tx) = log.held.swap_remove(index);
+                    tx.send(()).unwrap();
+                    stored.push(request);
+                    log.requests.len()
+                };
+                while log.lock().requests.len() == arrivals {
+                    commonware_runtime::reschedule().await;
+                }
+
+                // Commit and prune the source until an in-flight operation request starts below
+                // the retained operations and ends beyond the new floor.
+                let next = loop {
+                    let mut guard = source_db.write().await;
+                    let db =
+                        H::apply_ops(guard.take().unwrap(), H::create_ops_seeded(1, seed)).await;
+                    seed += 1;
+                    let floor = db.sync_boundary();
+                    let db = db.prune(floor).await.unwrap();
+                    let start = db.bounds().start;
+                    let next = Target {
+                        root: H::sync_target_root(&db),
+                        range: non_empty_range!(floor, db.bounds().end),
+                    };
+                    *guard = Some(db);
+                    drop(guard);
+                    assert!(next.range.start() > target.range.start(), "floor must move");
+                    let straddled = log.lock().live_operations().any(|request| {
+                        request.start() < start
+                            && request
+                                .start()
+                                .checked_add(request.max_ops().get())
+                                .unwrap()
+                                > floor
+                    });
+                    if straddled {
+                        break next;
+                    }
+                    assert!(seed < 1000, "floor must straddle an in-flight request");
+                };
+
+                // Some in-flight operation requests start at or above the new floor.
+                retained = log
+                    .lock()
+                    .live_operations()
+                    .filter(|request| request.start() >= next.range.start())
+                    .collect::<Vec<_>>();
+                assert!(!retained.is_empty());
+
+                // Send the update. The engine has handled it once it requests the new boundary.
+                update_tx.send(next.clone()).await.unwrap();
+                let boundary = Request::Boundary {
+                    size: next.range.end(),
+                    start: next.range.start(),
+                };
+                while !log.lock().requests.contains(&boundary) {
+                    commonware_runtime::reschedule().await;
+                }
+                target = next;
+            }
+
+            // A batch stored before an update lies at or above the final floor.
+            let floor = target.range.start();
+            assert!(stored.iter().any(|request| request.start() >= floor));
+
+            // Stop updates and release every request.
+            drop(update_tx);
+            let held = {
+                let mut log = log.lock();
+                log.open = true;
+                std::mem::take(&mut log.held)
+            };
+            for (_, tx) in held {
+                let _ = tx.send(());
+            }
+            (floor, retained)
+        };
+        let (synced, (floor, retained)) = futures::join!(sync, drive);
+
+        // Sync completes at the latest target.
+        let db = source_db.write().await.take().unwrap();
+        assert_eq!(synced.root(), db.root());
+
+        // Requests in flight at or above the final floor survived the last update.
+        let served = std::mem::take(&mut log.lock().served);
+        for request in &retained {
+            assert!(served.contains(request), "{request:?} must be served");
+        }
+
+        // Operations at or above the final floor were served once. Boundary requests repeat
+        // one location and are excluded.
+        let mut seen = BTreeSet::new();
+        for request in &served {
+            let Request::Operations {
+                size,
+                start,
+                max_ops,
+            } = *request
+            else {
+                continue;
+            };
+            let end = start.checked_add(max_ops.get()).unwrap().min(size);
+            for loc in *start.max(floor)..*end {
+                assert!(seen.insert(loc), "location {loc} refetched by {request:?}");
+            }
+        }
+
+        synced.destroy().await.unwrap();
+        db.destroy().await.unwrap();
+    });
+}
+
+/// Test that a target update moving the floor within the synced journal derives pinned nodes
+/// locally instead of requesting a boundary.
+pub(crate) fn test_target_update_derives_pinned_nodes_within_journal<H: SyncTestHarness>()
+where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    derive_pinned_nodes_within_journal::<H>(true);
+}
+
+/// Test that a target update moving the floor of an unpruned target within the synced journal
+/// derives pinned nodes locally without any boundary request.
+pub(crate) fn test_target_update_derives_pinned_nodes_from_unpruned_target<H: SyncTestHarness>()
+where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    derive_pinned_nodes_within_journal::<H>(false);
+}
+
+/// Syncs to a first target, pruned to its floor when `prune` is set, then moves the floor within
+/// the synced journal and checks that the engine reaches the next target with operation requests
+/// only.
+fn derive_pinned_nodes_within_journal<H: SyncTestHarness>(prune: bool)
+where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        // Build a source whose boundary is above zero, pruned to it when requested. A
+        // chunk-aligned boundary needs more operations before it moves above zero.
+        let mut db = H::init_db(context.child("source")).await;
+        db = H::apply_ops(db, H::create_ops(256)).await;
+        let mut rounds = 0;
+        while db.sync_boundary() == Location::new(0) {
+            rounds += 1;
+            assert!(rounds < 64, "boundary must move above zero");
+            db = H::apply_ops(db, H::create_ops(256)).await;
+        }
+        let floor = if prune {
+            let floor = db.sync_boundary();
+            db = db.prune(floor).await.unwrap();
+            assert!(floor > Location::new(0));
+            floor
+        } else {
+            Location::new(0)
+        };
+        let target = Target {
+            root: H::sync_target_root(&db),
+            range: non_empty_range!(floor, db.bounds().end),
+        };
+        let source_db = Arc::new(AsyncRwLock::new(Some(db)));
+        let log = Arc::new(Mutex::new(GateLog {
+            open: true,
+            requests: Vec::new(),
+            held: Vec::new(),
+            served: Vec::new(),
+        }));
+
+        // Sync with an explicit finish so the engine waits at each reached target.
+        let (update_tx, update_rx) = mpsc::channel(1);
+        let (finish_tx, finish_rx) = mpsc::channel(1);
+        let (reached_tx, mut reached_rx) = mpsc::channel(1);
+        let config = Config {
+            context: context.child("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            target: target.clone(),
+            source: GatedSource {
+                inner: source_db.clone(),
+                log: log.clone(),
+            },
+            fetch_batch_size: NZU64!(32),
+            apply_batch_size: NZU64!(16),
+            max_outstanding_requests: 4,
+            update_rx: Some(update_rx),
+            finish_rx: Some(finish_rx),
+            reached_target_tx: Some(reached_tx),
+        };
+        let sync = async {
+            sync::sync::<DbOf<H>, _>(config)
+                .await
+                .expect("sync must complete")
+        };
+        let drive = async {
+            // A pruned first target fetches its pinned nodes with a boundary request. An
+            // unpruned first target needs none.
+            assert_eq!(reached_rx.recv().await.unwrap(), target);
+            let boundary = Request::Boundary {
+                size: target.range.end(),
+                start: target.range.start(),
+            };
+            assert_eq!(log.lock().requests.contains(&boundary), prune);
+            let issued = log.lock().requests.len();
+
+            // Commit and prune the source until the floor moves within the synced journal.
+            let next = {
+                let mut guard = source_db.write().await;
+                let mut db = guard.take().unwrap();
+                let mut round = 0;
+                loop {
+                    round += 1;
+                    assert!(round < 1024, "floor must move");
+                    db = H::apply_ops(db, H::create_ops_seeded(1, round)).await;
+                    if db.sync_boundary() > target.range.start() {
+                        break;
+                    }
+                }
+                let floor = db.sync_boundary();
+                let db = db.prune(floor).await.unwrap();
+                let next = Target {
+                    root: H::sync_target_root(&db),
+                    range: non_empty_range!(floor, db.bounds().end),
+                };
+                *guard = Some(db);
+                next
+            };
+            assert!(next.range.start() > target.range.start());
+            assert!(next.range.start() <= target.range.end());
+
+            // The engine reaches the next target with operation requests only.
+            update_tx.send(next.clone()).await.unwrap();
+            assert_eq!(reached_rx.recv().await.unwrap(), next);
+            let requests = log.lock().requests[issued..].to_vec();
+            assert!(!requests.is_empty());
+            for request in requests {
+                assert!(
+                    matches!(request, Request::Operations { .. }),
+                    "{request:?} must not be issued"
+                );
+            }
+            finish_tx.send(()).await.unwrap();
+        };
+        let (synced, ()) = futures::join!(sync, drive);
+
+        // Sync completes at the latest target.
+        let db = source_db.write().await.take().unwrap();
+        assert_eq!(synced.root(), db.root());
+
+        synced.destroy().await.unwrap();
+        db.destroy().await.unwrap();
     });
 }
 
@@ -3027,6 +3416,21 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_local_pinned_nodes_below_floor() {
                 super::test_local_pinned_nodes_below_floor::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_updates_keep_verified_work_across_pruned_floors() {
+                super::test_target_updates_keep_verified_work_across_pruned_floors::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_update_derives_pinned_nodes_within_journal() {
+                super::test_target_update_derives_pinned_nodes_within_journal::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_update_derives_pinned_nodes_from_unpruned_target() {
+                super::test_target_update_derives_pinned_nodes_from_unpruned_target::<$harness>();
             }
         }
     };

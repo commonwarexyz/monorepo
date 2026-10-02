@@ -1,4 +1,5 @@
 use crate::p2p::wire;
+use bytes::Bytes;
 use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{Recipients, Sender, utils::codec::WrappedSender};
@@ -15,7 +16,7 @@ use rand::seq::SliceRandom;
 use rand_core::Rng;
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     marker::PhantomData,
     mem,
     time::{Duration, SystemTime},
@@ -40,6 +41,32 @@ struct ActiveRequest<P, Key> {
     key: Key,
     peer: P,
     start: SystemTime,
+}
+
+/// A key whose response the consumer is judging.
+struct Judging<P> {
+    /// Start of the request whose response is judged.
+    start: SystemTime,
+    /// A response to another request for the key, received during the judgment.
+    held: Option<Held<P>>,
+}
+
+/// A data response held until the consumer judges an earlier response for the same key.
+struct Held<P> {
+    peer: P,
+    start: SystemTime,
+    elapsed: Duration,
+    response: Bytes,
+}
+
+/// Next step for a key whose judged response was rejected.
+pub enum Rejected<P> {
+    /// Judge the response held during the rejected judgment.
+    Judge(P, Duration, Bytes),
+    /// Another request for the key is active.
+    Wait,
+    /// No request for the key remains.
+    Retry,
 }
 
 /// Throughput of a response in bytes per second (higher is better).
@@ -78,6 +105,25 @@ pub struct Config<P: PublicKey> {
 /// Both types of requests will be retried after a timeout if not resolved (i.e. a response or a
 /// cancellation). Upon retry, requests may either be placed in active or pending state again.
 ///
+/// # Rotation
+///
+/// Retries and hedges prefer eligible peers not yet tried for the key in the current rotation. A
+/// tried peer receives the key again only when no untried peer accepts the send. Once every
+/// eligible peer has been tried, a new rotation begins. Retiring or removing the key ends its
+/// rotation.
+///
+/// # Hedging
+///
+/// A request sent while its key has no other active request is hedged once it has been
+/// outstanding for half the timeout: the key is also sent to an eligible peer without an active
+/// request for the key. A timeout or missing-data response for one request leaves the key to the
+/// other, which is not hedged again.
+///
+/// The other request keeps running while the consumer judges a data response. A data response it
+/// returns during the judgment is held. An accepted response cancels the other request or
+/// discards its held response, and scores it as a timeout if it was sent first. A rejected
+/// response leaves the key to the held response or to the other request.
+///
 /// # Targets
 ///
 /// Peers can be registered as "targets" for specific keys, restricting fetches to only those
@@ -114,19 +160,26 @@ where
     active: PrioritySet<ID, SystemTime>,
     /// Request data for active requests (ID -> request details)
     requests: HashMap<ID, ActiveRequest<P, Key>>,
-    /// Reverse lookup from key to request ID
-    key_to_id: HashMap<Key, ID>,
+    /// Reverse lookup from key to its active request IDs, oldest first
+    key_to_ids: HashMap<Key, Vec<ID>>,
+    /// Keys whose single active request is not yet hedged, ordered by hedge time
+    hedges: PrioritySet<Key, SystemTime>,
+    /// Keys whose data response the consumer is judging
+    judging: HashMap<Key, Judging<P>>,
 
     // Config
     /// Timeout for requests
     timeout: Duration,
+
+    /// How long a request is outstanding before its key is hedged
+    hedge: Duration,
 
     /// Manages pending requests. When a request is registered (for both the first time and after
     /// a retry), it is added to this set.
     ///
     /// Fresh requests precede retries. Within each class, requests are ordered
     /// by the next time they should be attempted. Retried requests use a random
-    /// peer rather than the best-performing peer.
+    /// untried peer rather than the best-performing peer.
     pending: PrioritySet<Key, (bool, SystemTime)>,
 
     /// If no peers are ready to handle a request (all filtered out or send failed), the waiter is set
@@ -144,6 +197,10 @@ where
     /// fallback to other peers. Targets persist through transient failures and are
     /// cleared on successful fetch. Blocked targets are skipped until unblocked.
     targets: HashMap<Key, HashSet<P>>,
+
+    /// Per-key peers attempted in the current rotation. An entry is removed when
+    /// its key is retired, is retained away, or starts a new rotation.
+    tried: HashMap<Key, HashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of throughput in bytes per second)
     performance: GaugeFamily<Peer<P>>,
@@ -193,13 +250,17 @@ where
             request_id: 0,
             active: PrioritySet::new(),
             requests: HashMap::new(),
-            key_to_id: HashMap::new(),
+            key_to_ids: HashMap::new(),
+            hedges: PrioritySet::new(),
+            judging: HashMap::new(),
             timeout: config.timeout,
+            hedge: config.timeout / 2,
             pending: PrioritySet::new(),
             waiter: None,
             retry_timeout: config.retry_timeout,
             priority_requests: config.priority_requests,
             targets: HashMap::new(),
+            tried: HashMap::new(),
             performance,
             requests_created,
             requests_sent,
@@ -226,29 +287,42 @@ where
         let _ = self.performance.get_or_create_by(participant).try_set(next);
     }
 
-    /// Get eligible peers for a key, best-performing first.
+    /// Get eligible peers for a key, untried peers first.
     ///
-    /// If `shuffle` is true, the peers are shuffled (used for retries to try different peers).
+    /// Peers not yet tried for the key in the current rotation precede tried peers, and each
+    /// group is ordered best-performing first. Once every eligible peer has been tried, a new
+    /// rotation begins with all of them.
+    ///
+    /// If `shuffle` is true, each group is shuffled (used for retries to try different peers).
     fn get_eligible_peers(&mut self, key: &Key, shuffle: bool) -> Vec<P> {
         let targets = self.targets.get(key);
+        let seen = self.tried.get(key);
 
         // Prepare participant iterator. The set stores throughput as `Reverse`,
         // so it iterates best-performing peer first.
         let participant_iter = self.participants.iter();
 
-        // Collect eligible peers
-        let mut eligible: Vec<P> = participant_iter
+        // Collect eligible peers, split by whether they were tried in this rotation
+        let (mut untried, mut tried): (Vec<P>, Vec<P>) = participant_iter
             .filter(|(p, _)| self.me.as_ref() != Some(p)) // not self
             .filter(|(p, _)| !self.blocked.contains(p)) // not blocked
             .filter(|(p, _)| targets.is_none_or(|t| t.contains(p))) // matches target if any
             .map(|(p, _)| p.clone())
-            .collect();
+            .partition(|p| seen.is_none_or(|t| !t.contains(p)));
+
+        // Start a new rotation once every eligible peer has been tried
+        if untried.is_empty() {
+            self.tried.remove(key);
+            mem::swap(&mut untried, &mut tried);
+        }
 
         // Shuffle if requested
         if shuffle {
-            eligible.shuffle(&mut self.context);
+            untried.shuffle(&mut self.context);
+            tried.shuffle(&mut self.context);
         }
-        eligible
+        untried.extend(tried);
+        untried
     }
 
     /// Attempts to send a fetch request for a pending key.
@@ -296,7 +370,12 @@ where
                         continue;
                     }
                 };
+
                 // Attempt send
+                self.tried
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(peer.clone());
                 let id = self.next_id();
                 let message = wire::Message {
                     id,
@@ -326,17 +405,7 @@ where
         self.pending = pending;
         if let Some((key, id, peer, start)) = sent {
             assert!(self.pending.remove(&key));
-            let deadline = start.checked_add(self.timeout).expect("time overflowed");
-            self.active.put(id, deadline);
-            self.requests.insert(
-                id,
-                ActiveRequest {
-                    key: key.clone(),
-                    peer,
-                    start,
-                },
-            );
-            self.key_to_id.insert(key, id);
+            self.track(key, id, peer, start);
             return;
         }
 
@@ -354,6 +423,110 @@ where
         });
     }
 
+    /// Tracks a sent request as active and schedules the hedge of a key's first request.
+    fn track(&mut self, key: Key, id: ID, peer: P, start: SystemTime) {
+        let deadline = start.checked_add(self.timeout).expect("time overflowed");
+        self.active.put(id, deadline);
+        self.requests.insert(
+            id,
+            ActiveRequest {
+                key: key.clone(),
+                peer,
+                start,
+            },
+        );
+        let ids = self.key_to_ids.entry(key.clone()).or_default();
+        ids.push(id);
+        if ids.len() == 1 {
+            let hedge = start.checked_add(self.hedge).expect("time overflowed");
+            self.hedges.put(key, hedge);
+        }
+    }
+
+    /// Removes `id` from the active requests of `key`.
+    ///
+    /// Returns whether the key has no other active request and no judged response.
+    fn untrack(&mut self, key: &Key, id: ID) -> bool {
+        let ids = self
+            .key_to_ids
+            .get_mut(key)
+            .expect("active request must be tracked by key");
+        ids.retain(|other| *other != id);
+        if !ids.is_empty() {
+            return false;
+        }
+        self.key_to_ids.remove(key);
+        self.hedges.remove(key);
+        !self.judging.contains_key(key)
+    }
+
+    /// Removes every active request for `key` and returns them.
+    fn cancel(&mut self, key: &Key) -> Vec<ActiveRequest<P, Key>> {
+        self.hedges.remove(key);
+        self.key_to_ids
+            .remove(key)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| {
+                self.active.remove(&id);
+                self.requests
+                    .remove(&id)
+                    .expect("tracked request must be active")
+            })
+            .collect()
+    }
+
+    /// Sends a second request for every key whose hedge is due.
+    ///
+    /// The request goes to an eligible peer without an active request for the key, untried peers
+    /// first. A key with no such peer that accepts the send is not hedged.
+    pub fn hedge(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
+        let now = self.context.current();
+        while self
+            .hedges
+            .peek()
+            .is_some_and(|(_, deadline)| *deadline <= now)
+        {
+            let (key, _) = self.hedges.pop().expect("peeked hedge must exist");
+            let active: Vec<P> = self.key_to_ids[&key]
+                .iter()
+                .map(|id| self.requests[id].peer.clone())
+                .collect();
+            let peers = self.get_eligible_peers(&key, true);
+            for peer in peers.into_iter().filter(|peer| !active.contains(peer)) {
+                let Ok(checked) = sender.check(Recipients::One(peer.clone())) else {
+                    continue;
+                };
+                self.tried
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(peer.clone());
+                let id = self.next_id();
+                let message = wire::Message {
+                    id,
+                    payload: wire::Payload::Request(key.clone()),
+                };
+                match checked.send(message, self.priority_requests) {
+                    Unreliable::Outcome(Feedback::Ok | Feedback::Backoff) => {
+                        self.requests_sent.inc(Status::Success);
+                        self.track(key.clone(), id, peer, now);
+                        break;
+                    }
+                    feedback @ (Unreliable::Rejected | Unreliable::Outcome(Feedback::Closed)) => {
+                        self.requests_sent.inc(Status::Dropped);
+                        debug!(?peer, ?feedback, "hedge send failed");
+                        self.update_performance(&peer, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns the deadline for the next hedge.
+    pub fn get_hedge_deadline(&self) -> Option<SystemTime> {
+        self.hedges.peek().map(|(_, deadline)| *deadline)
+    }
+
     /// Retains only the fetches with keys greater than the given key.
     pub fn retain(&mut self, predicate: impl Fn(&Key) -> bool) {
         // Collect IDs to remove based on key predicate
@@ -367,9 +540,12 @@ where
             self.active.remove(&id);
             self.requests.remove(&id);
         }
-        self.key_to_id.retain(|k, _| predicate(k));
+        self.key_to_ids.retain(|k, _| predicate(k));
+        self.hedges.retain(&predicate);
+        self.judging.retain(|k, _| predicate(k));
         self.pending.retain(&predicate);
         self.targets.retain(|k, _| predicate(k));
+        self.tried.retain(|k, _| predicate(k));
 
         // Clear waiter since the key that caused it may have been removed
         self.waiter = None;
@@ -415,7 +591,8 @@ where
         self.active.peek().map(|(_, deadline)| *deadline)
     }
 
-    /// Removes and returns the key with the next request timeout.
+    /// Removes the request with the next timeout and returns its key if the key has no other
+    /// active request and no judged response.
     ///
     /// Targets are not removed on timeout.
     pub fn pop_active(&mut self) -> Option<Key> {
@@ -424,13 +601,11 @@ where
 
         // Remove the request and score zero throughput (nothing was delivered).
         let req = self.requests.remove(&id)?;
-        self.key_to_id.remove(&req.key);
         self.update_performance(&req.peer, 0);
-
-        Some(req.key)
+        self.untrack(&req.key, id).then_some(req.key)
     }
 
-    /// Remove the active request matching `id` and `peer`.
+    /// Remove the active request matching `id` and `peer`, leaving it tracked by key.
     fn pop_request(&mut self, id: ID, peer: &P) -> Option<ActiveRequest<P, Key>> {
         let req = self.requests.get(&id)?;
         if &req.peer != peer {
@@ -439,15 +614,18 @@ where
 
         let req = self.requests.remove(&id)?;
         self.active.remove(&id);
-        self.key_to_id.remove(&req.key);
         Some(req)
     }
 
     /// Processes a data response from a peer.
     ///
-    /// Removes the matching request and returns its key and network response time. The caller
-    /// must report the response with [`Self::record_response`] after the consumer decides it
-    /// should be attributed to the peer.
+    /// Removes the matching request and returns its key, network response time, and data for the
+    /// consumer to judge. Other active requests for the key keep running. If the consumer is
+    /// already judging a response for the key, the data is held for [`Self::reject`] and nothing
+    /// is returned. The caller reports the outcome with [`Self::resolve`] or [`Self::reject`].
+    ///
+    /// The caller must score the response with [`Self::record_response`] after the consumer
+    /// decides it should be attributed to the peer.
     ///
     /// Targets are not removed here. The caller clears them when the logical fetch completes or
     /// is ignored. On invalid data, the caller blocks the peer, which is then skipped until the
@@ -456,14 +634,83 @@ where
     /// Note that this matches responses against the peer a request was already sent to. A later
     /// `reconcile()` call may remove that peer from the candidate pool for future sends, but it
     /// does not retroactively invalidate the in-flight request.
-    pub fn pop_response(&mut self, id: ID, peer: &P) -> Option<(Key, Duration)> {
+    pub fn pop_response(
+        &mut self,
+        id: ID,
+        peer: &P,
+        response: Bytes,
+    ) -> Option<(Key, Duration, Bytes)> {
         let req = self.pop_request(id, peer)?;
+        self.untrack(&req.key, id);
         let elapsed = self
             .context
             .current()
             .duration_since(req.start)
             .unwrap_or_default();
-        Some((req.key, elapsed))
+        match self.judging.entry(req.key) {
+            Entry::Occupied(mut judging) => {
+                let judging = judging.get_mut();
+                assert!(
+                    judging.held.is_none(),
+                    "key has at most two active requests"
+                );
+                judging.held = Some(Held {
+                    peer: req.peer,
+                    start: req.start,
+                    elapsed,
+                    response,
+                });
+                None
+            }
+            Entry::Vacant(judging) => {
+                let key = judging.key().clone();
+                judging.insert(Judging {
+                    start: req.start,
+                    held: None,
+                });
+                Some((key, elapsed, response))
+            }
+        }
+    }
+
+    /// Ends the judgment of a key whose response the consumer accepted.
+    ///
+    /// Cancels the other active requests for the key and discards any held response. Each one
+    /// sent before the accepted request is scored as a timeout.
+    pub fn resolve(&mut self, key: &Key) {
+        let judging = self
+            .judging
+            .remove(key)
+            .expect("accepted response must be judged");
+        if let Some(held) = judging.held
+            && held.start <= judging.start
+        {
+            self.update_performance(&held.peer, 0);
+        }
+        for other in self.cancel(key) {
+            if other.start <= judging.start {
+                self.update_performance(&other.peer, 0);
+            }
+        }
+    }
+
+    /// Ends the judgment of a key whose response the consumer rejected.
+    ///
+    /// Returns the held response for the consumer to judge next, if any. Otherwise returns
+    /// whether another request for the key is active.
+    pub fn reject(&mut self, key: &Key) -> Rejected<P> {
+        if let Some(judging) = self.judging.get_mut(key) {
+            if let Some(held) = judging.held.take() {
+                judging.start = held.start;
+                return Rejected::Judge(held.peer, held.elapsed, held.response);
+            }
+            self.judging.remove(key);
+        }
+        if self.key_to_ids.contains_key(key) {
+            Rejected::Wait
+        } else {
+            Rejected::Retry
+        }
     }
 
     /// Attribute a received data response to its serving peer.
@@ -478,11 +725,12 @@ where
 
     /// Processes a response indicating that the peer does not have the requested data.
     ///
-    /// Missing data is scored as zero throughput because the peer delivered nothing.
+    /// Returns the key if it has no other active request and no judged response. Missing data is
+    /// scored as zero throughput because the peer delivered nothing.
     pub fn pop_missing(&mut self, id: ID, peer: &P) -> Option<Key> {
         let req = self.pop_request(id, peer)?;
         self.update_performance(&req.peer, 0);
-        Some(req.key)
+        self.untrack(&req.key, id).then_some(req.key)
     }
 
     /// Reconciles the list of peers that can be used to fetch future requests.
@@ -536,10 +784,18 @@ where
         self.targets.contains_key(key)
     }
 
+    /// Drops the requests, judgment, targets, and rotation of a retired key.
+    pub fn finish(&mut self, key: &Key) {
+        self.cancel(key);
+        self.judging.remove(key);
+        self.tried.remove(key);
+        self.clear_targets(key);
+    }
+
     /// Returns the number of fetches.
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.pending.len() + self.requests.len()
+        self.pending.len() + self.key_to_ids.len()
     }
 
     /// Returns the number of pending fetches.
@@ -549,13 +805,13 @@ where
 
     /// Returns the number of active fetches.
     pub fn len_active(&self) -> usize {
-        self.requests.len()
+        self.key_to_ids.len()
     }
 
     /// Returns true if the fetch is in progress.
     #[cfg(test)]
     pub fn contains(&self, key: &Key) -> bool {
-        self.key_to_id.contains_key(key) || self.pending.contains(key)
+        self.key_to_ids.contains_key(key) || self.pending.contains(key)
     }
 }
 
@@ -779,7 +1035,7 @@ mod tests {
                 start: now,
             },
         );
-        fetcher.key_to_id.insert(key, id);
+        fetcher.key_to_ids.entry(key).or_default().push(id);
     }
 
     #[test]
@@ -817,9 +1073,9 @@ mod tests {
             assert!(fetcher.pending.contains(&MockKey(1)));
             assert!(fetcher.pending.contains(&MockKey(2)));
             assert!(fetcher.pending.contains(&MockKey(3)));
-            assert!(fetcher.key_to_id.contains_key(&MockKey(10)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(20)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(30)));
+            assert!(fetcher.key_to_ids.contains_key(&MockKey(10)));
+            assert!(!fetcher.key_to_ids.contains_key(&MockKey(20)));
+            assert!(!fetcher.key_to_ids.contains_key(&MockKey(30)));
         });
     }
 
@@ -1080,11 +1336,13 @@ mod tests {
 
             add_test_active(&mut fetcher, 100, MockKey(10));
 
-            assert!(fetcher.pop_response(999, &peer).is_none());
+            assert!(fetcher.pop_response(999, &peer, Bytes::new()).is_none());
             assert_eq!(fetcher.len_active(), 1);
 
             fetcher.context.sleep(Duration::from_millis(20)).await;
-            let (key, elapsed) = fetcher.pop_response(100, &peer).expect("matching response");
+            let (key, elapsed, _) = fetcher
+                .pop_response(100, &peer, Bytes::new())
+                .expect("matching response");
             assert_eq!(key, MockKey(10));
             assert_eq!(elapsed, Duration::from_millis(20));
             assert_eq!(fetcher.len_active(), 0);
@@ -1263,12 +1521,12 @@ mod tests {
 
             // Verify the ID mapping is preserved correctly
             assert_eq!(fetcher.len_active(), 1);
-            assert!(fetcher.key_to_id.contains_key(&MockKey(1)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(2)));
+            assert!(fetcher.key_to_ids.contains_key(&MockKey(1)));
+            assert!(!fetcher.key_to_ids.contains_key(&MockKey(2)));
 
             // Verify the request data for MockKey(1) is preserved
-            let id = fetcher.key_to_id.get(&MockKey(1)).unwrap();
-            assert!(fetcher.requests.contains_key(id));
+            let id = fetcher.key_to_ids[&MockKey(1)][0];
+            assert!(fetcher.requests.contains_key(&id));
         });
     }
 
@@ -1854,7 +2112,9 @@ mod tests {
             fetcher.fetch(&mut sender);
             let id = *fetcher.active.iter().next().unwrap().0;
             assert_eq!(
-                fetcher.pop_response(id, &peer1).map(|(key, _)| key),
+                fetcher
+                    .pop_response(id, &peer1, Bytes::new())
+                    .map(|(key, _, _)| key),
                 Some(MockKey(3))
             );
             assert!(fetcher.targets.get(&MockKey(3)).unwrap().contains(&peer1));
@@ -2066,6 +2326,652 @@ mod tests {
                 found_different_order,
                 "Shuffling should produce different orders"
             );
+        });
+    }
+
+    type TestFetcher = Fetcher<Context, PublicKey, MockKey, SuccessMockSender>;
+    type TestSender = WrappedSender<SuccessMockSender, wire::Message<MockKey>>;
+
+    /// Sends the next pending fetch and returns the peer that received `key`.
+    fn send_next(fetcher: &mut TestFetcher, sender: &mut TestSender, key: &MockKey) -> PublicKey {
+        fetcher.fetch(sender);
+        let id = fetcher.key_to_ids[key][0];
+        fetcher.requests[&id].peer.clone()
+    }
+
+    /// Creates a fetcher over `count` remote peers and returns it with its sender and peers.
+    fn create_rotation_fetcher(
+        context: &Context,
+        count: u64,
+    ) -> (TestFetcher, TestSender, Vec<PublicKey>) {
+        let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.child("fetcher"));
+        let sender = WrappedSender::new(
+            context.network_buffer_pool().clone(),
+            SuccessMockSender::default(),
+        );
+        let peers: Vec<_> = (1..=count)
+            .map(|seed| PrivateKey::from_seed(seed).public_key())
+            .collect();
+        let mut participants = peers.clone();
+        participants.push(PrivateKey::from_seed(0).public_key());
+        fetcher.reconcile(&participants);
+        (fetcher, sender, peers)
+    }
+
+    /// A retry skips every peer that failed the key while an untried eligible peer remains.
+    #[test]
+    fn test_retry_skips_tried_peers() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, _) = create_rotation_fetcher(&context, 3);
+            for i in 0..16 {
+                let key = MockKey(i);
+
+                // The first attempt times out.
+                fetcher.add_ready(key.clone());
+                let first = send_next(&mut fetcher, &mut sender, &key);
+                assert_eq!(fetcher.pop_active(), Some(key.clone()));
+                fetcher.add_retry(key.clone());
+
+                // The retry goes to another peer, which reports missing data.
+                let second = send_next(&mut fetcher, &mut sender, &key);
+                assert_ne!(second, first);
+                let id = fetcher.key_to_ids[&key][0];
+                assert_eq!(fetcher.pop_missing(id, &second), Some(key.clone()));
+                fetcher.add_retry(key.clone());
+
+                // The next retry goes to the last untried peer.
+                let third = send_next(&mut fetcher, &mut sender, &key);
+                assert_ne!(third, first);
+                assert_ne!(third, second);
+
+                // Cancel the key before the next round.
+                fetcher.retain(|k| *k != key);
+            }
+        });
+    }
+
+    /// A retry starts a new rotation once every eligible peer has been tried for the key.
+    #[test]
+    fn test_retry_rotation_restarts() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, _) = create_rotation_fetcher(&context, 2);
+            for i in 0..16 {
+                let key = MockKey(i);
+
+                // Both peers time out.
+                fetcher.add_ready(key.clone());
+                let first = send_next(&mut fetcher, &mut sender, &key);
+                assert_eq!(fetcher.pop_active(), Some(key.clone()));
+                fetcher.add_retry(key.clone());
+                let second = send_next(&mut fetcher, &mut sender, &key);
+                assert_ne!(second, first);
+                assert_eq!(fetcher.pop_active(), Some(key.clone()));
+                fetcher.add_retry(key.clone());
+
+                // The next retry starts a new rotation with either peer.
+                let third = send_next(&mut fetcher, &mut sender, &key);
+                assert_eq!(fetcher.pop_active(), Some(key.clone()));
+                fetcher.add_retry(key.clone());
+
+                // The new rotation skips the peer it already tried.
+                let fourth = send_next(&mut fetcher, &mut sender, &key);
+                assert_ne!(fourth, third);
+
+                // Cancel the key before the next round.
+                fetcher.retain(|k| *k != key);
+            }
+        });
+    }
+
+    /// Retiring the key or retaining it away drops the key's rotation. A data response keeps it.
+    #[test]
+    fn test_retry_rotation_cleared() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, _) = create_rotation_fetcher(&context, 3);
+            let resolved = MockKey(1);
+            let cancelled = MockKey(2);
+
+            // The first key times out, its retry receives a data response, and the key is
+            // retired.
+            fetcher.add_ready(resolved.clone());
+            let first = send_next(&mut fetcher, &mut sender, &resolved);
+            assert_eq!(fetcher.pop_active(), Some(resolved.clone()));
+            fetcher.add_retry(resolved.clone());
+            assert_eq!(fetcher.tried[&resolved], HashSet::from([first.clone()]));
+            let second = send_next(&mut fetcher, &mut sender, &resolved);
+            assert_eq!(
+                fetcher.tried[&resolved],
+                HashSet::from([first, second.clone()])
+            );
+            let id = fetcher.key_to_ids[&resolved][0];
+            assert!(fetcher.pop_response(id, &second, Bytes::new()).is_some());
+            assert_eq!(fetcher.tried[&resolved].len(), 2);
+            fetcher.finish(&resolved);
+            assert!(fetcher.tried.is_empty());
+
+            // The second key times out and is retained away while pending.
+            fetcher.add_ready(cancelled.clone());
+            let peer = send_next(&mut fetcher, &mut sender, &cancelled);
+            assert_eq!(fetcher.pop_active(), Some(cancelled.clone()));
+            fetcher.add_retry(cancelled.clone());
+            assert_eq!(fetcher.tried[&cancelled], HashSet::from([peer]));
+            fetcher.retain(|k| *k != cancelled);
+            assert!(fetcher.tried.is_empty());
+        });
+    }
+
+    /// A failed send counts as an attempt in the key's rotation.
+    #[test]
+    fn test_retry_rotation_records_failed_sends() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context.child("fetcher"));
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                FailMockSender::default(),
+            );
+            let peers: Vec<_> = (1..=3)
+                .map(|seed| PrivateKey::from_seed(seed).public_key())
+                .collect();
+            fetcher.reconcile(&peers);
+
+            // Every send fails. Every peer is recorded and the key stays pending.
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender);
+            assert!(fetcher.pending.contains(&MockKey(1)));
+            assert_eq!(fetcher.tried[&MockKey(1)], peers.into_iter().collect());
+        });
+    }
+
+    /// A key with a single eligible peer keeps retrying that peer.
+    #[test]
+    fn test_retry_single_peer() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, peers) = create_rotation_fetcher(&context, 1);
+            let key = MockKey(1);
+
+            // The only peer times out.
+            fetcher.add_ready(key.clone());
+            assert_eq!(send_next(&mut fetcher, &mut sender, &key), peers[0]);
+            assert_eq!(fetcher.pop_active(), Some(key.clone()));
+            fetcher.add_retry(key.clone());
+
+            // The retry goes to the same peer, which reports missing data.
+            assert_eq!(send_next(&mut fetcher, &mut sender, &key), peers[0]);
+            let id = fetcher.key_to_ids[&key][0];
+            assert_eq!(fetcher.pop_missing(id, &peers[0]), Some(key.clone()));
+            fetcher.add_retry(key.clone());
+
+            // The peer is retried again.
+            assert_eq!(send_next(&mut fetcher, &mut sender, &key), peers[0]);
+        });
+    }
+
+    /// Rotation covers only the key's targets.
+    #[test]
+    fn test_retry_rotation_respects_targets() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, peers) = create_rotation_fetcher(&context, 4);
+            let targets = [peers[0].clone(), peers[1].clone()];
+            for i in 0..16 {
+                let key = MockKey(i);
+                fetcher.add_targets(key.clone(), targets.clone());
+
+                // The first attempt goes to a target and times out.
+                fetcher.add_ready(key.clone());
+                let first = send_next(&mut fetcher, &mut sender, &key);
+                assert!(targets.contains(&first));
+                assert_eq!(fetcher.pop_active(), Some(key.clone()));
+                fetcher.add_retry(key.clone());
+
+                // The retry goes to the other target and times out.
+                let second = send_next(&mut fetcher, &mut sender, &key);
+                assert!(targets.contains(&second));
+                assert_ne!(second, first);
+                assert_eq!(fetcher.pop_active(), Some(key.clone()));
+                fetcher.add_retry(key.clone());
+
+                // The new rotation stays within the targets.
+                let third = send_next(&mut fetcher, &mut sender, &key);
+                assert!(targets.contains(&third));
+
+                // Cancel the key before the next round.
+                fetcher.retain(|k| *k != key);
+            }
+        });
+    }
+
+    /// A blocked untried peer does not hold back a new rotation.
+    #[test]
+    fn test_retry_rotation_skips_blocked_peers() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, peers) = create_rotation_fetcher(&context, 3);
+            let key = MockKey(1);
+
+            // The first attempt times out.
+            fetcher.add_ready(key.clone());
+            let first = send_next(&mut fetcher, &mut sender, &key);
+            assert_eq!(fetcher.pop_active(), Some(key.clone()));
+            fetcher.add_retry(key.clone());
+
+            // Block one untried peer. The retry goes to the other untried peer and times out.
+            let blocked = peers.iter().find(|p| **p != first).unwrap().clone();
+            fetcher.set_blocked([blocked.clone()]);
+            let second = send_next(&mut fetcher, &mut sender, &key);
+            assert_ne!(second, first);
+            assert_ne!(second, blocked);
+            assert_eq!(fetcher.pop_active(), Some(key.clone()));
+            fetcher.add_retry(key.clone());
+
+            // Every unblocked peer has been tried. The retry starts a new rotation.
+            let third = send_next(&mut fetcher, &mut sender, &key);
+            assert_ne!(third, blocked);
+        });
+    }
+
+    /// Returns the peer of each active request for `key`, oldest first.
+    fn active_peers(fetcher: &TestFetcher, key: &MockKey) -> Vec<PublicKey> {
+        fetcher.key_to_ids[key]
+            .iter()
+            .map(|id| fetcher.requests[id].peer.clone())
+            .collect()
+    }
+
+    /// A retry after a response the consumer could not use goes to another peer.
+    #[test]
+    fn test_retry_after_response_skips_answering_peer() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, _) = create_rotation_fetcher(&context, 2);
+            for i in 0..16 {
+                let key = MockKey(i);
+
+                // One peer answers, and the rejected response is retried.
+                fetcher.add_ready(key.clone());
+                let first = send_next(&mut fetcher, &mut sender, &key);
+                let id = fetcher.key_to_ids[&key][0];
+                assert!(fetcher.pop_response(id, &first, Bytes::new()).is_some());
+                assert!(matches!(fetcher.reject(&key), Rejected::Retry));
+                fetcher.add_retry(key.clone());
+
+                // The retry goes to the other peer.
+                assert_ne!(send_next(&mut fetcher, &mut sender, &key), first);
+
+                // Cancel the key before the next round.
+                fetcher.retain(|k| *k != key);
+            }
+        });
+    }
+
+    /// A key whose request is outstanding for half the timeout is also sent to another peer.
+    /// Accepting the second response cancels the first request and scores it as a timeout.
+    #[test]
+    fn test_hedge_sends_second_request_after_half_timeout() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, peers) = create_rotation_fetcher(&context, 3);
+            let key = MockKey(1);
+
+            // The best-performing peer receives the fresh request.
+            fetcher.record_response(&peers[0], Duration::from_millis(1), 1000);
+            let Some(Reverse(score)) = fetcher.participants.get(&peers[0]) else {
+                panic!("peer must be a participant");
+            };
+            fetcher.add_ready(key.clone());
+            assert_eq!(send_next(&mut fetcher, &mut sender, &key), peers[0]);
+
+            // No hedge is sent before half the timeout.
+            fetcher.hedge(&mut sender);
+            assert_eq!(active_peers(&fetcher, &key).len(), 1);
+            let deadline = fetcher.get_hedge_deadline().unwrap();
+            assert_eq!(
+                deadline,
+                fetcher.requests[&fetcher.key_to_ids[&key][0]].start + Duration::from_millis(2500)
+            );
+
+            // At half the timeout, a second request goes to another peer.
+            context.sleep(Duration::from_millis(2500)).await;
+            fetcher.hedge(&mut sender);
+            let active = active_peers(&fetcher, &key);
+            assert_eq!(active.len(), 2);
+            assert_ne!(active[1], peers[0]);
+            assert!(fetcher.get_hedge_deadline().is_none());
+            assert_eq!(fetcher.len_active(), 1);
+
+            // The second request answers first. The first keeps running while the response is
+            // judged.
+            let hedge_id = fetcher.key_to_ids[&key][1];
+            let first_id = fetcher.key_to_ids[&key][0];
+            assert!(
+                fetcher
+                    .pop_response(hedge_id, &active[1], Bytes::new())
+                    .is_some()
+            );
+            assert_eq!(active_peers(&fetcher, &key), vec![peers[0].clone()]);
+            assert_eq!(fetcher.participants.get(&peers[0]), Some(Reverse(score)));
+
+            // Accepting the response cancels the first request and scores it as a timeout.
+            fetcher.resolve(&key);
+            assert!(fetcher.requests.is_empty());
+            assert!(fetcher.get_active_deadline().is_none());
+            assert_eq!(
+                fetcher.participants.get(&peers[0]),
+                Some(Reverse(score / 2))
+            );
+            assert!(
+                fetcher
+                    .pop_response(first_id, &peers[0], Bytes::new())
+                    .is_none()
+            );
+        });
+    }
+
+    /// A response held during an accepted judgment is discarded. It is scored as a timeout only
+    /// if its request was sent before the accepted one.
+    #[test]
+    fn test_accepted_judgment_scores_held_earlier_response() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, peers) = create_rotation_fetcher(&context, 3);
+            let key = MockKey(1);
+
+            // The best-performing peer receives the fresh request, and the key is hedged.
+            fetcher.record_response(&peers[0], Duration::from_millis(1), 1000);
+            let Some(Reverse(score)) = fetcher.participants.get(&peers[0]) else {
+                panic!("peer must be a participant");
+            };
+            fetcher.add_ready(key.clone());
+            assert_eq!(send_next(&mut fetcher, &mut sender, &key), peers[0]);
+            context.sleep(Duration::from_millis(2500)).await;
+            fetcher.hedge(&mut sender);
+            let active = active_peers(&fetcher, &key);
+            assert_eq!(active.len(), 2);
+            let first_id = fetcher.key_to_ids[&key][0];
+            let hedge_id = fetcher.key_to_ids[&key][1];
+
+            // The hedge answers first and is judged. The first request answers during the
+            // judgment and is held.
+            assert!(
+                fetcher
+                    .pop_response(hedge_id, &active[1], Bytes::new())
+                    .is_some()
+            );
+            assert!(
+                fetcher
+                    .pop_response(first_id, &peers[0], Bytes::new())
+                    .is_none()
+            );
+
+            // Accepting the hedge response discards the held response and scores the first
+            // request as a timeout.
+            fetcher.resolve(&key);
+            assert!(!fetcher.contains(&key));
+            assert_eq!(
+                fetcher.participants.get(&peers[0]),
+                Some(Reverse(score / 2))
+            );
+
+            // A second key is hedged. Its first request answers first and is judged. The hedge
+            // answers during the judgment and is held.
+            let key = MockKey(2);
+            let Some(Reverse(score)) = fetcher.participants.get(&peers[0]) else {
+                panic!("peer must be a participant");
+            };
+            fetcher.add_ready(key.clone());
+            assert_eq!(send_next(&mut fetcher, &mut sender, &key), peers[0]);
+            context.sleep(Duration::from_millis(2500)).await;
+            fetcher.hedge(&mut sender);
+            let active = active_peers(&fetcher, &key);
+            assert_eq!(active.len(), 2);
+            let hedge_score = fetcher.participants.get(&active[1]);
+            let first_id = fetcher.key_to_ids[&key][0];
+            let hedge_id = fetcher.key_to_ids[&key][1];
+            assert!(
+                fetcher
+                    .pop_response(first_id, &peers[0], Bytes::new())
+                    .is_some()
+            );
+            assert!(
+                fetcher
+                    .pop_response(hedge_id, &active[1], Bytes::new())
+                    .is_none()
+            );
+
+            // Accepting the first response discards the held hedge response without scoring
+            // either peer.
+            fetcher.resolve(&key);
+            assert!(!fetcher.contains(&key));
+            assert_eq!(fetcher.participants.get(&peers[0]), Some(Reverse(score)));
+            assert_eq!(fetcher.participants.get(&active[1]), hedge_score);
+        });
+    }
+
+    /// Rejecting the second response of a hedged key leaves the key to the first request without
+    /// scoring it. The first request's response is then judged.
+    #[test]
+    fn test_rejected_hedge_response_keeps_first_request() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, peers) = create_rotation_fetcher(&context, 3);
+            let key = MockKey(1);
+
+            // The best-performing peer receives the fresh request, and the key is hedged.
+            fetcher.record_response(&peers[0], Duration::from_millis(1), 1000);
+            let score = fetcher.participants.get(&peers[0]);
+            fetcher.add_ready(key.clone());
+            assert_eq!(send_next(&mut fetcher, &mut sender, &key), peers[0]);
+            context.sleep(Duration::from_millis(2500)).await;
+            fetcher.hedge(&mut sender);
+            let active = active_peers(&fetcher, &key);
+            assert_eq!(active.len(), 2);
+
+            // The hedge answers first and its response is rejected. The first request remains
+            // active and unscored.
+            let hedge_id = fetcher.key_to_ids[&key][1];
+            let first_id = fetcher.key_to_ids[&key][0];
+            assert!(
+                fetcher
+                    .pop_response(hedge_id, &active[1], Bytes::new())
+                    .is_some()
+            );
+            assert!(matches!(fetcher.reject(&key), Rejected::Wait));
+            assert_eq!(active_peers(&fetcher, &key), vec![peers[0].clone()]);
+            assert_eq!(fetcher.participants.get(&peers[0]), score);
+            assert!(fetcher.get_hedge_deadline().is_none());
+
+            // The first request answers, and its response is judged and accepted.
+            let (judged, _, _) = fetcher
+                .pop_response(first_id, &peers[0], Bytes::new())
+                .expect("first request must remain active");
+            assert_eq!(judged, key);
+            fetcher.resolve(&key);
+            assert!(!fetcher.contains(&key));
+            assert_eq!(fetcher.participants.get(&peers[0]), score);
+        });
+    }
+
+    /// A response received while another response for the key is judged is held. A timeout of
+    /// the other request does not return the key during the judgment. Rejecting the judged
+    /// response yields the held one.
+    #[test]
+    fn test_response_during_judgment_is_held() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, _) = create_rotation_fetcher(&context, 3);
+            let key = MockKey(1);
+
+            // Send the key and hedge it.
+            fetcher.add_ready(key.clone());
+            send_next(&mut fetcher, &mut sender, &key);
+            context.sleep(Duration::from_millis(2500)).await;
+            fetcher.hedge(&mut sender);
+            let active = active_peers(&fetcher, &key);
+            let first_id = fetcher.key_to_ids[&key][0];
+            let hedge_id = fetcher.key_to_ids[&key][1];
+
+            // The first request answers and is judged. The hedge answers during the judgment and
+            // is held.
+            assert!(
+                fetcher
+                    .pop_response(first_id, &active[0], Bytes::from("first"))
+                    .is_some()
+            );
+            assert!(
+                fetcher
+                    .pop_response(hedge_id, &active[1], Bytes::from("hedge"))
+                    .is_none()
+            );
+            assert!(fetcher.requests.is_empty());
+
+            // Rejecting the first response yields the held response.
+            let Rejected::Judge(peer, _, response) = fetcher.reject(&key) else {
+                panic!("held response must be judged");
+            };
+            assert_eq!(peer, active[1]);
+            assert_eq!(response, Bytes::from("hedge"));
+
+            // Rejecting the held response leaves nothing, and the key is retried.
+            assert!(matches!(fetcher.reject(&key), Rejected::Retry));
+            fetcher.add_retry(key.clone());
+            assert!(fetcher.contains(&key));
+
+            // A timeout during a judgment does not return the key.
+            fetcher.retain(|_| false);
+            fetcher.add_ready(key.clone());
+            send_next(&mut fetcher, &mut sender, &key);
+            context.sleep(Duration::from_millis(2500)).await;
+            fetcher.hedge(&mut sender);
+            let active = active_peers(&fetcher, &key);
+            let first_id = fetcher.key_to_ids[&key][0];
+            assert!(
+                fetcher
+                    .pop_response(first_id, &active[0], Bytes::new())
+                    .is_some()
+            );
+            assert_eq!(fetcher.pop_active(), None);
+            assert!(matches!(fetcher.reject(&key), Rejected::Retry));
+        });
+    }
+
+    /// A timeout or missing response for one request of a hedged key leaves the key to the other
+    /// request. The key is retried only once neither remains.
+    #[test]
+    fn test_hedge_failure_leaves_key_to_other_request() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, _) = create_rotation_fetcher(&context, 3);
+            let key = MockKey(1);
+
+            // Send the key and hedge it.
+            fetcher.add_ready(key.clone());
+            send_next(&mut fetcher, &mut sender, &key);
+            context.sleep(Duration::from_millis(2500)).await;
+            fetcher.hedge(&mut sender);
+            let active = active_peers(&fetcher, &key);
+            assert_eq!(active.len(), 2);
+
+            // The hedge reports missing data, and the first request remains.
+            let hedge_id = fetcher.key_to_ids[&key][1];
+            assert_eq!(fetcher.pop_missing(hedge_id, &active[1]), None);
+            assert_eq!(active_peers(&fetcher, &key), vec![active[0].clone()]);
+
+            // The first request times out, and the key is returned for retry.
+            assert_eq!(fetcher.pop_active(), Some(key.clone()));
+            assert!(!fetcher.contains(&key));
+
+            // A timeout with the hedge still active returns nothing.
+            fetcher.add_retry(key.clone());
+            send_next(&mut fetcher, &mut sender, &key);
+            context.sleep(Duration::from_millis(2500)).await;
+            fetcher.hedge(&mut sender);
+            assert_eq!(active_peers(&fetcher, &key).len(), 2);
+            assert_eq!(fetcher.pop_active(), None);
+            assert_eq!(active_peers(&fetcher, &key).len(), 1);
+        });
+    }
+
+    /// A key with no other eligible peer is not hedged.
+    #[test]
+    fn test_hedge_requires_other_peer() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, _) = create_rotation_fetcher(&context, 1);
+            fetcher.add_ready(MockKey(1));
+            send_next(&mut fetcher, &mut sender, &MockKey(1));
+            context.sleep(Duration::from_millis(2500)).await;
+            fetcher.hedge(&mut sender);
+            assert_eq!(active_peers(&fetcher, &MockKey(1)).len(), 1);
+            assert!(fetcher.get_hedge_deadline().is_none());
+        });
+    }
+
+    /// Retaining a hedged key away cancels both of its requests.
+    #[test]
+    fn test_hedged_key_is_retained_away() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let (mut fetcher, mut sender, _) = create_rotation_fetcher(&context, 2);
+            fetcher.add_ready(MockKey(1));
+            send_next(&mut fetcher, &mut sender, &MockKey(1));
+            context.sleep(Duration::from_millis(2500)).await;
+            fetcher.hedge(&mut sender);
+            assert_eq!(active_peers(&fetcher, &MockKey(1)).len(), 2);
+            fetcher.retain(|key| *key != MockKey(1));
+            assert!(fetcher.requests.is_empty());
+            assert!(fetcher.get_active_deadline().is_none());
+            assert!(!fetcher.contains(&MockKey(1)));
+        });
+    }
+
+    /// A retry falls back to a tried peer when every untried peer is rate-limited.
+    #[test]
+    fn test_retry_falls_back_to_tried_peer_when_untried_is_rate_limited() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
+            let config = Config {
+                me: Some(public_key.clone()),
+                timeout: Duration::from_secs(5),
+                retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+            };
+            let mut fetcher: Fetcher<_, _, MockKey, LimitedMockSender<Context>> =
+                Fetcher::new(context.child("fetcher"), config);
+            fetcher.reconcile(&[public_key, peer1, peer2]);
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                LimitedMockSender::new(Quota::per_second(NZU32!(1)), context.child("limiter")),
+            );
+            let peer_of = |fetcher: &Fetcher<_, _, MockKey, LimitedMockSender<Context>>,
+                           key: &MockKey| {
+                fetcher.requests[&fetcher.key_to_ids[key][0]].peer.clone()
+            };
+
+            // The first key times out at one peer.
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender);
+            let first = peer_of(&fetcher, &MockKey(1));
+            assert_eq!(fetcher.pop_active(), Some(MockKey(1)));
+            fetcher.add_retry(MockKey(1));
+
+            // A second key spends the other peer's token.
+            context.sleep(Duration::from_millis(500)).await;
+            fetcher.add_ready(MockKey(2));
+            fetcher.fetch(&mut sender);
+            assert_ne!(peer_of(&fetcher, &MockKey(2)), first);
+
+            // Once only the tried peer has a token, the retry goes to it.
+            context.sleep(Duration::from_millis(600)).await;
+            fetcher.fetch(&mut sender);
+            assert_eq!(peer_of(&fetcher, &MockKey(1)), first);
         });
     }
 }
