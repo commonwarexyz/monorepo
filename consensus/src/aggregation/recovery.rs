@@ -108,6 +108,9 @@ impl Recoverer for Recovery {
 /// Excess distinct fetches return [`Unreliable::Rejected`] without being retained and can be
 /// retried.
 /// Actor wakeups are coalesced, so fetch and cancel churn cannot create unbounded mailbox overflow.
+///
+/// The coordinator stops once every [`Recovery`] handle is dropped, and it drops its resolver.
+/// A node that serves certificates through that resolver must retain a handle.
 pub struct RecoveryCoordinator<E, R>
 where
     E: Spawner + Metrics,
