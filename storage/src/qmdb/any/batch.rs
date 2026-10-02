@@ -71,6 +71,35 @@ where
 /// values have already been consumed by a rewrite. Candidate keys remain unchanged.
 type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
+/// A batch's mutations in key order. The outer `None` marks a mutation an existing key's
+/// operation has taken. Upserts left afterwards become creates.
+type MutationSlots<K, V> = Vec<(K, Option<Option<V>>)>;
+
+/// Convert a batch's mutations into [`MutationSlots`].
+fn mutation_slots<K, V>(mutations: BTreeMap<K, Option<V>>) -> MutationSlots<K, V> {
+    mutations
+        .into_iter()
+        .map(|(key, mutation)| (key, Some(mutation)))
+        .collect()
+}
+
+/// Take the mutation for `key` from `slots`, trying the slot at `hint` first.
+///
+/// Returns `None` if `key` has no mutation or its mutation was already taken.
+fn take_mutation<K: Ord, V>(
+    slots: &mut MutationSlots<K, V>,
+    hint: usize,
+    key: &K,
+) -> Option<Option<V>> {
+    let slot = if slots[hint].0 == *key {
+        hint
+    } else {
+        // A snapshot collision resolved the location to another key's operation.
+        slots.binary_search_by(|(k, _)| k.cmp(key)).ok()?
+    };
+    slots[slot].1.take()
+}
+
 /// Where a staged read resolved: in the committed snapshot, or in an uncommitted
 /// ancestor's diff. Either way, the resolved location orders the staged write among this
 /// batch's emitted operations. The variants differ in which committed location the write
@@ -930,12 +959,15 @@ where
     /// bucket for collision siblings (other keys sharing the same translated-key bucket). The
     /// ordered path needs these so their `next_key` pointers are rewritten when a sibling is
     /// deleted; the unordered path can skip them.
+    ///
+    /// Each location is paired with the index of the mutation slot it was gathered for, sorted
+    /// and deduplicated by location.
     fn gather_existing_locations<E, C, I, const N: usize>(
         &self,
-        mutations: &BTreeMap<U::Key, Option<U::Value>>,
+        mutations: &MutationSlots<U::Key, U::Value>,
         db: &Db<F, E, C, I, H, U, N, S>,
         include_active_collision_siblings: bool,
-    ) -> Vec<Location<F>>
+    ) -> Vec<(Location<F>, usize)>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -945,12 +977,12 @@ where
         // location per key.
         let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
         if self.ancestors.is_empty() {
-            for key in mutations.keys() {
-                locations.extend(db.snapshot.get(key).copied());
+            for (slot, (key, _)) in mutations.iter().enumerate() {
+                locations.extend(db.snapshot.get(key).map(|&loc| (loc, slot)));
             }
         } else {
             let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
-            for key in mutations.keys() {
+            for (slot, (key, _)) in mutations.iter().enumerate() {
                 match ancestors.resolve(key) {
                     Some(DiffEntry::Deleted { .. }) => {
                         // No live operation remains. resolve_creates handles any recreation.
@@ -958,38 +990,39 @@ where
                     Some(DiffEntry::Active {
                         loc, base_old_loc, ..
                     }) => {
-                        locations.push(*loc);
+                        locations.push((*loc, slot));
                         if include_active_collision_siblings {
                             locations.extend(
                                 db.snapshot
                                     .get(key)
                                     .copied()
-                                    .filter(move |loc| Some(*loc) != *base_old_loc),
+                                    .filter(move |loc| Some(*loc) != *base_old_loc)
+                                    .map(|loc| (loc, slot)),
                             );
                         }
                     }
                     None => {
-                        locations.extend(db.snapshot.get(key).copied());
+                        locations.extend(db.snapshot.get(key).map(|&loc| (loc, slot)));
                     }
                 }
             }
         }
-        db.strategy().sort_by(&mut locations, |a, b| a.cmp(b));
-        locations.dedup();
+        db.strategy().sort_by(&mut locations, |a, b| a.0.cmp(&b.0));
+        locations.dedup_by_key(|(loc, _)| *loc);
         locations
     }
 
     /// Resolve remaining mutations into creates in key order. Re-created keys inherit
     /// the base location of the nearest ancestor deletion. Existing keys must already
-    /// be resolved and removed from `mutations`. Deletes of absent keys are ignored.
+    /// be resolved and taken from `mutations`. Deletes of absent keys are ignored.
     #[allow(clippy::type_complexity)]
     fn resolve_creates(
         &self,
-        mutations: BTreeMap<U::Key, Option<U::Value>>,
+        mutations: MutationSlots<U::Key, U::Value>,
     ) -> impl Iterator<Item = (U::Key, U::Value, Option<Location<F>>)> {
         let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
         mutations.into_iter().filter_map(move |(key, value)| {
-            let value = value?;
+            let value = value??;
             let base_old_loc = match ancestors.resolve(&key) {
                 Some(DiffEntry::Deleted { base_old_loc }) => *base_old_loc,
                 _ => None,
@@ -2132,12 +2165,16 @@ where
     ) -> RetainedMerkleizeResult<F, H::Digest, update::Unordered<K, V>, S> {
         let Self {
             db,
-            mut mutations,
+            mutations,
             merkleizer: m,
         } = self;
+        let mut mutations = mutation_slots(mutations);
 
         // Resolve existing keys.
-        let locations = m.gather_existing_locations(&mutations, db, false);
+        let (locations, slots): (Vec<_>, Vec<_>) = m
+            .gather_existing_locations(&mutations, db, false)
+            .into_iter()
+            .unzip();
         let results = m.read_ops(&locations, &[], &db.log).await?;
 
         // Generate user mutation operations.
@@ -2202,7 +2239,7 @@ where
             StagedLoc::Ancestor { base_old_loc, .. } => base_old_loc,
         };
         let mut cached = staged_updates.into_iter().peekable();
-        for (op, &old_loc) in zip_eq(results, &locations) {
+        for ((op, &old_loc), &slot) in zip_eq(zip_eq(results, &locations), &slots) {
             while cached
                 .peek()
                 .is_some_and(|&(_, sloc, (), _)| sloc.loc() < old_loc)
@@ -2228,7 +2265,7 @@ where
                 Some(old_loc)
             };
 
-            let Some(mutation) = mutations.remove(&key) else {
+            let Some(mutation) = take_mutation(&mut mutations, slot, &key) else {
                 // Snapshot index collision: this operation's key does not match
                 // any mutation key. The mutation will be handled as a create below.
                 continue;
@@ -2349,12 +2386,16 @@ where
     ) -> RetainedMerkleizeResult<F, H::Digest, update::Ordered<K, V>, S> {
         let Self {
             db,
-            mut mutations,
+            mutations,
             merkleizer: m,
         } = self;
+        let mut mutations = mutation_slots(mutations);
 
         // Resolve existing keys.
-        let locations = m.gather_existing_locations(&mutations, db, true);
+        let (locations, slots): (Vec<_>, Vec<_>) = m
+            .gather_existing_locations(&mutations, db, true)
+            .into_iter()
+            .unzip();
 
         // Classify mutations into deleted, created, updated. `next_candidates` and
         // `prev_candidates` are built as unsorted `Vec`s here and sorted+deduped once below,
@@ -2364,7 +2405,8 @@ where
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
-        for (op, &old_loc) in zip_eq(m.read_ops(&locations, &[], &db.log).await?, &locations) {
+        let results = m.read_ops(&locations, &[], &db.log).await?;
+        for ((op, &old_loc), &slot) in zip_eq(zip_eq(results, &locations), &slots) {
             let update::Ordered {
                 key,
                 value,
@@ -2391,7 +2433,7 @@ where
             next_candidates.push(next_key);
             prev_candidates.push((key.clone(), (Some(Cow::Owned(value)), old_loc)));
 
-            let Some(mutation) = mutations.remove(&key) else {
+            let Some(mutation) = take_mutation(&mut mutations, slot, &key) else {
                 // Snapshot index collision: this operation's key does not match
                 // the mutation key (the snapshot uses a compressed translated key
                 // that can collide). The mutation will be handled as a create below.
@@ -2426,12 +2468,13 @@ where
 
         // Keep creates in key order for candidate lookups and operation emission,
         // including keys re-created after an ancestor deleted them.
-        let mut created: Vec<(K, V::Value, Option<Location<F>>)> =
-            Vec::with_capacity(mutations.len());
-        for (key, value, base_old_loc) in m.resolve_creates(mutations) {
-            next_candidates.push(key.clone());
-            created.push((key, value, base_old_loc));
-        }
+        let remaining = mutations
+            .iter()
+            .filter(|(_, mutation)| mutation.is_some())
+            .count();
+        let mut created: Vec<(K, V::Value, Option<Location<F>>)> = Vec::with_capacity(remaining);
+        created.extend(m.resolve_creates(mutations));
+        next_candidates.extend(created.iter().map(|(key, ..)| key.clone()));
 
         // Look up prev_translated_key for created/deleted keys.
         let mut prev_locations = Vec::new();
