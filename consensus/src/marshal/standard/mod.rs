@@ -2726,7 +2726,7 @@ mod tests {
                 let mut view = View::zero();
                 let mut missed = false;
                 let mut rejected = Vec::new();
-                let mut skipped = 0;
+                let mut skipped = Vec::new();
                 let mut chain = vec![genesis.digest()];
                 for height in (1..=tip.get()).map(Height::new) {
                     let next = epocher.containing(height).unwrap().epoch();
@@ -2772,7 +2772,7 @@ mod tests {
                             // certification returns the application's verdict either way.
                             WrapperKind::Deferred => {
                                 if missed {
-                                    skipped += 1;
+                                    skipped.push((epoch.get(), view.get()));
                                 } else {
                                     assert!(
                                         wrapper
@@ -2857,14 +2857,20 @@ mod tests {
                 let delivered: Vec<_> = app.blocks().values().map(|block| block.digest()).collect();
                 assert_eq!(delivered, chain, "{old:?} -> {new:?}");
 
-                // Every Byzantine view was rejected. The Deferred epoch certified at least one
-                // without verifying it first.
+                // Every Byzantine view was rejected.
                 let expected: Vec<_> = [0, 1]
                     .into_iter()
                     .flat_map(|epoch| (1..=25).step_by(4).map(move |view| (epoch, view)))
                     .collect();
                 assert_eq!(rejected, expected, "{old:?} -> {new:?}");
-                assert!(skipped > 0, "{old:?} -> {new:?}");
+
+                // The Deferred epoch certified every other Byzantine block without verifying it.
+                let deferred = u64::from(old == WrapperKind::Inline);
+                assert_eq!(
+                    skipped,
+                    [(deferred, 5), (deferred, 13), (deferred, 21)],
+                    "{old:?} -> {new:?}"
+                );
             });
         }
     }
