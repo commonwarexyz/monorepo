@@ -3596,15 +3596,16 @@ pub(crate) mod test {
 
         // Depth 2 apply: the grandparent and the parent each update two committed keys and create
         // a key. The sweep keeps one update of each ancestor, evicts the other, and replaces the
-        // create.
+        // create. No kept key immediately precedes an evicted key, so an ordered database moves
+        // the kept updates as the raise would.
         let grand = [
             (key(1), Some(make_value(401))),
-            (key(3), Some(make_value(402))),
+            (key(6), Some(make_value(402))),
             (key(103), Some(make_value(403))),
         ];
         let middle = [
-            (key(5), Some(make_value(404))),
-            (key(6), Some(make_value(405))),
+            (key(3), Some(make_value(404))),
+            (key(102), Some(make_value(405))),
             (key(104), Some(make_value(406))),
         ];
         let grandparent = hold_batch(&db, db.new_batch(), &grand).await;
@@ -3612,9 +3613,9 @@ pub(crate) mod test {
         model.apply(&grand);
         model.apply(&middle);
         let decisions = [
-            (key(3), None),
-            (key(103), Some(make_value(407))),
             (key(6), None),
+            (key(103), Some(make_value(407))),
+            (key(102), None),
             (key(104), Some(make_value(408))),
         ];
         let ancestors = [&grandparent, &parent];
@@ -3622,18 +3623,19 @@ pub(crate) mod test {
         drop((grandparent, parent));
 
         // Depth 1 apply: the parent updates three committed keys and creates a key. The sweep
-        // keeps one update, evicts another and the create, and replaces the third.
+        // keeps one update, evicts another and the create, and replaces the third. The kept key
+        // does not immediately precede an evicted key.
         let middle = [
-            (key(7), Some(make_value(501))),
-            (key(100), Some(make_value(502))),
-            (key(102), Some(make_value(503))),
+            (key(1), Some(make_value(501))),
+            (key(5), Some(make_value(502))),
+            (key(104), Some(make_value(503))),
             (key(105), Some(make_value(504))),
         ];
         let parent = hold_batch(&db, db.new_batch(), &middle).await;
         model.apply(&middle);
         let decisions = [
-            (key(100), None),
-            (key(102), Some(make_value(505))),
+            (key(5), None),
+            (key(104), Some(make_value(505))),
             (key(105), None),
         ];
         let db = apply_decided(db, &[&parent], D::child(&parent), &decisions, &mut model).await;
