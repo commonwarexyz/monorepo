@@ -46,6 +46,7 @@ members = [
     "math/fuzz",
     "p2p/fuzz",
     "runtime/fuzz",
+    "simd/fuzz",
     "sol/fuzz",
     "stream/fuzz",
     "storage/fuzz",

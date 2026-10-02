@@ -42,6 +42,10 @@ check-fmt:
 clippy *args='':
     cargo clippy --all-targets $@ -- -D warnings
 
+# Check optimized cross-crate SIMD consumers without LTO.
+check-simd-codegen *args:
+    python3 .github/scripts/check_simd_codegen.py "$@"
+
 # Fix clippy lints
 fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@

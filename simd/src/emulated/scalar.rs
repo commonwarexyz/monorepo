@@ -14,10 +14,14 @@ impl Simd for EmulatedScalar {
 
     const U64_LANES: usize = 1;
 
+    // Expose the body to downstream loops so vector bounds checks can be eliminated.
+    #[inline]
     fn u64_load(self, input: &[u64]) -> Self::U64 {
         load(input)
     }
 
+    // Expose the body to downstream loops so vector bounds checks can be eliminated.
+    #[inline]
     fn u64_store(self, value: Self::U64, output: &mut [u64]) {
         store(value, output);
     }
@@ -26,6 +30,8 @@ impl Simd for EmulatedScalar {
         [value; 1]
     }
 
+    // Inline lane arithmetic into downstream loops instead of calling once per vector.
+    #[inline]
     fn u64_add(self, a: Self::U64, b: Self::U64) -> Self::U64 {
         add(a, b)
     }
