@@ -13,6 +13,15 @@
 //! - [`Inline`]: Inline-verification wrapper for applications whose blocks do not
 //!   implement [`crate::CertifiableBlock`].
 //!
+//! # Wrapper Consistency
+//!
+//! All validators must run the same wrapper for every view of an epoch. Validators must switch
+//! between [`Inline`] and [`Deferred`] at the same epoch boundary.
+//!
+//! [`Inline`] votes to notarize after application verification and certifies without it.
+//! [`Deferred`] votes to notarize after checking the block's embedded context and certifies with
+//! the application's verdict.
+//!
 //! # Usage
 //!
 //! The standard variant uses the core [`crate::marshal::core::Actor`] and
