@@ -64,6 +64,13 @@ End-to-end campaigns at commit `2e56fa856e`, with Claude as the agent, in scratc
 
 Section 8.1 lists what was checked for marshal, at commit `2649e4a668`.
 
+`provider_me` (Appendix A, D27) was checked at commit `58d8c738e4` in a scratch checkout
+materialized for the `marshal` profile: the runtime's 12 unit tests pass, among them one
+showing that a provider other than `ConstantProvider` is not looked up at all, and a call
+from `core::Actor::init`, the coding adapter and the shards engine compiles. The A/B that
+motivated it ran at the same commit: a test that uses `RetiringProvider` passes, and fails
+with only a creation-time provider lookup added to `Actor::init`.
+
 The knowledge base has not been exercised with a real agent: section 5.6, the `kb` row of
 5.4, and the knowledge-base part of the beacon step (7.4, prompt 13.9). AC-14 and AC-15
 cover it.
@@ -1285,7 +1292,7 @@ and 6.4) have not been exercised with a real agent, so AC-14 to AC-17 are unveri
 | D24 | StateLens variants are generated from the existing marshal targets, with two anchored insertions each, rather than kept as templates. The variant set therefore always equals the target set. | R-M-P2-1 step 1 |
 | D25 | The `marshal` profile derives variants only from the targets of `consensus/fuzz/marshal`, so it adds no simplex variant (section 7.2, edits 4 and 5). | R-M-P2-1 step 1 |
 | D26 | The wedge scenario gets its own guard hook (Appendix F). The Twins targets use edit 6, and the other targets need no hook. | G5 |
-| D27 | The core actor derives `me` when it is created and copies it into its mailbox. The standard adapters read it there, and coding reads its scheme provider. `None` never stands for an unknown identity. | R-M-INS-1 |
+| D27 | Marshal code learns `me` from one source, `statelens::provider_me` (Appendix A), and never by looking its scheme provider up or by reading `me()` from a scheme the implementation holds. A lookup is not a read: an application may count lookups against a scope and retire it. The helper reads a `ConstantProvider`, whose lookup only clones its scheme and which every harness uses, and reports any other provider, or a missing signing scheme, as an unknown index without looking it up. One source keeps every site of a component armed or inert together. The core actor calls it once when it is created and copies the result into its mailbox; the standard adapters read it there; coding calls it in the method that owns its provider. An unknown index leaves a site uninstrumented at run time; `None` never stands for it. | R-M-INS-1 |
 | D28 | The marshal beacon components are `marshal.core`, `marshal.standard` and `marshal.coding`. The backfill resolver, application gates, ancestry and store modules have no identity of their own, so they are instrumented at their call sites in these components. | R-FB-4, R-M-FB-1 |
 | D29 | The test gate of the `marshal` profile adds `test(/^marshal::/)` to the filter of section 7.7. | R-M-P2-1 step 6 |
 | D30 | The campaign builds every StateLens variant and runs none of them (D23). The operator chooses which variants to fuzz. | R-M-P2-1 step 7, R-M-P3-1 |
@@ -1372,18 +1379,30 @@ These rules add to section 10 for marshal code, and the marshal subsystem rules 
 |---|---|
 | Editable code | An invariant: the root of its subsystem (section 5.5). A beacon run: the component directory, and the marshal code it calls outside `mocks/`. |
 | Runtime | Marshal code calls `crate::simplex::statelens::...`, as simplex code does. |
-| Replica index | Core actor: derived once when the actor is created, from the scheme its provider returns for the epoch it starts in. It is kept in a `// [statelens] me` field and copied into a `// [statelens] me` field of `core::Mailbox` when the actor creates the mailbox. Standard adapters: read from the mailbox they hold. Coding adapter and shards engine: from their scheme provider at the epoch of the round in hand. |
+| Replica index | Through `statelens::provider_me(&provider, epoch)`, never by calling `scoped` or `scheme` on a provider (D27). Core actor: called once in `Actor::init` at the epoch it starts in, kept in a `// [statelens] me` field of type `Option<Option<Participant>>` and copied into a field of the same type on the `core::Mailbox` it creates. Standard adapters: read from the mailbox they hold. Coding adapter and shards engine: called at the epoch of the round in hand. |
 | Modules without identity | The backfill resolver, the application gates and validation, ancestry and store are instrumented at their call sites in the components, never inside. |
-| Unknown identity | Never pass `None` for an index that could not be obtained. Leave the site without instrumentation, and say why in the plan. |
+| Unknown identity | Never pass `None` for an index that could not be obtained. Leave the site without instrumentation, and say why in the plan; where `provider_me` decides at run time, guard the site with `if let Some(me) = ...`. |
 | Discretization | Heights relative to the processed floor, the last delivered height or the finalized tip. Never raw heights, digests, commitments or shard indices. |
 
-The rule for the core actor assumes that a replica's provider returns its own signing
-scheme at every epoch. This holds for every harness at the reference commit. The Twins
-stacks, the scenarios, the store target and the marshal test harness give each validator
-a `ConstantProvider` over its own scheme. Some marshal tests use other providers:
-`VerifierProvider`, `RetiringProvider`, `MultiEpochProvider` and `ChurningProvider`.
-When the scheme a provider returns has no signer, `me` is `None`: that replica is not a
-participant, and it is checked without ghost state.
+Every harness at the reference commit gives each validator a `ConstantProvider` over its
+own scheme: the Twins stacks, the scenarios, the store target and the marshal test harness.
+`provider_me` reads those without an effect, so the index is known from the moment the
+actor is created, in every fuzz run and in every test that uses them. Other marshal tests
+use other providers -- `VerifierProvider`, `RetiringProvider`, `MultiEpochProvider`,
+`ChurningProvider` and `EmptyProvider` -- and two of those count lookups: an extra lookup
+made by instrumentation consumed the scope `RetiringProvider` keeps for admission and
+failed four tests in a campaign. With them the index is unknown, and the sites of the
+component built with them stay uninstrumented, so those tests run its original code only.
+That costs the test gate (section 7.7) some screening, and it is larger than it sounds:
+every unit test of the shards engine builds it with `MultiEpochProvider`, or once with
+`ChurningProvider` (53 tests at the reference commit, all of its malicious-shard tests
+among them), so the gate screens shards-engine instrumentation only through the coding
+tests, which build the engine with a `ConstantProvider` through the marshal test harness.
+Core and standard sites are inert in four `VerifierProvider`, four `RetiringProvider` and
+one `EmptyProvider` test, and the coding adapter in one `EmptyProvider` test. An alarm that
+only adversarial shard input raises therefore appears first while fuzzing. When the scheme
+a `ConstantProvider` holds has no signer, `provider_me` returns `Some(None)`: that replica
+is known not to be a participant, and it is checked without ghost state.
 
 ### 8.6 Acceptance procedures
 
@@ -2261,6 +2280,9 @@ The instrumented tree does not build. Fix the instrumentation only: code marked
 `// [statelens]`, and `consensus/src/simplex/statelens.rs`. Do not change existing code.
 Do not weaken an assertion to make it compile: if an assertion cannot be written
 faithfully, remove it and set its invariant to `unbound` in the plan with the reason.
+Never fix a type error at a macro's `me` with `.flatten()`, `.unwrap_or(None)` or
+`.and_then(|me| me)`: each turns an unknown index into "not a participant", which turns the
+Byzantine guard off. The error means a guard such as `if let Some(me) = ...` is missing.
 Run the failing command and the check command until both pass.
 
 Failing command:
@@ -2345,7 +2367,8 @@ Last lines of its output:
   `scheme/`.
 - Components: the voter, batcher and resolver actors in `consensus/src/simplex/actors/`,
   which exchange messages through mailboxes, and the journal replay path on restart.
-- Replica index: `self.scheme.me()` wherever a scheme is in scope. The batcher and the
+- Replica index, in `consensus/src/simplex/` only (marshal code has its own rule):
+  `self.scheme.me()` wherever a scheme is in scope. The batcher and the
   resolver actors hold one; the voter actor does not, because `Actor::new` moves the
   scheme into `StateConfig`, so read the index from its `State` through a
   `// [statelens] me` accessor rather than keeping a second copy. Where no scheme is
@@ -2380,31 +2403,41 @@ Last lines of its output:
   They exchange messages through mailboxes. They use the backfill resolver (`resolver/`),
   the application gates and validation (`application/`), `ancestry.rs` and `store.rs`.
 - Replica index: the participant index of the replica's own signing scheme. Marshal holds a
-  scheme provider, not a scheme, and a provider lookup is not a read: `Provider::scheme`
-  calls `Provider::scoped`, and an application may count lookups against the scope it
-  serves and then retire it (the standard tests' `RetiringProvider` allows exactly one), so
-  a lookup of yours can turn one of the implementation's into `None`. Never call the
-  provider, or anything that calls it, to learn `me`. Read it from a scheme the
-  implementation has already obtained, where it obtained it: `scheme.me()`, or for a
-  `Scoped`, `scoped.clone().into_scheme()` and then `me()` (a clone of a `Scoped` is a
-  read).
-  - Coding adapter and shards engine: every site that needs a scheme already looks one up
-    for the round in hand; read `me` from that one.
-  - Core actor: it looks a scheme up only while it works, never when it is created. Give it
-    a `// [statelens] me` cell of type
-    `Arc<std::sync::OnceLock<Option<crate::simplex::statelens::Participant>>>`, shared with
-    every clone of its mailbox, and set it from the first scheme the actor obtains. It is
-    StateLens state, so setting it later is allowed, and the standard adapters, which never
-    look a scheme up, read it through the mailbox they hold. It keeps the first epoch's
-    index, which the harnesses' `ConstantProvider` never changes.
-  - Until the cell is set the index is not obtained, so guard a site that needs it with
-    `if let Some(&me) = cell.get()` instead of passing `None`, which means "not a
-    participant" and turns the Byzantine guard off.
+  scheme provider, not a scheme, and a provider lookup is not a read: an application may
+  count lookups against the scope it serves and retire it, as the standard tests'
+  `RetiringProvider` and the shards engine tests' `ChurningProvider` do, so a lookup of
+  yours can turn a later one of the implementation's into `None`. Never call `scoped` or
+  `scheme` on a provider yourself. In marshal `me` has exactly one source,
+  `crate::simplex::statelens::provider_me(&provider, epoch)`: for the `ConstantProvider`
+  every harness uses it reads the index without an effect, and for any other provider it
+  looks nothing up and returns `None`, an unknown index. The scope is not used, so pass any
+  epoch in hand, such as `last_processed_round.epoch()` in `Actor::init`, or
+  `Epoch::zero()`. Do not read `me()` from a scheme the implementation holds, even where one
+  is in hand: under any other provider that site would be checked while its neighbours are
+  not, and history one of them writes and another requires would be incomplete.
+  - Core actor: call it once in `Actor::init`, keep the result in a `// [statelens] me`
+    field of type `Option<Option<crate::simplex::statelens::Participant>>`, and copy it into
+    a field of the same type on the mailbox `init` creates, so every holder of a mailbox
+    clone can read it. `Mailbox::new` is a `const fn`: initialize the field to `None` there,
+    set it by wrapping the `Mailbox::new(..)` expression in `init` in a block, and list that
+    wrap under "Edited lines".
+  - Standard adapters: read it from the core mailbox they hold.
+  - Coding adapter and shards engine: call it in the `Marshaled` or `Engine` method that
+    owns the provider. A task the adapter spawns, and the shards sub-states, hold no
+    provider: call it in the method before the spawn, so the task captures the `Copy`
+    result, or put the site in the `Engine` method that calls the sub-state. Never add a
+    parameter to pass it down.
+  - `Some(me)` is the index to pass, including `Some(None)` for a scheme with no signer: the
+    replica is known not to be a participant. `None` is not an index. Guard the site with
+    `if let Some(me) = ...`, so that under any other provider it stays uninstrumented at run
+    time, as rule 3 requires for an index you could not obtain. Never pass `None` in its
+    place, and never convert it with `.flatten()`, `.unwrap_or(None)` or
+    `.and_then(|me| me)`: each turns an unknown index into "not a participant", and the
+    Byzantine guard off. A type error at a macro means the guard is missing.
+  - Say in each plan section that its sites take `me` from `provider_me`.
   - The backfill resolver, the application gates and validation, `ancestry.rs` and
     `store.rs` have no identity of their own. Instrument them at their call sites in the
     components above, never inside them.
-  - When the scheme has no signer (it is a verifier), `me` is `None`: the replica is not a
-    participant.
 - Asynchrony worth probing:
   - a finalization arrives before its block;
   - the floor moves while backfill is in flight;
@@ -2763,7 +2796,8 @@ variants.
 //!
 //! It provides:
 //! - the Byzantine guard: [set_compromised], [clear_compromised], [is_byzantine]
-//!   and [should_check];
+//!   and [should_check], and [provider_me] for a component that has a scheme
+//!   provider but no scheme;
 //! - a SanitizerCoverage counter table fed by state probes: [record] and [reset];
 //! - the instrumentation macros `sl_probe!`, `sl_assert!` and `sl_implies!`,
 //!   invoked as `crate::simplex::statelens::sl_probe!(...)`;
@@ -2784,8 +2818,10 @@ variants.
 // declare for this crate.
 #![allow(unexpected_cfgs)]
 
+use commonware_cryptography::certificate::{ConstantProvider, Provider, Scheme as _};
 pub use commonware_utils::Participant;
 use std::{
+    any::TypeId,
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -2895,6 +2931,27 @@ pub fn should_check(me: Option<Participant>) -> bool {
             Replica(me)
         ),
     }
+}
+
+/// Returns the replica index a component that holds a scheme provider can use as
+/// `me`, without a lookup anyone can observe.
+///
+/// A provider lookup is not a read: an application may count lookups against the
+/// scope it serves and retire it, so an extra one can turn a later lookup of the
+/// implementation's into `None`. The only provider whose lookups are known to
+/// change nothing is [ConstantProvider], which clones its scheme, and it is the one
+/// every fuzz harness uses. For it, this returns `Some` of the scheme's index
+/// (`Some(None)` for a scheme that is not a participant). For any other provider it
+/// makes no lookup and returns `None`, and so it does when the provider has no
+/// signing scheme for `scope`: the index is unknown, and the caller must leave its
+/// sites uninstrumented rather than pass `None` as `me`, which would turn the
+/// Byzantine guard off. `scope` is not used for a [ConstantProvider], so any one in
+/// hand will do.
+pub fn provider_me<P: Provider>(provider: &P, scope: P::Scope) -> Option<Option<Participant>> {
+    if TypeId::of::<P>() != TypeId::of::<ConstantProvider<P::Scheme, P::Scope>>() {
+        return None;
+    }
+    provider.scheme(scope).map(|scheme| scheme.me())
 }
 
 /// Raw pointer to the counter bytes.
@@ -3181,6 +3238,67 @@ mod tests {
         assert_eq!(flag(true), 1);
         assert_eq!(disc(&Some(1u8)), disc(&Some(2u8)));
         assert_ne!(disc(&Some(1u8)), disc(&None::<u8>));
+    }
+
+    /// A provider that counts its lookups, as an application that retires a scope
+    /// after a number of them would.
+    #[derive(Clone)]
+    struct CountingProvider {
+        scheme: std::sync::Arc<crate::simplex::scheme::ed25519::Scheme>,
+        lookups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Provider for CountingProvider {
+        type Scope = ();
+        type Scheme = crate::simplex::scheme::ed25519::Scheme;
+
+        fn scoped(
+            &self,
+            _: (),
+        ) -> Option<commonware_cryptography::certificate::Scoped<Self::Scheme>> {
+            self.lookups.fetch_add(1, Ordering::Relaxed);
+            Some(commonware_cryptography::certificate::Scoped::scheme(
+                self.scheme.clone(),
+            ))
+        }
+    }
+
+    #[test]
+    fn test_provider_me_reads_a_constant_provider() {
+        let commonware_cryptography::certificate::mocks::Fixture {
+            schemes, verifier, ..
+        } = crate::simplex::scheme::ed25519::fixture(
+            &mut commonware_utils::test_rng(),
+            b"statelens",
+            4,
+        );
+        let expected = schemes[2].me();
+        assert!(expected.is_some());
+        let provider = ConstantProvider::<_, ()>::new(schemes[2].clone());
+        assert_eq!(provider_me(&provider, ()), Some(expected));
+        // A scheme that is not a participant is known to be one: `Some(None)`.
+        let provider = ConstantProvider::<_, ()>::new(verifier);
+        assert_eq!(provider_me(&provider, ()), Some(None));
+    }
+
+    #[test]
+    fn test_provider_me_leaves_any_other_provider_alone() {
+        let commonware_cryptography::certificate::mocks::Fixture { schemes, .. } =
+            crate::simplex::scheme::ed25519::fixture(
+                &mut commonware_utils::test_rng(),
+                b"statelens",
+                4,
+            );
+        let provider = CountingProvider {
+            scheme: std::sync::Arc::new(schemes[0].clone()),
+            lookups: Default::default(),
+        };
+        assert_eq!(provider_me(&provider, ()), None, "the index is unknown");
+        assert_eq!(
+            provider.lookups.load(Ordering::Relaxed),
+            0,
+            "an unknown provider must not be looked up"
+        );
     }
 
     #[test]

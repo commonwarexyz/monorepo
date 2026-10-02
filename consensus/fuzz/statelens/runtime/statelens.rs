@@ -7,7 +7,8 @@
 //!
 //! It provides:
 //! - the Byzantine guard: [set_compromised], [clear_compromised], [is_byzantine]
-//!   and [should_check];
+//!   and [should_check], and [provider_me] for a component that has a scheme
+//!   provider but no scheme;
 //! - a SanitizerCoverage counter table fed by state probes: [record] and [reset];
 //! - the instrumentation macros `sl_probe!`, `sl_assert!` and `sl_implies!`,
 //!   invoked as `crate::simplex::statelens::sl_probe!(...)`;
@@ -28,8 +29,10 @@
 // declare for this crate.
 #![allow(unexpected_cfgs)]
 
+use commonware_cryptography::certificate::{ConstantProvider, Provider, Scheme as _};
 pub use commonware_utils::Participant;
 use std::{
+    any::TypeId,
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -139,6 +142,27 @@ pub fn should_check(me: Option<Participant>) -> bool {
             Replica(me)
         ),
     }
+}
+
+/// Returns the replica index a component that holds a scheme provider can use as
+/// `me`, without a lookup anyone can observe.
+///
+/// A provider lookup is not a read: an application may count lookups against the
+/// scope it serves and retire it, so an extra one can turn a later lookup of the
+/// implementation's into `None`. The only provider whose lookups are known to
+/// change nothing is [ConstantProvider], which clones its scheme, and it is the one
+/// every fuzz harness uses. For it, this returns `Some` of the scheme's index
+/// (`Some(None)` for a scheme that is not a participant). For any other provider it
+/// makes no lookup and returns `None`, and so it does when the provider has no
+/// signing scheme for `scope`: the index is unknown, and the caller must leave its
+/// sites uninstrumented rather than pass `None` as `me`, which would turn the
+/// Byzantine guard off. `scope` is not used for a [ConstantProvider], so any one in
+/// hand will do.
+pub fn provider_me<P: Provider>(provider: &P, scope: P::Scope) -> Option<Option<Participant>> {
+    if TypeId::of::<P>() != TypeId::of::<ConstantProvider<P::Scheme, P::Scope>>() {
+        return None;
+    }
+    provider.scheme(scope).map(|scheme| scheme.me())
 }
 
 /// Raw pointer to the counter bytes.
@@ -425,6 +449,67 @@ mod tests {
         assert_eq!(flag(true), 1);
         assert_eq!(disc(&Some(1u8)), disc(&Some(2u8)));
         assert_ne!(disc(&Some(1u8)), disc(&None::<u8>));
+    }
+
+    /// A provider that counts its lookups, as an application that retires a scope
+    /// after a number of them would.
+    #[derive(Clone)]
+    struct CountingProvider {
+        scheme: std::sync::Arc<crate::simplex::scheme::ed25519::Scheme>,
+        lookups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Provider for CountingProvider {
+        type Scope = ();
+        type Scheme = crate::simplex::scheme::ed25519::Scheme;
+
+        fn scoped(
+            &self,
+            _: (),
+        ) -> Option<commonware_cryptography::certificate::Scoped<Self::Scheme>> {
+            self.lookups.fetch_add(1, Ordering::Relaxed);
+            Some(commonware_cryptography::certificate::Scoped::scheme(
+                self.scheme.clone(),
+            ))
+        }
+    }
+
+    #[test]
+    fn test_provider_me_reads_a_constant_provider() {
+        let commonware_cryptography::certificate::mocks::Fixture {
+            schemes, verifier, ..
+        } = crate::simplex::scheme::ed25519::fixture(
+            &mut commonware_utils::test_rng(),
+            b"statelens",
+            4,
+        );
+        let expected = schemes[2].me();
+        assert!(expected.is_some());
+        let provider = ConstantProvider::<_, ()>::new(schemes[2].clone());
+        assert_eq!(provider_me(&provider, ()), Some(expected));
+        // A scheme that is not a participant is known to be one: `Some(None)`.
+        let provider = ConstantProvider::<_, ()>::new(verifier);
+        assert_eq!(provider_me(&provider, ()), Some(None));
+    }
+
+    #[test]
+    fn test_provider_me_leaves_any_other_provider_alone() {
+        let commonware_cryptography::certificate::mocks::Fixture { schemes, .. } =
+            crate::simplex::scheme::ed25519::fixture(
+                &mut commonware_utils::test_rng(),
+                b"statelens",
+                4,
+            );
+        let provider = CountingProvider {
+            scheme: std::sync::Arc::new(schemes[0].clone()),
+            lookups: Default::default(),
+        };
+        assert_eq!(provider_me(&provider, ()), None, "the index is unknown");
+        assert_eq!(
+            provider.lookups.load(Ordering::Relaxed),
+            0,
+            "an unknown provider must not be looked up"
+        );
     }
 
     #[test]

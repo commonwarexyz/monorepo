@@ -4,7 +4,8 @@
   `scheme/`.
 - Components: the voter, batcher and resolver actors in `consensus/src/simplex/actors/`,
   which exchange messages through mailboxes, and the journal replay path on restart.
-- Replica index: `self.scheme.me()` wherever a scheme is in scope. The batcher and the
+- Replica index, in `consensus/src/simplex/` only (marshal code has its own rule):
+  `self.scheme.me()` wherever a scheme is in scope. The batcher and the
   resolver actors hold one; the voter actor does not, because `Actor::new` moves the
   scheme into `StateConfig`, so read the index from its `State` through a
   `// [statelens] me` accessor rather than keeping a second copy. Where no scheme is

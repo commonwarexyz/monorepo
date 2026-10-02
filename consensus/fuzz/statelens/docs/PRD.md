@@ -771,13 +771,22 @@ the Byzantine guard.
 #### Instrumentation
 
 R-M-INS-1. Identity in marshal. `me` is the participant index of the replica's own
-signing scheme, which marshal gets from its scheme provider:
-- The core actor derives `me` when it is created and passes it to the mailbox it returns,
+signing scheme. Marshal holds a scheme provider rather than a scheme, and looking a
+provider up is not a read: an application may count lookups against the scope it serves
+and retire it, so a lookup made by instrumentation can change what a later lookup of the
+implementation returns. Instrumentation therefore learns `me` through a runtime helper
+that reads a `ConstantProvider`, whose lookup only clones its scheme and which every
+harness uses, and that reports any other provider as an unknown index without looking it
+up:
+- The core actor obtains `me` when it is created and passes it to the mailbox it returns,
   so the standard adapters can read it from the mailbox they hold.
-- The coding adapter and the shards engine derive it from their scheme provider at the
-  epoch in hand.
+- The coding adapter and the shards engine obtain it in the method that owns their
+  provider.
 
-A site that cannot obtain `me` gets no instrumentation. `None` means "not a participant"
+The helper is the only source of `me` in marshal: reading `me()` from a scheme the
+implementation holds would arm some sites of a component and not others under another
+provider, and history one writes and another requires would be incomplete. A site whose
+`me` is unknown gets no instrumentation. `None` means "not a participant"
 and turns the guard off, so it never stands in for an unknown identity.
 
 #### Feedback
@@ -875,6 +884,7 @@ with StateLens feedback than with `STATELENS_FEEDBACK=0`.
 |---|---|
 | Simplex invariants were bound and tested against the mock application. With marshal's real certifiers and harness-seeded journals, they may fail for reasons that are not bugs. | Triage as in R-OR-3. A 2-minute smoke run of a marshal Twins target on a simplex-instrumented tree found no violation (SPEC section 8.1). |
 | The standard adapters get `me` only through an instrumentation field in marshal's mailbox. An agent that misses it leaves adapter sites uninstrumented. | R-M-INS-1 is in the prompt. The plan names the identity source of every marshal site. AC-11. |
+| Marshal sites are inert in tests whose provider is not a `ConstantProvider`, which includes every unit test of the shards engine, so the test gate screens less marshal instrumentation than it runs. | Every fuzz harness uses a `ConstantProvider`, so fuzzing runs every site. The coding tests screen the shards engine through the marshal test harness. SPEC section 8.5 lists what is inert. |
 | The operator chooses which of the twelve variants to run. Skipping the Twins and wedge variants skips every variant in which the adversary runs Simplex or marshal code. | The summary lists every variant (SPEC section 8.3), and 9.4 says which have an adversary with a real stack. One Twins process measured 15 exec/s and 628 MB peak RSS. |
 | Six beacon runs (three per subsystem) raise the probe count and the agent time. | The per-component budget of R-FB-4 applies to each of the six. |
 | Marshal moves under `consensus/src/simplex/` (draft PR #4994). | Paths are profile data in `statelens.py`. When the move lands, the marshal root and test filter change, and the `simplex` profile's editable code must exclude `consensus/src/simplex/marshal/`. |

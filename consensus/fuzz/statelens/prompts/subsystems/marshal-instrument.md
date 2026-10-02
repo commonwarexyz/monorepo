@@ -11,31 +11,41 @@
   They exchange messages through mailboxes. They use the backfill resolver (`resolver/`),
   the application gates and validation (`application/`), `ancestry.rs` and `store.rs`.
 - Replica index: the participant index of the replica's own signing scheme. Marshal holds a
-  scheme provider, not a scheme, and a provider lookup is not a read: `Provider::scheme`
-  calls `Provider::scoped`, and an application may count lookups against the scope it
-  serves and then retire it (the standard tests' `RetiringProvider` allows exactly one), so
-  a lookup of yours can turn one of the implementation's into `None`. Never call the
-  provider, or anything that calls it, to learn `me`. Read it from a scheme the
-  implementation has already obtained, where it obtained it: `scheme.me()`, or for a
-  `Scoped`, `scoped.clone().into_scheme()` and then `me()` (a clone of a `Scoped` is a
-  read).
-  - Coding adapter and shards engine: every site that needs a scheme already looks one up
-    for the round in hand; read `me` from that one.
-  - Core actor: it looks a scheme up only while it works, never when it is created. Give it
-    a `// [statelens] me` cell of type
-    `Arc<std::sync::OnceLock<Option<crate::simplex::statelens::Participant>>>`, shared with
-    every clone of its mailbox, and set it from the first scheme the actor obtains. It is
-    StateLens state, so setting it later is allowed, and the standard adapters, which never
-    look a scheme up, read it through the mailbox they hold. It keeps the first epoch's
-    index, which the harnesses' `ConstantProvider` never changes.
-  - Until the cell is set the index is not obtained, so guard a site that needs it with
-    `if let Some(&me) = cell.get()` instead of passing `None`, which means "not a
-    participant" and turns the Byzantine guard off.
+  scheme provider, not a scheme, and a provider lookup is not a read: an application may
+  count lookups against the scope it serves and retire it, as the standard tests'
+  `RetiringProvider` and the shards engine tests' `ChurningProvider` do, so a lookup of
+  yours can turn a later one of the implementation's into `None`. Never call `scoped` or
+  `scheme` on a provider yourself. In marshal `me` has exactly one source,
+  `crate::simplex::statelens::provider_me(&provider, epoch)`: for the `ConstantProvider`
+  every harness uses it reads the index without an effect, and for any other provider it
+  looks nothing up and returns `None`, an unknown index. The scope is not used, so pass any
+  epoch in hand, such as `last_processed_round.epoch()` in `Actor::init`, or
+  `Epoch::zero()`. Do not read `me()` from a scheme the implementation holds, even where one
+  is in hand: under any other provider that site would be checked while its neighbours are
+  not, and history one of them writes and another requires would be incomplete.
+  - Core actor: call it once in `Actor::init`, keep the result in a `// [statelens] me`
+    field of type `Option<Option<crate::simplex::statelens::Participant>>`, and copy it into
+    a field of the same type on the mailbox `init` creates, so every holder of a mailbox
+    clone can read it. `Mailbox::new` is a `const fn`: initialize the field to `None` there,
+    set it by wrapping the `Mailbox::new(..)` expression in `init` in a block, and list that
+    wrap under "Edited lines".
+  - Standard adapters: read it from the core mailbox they hold.
+  - Coding adapter and shards engine: call it in the `Marshaled` or `Engine` method that
+    owns the provider. A task the adapter spawns, and the shards sub-states, hold no
+    provider: call it in the method before the spawn, so the task captures the `Copy`
+    result, or put the site in the `Engine` method that calls the sub-state. Never add a
+    parameter to pass it down.
+  - `Some(me)` is the index to pass, including `Some(None)` for a scheme with no signer: the
+    replica is known not to be a participant. `None` is not an index. Guard the site with
+    `if let Some(me) = ...`, so that under any other provider it stays uninstrumented at run
+    time, as rule 3 requires for an index you could not obtain. Never pass `None` in its
+    place, and never convert it with `.flatten()`, `.unwrap_or(None)` or
+    `.and_then(|me| me)`: each turns an unknown index into "not a participant", and the
+    Byzantine guard off. A type error at a macro means the guard is missing.
+  - Say in each plan section that its sites take `me` from `provider_me`.
   - The backfill resolver, the application gates and validation, `ancestry.rs` and
     `store.rs` have no identity of their own. Instrument them at their call sites in the
     components above, never inside them.
-  - When the scheme has no signer (it is a verifier), `me` is `None`: the replica is not a
-    participant.
 - Asynchrony worth probing:
   - a finalization arrives before its block;
   - the floor moves while backfill is in flight;
