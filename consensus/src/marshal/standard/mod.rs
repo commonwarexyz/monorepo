@@ -13,7 +13,19 @@
 //! - [`Inline`]: Inline-verification wrapper for applications whose blocks do not
 //!   implement [`crate::CertifiableBlock`].
 //!
-//! # Wrapper Consistency
+//! # Usage
+//!
+//! The standard variant uses the core [`crate::marshal::core::Actor`] and
+//! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter.
+//! Blocks are broadcast through [`commonware_broadcast::buffered`].
+//!
+//! # When to Use
+//!
+//! Prefer this variant when block sizes are small enough that shipping full blocks
+//! to every peer is acceptable or if participants have sufficiently powerful networking
+//! and want to avoid encoding / decoding overhead.
+//!
+//! # Consistency
 //!
 //! All validators must run the same wrapper for all views in a given epoch. Validators can switch
 //! between [`Inline`] and [`Deferred`] at the same epoch boundary.
@@ -27,18 +39,6 @@
 //! [`Deferred`] votes to notarize after checking the block's embedded context and certifies with
 //! the application's verdict, using the embedded context when it did not verify the block. Its
 //! notarize vote does not attest to application validity.
-//!
-//! # Usage
-//!
-//! The standard variant uses the core [`crate::marshal::core::Actor`] and
-//! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter.
-//! Blocks are broadcast through [`commonware_broadcast::buffered`].
-//!
-//! # When to Use
-//!
-//! Prefer this variant when block sizes are small enough that shipping full blocks
-//! to every peer is acceptable or if participants have sufficiently powerful networking
-//! and want to avoid encoding / decoding overhead.
 
 commonware_macros::stability_scope!(ALPHA {
     mod deferred;
