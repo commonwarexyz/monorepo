@@ -2717,17 +2717,15 @@ mod tests {
                     |view: View| participants[view.get() as usize % participants.len()].clone();
                 let byzantine = participants[1].clone();
 
-                // Verify, certify, and finalize every block of epoch 0 and the first blocks of
-                // epoch 1, through its second Byzantine view.
+                // Verify, certify, and finalize every block of epochs 0 and 1.
                 let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-                let boundary = epocher.last(Epoch::zero()).unwrap();
-                let tip = Height::new(boundary.get() + 4);
+                let tip = epocher.last(Epoch::new(1)).unwrap();
                 let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let mut parent = (View::zero(), genesis.digest());
                 let mut epoch = Epoch::zero();
                 let mut view = View::zero();
                 let mut missed = false;
-                let mut rejected = [0; 2];
+                let mut rejected = Vec::new();
                 let mut skipped = 0;
                 let mut chain = vec![genesis.digest()];
                 for height in (1..=tip.get()).map(Height::new) {
@@ -2807,7 +2805,7 @@ mod tests {
                                 missed = !missed;
                             }
                         }
-                        rejected[epoch.get() as usize] += 1;
+                        rejected.push((epoch.get(), view.get()));
                         view = view.next();
                     }
 
@@ -2859,9 +2857,13 @@ mod tests {
                 let delivered: Vec<_> = app.blocks().values().map(|block| block.digest()).collect();
                 assert_eq!(delivered, chain, "{old:?} -> {new:?}");
 
-                // Every Byzantine view was rejected: seven in epoch 0 and two in epoch 1. The
-                // Deferred epoch certified at least one without verifying it first.
-                assert_eq!(rejected, [7, 2], "{old:?} -> {new:?}");
+                // Every Byzantine view was rejected. The Deferred epoch certified at least one
+                // without verifying it first.
+                let expected: Vec<_> = [0, 1]
+                    .into_iter()
+                    .flat_map(|epoch| (1..=25).step_by(4).map(move |view| (epoch, view)))
+                    .collect();
+                assert_eq!(rejected, expected, "{old:?} -> {new:?}");
                 assert!(skipped > 0, "{old:?} -> {new:?}");
             });
         }
