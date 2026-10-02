@@ -24,7 +24,7 @@
 //! availability in marshal. No additional deferred verification state needs to
 //! be awaited at certify time.
 //!
-//! All validators must run [`Inline`] for every view of an epoch (see
+//! All validators must run [`Inline`] for all views in a given epoch (see
 //! [`crate::marshal::standard`] for more details).
 //!
 //! # Usage

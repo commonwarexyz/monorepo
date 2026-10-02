@@ -15,7 +15,7 @@
 //!
 //! # Wrapper Consistency
 //!
-//! All validators must run the same wrapper for every view of an epoch. Validators can switch
+//! All validators must run the same wrapper for all views in a given epoch. Validators can switch
 //! between [`Inline`] and [`Deferred`] at the same epoch boundary.
 //!
 //! [`Inline`] votes to notarize after application verification. Certification receives only the

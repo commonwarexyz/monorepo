@@ -21,7 +21,7 @@
 //! latency). Once a certificate is formed, we wait on the verification result in [`CertifiableAutomaton::certify`]
 //! before voting to finalize (ensuring no invalid blocks are admitted to the canonical chain).
 //!
-//! All validators must run [`Deferred`] for every view of an epoch (see
+//! All validators must run [`Deferred`] for all views in a given epoch (see
 //! [`crate::marshal::standard`] for more details).
 //!
 //! # Usage
