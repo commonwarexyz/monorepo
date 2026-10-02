@@ -671,6 +671,132 @@ mod tests {
         });
     }
 
+    /// A voter restarted from a finalized floor reports the floor finalization
+    /// once at startup. A later certificate at the floor view must not report
+    /// or broadcast it again.
+    #[test_traced("WARN")]
+    fn test_voter_restart_floor_finalization_not_resent() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_restart_floor_not_resent".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            // Observe the certificates the voter broadcasts.
+            let observer = participants[1].clone();
+            let (_, mut certificates) = oracle
+                .control(observer.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    participants[0].clone(),
+                    observer,
+                    Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: probability!(1.0),
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Start from a finalized floor at view 8.
+            let finalization = |view: View| {
+                let proposal = Proposal::new(
+                    Round::new(epoch, view),
+                    view.previous().unwrap(),
+                    Sha256::hash(&[&view.get().to_be_bytes()]),
+                );
+                build_finalization(&schemes, &proposal, quorum).1
+            };
+            let floor_view = View::new(8);
+            let floor_finalization = finalization(floor_view);
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let (
+                mut mailbox,
+                mut batcher_receiver,
+                mut resolver_receiver,
+                _relay,
+                reporter,
+                _handle,
+            ) = start_voter_with_floor(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                VoterFloorStart {
+                    partition: "voter_restart_floor_not_resent".to_string(),
+                    epoch,
+                    floor: Floor::Finalized(floor_finalization.clone()),
+                    skip_budget: u64::MAX,
+                    page_cache,
+                },
+            )
+            .await;
+            expect_restarted_voter_at_floor(
+                &mut context,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                floor_view,
+            )
+            .await;
+
+            // A peer forwards the floor finalization again, followed by a new
+            // finalization that ends the observation.
+            let next_view = floor_view.next();
+            mailbox.recovered(Certificate::Finalization(floor_finalization));
+            mailbox.recovered(Certificate::Finalization(finalization(next_view)));
+
+            // Only the new finalization is broadcast, reported to the
+            // application, and reported to the resolver.
+            loop {
+                let (_, encoded) = certificates.recv().await.unwrap();
+                let certificate: Certificate<ed25519::Scheme, Sha256Digest> =
+                    Certificate::decode_cfg(encoded, &schemes[0].certificate_codec_config())
+                        .unwrap();
+                assert_ne!(
+                    certificate.view(),
+                    floor_view,
+                    "floor finalization broadcast again"
+                );
+                if certificate.view() == next_view {
+                    break;
+                }
+            }
+            {
+                let finalizations = reporter.finalizations.lock();
+                assert_eq!(finalizations[&floor_view].1, 1);
+                assert_eq!(finalizations[&next_view].1, 1);
+            }
+            loop {
+                if let resolver::MailboxMessage::Updated { certificate, .. } =
+                    resolver_receiver.recv().await.unwrap()
+                {
+                    assert_ne!(
+                        certificate.view(),
+                        floor_view,
+                        "floor finalization reported again"
+                    );
+                    if certificate.view() == next_view {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_voter_restart_older_floor_ignored_for_newer_journal() {
         let runner = deterministic::Runner::timed(Duration::from_secs(20));
@@ -1496,7 +1622,7 @@ mod tests {
                     // Finalization must match the signatures recovered from finalize votes
                     if matches!(
                         finalizations.get(&view),
-                        Some(finalization) if finalization == &expected_finalization
+                        Some((finalization, _)) if finalization == &expected_finalization
                     ) {
                         break;
                     }
@@ -3811,7 +3937,7 @@ mod tests {
 
             // Verify finalization was recorded by checking reporter
             let finalizations = reporter.finalizations.lock();
-            let recorded = finalizations
+            let (recorded, _) = finalizations
                 .get(&view)
                 .expect("finalization should be recorded");
             assert_eq!(recorded, &finalization);
