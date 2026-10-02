@@ -77,7 +77,7 @@ struct DigestRequest<D: Digest> {
 pub enum CertificateOutcome {
     /// The certificate was valid and advanced local state.
     Accepted,
-    /// The position was already certified or is no longer active.
+    /// The position is not active or the engine has stopped.
     Ignored,
     /// The key, epoch, range, or signature was invalid.
     Invalid,
@@ -130,8 +130,9 @@ pub struct Mailbox<S: commonware_cryptography::certificate::Scheme, D: Digest> {
 /// Gracefully stops one aggregation engine.
 ///
 /// Dropping this handle also requests shutdown. The engine finishes its current operation,
-/// cancels recovery, and returns [`EngineOutcome::Stopped`]. Keep it for as long as the engine
-/// should run: `let (handle, _) = engine.start_stoppable(network)` stops the engine immediately.
+/// cancels recovery, and returns [`EngineOutcome::Stopped`]. Bind it to a named variable for as
+/// long as the engine should run. `let (handle, _) = engine.start_stoppable(network)` drops it and
+/// stops the engine immediately.
 #[must_use = "dropping a Stopper stops its engine"]
 pub struct Stopper(oneshot::Sender<()>);
 
@@ -145,8 +146,10 @@ impl Stopper {
 impl<S: commonware_cryptography::certificate::Scheme, D: Digest> Mailbox<S, D> {
     /// Validates and applies a certificate recovered for `key`.
     ///
-    /// Returns [`CertificateOutcome::Invalid`] if `key` does not name the certificate's
-    /// namespace, epoch, and position.
+    /// When processed by the engine, a `key` that does not name the certificate's namespace,
+    /// epoch, and position returns [`CertificateOutcome::Invalid`]. A full mailbox returns
+    /// [`CertificateOutcome::Backpressured`]. A stopped engine returns
+    /// [`CertificateOutcome::Ignored`].
     pub async fn submit(
         &mut self,
         key: RecoveryKey,

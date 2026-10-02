@@ -9,9 +9,9 @@
 //! synced before reporting.
 //! A position is an application-defined sequence number. It need not be a block height. For
 //! example, an application that checkpoints every 1000 blocks can assign position `k` to the
-//! checkpoint at height `1000k + 999`. Each epoch's length is then a multiple of 1000, so the
-//! epoch's last block is a checkpoint. Discovering the newest certificate is the application's
-//! responsibility.
+//! checkpoint at height `1000k + 999`. If that application also starts each epoch at a multiple
+//! of 1000 and makes each epoch's length a multiple of 1000, the epoch's last block is a
+//! checkpoint. Discovering the newest certificate is the application's responsibility.
 //! The engine keeps a bounded window anchored at the lowest uncertified position. It returns
 //! `Completed` only after the entire range is certified; shutdown returns `Stopped`. A durable
 //! header binds the journal to its committee, epoch, and range. Replay revalidates each

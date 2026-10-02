@@ -47,6 +47,9 @@ pub struct Config<
     pub rebroadcast_timeout: NonZeroDuration,
     /// Number of rebroadcast ticks after a position enters the window before resolver recovery
     /// starts.
+    ///
+    /// Recovery starts immediately for the initial window after a restart and for a position
+    /// whose digest the application declined.
     pub recovery_after_rebroadcasts: NonZeroU64,
     /// Shared resolver recovery coordinator.
     pub recoverer: R,

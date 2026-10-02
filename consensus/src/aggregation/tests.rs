@@ -1139,7 +1139,7 @@ fn test_recovery_retries_rejected_admission() {
         let mut cfg = config(
             &context,
             fixture.schemes[0].clone(),
-            ClosedApplication::default(),
+            PendingApplication::default(),
             RecordingReporter::default(),
             oracle.control(participant.clone()),
             EngineScope {
@@ -1150,14 +1150,21 @@ fn test_recovery_retries_rejected_admission() {
                 window: 1,
             },
         );
-        cfg.recovery_after_rebroadcasts = NonZeroU64::new(1).unwrap();
+        cfg.recovery_after_rebroadcasts = NonZeroU64::new(2).unwrap();
         cfg.recoverer = recoverer;
+        let timeout = cfg.rebroadcast_timeout.get();
         let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let start = context.current();
         let handle = engine.start(registrations.remove(&participant).unwrap());
+        let fetches = || events.lock().iter().filter(|(fetch, _)| *fetch).count();
 
-        while events.lock().iter().filter(|(fetch, _)| *fetch).count() < 2 {
-            context.sleep(Duration::from_millis(1)).await;
-        }
+        // The first tick is below the threshold, the second is rejected, and the third retries.
+        context.sleep_until(start + timeout + timeout / 2).await;
+        assert_eq!(fetches(), 0);
+        context.sleep_until(start + timeout * 2 + timeout / 2).await;
+        assert_eq!(fetches(), 1);
+        context.sleep_until(start + timeout * 3 + timeout / 2).await;
+        assert_eq!(fetches(), 2);
         assert_eq!(
             submit(
                 &mut mailbox,
