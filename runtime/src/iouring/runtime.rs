@@ -1282,8 +1282,7 @@ struct Worker {
     inbox: Vec<Message>,
     /// Mailbox publication sequence acknowledged when whole batches enter the inbox.
     processed_seq: u32,
-    /// Whether this is the ordinary worker, which hosts every task and closes
-    /// and drains the task set during shutdown.
+    /// Whether this worker runs ordinary tasks and closes and drains the task set.
     ordinary: bool,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
